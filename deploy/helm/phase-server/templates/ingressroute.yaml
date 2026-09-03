@@ -1,7 +1,31 @@
 {{- if and .Values.scaleOut.enabled .Values.ingress.enabled }}
 {{- $fullname := include "phase-server.fullname" . }}
 {{- $host := required "ingress.host is required when ingress.enabled is true (it is the entry hostname the router matches and the certificate is issued for)." .Values.ingress.host }}
-{{- $mw := include "phase-server.middlewareRefs" . }}
+{{- $mw := include "phase-server.middlewareRefs" (dict "ctx" . "excludeCompress" false) }}
+{{- /* /ws gets every other common middleware but skips compress — see
+     `phase-server.commonMiddlewares` for why. Traefik's IngressRoute has no
+     path-based routing to a separate resource the way the plain Ingress
+     does (it matches by Host() only, see the entry route below), so the
+     split happens as a second, more specific `routes[]` rule instead:
+     `Host(...) && PathPrefix("/ws")` wins over the plain `Host(...)` match
+     under Traefik's default priority, which sorts routers on an entrypoint
+     by descending rule-string length when no router sets an explicit
+     `priority:`. The `/ws` rule is the `Host(...)` rule's text plus a fixed
+     ` && PathPrefix(`/ws`)` suffix, so it is unconditionally longer — for
+     every possible host value — and therefore unconditionally higher
+     priority under that default. Deliberately no `priority:` field is set
+     on either rule: `priority` is scoped to the whole entrypoint (shared
+     with every other IngressRoute/Ingress Traefik watches, not just this
+     chart's own pair), so pinning an explicit low value here (e.g. `1` for
+     the general rule) would rank this route below any other router on the
+     entrypoint that keeps the (near-universal) default, which is a much
+     larger blast radius than the ordering problem it would "fix". See
+     `deploy/helm/phase-server/tests/assert-compression-boundary.sh` for the
+     rendered-length assertion that keeps this contract honest. */}}
+{{- $wsMw := include "phase-server.middlewareRefs" (dict "ctx" . "excludeCompress" true) }}
+{{- /* The SPA keeps headers + compress but leaves the game API's rate bucket
+     alone — see phase-server.commonMiddlewares for why. */}}
+{{- $webMw := include "phase-server.middlewareRefs" (dict "ctx" . "excludeCompress" false "excludeRateLimit" true) }}
 {{- /* Every route below terminates TLS unconditionally, so an advertised
      `http://` ordinal URL names an address this chart does not serve. `http`
      stays legal with ingress.enabled=false, where the chart renders no route
@@ -34,7 +58,45 @@ spec:
     - {{ .Values.scaleOut.entryPoint | default "websecure" }}
   routes:
     - kind: Rule
+      match: Host(`{{ $host }}`) && PathPrefix(`/ws`)
+      {{- with $wsMw | trim }}
+      middlewares:
+        {{- . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ $fullname }}
+          port: {{ .Values.service.port }}
+          {{- if .Values.scaleOut.sticky.enabled }}
+          sticky:
+            cookie:
+              name: {{ .Values.scaleOut.sticky.name }}
+              secure: {{ .Values.scaleOut.sticky.secure }}
+              httpOnly: {{ .Values.scaleOut.sticky.httpOnly }}
+              sameSite: {{ .Values.scaleOut.sticky.sameSite }}
+              maxAge: {{ int64 .Values.scaleOut.sticky.maxAge }}
+          {{- end }}
+    - kind: Rule
       match: Host(`{{ $host }}`)
+      {{- if .Values.web.enabled }}
+      {{- /* With the SPA enabled the catch-all becomes the site and the server's
+           own HTTP endpoints move to explicit longer rules below. Deliberately
+           NO sticky block here: the SPA and /ws are two load balancers over
+           different server lists (same pods, different ports) sharing one cookie
+           NAME, so every asset fetch would re-mint `{{ .Values.scaleOut.sticky.name }}`
+           with a value the /ws balancer cannot resolve — sending the host's own
+           post-GameStarted re-dial to a pod that never had its game. The SPA is
+           stateless and every pod serves identical bytes, so it needs no pin.
+           Serving it same-origin with /ws also stops that cookie being a
+           third-party cookie, which is what made it fragile in browsers that
+           block those. */}}
+      {{- with $webMw | trim }}
+      middlewares:
+        {{- . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ $fullname }}
+          port: {{ .Values.web.server.port }}
+      {{- else }}
       {{- with $mw | trim }}
       middlewares:
         {{- . | nindent 8 }}
@@ -51,6 +113,40 @@ spec:
               sameSite: {{ .Values.scaleOut.sticky.sameSite }}
               maxAge: {{ int64 .Values.scaleOut.sticky.maxAge }}
           {{- end }}
+      {{- end }}
+{{- if .Values.web.enabled }}
+{{- /* The server's non-/ws HTTP surface, walked from build_router and
+     mount_admin_routes rather than recalled: /health, /p2p-draft-backup (and
+     its /{code} form, covered by the same prefix), and /admin/drafts[/{code}]
+     when an admin token is mounted. Each match string is the catch-all's plus a
+     PathPrefix suffix, so it is unconditionally longer and wins under Traefik's
+     default rule-length ordering — the same contract the /ws rule relies on, and
+     the reason no `priority:` is set here either. Appended AFTER the catch-all
+     so the first two rules keep the positions
+     tests/assert-compression-boundary.sh slices by. */}}
+{{- /* `/admin/*` is deliberately absent here too — see templates/ingress.yaml. */}}
+{{- $serverPaths := list "/health" "/p2p-draft-backup" }}
+{{- range $p := $serverPaths }}
+    - kind: Rule
+      match: Host(`{{ $host }}`) && PathPrefix(`{{ $p }}`)
+      {{- with $mw | trim }}
+      middlewares:
+        {{- . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ $fullname }}
+          port: {{ $.Values.service.port }}
+          {{- if $.Values.scaleOut.sticky.enabled }}
+          sticky:
+            cookie:
+              name: {{ $.Values.scaleOut.sticky.name }}
+              secure: {{ $.Values.scaleOut.sticky.secure }}
+              httpOnly: {{ $.Values.scaleOut.sticky.httpOnly }}
+              sameSite: {{ $.Values.scaleOut.sticky.sameSite }}
+              maxAge: {{ int64 $.Values.scaleOut.sticky.maxAge }}
+          {{- end }}
+{{- end }}
+{{- end }}
   tls:
     secretName: {{ include "phase-server.tlsSecretName" . }}
     {{- if .Values.cloudflare.authenticatedOriginPulls.enabled }}
@@ -75,6 +171,15 @@ spec:
   entryPoints:
     - {{ $.Values.scaleOut.entryPoint | default "websecure" }}
   routes:
+    - kind: Rule
+      match: Host(`{{ include "phase-server.ordinalHost" (dict "ctx" $ "ordinal" $i) }}`) && PathPrefix(`/ws`)
+      {{- with $wsMw | trim }}
+      middlewares:
+        {{- . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ $fullname }}-{{ $i }}
+          port: {{ $.Values.service.port }}
     - kind: Rule
       match: Host(`{{ include "phase-server.ordinalHost" (dict "ctx" $ "ordinal" $i) }}`)
       {{- with $mw | trim }}

@@ -25,8 +25,21 @@ import {
 import { ZoneViewer } from "../ZoneViewer.tsx";
 
 vi.mock("../../card/CardImage.tsx", () => ({
-  CardImage: ({ cardName, oracleId }: { cardName: string; oracleId?: string }) => (
-    <div aria-label={cardName} data-testid="card-image" data-oracle-id={oracleId ?? ""} />
+  CardImage: ({
+    cardName,
+    oracleId,
+    faceDown,
+  }: {
+    cardName: string;
+    oracleId?: string;
+    faceDown?: boolean;
+  }) => (
+    <div
+      aria-label={faceDown ? "Face-down card" : cardName}
+      data-testid="card-image"
+      data-oracle-id={faceDown ? "" : oracleId ?? ""}
+      data-face-down={String(!!faceDown)}
+    />
   ),
 }));
 
@@ -526,5 +539,104 @@ describe("ZoneViewer", () => {
     expect(dispatch).toHaveBeenCalledWith(
       expect.objectContaining({ type: "CastSpell" }),
     );
+  });
+
+  it("shows an engine-provided time-counter count on a visible exiled card", () => {
+    const exiled = makeObject({ zone: "Exile", name: "Rift Bolt" });
+    const base = makeState(exiled);
+    const gameState = {
+      ...base,
+      objects: buildObjectMap(exiled),
+      players: base.players.map((player) => ({ ...player, graveyard: [] })),
+      exile: [exiled.id],
+      derived: {
+        counter_display: {
+          [String(exiled.id)]: { pills: [{ counter: "time", count: 3 }] },
+        },
+      },
+    };
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+
+    render(<ZoneViewer zone="exile" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.getByLabelText("3")).toBeInTheDocument();
+  });
+
+  it("does not expose a time-counter badge for a face-down exiled card", () => {
+    const hidden = makeObject({
+      zone: "Exile",
+      name: "Secret Suspend Card",
+      face_down: true,
+    });
+    const base = makeState(hidden);
+    const gameState = {
+      ...base,
+      objects: buildObjectMap(hidden),
+      players: base.players.map((player) => ({ ...player, graveyard: [] })),
+      exile: [hidden.id],
+      derived: {
+        counter_display: {
+          [String(hidden.id)]: { pills: [{ counter: "time", count: 3 }] },
+        },
+      },
+    };
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+
+    render(<ZoneViewer zone="exile" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.getByLabelText("Face-down card")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Secret Suspend Card")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("3")).not.toBeInTheDocument();
+  });
+
+  it("renders a time counter without labeling a non-Suspend card as suspended", () => {
+    const exiled = makeObject({
+      zone: "Exile",
+      name: "Timebug",
+      keywords: [],
+      base_keywords: [],
+    });
+    const base = makeState(exiled);
+    const gameState = {
+      ...base,
+      objects: buildObjectMap(exiled),
+      players: base.players.map((player) => ({ ...player, graveyard: [] })),
+      exile: [exiled.id],
+      derived: {
+        counter_display: {
+          [String(exiled.id)]: { pills: [{ counter: "time", count: 2 }] },
+        },
+      },
+    };
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+
+    render(<ZoneViewer zone="exile" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.getByLabelText("2")).toBeInTheDocument();
+    expect(screen.queryByText(/suspend/i)).not.toBeInTheDocument();
   });
 });

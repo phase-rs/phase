@@ -18,11 +18,16 @@ describe("P2PDraftHost pre-draft lobby view", () => {
     pod_size: 4,
     human_seats: 1,
     min_pod_size: 3,
+    max_pod_size: 8,
+    allowed_pod_sizes: [3, 4, 5, 6, 7, 8],
     packs_per_player: 3,
     cards_per_pick: 2,
     pick_selection_mode: "Ordered",
+    distribution: "PickAndPass",
     min_deck_size: 60,
     commanders_required: 1,
+    post_draft_play: "CompleteImmediately",
+    launch_capability: "CommanderMultiplayer",
     match_config: { match_type: "Bo1" },
   };
 
@@ -30,11 +35,16 @@ describe("P2PDraftHost pre-draft lobby view", () => {
     pod_size: 8,
     human_seats: 8,
     min_pod_size: 2,
+    max_pod_size: 8,
+    allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
     packs_per_player: 3,
     cards_per_pick: 1,
     pick_selection_mode: "Direct",
+    distribution: "PickAndPass",
     min_deck_size: 40,
     commanders_required: 0,
+    post_draft_play: "TournamentPairings",
+    launch_capability: "None",
     match_config: { match_type: "Bo3" },
   };
 
@@ -72,7 +82,7 @@ describe("P2PDraftHost pre-draft lobby view", () => {
       4,
     );
 
-    expect(draftProcedure).toHaveBeenCalledWith("CommanderDraft");
+    expect(draftProcedure).toHaveBeenCalledWith("CommanderDraft", "Swiss");
     expect(view.min_deck_size).toBe(60); // CR 903.13f(1)
     expect(view.pack_count).toBe(3); // CR 903.13b
     // 0, not 2: the lobby seat has no pending pack, which is exactly what
@@ -88,6 +98,7 @@ describe("P2PDraftHost pre-draft lobby view", () => {
     // prove `buildLobbyView` ran and read the procedure at all, so this `0`
     // cannot be an artifact of a view that was never built.
     expect(view.pick_steps_per_pack).toBe(0);
+    expect(view.launch_capability).toBe("CommanderMultiplayer");
     expect(view.match_config.match_type).toBe("Bo1");
     // Identity, not just equality: the view must PASS THROUGH the engine's
     // object. The old `this.kind === "Traditional" ? "Bo3" : "Bo1"` built a
@@ -107,8 +118,19 @@ describe("P2PDraftHost pre-draft lobby view", () => {
     // The other half of row 10's cross-fixture identity: `0` here too, under a
     // procedure whose `cards_per_pick` differs from the Commander one.
     expect(view.pick_steps_per_pack).toBe(0);
+    expect(view.launch_capability).toBe("None");
     expect(view.match_config.match_type).toBe("Bo3");
     expect(view.match_config).toBe(TRADITIONAL_PROCEDURE.match_config);
+  });
+
+  it("forwards the WASM launch capability without recomputing it from procedure axes", async () => {
+    const { view } = await lobbyViewFor(
+      "CommanderDraft",
+      { ...COMMANDER_PROCEDURE, launch_capability: "None" },
+      4,
+    );
+
+    expect(view.launch_capability).toBe("None");
   });
 
   /**

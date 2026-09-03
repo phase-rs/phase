@@ -1471,6 +1471,24 @@ impl TournamentManager {
         self.tournaments.is_empty()
     }
 
+    /// Every tournament this manager holds, in unspecified order.
+    ///
+    /// Deliberately unfiltered: it yields terminal and abandoned events
+    /// alongside live ones, because "which tournaments are interesting" is a
+    /// caller's question and differs per call site. Callers that need a stable
+    /// order (e.g. building a `TournamentListUpdate`) sort the result
+    /// themselves — this makes no ordering promise, matching
+    /// [`std::collections::HashMap::values`]'s own contract, which it wraps
+    /// directly.
+    ///
+    /// Returns an opaque iterator rather than a concrete `Values` or a
+    /// materialized `Vec` so the storage behind it stays an implementation
+    /// detail, the same way [`Self::get`]/[`Self::len`] keep the map itself
+    /// private.
+    pub fn iter(&self) -> impl Iterator<Item = &TournamentMeta> {
+        self.tournaments.values()
+    }
+
     fn meta_mut(&mut self, code: &str) -> Result<&mut TournamentMeta, String> {
         self.tournaments
             .get_mut(code)
@@ -3928,5 +3946,119 @@ mod tests {
             abandoned.check_expired(&env2),
             vec![TournamentExpiryEvent::Deleted("T".to_string())]
         );
+    }
+
+    /// Verification Matrix row 11's hostile fixture: one tournament in EACH
+    /// of the four [`TournamentStatus`] variants. `iter()` must yield all
+    /// four — proving no status filtering leaked into the accessor, since
+    /// filtering (if any) is a caller's job.
+    #[test]
+    fn iter_yields_every_tournament_regardless_of_status() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+
+        // Registration: created, nobody paired.
+        create(&mut mgr, "REG", arity(2), BracketShape::Swiss, &env);
+
+        // InProgress: round 1 paired.
+        create(&mut mgr, "RUN", arity(2), BracketShape::Swiss, &env);
+        join_n(&mut mgr, "RUN", 4, &env);
+        mgr.generate_pairings("RUN", &env).expect("round 1");
+
+        // Completed: every pairing resolved, then frozen by the organizer.
+        create(&mut mgr, "DONE", arity(2), BracketShape::Swiss, &env);
+        join_n(&mut mgr, "DONE", 2, &env);
+        mgr.generate_pairings("DONE", &env).expect("round 1");
+        let pairing_id = mgr.get("DONE").expect("done").pairings[0].id;
+        mgr.report_result(
+            "DONE",
+            pairing_id,
+            PodOutcome::Decisive {
+                winner: key(0),
+                game_wins: [(key(0), 2u8), (key(1), 0u8)].into_iter().collect(),
+            },
+            &env,
+        )
+        .expect("report");
+        mgr.complete_tournament("DONE", &env).expect("complete");
+
+        // Abandoned: reached only through the 7-day inactivity transition.
+        create(&mut mgr, "GONE", arity(2), BracketShape::Swiss, &env);
+        join_n(&mut mgr, "GONE", 4, &env);
+        mgr.generate_pairings("GONE", &env).expect("round 1");
+
+        let statuses: Vec<TournamentStatus> = ["REG", "RUN", "DONE", "GONE"]
+            .iter()
+            .map(|c| mgr.get(c).expect("present").status)
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                TournamentStatus::Registration,
+                TournamentStatus::InProgress,
+                TournamentStatus::Completed,
+                TournamentStatus::InProgress,
+            ],
+            "fixture precondition: the four records are in the intended states"
+        );
+
+        // Push "GONE" (and only it) into Abandoned. "RUN" is kept alive by a
+        // fresh activity stamp so the sweep cannot abandon it too, and "REG"
+        // would be deleted outright, so it is re-created after the sweep.
+        // "DONE" survives untouched: 7 days is well inside the 30-day terminal
+        // retention window, which is what leaves all FOUR statuses present at
+        // once for the assertion below.
+        env.advance_secs(IN_PROGRESS_ABANDON_SECS + 1);
+        // A `const` block: both operands are constants, so the fixture's
+        // premise is decidable at compile time and a retention window that
+        // shrank below the abandonment window should fail the BUILD rather
+        // than wait for someone to run this test. Same idiom as
+        // `protocol.rs`'s floor-versus-version guard.
+        const {
+            assert!(
+                IN_PROGRESS_ABANDON_SECS + 1 < TERMINAL_RETENTION_SECS,
+                "this fixture needs the terminal window to outlast the abandonment one, \
+                 so the Completed record survives the sweep that abandons GONE"
+            )
+        };
+        mgr.report_result(
+            "RUN",
+            mgr.get("RUN").expect("run").pairings[0].id,
+            PodOutcome::Draw,
+            &env,
+        )
+        .expect("keep RUN active");
+        let events = mgr.check_expired(&env);
+        assert!(events.contains(&TournamentExpiryEvent::Abandoned("GONE".to_string())));
+        create(&mut mgr, "REG", arity(2), BracketShape::Swiss, &env);
+
+        let mut seen: Vec<(&str, TournamentStatus)> =
+            mgr.iter().map(|m| (m.code.as_str(), m.status)).collect();
+        seen.sort_by_key(|(code, _)| *code);
+
+        assert_eq!(
+            seen,
+            vec![
+                ("DONE", TournamentStatus::Completed),
+                ("GONE", TournamentStatus::Abandoned),
+                ("REG", TournamentStatus::Registration),
+                ("RUN", TournamentStatus::InProgress),
+            ],
+            "iter() must yield every held tournament, in every status"
+        );
+        assert_eq!(
+            mgr.iter().count(),
+            mgr.len(),
+            "iter() yields each tournament exactly once"
+        );
+    }
+
+    /// The empty case: a fresh manager's `iter()` yields nothing rather than
+    /// panicking or special-casing.
+    #[test]
+    fn iter_on_an_empty_manager_yields_nothing() {
+        let mgr = TournamentManager::new();
+        assert_eq!(mgr.iter().count(), 0);
+        assert!(mgr.iter().next().is_none());
     }
 }

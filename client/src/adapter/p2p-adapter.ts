@@ -345,6 +345,10 @@ class NativeP2PBridge {
     return this.clientFor(playerId).previewManaPayment(action, playerId);
   }
 
+  async exportPersistenceState(): Promise<string> {
+    return this.clientFor(0).exportPersistenceState();
+  }
+
   async getState(): Promise<GameState> {
     return this.clientFor(0).getState();
   }
@@ -736,6 +740,8 @@ function hostDisposedError(): AdapterError {
 export class P2PHostAdapter implements EngineAdapter {
   private wasm = getHostAdapter();
   private nativeBridge: NativeP2PBridge | null = null;
+  /** Present for a P2P host, whether its authority is browser WASM or native. */
+  exportPersistenceState?: () => Promise<string>;
   private nativeInitialSetupPending = false;
   private listeners: P2PAdapterEventListener[] = [];
   /**
@@ -972,17 +978,24 @@ export class P2PHostAdapter implements EngineAdapter {
         (fault) => this.enqueueDelivery(() => this.handleNativeAiDriverFault(fault)),
         nativeResume,
       );
-    } else {
-      this.attachBrowserAiDecisionDiagnostics();
     }
+    this.attachAuthorityDiagnostics();
   }
 
   /**
-   * Installs the local-only diagnostics capability once this host is backed by
-   * browser WASM. It deliberately remains an instance property: native hosts
-   * and P2P guests must fail capability detection rather than receive a no-op.
+   * Installs the local authority diagnostics capability. Native hosts request
+   * the server's trusted envelope; browser hosts obtain it from their WASM
+   * engine. P2P guests never construct this adapter.
    */
-  private attachBrowserAiDecisionDiagnostics(): void {
+  private attachAuthorityDiagnostics(): void {
+    this.exportPersistenceState = async () => {
+      this.assertNotDisposed();
+      if (!this.ownsAuthority()) {
+        throw new AdapterError("P2P_ERROR", "P2P host authority changed", false);
+      }
+      if (this.nativeBridge) return this.nativeBridge.exportPersistenceState();
+      return this.wasm.exportPersistenceState();
+    };
     if (this.nativeBridge) return;
     Object.assign(this, {
       setAiDecisionDiagnosticsEnabled: (enabled: boolean) =>
@@ -1584,7 +1597,7 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           this.nativeBridge.dispose();
           this.nativeBridge = null;
-          this.attachBrowserAiDecisionDiagnostics();
+          this.attachAuthorityDiagnostics();
         }
       }
       // A teardown may have landed while `wasm.initialize()` (and the native
@@ -1806,7 +1819,7 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           this.nativeBridge.dispose();
           this.nativeBridge = null;
-          this.attachBrowserAiDecisionDiagnostics();
+          this.attachAuthorityDiagnostics();
         }
       }
       if (!this.ownsAuthority()) {
@@ -1849,24 +1862,33 @@ export class P2PHostAdapter implements EngineAdapter {
       if (this.pregameSeatState.seats[pid]?.type !== "JoinedHuman") return;
 
       try {
-        // Validate against the worker engine's already-resident card DB
-        // (`checkDeckCompatibility` self-ensures it). Using the main-thread
-        // `engineRuntime` instance instead would parse a SECOND full ~93 MB
-        // card DB into the page — doubling host footprint past iOS Safari's
-        // per-tab memory ceiling and silently OOM-reloading the host tab.
-        const result = await this.wasm.checkDeckCompatibility({
+        // This is a SECURITY GATE, not a UI hint: a guest whose deck fails is
+        // kicked. It therefore uses the dedicated `evaluateDeckFormatGate`,
+        // which always returns a definite verdict, and never the shared
+        // `checkDeckCompatibility`. The shared one deliberately answers "no
+        // opinion" (`selected_format_compatible: null`) for a Custom format —
+        // correct for the lobby's legality chip, but here it would read as
+        // "not false", silently admitting every Custom-format guest deck and
+        // disabling this check for exactly the case it cannot evaluate.
+        //
+        // Still routed through the WORKER engine's already-resident card DB
+        // (the adapter self-ensures it), not the main-thread `engineRuntime`
+        // instance: that would parse a SECOND full ~93 MB card DB into the
+        // page, doubling host footprint past iOS Safari's per-tab memory
+        // ceiling and silently OOM-reloading the host tab.
+        const result = await this.wasm.evaluateDeckFormatGate({
           main_deck: deck.main_deck,
           sideboard: deck.sideboard,
           commander: deck.commander ?? [],
           companion: deck.companion ?? [],
           signature_spell: deck.signature_spell ?? [],
           selected_format: this.formatConfig!.format,
-        }) as { selected_format_compatible?: boolean | null; selected_format_reasons: string[] };
+        }) as { compatible: boolean; reasons: string[] };
 
         if (!this.ownsAuthority()) return;
         if (this.gameStarted) return;
-        if (result.selected_format_compatible === false) {
-          const reason = result.selected_format_reasons[0]
+        if (!result.compatible) {
+          const reason = result.reasons[0]
             ?? `Deck is not legal in ${this.formatConfig!.format}.`;
           const session = this.guestSessions.get(pid);
           if (session) {
@@ -1912,7 +1934,7 @@ export class P2PHostAdapter implements EngineAdapter {
       });
       this.nativeBridge.dispose();
       this.nativeBridge = null;
-      this.attachBrowserAiDecisionDiagnostics();
+      this.attachAuthorityDiagnostics();
     }
   }
 
@@ -3859,6 +3881,17 @@ export class P2PGuestAdapter implements EngineAdapter {
       }
       case "state_update": {
         if (this.authenticatedSession !== session) return;
+        // PeerJS normally preserves message order, but state resync after a
+        // reconnect can race a previously queued delivery. Never let that old
+        // view overwrite a newer authority revision: it can leave two peers
+        // each waiting for the other to act.
+        if (
+          msg.revision !== undefined
+          && this.cachedRevision !== null
+          && msg.revision < this.cachedRevision
+        ) {
+          return;
+        }
         this.cachedRevision = msg.revision ?? null;
         const updateSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         if (this.pendingResolve) {

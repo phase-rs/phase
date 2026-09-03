@@ -255,7 +255,94 @@ impl ResolvedSetSelection {
             PackGenerator::for_sequence(selection.pools, &codes).map_err(|e| e.to_string())?;
 
         Ok(Self {
-            source: DraftSource::Set { codes },
+            source: DraftSource::Set {
+                layout: SetLayout::UniformByRound { codes },
+            },
+            cards_per_pack,
+            pack_count,
+            generator,
+        })
+    }
+}
+
+/// Preflight every set a Chaos draft can select. Pack passing requires every
+/// seat's booster in a round to exhaust on the same pick count, so a variable
+/// MTGJSON variant or a different declared total is rejected before assignment.
+fn preflight_chaos_pools(
+    pools: &[LimitedSetPool],
+    candidate_codes: &[String],
+) -> Result<(Vec<String>, u8), String> {
+    let mut canonical_codes = Vec::with_capacity(candidate_codes.len());
+    let mut cards_per_pack = None;
+    for candidate in candidate_codes {
+        let pool = pools
+            .iter()
+            .find(|pool| pool.code.eq_ignore_ascii_case(candidate))
+            .ok_or_else(|| format!("No pool data was supplied for set '{candidate}'"))?;
+        let size = set_cards_per_pack(pool)?;
+        if let Some(expected) = cards_per_pack {
+            if expected != size {
+                return Err(format!(
+                    "Chaos candidate sets must share one MTGJSON pack size; {} has {size}, expected {expected}",
+                    pool.code
+                ));
+            }
+        } else {
+            cards_per_pack = Some(size);
+        }
+        canonical_codes.push(pool.code.clone());
+    }
+    let cards_per_pack = cards_per_pack
+        .ok_or_else(|| "A Chaos draft must name at least one candidate set".to_string())?;
+    Ok((canonical_codes, cards_per_pack))
+}
+
+/// Host-local Chaos input. The host names only the candidate pools; the WASM
+/// boundary derives the exact seat-by-round assignment from its private seed
+/// and persists it in the session. Guests never receive this input.
+#[derive(Deserialize)]
+struct ChaosPackSelection {
+    pools: Vec<LimitedSetPool>,
+    candidate_codes: Vec<String>,
+}
+
+/// A resolved Chaos source and generator. Unlike `ResolvedSetSelection`, this
+/// records one set assignment for each seat and round.
+struct ResolvedChaosSelection {
+    source: DraftSource,
+    cards_per_pack: u8,
+    pack_count: u8,
+    generator: PackGenerator,
+}
+
+impl ResolvedChaosSelection {
+    fn resolve(
+        selection: ChaosPackSelection,
+        seat_count: u8,
+        pack_count: u8,
+        seed: u64,
+    ) -> Result<Self, String> {
+        let (candidate_codes, cards_per_pack) =
+            preflight_chaos_pools(&selection.pools, &selection.candidate_codes)?;
+        let assignments =
+            PackGenerator::chaos_assignments(&candidate_codes, seat_count, pack_count, seed)
+                .map_err(|error| error.to_string())?;
+        let generator = PackGenerator::for_chaos(
+            selection.pools,
+            &candidate_codes,
+            &assignments,
+            seat_count,
+            pack_count,
+        )
+        .map_err(|error| error.to_string())?;
+
+        Ok(Self {
+            source: DraftSource::Set {
+                layout: SetLayout::Chaos {
+                    candidate_codes,
+                    assignments,
+                },
+            },
             cards_per_pack,
             pack_count,
             generator,
@@ -955,13 +1042,29 @@ pub fn get_view_for_seat(seat: u8) -> Result<JsValue, JsValue> {
 /// Serialize the full DraftSession to JSON for host persistence.
 ///
 /// The host persists this after every authoritative mutation so a
-/// crashed/reloaded host can restore the draft state.
+/// crashed/reloaded host can restore the draft state. This is the trusted
+/// authority export: unlike `DraftSourceView`, it intentionally retains a
+/// Chaos layout's complete assignment matrix and must not be sent to guests.
 #[wasm_bindgen]
 pub fn export_draft_session() -> Result<String, JsValue> {
     with_draft(|session| {
         serde_json::to_string(session)
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize draft session: {e}")))
     })?
+}
+
+/// Decode only snapshot shapes this client can safely present after a restore.
+///
+/// Player and spectator projections own the privacy boundary for a Chaos
+/// layout: the persisted snapshot remains host-local, while all ordinary views
+/// expose only `DraftSourceView`'s redacted metadata.
+fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String> {
+    let session: DraftSession = serde_json::from_str(json)
+        .map_err(|error| format!("Failed to deserialize draft session: {error}"))?;
+    session
+        .validate_persisted_snapshot()
+        .map_err(|error| format!("Invalid draft snapshot: {error}"))?;
+    Ok(session)
 }
 
 /// Restore a DraftSession from a persisted JSON snapshot.
@@ -973,11 +1076,8 @@ pub fn export_draft_session() -> Result<String, JsValue> {
 /// original session's RNG stream, which is fine.
 #[wasm_bindgen]
 pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsValue> {
-    let session: DraftSession = serde_json::from_str(json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize draft session: {e}")))?;
-    session
-        .validate_sealed_snapshot()
-        .map_err(|e| JsValue::from_str(&format!("Invalid draft snapshot: {e}")))?;
+    let session =
+        restorable_draft_session_from_json(json).map_err(|error| JsValue::from_str(&error))?;
 
     let offset = u64::from(session.cards_in_pack(session.current_pack_number))
         * u64::from(session.current_pack_number)
@@ -1128,12 +1228,15 @@ enum SeatDescriptor {
 /// JSON examples:
 ///   `{ "type": "Set",  "data": { "pools": [<LimitedSetPool>, ...],
 ///                                 "sequence": ["isd", "dka", "avr"] } }`
+///   `{ "type": "Chaos", "data": { "pools": [<LimitedSetPool>, ...],
+///                                  "candidate_codes": ["isd", "dka"] } }`
 ///   `{ "type": "Cube", "data": { "cube_list_text": "...", "cube_name": "My Cube",
 ///                                 "cube_draft_settings": { ... } } }`
 #[derive(Deserialize)]
 #[serde(tag = "type", content = "data")]
 enum PoolInput {
     Set(SetPoolInput),
+    Chaos(ChaosPackSelection),
     Cube {
         cube_list_text: String,
         cube_name: String,
@@ -1177,21 +1280,25 @@ impl SetPoolInput {
 /// Boundary mirror of `draft_core::types::DraftProcedure` for the JS bridge.
 ///
 /// A DTO rather than `#[derive(Serialize)]` on `DraftProcedure` itself:
-/// `DraftProcedure`, `PackDistribution` and `PostDraftPlay` derive no
-/// `Serialize`, and adding it would edit `draft-core` — a scope path this phase
-/// cannot afford. Same idiom as `lobby_broker_wasm::OutboundDto`. Only the axes
-/// a caller outside the reducer can act on are published; the reducer remains
-/// the authority for everything else.
+/// `DraftProcedure` derives no `Serialize`, so this keeps the external procedure
+/// surface intentionally explicit. `PostDraftPlay` and `PackDistribution` are
+/// serialized here because a host must know whether the procedure runs in-session
+/// tournament pairings; the reducer remains the authority for every constraint.
 #[derive(Serialize)]
 struct DraftProcedureDto {
     pod_size: u8,
     human_seats: u8,
     min_pod_size: u8,
+    max_pod_size: u8,
+    allowed_pod_sizes: Vec<u8>,
     packs_per_player: u8,
     cards_per_pick: u8,
     pick_selection_mode: draft_core::types::PickSelectionMode,
+    distribution: draft_core::types::PackDistribution,
     min_deck_size: usize,
     commanders_required: u8,
+    post_draft_play: draft_core::types::PostDraftPlay,
+    launch_capability: draft_core::types::DraftLaunchCapability,
     match_config: engine::types::match_config::MatchConfig,
 }
 
@@ -1199,8 +1306,10 @@ struct DraftProcedureDto {
 /// reads these; it never re-derives them (CLAUDE.md: the frontend is a display
 /// layer, not a logic layer).
 #[wasm_bindgen]
-pub fn draft_procedure(kind: u8) -> Result<JsValue, JsValue> {
-    let dto = draft_procedure_dto(kind).map_err(|e| JsValue::from_str(&e))?;
+pub fn draft_procedure(kind: u8, tournament_format: &str) -> Result<JsValue, JsValue> {
+    let tournament_format =
+        parse_tournament_format(tournament_format).map_err(|e| JsValue::from_str(&e))?;
+    let dto = draft_procedure_dto(kind, tournament_format).map_err(|e| JsValue::from_str(&e))?;
     Ok(to_js(&dto))
 }
 
@@ -1213,19 +1322,35 @@ pub fn draft_procedure(kind: u8) -> Result<JsValue, JsValue> {
 /// Nothing in the type system catches that;
 /// `draft_procedure_dto_copies_every_axis_unmoved` is the substitute for the
 /// missing type error.
-fn draft_procedure_dto(kind: u8) -> Result<DraftProcedureDto, String> {
+fn draft_procedure_dto(
+    kind: u8,
+    tournament_format: TournamentFormat,
+) -> Result<DraftProcedureDto, String> {
     let procedure = draft_kind_from_wire(kind)?.procedure();
     Ok(DraftProcedureDto {
         pod_size: procedure.pod_size,
         human_seats: procedure.human_seats,
         min_pod_size: procedure.min_pod_size,
+        max_pod_size: procedure.max_pod_size,
+        allowed_pod_sizes: procedure.allowed_pod_sizes(tournament_format),
         packs_per_player: procedure.packs_per_player,
         cards_per_pick: procedure.cards_per_pick,
         pick_selection_mode: procedure.pick_selection_mode,
+        distribution: procedure.distribution,
         min_deck_size: procedure.min_deck_size,
         commanders_required: procedure.commanders_required,
+        post_draft_play: procedure.post_draft_play,
+        launch_capability: procedure.launch_capability(),
         match_config: procedure.match_config,
     })
+}
+
+fn parse_tournament_format(tournament_format: &str) -> Result<TournamentFormat, String> {
+    match tournament_format {
+        "Swiss" => Ok(TournamentFormat::Swiss),
+        "SingleElimination" => Ok(TournamentFormat::SingleElimination),
+        _ => Err("tournament_format must be Swiss or SingleElimination".to_string()),
+    }
 }
 
 /// The numeric `kind` the JS bridge sends, and the single authority for it.
@@ -1264,10 +1389,10 @@ fn draft_kind_from_wire(kind: u8) -> Result<DraftKind, String> {
 
 /// Create a multiplayer draft session. Used by the P2P host to initialize a
 /// Premier, Traditional, Sealed, or Commander draft with human + bot seats from
-/// either a Set pool or a custom Cube list.
+/// a Set pool, host-local Chaos candidate pools, or a custom Cube list.
 ///
 /// - `pool_input_json`: serialized `PoolInput` discriminated union
-///   (`{ "type": "Set" | "Cube", "data": { ... } }`)
+///   (`{ "type": "Set" | "Chaos" | "Cube", "data": { ... } }`)
 /// - `seats_json`: JSON array of SeatDescriptors
 /// - `kind`: 0=Quick, 1=Premier, 2=Traditional, 3=Sealed, 4=CommanderDraft
 ///   (CR 903.13a). The mapping's single authority is `draft_kind_wire_number`.
@@ -1323,13 +1448,7 @@ fn create_multiplayer_draft_inner(
 
     let draft_kind = draft_kind_from_wire(kind)?;
 
-    let tournament_format = match tournament_format {
-        "Swiss" => TournamentFormat::Swiss,
-        "SingleElimination" => TournamentFormat::SingleElimination,
-        _ => {
-            return Err("tournament_format must be Swiss or SingleElimination".to_string());
-        }
-    };
+    let tournament_format = parse_tournament_format(tournament_format)?;
 
     let pod_policy = match pod_policy {
         "Competitive" => PodPolicy::Competitive,
@@ -1338,6 +1457,26 @@ fn create_multiplayer_draft_inner(
             return Err("pod_policy must be Competitive or Casual".to_string());
         }
     };
+
+    // This entry point hosts a draft for remote peers. It deliberately uses
+    // the public procedure range, not Quick Draft's local-cube allowance, so
+    // an arbitrary seat payload cannot allocate an unbounded remote pod.
+    let procedure = draft_kind.procedure();
+    let allowed = procedure.allowed_pod_size_range(tournament_format);
+    let pod_size = u8::try_from(seat_descriptors.len()).map_err(|_| {
+        format!(
+            "pod_size must be between {} and {}",
+            allowed.start(),
+            allowed.end()
+        )
+    })?;
+    if !procedure.allows_pod_size(tournament_format, pod_size) {
+        return Err(format!(
+            "pod_size must be between {} and {}",
+            allowed.start(),
+            allowed.end()
+        ));
+    }
 
     let seats: Vec<DraftSeat> = seat_descriptors
         .into_iter()
@@ -1358,7 +1497,6 @@ fn create_multiplayer_draft_inner(
             // The procedure table is the single authority for how many boosters
             // this kind opens; the host's selection only decides which set fills
             // each of them. Same contract as the single-player entry points.
-            let procedure = draft_kind.procedure();
             let selection = ResolvedSetSelection::resolve(
                 set_pool_input.into_sequence()?,
                 Some(procedure.packs_per_player),
@@ -1368,7 +1506,44 @@ fn create_multiplayer_draft_inner(
                 set_code: selection.source.set_code(),
                 source: selection.source,
                 kind: draft_kind,
-                pod_size: seats.len() as u8,
+                pod_size,
+                cards_per_pack: selection.cards_per_pack,
+                pack_count: selection.pack_count,
+                min_deck_size: procedure.min_deck_size,
+                addable_cards: DeckAddableCards::standard_basics(),
+                rng_seed: seed as u64,
+                tournament_format,
+                pod_policy,
+                spectator_visibility: SpectatorVisibility::default(),
+            };
+
+            let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
+            let pack_gen = selection.generator;
+
+            session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
+                .map_err(|e| format!("Failed to start draft: {}", e))?;
+
+            let view = filter_for_player(&draft_session, 0);
+
+            DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+            PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+            RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+
+            Ok(view)
+        }
+        PoolInput::Chaos(chaos_selection) => {
+            let selection = ResolvedChaosSelection::resolve(
+                chaos_selection,
+                pod_size,
+                procedure.packs_per_player,
+                seed as u64,
+            )?;
+
+            let config = DraftConfig {
+                set_code: selection.source.set_code(),
+                source: selection.source,
+                kind: draft_kind,
+                pod_size,
                 cards_per_pack: selection.cards_per_pack,
                 pack_count: selection.pack_count,
                 min_deck_size: procedure.min_deck_size,
@@ -1443,7 +1618,7 @@ fn create_multiplayer_draft_inner(
                 },
                 set_code: "custom-cube".to_string(),
                 kind: draft_kind,
-                pod_size: seats.len() as u8,
+                pod_size,
                 cards_per_pack: settings.cards_per_pack,
                 pack_count: settings.pack_count,
                 min_deck_size: settings.min_deck_size,
@@ -1548,6 +1723,19 @@ mod pool_input_tests {
         }
     }
 
+    #[test]
+    fn pool_input_chaos_carries_candidates_without_assignments() {
+        let json = r#"{"type":"Chaos","data":{"pools":[],"candidate_codes":["foo"]}}"#;
+        let parsed: PoolInput = serde_json::from_str(json).unwrap();
+        match parsed {
+            PoolInput::Chaos(input) => {
+                assert_eq!(input.candidate_codes, vec!["foo".to_string()]);
+                assert!(input.pools.is_empty());
+            }
+            _ => panic!("expected Chaos"),
+        }
+    }
+
     /// The pre-multi-set spelling one pod host may still have persisted:
     /// a single serialized pool, promoted to the one-element sequence it meant.
     #[test]
@@ -1607,7 +1795,32 @@ mod pool_input_tests {
 
 #[cfg(test)]
 mod set_selection_tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+
+    fn declared_pool(code: &str, variant_sizes: &[u8]) -> LimitedSetPool {
+        LimitedSetPool {
+            code: code.to_string(),
+            name: format!("{code} Set"),
+            release_date: None,
+            pack_variants: variant_sizes
+                .iter()
+                .map(|size| draft_core::set_pool::PackVariant {
+                    contents: vec![draft_core::set_pool::PackSlot {
+                        slot: "common".to_string(),
+                        count: *size,
+                        choices: Vec::new(),
+                    }],
+                    weight: 1,
+                })
+                .collect(),
+            pack_variants_total_weight: variant_sizes.len() as u32,
+            sheets: BTreeMap::new(),
+            prints: Vec::new(),
+            basic_lands: Vec::new(),
+        }
+    }
 
     /// A minimal `LimitedSetPool` whose single variant holds `size` commons.
     fn pool_json(code: &str, size: u8) -> String {
@@ -1676,10 +1889,71 @@ mod set_selection_tests {
         assert_eq!(
             selection.source,
             DraftSource::Set {
-                codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+                layout: SetLayout::UniformByRound {
+                    codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+                },
             }
         );
         assert_eq!(selection.source.set_code(), "AAA+BBB");
+    }
+
+    #[test]
+    fn chaos_preflight_checks_every_selectable_pool_and_each_variant_shape() {
+        let mismatch = preflight_chaos_pools(
+            &[declared_pool("AAA", &[15]), declared_pool("BBB", &[14])],
+            &["AAA".to_string(), "BBB".to_string()],
+        )
+        .expect_err("all selectable Chaos pools must share a total");
+        assert!(mismatch.contains("BBB"), "unexpected error: {mismatch}");
+
+        let variable =
+            preflight_chaos_pools(&[declared_pool("AAA", &[15, 14])], &["AAA".to_string()])
+                .expect_err("variable MTGJSON variants are invalid for Chaos");
+        assert!(
+            variable.contains("no single MTGJSON pack size"),
+            "unexpected error: {variable}"
+        );
+
+        assert_eq!(
+            preflight_chaos_pools(
+                &[declared_pool("AAA", &[15]), declared_pool("BBB", &[15])],
+                &["AAA".to_string(), "BBB".to_string()],
+            )
+            .unwrap(),
+            (vec!["AAA".to_string(), "BBB".to_string()], 15)
+        );
+    }
+
+    #[test]
+    fn private_chaos_construction_persists_deterministic_assignments() {
+        let first = ResolvedChaosSelection::resolve(
+            ChaosPackSelection {
+                pools: vec![declared_pool("AAA", &[15]), declared_pool("BBB", &[15])],
+                candidate_codes: vec!["AAA".to_string(), "BBB".to_string()],
+            },
+            2,
+            3,
+            42,
+        )
+        .unwrap();
+        let replay = ResolvedChaosSelection::resolve(
+            ChaosPackSelection {
+                pools: vec![declared_pool("AAA", &[15]), declared_pool("BBB", &[15])],
+                candidate_codes: vec!["AAA".to_string(), "BBB".to_string()],
+            },
+            2,
+            3,
+            42,
+        )
+        .unwrap();
+
+        assert_eq!(first.source, replay.source);
+        assert!(matches!(
+            first.source,
+            DraftSource::Set {
+                layout: SetLayout::Chaos { assignments, .. }
+            } if assignments.len() == 2 && assignments.iter().all(|rounds| rounds.len() == 3)
+        ));
     }
 
     #[test]
@@ -1792,6 +2066,90 @@ mod create_multiplayer_draft_tests {
         PACK_GEN.with(|cell| cell.set(None));
         RNG.with(|cell| cell.set(None));
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    fn persisted_premier_session(layout: SetLayout) -> DraftSession {
+        let source = DraftSource::Set { layout };
+        let config = DraftConfig {
+            set_code: source.set_code(),
+            source,
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats = (0..8)
+            .map(|seat| DraftSeat::Human {
+                player_id: engine::types::player::PlayerId(seat),
+                display_name: format!("Player {seat}"),
+            })
+            .collect();
+        DraftSession::new(config, seats, "persisted-draft".to_string())
+    }
+
+    #[test]
+    fn import_accepts_persisted_chaos_only_through_a_redacted_player_view() {
+        clear_state();
+
+        let uniform = persisted_premier_session(SetLayout::UniformByRound {
+            codes: vec!["TST".to_string()],
+        });
+        let uniform_json = serde_json::to_string(&uniform).expect("serialize uniform snapshot");
+        assert!(
+            restorable_draft_session_from_json(&uniform_json).is_ok(),
+            "existing Uniform snapshots must continue to restore"
+        );
+
+        let chaos = persisted_premier_session(SetLayout::Chaos {
+            candidate_codes: vec!["TST".to_string()],
+            assignments: vec![vec!["TST".to_string(); 3]; 8],
+        });
+        let chaos_json = serde_json::to_string(&chaos).expect("serialize Chaos snapshot");
+        let restored = restorable_draft_session_from_json(&chaos_json)
+            .expect("redacted player views make persisted Chaos snapshots restorable");
+        let view = filter_for_player(&restored, 0);
+
+        let serialized = serde_json::to_value(view).expect("serialize redacted view");
+        assert!(
+            serialized
+                .pointer("/source/data/layout/Chaos/assignments")
+                .is_none(),
+            "a player view must never serialize the host-only assignments"
+        );
+        assert_eq!(
+            serialized.pointer("/source/data/layout/Chaos/candidate_codes"),
+            Some(&serde_json::json!(["TST"])),
+        );
+        DRAFT_SESSION.with(|cell| assert!(cell.take().is_none()));
+    }
+
+    #[test]
+    fn import_rejects_redacted_chaos_snapshot_that_claims_a_uniform_layout() {
+        clear_state();
+
+        let chaos = persisted_premier_session(SetLayout::Chaos {
+            candidate_codes: vec!["TST".to_string()],
+            assignments: vec![vec!["TST".to_string(); 3]; 8],
+        });
+        let mut snapshot = serde_json::to_value(chaos).expect("serialize Chaos snapshot");
+        let layout = snapshot
+            .pointer_mut("/config/source/data")
+            .expect("canonical DraftSource layout");
+        *layout = serde_json::json!({
+            "candidate_codes": ["TST"],
+            "codes": ["TST"],
+        });
+
+        let error = restorable_draft_session_from_json(&snapshot.to_string())
+            .expect_err("a public redaction is not a restorable Chaos snapshot");
+        assert!(error.contains("Failed to deserialize draft session"));
+        DRAFT_SESSION.with(|cell| assert!(cell.take().is_none()));
     }
 
     #[test]
@@ -2033,11 +2391,53 @@ mod create_multiplayer_draft_tests {
         .to_string()
     }
 
+    fn pod_chaos_pool_input(candidates: &[&str]) -> String {
+        let pools: Vec<serde_json::Value> = candidates
+            .iter()
+            .map(|code| serde_json::from_str(&pod_pool_json(code)).expect("pool fixture"))
+            .collect();
+        serde_json::json!({
+            "type": "Chaos",
+            "data": { "pools": pools, "candidate_codes": candidates }
+        })
+        .to_string()
+    }
+
     fn two_human_seats_json() -> &'static str {
         r#"[
             { "type": "Human", "player_id": 0, "display_name": "Host" },
             { "type": "Human", "player_id": 1, "display_name": "Guest" }
         ]"#
+    }
+
+    #[test]
+    fn remote_quick_draft_rejects_pods_outside_the_public_procedure_range() {
+        for seat_count in [1, 9] {
+            let seats_json = format!(
+                "[{}]",
+                (0..seat_count)
+                    .map(|seat| {
+                        format!(
+                            r#"{{ "type": "Human", "player_id": {seat}, "display_name": "P{seat}" }}"#
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+
+            let err = create_multiplayer_draft_inner(
+                &pod_sequence_pool_input(&["AAA"], &["AAA"]),
+                &seats_json,
+                0, // Quick
+                42,
+                "test-room",
+                "Swiss",
+                "Competitive",
+            )
+            .expect_err("remote Quick Draft must use its public 2..=8 pod range");
+
+            assert!(err.contains("pod_size must be between 2 and 8"), "{err}");
+        }
     }
 
     /// THE multiplayer multi-set claim: a pod host names one set per booster,
@@ -2073,6 +2473,44 @@ mod create_multiplayer_draft_tests {
             "pack 1 must be dealt from the sequence's first set: {:?}",
             pack.iter().map(|c| &c.set_code).collect::<Vec<_>>()
         );
+        clear_state();
+    }
+
+    #[test]
+    fn a_chaos_pod_derives_and_persists_assignments_from_host_candidates() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &pod_chaos_pool_input(&["AAA", "BBB"]),
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("a Chaos pod should resolve host-local assignments");
+
+        let source = serde_json::to_value(&view.source).expect("view source serializes");
+        assert_eq!(
+            source.pointer("/data/layout/Chaos/candidate_codes"),
+            Some(&serde_json::json!(["AAA", "BBB"])),
+        );
+        assert!(
+            source.pointer("/data/layout/Chaos/assignments").is_none(),
+            "player views must not expose host-local assignments"
+        );
+
+        let persisted = export_draft_session().expect("host session exports");
+        let persisted: serde_json::Value = serde_json::from_str(&persisted).expect("session JSON");
+        let assignments = persisted
+            .pointer("/config/source/data/assignments")
+            .expect("host session persists exact Chaos assignments");
+        assert_eq!(assignments.as_array().map(Vec::len), Some(2));
+        assert!(assignments
+            .as_array()
+            .expect("assignment rows")
+            .iter()
+            .all(|row| row.as_array().map(Vec::len) == Some(3)));
         clear_state();
     }
 
@@ -2378,13 +2816,13 @@ mod create_multiplayer_draft_tests {
     /// transposition reddens here. `commanders_required` is `[0, 0, 0, 0, 1]`
     /// over `DraftKind::ALL` and equals no other column (`pod_size`
     /// `[8, 8, 8, 8, 4]`, `human_seats` `[1, 8, 8, 8, 1]`, `min_pod_size`
-    /// `[1, 2, 2, 2, 3]`, `packs_per_player` `[3, 3, 3, 6, 3]`, `cards_per_pick`
+    /// `[2, 2, 2, 2, 3]`, `packs_per_player` `[3, 3, 3, 6, 3]`, `cards_per_pick`
     /// `[1, 1, 1, 1, 2]`), so the argument survives its addition.
     #[test]
     fn draft_procedure_dto_copies_every_axis_unmoved() {
         for kind in DraftKind::ALL {
             let procedure = kind.procedure();
-            let dto = draft_procedure_dto(draft_kind_wire_number(kind))
+            let dto = draft_procedure_dto(draft_kind_wire_number(kind), TournamentFormat::Swiss)
                 .unwrap_or_else(|e| panic!("{kind:?} has a wire number: {e}"));
 
             assert_eq!(dto.pod_size, procedure.pod_size, "pod_size ({kind:?})");
@@ -2395,6 +2833,15 @@ mod create_multiplayer_draft_tests {
             assert_eq!(
                 dto.min_pod_size, procedure.min_pod_size,
                 "min_pod_size ({kind:?})"
+            );
+            assert_eq!(
+                dto.max_pod_size, procedure.max_pod_size,
+                "max_pod_size ({kind:?})"
+            );
+            assert_eq!(
+                dto.allowed_pod_sizes,
+                procedure.allowed_pod_sizes(TournamentFormat::Swiss),
+                "allowed_pod_sizes ({kind:?})"
             );
             assert_eq!(
                 dto.packs_per_player, procedure.packs_per_player,
@@ -2409,6 +2856,10 @@ mod create_multiplayer_draft_tests {
                 "pick_selection_mode ({kind:?})"
             );
             assert_eq!(
+                dto.distribution, procedure.distribution,
+                "distribution ({kind:?})"
+            );
+            assert_eq!(
                 dto.min_deck_size, procedure.min_deck_size,
                 "min_deck_size ({kind:?})"
             );
@@ -2417,10 +2868,30 @@ mod create_multiplayer_draft_tests {
                 "commanders_required ({kind:?})"
             );
             assert_eq!(
+                dto.post_draft_play, procedure.post_draft_play,
+                "post_draft_play ({kind:?})"
+            );
+            assert_eq!(
+                dto.launch_capability,
+                procedure.launch_capability(),
+                "launch_capability ({kind:?})"
+            );
+            assert_eq!(
                 dto.match_config, procedure.match_config,
                 "match_config ({kind:?})"
             );
         }
+    }
+
+    #[test]
+    fn draft_procedure_dto_publishes_the_engine_single_elimination_seat_set() {
+        let dto = draft_procedure_dto(
+            draft_kind_wire_number(DraftKind::Premier),
+            TournamentFormat::SingleElimination,
+        )
+        .expect("Premier has a wire number");
+
+        assert_eq!(dto.allowed_pod_sizes, vec![8]);
     }
 
     // ── V-RS: the CR 903.3 designation's channel, seat by seat ─────────────
@@ -2439,7 +2910,7 @@ mod create_multiplayer_draft_tests {
     /// The CR 903.13e granting twin of `commander_pool_input_json()`.
     ///
     /// Identical but for the set code, which is the only thing that makes the
-    /// grant fire: `session_concessions` latches `DraftSource::Set { codes }`
+    /// grant fire: `session_concessions` latches `SetLayout::UniformByRound`
     /// and matches each of them case-insensitively against the engine's
     /// `DRAFT_SET_CONCESSIONS` table, where "CMM" grants up to two copies of
     /// The Prismatic Piper. The grant is therefore LATCHED from what the draft

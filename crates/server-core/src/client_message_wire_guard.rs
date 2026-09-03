@@ -18,7 +18,12 @@ use lobby_broker::inbound_guard::{
     LookupJoinTargetInbound,
 };
 use lobby_broker::validation::{
-    validate_unregister_lobby_fields, validate_update_lobby_metadata_fields,
+    validate_create_tournament_fields, validate_drop_from_tournament_fields,
+    validate_end_tournament_fields, validate_get_tournament_fields,
+    validate_join_tournament_fields, validate_report_match_result_fields,
+    validate_start_tournament_round_fields, validate_unregister_lobby_fields,
+    validate_update_lobby_metadata_fields, CreateTournamentFields, DropFromTournamentFields,
+    EndTournamentFields, JoinTournamentFields, ReportMatchResultFields, StartTournamentRoundFields,
     UpdateLobbyMetadataFields,
 };
 
@@ -35,7 +40,7 @@ use crate::game_reconnect_guard::guard_game_reconnect;
 use crate::interaction_payload_guard::guard_interaction_submission_payload;
 use crate::legacy_deck_guard::guard_legacy_deck;
 use crate::legacy_join_guard::guard_legacy_join_game;
-use crate::protocol::{ClientMessage, ServerMessage, ServerMode};
+use crate::protocol::{resolve_draft_source_intent_ref, ClientMessage, ServerMessage, ServerMode};
 use crate::seat_mutation_wire_guard::guard_seat_mutation;
 use crate::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
@@ -80,6 +85,7 @@ pub fn guard_client_message_before_dispatch(
         | ClientMessage::Concede
         | ClientMessage::ConcedeMatch
         | ClientMessage::AbandonGame
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => Ok(()),
@@ -174,22 +180,77 @@ pub fn guard_client_message_before_dispatch(
         }),
         ClientMessage::SeatMutate { mutation } => guard_seat_mutation(mutation),
         ClientMessage::UnregisterLobby { game_code } => validate_unregister_lobby_fields(game_code),
+        // Tournament variants are lobby-scoped, so they delegate straight to
+        // `lobby_broker::validation` exactly as `UpdateLobbyMetadata`/
+        // `UnregisterLobby` above do — no `server-core`-local guard module,
+        // which is reserved for game-action variants needing engine-type-aware
+        // validation the broker crate cannot depend on. The identical calls
+        // appear in `guard_broker_projection_inbound`; `both_inbound_guards_agree_
+        // on_every_tournament_variant` is what keeps the two from drifting.
+        ClientMessage::CreateTournament { name, .. } => {
+            validate_create_tournament_fields(CreateTournamentFields { name })
+        }
+        ClientMessage::JoinTournament {
+            code,
+            player_key,
+            display_name,
+        } => validate_join_tournament_fields(JoinTournamentFields {
+            code,
+            player_key,
+            display_name,
+        }),
+        ClientMessage::GetTournament { code } => validate_get_tournament_fields(code),
+        ClientMessage::StartTournamentRound {
+            code,
+            organizer_token,
+        } => validate_start_tournament_round_fields(StartTournamentRoundFields {
+            code,
+            organizer_token,
+        }),
+        ClientMessage::ReportMatchResult {
+            code,
+            player_token,
+            outcome,
+            ..
+        } => validate_report_match_result_fields(ReportMatchResultFields {
+            code,
+            player_token,
+            outcome,
+        }),
+        ClientMessage::DropFromTournament { code, player_token } => {
+            validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token })
+        }
+        ClientMessage::EndTournament {
+            code,
+            organizer_token,
+        } => validate_end_tournament_fields(EndTournamentFields {
+            code,
+            organizer_token,
+        }),
         ClientMessage::CreateDraftWithSettings {
             display_name,
+            source,
             set_codes,
             password,
             timer_seconds,
             pod_size,
             kind,
+            tournament_format,
             ..
-        } => guard_create_draft_with_settings(
-            display_name,
-            set_codes,
-            password,
-            *timer_seconds,
-            *pod_size,
-            *kind,
-        ),
+        } => {
+            // Normalize the new tagged object and legacy root spelling before
+            // validating any candidate token or touching a pool map.
+            let intent = resolve_draft_source_intent_ref(source.as_ref(), set_codes.as_ref())?;
+            guard_create_draft_with_settings(
+                display_name,
+                intent.set_codes(),
+                password,
+                *timer_seconds,
+                *pod_size,
+                *kind,
+                *tournament_format,
+            )
+        }
         ClientMessage::JoinDraftWithPassword {
             draft_code,
             display_name,
@@ -246,6 +307,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
         | ClientMessage::CreateGameWithSettings { .. }
@@ -269,7 +331,20 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::SpectateDraft { .. }
         | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
-        | ClientMessage::CancelTakeback => ServerMessage::error(reason),
+        | ClientMessage::CancelTakeback
+        // Tournament variants join the operational-error bucket: none is a
+        // game action, so there is no `ActionRejected`/`ManaPaymentPreviewRejected`
+        // channel for them to answer on. Their bounds are also not routinely
+        // trippable by a non-hostile client — a name over 40 characters or a
+        // token over 128 bytes is a malformed frame, not a rejected decision
+        // — so the `Error` disposal behavior is the right one here.
+        | ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::GetTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::EndTournament { .. } => ServerMessage::error(reason),
     }
 }
 
@@ -346,11 +421,58 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             consumed_reservation_tokens,
         }),
         ClientMessage::UnregisterLobby { game_code } => validate_unregister_lobby_fields(game_code),
+        // Identical delegation to `guard_client_message_before_dispatch`'s
+        // arms, and it must stay identical: this guard runs BEFORE
+        // `to_lobby_client_message` clones these strings and the `game_wins`
+        // map into the broker, so anything unbounded here is an unbounded
+        // clone — the same hazard `UpdateLobbyMetadata`'s arm above exists to
+        // prevent.
+        ClientMessage::CreateTournament { name, .. } => {
+            validate_create_tournament_fields(CreateTournamentFields { name })
+        }
+        ClientMessage::JoinTournament {
+            code,
+            player_key,
+            display_name,
+        } => validate_join_tournament_fields(JoinTournamentFields {
+            code,
+            player_key,
+            display_name,
+        }),
+        ClientMessage::GetTournament { code } => validate_get_tournament_fields(code),
+        ClientMessage::StartTournamentRound {
+            code,
+            organizer_token,
+        } => validate_start_tournament_round_fields(StartTournamentRoundFields {
+            code,
+            organizer_token,
+        }),
+        ClientMessage::ReportMatchResult {
+            code,
+            player_token,
+            outcome,
+            ..
+        } => validate_report_match_result_fields(ReportMatchResultFields {
+            code,
+            player_token,
+            outcome,
+        }),
+        ClientMessage::DropFromTournament { code, player_token } => {
+            validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token })
+        }
+        ClientMessage::EndTournament {
+            code,
+            organizer_token,
+        } => validate_end_tournament_fields(EndTournamentFields {
+            code,
+            organizer_token,
+        }),
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::Concede
@@ -601,5 +723,205 @@ mod tests {
             ),
             "an oversized action is a typed invalid action"
         );
+    }
+
+    // -- Tournament organizer ----------------------------------------------
+
+    use crate::protocol::{BracketShape, MatchArity, PodOutcome, ScoringPolicy};
+    use lobby_broker::validation::{
+        MAX_DISPLAY_NAME_LEN, MAX_GAME_CODE_LEN, MAX_GAME_WINS_ENTRIES, MAX_ROOM_NAME_LEN,
+        MAX_TOKEN_LEN,
+    };
+    use std::collections::HashMap;
+
+    /// One frame per tournament variant, each with exactly one oversized
+    /// field, paired with the substring its rejection must name. Driving both
+    /// guards from ONE table is the point: a variant that reached only one of
+    /// them would have to be listed twice to slip through.
+    fn oversized_tournament_frames() -> Vec<(&'static str, ClientMessage)> {
+        let long_token = "t".repeat(MAX_TOKEN_LEN + 1);
+        let long_code = "c".repeat(MAX_GAME_CODE_LEN + 1);
+        vec![
+            (
+                "name",
+                ClientMessage::CreateTournament {
+                    name: "n".repeat(MAX_ROOM_NAME_LEN + 1),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default(),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                },
+            ),
+            (
+                "display_name",
+                ClientMessage::JoinTournament {
+                    code: "TOUR01".into(),
+                    player_key: "key-a".into(),
+                    display_name: "d".repeat(MAX_DISPLAY_NAME_LEN + 1),
+                },
+            ),
+            (
+                "code",
+                ClientMessage::GetTournament {
+                    code: long_code.clone(),
+                },
+            ),
+            (
+                "organizer_token",
+                ClientMessage::StartTournamentRound {
+                    code: "TOUR01".into(),
+                    organizer_token: long_token.clone(),
+                },
+            ),
+            (
+                "player_token",
+                ClientMessage::ReportMatchResult {
+                    code: "TOUR01".into(),
+                    pairing_id: 0,
+                    player_token: long_token.clone(),
+                    outcome: PodOutcome::Draw,
+                },
+            ),
+            (
+                "player_token",
+                ClientMessage::DropFromTournament {
+                    code: "TOUR01".into(),
+                    player_token: long_token.clone(),
+                },
+            ),
+            (
+                "organizer_token",
+                ClientMessage::EndTournament {
+                    code: "TOUR01".into(),
+                    organizer_token: long_token,
+                },
+            ),
+        ]
+    }
+
+    fn valid_tournament_frames() -> Vec<ClientMessage> {
+        vec![
+            ClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: Some(3),
+            },
+            ClientMessage::JoinTournament {
+                code: "TOUR01".into(),
+                player_key: "key-a".into(),
+                display_name: "Alice".into(),
+            },
+            ClientMessage::GetTournament {
+                code: "TOUR01".into(),
+            },
+            ClientMessage::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: "tok".into(),
+            },
+            ClientMessage::ReportMatchResult {
+                code: "TOUR01".into(),
+                pairing_id: 0,
+                player_token: "tok".into(),
+                outcome: PodOutcome::Draw,
+            },
+            ClientMessage::DropFromTournament {
+                code: "TOUR01".into(),
+                player_token: "tok".into(),
+            },
+            ClientMessage::EndTournament {
+                code: "TOUR01".into(),
+                organizer_token: "tok".into(),
+            },
+        ]
+    }
+
+    /// Verification Matrix row 13's core assertion. Both guards must reject
+    /// the SAME oversized field for every variant — a variant bounded in one
+    /// guard but not the other is exactly the silent divergence this test
+    /// exists to rule out, and it is not a compile error (both matches would
+    /// still be exhaustive with an `Ok(())` arm).
+    #[test]
+    fn both_inbound_guards_agree_on_every_tournament_variant() {
+        for (field, msg) in oversized_tournament_frames() {
+            let dispatch = guard_client_message_before_dispatch(&msg, ServerMode::Full)
+                .expect_err(&format!("dispatch guard accepted an oversized {field}"));
+            let projection = guard_broker_projection_inbound(&msg)
+                .expect_err(&format!("projection guard accepted an oversized {field}"));
+
+            assert!(dispatch.contains(field), "unexpected reason: {dispatch}");
+            assert_eq!(
+                dispatch, projection,
+                "the two guards must delegate to the same validation function"
+            );
+        }
+    }
+
+    /// Non-vacuity for the test above: both guards ACCEPT well-formed frames,
+    /// so neither is passing by rejecting everything. Also proves the mode
+    /// argument does not gate tournaments — that stays `reject_if_disabled`'s
+    /// job.
+    #[test]
+    fn both_inbound_guards_accept_valid_tournament_frames() {
+        for msg in valid_tournament_frames() {
+            assert!(
+                guard_client_message_before_dispatch(&msg, ServerMode::Full).is_ok(),
+                "Full-mode dispatch guard rejected {msg:?}"
+            );
+            assert!(
+                guard_client_message_before_dispatch(&msg, ServerMode::LobbyOnly).is_ok(),
+                "LobbyOnly dispatch guard rejected {msg:?}"
+            );
+            assert!(
+                guard_broker_projection_inbound(&msg).is_ok(),
+                "projection guard rejected {msg:?}"
+            );
+        }
+    }
+
+    /// The `ReportMatchResult` collection bound specifically, at the
+    /// projection boundary — the direct sibling of
+    /// `broker_projection_rejects_too_many_consumed_tokens`, for the one
+    /// tournament payload that carries an unbounded-by-shape map a client
+    /// controls, and which `to_lobby_client_message` would otherwise clone.
+    #[test]
+    fn broker_projection_rejects_an_oversized_game_wins_map_before_clone() {
+        let game_wins: HashMap<String, u8> = (0..=MAX_GAME_WINS_ENTRIES)
+            .map(|i| (format!("key-{i}"), 1u8))
+            .collect();
+        let msg = ClientMessage::ReportMatchResult {
+            code: "TOUR01".into(),
+            pairing_id: 0,
+            player_token: "tok".into(),
+            outcome: PodOutcome::Decisive {
+                winner: "key-0".into(),
+                game_wins,
+            },
+        };
+
+        let err = guard_broker_projection_inbound(&msg).unwrap_err();
+        assert!(err.contains("game_wins"), "unexpected reason: {err}");
+        assert_eq!(
+            guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err(),
+            err
+        );
+    }
+
+    /// The declared rejection channel: a tournament frame is not a game
+    /// action, so it answers on the operational-error channel, never
+    /// `ActionRejected`.
+    #[test]
+    fn tournament_wire_rejections_answer_on_the_operational_error_channel() {
+        for (_, msg) in oversized_tournament_frames() {
+            let reason = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
+            match wire_rejection_message(&msg, reason.clone()) {
+                ServerMessage::Error { message, code } => {
+                    assert_eq!(message, reason);
+                    assert!(code.is_none());
+                }
+                other => panic!("a tournament frame must not answer as {other:?}"),
+            }
+        }
     }
 }

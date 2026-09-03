@@ -176,11 +176,15 @@ jobs:
 
       - name: Build binaries launched by integration tests
         # `CARGO_BIN_EXE_*` embeds target/debug paths. Nextest's archive does
-        # not preserve those launcher paths, so share the two binaries the
-        # integration tests execute directly with every shard.
+        # not preserve those launcher paths, so share the binaries the
+        # integration tests execute directly with every shard. This list and the
+        # two below must cover every such binary: a launcher added here must also
+        # be uploaded and made executable below, or the shard fails on the leg
+        # that was missed rather than on the one that was added.
+        # `crates/phase-ai/tests/gate_cli.rs` reds when they fall behind.
         run: |
           cargo build -p probe-pin
-          cargo build -p phase-ai --bin ai-commander
+          cargo build -p phase-ai --bin ai-commander --bin ai-duel --bin ai-gate
 
       - name: Upload test archive
         uses: actions/upload-artifact@v4
@@ -197,6 +201,8 @@ jobs:
           path: |
             target/debug/probe-pin
             target/debug/ai-commander
+            target/debug/ai-duel
+            target/debug/ai-gate
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
@@ -241,7 +247,7 @@ jobs:
 
       - name: Restore test runtime binary permissions
         # Actions artifacts preserve file contents but not executable bits.
-        run: chmod +x target/debug/probe-pin target/debug/ai-commander
+        run: chmod +x target/debug/probe-pin target/debug/ai-commander target/debug/ai-duel target/debug/ai-gate
 
       - name: Run tests
         # The archive retains build options. Each shard only extracts it and
@@ -818,7 +824,10 @@ jobs:
           test -x "$NODE_BIN"
           test -f "$TAURI_JS"
           export ORG_GRADLE_PROJECT_phaseNodeExecutable="$NODE_BIN"
-          "$NODE_BIN" "$TAURI_JS" android build --debug --target aarch64 --apk
+          (
+            cd client
+            "$NODE_BIN" "$TAURI_JS" android build --debug --target aarch64 --apk
+          )
 
       - name: Inspect ARM64 debug APK
         run: |

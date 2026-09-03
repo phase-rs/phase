@@ -1004,6 +1004,7 @@ function GamePageContent({
   );
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
+  const logPanelOpen = useUiStore((s) => s.logPanelOpen);
   const toggleDebugClickModeButtonVisible = useUiStore(
     (s) => s.toggleDebugClickModeButtonVisible,
   );
@@ -1619,7 +1620,11 @@ function GamePageContent({
             scaleKey="playerPiles"
             className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
             // Anchor box-scale to the bottom-left dock corner.
-            style={{ ...playerZoneRailStyle, transformOrigin: "bottom left" }}
+            style={{
+              ...playerZoneRailStyle,
+              left: "var(--game-left-rail-offset, 0px)",
+              transformOrigin: "bottom left",
+            }}
           >
             <div className="flex items-end gap-2">
               <ExilePile
@@ -1726,6 +1731,8 @@ function GamePageContent({
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
+        logPanelOpen={logPanelOpen}
+        onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
         multiplayerBoardLayout={
           seatCount > 2 && !untapForcedSplit ? resolvedMultiplayerBoardLayout : undefined
         }
@@ -3263,6 +3270,11 @@ function AbilityChoiceModal() {
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
   );
+  // CR 709.5b: engine-published Room halves, already resolved through the
+  // COPIED halves for a permanent that copies a Room.
+  const roomHalfIdentities = useGameStore(
+    (s) => s.gameState?.derived?.room_half_identities,
+  );
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
 
   if (!pending || !obj) return null;
@@ -3309,6 +3321,7 @@ function AbilityChoiceModal() {
           obj,
           objects,
           webSlingingCosts,
+          roomHalfIdentities,
         );
         if (action.type === "TapLandForMana") {
           const surfaces = action.interactionActionId

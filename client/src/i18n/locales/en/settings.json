@@ -26,7 +26,7 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Skip low-use priority windows (Experimental)",
     "skipLowUsePriorityWindowsDescription": "Automatically pass your own empty-stack upkeep, draw, and end-step priority windows. Phase stops and Full Control still pause.",
-    "logDefault": "Log Default",
+    "logDockSide": "Game Log Position",
     "spellPayment": "Spell Payment",
     "manualManaPayment": "Manual mana payment for spells",
     "spellPaymentOptions": {
@@ -60,9 +60,9 @@
       "medium": "Medium",
       "large": "Large"
     },
-    "logDefaultOptions": {
-      "open": "Open",
-      "closed": "Closed"
+    "logDockSideOptions": {
+      "left": "Left",
+      "right": "Right"
     }
   },
   "visual": {

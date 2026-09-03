@@ -1,15 +1,31 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchType } from "../../adapter/types";
+import type {
+  CustomFormatDef,
+  FormatConfig,
+  FormatGroup,
+  GameFormat,
+  LoopDetectionMode,
+  MatchType,
+} from "../../adapter/types";
 import { AI_DIFFICULTIES } from "../../constants/ai";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import {
   FORMAT_DEFAULTS,
+  isKnownFormat,
   useMultiplayerStore,
 } from "../../stores/multiplayerStore";
 import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStore";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import {
+  deleteSavedCustomFormat,
+  loadSavedCustomFormats,
+  saveCustomFormat,
+  type SavedCustomFormat,
+} from "../../services/customFormats";
+import { getHostAdapter } from "../../adapter/wasm-adapter";
+import { isFormatConfigShape } from "../../adapter/format-config-shape";
 import { expandParsedDeck } from "../../services/deckParser";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { IntegerField } from "../ui/IntegerField";
@@ -193,6 +209,7 @@ export function HostSetup({
   const storeFormatConfig = useMultiplayerStore((s) => s.formatConfig);
   const lastHostConfig = useMultiplayerStore((s) => s.lastHostConfig);
   const rememberHostConfig = useMultiplayerStore((s) => s.rememberHostConfig);
+  const clearRememberedHostConfig = useMultiplayerStore((s) => s.clearRememberedHostConfig);
 
   const isP2P = connectionMode === "p2p";
 
@@ -200,9 +217,24 @@ export function HostSetup({
   // when they're still hostable in this connection mode. A remembered format
   // whose minimum exceeds the P2P mesh ceiling can't run over P2P, so we drop
   // back to defaults rather than seed an unhostable configuration.
+  //
+  // `FORMAT_DEFAULTS` is built from the BUILT-IN registry and has no entry for
+  // any `Custom:<id>` key, so indexing it with a remembered custom format
+  // returns `undefined` and reading `.min_players` off that throws — a hard
+  // crash on mount for anyone whose last hosted game used a custom format.
+  // Guard with `isKnownFormat` (the same predicate `normalizeRememberedHostConfig`
+  // uses) and fall back to the format's OWN already-resolved `FormatConfig`,
+  // which for a custom format is the only source of truth for these fields.
+  const rememberedMinPlayers =
+    lastHostConfig == null
+      ? null
+      : isKnownFormat(lastHostConfig.format)
+        ? FORMAT_DEFAULTS[lastHostConfig.format].min_players
+        : lastHostConfig.formatConfig.min_players;
   const remembered =
     lastHostConfig != null
-    && (!isP2P || FORMAT_DEFAULTS[lastHostConfig.format].min_players <= P2P_MAX_PEERS)
+    && rememberedMinPlayers != null
+    && (!isP2P || rememberedMinPlayers <= P2P_MAX_PEERS)
       ? lastHostConfig
       : null;
   const initialFormatConfig =
@@ -233,6 +265,27 @@ export function HostSetup({
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>(remembered?.aiSeats ?? []);
   const [startWhenFull, setStartWhenFull] = useState(remembered?.startWhenFull ?? true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // ── Axis A: saved custom formats (client-persisted) ────────────────────
+  // `savedCustomFormatId` is what identifies WHICH saved definition is active:
+  // every Axis-A save carries the engine's reserved sentinel `CustomFormatId(0)`
+  // by design, so `selectedFormat` is the string "Custom:0" for all of them and
+  // cannot tell two apart.
+  const [savedFormats, setSavedFormats] = useState<SavedCustomFormat[]>(() =>
+    loadSavedCustomFormats(),
+  );
+  const [savedCustomFormatId, setSavedCustomFormatId] = useState<string | null>(
+    remembered?.savedCustomFormatId ?? null,
+  );
+  const [customFormatName, setCustomFormatName] = useState("");
+  /** True while a saved format's `FormatConfig` is being resolved by the engine.
+   *  Gates the picker and the submit button so no partially-resolved config can
+   *  be selected or hosted. */
+  const [isResolvingFormat, setIsResolvingFormat] = useState(false);
+  const [customFormatError, setCustomFormatError] = useState<string | null>(null);
+  /** Monotonic token for format resolves. A resolve that finishes after a newer
+   *  one started must not write its stale config into state. */
+  const formatResolveSeq = useRef(0);
   const effectiveMatchType = playerCount === 2 ? matchType : "Bo1";
   const aiDeckCatalog = useAiDeckCatalog({
     selectedFormat: formatConfig.format,
@@ -262,19 +315,113 @@ export function HostSetup({
     : formatConfig.max_players;
   const accentTone = isP2P ? "cyan" : "emerald";
 
-  const handleFormatSelect = (format: GameFormat) => {
-    const defaults = FORMAT_DEFAULTS[format];
+  /** Apply a freshly-resolved format config. Shared by the built-in picker and
+   *  the saved-custom-format picker so both reset the same dependent state. */
+  const applyResolvedFormat = (
+    format: GameFormat,
+    config: FormatConfig,
+    savedId: string | null,
+  ) => {
     setSelectedFormat(format);
-    setLocalFormatConfig(defaults);
+    setLocalFormatConfig(config);
+    setSavedCustomFormatId(savedId);
     // Let multi-seat formats start at their own minimum (e.g. Commander's
     // min is 2, so it still defaults to a duel but users can bump up to 4).
-    const newCount = defaults.min_players;
+    const newCount = config.min_players;
     setPlayerCount(newCount);
     setCompatibilityPlayerCount(newCount);
     if (newCount !== 2) {
       setMatchType("Bo1");
     }
     setAiSeats([]);
+  };
+
+  const handleFormatSelect = (format: GameFormat) => {
+    // Only built-in formats reach here: `formatMenuGroups` is built from
+    // `availableFormats`, itself derived from the engine's built-in registry.
+    // Guarded anyway so a future caller cannot reintroduce the
+    // `FORMAT_DEFAULTS[custom]` crash.
+    if (!isKnownFormat(format)) return;
+    // A built-in selection supersedes any in-flight custom resolve.
+    formatResolveSeq.current += 1;
+    setIsResolvingFormat(false);
+    setCustomFormatError(null);
+    applyResolvedFormat(format, FORMAT_DEFAULTS[format], null);
+  };
+
+  /**
+   * Select a saved custom format.
+   *
+   * Deliberately `async`, and NO state setter runs before the engine's resolver
+   * has answered: `FormatConfig::for_custom_rules` is the single authority for
+   * turning saved rules into an active config, and a half-applied selection
+   * (new format string, old config) is exactly the mixed state that would be
+   * submitted if the user clicked Host mid-resolve. While this is in flight the
+   * picker and the submit button are disabled, and the pre-selection config
+   * remains intact and hostable.
+   */
+  const handleSavedFormatSelect = async (saved: SavedCustomFormat) => {
+    const token = formatResolveSeq.current + 1;
+    formatResolveSeq.current = token;
+    setIsResolvingFormat(true);
+    setCustomFormatError(null);
+    try {
+      const resolved = await getHostAdapter().formatConfigForCustomRules(saved.def.rules);
+      // A newer selection started while this was resolving — discard.
+      if (formatResolveSeq.current !== token) return;
+      if (!isFormatConfigShape(resolved)) {
+        setCustomFormatError(t("hostSetup.customFormatResolveFailed"));
+        return;
+      }
+      applyResolvedFormat(resolved.format, resolved, saved.id);
+    } catch {
+      if (formatResolveSeq.current !== token) return;
+      setCustomFormatError(t("hostSetup.customFormatResolveFailed"));
+    } finally {
+      if (formatResolveSeq.current === token) setIsResolvingFormat(false);
+    }
+  };
+
+  /**
+   * Capture the current lobby setup as a saved custom format.
+   *
+   * The ENGINE builds the definition (`customFormatFromLobbyConfig`); this only
+   * persists what it returns. Its rejection message is surfaced verbatim —
+   * Planechase / Archenemy / Momir carry an auxiliary deck or component that
+   * `StructuralRules` cannot represent, an already-custom source would silently
+   * lose its own legality rules, and an empty name has nothing to label. The
+   * frontend must not re-derive any of those conditions.
+   */
+  const handleSaveAsCustomFormat = async () => {
+    const name = customFormatName.trim();
+    setCustomFormatError(null);
+    try {
+      const def = await getHostAdapter().customFormatFromLobbyConfig(name, formatConfig);
+      const saved = saveCustomFormat(name, def as CustomFormatDef);
+      setSavedFormats(loadSavedCustomFormats());
+      setCustomFormatName("");
+      await handleSavedFormatSelect(saved);
+    } catch (err) {
+      setCustomFormatError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleDeleteSavedFormat = (id: string) => {
+    // A selection may still be resolving when its saved definition is removed.
+    // Invalidate that resolver before changing the local record so its delayed
+    // result cannot restore a definition that no longer exists.
+    formatResolveSeq.current += 1;
+    setIsResolvingFormat(false);
+    deleteSavedCustomFormat(id);
+    setSavedFormats(loadSavedCustomFormats());
+    if (lastHostConfig?.savedCustomFormatId === id) {
+      clearRememberedHostConfig();
+    }
+    // Deleting the active selection falls back to a built-in, so the form is
+    // never left pointing at a definition that no longer exists.
+    if (savedCustomFormatId === id) {
+      handleFormatSelect("Commander");
+    }
   };
 
   const handlePlayerCountChange = (count: number) => {
@@ -312,6 +459,10 @@ export function HostSetup({
 
   const handleHost = async () => {
     if (isSubmitting || hostingStatus !== "idle") return;
+    // A format resolve in flight means `formatConfig` is still the previous
+    // (valid) selection. `submitDisabled` already blocks the button; this is
+    // the belt-and-braces guard for a programmatic form submit.
+    if (isResolvingFormat) return;
     setIsSubmitting(true);
     // `finalConfig` is the submission payload — `max_players` here is the
     // user's chosen count, not the format ceiling. Do NOT mirror this
@@ -338,6 +489,9 @@ export function HostSetup({
     rememberHostConfig({
       format: selectedFormat,
       formatConfig,
+      // Persisted so rehydration can resolve WHICH saved definition this was —
+      // `selectedFormat` is "Custom:0" for every Axis-A save and cannot.
+      savedCustomFormatId,
       playerCount,
       matchType: effectiveMatchType,
       loopDetection,
@@ -397,6 +551,20 @@ export function HostSetup({
       on ? "bg-white/10 text-white" : "text-fg-meta hover:text-slate-200"
     } ${extra}`;
   const formatMeta = availableFormats.find((f) => f.format === selectedFormat);
+  const activeSavedFormat = savedFormats.find((s) => s.id === savedCustomFormatId) ?? null;
+  const availableSavedFormats = isP2P
+    ? savedFormats.filter(
+        (saved) => saved.def.rules.structural.min_players <= P2P_MAX_PEERS,
+      )
+    : savedFormats;
+  // A custom format has no registry metadata, so its label/description come
+  // from the engine-authored `CustomFormatDef` instead.
+  const formatLabel = activeSavedFormat
+    ? activeSavedFormat.def.label
+    : (formatMeta?.label ?? selectedFormat);
+  const formatDescription = activeSavedFormat
+    ? activeSavedFormat.def.description
+    : formatMeta?.description;
   const formatMenuGroups = useMemo((): MenuSelectGroup[] => {
     const groups: MenuSelectGroup[] = [];
     for (const group of (Object.keys(GROUP_ORDER) as FormatGroup[]).sort(
@@ -422,8 +590,23 @@ export function HostSetup({
       })),
     [t],
   );
+  // No CustomFormatRules deck-validation resolver exists yet (Phase 1d) —
+  // `validate_deck_for_format` (the authoritative game-creation gate) rejects
+  // EVERY Custom-format deck unconditionally, for any deck, so hosting or
+  // joining with a saved custom format deterministically fails at
+  // initialization today. The live-check chip reports this format as
+  // "idle" (deliberately not "illegal" — the engine has no opinion, not a
+  // rejection), so `hostDisabled` alone never catches this case. Block
+  // submission locally instead of letting the user walk the full
+  // save/select/deck-pick flow into a guaranteed dead end.
+  const customFormatHostUnavailable = activeSavedFormat !== null;
   const submitDisabled =
-    hostDisabled || isSubmitting || hostingStatus !== "idle" || (effectiveAiSeats.length > 0 && !defaultAiDeck);
+    hostDisabled
+    || customFormatHostUnavailable
+    || isSubmitting
+    || isResolvingFormat
+    || hostingStatus !== "idle"
+    || (effectiveAiSeats.length > 0 && !defaultAiDeck);
 
   return (
     <form
@@ -468,10 +651,10 @@ export function HostSetup({
             {/* Format — grouped MenuSelect mirrors the engine's FormatGroup
                 taxonomy. fitContainer keeps the trigger inside the grid column;
                 menuLayout="dropdown" anchors below the trigger on all widths. */}
-            <Field label={t("hostSetup.format")} hint={formatMeta?.description}>
+            <Field label={t("hostSetup.format")} hint={formatDescription}>
               <MenuSelect
                 ariaLabel={t("hostSetup.format")}
-                label={formatMeta?.label ?? selectedFormat}
+                label={isResolvingFormat ? t("hostSetup.loadingCustomFormat") : formatLabel}
                 selectedValue={selectedFormat}
                 groups={formatMenuGroups}
                 onSelect={(value) => handleFormatSelect(value as GameFormat)}
@@ -481,6 +664,12 @@ export function HostSetup({
                 className={`${inp} min-h-[44px] w-full cursor-pointer font-medium`}
               />
             </Field>
+
+            {customFormatHostUnavailable && (
+              <p role="status" className="text-xs text-amber-300 sm:col-span-2">
+                {t("hostSetup.customFormatHostingUnavailable")}
+              </p>
+            )}
 
             <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
               <IntegerField
@@ -583,6 +772,92 @@ export function HostSetup({
               />
             </Field>
           )}
+
+          <div className="border-t border-hairline-strong" />
+
+          {/* Axis A — save the current setup as a reusable custom format, and
+              pick from previously saved ones. Definitions are built by the
+              ENGINE and persisted client-side; there is no server registry. */}
+          <div className="flex flex-col gap-2.5">
+            <Field
+              label={t("hostSetup.savedFormats")}
+              htmlFor="host-setup-custom-format-name"
+            >
+              <div className="flex gap-2">
+                <input
+                  id="host-setup-custom-format-name"
+                  type="text"
+                  value={customFormatName}
+                  onChange={(e) => setCustomFormatName(e.target.value)}
+                  onKeyDown={(e) => {
+                    // This field lives inside the Host Game <form>, whose
+                    // onSubmit calls handleHost(). Without this, pressing
+                    // Enter to confirm a format name would instead submit the
+                    // form and start hosting immediately.
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    if (customFormatName.trim().length === 0 || isResolvingFormat) return;
+                    void handleSaveAsCustomFormat();
+                  }}
+                  placeholder={t("hostSetup.customFormatNamePlaceholder")}
+                  maxLength={40}
+                  className={inp}
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleSaveAsCustomFormat()}
+                  disabled={customFormatName.trim().length === 0 || isResolvingFormat}
+                  className={`${menuButtonClass({ tone: accentTone, size: "sm" })} shrink-0 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50`}
+                >
+                  {t("hostSetup.saveAsCustomFormat")}
+                </button>
+              </div>
+            </Field>
+
+            {customFormatError && (
+              <p role="alert" className="text-xs text-rose-300">
+                {customFormatError}
+              </p>
+            )}
+
+            {availableSavedFormats.length === 0 ? (
+              <p className="text-xs text-fg-meta">{t("hostSetup.noSavedCustomFormats")}</p>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {availableSavedFormats.map((saved) => (
+                  <li
+                    key={saved.id}
+                    className="flex items-center gap-2.5 rounded-[12px] border border-hairline bg-black/20 px-3 py-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[13px] text-fg-card-body">{saved.name}</div>
+                      <div className="truncate text-[11px] text-fg-meta">
+                        {saved.def.description}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleSavedFormatSelect(saved)}
+                      disabled={isResolvingFormat || savedCustomFormatId === saved.id}
+                      className={`${menuButtonClass({ tone: accentTone, size: "sm" })} shrink-0 disabled:cursor-not-allowed disabled:opacity-50`}
+                    >
+                      {savedCustomFormatId === saved.id
+                        ? t("hostSetup.customFormatInUse")
+                        : t("hostSetup.useCustomFormat")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSavedFormat(saved.id)}
+                      aria-label={t("hostSetup.deleteCustomFormat")}
+                      className={`${menuButtonClass({ tone: "neutral", size: "sm" })} shrink-0`}
+                    >
+                      {t("hostSetup.deleteCustomFormat")}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
 
           <div className="border-t border-hairline-strong" />
 
@@ -691,7 +966,13 @@ export function HostSetup({
           <button
             type="submit"
             disabled={submitDisabled}
-            title={hostDisabled ? hostDisabledReason : undefined}
+            title={
+              customFormatHostUnavailable
+                ? t("hostSetup.customFormatHostingUnavailable")
+                : hostDisabled
+                  ? hostDisabledReason
+                  : undefined
+            }
             aria-disabled={submitDisabled || undefined}
             className={`${menuButtonClass({ tone: accentTone, size: "md" })} w-full disabled:cursor-not-allowed disabled:opacity-50`}
           >

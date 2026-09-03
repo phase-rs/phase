@@ -26,7 +26,7 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Salta le finestre di priorità poco usate (sperimentale)",
     "skipLowUsePriorityWindowsDescription": "Passa automaticamente le tue finestre di priorità con la pila vuota durante il mantenimento, la sottofase di acquisizione e la sottofase finale. Le fermate di fase e il Controllo totale continuano a mettere in pausa.",
-    "logDefault": "Registro predefinito",
+    "logDockSide": "Posizione del registro di gioco",
     "spellPayment": "Pagamento magie",
     "manualManaPayment": "Pagamento manuale del mana per le magie",
     "spellPaymentOptions": { "auto": "Automatico", "autoExceptSacrificialMana": "Chiedi prima di sacrificare", "manual": "Manuale" },
@@ -56,9 +56,9 @@
       "medium": "Medio",
       "large": "Grande"
     },
-    "logDefaultOptions": {
-      "open": "Aperto",
-      "closed": "Chiuso"
+    "logDockSideOptions": {
+      "left": "Sinistra",
+      "right": "Destra"
     }
   },
   "visual": {

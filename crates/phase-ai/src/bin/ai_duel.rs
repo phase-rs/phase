@@ -10,7 +10,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{
-    load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
+    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
     PlayerDeckPayload,
 };
 use engine::types::format::FormatConfig;
@@ -20,10 +20,12 @@ use engine::types::player::PlayerId;
 use phase_ai::auto_play::run_ai_actions;
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::duel_suite::compare::{
-    compare as compare_reports, load_report, print_markdown as print_compare_markdown,
+    compare as compare_reports, emit_gate_verdict, load_report, render_error_markdown,
     CompareOptions,
 };
-use phase_ai::duel_suite::run::{resolve_matchup, run_suite, AttributionMode, SuiteOptions};
+use phase_ai::duel_suite::run::{
+    resolve_matchup, run_suite, AttributionMode, ReportSink, SuiteOptions,
+};
 use phase_ai::duel_suite::{all_matchups, find_matchup};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -140,7 +142,7 @@ fn main() {
             let output_path =
                 output.unwrap_or_else(|| PathBuf::from("target/duel-suite-results.json"));
             let mut options = SuiteOptions::new(difficulty, games, base_seed);
-            options.output_path = output_path.clone();
+            options.output = ReportSink::Create(output_path.clone());
             options.filter = suite_filter;
             options.attribution = attribution;
             options.harvest_output = harvest_output;
@@ -216,7 +218,7 @@ fn run_single(
         }
 
         let start = Instant::now();
-        let (winner, turns) = run_game(&payload, game_seed, difficulty, verbose, is_batch);
+        let (winner, turns) = run_game(db, &payload, game_seed, difficulty, verbose, is_batch);
         let elapsed = start.elapsed().as_millis();
 
         match winner {
@@ -263,6 +265,7 @@ fn run_single(
 }
 
 fn run_game(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
@@ -270,7 +273,10 @@ fn run_game(
     silent: bool,
 ) -> (Option<PlayerId>, u32) {
     let mut state = GameState::new_two_player(seed);
-    load_deck_into_state(&mut state, payload);
+    // Canonical init path (shared with engine-wasm / server-core): hydrates
+    // dual-faced back faces and the `#[serde(skip)]` card-name pool that
+    // `NamedChoice { CardName, .. }` prompts (Pithing Needle) validate against.
+    load_and_hydrate_decks(&mut state, payload, Some(db));
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = [PlayerId(0), PlayerId(1)].into_iter().collect();
@@ -299,7 +305,10 @@ fn run_game(
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
                 break;
             }
-            eprintln!("Warning: no AI actions and game not over — breaking");
+            eprintln!(
+                "Warning: no AI actions and game not over — breaking (turn {}, waiting_for: {:?})",
+                state.turn_number, state.waiting_for
+            );
             break;
         }
         total_actions += results.len();
@@ -375,6 +384,7 @@ fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
                 .wrapping_add(candidate_seat as u64 * 10_000)
                 .wrapping_add(game_idx as u64);
             let result = run_commander_game(
+                db,
                 &payload,
                 seed,
                 candidate,
@@ -470,6 +480,7 @@ struct CommanderGameResult {
 }
 
 fn run_commander_game(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     candidate: PlayerId,
@@ -477,7 +488,7 @@ fn run_commander_game(
     baseline_difficulty: AiDifficulty,
 ) -> CommanderGameResult {
     let mut state = GameState::new(FormatConfig::commander(), 4, seed);
-    load_deck_into_state(&mut state, payload);
+    load_and_hydrate_decks(&mut state, payload, Some(db));
     engine::game::engine::start_game(&mut state);
 
     let ai_players: HashSet<PlayerId> = (0..4).map(|seat| PlayerId(seat as u8)).collect();
@@ -707,7 +718,8 @@ fn print_usage() {
     eprintln!("Compare mode (CI regression gate):");
     eprintln!("  compare BASELINE CURRENT   Diff two suite reports");
     eprintln!("  reports paired-seed flips and a binomial sign-test p-value");
-    eprintln!("  Exit code 0 if no regressions; 1 if any matchup FAILs.");
+    eprintln!("  Exit code 0 if no regressions; 1 if any matchup FAILs; 2 if the two");
+    eprintln!("  reports cannot be compared at all (the refusal is printed to stdout).");
 }
 
 /// Parse `compare` subcommand arguments and run the comparison. Returns the
@@ -728,10 +740,19 @@ fn run_compare(args: &[String]) -> i32 {
         }
     }
 
+    // A report that cannot be READ is refused on the same terms as one that cannot be COMPARED.
+    // Every other refusal on this path publishes a stdout body; an arm that spoke only to stderr
+    // would hand a caller redirecting stdout — the only way this command is used in CI — an empty
+    // file and no statement of what failed.
+    //
+    // The path stays on stderr because `CompareError` carries the cause but not the file, and a
+    // refusal that says "I/O error" without naming which of two inputs it was reading is not
+    // actionable.
     let baseline = match load_report(&baseline_path) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to load baseline {}: {e}", baseline_path.display());
+            print!("{}", render_error_markdown(&e));
             return 2;
         }
     };
@@ -739,23 +760,22 @@ fn run_compare(args: &[String]) -> i32 {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to load current {}: {e}", current_path.display());
+            print!("{}", render_error_markdown(&e));
             return 2;
         }
     };
 
-    let report = match compare_reports(&baseline, &current, &CompareOptions) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Compare failed: {e}");
-            return 2;
-        }
-    };
-    print_compare_markdown(&report);
-    if report.any_fail() {
-        1
-    } else {
-        0
+    // Third caller of the same two statements, and it had the same defect: a refusal spoke
+    // only to stderr, so anything redirecting this command's stdout got an empty file and no
+    // statement of what failed. Routed through the shared emitter rather than repaired in
+    // place — `tests/gate_cli.rs` drives THIS binary, because it is the only one of the three
+    // that needs no card database, so the contract is bound at a real process boundary for
+    // milliseconds instead of a full suite run.
+    let comparison = compare_reports(&baseline, &current, &CompareOptions);
+    if let Err(e) = &comparison {
+        eprintln!("Compare failed: {e}");
     }
+    emit_gate_verdict(&comparison)
 }
 
 fn list_matchups() {

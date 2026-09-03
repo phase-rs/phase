@@ -165,6 +165,42 @@ export type DraftStatus =
 export type DraftKind = "Quick" | "Premier" | "Traditional" | "Sealed" | "CommanderDraft";
 
 /**
+ * View-safe source metadata from `draft_core::view::DraftSourceView`.
+ *
+ * This is intentionally not the persisted DraftSource. In particular, a
+ * Chaos view can name its candidate sets and the viewer's scoped information,
+ * but cannot represent the host-only assignment matrix.
+ */
+export type DraftSourceView =
+  | {
+      type: "Set";
+      data: { layout: DraftSetLayoutView };
+    }
+  | {
+      type: "Cube";
+      data: { id: string; name: string };
+    };
+
+/** Matches the externally tagged Rust `SetLayoutView` enum. */
+export type DraftSetLayoutView =
+  | { UniformByRound: { codes: string[] } }
+  | {
+      Chaos: {
+        candidate_codes: string[];
+        current_pack_code: string | null;
+        completed_own_pack_codes: string[] | null;
+        actual_set_codes: string[] | null;
+      };
+    };
+
+/** What the engine does after every seat has submitted a deck. */
+export type PostDraftPlay = "CompleteImmediately" | "TournamentPairings";
+/** How the engine procedure distributes packs to seats. */
+export type PackDistribution = "PickAndPass" | "AllAtOnce";
+/** Engine-authorized game launch for a completed draft procedure. */
+export type DraftLaunchCapability = "None" | "CommanderMultiplayer";
+
+/**
  * The numeric kind the wasm bridge expects. Mirrors `draft_kind_wire_number`
  * in `crates/draft-wasm/src/lib.rs`, which is the single authority.
  *
@@ -192,10 +228,14 @@ export interface DraftProcedure {
   pod_size: number;
   human_seats: number;
   min_pod_size: number;
+  max_pod_size: number;
+  /** Exact engine-allowed seat counts for the requested tournament format. */
+  allowed_pod_sizes: number[];
   packs_per_player: number;
   cards_per_pick: number;
   /** Engine-owned interaction policy for selecting cards in one pick step. */
   pick_selection_mode: "Direct" | "Ordered";
+  distribution: PackDistribution;
   min_deck_size: number;
   /**
    * CR 903.3: how many commanders a deck built from this kind's pool must
@@ -204,6 +244,10 @@ export interface DraftProcedure {
    * rather than a silent `undefined`, which is the whole point of a mirror.
    */
   commanders_required: number;
+  /** Engine-owned tournament-pairing capability for this draft kind. */
+  post_draft_play: PostDraftPlay;
+  /** Engine-authorized game launch for a completed draft procedure. */
+  launch_capability: DraftLaunchCapability;
   match_config: MatchConfig;
 }
 
@@ -223,6 +267,11 @@ export interface DraftProgressFields {
   pack_sizes?: number[];
   /** The set filling each booster, in pack order. */
   pack_set_codes?: string[];
+  /**
+   * Safe source metadata. Optional while peers transition to the redacted
+   * source contract; it never falls back to a persisted source snapshot.
+   */
+  source?: DraftSourceView;
   /**
    * CR 903.13b: pick STEPS in each booster, in pack order — the per-pack
    * counterpart of `pick_steps_per_pack`. A progress display measures each
@@ -274,6 +323,8 @@ export interface PairingView {
 export interface SpectatorDraftView {
   status: DraftStatus;
   kind: DraftKind;
+  /** Candidate intent only for Chaos; no seat assignment is present. */
+  source?: DraftSourceView;
   current_pack_number: number;
   pick_number: number;
   pass_direction: "Left" | "Right";
@@ -302,7 +353,7 @@ export interface SpectatorDraftView {
   pod_policy: PodPolicy;
   pairings: PairingView[];
   match_config: MatchConfig;
-  /** Present only when the host enabled omniscient spectator visibility. */
+  /** Present only for non-Chaos drafts when the host enabled omniscient visibility. */
   pools?: DraftCardInstance[][];
   current_packs?: (DraftCardInstance[] | null)[];
 }
@@ -322,6 +373,10 @@ export interface GrantableCommanderFiller {
 export interface DraftPlayerView {
   status: DraftStatus;
   kind: DraftKind;
+  /** Candidate intent plus the viewer-scoped Chaos metadata from the engine. */
+  source?: DraftSourceView;
+  /** Engine-owned completed-pod launch capability; never infer this from kind. */
+  launch_capability: DraftLaunchCapability;
   current_pack_number: number;
   pick_number: number;
   pass_direction: "Left" | "Right";
@@ -417,6 +472,15 @@ export type MultiplayerSeatDescriptor =
  */
 export type PoolInput =
   | { type: "Set"; data: SetPackSequence | { set_pool_json: string } }
+  | {
+      /**
+       * Host-local Chaos Draft input. The host provides candidate pools only;
+       * draft-wasm derives the persisted seat-by-round assignments from its
+       * private seed, so this shape can never carry assignments to a guest.
+       */
+      type: "Chaos";
+      data: { pools: unknown[]; candidate_codes: string[] };
+    }
   | {
       type: "Cube";
       data: {
@@ -666,8 +730,14 @@ export class DraftEngineOperationLease {
     return this.wasm.all_picks_submitted();
   }
 
-  draftProcedure(kind: Exclude<DraftKind, "Quick">): DraftProcedure {
-    return this.wasm.draft_procedure(DRAFT_KIND_WIRE_NUMBER[kind]) as DraftProcedure;
+  draftProcedure(
+    kind: Exclude<DraftKind, "Quick">,
+    tournamentFormat: TournamentFormat,
+  ): DraftProcedure {
+    return this.wasm.draft_procedure(
+      DRAFT_KIND_WIRE_NUMBER[kind],
+      tournamentFormat,
+    ) as DraftProcedure;
   }
 
   applyActionAndGetHostView(actionJson: string): DraftPlayerView {
@@ -836,8 +906,11 @@ export class DraftAdapter {
   }
 
   /** The engine-owned per-kind procedure axes; never re-derived by the UI. */
-  async draftProcedure(kind: Exclude<DraftKind, "Quick">): Promise<DraftProcedure> {
-    return withDraftEngineOperation((lease) => lease.draftProcedure(kind));
+  async draftProcedure(
+    kind: Exclude<DraftKind, "Quick">,
+    tournamentFormat: TournamentFormat,
+  ): Promise<DraftProcedure> {
+    return withDraftEngineOperation((lease) => lease.draftProcedure(kind, tournamentFormat));
   }
 
   async submitPickWithDraftEffectForSeat(

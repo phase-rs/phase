@@ -30,10 +30,14 @@
 //! - `GainLife` — controller's life ≥ `LIFE_DIMINISHING_RETURNS`.
 //! - `DealDamage` / `Draw` / `AddCounter` — the `QuantityExpr` (`amount`/
 //!   `count`) resolves to 0, so the effect is a strict no-op.
-//! - `GenericEffect` granting a keyword — every candidate target already
-//!   has that keyword effectively.
+//! - `GenericEffect` granting a keyword or a rule-modifying `StaticMode` —
+//!   every candidate target already has each grant in force.
 //! - `Animate` granting keywords — every candidate target already has all
 //!   granted keywords.
+//! - `Adapt` — the source already carries a +1/+1 counter (CR 701.46a's
+//!   built-in guard makes every further adapt a strict no-op).
+//! - `Regenerate` — every candidate target already carries an unconsumed
+//!   regeneration shield.
 //!
 //! TODOs for follow-up shipments (exhaustive-match arms intentionally
 //! return `None` for these categories today):
@@ -62,11 +66,12 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords::{has_flash, has_keyword};
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{
-    ContinuousModification, Duration, Effect, EffectScope, QuantityExpr, StaticDefinition,
-    TapStateChange, TargetFilter,
+    ContinuousModification, Duration, Effect, EffectScope, QuantityExpr, ShieldKind,
+    StaticDefinition, TapStateChange, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{GameState, TransientContinuousEffect};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -153,6 +158,22 @@ const KIND_FLASH_CAST_PERMISSION: i64 = 10;
 /// never become unflipped. Targeting an already-flipped permanent with a flip
 /// instruction is therefore a deterministic no-op, unlike two-way `Transform`.
 const KIND_FLIP_ALREADY_FLIPPED: i64 = 11;
+/// CR 701.46a: "Adapt N" means "If this permanent has no +1/+1 counters on it,
+/// put N +1/+1 counters on it." The guard is part of the keyword action itself,
+/// so once the source carries a single +1/+1 counter every further activation
+/// resolves to nothing at all.
+const KIND_ADAPT_ALREADY_ADAPTED: i64 = 12;
+/// CR 701.19a: A resolving regenerate effect creates a replacement that protects
+/// the permanent "the next time it would be destroyed this turn". A second
+/// shield on a creature that already holds an unconsumed one is diminishing
+/// (it covers only a second destruction in the same turn), not a strict no-op.
+const KIND_REGENERATE_ALREADY_SHIELDED: i64 = 13;
+/// CR 611.2a: a `GenericEffect` grant delivered as
+/// `ContinuousModification::AddStaticMode` (a continuous effect lasting as
+/// stated) whose mode is already in force on every recipient. Sibling of `KIND_GENERIC_KEYWORD`,
+/// separate so traces distinguish a redundant keyword from a redundant
+/// rule-modifying mode.
+const KIND_GENERIC_STATIC_MODE: i64 = 14;
 
 pub struct RedundancyAvoidancePolicy;
 
@@ -268,7 +289,9 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
 ///   - Pump: `power * 100 + toughness` (power dominates; tolerates ±99)
 ///   - GainLife: current life total
 ///   - DealDamage/Draw/AddCounter: resolved quantity (0)
-///   - Generic/Animate keyword: count of granted keywords already present
+///   - Generic/Animate grant: count of grants already in force
+///   - Adapt: number of +1/+1 counters already on the source
+///   - Regenerate: count of already-shielded candidates
 ///   - Bounce self-undo: candidate-set size (0 = trigger fizzles, 1 = source-only)
 ///
 /// `origin` records which layer the effect was pulled from. Most arms ignore
@@ -341,10 +364,19 @@ fn redundancy_delta(
             static_abilities,
             target,
             ..
-        } => generic_effect_keyword_redundancy(state, source_id, static_abilities, target.as_ref())
+        } => generic_effect_grant_redundancy(state, source_id, static_abilities, target.as_ref())
             .or_else(|| {
                 generic_effect_flash_cast_permission_redundancy(state, ai_player, static_abilities)
             }),
+        // CR 701.46a: "Adapt N" is guarded by its own "if this permanent has no
+        // +1/+1 counters on it" clause, so a source that already carries one
+        // gains nothing from re-activating. Adapt names no target — it always
+        // acts on the permanent whose ability it is.
+        Effect::Adapt { .. } => adapt_redundancy(state, source_id),
+        // CR 701.19a: a regeneration shield protects against the NEXT destruction
+        // this turn; stacking a second one on a creature that already holds an
+        // unconsumed shield buys only a second destruction in the same turn.
+        Effect::Regenerate { target } => regenerate_redundancy(state, source_id, target),
         Effect::Animate {
             keywords, target, ..
         } => animate_keyword_redundancy(state, source_id, keywords, target),
@@ -378,7 +410,6 @@ fn redundancy_delta(
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::Destroy { .. }
-        | Effect::Regenerate { .. }
         | Effect::RemoveAllDamage { .. }
         | Effect::Counter { .. }
         | Effect::Token { .. }
@@ -565,7 +596,6 @@ fn redundancy_delta(
         | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
-        | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
         | Effect::CompletePlayerAction { .. }
@@ -828,6 +858,81 @@ fn flip_redundancy(
     }
 }
 
+/// Adapt-on-adapted: the source already carries at least one +1/+1 counter.
+///
+/// CR 701.46a: "Adapt N" means "If this permanent has no +1/+1 counters on it,
+/// put N +1/+1 counters on it." The no-op guard is part of the keyword action,
+/// so a source holding even one +1/+1 counter gets literally nothing from a
+/// further activation — the same strict-no-op class as tap-on-tapped, hence the
+/// shared -3.0 delta.
+///
+/// `Effect::Adapt` carries no `TargetFilter`: it always acts on the permanent
+/// whose ability it is. This is therefore one map lookup on the source, with no
+/// target resolution and no board scan.
+fn adapt_redundancy(state: &GameState, source_id: ObjectId) -> Option<(f64, i64, i64)> {
+    let counters = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.counters.get(&CounterType::Plus1Plus1))
+        .copied()
+        .unwrap_or(0);
+    if counters == 0 {
+        return None;
+    }
+    Some((-3.0, KIND_ADAPT_ALREADY_ADAPTED, counters as i64))
+}
+
+/// Regenerate-on-shielded: every candidate match already carries an unconsumed
+/// regeneration shield.
+///
+/// CR 701.19a: a resolving regenerate effect creates a replacement protecting
+/// the permanent "the next time it would be destroyed this turn". Each shield
+/// covers exactly one destruction, so a second shield is *diminishing* rather
+/// than a strict no-op — it still buys coverage against a second destruction in
+/// the same turn. The delta is therefore -1.5 (the `pump_redundancy` band) and
+/// not the -3.0 the strict-no-op arms emit.
+///
+/// A CONSUMED shield does not count as coverage. `is_consumed` shields stay on
+/// `replacement_definitions` until the cleanup prune (CR 514.2), so reading the
+/// flag is what separates "still protected" from "already spent, re-shielding
+/// is real value".
+fn regenerate_redundancy(
+    state: &GameState,
+    source_id: ObjectId,
+    target: &TargetFilter,
+) -> Option<(f64, i64, i64)> {
+    let candidates = resolved_candidate_targets(state, source_id, target);
+    if candidates.is_empty() {
+        return None;
+    }
+    let all_shielded = candidates.iter().all(|id| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(object_has_live_regen_shield)
+    });
+    if all_shielded {
+        Some((
+            -1.5,
+            KIND_REGENERATE_ALREADY_SHIELDED,
+            candidates.len() as i64,
+        ))
+    } else {
+        None
+    }
+}
+
+/// True iff the object carries a regeneration shield that has not been used up.
+/// Mirrors the engine's own read (`combat_damage.rs::combatant_has_regeneration_shield`)
+/// and adds the CR 701.19a "the NEXT time" lifetime check via `is_consumed`.
+fn object_has_live_regen_shield(obj: &engine::game::game_object::GameObject) -> bool {
+    obj.replacement_definitions
+        .iter_unchecked()
+        .any(|replacement| {
+            replacement.shield_kind == ShieldKind::Regeneration && !replacement.is_consumed
+        })
+}
+
 /// Untap-on-untapped: symmetric to `tap_redundancy`. Every candidate match
 /// is already untapped, so the Untap effect is a no-op on its target set.
 fn untap_redundancy(
@@ -992,9 +1097,23 @@ fn zero_quantity_redundancy(
     }
 }
 
+/// A single thing a `GenericEffect`'s static abilities hand to a recipient.
+///
+/// A granted keyword and a granted rule-modifying `StaticMode`
+/// (`ContinuousModification::AddStaticMode`) are two
+/// leaves of one question: "does the recipient already have this?" Keeping them
+/// in one typed enum keeps `generic_effect_grant_redundancy`'s "every grant is
+/// already in force on every recipient" logic in a single place instead of
+/// growing a parallel keyword-only and mode-only code path.
+#[derive(Debug, Clone, PartialEq)]
+enum Grant {
+    Keyword(Keyword),
+    StaticMode(StaticMode),
+}
+
 /// `GenericEffect` redundancy: the effect's static abilities grant one or
-/// more keywords (via `ContinuousModification::AddKeyword`), and every
-/// recipient already effectively has each granted keyword.
+/// more keywords or static modes, and every recipient already has each grant
+/// in force.
 ///
 /// Recipients are resolved by layer (CR 611.2 — a continuous effect's
 /// affected set is defined by the ability, which may or may not be a chosen
@@ -1005,17 +1124,26 @@ fn zero_quantity_redundancy(
 /// - A self/affected-scoped grant carries `target: None` (e.g. Prognostic
 ///   Sphinx's "~ gains hexproof until end of turn", whose lowered form has
 ///   `target: None` and a `StaticDefinition` with `affected: Some(SelfRef)`).
-///   The recipients are then the union of each keyword-granting static's
-///   `affected` filter. Without this fallback the policy is blind to redundant
-///   self-buffs — the AI re-pays the cost (here: discarding a card) to grant a
-///   keyword it already has (issue #1966).
-fn generic_effect_keyword_redundancy(
+///   The recipients are then the union of each granting static's `affected`
+///   filter. Without this fallback the policy is blind to redundant self-buffs
+///   — the AI re-pays the cost (here: discarding a card) to grant something it
+///   already has (issue #1966).
+///
+/// Scope note — **Rogue's Passage is deliberately NOT covered here.** Its
+/// "target creature you control can't be blocked this turn" grant is targeted,
+/// so at activation time the recipient set is every creature the filter admits
+/// and this arm can only fire when ALL of them already have the mode; the
+/// repeat activation the reports describe is really settled at the later
+/// `ChooseTarget` step, which this policy never scores. What ships here is the
+/// self-scoped class (Ghostly Pilferer, Aetherling), where the recipient is
+/// known at activation time.
+fn generic_effect_grant_redundancy(
     state: &GameState,
     source_id: ObjectId,
     static_abilities: &[StaticDefinition],
     target: Option<&TargetFilter>,
 ) -> Option<(f64, i64, i64)> {
-    let granted = collect_keyword_grants(static_abilities);
+    let granted = collect_grants(static_abilities);
     if granted.is_empty() {
         return None;
     }
@@ -1026,25 +1154,72 @@ fn generic_effect_keyword_redundancy(
     if candidates.is_empty() {
         return None;
     }
-    let all_redundant = candidates.iter().all(|id| {
-        state
-            .objects
-            .get(id)
-            .is_some_and(|o| granted.iter().all(|k| has_keyword(o, k)))
-    });
+    let all_redundant = candidates
+        .iter()
+        .all(|&id| granted.iter().all(|g| grant_already_active(state, id, g)));
     if all_redundant {
-        Some((-2.0, KIND_GENERIC_KEYWORD, granted.len() as i64))
+        let kind = if granted.iter().any(|g| matches!(g, Grant::StaticMode(_))) {
+            KIND_GENERIC_STATIC_MODE
+        } else {
+            KIND_GENERIC_KEYWORD
+        };
+        Some((-2.0, kind, granted.len() as i64))
     } else {
         None
     }
 }
 
-/// Resolve the recipients of a keyword-granting `GenericEffect` that carries
-/// no chosen `target` — the self/affected-scoped case (Prognostic Sphinx's
-/// "~ gains hexproof until end of turn"). Returns the dedup-preserving union of
-/// objects matched by the `affected` filter of every static ability that
-/// grants at least one keyword. A static whose `affected` is `None` defines no
-/// recipient set and contributes nothing.
+/// True iff `obj_id` already has `grant` in force, so re-granting it adds
+/// nothing.
+fn grant_already_active(state: &GameState, obj_id: ObjectId, grant: &Grant) -> bool {
+    match grant {
+        Grant::Keyword(keyword) => state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|obj| has_keyword(obj, keyword)),
+        Grant::StaticMode(mode) => object_has_active_static_mode(state, obj_id, mode),
+    }
+}
+
+/// True iff `obj_id` is affected by an active `UntilEndOfTurn` transient
+/// continuous effect that grants `mode` — **from any source**.
+///
+/// CR 514.2: "until end of turn" effects end at cleanup, so a UEOT grant found
+/// here is still in force for the remainder of this turn and re-granting the
+/// same mode changes nothing. Unlike `object_has_active_same_source_pump` this
+/// deliberately does not filter on the granting source: "this creature can't be
+/// blocked" is in force no matter which permanent said it, and a same-source
+/// filter would still let the AI pay to duplicate a mode another permanent
+/// already provides.
+///
+/// Checks run cheapest-first — duration, then the modification scan, and only
+/// then filter evaluation — so an unrelated transient effect exits before
+/// `matches_target_filter` is ever called. This is the object-keyed lookup
+/// `pump_redundancy` already performs; it is NOT the board-wide
+/// `collect_block_restriction_statics` sweep behind
+/// `combat::has_cant_be_blocked_static`.
+fn object_has_active_static_mode(state: &GameState, obj_id: ObjectId, mode: &StaticMode) -> bool {
+    state.transient_continuous_effects.iter().any(|tce| {
+        matches!(tce.duration, Duration::UntilEndOfTurn)
+            && tce.modifications.iter().any(|m| {
+                matches!(m, ContinuousModification::AddStaticMode { mode: granted } if granted == mode)
+            })
+            && matches_target_filter(
+                state,
+                obj_id,
+                &tce.affected,
+                &FilterContext::from_source(state, tce.source_id),
+            )
+    })
+}
+
+/// Resolve the recipients of a granting `GenericEffect` that carries no chosen
+/// `target` — the self/affected-scoped case (Prognostic Sphinx's "~ gains
+/// hexproof until end of turn"; Ghostly Pilferer's "~ can't be blocked this
+/// turn"). Returns the dedup-preserving union of objects matched by the
+/// `affected` filter of every static ability that grants at least one keyword
+/// or static mode. A static whose `affected` is `None` defines no recipient set
+/// and contributes nothing.
 fn resolve_affected_candidates(
     state: &GameState,
     source_id: ObjectId,
@@ -1052,11 +1227,14 @@ fn resolve_affected_candidates(
 ) -> Vec<ObjectId> {
     let mut out = Vec::new();
     for stat in static_abilities {
-        let grants_keyword = stat
-            .modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. }));
-        if !grants_keyword {
+        let grants = stat.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddKeyword { .. }
+                    | ContinuousModification::AddStaticMode { .. }
+            )
+        });
+        if !grants {
             continue;
         }
         let Some(affected) = stat.affected.as_ref() else {
@@ -1127,16 +1305,23 @@ fn generic_effect_flash_cast_permission_redundancy(
     }
 }
 
-/// Walk `StaticDefinition.modifications` and collect the keywords that
-/// would be granted. Other modification kinds (AddPower, GrantAbility,
-/// etc.) are ignored here — this predicate is specifically about keyword
-/// grants.
-fn collect_keyword_grants(static_abilities: &[StaticDefinition]) -> Vec<Keyword> {
+/// Walk `StaticDefinition.modifications` and collect every grant delivered —
+/// keywords (`AddKeyword`) and rule-modifying static modes (`AddStaticMode`).
+/// Other modification kinds (AddPower, GrantAbility, etc.) are ignored here:
+/// this predicate is specifically about "the recipient already has it" grants,
+/// and a stat/P-T modification stacks rather than being redundant.
+fn collect_grants(static_abilities: &[StaticDefinition]) -> Vec<Grant> {
     let mut out = Vec::new();
     for stat in static_abilities {
         for modification in &stat.modifications {
-            if let ContinuousModification::AddKeyword { keyword } = modification {
-                out.push(keyword.clone());
+            match modification {
+                ContinuousModification::AddKeyword { keyword } => {
+                    out.push(Grant::Keyword(keyword.clone()));
+                }
+                ContinuousModification::AddStaticMode { mode } => {
+                    out.push(Grant::StaticMode(mode.clone()));
+                }
+                _ => {}
             }
         }
     }
@@ -1187,6 +1372,7 @@ mod tests {
     use crate::policies::registry::PolicyRegistry;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
+    use engine::types::ability::ReplacementDefinition;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, BounceSelection, PtValue, QuantityExpr, TargetFilter,
     };
@@ -1194,6 +1380,7 @@ mod tests {
     use engine::types::counter::CounterType;
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
+    use engine::types::replacements::ReplacementEvent;
     use engine::types::statics::StaticMode;
     use engine::types::zones::Zone;
 
@@ -1946,6 +2133,246 @@ mod tests {
             panic!("expected Score verdict");
         };
         assert_eq!(delta, 0.0, "different pump values should not penalise");
+    }
+
+    /// Verdict delta for a single-effect activated ability on `obj_id`.
+    fn activation_delta(state: &GameState, obj_id: ObjectId) -> f64 {
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(obj_id);
+        let ctx = mk_ctx(state, &decision, &candidate, &config, &ai_ctx);
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        delta
+    }
+
+    fn make_adapter(state: &mut GameState) -> ObjectId {
+        make_creature_with_ability(
+            state,
+            "Growth-Chamber Guardian",
+            Effect::Adapt {
+                count: QuantityExpr::Fixed { value: 2 },
+            },
+        )
+    }
+
+    #[test]
+    fn adapt_with_plus_one_counter_is_redundant() {
+        // CR 701.46a: "Adapt N" only places counters "if this permanent has no
+        // +1/+1 counters on it" — a source that already carries one gets
+        // literally nothing, so it is a strict no-op (-3.0).
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_adapter(&mut state);
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        assert_eq!(
+            activation_delta(&state, obj_id),
+            -3.0,
+            "re-adapting an already-adapted permanent should emit -3.0"
+        );
+    }
+
+    #[test]
+    fn adapt_without_counters_is_not() {
+        // The first adapt actually places counters — it must not be penalised.
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_adapter(&mut state);
+
+        assert_eq!(
+            activation_delta(&state, obj_id),
+            0.0,
+            "the first adapt places real counters and must not be penalised"
+        );
+    }
+
+    fn make_regenerator(state: &mut GameState) -> ObjectId {
+        make_creature_with_ability(
+            state,
+            "Drudge Skeletons",
+            Effect::Regenerate {
+                target: TargetFilter::SelfRef,
+            },
+        )
+    }
+
+    /// The construction `game/effects/regenerate.rs` itself uses when a
+    /// regenerate effect resolves.
+    fn push_regen_shield(state: &mut GameState, obj_id: ObjectId, consumed: bool) {
+        let mut shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .valid_card(TargetFilter::SelfRef)
+            .regeneration_shield();
+        shield.is_consumed = consumed;
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .replacement_definitions
+            .push(shield);
+    }
+
+    #[test]
+    fn regenerate_already_shielded_is_redundant() {
+        // CR 701.19a: the live shield already protects the next destruction this
+        // turn, so a second one is diminishing (-1.5), not free value.
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_regenerator(&mut state);
+        push_regen_shield(&mut state, obj_id, /* consumed= */ false);
+
+        assert_eq!(
+            activation_delta(&state, obj_id),
+            -1.5,
+            "re-shielding an already-shielded creature should emit -1.5"
+        );
+    }
+
+    #[test]
+    fn regenerate_unshielded_is_not() {
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_regenerator(&mut state);
+
+        assert_eq!(
+            activation_delta(&state, obj_id),
+            0.0,
+            "the first regeneration shield is real protection"
+        );
+    }
+
+    #[test]
+    fn regenerate_after_consumed_shield_is_not_redundant() {
+        // A consumed shield stays on `replacement_definitions` until the cleanup
+        // prune (CR 514.2) but protects nothing any more — re-regenerating after
+        // the shield was spent this turn is genuine value.
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_regenerator(&mut state);
+        push_regen_shield(&mut state, obj_id, /* consumed= */ true);
+
+        assert_eq!(
+            activation_delta(&state, obj_id),
+            0.0,
+            "a spent shield must not suppress the next regeneration"
+        );
+    }
+
+    /// Ghostly Pilferer / Aetherling shape: `GenericEffect` with `target: None`
+    /// and a `StaticDefinition { affected: SelfRef, modifications: [AddStaticMode
+    /// { CantBeBlocked }] }` (see the `aetherling_lowered` parser snapshot).
+    fn make_unblockable_granter(state: &mut GameState) -> ObjectId {
+        let stat = StaticDefinition::new(StaticMode::CantBeBlocked)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeBlocked,
+            }]);
+        make_creature_with_ability(
+            state,
+            "Ghostly Pilferer",
+            Effect::GenericEffect {
+                static_abilities: vec![stat],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        )
+    }
+
+    #[test]
+    fn add_static_mode_grant_already_active_from_same_source_is_redundant() {
+        // Second activation this turn: the engine installed the first grant as a
+        // UEOT transient effect bound to `SpecificObject { id: source }`, so the
+        // mode is already in force and the AI must not pay the discard again.
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_unblockable_granter(&mut state);
+        state.add_transient_continuous_effect(
+            obj_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeBlocked,
+            }],
+            None,
+        );
+
+        assert_eq!(
+            activation_delta(&state, obj_id),
+            -2.0,
+            "re-granting an active static mode should emit -2.0"
+        );
+    }
+
+    #[test]
+    fn add_static_mode_grant_already_active_from_another_source_is_redundant() {
+        // The mode is in force no matter who granted it — a same-source-only
+        // check would still let the AI pay to duplicate another permanent's
+        // grant.
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_unblockable_granter(&mut state);
+        let other_id = create_object(
+            &mut state,
+            CardId(777),
+            PlayerId(0),
+            "Rogue's Passage".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            other_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeBlocked,
+            }],
+            None,
+        );
+
+        assert_eq!(
+            activation_delta(&state, obj_id),
+            -2.0,
+            "a cross-source static-mode grant already in force is still redundant"
+        );
+    }
+
+    #[test]
+    fn first_add_static_mode_grant_is_not() {
+        // Nothing grants the mode yet — the first activation is real evasion.
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_unblockable_granter(&mut state);
+
+        assert_eq!(
+            activation_delta(&state, obj_id),
+            0.0,
+            "the first static-mode grant must not be penalised"
+        );
+    }
+
+    #[test]
+    fn unrelated_active_static_mode_does_not_make_the_grant_redundant() {
+        // A UEOT transient effect granting a DIFFERENT mode to the same object
+        // must not satisfy the CantBeBlocked grant.
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_unblockable_granter(&mut state);
+        state.add_transient_continuous_effect(
+            obj_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MustBeBlocked { by: None },
+            }],
+            None,
+        );
+
+        assert_eq!(
+            activation_delta(&state, obj_id),
+            0.0,
+            "a different active static mode must not suppress this grant"
+        );
     }
 
     #[test]

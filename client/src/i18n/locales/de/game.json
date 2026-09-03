@@ -605,6 +605,8 @@
     "chooseXInputAria": "X-Wert eingeben",
     "decreaseX": "X-Wert verringern",
     "increaseX": "X-Wert erhöhen",
+    "maximum": "Maximum",
+    "setXToMaximum": "X auf Maximum setzen",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
     "amountOutOfRange": "Gib eine ganze Zahl zwischen {{min}} und {{max}} ein",
@@ -660,7 +662,9 @@
   },
   "storm": {
     "copies_one": "Sturm: {{count}} Kopie",
-    "copies_other": "Sturm: {{count}} Kopien"
+    "copies_other": "Sturm: {{count}} Kopien",
+    "count_one": "Sturmzähler: {{count}} Kopie",
+    "count_other": "Sturmzähler: {{count}} Kopien"
   },
   "opponentHud": {
     "ally": "Verbündeter",
@@ -822,6 +826,8 @@
   },
   "log": {
     "title": "Spielprotokoll",
+    "dockLeft": "Spielprotokoll links andocken",
+    "dockRight": "Spielprotokoll rechts andocken",
     "noEvents": "Noch keine Ereignisse",
     "closeLog": "Spielprotokoll schließen",
     "verbosityFull": "vollständig",
@@ -1104,7 +1110,10 @@
       "subtitlePreparedCopy": "Den vorbereiteten Zauberspruch wirken?",
       "subtitleActivate": "Diese Fähigkeit aktivieren?",
       "subtitlePlay": "Wähle, wie du diese Karte spielst",
-      "subtitleChoose": "Wähle eine zu aktivierende Fähigkeit"
+      "subtitleChoose": "Wähle eine zu aktivierende Fähigkeit",
+      "unlockThisDoor": "Diese Tür entriegeln",
+      "unlockHalf": "{{name}} entriegeln",
+      "unlockHalfWithCost": "{{name}} ({{cost}}) entriegeln"
     },
     "manaRestrictions": {
       "tapForMana": "Für Mana tappen",
@@ -1616,6 +1625,9 @@
       "selectAll": "Alle auswählen",
       "invert": "Umkehren",
       "clear": "Leeren",
+      "searchLabel": "Filter",
+      "searchPlaceholder": "Kartenname",
+      "searchCardsAria": "Karten nach Namen filtern",
       "sortLabel": "Sortieren",
       "groupLabel": "Gruppieren",
       "optNone": "Keine",

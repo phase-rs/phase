@@ -26259,6 +26259,17 @@ pub struct StaticDefinition {
     /// must list both explicitly, matching `TriggerDefinition.trigger_zones`.
     #[serde(default)]
     pub active_zones: Vec<Zone>,
+    /// CR 604.3: True when this static is a characteristic-defining ability
+    /// (CDA) — one that defines the object's own colors, subtypes, power, or
+    /// toughness, is printed on (or granted to a token by, or copied/text-
+    /// changed onto) the object it affects, and doesn't set those values only
+    /// conditionally. CDAs "function in all zones" per CR 604.3, regardless
+    /// of `active_zones` above: a CDA is not expected to separately opt into
+    /// every zone it should function in via `active_zones` (typically empty
+    /// for a CDA) — its all-zones behavior is intrinsic to the flag itself.
+    /// See `functioning_abilities::static_functions_in_zone`, the single
+    /// authority that checks this flag before falling back to the ordinary
+    /// `active_zones` gate.
     #[serde(default)]
     pub characteristic_defining: bool,
     #[serde(default)]

@@ -75,11 +75,13 @@ const REAP_INTERVAL_MS = 60_000;
 /// Per-socket state, mirroring `lobby_broker::ConnState::default()`. Stored in
 /// the WebSocket attachment as a structured object; stringified across the WASM
 /// boundary and written back from each call's result.
-const DEFAULT_CONN = {
+const DEFAULT_CONN: ConnAttachment = {
   client_hello: null,
   subscribed: false,
   host_game: null,
   reservations: [],
+  organized_tournaments: [],
+  joined_tournaments: [],
 };
 
 /** Boundary mirror of `lobby_broker_wasm::OutboundDto`. */
@@ -248,10 +250,18 @@ export class LobbyDO {
     const outbounds = JSON.parse(
       broker.reap_expired(REAP_TIMEOUT_SECONDS, Date.now()),
     ) as OutboundDto[];
-    // Reaper emits only ToSubscribers(LobbyGameRemoved) — no connection scope.
+    // Every reaper outbound is ToSubscribers — no connection scope — but the
+    // PAYLOAD is no longer only LobbyGameRemoved: a sweep can also emit
+    // TournamentRemoved / TournamentUpdate per expired tournament, plus one
+    // trailing TournamentListUpdate (see `Broker::reap_expired`). This loop is
+    // deliberately variant-agnostic — dispatchOutbound switches on the
+    // Outbound's own `kind` alone and never on the LobbyServerMessage carried
+    // inside it — so a new server message needs no change here.
     for (const o of outbounds) this.dispatchOutbound(null, o);
-    // One log per non-empty sweep (≤ once/REAP_INTERVAL_MS); count == entries
-    // reaped, since each removal emits exactly one LobbyGameRemoved.
+    // One log per non-empty sweep (≤ once/REAP_INTERVAL_MS). `count` is
+    // outbounds emitted, which is no longer 1:1 with entries reaped: a
+    // tournament sweep adds a single trailing TournamentListUpdate on top of
+    // its per-entry messages.
     if (outbounds.length > 0) {
       console.log({ event: "lobby_reaped", count: outbounds.length });
     }

@@ -11726,7 +11726,17 @@ fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, Targe
             .parse(span)
             .ok()?;
     let target_a = parse_exchange_slot(left.trim())?;
-    let target_b = parse_exchange_slot(right.trim())?;
+    let mut target_b = parse_exchange_slot(right.trim())?;
+    // The relative clause attaches RIGHTWARD, to slot B, and its antecedent is
+    // slot A's declared object target. Guarded on slot A actually
+    // surfacing one: `collect_target_slots`' ExchangeControl loop skips a
+    // `TargetFilter::SelfRef` slot (`ability_utils.rs:2667`), so for "exchange
+    // control of this artifact and target X with equal or lesser mana value"
+    // there is no prior object target and `ObjectScope::Target` would resolve
+    // to slot B ITSELF. Keep this guard in sync with that skip.
+    if !matches!(target_a, TargetFilter::SelfRef) {
+        crate::parser::oracle_target::rebind_compound_slot_referent_to_prior_target(&mut target_b);
+    }
     Some((target_a, target_b))
 }
 

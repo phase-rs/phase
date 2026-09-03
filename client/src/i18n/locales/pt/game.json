@@ -605,6 +605,8 @@
     "chooseXInputAria": "Inserir valor de X",
     "decreaseX": "Diminuir valor de X",
     "increaseX": "Aumentar valor de X",
+    "maximum": "Máx.",
+    "setXToMaximum": "Definir X como máximo",
     "minMax": "mín {{min}} / máx {{max}}",
     "maxOnly": "máx {{max}}",
     "amountOutOfRange": "Digite um número inteiro entre {{min}} e {{max}}",
@@ -660,7 +662,9 @@
   },
   "storm": {
     "copies_one": "Tempestade: {{count}} cópia",
-    "copies_other": "Tempestade: {{count}} cópias"
+    "copies_other": "Tempestade: {{count}} cópias",
+    "count_one": "Contador de tempestade: {{count}} cópia",
+    "count_other": "Contador de tempestade: {{count}} cópias"
   },
   "opponentHud": {
     "ally": "Aliado",
@@ -822,6 +826,8 @@
   },
   "log": {
     "title": "Registro do Jogo",
+    "dockLeft": "Fixar o registro à esquerda",
+    "dockRight": "Fixar o registro à direita",
     "noEvents": "Nenhum evento ainda",
     "closeLog": "Fechar o registro do jogo",
     "verbosityFull": "completo",
@@ -1104,7 +1110,10 @@
       "subtitlePreparedCopy": "Conjurar a mágica preparada?",
       "subtitleActivate": "Ativar esta habilidade?",
       "subtitlePlay": "Escolha como jogar esta carta",
-      "subtitleChoose": "Escolha uma habilidade para ativar"
+      "subtitleChoose": "Escolha uma habilidade para ativar",
+      "unlockThisDoor": "Desbloquear esta porta",
+      "unlockHalf": "Desbloquear {{name}}",
+      "unlockHalfWithCost": "Desbloquear {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Virar para gerar mana",
@@ -1616,6 +1625,9 @@
       "selectAll": "Selecionar tudo",
       "invert": "Inverter",
       "clear": "Limpar",
+      "searchLabel": "Filtrar",
+      "searchPlaceholder": "Nome da carta",
+      "searchCardsAria": "Filtrar cartas por nome",
       "sortLabel": "Ordenar",
       "groupLabel": "Agrupar",
       "optNone": "Nenhum",

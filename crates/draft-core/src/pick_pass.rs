@@ -239,6 +239,9 @@ fn finish_pick(
     card_instance_ids: Vec<String>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
     let pod_size = session.seats.len() as u8;
+    session
+        .current_pack_origins
+        .resize(usize::from(pod_size), None);
     session.seats_picked_this_round.set(seat, true);
 
     let mut deltas: Vec<DraftDelta> = card_instance_ids
@@ -284,10 +287,15 @@ fn finish_pick(
                 // Start new pack round
                 session.pass_direction = PassDirection::for_pack(session.current_pack_number);
                 session.pick_number = 0;
+                session
+                    .current_pack_origins
+                    .resize(usize::from(pod_size), None);
+                session.current_pack_origins.fill(None);
 
                 for s in 0..pod_size as usize {
                     if !session.packs_by_seat[s].is_empty() {
                         session.current_pack[s] = Some(session.packs_by_seat[s].remove(0));
+                        session.current_pack_origins[s] = Some(s as u8);
                     }
                 }
 
@@ -301,11 +309,17 @@ fn finish_pick(
             deltas.push(DraftDelta::PackPassed);
 
             let mut new_packs: Vec<Option<DraftPack>> = vec![None; pod_size as usize];
+            let mut new_origins: Vec<Option<u8>> = vec![None; pod_size as usize];
             for i in 0..pod_size {
                 let dest = session.pass_direction.next_seat(i, pod_size);
                 new_packs[dest as usize] = session.current_pack[i as usize].take();
+                new_origins[dest as usize] = session
+                    .current_pack_origins
+                    .get_mut(i as usize)
+                    .and_then(Option::take);
             }
             session.current_pack = new_packs;
+            session.current_pack_origins = new_origins;
         }
     }
 

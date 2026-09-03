@@ -54,7 +54,7 @@ function card(instanceId: string) {
 }
 
 function view(...instanceIds: string[]): DraftPlayerView {
-  return { pool: instanceIds.map(card) } as unknown as DraftPlayerView;
+  return { launch_capability: "None", pool: instanceIds.map(card) } as unknown as DraftPlayerView;
 }
 
 function workspace(

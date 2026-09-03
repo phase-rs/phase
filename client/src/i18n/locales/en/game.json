@@ -658,6 +658,8 @@
     "chooseXInputAria": "Enter X value",
     "decreaseX": "Decrease X value",
     "increaseX": "Increase X value",
+    "maximum": "Max",
+    "setXToMaximum": "Set X to maximum",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
     "amountOutOfRange": "Enter a whole number between {{min}} and {{max}}",
@@ -713,7 +715,9 @@
   },
   "storm": {
     "copies_one": "Storm: {{count}} copy",
-    "copies_other": "Storm: {{count}} copies"
+    "copies_other": "Storm: {{count}} copies",
+    "count_one": "Storm count: {{count}} copy",
+    "count_other": "Storm count: {{count}} copies"
   },
   "opponentHud": {
     "ally": "Ally",
@@ -875,6 +879,8 @@
   },
   "log": {
     "title": "Game Log",
+    "dockLeft": "Dock game log on the left",
+    "dockRight": "Dock game log on the right",
     "noEvents": "No events yet",
     "closeLog": "Close game log",
     "verbosityFull": "full",
@@ -1157,7 +1163,10 @@
       "subtitlePreparedCopy": "Cast the prepared spell?",
       "subtitleActivate": "Activate this ability?",
       "subtitlePlay": "Choose how to play this card",
-      "subtitleChoose": "Choose an ability to activate"
+      "subtitleChoose": "Choose an ability to activate",
+      "unlockThisDoor": "Unlock this door",
+      "unlockHalf": "Unlock {{name}}",
+      "unlockHalfWithCost": "Unlock {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Tap for mana",
@@ -1687,6 +1696,9 @@
       "filterCreatures": "Creatures",
       "filterLands": "Lands",
       "filterNonland": "Nonland",
+      "searchLabel": "Filter",
+      "searchPlaceholder": "Card name",
+      "searchCardsAria": "Filter cards by name",
       "counterDiscard": "Discard {{selected}} of {{cap}}",
       "counterKeep": "Keep {{selected}} of {{cap}}",
       "keepInstead": "Keep instead",

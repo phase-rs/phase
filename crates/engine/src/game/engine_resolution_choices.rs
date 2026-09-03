@@ -137,7 +137,7 @@ fn legacy_mass_library_order_prompt_is_current(
     let player_scope = effects::change_zone::change_zone_all_player_scope(state, ability, target);
     let filter_context = super::filter::FilterContext::from_ability_with_controller(
         ability,
-        effects::controller_for_relative_filter(ability, target),
+        effects::controller_for_relative_filter(state, ability, target),
     );
     let member_is_current = |card_id: ObjectId, expected_owner| {
         state.objects.get(&card_id).is_some_and(|object| {

@@ -32,6 +32,7 @@ export function GameCardPreview() {
   const previewPlacement = useUiStore((s) => s.previewPlacement);
   const isDragging = useUiStore((s) => s.isDragging);
   const shiftHeld = useUiStore((s) => s.shiftHeld);
+  const previewSticky = useUiStore((s) => s.previewSticky);
   // Card-preview behavior preference. In "shift" mode the preview only renders
   // while Shift is held; in "side" mode it docks to the screen edge.
   const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
@@ -84,7 +85,9 @@ export function GameCardPreview() {
       ? inspectedFaceIndex === 1 ? inspectedObj.name : inspectedObj.back_face.name
       : null;
 
-  const previewSuppressed = cardPreviewMode === "shift" && !shiftHeld;
+  // A sticky preview is an explicit request (long-press or a log card link),
+  // so it must remain visible even when the hover-only Shift mode is selected.
+  const previewSuppressed = cardPreviewMode === "shift" && !shiftHeld && !previewSticky;
 
   return (
     <CardPreview

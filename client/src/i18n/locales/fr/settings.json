@@ -26,7 +26,7 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Passer les fenêtres de priorité peu utilisées (expérimental)",
     "skipLowUsePriorityWindowsDescription": "Passe automatiquement tes propres fenêtres de priorité avec une pile vide pendant l'entretien, l'étape de pioche et l'étape de fin. Les arrêts de phase et le Contrôle total continuent de mettre le jeu en pause.",
-    "logDefault": "Journal par défaut",
+    "logDockSide": "Position du journal de partie",
     "spellPayment": "Paiement des sorts",
     "manualManaPayment": "Paiement manuel du mana pour les sorts",
     "spellPaymentOptions": { "auto": "Automatique", "autoExceptSacrificialMana": "Demander avant de sacrifier", "manual": "Manuel" },
@@ -56,9 +56,9 @@
       "medium": "Moyen",
       "large": "Grand"
     },
-    "logDefaultOptions": {
-      "open": "Ouvert",
-      "closed": "Fermé"
+    "logDockSideOptions": {
+      "left": "Gauche",
+      "right": "Droite"
     }
   },
   "visual": {

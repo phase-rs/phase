@@ -2,7 +2,13 @@ import { useMultiplayerStore } from "../stores/multiplayerStore";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   OFFICIAL_MULTIPLAYER_SERVER_URL,
+  parseWebSocketUrl,
 } from "../config/multiplayerServer";
+
+// Re-exported from the config leaf, which needs it to validate the runtime
+// /config.js override and cannot import this module without a cycle. One
+// implementation, and every existing import of it from here still resolves.
+export { parseWebSocketUrl };
 
 const DEFAULT_PORT = 9374;
 
@@ -39,18 +45,6 @@ export const DEFAULT_SERVER = SERVER_PRESETS[0].url;
 /** Flag for a known preset server, or `null` for self-hosted/custom addresses. */
 export function flagForServer(url: string): FlagCode | null {
   return SERVER_PRESETS.find((p) => p.url === url)?.flag ?? null;
-}
-
-export function parseWebSocketUrl(value: string): URL | null {
-  try {
-    const url = new URL(value);
-    if ((url.protocol !== "ws:" && url.protocol !== "wss:") || !url.host) {
-      return null;
-    }
-    return url;
-  } catch {
-    return null;
-  }
 }
 
 export function isValidWebSocketUrl(value: string): boolean {

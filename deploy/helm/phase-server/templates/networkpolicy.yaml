@@ -18,6 +18,12 @@ spec:
       ports:
         - port: http
           protocol: TCP
+        {{- if .Values.web.enabled }}
+        # Same ingress source as http: the SPA is served to the public through
+        # the same Traefik namespace that reaches /ws.
+        - port: web
+          protocol: TCP
+        {{- end }}
     {{- if .Values.metrics.enabled }}
     - from:
         - namespaceSelector:

@@ -156,6 +156,9 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
       const viewFor = (seat: number) => ({
         status: statusNow(),
         kind: stubConfig.postDraftPlay === "CompleteImmediately" ? "CommanderDraft" : "Premier",
+        launch_capability: stubConfig.postDraftPlay === "CompleteImmediately"
+          ? "CommanderMultiplayer"
+          : "None",
         seat_index: seat,
         current_round: 1,
         pairings: [],
@@ -194,6 +197,9 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
         loadCardDatabase: vi.fn(async () => 0),
         draftProcedure: vi.fn(async () => ({
           post_draft_play: stubConfig.postDraftPlay,
+          launch_capability: stubConfig.postDraftPlay === "CompleteImmediately"
+            ? "CommanderMultiplayer"
+            : "None",
         })),
         // Seam 1 again: `submitHostDeck` refuses a submission before the draft
         // has started, so the chain now runs `startDraft` first and this is the

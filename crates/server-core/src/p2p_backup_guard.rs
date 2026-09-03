@@ -21,9 +21,9 @@
 //! recovery only.
 //!
 //! The host also embeds a full `draftSessionJson` blob (exported `DraftSession`).
-//! That nested payload can carry `config.rng_seed` and unopened `packs_by_seat`,
-//! which must be stripped before SQLite persistence or `GET` echo — merged #5053
-//! only removed top-level seat tokens.
+//! That nested payload can carry `config.rng_seed`, unopened `packs_by_seat`, and
+//! Chaos `config.source` assignments. All three must be stripped before SQLite
+//! persistence or `GET` echo — merged #5053 only removed top-level seat tokens.
 
 use lobby_broker::validation::{validate_token, MAX_TOKEN_LEN};
 use serde_json::{Map, Value};
@@ -78,6 +78,11 @@ const NESTED_DRAFT_SECRET_KEYS: &[&str] = &["packs_by_seat"];
 /// The backup row is keyed only by the 6-character draft code and is readable by
 /// any caller of `GET /p2p-draft-backup/{code}`, so stored snapshots must not
 /// contain per-seat tokens or competitive secrets embedded in `draftSessionJson`.
+///
+/// A Chaos layout's assignments are also private draft state. A guest who can
+/// derive the host peer id can reach this HTTP endpoint, so the public backup
+/// may retain candidate intent but never the per-seat assignment matrix. The
+/// authoritative, resumable copy stays in the host's IndexedDB snapshot.
 pub fn redact_p2p_backup_snapshot_secrets(snapshot_json: &str) -> Result<String, String> {
     let mut value: Value = serde_json::from_str(snapshot_json)
         .map_err(|_| "snapshot_json must be a JSON object".to_string())?;
@@ -129,6 +134,38 @@ fn redact_draft_session_object(session: &mut Map<String, Value>) {
     }
     if let Some(Value::Object(config)) = session.get_mut("config") {
         config.insert("rng_seed".to_string(), Value::Number(0.into()));
+        redact_chaos_assignments(config);
+    }
+}
+
+/// Drop the private assignment matrix from each supported serialized
+/// `DraftSource` representation. `DraftSource` itself uses adjacent serde
+/// tagging (`{"type":"Set","data":{...}}`), while older and transport-local
+/// snapshots can use a `{"Set":{...}}` wrapper. Keeping the redactor structural
+/// lets the public backup tolerate both shapes without allowing either one to
+/// disclose a Chaos assignment.
+fn redact_chaos_assignments(config: &mut Map<String, Value>) {
+    let Some(Value::Object(source)) = config.get_mut("source") else {
+        return;
+    };
+
+    if let Some(Value::Object(set)) = source.get_mut("Set") {
+        redact_chaos_assignments_from_set(set);
+    }
+    if source.get("type").and_then(Value::as_str) == Some("Set") {
+        if let Some(Value::Object(data)) = source.get_mut("data") {
+            redact_chaos_assignments_from_set(data);
+        }
+    }
+    redact_chaos_assignments_from_set(source);
+}
+
+fn redact_chaos_assignments_from_set(set: &mut Map<String, Value>) {
+    // `candidate_codes` distinguishes a Chaos layout from a different future
+    // field coincidentally named `assignments`; Uniform layouts retain their
+    // `codes` unchanged.
+    if set.contains_key("candidate_codes") {
+        set.remove("assignments");
     }
 }
 
@@ -241,6 +278,56 @@ mod tests {
         assert_eq!(nested_out["config"]["rng_seed"], 0);
         assert!(nested_out.get("packs_by_seat").is_none());
         assert_eq!(nested_out["status"], "Drafting");
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_strips_chaos_assignments_but_keeps_intent() {
+        let nested = serde_json::json!({
+            "config": {
+                "rng_seed": 42,
+                "source": {
+                    "Set": {
+                        "candidate_codes": ["TST", "ALT"],
+                        "assignments": [["TST", "ALT"], ["ALT", "TST"]]
+                    }
+                }
+            },
+            "status": "Drafting"
+        });
+        let raw = serde_json::json!({ "draftSessionJson": nested.to_string() });
+
+        let redacted =
+            redact_p2p_backup_snapshot_secrets(&raw.to_string()).expect("valid snapshot");
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        let nested_out: Value =
+            serde_json::from_str(parsed["draftSessionJson"].as_str().unwrap()).unwrap();
+        let source = &nested_out["config"]["source"]["Set"];
+        assert_eq!(source["candidate_codes"], serde_json::json!(["TST", "ALT"]));
+        assert!(source.get("assignments").is_none());
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_keeps_uniform_layout_unchanged() {
+        let nested = serde_json::json!({
+            "config": {
+                "rng_seed": 42,
+                "source": { "Set": { "codes": ["TST", "ALT"] } }
+            }
+        });
+        let raw = serde_json::json!({ "draftSessionJson": nested.to_string() });
+
+        let redacted =
+            redact_p2p_backup_snapshot_secrets(&raw.to_string()).expect("valid snapshot");
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        let nested_out: Value =
+            serde_json::from_str(parsed["draftSessionJson"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            nested_out["config"]["source"]["Set"]["codes"],
+            serde_json::json!(["TST", "ALT"])
+        );
+        assert!(nested_out["config"]["source"]["Set"]
+            .get("assignments")
+            .is_none());
     }
 
     #[test]

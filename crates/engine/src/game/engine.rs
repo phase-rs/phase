@@ -20470,7 +20470,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            44,
+            45,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -20478,9 +20478,10 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 9, 30),
+            (5, 9, 31),
             "the partition, not just the total: five PRODUCTION producers, nine PRODUCTION \
-             readers (they read `state.waiting_for` and never write it), 30 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+             readers (they read `state.waiting_for` and never write it), 31 `#[cfg(test)]` lines \
+             (the 31st is `sba.rs`'s paused-resolution fixture for the CR 704.4 safety-net guard).\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(

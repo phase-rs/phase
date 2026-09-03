@@ -26,9 +26,9 @@ const mocks = vi.hoisted(() => ({
   },
   podState: {
     botFillEnabled: true,
-    // CR 903.13a + CR 800.1: the engine-published per-kind seat floor the
-    // lobby's Start gate reads. `2` matches the base `Premier` config below.
-    minPodSize: 2 as number | null,
+    // The engine-published seat counts the lobby's Start gate reads. The base
+    // Premier procedure allows every normal pod size from two through eight.
+    allowedPodSizes: [2, 3, 4, 5, 6, 7, 8] as number[] | null,
     config: {
       setCode: "dft",
       setName: "Draft Set",
@@ -119,15 +119,14 @@ describe("DraftPodLobby", () => {
     expect(screen.getByText(/Premier Draft/)).toBeInTheDocument();
   });
   /**
-   * VM row 6 — CR 903.13a + CR 800.1. `canStart` reads the ENGINE-published
-   * per-kind floor from the store; the kind-blind literal `2` is deleted, not
-   * relocated, and there is deliberately no `?? 2` fallback.
+   * `canStart` reads the complete engine-published allowed-size set from the
+   * store. No kind-blind floor or fallback is reconstructed in the UI.
    */
-  describe("the Start gate reads the kind's engine-published seat floor", () => {
+  describe("the Start gate reads the engine-published allowed seat counts", () => {
     const baseSeats = mocks.multiplayerState.seats;
     const baseJoined = mocks.multiplayerState.joined;
     const baseBotFill = mocks.podState.botFillEnabled;
-    const baseMinPodSize = mocks.podState.minPodSize;
+    const baseAllowedPodSizes = mocks.podState.allowedPodSizes;
 
     /** `filled` occupied seats out of four. `DraftPodLobby` counts a seat as
      *  filled by its `display_name`, so the empties carry none. */
@@ -156,22 +155,22 @@ describe("DraftPodLobby", () => {
       mocks.multiplayerState.seats = baseSeats;
       mocks.multiplayerState.joined = baseJoined;
       mocks.podState.botFillEnabled = baseBotFill;
-      mocks.podState.minPodSize = baseMinPodSize;
+      mocks.podState.allowedPodSizes = baseAllowedPodSizes;
     });
 
-    it("disables Start below a Commander pod's floor of three", () => {
-      mocks.podState.minPodSize = 3;
+    it("disables Start when two seats are outside Commander Draft's allowed set", () => {
+      mocks.podState.allowedPodSizes = [3, 4, 5, 6, 7, 8];
       render(<DraftPodLobby onLeave={vi.fn()} />);
 
       // Reach guard: the lobby really rendered these two seats, so the
       // disabled state below is a reading of THIS fixture.
       expect(screen.getByText("2 / 4 seats filled")).toBeInTheDocument();
-      // REVERT-FAILING: the base `filledSeats >= 2` literal makes this enabled.
+      // REVERT-FAILING: a kind-blind two-seat fallback makes this enabled.
       expect(startButton()).toBeDisabled();
     });
 
-    it("enables Start at a Premier pod's floor of two", () => {
-      mocks.podState.minPodSize = 2;
+    it("enables Start when two seats are in Premier's allowed set", () => {
+      mocks.podState.allowedPodSizes = [2, 3, 4, 5, 6, 7, 8];
       render(<DraftPodLobby onLeave={vi.fn()} />);
 
       // The paired positive reach-guard: without it the negative above is
@@ -179,8 +178,8 @@ describe("DraftPodLobby", () => {
       expect(startButton()).toBeEnabled();
     });
 
-    it("lets bot-fill enable Start below the floor", () => {
-      mocks.podState.minPodSize = 3;
+    it("lets bot-fill enable Start outside the current allowed set", () => {
+      mocks.podState.allowedPodSizes = [3, 4, 5, 6, 7, 8];
       mocks.podState.botFillEnabled = true;
       render(<DraftPodLobby onLeave={vi.fn()} />);
 
@@ -190,11 +189,10 @@ describe("DraftPodLobby", () => {
     });
 
     it("disables Start while the engine has not answered", () => {
-      mocks.podState.minPodSize = null;
+      mocks.podState.allowedPodSizes = null;
       render(<DraftPodLobby onLeave={vi.fn()} />);
 
-      // Fail-CLOSED, pinning that no `?? 2` fallback was reinstated under a
-      // different name.
+      // Fail closed: no client-side fallback may reinstate a legal count.
       expect(startButton()).toBeDisabled();
     });
   });

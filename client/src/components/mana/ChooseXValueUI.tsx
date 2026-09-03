@@ -125,6 +125,7 @@ export function ChooseXValueUI() {
               input: t("mana.chooseXInputAria"),
               decrease: t("mana.decreaseX"),
               increase: t("mana.increaseX"),
+              setMaximum: t("mana.setXToMaximum"),
             }}
           />
 

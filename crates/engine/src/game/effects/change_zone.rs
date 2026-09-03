@@ -665,7 +665,7 @@ pub fn resolve(
             });
     }
     let filter_controller =
-        crate::game::effects::controller_for_relative_filter(ability, target_filter);
+        crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
@@ -1810,7 +1810,7 @@ pub fn resolve_all(
     let player_scope = change_zone_all_player_scope(state, ability, &target_filter);
 
     let filter_controller =
-        crate::game::effects::controller_for_relative_filter(ability, &target_filter);
+        crate::game::effects::controller_for_relative_filter(state, ability, &target_filter);
     let target_filter = owner_scoped_nonbattlefield_mass_filter(target_filter, &origin_zones);
 
     // Use a permissive default filter if the effect's target is None

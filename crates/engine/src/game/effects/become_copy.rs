@@ -7,8 +7,10 @@ use crate::types::ability::{
 };
 use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{
+    GameState, PendingCounterAddition, PendingEffectResolved, TransientContinuousEffectBindings,
+};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
@@ -76,7 +78,7 @@ pub fn resolve(
     let copy = PrecomputedCopyValues {
         source_id: ability.source_id,
         controller: ability.controller,
-        duration_subject_id: target_id,
+        duration_subject: ObjectIncarnationRef::from_object(&state.objects[&target_id]),
         duration,
         values,
         display_source: source_display_source,
@@ -97,7 +99,7 @@ pub(crate) struct PrecomputedCopyValues {
     /// `ForAsLongAs` duration tracks. For self-copy effects this is the copy
     /// target; for effects applied to another recipient (Assimilation Aegis), this
     /// is the recipient while `values` carries the copied object's characteristics.
-    pub duration_subject_id: ObjectId,
+    pub duration_subject: ObjectIncarnationRef,
     pub duration: Duration,
     pub values: CopiableValues,
     pub display_source: DisplaySource,
@@ -120,7 +122,7 @@ pub(crate) fn apply_precomputed_copy_values(
     let PrecomputedCopyValues {
         source_id,
         controller,
-        duration_subject_id,
+        duration_subject,
         duration,
         mut values,
         display_source,
@@ -173,15 +175,24 @@ pub(crate) fn apply_precomputed_copy_values(
     }];
     modifications.extend(layered_mods);
 
-    let tce_id = state.add_transient_continuous_effect(
+    let recipient = ObjectIncarnationRef::from_object(
+        state
+            .objects
+            .get(&recipient_id)
+            .ok_or(EffectError::ObjectNotFound(recipient_id))?,
+    );
+    state.add_transient_continuous_effect_with_bindings(
         source_id,
         controller,
         duration,
         TargetFilter::SpecificObject { id: recipient_id },
         modifications,
         None,
+        TransientContinuousEffectBindings {
+            affected_recipient: Some(recipient),
+            duration_subject: Some(duration_subject),
+        },
     );
-    state.set_transient_duration_subject(tce_id, duration_subject_id);
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
     // copy is or has certain characteristics" — flush the layer re-evaluation
@@ -306,7 +317,8 @@ fn apply_copy_values_to_recipients(
                 // remains attached to it") track the concrete object receiving
                 // the copy effect, while the copied values may come from a
                 // different object ("a creature card exiled with ~").
-                recipient_copy.duration_subject_id = id;
+                recipient_copy.duration_subject =
+                    ObjectIncarnationRef::from_object(&state.objects[&id]);
                 apply_precomputed_copy_values(state, id, recipient_copy, events)?;
             }
             Ok(())
@@ -2192,7 +2204,9 @@ mod tests {
             .expect("BecomeCopy must register a TCE");
         assert_eq!(
             tce.duration_subject,
-            Some(target_id),
+            Some(ObjectIncarnationRef::from_object(
+                &state.objects[&target_id]
+            )),
             "the copy TARGET must be captured as the duration subject"
         );
         assert_eq!(

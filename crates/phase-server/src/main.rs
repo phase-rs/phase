@@ -4,6 +4,7 @@ mod draft_pools;
 mod logging;
 mod metrics;
 mod persistence;
+mod wire;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -32,7 +33,7 @@ use engine::game::validate_name_deck_for_format_full;
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, TrustedGameStateEnvelope};
 use engine::types::interaction::InteractionSubmission;
 use engine::types::player::PlayerId;
 use engine::types::GameLogEntry;
@@ -41,7 +42,7 @@ use lobby_broker::{
     check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
     Outbound, NOT_OWNED_RESERVATION,
 };
-use rand::Rng;
+use rand::{Rng, TryRngCore};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
 use server_core::client_hello_guard::guard_client_hello;
@@ -66,15 +67,15 @@ use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
 use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
-    build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
-    LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL,
-    MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
+    build_commit, resolve_draft_source_intent, ClientMessage, RankedPlayerResult, ServerMessage,
+    ServerMode, WireFormat, LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION,
+    MIN_SUPPORTED_LOBBY_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{
-    ActionResult, FullRuntime, GameSession, RevisionedActionResult, SessionActionError,
-    SessionManager,
+    ActionResult, FullRuntime, GameSession, HostingMode, RevisionedActionResult,
+    SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
@@ -84,6 +85,7 @@ use server_core::takeback::RewindOption;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use url::Url;
@@ -190,6 +192,33 @@ fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, St
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
     GameSession::from_persisted(persisted, db.as_ref())
+}
+
+/// Admit a persisted draft row only when its SQLite key names the enclosed
+/// session, then prepare its post-admission startup data.
+///
+/// The persisted wrapper and core session validate each other in `server-core`,
+/// but the database row key is a separate authority used by startup lookups and
+/// lobby registration. Validate it before admission so a corrupt row cannot
+/// leave the manager indexed under one code and the caller looking up another.
+fn restore_persisted_draft_session(
+    row_draft_code: &str,
+    persisted: server_core::persist::PersistedDraftSession,
+    drafts: &mut DraftSessionManager,
+) -> Result<(Option<RegisterGameRequest>, Option<u32>), String> {
+    if persisted.draft_code != row_draft_code {
+        return Err("persisted draft code does not match its database row".to_string());
+    }
+    drafts.restore_persisted_session(persisted)?;
+    let restored = drafts
+        .sessions
+        .get(row_draft_code)
+        .ok_or_else(|| "admitted persisted draft session is missing".to_string())?;
+    let restored_snapshot = restored.to_persisted();
+    Ok((
+        server_core::persist::restored_draft_lobby_register_request(&restored_snapshot),
+        restored.timer_remaining_ms,
+    ))
 }
 
 /// The startup restore owner keeps a session private until this handoff has
@@ -926,6 +955,30 @@ struct SocketIdentity {
     lobby_host_game: Option<String>,
     seat_reservations: Vec<(String, String)>,
     lobby_reservations: Vec<(String, String)>,
+    /// Tournament codes this socket created, mirroring
+    /// `ConnState::organized_tournaments`.
+    ///
+    /// Threaded rather than defaulted on every broker call: the broker appends
+    /// to its `ConnState` view, and without a home here that append would be
+    /// discarded the instant the view drops — a field that looks populated in
+    /// the core and is permanently empty in the native shell. Explicitly NOT
+    /// an authority (the `organizer_token` is), and deliberately not cleared
+    /// on disconnect.
+    ///
+    /// Growth is bounded by the core, not here: the broker is the only writer
+    /// (`absorb_conn_state` copies back whatever it produced), and it appends
+    /// through `push_conn_tournament`, which holds the list at
+    /// `lobby_broker::broker::MAX_CONN_TOURNAMENT_ENTRIES`. The shell must not
+    /// add a second, independently-drifting bound.
+    lobby_organized_tournaments: Vec<String>,
+    /// Tournament codes this socket joined, mirroring
+    /// `ConnState::joined_tournaments`. Same threading rationale as
+    /// [`SocketIdentity::lobby_organized_tournaments`].
+    ///
+    /// Codes only. The core deliberately does not retain the `player_token`
+    /// here, precisely because this per-socket identity is where such a
+    /// secret would be held long past the operation that minted it.
+    lobby_joined_tournaments: Vec<String>,
     /// Set when this socket is participating in a draft session.
     draft_code: Option<String>,
     draft_seat: Option<usize>,
@@ -943,7 +996,10 @@ struct SocketIdentity {
 struct ClientHelloInfo {
     client_version: String,
     build_commit: String,
+    wire_format: Option<WireFormat>,
 }
+
+const MAX_ADVERTISED_WIRE_FORMATS: usize = 8;
 
 /// Outcome of evaluating the handshake gate against an incoming message.
 /// Extracted into a pure function so the gate's invariants can be unit-tested
@@ -1032,6 +1088,7 @@ fn classify_hello_gate(
                 build_commit,
                 protocol_version,
                 lobby_protocol_version,
+                wire_formats,
             },
         ) => {
             // The `server` field on RejectProtocol surfaces the version this
@@ -1041,12 +1098,19 @@ fn classify_hello_gate(
                 acceptance.reject(*protocol_version, *lobby_protocol_version)
             {
                 HelloGateOutcome::RejectProtocol { client, server }
+            } else if wire_formats.len() > MAX_ADVERTISED_WIRE_FORMATS {
+                HelloGateOutcome::RejectInvalidHello(
+                    "ClientHello advertises too many wire formats".to_string(),
+                )
             } else if let Err(reason) = guard_client_hello(client_version, build_commit) {
                 HelloGateOutcome::RejectInvalidHello(reason)
             } else {
                 HelloGateOutcome::Accept(ClientHelloInfo {
                     client_version: client_version.clone(),
                     build_commit: build_commit.clone(),
+                    wire_format: wire_formats
+                        .contains(&WireFormat::GzipEnvelopeV1)
+                        .then_some(WireFormat::GzipEnvelopeV1),
                 })
             }
         }
@@ -1094,6 +1158,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
@@ -1117,6 +1182,22 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         ClientMessage::CreateGameWithSettings { .. }
         | ClientMessage::JoinGameWithPassword { .. }
         | ClientMessage::LookupJoinTarget { .. } => None,
+
+        // Tournament messages — allowed in BOTH modes, unlike the
+        // lobby-only-exclusive pair below. A tournament is an event record
+        // the broker owns outright: it runs no server-side game session (so
+        // there is nothing for Full mode to be missing), and it is not a
+        // P2P-host bookkeeping message that only makes sense when the server
+        // is not running the game (so there is nothing for Full mode to
+        // refuse). Both shells hold the same `TournamentManager`, so gating
+        // by mode here would refuse a capability the server demonstrably has.
+        ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::GetTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::EndTournament { .. } => None,
 
         // Draft messages — Full-only (draft sessions are server-hosted).
         ClientMessage::CreateDraftWithSettings { .. }
@@ -1153,25 +1234,18 @@ fn guard_full_create_game_settings_inbound(
     Ok(pc)
 }
 
-/// Whether the single-elimination seat rule applies to a requested pod.
+/// Whether the engine procedure permits this pod's requested seat count.
 ///
-/// A single named authority so the `CreateDraftWithSettings` handler and its
-/// test read the SAME predicate — a test that re-states the rule inline would
-/// stay green after the handler's rule changed, which is no evidence at all.
-///
-/// CR 903.13a: a Commander Draft pod plays one multiplayer game, not a bracket,
-/// so the seat requirement does not reach it — its `post_draft_play` is
-/// `CompleteImmediately`, and the kind is read through the procedure table
-/// rather than compared by name. The rule is a property of running tournament
-/// pairings, not of any particular kind.
-fn single_elimination_seat_rule_applies(
+/// The socket preflight deliberately delegates the full range and
+/// tournament-pairing bracket policy to `DraftProcedure`; this boundary only
+/// reports that policy before resolving pool data.
+fn draft_pod_size_is_allowed(
     kind: draft_core::types::DraftKind,
     tournament_format: draft_core::types::TournamentFormat,
     pod_size: u8,
 ) -> bool {
-    kind.procedure().post_draft_play == draft_core::types::PostDraftPlay::TournamentPairings
-        && tournament_format == draft_core::types::TournamentFormat::SingleElimination
-        && pod_size != 8
+    kind.procedure()
+        .allows_pod_size(tournament_format, pod_size)
 }
 
 /// Returns `Some(reason)` if `action` cannot legitimately come from a client
@@ -1240,6 +1314,8 @@ impl SocketIdentity {
             subscribed: self.lobby_subscribed,
             host_game: self.lobby_host_game.clone(),
             reservations: self.lobby_reservations.clone(),
+            organized_tournaments: self.lobby_organized_tournaments.clone(),
+            joined_tournaments: self.lobby_joined_tournaments.clone(),
         }
     }
 
@@ -1250,6 +1326,8 @@ impl SocketIdentity {
         self.lobby_subscribed = conn.subscribed;
         self.lobby_host_game = conn.host_game;
         self.lobby_reservations = conn.reservations;
+        self.lobby_organized_tournaments = conn.organized_tournaments;
+        self.lobby_joined_tournaments = conn.joined_tournaments;
     }
 
     /// The Full-game seat claimed by this socket. A complete triple is required
@@ -1307,7 +1385,20 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
         | ClientMessage::ReconnectDraft { .. }
         | ClientMessage::SpectateDraft { .. }
         | ClientMessage::UpdateLobbyMetadata { .. }
-        | ClientMessage::UnregisterLobby { .. } => FullSocketAuthority::Independent,
+        | ClientMessage::UnregisterLobby { .. }
+        // Tournaments use no Full-game seat at all: authority is the
+        // `organizer_token`/`player_token` in the payload, checked by the
+        // broker against the stored value, and a tournament entrant is not a
+        // seat in a running game. `Independent` is what lets an organizer act
+        // from a socket that is also mid-game, or from a fresh one after a
+        // reconnect — the property the token model exists to provide.
+        | ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::GetTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::EndTournament { .. } => FullSocketAuthority::Independent,
 
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -1327,6 +1418,7 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
         ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
@@ -1967,23 +2059,21 @@ async fn serve() {
                 for (draft_code, json) in &persisted_drafts {
                     match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json)
                     {
-                        Ok(ps) => {
-                            let register_req =
-                                server_core::persist::restored_draft_lobby_register_request(&ps);
-                            let timer_ms = ps.timer_remaining_ms;
-                            if let Err(error) = dsm.restore_persisted_session(ps) {
+                        Ok(ps) => match restore_persisted_draft_session(draft_code, ps, &mut dsm) {
+                            Ok((register_req, timer_ms)) => {
+                                if let Some(req) = register_req {
+                                    lob.register_game(draft_code, req, &SysEnv);
+                                }
+                                if let Some(ms) = timer_ms {
+                                    info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
+                                }
+                                restored_drafts += 1;
+                            }
+                            Err(error) => {
                                 warn!(draft = %draft_code, error = %error, "invalid persisted draft session, deleting");
                                 let _ = game_db.delete_draft_session(draft_code);
-                                continue;
                             }
-                            if let Some(req) = register_req {
-                                lob.register_game(draft_code, req, &SysEnv);
-                            }
-                            if let Some(ms) = timer_ms {
-                                info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
-                            }
-                            restored_drafts += 1;
-                        }
+                        },
                         Err(e) => {
                             warn!(draft = %draft_code, error = %e, "failed to restore draft session, deleting");
                             let _ = game_db.delete_draft_session(draft_code);
@@ -2115,7 +2205,20 @@ async fn serve() {
                         _ => None,
                     })
                     .collect();
-                info!(count = expired_lobby.len(), "expiring stale lobby games");
+                // `expired_lobby` is deliberately lobby-filtered: it drives the
+                // Full-mode session/db cleanup below, and a tournament has no
+                // server-run session to retire. But `reap_outbounds` now also
+                // carries tournament lifecycle events, so reporting only the
+                // lobby count would print a misleading `count=0` for a sweep
+                // that reaped tournaments and nothing else. Both counts are
+                // named explicitly rather than summed — they are different
+                // kinds of expiry with different cleanup, and a single total
+                // would hide which one actually fired.
+                let tournament_events = reap_outbounds.len() - expired_lobby.len();
+                info!(
+                    lobby_games = expired_lobby.len(),
+                    tournament_events, "expiring stale lobby entries"
+                );
                 let mut mgr = bg_state.lock().await;
                 for game_code in &expired_lobby {
                     if mgr
@@ -2244,17 +2347,6 @@ async fn serve() {
         info!(public_url = %url, "advertising public URL for join-code sharing");
     }
 
-    // Public, client-facing HTTP surface. `/p2p-draft-backup*` is part of the
-    // normal P2P draft flow; only the administrative `/admin/*` routes are gated.
-    let mut app = Router::new()
-        .route("/ws", get(ws_handler))
-        .route("/health", get(health))
-        .route("/p2p-draft-backup", post(admin::p2p_backup_store))
-        .route(
-            "/p2p-draft-backup/{code}",
-            get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
-        );
-
     // Administrative endpoints are destructive and information-disclosing, and
     // reachable through the same reverse proxy as `/ws` (see deploy nginx).
     // Mount them only when PHASE_ADMIN_TOKEN is set; otherwise absent (404).
@@ -2262,9 +2354,6 @@ async fn serve() {
     match admin_token.as_deref() {
         Some(_) => info!("admin HTTP endpoints enabled (bearer-token authenticated)"),
         None => info!("admin HTTP endpoints disabled (set PHASE_ADMIN_TOKEN to enable)"),
-    }
-    if let Some(token) = admin_token.as_deref().filter(|t| !t.is_empty()) {
-        app = mount_admin_routes(app, token);
     }
 
     let app_state = AppState {
@@ -2285,7 +2374,11 @@ async fn serve() {
         allowed_origin: cli.allowed_origin.clone(),
     };
 
-    let app = app.layer(cors).with_state(app_state.clone());
+    // `/p2p-draft-backup*` is part of the normal P2P draft flow; only the
+    // administrative `/admin/*` routes are gated. `build_router` keeps `/ws`
+    // out from under `CompressionLayer` (see its doc comment) while every
+    // other public and admin response gets compressed.
+    let app = build_router(app_state.clone(), cors, admin_token.as_deref());
 
     // Rejected before anything binds. Left alone this surfaces later as "address
     // in use" on one of the two listeners, which reads like a stale process
@@ -2582,6 +2675,189 @@ mod lifecycle_tests {
         assert!(!conns.contains_key("EXPIRED"));
         assert!(conns.contains_key("ACTIVE"));
     }
+
+    // -- Tournament reaper fan-out -----------------------------------------
+
+    use lobby_broker::{
+        Broker, BrokerEnv, ConnState, LobbyClientMessage, LobbyServerMessage, Outbound,
+    };
+    use server_core::protocol::{BracketShape, MatchArity, ScoringPolicy};
+    use std::cell::Cell;
+
+    /// Settable-clock `BrokerEnv`. `SysEnv` reads the real wall clock, and the
+    /// tournament lifecycle windows are fixed multi-day constants, so the
+    /// production env cannot reach an expiry inside a test.
+    struct FakeEnv {
+        now: Cell<u64>,
+        token: Cell<u64>,
+        code: Cell<u64>,
+    }
+    impl BrokerEnv for FakeEnv {
+        fn now_ms(&self) -> u64 {
+            self.now.get()
+        }
+        fn new_token(&self) -> String {
+            let n = self.token.get();
+            self.token.set(n + 1);
+            format!("token-{n}")
+        }
+        fn new_game_code(&self) -> String {
+            let n = self.code.get();
+            self.code.set(n + 1);
+            format!("CODE{n:02}")
+        }
+    }
+
+    /// Verification Matrix row 10. `Broker::reap_expired` returning the right
+    /// outbounds is necessary but NOT sufficient — the shell's reap block also
+    /// has to forward them. This drives the block's two real steps in the same
+    /// order the production code does:
+    ///
+    ///   1. the `expired_lobby` `filter_map`, which is lobby-only by design
+    ///      (a tournament has no Full-mode session to retire), and
+    ///   2. the fan-out loop, which iterates the FULL `reap_outbounds` rather
+    ///      than the filtered list — the reason tournaments reach subscribers
+    ///      with no new code in the loop.
+    ///
+    /// If step 2 were ever narrowed to `expired_lobby`, a subscribed client
+    /// would receive nothing when a tournament it is watching expires, while
+    /// every broker-level test kept passing.
+    #[tokio::test]
+    async fn the_reaper_fans_tournament_expiry_out_to_subscribed_clients() {
+        let env = FakeEnv {
+            now: Cell::new(1_000_000),
+            token: Cell::new(0),
+            code: Cell::new(0),
+        };
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+
+        let created = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+            },
+            &env,
+        );
+        let tour_code = match &created[0] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentCreated { code, .. }) => code.clone(),
+            other => panic!("expected TournamentCreated, got {other:?}"),
+        };
+
+        // Past the registration window, so the sweep reaps it.
+        env.now
+            .set(env.now.get() + (lobby_broker::REGISTRATION_TIMEOUT_SECS + 1) * 1000);
+        let reap_outbounds = broker.reap_expired(300, &env);
+        assert!(!reap_outbounds.is_empty());
+
+        // Step 1, verbatim from the reap block.
+        let expired_lobby: Vec<String> = reap_outbounds
+            .iter()
+            .filter_map(|ob| match ob {
+                Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved { game_code }) => {
+                    Some(game_code.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            expired_lobby.is_empty(),
+            "a tournament must not be mistaken for a lobby game needing session cleanup"
+        );
+
+        // Step 2, verbatim: one subscribed client, and the fan-out loop.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for ob in reap_outbounds {
+            if let Outbound::ToSubscribers(msg) = ob {
+                let server_msg = super::to_server_message(msg);
+                let _ = tx.send(server_msg);
+            }
+        }
+        drop(tx);
+
+        let mut received = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            received.push(msg);
+        }
+
+        assert!(
+            received.iter().any(|m| matches!(
+                m,
+                server_core::protocol::ServerMessage::TournamentRemoved { code } if *code == tour_code
+            )),
+            "a subscribed client must be told the tournament is gone: {received:?}"
+        );
+        assert!(
+            received.iter().any(|m| matches!(
+                m,
+                server_core::protocol::ServerMessage::TournamentListUpdate { .. }
+            )),
+            "...and receive the refreshed list: {received:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod restored_draft_startup_tests {
+    use super::restore_persisted_draft_session;
+    use draft_core::types::{
+        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SpectatorVisibility,
+        TournamentFormat,
+    };
+    use server_core::draft_session::DraftSessionManager;
+    use server_core::persist::{PersistedDraftSession, PersistedLobbyMeta};
+
+    fn uniform_lobby_snapshot() -> PersistedDraftSession {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let mut drafts = DraftSessionManager::new();
+        let (draft_code, _, _) = drafts.create_draft(config, "Alice".to_string());
+        drafts.sessions.get_mut(&draft_code).unwrap().lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+        drafts.sessions[&draft_code].to_persisted()
+    }
+
+    #[test]
+    fn persisted_draft_row_key_must_match_before_admission_or_lobby_registration() {
+        let snapshot = uniform_lobby_snapshot();
+        let mut restored = DraftSessionManager::new();
+
+        let rejected_registration =
+            match restore_persisted_draft_session("WRONG1", snapshot.clone(), &mut restored) {
+                Ok((registration, _)) => registration,
+                Err(_) => None,
+            };
+        assert!(rejected_registration.is_none());
+        assert!(restored.sessions.is_empty());
+
+        let (registration, _) =
+            restore_persisted_draft_session(&snapshot.draft_code, snapshot.clone(), &mut restored)
+                .expect("a valid Uniform snapshot restores under its own row key");
+        assert!(registration.is_some());
+        assert!(restored.sessions.contains_key(&snapshot.draft_code));
+    }
 }
 
 #[cfg(test)]
@@ -2723,6 +2999,38 @@ fn admin_token_from_env() -> Option<String> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
+}
+
+/// Assembles the public HTTP/WS surface. `/ws` is kept on its own sub-router,
+/// deliberately outside `CompressionLayer`: the WebSocket upgrade response
+/// (`101 Switching Protocols`) carries no body to compress, and axum's
+/// upgrade takes the connection over via `hyper`'s `OnUpgrade` extension
+/// rather than through the response body a compressing layer would wrap —
+/// keeping the layer off that route entirely removes any dependence on that
+/// implementation detail continuing to hold across axum/tower-http upgrades.
+/// Every other route (health check, the P2P draft backup API, and — when
+/// `admin_token` is set — the bearer-guarded `/admin/*` routes) is served
+/// through gzip `CompressionLayer` so JSON/text responses shrink whenever the
+/// client advertises `Accept-Encoding: gzip`.
+fn build_router(app_state: AppState, cors: CorsLayer, admin_token: Option<&str>) -> Router {
+    let ws_router: Router<AppState> = Router::new().route("/ws", get(ws_handler));
+
+    let mut http_router: Router<AppState> = Router::new()
+        .route("/health", get(health))
+        .route("/p2p-draft-backup", post(admin::p2p_backup_store))
+        .route(
+            "/p2p-draft-backup/{code}",
+            get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
+        );
+    if let Some(token) = admin_token.filter(|t| !t.is_empty()) {
+        http_router = mount_admin_routes(http_router, token);
+    }
+    let http_router = http_router.layer(CompressionLayer::new());
+
+    ws_router
+        .merge(http_router)
+        .layer(cors)
+        .with_state(app_state)
 }
 
 /// Mount bearer-guarded `/admin/*` routes on a router that will receive `AppState`.
@@ -2954,6 +3262,47 @@ struct ConnectionSlot {
     armed: bool,
 }
 
+/// Per-connection WebSocket writer. Once the text handshake negotiates a wire
+/// format, every later JSON text send passes through the same envelope path —
+/// including direct errors as well as queued broadcasts.
+struct NegotiatedSocket {
+    inner: WebSocket,
+    wire_format: Option<WireFormat>,
+}
+
+impl NegotiatedSocket {
+    fn new(inner: WebSocket) -> Self {
+        Self {
+            inner,
+            wire_format: None,
+        }
+    }
+
+    fn set_wire_format(&mut self, wire_format: Option<WireFormat>) {
+        self.wire_format = wire_format;
+    }
+
+    fn uses_gzip_envelope(&self) -> bool {
+        self.wire_format == Some(WireFormat::GzipEnvelopeV1)
+    }
+
+    async fn send(&mut self, message: Message) -> Result<(), axum::Error> {
+        let message = match message {
+            Message::Text(json) => {
+                wire::encode_json_message(json.to_string(), self.uses_gzip_envelope())
+                    .await
+                    .map_err(axum::Error::new)?
+            }
+            other => other,
+        };
+        self.inner.send(message).await
+    }
+
+    async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
+        self.inner.recv().await
+    }
+}
+
 impl ConnectionSlot {
     fn new(player_count: SharedPlayerCount) -> Self {
         Self {
@@ -2977,7 +3326,7 @@ impl Drop for ConnectionSlot {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_socket(
-    mut socket: WebSocket,
+    socket: WebSocket,
     state: SharedState,
     draft_state: SharedDraftState,
     draft_pools: SharedDraftPools,
@@ -2995,6 +3344,7 @@ async fn handle_socket(
     online_count: u32,
     slot: ConnectionSlot,
 ) {
+    let mut socket = NegotiatedSocket::new(socket);
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
     // The slot was reserved before the upgrade; from here the two `fetch_sub`
@@ -3014,6 +3364,8 @@ async fn handle_socket(
         lobby_host_game: None,
         seat_reservations: Vec::new(),
         lobby_reservations: Vec::new(),
+        lobby_organized_tournaments: Vec::new(),
+        lobby_joined_tournaments: Vec::new(),
         draft_code: None,
         draft_seat: None,
         draft_token: None,
@@ -3035,6 +3387,7 @@ async fn handle_socket(
         mode,
         lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
         public_url,
+        wire_formats: vec![WireFormat::GzipEnvelopeV1],
     };
     if let Ok(json) = serde_json::to_string(&hello) {
         if socket.send(Message::text(json)).await.is_err() {
@@ -3049,25 +3402,32 @@ async fn handle_socket(
             biased;
             Some(msg) = rx.recv() => {
                 if let Ok(json) = serde_json::to_string(&msg) {
-                    if socket.send(Message::text(json)).await.is_err() {
-                        break;
-                    }
+                    if socket.send(Message::text(json)).await.is_err() { break; }
                 }
             }
 
             result = socket.recv() => {
                 match result {
                     Some(Ok(msg)) => {
-                        let text = match msg {
-                            Message::Text(t) => t.to_string(),
-                            Message::Close(_) => break,
-                            _ => continue,
-                        };
-
                         if !rate_limiter.check() {
                             debug!("rate limit exceeded, dropping message");
                             continue;
                         }
+
+                        let text = match msg {
+                            Message::Text(t) => t.to_string(),
+                            Message::Binary(bytes) if socket.uses_gzip_envelope() => {
+                                match wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES).await {
+                                    Ok(text) => text,
+                                    Err(error) => {
+                                        warn!(%error, "failed to decode client binary envelope");
+                                        continue;
+                                    }
+                                }
+                            }
+                            Message::Close(_) => break,
+                            _ => continue,
+                        };
 
                         let client_msg: ClientMessage = match serde_json::from_str(&text) {
                             Ok(m) => m,
@@ -3248,6 +3608,9 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             // LobbyOnly brokers run no server-side game, so there is no
             // game-server URL to advertise for a `<code>@<host>` share string.
             public_url: None,
+            // Socket negotiation uses the canonical ServerHello sent directly
+            // by handle_socket; broker-originated hellos are only projections.
+            wire_formats: Vec::new(),
         },
         L::GameCreated {
             game_code,
@@ -3301,6 +3664,32 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             filled_seats,
             reservation_token,
         },
+        // Tournament variants. `view`/`tournaments` move rather than clone —
+        // the view types are re-exported from `lobby_broker::protocol`, so
+        // both enums name the same struct and this stays a pure re-tag.
+        L::TournamentCreated {
+            code,
+            organizer_token,
+            view,
+        } => ServerMessage::TournamentCreated {
+            code,
+            organizer_token,
+            view,
+        },
+        L::TournamentJoined {
+            code,
+            player_token,
+            view,
+        } => ServerMessage::TournamentJoined {
+            code,
+            player_token,
+            view,
+        },
+        L::TournamentUpdate { code, view } => ServerMessage::TournamentUpdate { code, view },
+        L::TournamentRemoved { code } => ServerMessage::TournamentRemoved { code },
+        L::TournamentListUpdate { tournaments } => {
+            ServerMessage::TournamentListUpdate { tournaments }
+        }
     }
 }
 
@@ -3317,6 +3706,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             build_commit,
             protocol_version,
             lobby_protocol_version,
+            wire_formats: _,
         } => L::ClientHello {
             client_version: client_version.clone(),
             build_commit: build_commit.clone(),
@@ -3397,6 +3787,68 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
         },
         ClientMessage::UnregisterLobby { game_code } => L::UnregisterLobby {
             game_code: game_code.clone(),
+        },
+        // Tournament variants. NOTE the asymmetry with `to_server_message`:
+        // that function is wildcard-free, so a forgotten arm there is a
+        // compile error. THIS function ends in `_ => return None`, because
+        // most `ClientMessage` variants are legitimately non-lobby — so a
+        // forgotten arm here is NOT a compile error. It silently returns
+        // `None`, which `dispatch_broker` reads as "not a lobby message" and
+        // simply does not dispatch, leaving the client's request answered by
+        // nothing at all. `tournament_variants_survive_the_canonical_lobby_roundtrip`
+        // asserts `.is_some()` for every one of these seven precisely because
+        // the compiler cannot.
+        ClientMessage::CreateTournament {
+            name,
+            arity,
+            scoring,
+            bracket,
+            total_rounds,
+        } => L::CreateTournament {
+            name: name.clone(),
+            arity: *arity,
+            scoring: *scoring,
+            bracket: *bracket,
+            total_rounds: *total_rounds,
+        },
+        ClientMessage::JoinTournament {
+            code,
+            player_key,
+            display_name,
+        } => L::JoinTournament {
+            code: code.clone(),
+            player_key: player_key.clone(),
+            display_name: display_name.clone(),
+        },
+        ClientMessage::GetTournament { code } => L::GetTournament { code: code.clone() },
+        ClientMessage::StartTournamentRound {
+            code,
+            organizer_token,
+        } => L::StartTournamentRound {
+            code: code.clone(),
+            organizer_token: organizer_token.clone(),
+        },
+        ClientMessage::ReportMatchResult {
+            code,
+            pairing_id,
+            player_token,
+            outcome,
+        } => L::ReportMatchResult {
+            code: code.clone(),
+            pairing_id: *pairing_id,
+            player_token: player_token.clone(),
+            outcome: outcome.clone(),
+        },
+        ClientMessage::DropFromTournament { code, player_token } => L::DropFromTournament {
+            code: code.clone(),
+            player_token: player_token.clone(),
+        },
+        ClientMessage::EndTournament {
+            code,
+            organizer_token,
+        } => L::EndTournament {
+            code: code.clone(),
+            organizer_token: organizer_token.clone(),
         },
         _ => return None,
     })
@@ -4443,7 +4895,7 @@ async fn broadcast_game_started(
     broadcast_ai_failure(connections, game_code, ai_failure).await;
 }
 
-async fn require_host(identity: &SocketIdentity, socket: &mut WebSocket) -> Result<(), ()> {
+async fn require_host(identity: &SocketIdentity, socket: &mut NegotiatedSocket) -> Result<(), ()> {
     if identity.player_id != Some(PlayerId(0)) {
         let msg = ServerMessage::error("Only the host can modify seats.".to_string());
         if let Ok(json) = serde_json::to_string(&msg) {
@@ -4468,7 +4920,7 @@ fn is_joining_current_game(identity: &SocketIdentity, target_game_code: &str) ->
 async fn reject_joining_current_game(
     identity: &SocketIdentity,
     target_game_code: &str,
-    socket: &mut WebSocket,
+    socket: &mut NegotiatedSocket,
 ) -> Result<(), ()> {
     if !is_joining_current_game(identity, target_game_code) {
         return Ok(());
@@ -4488,23 +4940,37 @@ async fn draft_pack_generator_for_start(
 ) -> Result<draft_core::pack_generator::PackGenerator, String> {
     // The SOURCE, not `config.set_code`. `set_code` is the whole-source display
     // label, which a multi-set pod joins into `"ISD+DKA+AVR"` — a string no pool
-    // map can key on. The per-pack sequence lives on `DraftSource::Set`, and it
-    // is what decides which set fills each booster.
-    let set_codes = {
+    // map can key on. The persisted core source is the single authority for
+    // both Uniform and Chaos rebuilds; Chaos assignments were resolved once at
+    // admission and are never drawn again here.
+    let (source, pod_size, pack_count) = {
         let mgr = draft_state.lock().await;
         let session = mgr
             .sessions
             .get(draft_code)
             .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
-        match &session.config.source {
-            draft_core::types::DraftSource::Set { codes } => codes.clone(),
-            draft_core::types::DraftSource::Cube { .. } => {
-                return Err("Server-hosted drafts require a set pool".to_string());
-            }
-        }
+        (
+            session.config.source.clone(),
+            session.config.pod_size,
+            session.config.pack_count,
+        )
     };
 
-    draft_pools.generator_for_sequence(&set_codes)
+    match source {
+        draft_core::types::DraftSource::Set {
+            layout: draft_core::types::SetLayout::UniformByRound { codes },
+        } => draft_pools.generator_for_sequence(&codes),
+        draft_core::types::DraftSource::Set {
+            layout:
+                draft_core::types::SetLayout::Chaos {
+                    candidate_codes,
+                    assignments,
+                },
+        } => draft_pools.generator_for_chaos(&candidate_codes, &assignments, pod_size, pack_count),
+        draft_core::types::DraftSource::Cube { .. } => {
+            Err("Server-hosted drafts require a set pool".to_string())
+        }
+    }
 }
 
 /// Per-AI-result fan-out for a batch of `run_ai` results.
@@ -4808,6 +5274,9 @@ fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<Serv
                 message,
             })
         }
+        ClientMessage::ExportAuthoritativeState => {
+            Some(ServerMessage::AuthoritativeStateExportFailed { message })
+        }
         ClientMessage::ClientHello { .. }
         | ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -4835,7 +5304,18 @@ fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<Serv
         | ClientMessage::JoinDraftWithPassword { .. }
         | ClientMessage::DraftAction { .. }
         | ClientMessage::ReconnectDraft { .. }
-        | ClientMessage::SpectateDraft { .. } => None,
+        | ClientMessage::SpectateDraft { .. }
+        // No correlated `*Failed` frame: a tournament request that fails is
+        // answered by the broker's own `Error` outbound, carrying the
+        // manager's reason verbatim. `ActionFailed` is for the game-action
+        // promise a client is awaiting, which none of these is.
+        | ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::GetTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::EndTournament { .. } => None,
     }
 }
 
@@ -4920,7 +5400,7 @@ impl GameSubmission {
 #[allow(clippy::too_many_arguments)]
 async fn handle_full_game_submission(
     submission: GameSubmission,
-    socket: &mut WebSocket,
+    socket: &mut NegotiatedSocket,
     state: &SharedState,
     db: &SharedDb,
     draft_state: &SharedDraftState,
@@ -5551,7 +6031,7 @@ async fn handle_resolve_all(
 #[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     client_msg: ClientMessage,
-    socket: &mut WebSocket,
+    socket: &mut NegotiatedSocket,
     state: &SharedState,
     draft_state: &SharedDraftState,
     draft_pools: &SharedDraftPools,
@@ -5581,6 +6061,7 @@ async fn handle_client_message(
                 commit = %info.build_commit,
                 "ClientHello accepted"
             );
+            socket.set_wire_format(info.wire_format);
             identity.client_hello = Some(info);
             return;
         }
@@ -6006,6 +6487,54 @@ async fn handle_client_message(
                 }
                 _ => ServerMessage::ManaPaymentPreviewFailed {
                     request_id,
+                    message: "Not in a game".to_string(),
+                },
+            };
+
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+        }
+
+        ClientMessage::ExportAuthoritativeState => {
+            // The native P2P host is always Player 1 (seat zero). Its local
+            // server deliberately redacts normal broadcast snapshots per
+            // viewer, but the host needs an unredacted snapshot to report an
+            // engine stall. The export is a trusted engine envelope, not a
+            // PersistedSession, so reconnect tokens and server metadata never
+            // leave the server.
+            let response = match (identity.game_code.as_deref(), identity.player_id) {
+                (Some(game_code), Some(PlayerId(0))) => {
+                    let mut manager = state.lock().await;
+                    match manager.sessions.get_mut(game_code) {
+                        Some(session) if session.hosting == HostingMode::SingleUser => {
+                            let mut snapshot = session.state.clone();
+                            snapshot.capture_rng_word_pos();
+                            match serde_json::to_string(&TrustedGameStateEnvelope::capture(
+                                snapshot,
+                            )) {
+                                Ok(state) => ServerMessage::AuthoritativeStateExport { state },
+                                Err(error) => ServerMessage::AuthoritativeStateExportFailed {
+                                    message: format!(
+                                        "Failed to serialize authoritative game state: {error}"
+                                    ),
+                                },
+                            }
+                        }
+                        Some(_) => ServerMessage::AuthoritativeStateExportFailed {
+                            message:
+                                "Authoritative state export is available only from a local host"
+                                    .to_string(),
+                        },
+                        None => ServerMessage::AuthoritativeStateExportFailed {
+                            message: "Game session is no longer available".to_string(),
+                        },
+                    }
+                }
+                (Some(_), Some(_)) => ServerMessage::AuthoritativeStateExportFailed {
+                    message: "Only the game host can export authoritative state".to_string(),
+                },
+                _ => ServerMessage::AuthoritativeStateExportFailed {
                     message: "Not in a game".to_string(),
                 },
             };
@@ -8638,6 +9167,7 @@ async fn handle_client_message(
 
         ClientMessage::CreateDraftWithSettings {
             display_name,
+            source,
             set_codes,
             kind,
             public,
@@ -8647,9 +9177,20 @@ async fn handle_client_message(
             pod_policy,
             pod_size,
         } => {
+            let source_intent = match resolve_draft_source_intent(source, set_codes) {
+                Ok(intent) => intent,
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+            let source_codes = source_intent.set_codes();
             info!(
                 display_name = %display_name,
-                set_codes = ?set_codes,
+                source = ?source_intent,
                 kind = ?kind,
                 public,
                 pod_size,
@@ -8658,11 +9199,12 @@ async fn handle_client_message(
 
             if let Err(reason) = guard_create_draft_with_settings(
                 &display_name,
-                &set_codes,
+                source_codes,
                 &password,
                 timer_seconds,
                 pod_size,
                 kind,
+                tournament_format,
             ) {
                 let msg = ServerMessage::DraftActionRejected { reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
@@ -8671,51 +9213,70 @@ async fn handle_client_message(
                 return;
             }
 
-            // Resolve the WHOLE sequence up front: a pod whose second pack
-            // names a set with no pool data must be refused at creation, not
-            // discovered when that booster fails to open mid-draft. The
-            // generator this proves out is rebuilt at StartDraft from the same
-            // source, so the two can never disagree.
-            //
-            // A sequence SHORTER than the kind's pack count repeats its last
-            // entry (`entry_for_pack`), which is how a single-set pod stays a
-            // one-element sequence; a LONGER one names boosters the event never
-            // opens, so it is the host's error rather than a silent truncation.
             let procedure = kind.procedure();
-            if set_codes.len() > usize::from(procedure.packs_per_player) {
-                let msg = ServerMessage::DraftActionRejected {
-                    reason: format!(
-                        "{kind:?} opens {} packs, but {} sets were named",
-                        procedure.packs_per_player,
-                        set_codes.len()
-                    ),
-                };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
-                return;
-            }
-            //
-            // Booster size follows pack 1's set, matching the single-player
-            // boundary (`ResolvedSetSelection`); per-pack sizes are recorded on
-            // the session from the packs the generator produces.
-            let resolved = draft_pools
-                .generator_for_sequence(&set_codes)
-                .and_then(|_| {
-                    let first = set_codes
-                        .first()
-                        .ok_or_else(|| "A pod must name at least one set".to_string())?;
-                    draft_pools
-                        .pool_for_set(first)
-                        .and_then(|pool| pool.cards_per_pack())
-                        .ok_or_else(|| {
-                            format!(
-                                "Set {first} has no single MTGJSON pack size across its booster variants"
-                            )
+            let resolved_source = match source_intent {
+                // A Uniform sequence names the booster set for each round. A
+                // short sequence retains its legacy repeat-final shorthand;
+                // a longer one would silently name boosters that never open.
+                server_core::protocol::DraftSourceIntent::Uniform { set_codes } => {
+                    if set_codes.len() > usize::from(procedure.packs_per_player) {
+                        Err(format!(
+                            "{kind:?} opens {} packs, but {} sets were named",
+                            procedure.packs_per_player,
+                            set_codes.len()
+                        ))
+                    } else {
+                        draft_pools.generator_for_sequence(&set_codes).and_then(|_| {
+                            let first = set_codes
+                                .first()
+                                .ok_or_else(|| "A pod must name at least one set".to_string())?;
+                            draft_pools
+                                .pool_for_set(first)
+                                .and_then(|pool| pool.cards_per_pack())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "Set {first} has no single MTGJSON pack size across its booster variants"
+                                    )
+                                })
+                                .map(|cards_per_pack| {
+                                    (
+                                        draft_core::types::DraftSource::Set {
+                                            layout: draft_core::types::SetLayout::UniformByRound {
+                                                codes: set_codes,
+                                            },
+                                        },
+                                        cards_per_pack,
+                                    )
+                                })
                         })
-                });
-            let cards_per_pack = match resolved {
-                Ok(cards_per_pack) => cards_per_pack,
+                    }
+                }
+                // The OS entropy draw is made once at admission. The persisted
+                // core layout holds the result, so reconnect/start never reroll
+                // a pod and a client never transmits assignments.
+                server_core::protocol::DraftSourceIntent::Chaos { candidate_codes } => {
+                    let seed = rand::rngs::OsRng.try_next_u64().map_err(|error| {
+                        format!("Unable to seed Chaos draft assignments: {error}")
+                    });
+                    seed.and_then(|seed| {
+                        draft_pools
+                            .resolve_chaos_layout(
+                                &candidate_codes,
+                                pod_size,
+                                procedure.packs_per_player,
+                                seed,
+                            )
+                            .map(|(layout, cards_per_pack)| {
+                                (
+                                    draft_core::types::DraftSource::Set { layout },
+                                    cards_per_pack,
+                                )
+                            })
+                    })
+                }
+            };
+            let (source, cards_per_pack) = match resolved_source {
+                Ok(resolved) => resolved,
                 Err(reason) => {
                     let msg = ServerMessage::DraftActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
@@ -8725,24 +9286,9 @@ async fn handle_client_message(
                 }
             };
 
-            // CR 903.13a: a Commander Draft pod plays one multiplayer game, not
-            // a bracket, so the single-elimination seat requirement does not
-            // apply to it. Was `kind != DraftKind::Quick`, which is TRUE for
-            // the fifth kind and would reject a legitimate 4-seat pod that the
-            // reducer accepts — the wire and the reducer disagreeing about the
-            // same kind in opposite directions.
-            //
-            // The predicate itself is covered by
-            // `single_elimination_seat_rule_skips_commander_draft` below, which
-            // asserts it over the procedure table: it must NOT fire for
-            // CommanderDraft (whose `post_draft_play` is `CompleteImmediately`)
-            // and MUST fire for Traditional at a 4-seat SE pod. The live socket
-            // path around it remains uncovered — reaching it needs a real
-            // connection and a created pod — so what is verified here is the
-            // typed comparison, not the frame handling.
-            if single_elimination_seat_rule_applies(kind, tournament_format, pod_size) {
+            if !draft_pod_size_is_allowed(kind, tournament_format, pod_size) {
                 let msg = ServerMessage::DraftActionRejected {
-                    reason: "Single-elimination draft events require exactly 8 seats".to_string(),
+                    reason: "Pod size is not allowed by the draft procedure".to_string(),
                 };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
@@ -8750,12 +9296,11 @@ async fn handle_client_message(
                 return;
             }
 
-            let source = draft_core::types::DraftSource::Set { codes: set_codes };
-            // One label naming the whole source, deduped in first-appearance
-            // order by the engine ("ISD+DKA+AVR"). The lobby listing and the
-            // session share it, so a listing can never describe a pod the
-            // session does not.
+            // The session label names only the resolved core source. The lobby
+            // row uses `lobby_set_label` below so a Chaos listing advertises
+            // candidate intent without leaking the assignment union.
             let set_label = source.set_code();
+            let lobby_set_label = server_core::persist::draft_lobby_source_label(&source);
             let config = draft_core::types::DraftConfig {
                 set_code: set_label.clone(),
                 source,
@@ -8828,7 +9373,7 @@ async fn handle_client_message(
                         room_name: None,
                         host_peer_id: String::new(),
                         draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
-                            set_code: set_label,
+                            set_code: lobby_set_label,
                             draft_kind: format!("{kind:?}"),
                             cube_name: None,
                         }),
@@ -9260,6 +9805,29 @@ async fn handle_client_message(
             )
             .await;
         }
+
+        // Every tournament variant routes straight to the broker, which owns
+        // the whole surface: token authority, the `TournamentManager` call,
+        // and outbound assembly. Mode-agnostic, matching `reject_if_disabled`
+        // — there is no Full-mode alternative path for any of them, so unlike
+        // `CreateGameWithSettings` these need no per-mode branch here.
+        ClientMessage::CreateTournament { .. }
+        | ClientMessage::JoinTournament { .. }
+        | ClientMessage::GetTournament { .. }
+        | ClientMessage::StartTournamentRound { .. }
+        | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::DropFromTournament { .. }
+        | ClientMessage::EndTournament { .. } => {
+            dispatch_broker(
+                &client_msg,
+                lobby,
+                lobby_subscribers,
+                player_count,
+                tx,
+                identity,
+            )
+            .await;
+        }
     }
 }
 
@@ -9504,6 +10072,8 @@ mod state_transport_derived_tests {
                 lobby_host_game: None,
                 seat_reservations: Vec::new(),
                 lobby_reservations: Vec::new(),
+                lobby_organized_tournaments: Vec::new(),
+                lobby_joined_tournaments: Vec::new(),
                 draft_code: None,
                 draft_seat: None,
                 draft_token: None,
@@ -9603,6 +10173,8 @@ mod state_transport_derived_tests {
                 lobby_host_game: None,
                 seat_reservations: Vec::new(),
                 lobby_reservations: Vec::new(),
+                lobby_organized_tournaments: Vec::new(),
+                lobby_joined_tournaments: Vec::new(),
                 draft_code: None,
                 draft_seat: None,
                 draft_token: None,
@@ -9773,6 +10345,8 @@ mod full_socket_authority_tests {
             lobby_host_game: None,
             seat_reservations: Vec::new(),
             lobby_reservations: Vec::new(),
+            lobby_organized_tournaments: Vec::new(),
+            lobby_joined_tournaments: Vec::new(),
             draft_code: None,
             draft_seat: None,
             draft_token: None,
@@ -10193,8 +10767,8 @@ mod full_socket_authority_tests {
 mod draft_socket_authority_tests {
     use super::*;
     use draft_core::types::{
-        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SpectatorVisibility,
-        TournamentFormat,
+        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SetLayout,
+        SpectatorVisibility, TournamentFormat,
     };
 
     fn empty_identity() -> SocketIdentity {
@@ -10208,6 +10782,8 @@ mod draft_socket_authority_tests {
             lobby_host_game: None,
             seat_reservations: Vec::new(),
             lobby_reservations: Vec::new(),
+            lobby_organized_tournaments: Vec::new(),
+            lobby_joined_tournaments: Vec::new(),
             draft_code: None,
             draft_seat: None,
             draft_token: None,
@@ -10246,7 +10822,8 @@ mod draft_socket_authority_tests {
         [
             ClientMessage::CreateDraftWithSettings {
                 display_name: "Alice".to_string(),
-                set_codes: vec!["TST".to_string()],
+                source: None,
+                set_codes: Some(vec!["TST".to_string()]),
                 kind: DraftKind::Premier,
                 public: false,
                 password: None,
@@ -10261,6 +10838,37 @@ mod draft_socket_authority_tests {
                 password: None,
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn server_rebuilds_a_persisted_chaos_source_at_draft_start() {
+        let (draft_state, _connections, draft_code, _player_token) = test_draft();
+        {
+            let mut manager = draft_state.lock().await;
+            let draft = manager
+                .sessions
+                .get_mut(&draft_code)
+                .expect("test draft exists");
+            draft.config.source = DraftSource::Set {
+                layout: SetLayout::Chaos {
+                    candidate_codes: vec!["TST".to_string()],
+                    assignments: vec![vec!["TST".to_string(); 3]; 8],
+                },
+            };
+        }
+
+        let result = draft_pack_generator_for_start(
+            &draft_state,
+            &Arc::new(draft_pools::DraftPools::default()),
+            &draft_code,
+        )
+        .await;
+
+        let Err(error) = result else {
+            panic!("the empty test pool must fail after reaching Chaos generator construction");
+        };
+
+        assert_eq!(error, "No draft pool data for set: TST");
     }
 
     #[test]
@@ -10785,42 +11393,36 @@ mod live_spectator_tests {
 }
 
 #[cfg(test)]
-mod single_elimination_seat_rule_tests {
-    use super::single_elimination_seat_rule_applies;
+mod draft_pod_size_policy_tests {
+    use super::draft_pod_size_is_allowed;
     use draft_core::types::{DraftKind, TournamentFormat};
 
-    /// CR 903.13a: a Commander pod plays one multiplayer game rather than a
-    /// bracket, so the 8-seat single-elimination requirement must not reject
-    /// its 4-seat product default.
-    ///
-    /// REVERT-PROBE: restore the old `kind != DraftKind::Quick` form of the
-    /// rule — which is TRUE for the fifth kind — and this reds.
+    /// Commander completes outside tournament pairings, so its normal 3-seat
+    /// floor remains valid even when this transport value is selected.
     #[test]
-    fn single_elimination_seat_rule_skips_commander_draft() {
-        assert!(!single_elimination_seat_rule_applies(
+    fn procedure_keeps_commander_single_elimination_at_its_normal_range() {
+        assert!(draft_pod_size_is_allowed(
             DraftKind::CommanderDraft,
             TournamentFormat::SingleElimination,
-            4
+            3
         ));
     }
 
-    /// The paired positive reach-guard: the rule still fires for a kind that
-    /// DOES run tournament pairings, so the negative above cannot pass merely
-    /// because the predicate never fires for anything.
+    /// The paired positive reach-guard: a procedure that does run tournament
+    /// pairings still requires the full single-elimination bracket.
     #[test]
-    fn single_elimination_seat_rule_fires_for_traditional_four_seat_pod() {
-        assert!(single_elimination_seat_rule_applies(
+    fn procedure_requires_the_full_pairing_bracket() {
+        assert!(!draft_pod_size_is_allowed(
             DraftKind::Traditional,
             TournamentFormat::SingleElimination,
             4
         ));
-        // ...and not at the legal 8-seat size, nor under Swiss.
-        assert!(!single_elimination_seat_rule_applies(
+        assert!(draft_pod_size_is_allowed(
             DraftKind::Traditional,
             TournamentFormat::SingleElimination,
             8
         ));
-        assert!(!single_elimination_seat_rule_applies(
+        assert!(draft_pod_size_is_allowed(
             DraftKind::Traditional,
             TournamentFormat::Swiss,
             4
@@ -11036,6 +11638,50 @@ mod issue_4548_full_create_tests {
         }
     }
 
+    async fn recv_enveloped_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let frame = socket
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("websocket frame");
+        let WsMessage::Binary(bytes) = frame else {
+            panic!("expected binary server message, got {frame:?}");
+        };
+        let json = wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES)
+            .await
+            .expect("decode server envelope");
+        serde_json::from_str(&json).expect("server message")
+    }
+
+    fn test_client_hello(wire_formats: Vec<WireFormat>) -> ClientMessage {
+        ClientMessage::ClientHello {
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_commit: build_commit().to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats,
+        }
+    }
+
+    async fn send_test_message<S>(
+        socket: &mut WebSocketStream<S>,
+        message: &ClientMessage,
+        enveloped: bool,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let json = serde_json::to_vec(message).expect("client message json");
+        let frame = if enveloped {
+            WsMessage::Binary([vec![0x00], json].concat().into())
+        } else {
+            WsMessage::Text(String::from_utf8(json).expect("client message utf8").into())
+        };
+        socket.send(frame).await.expect("send client message");
+    }
+
     #[tokio::test]
     async fn full_mode_create_sends_slots_after_game_created() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
@@ -11054,6 +11700,7 @@ mod issue_4548_full_create_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11113,6 +11760,104 @@ mod issue_4548_full_create_tests {
     }
 
     #[tokio::test]
+    async fn negotiated_gzip_envelope_accepts_and_returns_binary_frames() {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+
+            let server_hello = recv_server_message(&mut socket).await;
+            assert!(matches!(
+                server_hello,
+                ServerMessage::ServerHello { wire_formats, .. }
+                    if wire_formats.contains(&WireFormat::GzipEnvelopeV1)
+            ));
+
+            send_test_message(
+                &mut socket,
+                &test_client_hello(vec![WireFormat::GzipEnvelopeV1]),
+                false,
+            )
+            .await;
+            send_test_message(&mut socket, &ClientMessage::SubscribeLobby, true).await;
+            assert!(matches!(
+                recv_enveloped_server_message(&mut socket).await,
+                ServerMessage::LobbyUpdate { .. }
+            ));
+            for _ in 0..RATE_LIMIT_MESSAGES {
+                socket
+                    .send(WsMessage::Binary(vec![0x01, 1, 2, 3].into()))
+                    .await
+                    .expect("send malformed gzip");
+            }
+            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 7 }, true).await;
+            let pong = tokio::time::timeout(Duration::from_millis(100), async {
+                loop {
+                    if matches!(
+                        recv_enveloped_server_message(&mut socket).await,
+                        ServerMessage::Pong { .. }
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(pong.is_err());
+        })
+        .await;
+        server.abort();
+
+        assert!(result.is_ok(), "binary envelope roundtrip timed out");
+    }
+
+    #[tokio::test]
+    async fn lobby_broadcast_uses_each_clients_negotiated_frame_format() {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut compressed, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("connect compressed client");
+            recv_server_message(&mut compressed).await;
+            let (mut legacy, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("connect legacy client");
+            recv_server_message(&mut legacy).await;
+
+            send_test_message(
+                &mut compressed,
+                &test_client_hello(vec![WireFormat::GzipEnvelopeV1]),
+                false,
+            )
+            .await;
+            send_test_message(&mut legacy, &test_client_hello(Vec::new()), false).await;
+            send_test_message(&mut compressed, &ClientMessage::SubscribeLobby, true).await;
+            send_test_message(&mut legacy, &ClientMessage::SubscribeLobby, false).await;
+
+            for _ in 0..2 {
+                recv_enveloped_server_message(&mut compressed).await;
+                recv_server_message(&mut legacy).await;
+            }
+
+            let (_trigger, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("connect broadcast trigger");
+            while !matches!(
+                recv_enveloped_server_message(&mut compressed).await,
+                ServerMessage::PlayerCount { count: 3 }
+            ) {}
+            while !matches!(
+                recv_server_message(&mut legacy).await,
+                ServerMessage::PlayerCount { count: 3 }
+            ) {}
+        })
+        .await;
+        server.abort();
+
+        assert!(result.is_ok(), "mixed-version lobby broadcast timed out");
+    }
+
+    #[tokio::test]
     async fn full_mode_create_rejects_format_invalid_host_deck() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(2), async {
@@ -11130,6 +11875,7 @@ mod issue_4548_full_create_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11196,6 +11942,7 @@ mod issue_4548_full_create_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11328,6 +12075,7 @@ mod game_submission_tests {
             build_commit: build_commit().to_string(),
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: Vec::new(),
         };
         socket
             .send(WsMessage::Text(
@@ -11862,6 +12610,7 @@ mod game_submission_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11925,6 +12674,7 @@ mod mode_gate_tests {
                 request_id: 1,
                 action: GameAction::PassPriority,
             },
+            ClientMessage::ExportAuthoritativeState,
             ClientMessage::Reconnect {
                 game_code: "X".into(),
                 player_token: "t".into(),
@@ -11942,7 +12692,8 @@ mod mode_gate_tests {
             },
             ClientMessage::CreateDraftWithSettings {
                 display_name: "A".into(),
-                set_codes: vec!["TST".into()],
+                source: None,
+                set_codes: Some(vec!["TST".into()]),
                 kind: draft_core::types::DraftKind::Premier,
                 public: true,
                 password: None,
@@ -12011,6 +12762,13 @@ mod mode_gate_tests {
             ),
             Some(ServerMessage::ManaPaymentPreviewFailed { request_id: 5, message }) if message == "disabled"
         ));
+        assert!(matches!(
+            operation_failed_message(
+                &ClientMessage::ExportAuthoritativeState,
+                "disabled".to_string(),
+            ),
+            Some(ServerMessage::AuthoritativeStateExportFailed { message }) if message == "disabled"
+        ));
         assert!(
             operation_failed_message(&ClientMessage::ConcedeMatch, "disabled".to_string(),)
                 .is_none()
@@ -12025,6 +12783,7 @@ mod mode_gate_tests {
                 build_commit: "abc".into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             },
             ClientMessage::SubscribeLobby,
             ClientMessage::UnsubscribeLobby,
@@ -12079,13 +12838,15 @@ mod mode_gate_tests {
                 request_id: 1,
                 action: GameAction::PassPriority,
             },
+            ClientMessage::ExportAuthoritativeState,
             ClientMessage::AbandonGame,
             ClientMessage::Concede,
             ClientMessage::ConcedeMatch,
             ClientMessage::Ping { timestamp: 0 },
             ClientMessage::CreateDraftWithSettings {
                 display_name: "A".into(),
-                set_codes: vec!["TST".into()],
+                source: None,
+                set_codes: Some(vec!["TST".into()]),
                 kind: draft_core::types::DraftKind::Premier,
                 public: true,
                 password: None,
@@ -12140,6 +12901,236 @@ mod mode_gate_tests {
         assert!(to_lobby_client_message(&interaction_frame()).is_none());
         assert!(to_lobby_client_message(&ClientMessage::SubscribeLobby).is_some());
     }
+
+    // -- Tournament projection ---------------------------------------------
+
+    use server_core::protocol::{
+        BracketShape, MatchArity, PairingOutcome, PairingView, PlayerSummary, PodOutcome,
+        ScoringPolicy, TournamentStatus, TournamentSummary, TournamentView,
+    };
+
+    fn tournament_client_frames() -> Vec<ClientMessage> {
+        vec![
+            ClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::COMMANDER_POD,
+                scoring: ScoringPolicy::default_for_arity(MatchArity::COMMANDER_POD),
+                bracket: BracketShape::Swiss,
+                total_rounds: Some(4),
+            },
+            ClientMessage::JoinTournament {
+                code: "TOUR01".into(),
+                player_key: "key-a".into(),
+                display_name: "Alice".into(),
+            },
+            ClientMessage::GetTournament {
+                code: "TOUR01".into(),
+            },
+            ClientMessage::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: "org-tok".into(),
+            },
+            ClientMessage::ReportMatchResult {
+                code: "TOUR01".into(),
+                pairing_id: 7,
+                player_token: "player-tok".into(),
+                outcome: PodOutcome::Decisive {
+                    winner: "key-a".into(),
+                    game_wins: [("key-a".to_string(), 2u8), ("key-b".to_string(), 1u8)]
+                        .into_iter()
+                        .collect(),
+                },
+            },
+            ClientMessage::DropFromTournament {
+                code: "TOUR01".into(),
+                player_token: "player-tok".into(),
+            },
+            ClientMessage::EndTournament {
+                code: "TOUR01".into(),
+                organizer_token: "org-tok".into(),
+            },
+        ]
+    }
+
+    fn sample_view() -> TournamentView {
+        let alice = PlayerSummary {
+            player_key: "key-a".into(),
+            display_name: "Alice".into(),
+            dropped: false,
+        };
+        let bob = PlayerSummary {
+            player_key: "key-b".into(),
+            display_name: "Bob".into(),
+            dropped: true,
+        };
+        TournamentView {
+            summary: TournamentSummary {
+                code: "TOUR01".into(),
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                bracket: BracketShape::Swiss,
+                status: TournamentStatus::InProgress,
+                player_count: 1,
+                current_round: 1,
+                total_rounds: 3,
+                created_at: 1_000,
+            },
+            players: vec![alice.clone(), bob.clone()],
+            // Every `PairingOutcome` shape, so the round-trip cannot pass by
+            // collapsing a variant to a default.
+            pairings: vec![
+                PairingView {
+                    id: 0,
+                    round: 1,
+                    players: vec![alice.clone()],
+                    outcome: Some(PairingOutcome::Bye),
+                },
+                PairingView {
+                    id: 1,
+                    round: 1,
+                    players: vec![alice.clone(), bob.clone()],
+                    outcome: Some(PairingOutcome::Forfeit {
+                        winner: "key-a".into(),
+                    }),
+                },
+                PairingView {
+                    id: 2,
+                    round: 1,
+                    players: vec![alice.clone(), bob.clone()],
+                    outcome: Some(PairingOutcome::Reported(PodOutcome::Decisive {
+                        winner: "key-a".into(),
+                        game_wins: [("key-a".to_string(), 2u8), ("key-b".to_string(), 0u8)]
+                            .into_iter()
+                            .collect(),
+                    })),
+                },
+                PairingView {
+                    id: 3,
+                    round: 1,
+                    players: vec![alice.clone(), bob.clone()],
+                    outcome: Some(PairingOutcome::Reported(PodOutcome::Draw)),
+                },
+                PairingView {
+                    id: 4,
+                    round: 2,
+                    players: vec![alice, bob],
+                    outcome: None,
+                },
+            ],
+            standings: Vec::new(),
+        }
+    }
+
+    /// Verification Matrix row 9. The `.is_some()` assertion is the whole
+    /// point: `to_lobby_client_message` ends in `_ => return None`, so a
+    /// forgotten arm is NOT a compile error — it silently drops the frame.
+    /// A test that only compared fields inside an `if let Some(..)` would pass
+    /// VACUOUSLY against exactly that bug, which is why every frame is
+    /// unwrapped up front and the count is asserted.
+    #[test]
+    fn tournament_variants_survive_the_canonical_lobby_roundtrip() {
+        let frames = tournament_client_frames();
+        assert_eq!(frames.len(), 7, "every new client variant is covered");
+
+        for msg in &frames {
+            let projected = to_lobby_client_message(msg).unwrap_or_else(|| {
+                panic!(
+                    "{msg:?} projected to None — its arm is missing from to_lobby_client_message"
+                )
+            });
+
+            // The two enums are wire-compatible by construction, so equality
+            // of the serialized forms is the strongest available check
+            // (neither enum is `PartialEq`: both carry `DeckData`).
+            assert_eq!(
+                serde_json::to_string(&projected).expect("projected serializes"),
+                serde_json::to_string(msg).expect("canonical serializes"),
+                "field dropped or renamed across the projection for {msg:?}"
+            );
+        }
+    }
+
+    /// The server direction. `to_server_message` is wildcard-free, so a
+    /// missing arm is a compile error — this covers the remaining risk, a
+    /// field mistyped or dropped inside an arm that does exist.
+    #[test]
+    fn tournament_server_variants_survive_the_canonical_lobby_roundtrip() {
+        let view = sample_view();
+        let messages = vec![
+            lobby_broker::LobbyServerMessage::TournamentCreated {
+                code: "TOUR01".into(),
+                organizer_token: "org-tok".into(),
+                view: view.clone(),
+            },
+            lobby_broker::LobbyServerMessage::TournamentJoined {
+                code: "TOUR01".into(),
+                player_token: "player-tok".into(),
+                view: view.clone(),
+            },
+            lobby_broker::LobbyServerMessage::TournamentUpdate {
+                code: "TOUR01".into(),
+                view: view.clone(),
+            },
+            lobby_broker::LobbyServerMessage::TournamentRemoved {
+                code: "TOUR01".into(),
+            },
+            lobby_broker::LobbyServerMessage::TournamentListUpdate {
+                tournaments: vec![view.summary.clone()],
+            },
+        ];
+        assert_eq!(messages.len(), 5, "every new server variant is covered");
+
+        for msg in messages {
+            let expected = serde_json::to_string(&msg).expect("lobby form serializes");
+            let converted = to_server_message(msg);
+            assert_eq!(
+                serde_json::to_string(&converted).expect("canonical form serializes"),
+                expected
+            );
+        }
+    }
+
+    /// Regression guard: the pre-existing arms of both conversions are
+    /// unaffected by the tournament additions.
+    #[test]
+    fn pre_existing_lobby_projections_are_unaffected() {
+        assert!(to_lobby_client_message(&ClientMessage::SubscribeLobby).is_some());
+        assert!(to_lobby_client_message(&ClientMessage::UnsubscribeLobby).is_some());
+        assert!(to_lobby_client_message(&ClientMessage::Ping { timestamp: 1 }).is_some());
+        assert!(to_lobby_client_message(&ClientMessage::UnregisterLobby {
+            game_code: "GAME01".into()
+        })
+        .is_some());
+        assert!(to_lobby_client_message(&ClientMessage::Concede).is_none());
+    }
+
+    /// Tournaments are mode-agnostic: unlike `UpdateLobbyMetadata`/
+    /// `UnregisterLobby` (LobbyOnly-exclusive) and `Action` (Full-only), every
+    /// tournament variant is accepted in BOTH modes. Both halves are asserted
+    /// so a wholesale `None` in `reject_if_disabled` cannot satisfy this.
+    #[test]
+    fn tournament_variants_are_accepted_in_both_server_modes() {
+        for msg in tournament_client_frames() {
+            assert!(
+                reject_if_disabled(&msg, ServerMode::Full).is_none(),
+                "{msg:?} was refused in Full mode"
+            );
+            assert!(
+                reject_if_disabled(&msg, ServerMode::LobbyOnly).is_none(),
+                "{msg:?} was refused in LobbyOnly mode"
+            );
+        }
+        // Contrast, so the test above is not passing because the gate is a
+        // wholesale `None`.
+        assert!(reject_if_disabled(&ClientMessage::Concede, ServerMode::LobbyOnly).is_some());
+        assert!(reject_if_disabled(
+            &ClientMessage::UnregisterLobby {
+                game_code: "GAME01".into()
+            },
+            ServerMode::Full
+        )
+        .is_some());
+    }
 }
 
 #[cfg(test)]
@@ -12160,6 +13151,8 @@ mod handshake_tests {
             lobby_host_game: None,
             seat_reservations: Vec::new(),
             lobby_reservations: Vec::new(),
+            lobby_organized_tournaments: Vec::new(),
+            lobby_joined_tournaments: Vec::new(),
             draft_code: None,
             draft_seat: None,
             draft_token: None,
@@ -12187,6 +13180,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12195,6 +13189,30 @@ mod handshake_tests {
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
+                wire_format: None,
+            })
+        );
+    }
+
+    #[test]
+    fn negotiates_gzip_envelope_from_client_hello_capability() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            },
+            hello_acceptance(ServerMode::Full),
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::Accept(ClientHelloInfo {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                wire_format: Some(WireFormat::GzipEnvelopeV1),
             })
         );
     }
@@ -12215,6 +13233,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12239,6 +13258,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12259,6 +13279,7 @@ mod handshake_tests {
                 // Far outside LOBBY_MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION.
                 protocol_version: PROTOCOL_VERSION.saturating_sub(9),
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12279,6 +13300,7 @@ mod handshake_tests {
                 build_commit: "future12".into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION + 5),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12300,6 +13322,7 @@ mod handshake_tests {
                 build_commit: "ancient1".into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(below),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12325,6 +13348,7 @@ mod handshake_tests {
                 build_commit: "old1234".into(),
                 protocol_version: previous,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12349,6 +13373,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12372,6 +13397,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12395,6 +13421,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12412,6 +13439,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12462,6 +13490,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12645,6 +13674,123 @@ mod handshake_tests {
             Some((DraftStatus::Drafting, 2, 13)),
             Some((DraftStatus::Deckbuilding, 2, 13)),
         ));
+    }
+
+    /// The `ConnState` round-trip through the shell's own identity store.
+    ///
+    /// The broker appends to its transient `ConnState` view; without this
+    /// threading those appends would be discarded the instant the view drops,
+    /// leaving both fields permanently empty in the native shell while the
+    /// WASM shell (which round-trips `ConnState` through the WebSocket
+    /// attachment) populated them correctly. That divergence is a silent
+    /// no-op no broker-level test can catch, because at the broker layer the
+    /// append demonstrably works.
+    #[test]
+    fn tournament_conn_state_survives_the_socket_identity_round_trip() {
+        let mut identity = empty_identity();
+        assert!(identity.to_conn_state().organized_tournaments.is_empty());
+        assert!(identity.to_conn_state().joined_tournaments.is_empty());
+
+        let mut conn = identity.to_conn_state();
+        conn.organized_tournaments.push("TOUR01".to_string());
+        conn.joined_tournaments.push("TOUR02".to_string());
+        identity.absorb_conn_state(conn);
+
+        // Absorbed into the shell...
+        assert_eq!(identity.lobby_organized_tournaments, vec!["TOUR01"]);
+        assert_eq!(identity.lobby_joined_tournaments, vec!["TOUR02"]);
+        // ...and projected back out on the NEXT broker call, which is the half
+        // that would be missing if `to_conn_state` defaulted these fields.
+        let next = identity.to_conn_state();
+        assert_eq!(next.organized_tournaments, vec!["TOUR01"]);
+        assert_eq!(next.joined_tournaments, vec!["TOUR02"]);
+    }
+
+    /// The shell-side mirror must never come to hold a tournament
+    /// `player_token`.
+    ///
+    /// This is the field the token would have outlived its operation in: the
+    /// list is never pruned, `SocketIdentity` is per-socket state that
+    /// survives every broker call, and the equivalent WASM shell copies the
+    /// same `ConnState` verbatim into a durable WebSocket attachment. So the
+    /// assertion is made against a REAL minted token from a REAL join, not a
+    /// placeholder — a shape-only check would pass just as happily against a
+    /// tuple that still carried the secret.
+    #[test]
+    fn socket_identity_never_retains_a_tournament_player_token() {
+        use lobby_broker::{LobbyClientMessage, LobbyServerMessage};
+        use server_core::protocol::{BracketShape, MatchArity, ScoringPolicy};
+
+        // `SysEnv` is the production token source, so the needle below is a
+        // genuine `generate_player_token()` value.
+        let env = SysEnv;
+        let mut broker = Broker::new();
+        let mut identity = empty_identity();
+        let mut conn = identity.to_conn_state();
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateTournament {
+                name: "Friday Night".into(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+            },
+            &env,
+        );
+        let (code, organizer_token) = match &out[0] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentCreated {
+                code,
+                organizer_token,
+                ..
+            }) => (code.clone(), organizer_token.clone()),
+            other => panic!("expected TournamentCreated, got {other:?}"),
+        };
+
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::JoinTournament {
+                code: code.clone(),
+                player_key: "key-a".into(),
+                display_name: "Alice".into(),
+            },
+            &env,
+        );
+        let player_token = match &out[0] {
+            Outbound::ToSelf(LobbyServerMessage::TournamentJoined { player_token, .. }) => {
+                player_token.clone()
+            }
+            other => panic!("expected TournamentJoined, got {other:?}"),
+        };
+        assert!(!player_token.is_empty() && !organizer_token.is_empty());
+
+        identity.absorb_conn_state(conn);
+
+        // Reach-guard: the create and the join really did reach the mirror, so
+        // the negatives below are statements about a populated field rather
+        // than about an empty one.
+        assert_eq!(identity.lobby_organized_tournaments, vec![code.clone()]);
+        assert_eq!(identity.lobby_joined_tournaments, vec![code.clone()]);
+
+        // Structural: scan the whole projected `ConnState` — the exact value
+        // the WASM shell serializes into its durable attachment — so a token
+        // reintroduced at ANY nesting depth fails this, not just one in the
+        // field it is expected in.
+        let projected = identity.to_conn_state();
+        let json = serde_json::to_string(&projected).expect("ConnState serializes");
+        assert!(
+            json.contains(code.as_str()),
+            "reach-guard: the tournament code must be present: {json}"
+        );
+        assert!(
+            !json.contains(player_token.as_str()),
+            "player_token retained in per-socket state: {json}"
+        );
+        assert!(
+            !json.contains(organizer_token.as_str()),
+            "organizer_token retained in per-socket state: {json}"
+        );
     }
 }
 
@@ -12940,13 +14086,230 @@ mod admin_auth_tests {
 }
 
 #[cfg(test)]
+mod compression_tests {
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+
+    use lobby_broker::Broker;
+    use server_core::draft_session::DraftSessionManager;
+    use server_core::session::SessionManager;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
+    use tower_http::cors::CorsLayer;
+    use url::Url;
+
+    use super::{build_router, draft_pools, persistence, AppState, ServerContext, ServerMode};
+
+    fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
+        let game_db_path = temp_dir.path().join("games.db");
+        let game_db = Arc::new(
+            persistence::GameDb::open(&game_db_path, persistence::SessionRetention::Multiplayer)
+                .expect("game db"),
+        );
+        AppState {
+            sessions: Arc::new(Mutex::new(SessionManager::new())),
+            draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            draft_pools: Arc::new(draft_pools::DraftPools::default()),
+            connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            db: Arc::new(engine::database::CardDatabase::default()),
+            lobby: Arc::new(Mutex::new(Broker::new())),
+            lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+            player_count: Arc::new(AtomicU32::new(0)),
+            game_db,
+            draft_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            mode: ServerMode::Full,
+            context: ServerContext::default(),
+            public_url: None,
+            allowed_origin: None,
+        }
+    }
+
+    async fn spawn_compressed_test_server(
+        temp_dir: &tempfile::TempDir,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app_state = test_app_state(temp_dir);
+        let app = build_router(app_state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        (format!("{addr}"), handle)
+    }
+
+    /// Issues a raw `GET` (no client library in the way of the exact bytes on
+    /// the wire) and splits the response into its lowercased header block and
+    /// raw body, the same way the admin-auth tests above talk to the server.
+    /// A compressed response has no length known up front, so axum sends it
+    /// `Transfer-Encoding: chunked`; this unwraps that framing so callers see
+    /// the same payload bytes a real client's HTTP stack would hand them.
+    async fn raw_http_get(
+        addr: &str,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> (String, Vec<u8>) {
+        let url = Url::parse(&format!("http://{addr}{path}")).expect("url");
+        let host = url.host_str().expect("host");
+        let port = url.port().expect("port");
+        let mut stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .expect("connect");
+        let mut request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n");
+        for (name, value) in extra_headers {
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str("Connection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.expect("read");
+        let split_at = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("header/body separator");
+        let headers = String::from_utf8_lossy(&buf[..split_at]).to_ascii_lowercase();
+        let raw_body = &buf[split_at + 4..];
+        let body = if headers.contains("transfer-encoding: chunked") {
+            dechunk(raw_body)
+        } else {
+            raw_body.to_vec()
+        };
+        (headers, body)
+    }
+
+    /// Minimal HTTP/1.1 chunked-transfer-coding decoder (RFC 9112 §7.1) —
+    /// just enough to reassemble a `raw_http_get` body for assertions, not a
+    /// general-purpose client.
+    fn dechunk(mut body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(line_end) = body.windows(2).position(|w| w == b"\r\n") {
+            let size_line = std::str::from_utf8(&body[..line_end]).unwrap_or("0");
+            let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+            body = &body[line_end + 2..];
+            if size == 0 || body.len() < size {
+                break;
+            }
+            out.extend_from_slice(&body[..size]);
+            body = &body[size..];
+            body = body.strip_prefix(b"\r\n".as_slice()).unwrap_or(body);
+        }
+        out
+    }
+
+    /// `CompressionLayer`'s default predicate skips bodies below a minimum
+    /// size (compressing a couple of bytes would grow, not shrink, the
+    /// response once gzip's own framing overhead is counted) — so `/health`'s
+    /// two-byte `"ok"` body is *correctly* left alone even with the layer
+    /// present and `Accept-Encoding: gzip` on the request. This test pins
+    /// that expectation; `large_json_response_is_gzip_compressed_when_accepted`
+    /// below exercises the case the layer exists for.
+    #[tokio::test]
+    async fn health_response_is_uncompressed_regardless_of_accept_encoding() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (addr, server) = spawn_compressed_test_server(&temp_dir).await;
+
+        let (headers, body) = raw_http_get(&addr, "/health", &[("Accept-Encoding", "gzip")]).await;
+
+        assert!(
+            !headers.contains("content-encoding"),
+            "did not expect a Content-Encoding header on a response this small, got:\n{headers}"
+        );
+        assert_eq!(body, b"ok");
+
+        server.abort();
+    }
+
+    /// Exercises `CompressionLayer` against a response large enough to clear
+    /// the default minimum-size predicate: a P2P draft backup snapshot, the
+    /// same JSON API surface the issue's audit called out as uncompressed at
+    /// origin.
+    #[tokio::test]
+    async fn large_json_response_is_gzip_compressed_when_accepted() {
+        const DRAFT_CODE: &str = "GZIP01";
+        const HOST_PEER: &str = "peer-compression-test";
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        // A highly compressible payload comfortably over the predicate's
+        // minimum size, matching the redactor's "JSON object" requirement.
+        let padding = "a".repeat(4096);
+        let snapshot_json = format!(r#"{{"status":"Drafting","padding":"{padding}"}}"#);
+        app_state
+            .game_db
+            .save_p2p_backup(DRAFT_CODE, HOST_PEER, &snapshot_json)
+            .expect("seed backup");
+        let uncompressed_len = snapshot_json.len();
+
+        let app = build_router(app_state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        let addr = format!("{addr}");
+
+        let (headers, body) = raw_http_get(
+            &addr,
+            &format!("/p2p-draft-backup/{DRAFT_CODE}?host_peer_id={HOST_PEER}"),
+            &[("Accept-Encoding", "gzip")],
+        )
+        .await;
+
+        assert!(
+            headers.contains("content-encoding: gzip"),
+            "expected a gzip Content-Encoding header, got:\n{headers}"
+        );
+        assert_eq!(
+            body.get(..2),
+            Some([0x1f, 0x8b].as_slice()),
+            "response body does not start with the gzip magic bytes"
+        );
+        assert!(
+            body.len() < uncompressed_len,
+            "gzip body ({} bytes) should be smaller than the uncompressed JSON it wraps ({} bytes)",
+            body.len(),
+            uncompressed_len
+        );
+
+        server.abort();
+    }
+
+    /// Guards the exact regression this fix must not introduce — a
+    /// `CompressionLayer` applied broadly enough to wrap the `/ws` upgrade
+    /// response. `build_router` keeps `/ws` on its own uncompressed
+    /// sub-router; this asserts the handshake still completes when served
+    /// from the very `Router` that also carries compression.
+    #[tokio::test]
+    async fn ws_upgrade_still_succeeds_through_the_compressed_router() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (addr, server) = spawn_compressed_test_server(&temp_dir).await;
+
+        let connected = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await;
+        assert!(
+            connected.is_ok(),
+            "WebSocket upgrade failed through the compressed router: {:?}",
+            connected.err()
+        );
+
+        server.abort();
+    }
+}
+
+#[cfg(test)]
 mod p2p_backup_delete_tests {
     use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
 
+    use axum::body::to_bytes;
+    use axum::extract::{Path, Query, State};
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
     use axum::routing::{get, post};
-    use axum::Router;
+    use axum::{Json, Router};
     use lobby_broker::Broker;
     use server_core::draft_session::DraftSessionManager;
     use server_core::session::SessionManager;
@@ -13086,6 +14449,90 @@ mod p2p_backup_delete_tests {
             StatusCode::OK,
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn public_backup_store_and_get_redact_chaos_assignments() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let app_state = test_app_state(&temp_dir);
+        let nested = serde_json::json!({
+            "config": {
+                "source": {
+                    "type": "Set",
+                    "data": {
+                        "candidate_codes": ["TST", "ALT"],
+                        "assignments": [["TST", "ALT"], ["ALT", "TST"]]
+                    }
+                }
+            }
+        });
+        let snapshot = serde_json::json!({ "draftSessionJson": nested.to_string() }).to_string();
+
+        let stored = admin::p2p_backup_store(
+            State(app_state.clone()),
+            Json(admin::P2pBackupRequest {
+                draft_code: DRAFT_CODE.to_string(),
+                host_peer_id: HOST_PEER.to_string(),
+                snapshot_json: snapshot,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stored.status(), StatusCode::OK);
+
+        let (_, stored_snapshot, _) = app_state
+            .game_db
+            .load_p2p_backup(DRAFT_CODE)
+            .expect("load")
+            .expect("stored backup");
+        let stored_value: serde_json::Value =
+            serde_json::from_str(&stored_snapshot).expect("snapshot JSON");
+        let stored_session: serde_json::Value = serde_json::from_str(
+            stored_value["draftSessionJson"]
+                .as_str()
+                .expect("session JSON string"),
+        )
+        .expect("session JSON");
+        let stored_source = &stored_session["config"]["source"];
+        assert_eq!(stored_source["type"], "Set");
+        let stored_layout = &stored_source["data"];
+        assert!(stored_layout.get("assignments").is_none());
+        assert_eq!(
+            stored_layout["candidate_codes"],
+            serde_json::json!(["TST", "ALT"])
+        );
+
+        let response = admin::p2p_backup_get(
+            State(app_state),
+            Path(DRAFT_CODE.to_string()),
+            Query(admin::P2pBackupGetQuery {
+                host_peer_id: HOST_PEER.to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let public_response: serde_json::Value =
+            serde_json::from_slice(&body).expect("response JSON");
+        let public_snapshot: serde_json::Value = serde_json::from_str(
+            public_response["snapshot_json"]
+                .as_str()
+                .expect("snapshot JSON string"),
+        )
+        .expect("snapshot JSON");
+        let public_session: serde_json::Value = serde_json::from_str(
+            public_snapshot["draftSessionJson"]
+                .as_str()
+                .expect("session JSON string"),
+        )
+        .expect("session JSON");
+        assert_eq!(public_session["config"]["source"]["type"], "Set");
+        assert!(public_session["config"]["source"]["data"]
+            .get("assignments")
+            .is_none());
     }
 
     #[tokio::test]
@@ -13489,6 +14936,7 @@ mod metrics_tests {
             build_commit: build_commit().to_string(),
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: Vec::new(),
         };
         socket
             .send(WsMessage::Text(

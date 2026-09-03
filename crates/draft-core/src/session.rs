@@ -45,6 +45,7 @@ impl DraftSession {
             connected_seats: SeatFlags::all_true(pod_size as u8),
             packs_by_seat: vec![vec![]; pod_size],
             current_pack: vec![None; pod_size],
+            current_pack_origins: vec![None; pod_size],
             pools: vec![vec![]; pod_size],
             submitted_decks: HashMap::new(),
             match_records: HashMap::new(),
@@ -86,7 +87,12 @@ impl DraftSession {
             .collect()
     }
 
-    /// The set filling every booster of the session, in pack order.
+    /// The set filling seat 0's boosters, in pack order.
+    ///
+    /// Uniform layouts assign the same set to every seat. Chaos has a
+    /// seat-specific assignment, so callers that need another seat must use
+    /// [`DraftSource::set_code_for_seat_and_pack`] rather than inferring it
+    /// from this compatibility sequence.
     pub fn pack_set_code_sequence(&self) -> Vec<String> {
         (0..self.config.pack_count)
             .map(|pack| self.config.source.set_code_for_pack(pack))
@@ -108,18 +114,33 @@ impl DraftSession {
             .collect()
     }
 
-    /// Validate the small set of invariants unique to persisted Sealed events.
+    /// Validate the procedure and source invariants of a persisted draft event.
     ///
     /// This is intentionally an import/restore boundary check. Reducer-created
     /// sessions establish these properties at start and legacy `SeatFlags`
     /// snapshots remain compatible because their bitmap lengths are unrelated.
-    pub fn validate_sealed_snapshot(&self) -> Result<(), DraftError> {
+    pub fn validate_persisted_snapshot(&self) -> Result<(), DraftError> {
         if self.kind != self.config.kind {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "session kind does not match configuration".to_string(),
             });
         }
+        if let DraftSource::Set { layout } = &self.config.source {
+            layout
+                .validate_for_draft(self.seats.len() as u8, self.config.pack_count)
+                .map_err(|reason| DraftError::InvalidPackSequence { reason })?;
+        }
         let procedure = self.kind.procedure();
+        let pod_size = self.seats.len() as u8;
+        let local_cube_size_is_allowed = matches!(self.config.source, DraftSource::Cube { .. })
+            && procedure.allows_local_cube_pod_size(self.config.tournament_format, pod_size);
+        if !procedure.allows_pod_size(self.config.tournament_format, pod_size)
+            && !local_cube_size_is_allowed
+        {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "pod size does not satisfy the draft procedure".to_string(),
+            });
+        }
         match procedure.distribution {
             PackDistribution::PickAndPass => return Ok(()),
             PackDistribution::AllAtOnce => {}
@@ -139,15 +160,6 @@ impl DraftSession {
         {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
-            });
-        }
-        let valid_size = match self.config.tournament_format {
-            TournamentFormat::Swiss => (2..=8).contains(&(self.seats.len() as u8)),
-            TournamentFormat::SingleElimination => self.seats.len() == 8,
-        };
-        if !valid_size {
-            return Err(DraftError::InvalidSealedSnapshot {
-                reason: "sealed tournament size is invalid".to_string(),
             });
         }
         if self.status == DraftStatus::Drafting {
@@ -273,13 +285,19 @@ fn apply_generate_pairings(session: &mut DraftSession) -> Result<Vec<DraftDelta>
             action: "GeneratePairings".to_string(),
         });
     }
-    if session.kind.procedure().post_draft_play == PostDraftPlay::TournamentPairings
-        && session.config.tournament_format == TournamentFormat::SingleElimination
-        && session.seats.len() != 8
-    {
+    let procedure = session.kind.procedure();
+    if procedure.post_draft_play != PostDraftPlay::TournamentPairings {
+        return Err(DraftError::InvalidTransition {
+            from: session.status,
+            action: "GeneratePairings".to_string(),
+        });
+    }
+    if !procedure.allows_pod_size(session.config.tournament_format, session.seats.len() as u8) {
         return Err(DraftError::UnsupportedTournamentSize {
-            format: TournamentFormat::SingleElimination,
-            required: 8,
+            format: session.config.tournament_format,
+            required: *procedure
+                .allowed_pod_size_range(session.config.tournament_format)
+                .start(),
             actual: session.seats.len() as u8,
         });
     }
@@ -754,38 +772,34 @@ fn apply_start_draft(
     let seat_count = session.seats.len() as u8;
     let procedure = session.kind.procedure();
 
-    // CR 903.13a + CR 800.1: the smallest pod that can still deliver the
-    // multiplayer game this kind is defined as. Kind-general: the floor is the
-    // procedure table's, never a literal — a kind-blind constant is the exact
-    // defect this guard replaces. Ordered before the tournament-size rule
-    // because the floor is a precondition of every kind, while that rule is
-    // scoped to `PostDraftPlay::TournamentPairings`; the two coexist rather
-    // than alternate (a 9-seat Premier pod passes this and trips that one).
-    if seat_count < procedure.min_pod_size {
-        return Err(DraftError::PodBelowMinimumSize {
-            kind: session.kind,
-            required: procedure.min_pod_size,
-            actual: seat_count,
-        });
+    if let DraftSource::Set { layout } = &session.config.source {
+        layout
+            .validate_for_draft(seat_count, session.config.pack_count)
+            .map_err(|reason| DraftError::InvalidPackSequence { reason })?;
     }
 
-    if procedure.post_draft_play == PostDraftPlay::TournamentPairings {
-        let valid_size = match session.config.tournament_format {
-            TournamentFormat::Swiss => (2..=8).contains(&seat_count),
-            TournamentFormat::SingleElimination => seat_count == 8,
-        };
-        if !valid_size {
-            return Err(DraftError::UnsupportedTournamentSize {
-                format: session.config.tournament_format,
-                required: if session.config.tournament_format == TournamentFormat::SingleElimination
-                {
-                    8
-                } else {
-                    2
-                },
+    // CR 903.13a + CR 800.1: the smallest pod that can still deliver the
+    // multiplayer game this kind is defined as. The procedure owns the full
+    // allowed range and the pairing-only single-elimination exact size.
+    let local_cube_size_is_allowed = matches!(session.config.source, DraftSource::Cube { .. })
+        && procedure.allows_local_cube_pod_size(session.config.tournament_format, seat_count);
+    if !procedure.allows_pod_size(session.config.tournament_format, seat_count)
+        && !local_cube_size_is_allowed
+    {
+        if seat_count < procedure.min_pod_size {
+            return Err(DraftError::PodBelowMinimumSize {
+                kind: session.kind,
+                required: procedure.min_pod_size,
                 actual: seat_count,
             });
         }
+        return Err(DraftError::UnsupportedTournamentSize {
+            format: session.config.tournament_format,
+            required: *procedure
+                .allowed_pod_size_range(session.config.tournament_format)
+                .start(),
+            actual: seat_count,
+        });
     }
     // The session's kind and its configuration's kind must agree on how packs
     // reach the seats; a mismatched pair is a corrupt configuration. Testing the
@@ -807,7 +821,7 @@ fn apply_start_draft(
             }
             // A multi-set source labels itself with its joined distinct codes,
             // so the session label is compared against `set_code()` rather than
-            // against any single pack's set. Mirrors `validate_sealed_snapshot`.
+            // against any single pack's set. Mirrors `validate_persisted_snapshot`.
             if session.config.source.set_code() != session.config.set_code
                 || session.set_code != session.config.set_code
             {
@@ -865,6 +879,7 @@ fn apply_start_draft(
                 .collect();
             session.pools = pools;
             session.current_pack.fill(None);
+            session.current_pack_origins.fill(None);
             session.packs_by_seat.iter_mut().for_each(Vec::clear);
             session.status = DraftStatus::Deckbuilding;
             return Ok(vec![
@@ -877,9 +892,13 @@ fn apply_start_draft(
         PackDistribution::PickAndPass => {}
     }
 
+    session
+        .current_pack_origins
+        .resize(usize::from(pod_size), None);
     for (seat, mut seat_packs) in all_packs.into_iter().enumerate() {
         // First pack goes to current_pack, rest go to packs_by_seat
         session.current_pack[seat] = Some(seat_packs.remove(0));
+        session.current_pack_origins[seat] = Some(seat as u8);
         session.packs_by_seat[seat] = seat_packs;
     }
 
@@ -940,18 +959,7 @@ pub(crate) fn session_concessions(session: &DraftSession) -> DraftSetConcessions
 pub(crate) fn concession_set_codes(session: &DraftSession) -> Vec<&str> {
     match session.kind {
         DraftKind::CommanderDraft => match &session.config.source {
-            DraftSource::Set { codes } => {
-                let mut distinct: Vec<&str> = Vec::with_capacity(codes.len());
-                for code in codes {
-                    if !distinct
-                        .iter()
-                        .any(|held| held.eq_ignore_ascii_case(code.as_str()))
-                    {
-                        distinct.push(code.as_str());
-                    }
-                }
-                distinct
-            }
+            DraftSource::Set { .. } => session.config.source.actual_set_codes(),
             // A cube contains no draft boosters from any set.
             DraftSource::Cube { .. } => Vec::new(),
         },
@@ -1156,7 +1164,9 @@ mod tests {
     fn starting_a_draft_records_the_size_of_every_booster_it_opened() {
         let (mut session, _) = test_session(2);
         session.config.source = DraftSource::Set {
-            codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+            layout: SetLayout::UniformByRound {
+                codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+            },
         };
         let source = MixedSizePackSource {
             sizes: vec![15, 14, 15],
@@ -1193,10 +1203,12 @@ mod tests {
         session.config.kind = DraftKind::Sealed;
         session.config.pack_count = SEALED_PACK_COUNT;
         session.config.source = DraftSource::Set {
-            codes: vec!["AAA".to_string(); 3]
-                .into_iter()
-                .chain(vec!["BBB".to_string(); 3])
-                .collect(),
+            layout: SetLayout::UniformByRound {
+                codes: vec!["AAA".to_string(); 3]
+                    .into_iter()
+                    .chain(vec!["BBB".to_string(); 3])
+                    .collect(),
+            },
         };
         session.set_code = session.config.source.set_code();
         session.config.set_code = session.set_code.clone();
@@ -1211,7 +1223,7 @@ mod tests {
         assert!(session.pools.iter().all(|pool| pool.len() == 87));
         // The uniform scalar would have expected 6 × 14 = 84 and rejected this.
         session
-            .validate_sealed_snapshot()
+            .validate_persisted_snapshot()
             .expect("a mixed-size sealed pool is valid");
     }
 
@@ -1327,11 +1339,11 @@ mod tests {
         apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
         session.seats_picked_this_round = SeatFlags::default();
         session.connected_seats = SeatFlags::default();
-        assert!(session.validate_sealed_snapshot().is_ok());
+        assert!(session.validate_persisted_snapshot().is_ok());
 
         session.packs_by_seat[0].push(DraftPack(Vec::new()));
         assert!(matches!(
-            session.validate_sealed_snapshot(),
+            session.validate_persisted_snapshot(),
             Err(DraftError::InvalidSealedSnapshot { .. })
         ));
     }
@@ -1347,7 +1359,7 @@ mod tests {
         session.pools[0].pop();
 
         assert!(matches!(
-            session.validate_sealed_snapshot(),
+            session.validate_persisted_snapshot(),
             Err(DraftError::InvalidSealedSnapshot { .. })
         ));
     }
@@ -1358,7 +1370,7 @@ mod tests {
         session.kind = DraftKind::Sealed;
 
         assert!(matches!(
-            session.validate_sealed_snapshot(),
+            session.validate_persisted_snapshot(),
             Err(DraftError::InvalidSealedSnapshot { .. })
         ));
     }
@@ -1370,7 +1382,7 @@ mod tests {
         session.config.kind = DraftKind::Sealed;
         session.config.pack_count = 6;
         assert!(matches!(
-            session.validate_sealed_snapshot(),
+            session.validate_persisted_snapshot(),
             Err(DraftError::InvalidSealedSnapshot { .. })
         ));
 
@@ -1381,9 +1393,24 @@ mod tests {
         apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
         session.status = DraftStatus::Drafting;
         assert!(matches!(
-            session.validate_sealed_snapshot(),
+            session.validate_persisted_snapshot(),
             Err(DraftError::InvalidSealedSnapshot { .. })
         ));
+    }
+
+    #[test]
+    fn persisted_snapshot_uses_the_procedure_pod_size_policy_for_every_kind() {
+        let (session, _) = test_session(9);
+        assert!(matches!(
+            session.validate_persisted_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
+
+        let (mut commander, _) = test_session(3);
+        commander.kind = DraftKind::CommanderDraft;
+        commander.config.kind = DraftKind::CommanderDraft;
+        commander.config.tournament_format = TournamentFormat::SingleElimination;
+        assert!(commander.validate_persisted_snapshot().is_ok());
     }
 
     #[test]
@@ -2019,6 +2046,30 @@ mod tests {
             })
         ));
         assert_eq!(session.status, DraftStatus::Deckbuilding);
+        assert!(session.pairings.is_empty());
+    }
+
+    #[test]
+    fn complete_immediately_procedure_never_generates_pairings() {
+        let (mut session, _) = commander_session(3);
+        session.status = DraftStatus::Deckbuilding;
+        // Deckbuilding is normally valid for pairing generation, and this
+        // procedure's Swiss range admits a three-seat pod. The rejection below
+        // therefore depends specifically on the CompleteImmediately guard,
+        // rather than on a terminal status or an unsupported bracket size.
+        session.config.tournament_format = TournamentFormat::Swiss;
+        assert_eq!(
+            session.kind.procedure().post_draft_play,
+            PostDraftPlay::CompleteImmediately
+        );
+
+        assert!(matches!(
+            apply(&mut session, DraftAction::GeneratePairings, None),
+            Err(DraftError::InvalidTransition {
+                from: DraftStatus::Deckbuilding,
+                ..
+            })
+        ));
         assert!(session.pairings.is_empty());
     }
 
@@ -2936,7 +2987,9 @@ mod tests {
     fn a_mixed_set_commander_draft_concedes_every_contained_sets_grants() {
         let mut repeated = commander_draft_session("CMM");
         repeated.config.source = DraftSource::Set {
-            codes: vec!["CMM".to_string(), "cmm".to_string(), "CMM".to_string()],
+            layout: SetLayout::UniformByRound {
+                codes: vec!["CMM".to_string(), "cmm".to_string(), "CMM".to_string()],
+            },
         };
         assert_eq!(
             session_concessions(&repeated),
@@ -2946,7 +2999,9 @@ mod tests {
 
         let mut mixed = commander_draft_session("CMM");
         mixed.config.source = DraftSource::Set {
-            codes: vec!["CMM".to_string(), "CLB".to_string(), "CMM".to_string()],
+            layout: SetLayout::UniformByRound {
+                codes: vec!["CMM".to_string(), "CLB".to_string(), "CMM".to_string()],
+            },
         };
         assert_eq!(
             session_concessions(&mixed),
@@ -2965,6 +3020,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chaos_commander_concessions_use_assignments_not_unselected_candidates() {
+        let mut session = commander_draft_session("CMM");
+        session.config.source = DraftSource::Set {
+            layout: SetLayout::Chaos {
+                candidate_codes: vec!["CMM".to_string(), "CLB".to_string()],
+                assignments: vec![
+                    vec!["CLB".to_string(); 3],
+                    vec!["CLB".to_string(); 3],
+                    vec!["CLB".to_string(); 3],
+                    vec!["CLB".to_string(); 3],
+                ],
+            },
+        };
+
+        assert_eq!(concession_set_codes(&session), vec!["CLB"]);
+    }
+
     /// The latched set codes are what the draft CONTAINED -- distinct, and
     /// scoped to Commander Draft. This is the value `filter_for_player`
     /// publishes, so it is asserted at its own seam rather than only through
@@ -2973,7 +3046,9 @@ mod tests {
     fn the_latched_set_codes_are_the_distinct_sets_a_commander_draft_contained() {
         let mut mixed = commander_draft_session("CMM");
         mixed.config.source = DraftSource::Set {
-            codes: vec!["CMM".to_string(), "CLB".to_string(), "cmm".to_string()],
+            layout: SetLayout::UniformByRound {
+                codes: vec!["CMM".to_string(), "CLB".to_string(), "cmm".to_string()],
+            },
         };
         assert_eq!(
             concession_set_codes(&mixed),

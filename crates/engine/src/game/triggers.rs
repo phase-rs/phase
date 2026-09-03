@@ -628,7 +628,24 @@ impl TriggerCollectionSession {
         );
     }
 
-    fn record_match(&mut self, state: &mut GameState, matched: &MatchedTrigger, event: &GameEvent) {
+    /// Atomically admits one already-matched trigger candidate to collection.
+    ///
+    /// Candidate discovery deliberately performs its normal fire-time checks
+    /// before fanout. A single event can then expand into multiple candidates,
+    /// so ledger-backed limits must be checked again against the current
+    /// staged/live state immediately before their recording operation. This is
+    /// the boundary that prevents a rejected sibling from leaving either a
+    /// ledger edit or a transactional journal operation behind.
+    fn record_match(
+        &mut self,
+        state: &mut GameState,
+        matched: &MatchedTrigger,
+        event: &GameEvent,
+    ) -> bool {
+        if !matched_trigger_constraint_allows_admission(state, matched, event) {
+            return false;
+        }
+
         let _ = self.apply(
             state,
             TriggerCollectionOperation::RecordTriggerFired {
@@ -640,10 +657,10 @@ impl TriggerCollectionSession {
         );
 
         if !matched.batched || !batched_zone_change_batch(&matched.trigger_events) {
-            return;
+            return true;
         }
         let Some(definition_ref) = matched.definition_ref.clone() else {
-            return;
+            return true;
         };
         let turn_zone_change_keys = matched
             .trigger_events
@@ -662,6 +679,7 @@ impl TriggerCollectionSession {
                 turn_zone_change_keys,
             },
         );
+        true
     }
 
     fn mark_speed_trigger_used(&mut self, state: &mut GameState, player: PlayerId) {
@@ -3079,15 +3097,83 @@ pub(crate) fn trigger_event_unreachable_in_phase(def: &TriggerDefinition, phase:
     }
 }
 
-fn live_battlefield_source_was_present_at_event(event: &GameEvent, source_id: ObjectId) -> bool {
-    !matches!(
-        event,
-        GameEvent::ZoneChanged {
+/// CR 113.6 + CR 603.2 + CR 400.7: "Abilities of all other objects [than
+/// instants/sorceries] usually function only while that object is on the
+/// battlefield" (CR 113.6) — a battlefield trigger source only "sees" an
+/// event if it was already on the battlefield when that event occurred.
+/// `events` accumulates every event produced across a WHOLE resolved ability chain
+/// (e.g. Living Death's exile, then sacrifice, then return-to-battlefield
+/// steps all land in one `events` vec — CR 608.2c), and the caller scans them
+/// together, once, against the END-of-chain live object state. Gating solely
+/// on "is this event itself the object's own departure" misses the symmetric
+/// case: an object that (re-)ENTERS the battlefield partway through the SAME
+/// batch must not retroactively match an event that happened earlier in that
+/// batch, before its (possibly brand-new, CR 400.7) incarnation existed on the
+/// battlefield to observe it (issue #8160: Carmen, Cruel Skymarcher returning
+/// via a mass-reanimation spell must not gain +1/+1 counters for permanents
+/// that the SAME spell sacrificed before she was put back onto the
+/// battlefield).
+///
+/// `battlefield_entry_index` maps each object to the observation boundary of
+/// its LAST `ZoneChanged { to: Battlefield }` in `events`. The boundary also
+/// includes contiguous same-object counter events published immediately before
+/// that entry record for "enters with counters" replacements. An object with
+/// no entry recorded was already on the battlefield before the batch began
+/// (the caller already restricts candidates to objects currently on the
+/// battlefield), so it is present for every event in the batch. An object
+/// that DID (re-)enter mid-batch is present only from that boundary onward —
+/// CR 400.7 treats a permanent that changes zones as a new object
+/// with no memory of its prior incarnation, so even an earlier temporary
+/// presence within the SAME batch (a blink-and-return) does not extend
+/// backward past the most recent entry. This subsumes the original
+/// self-departure check: for a source that leaves and later re-enters within
+/// the same batch, its own departure index is always strictly less than its
+/// last-entry index, so it is correctly excluded.
+fn live_battlefield_source_was_present_at_event(
+    event_idx: usize,
+    source_id: ObjectId,
+    battlefield_entry_index: &std::collections::HashMap<ObjectId, usize>,
+) -> bool {
+    battlefield_entry_index
+        .get(&source_id)
+        .is_none_or(|&entry_idx| event_idx >= entry_idx)
+}
+
+/// Return each entrant's observation boundary within a resolved event batch.
+///
+/// An "enters with counters" replacement is applied while the object enters,
+/// but token creation currently publishes those contiguous `CounterAdded`
+/// events immediately before its journaled `ZoneChanged` event. They are part
+/// of the entry lifetime, so the boundary includes that same-object counter
+/// prefix. It deliberately stops at the first different event, keeping an
+/// unrelated event that occurred before entry outside the observer's lifetime.
+fn battlefield_entry_observation_indices(
+    events: &[GameEvent],
+) -> std::collections::HashMap<ObjectId, usize> {
+    let mut boundaries = std::collections::HashMap::new();
+    for (entry_idx, event) in events.iter().enumerate() {
+        let GameEvent::ZoneChanged {
             object_id,
-            from: Some(Zone::Battlefield),
+            to: Zone::Battlefield,
             ..
-        } if *object_id == source_id
-    )
+        } = event
+        else {
+            continue;
+        };
+
+        let mut boundary = entry_idx;
+        while boundary > 0
+            && matches!(
+                &events[boundary - 1],
+                GameEvent::CounterAdded { object_id: countered_id, .. }
+                    if countered_id == object_id
+            )
+        {
+            boundary -= 1;
+        }
+        boundaries.insert(*object_id, boundary);
+    }
+    boundaries
 }
 
 fn storm_copy_count_before_cast(state: &GameState) -> i32 {
@@ -4061,8 +4147,20 @@ fn collect_pending_triggers_with_collection(
     } else {
         active_suppress_trigger_statics(state)
     };
+    // CR 603.2 + CR 400.7: `events` accumulates every event produced across a
+    // WHOLE resolved ability chain (e.g. Living Death's exile, then sacrifice,
+    // then return-to-battlefield steps all land in one `events` vec), and this
+    // pass scans them together, once, against the END-of-chain live object
+    // state. Record the LAST index at which each object entered the
+    // battlefield in this batch so `live_battlefield_source_was_present_at_event`
+    // can refuse to match an earlier event in the SAME batch against an object
+    // that had not yet (re-)entered the battlefield when that event happened —
+    // otherwise a permanent returned to the battlefield later in the chain
+    // retroactively "sees" a sacrifice/etc. that occurred earlier in the same
+    // chain, before it was there to observe it (issue #8160).
+    let battlefield_entry_index = battlefield_entry_observation_indices(events);
 
-    for event in events {
+    for (event_idx, event) in events.iter().enumerate() {
         // CR 603.2 / CR 603.3: Per-event dedup. A single printed trigger definition
         // fires at most once per eligible event, even if multiple scan paths
         // (battlefield, leaves-battlefield last-known-information, graveyard/exile/stack)
@@ -4113,7 +4211,11 @@ fn collect_pending_triggers_with_collection(
 
         // Scan candidate permanents for matching triggers
         for obj_id in candidates.iter().copied() {
-            if !live_battlefield_source_was_present_at_event(event, obj_id) {
+            if !live_battlefield_source_was_present_at_event(
+                event_idx,
+                obj_id,
+                &battlefield_entry_index,
+            ) {
                 continue;
             }
             let (
@@ -4181,11 +4283,13 @@ fn collect_pending_triggers_with_collection(
             };
 
             for matched in matched_triggers {
+                if !session.record_match(state, &matched, event) {
+                    continue;
+                }
                 #[cfg(debug_assertions)]
                 if audit_trigger_index {
                     production_matched.insert((obj_id, matched.trig_idx));
                 }
-                session.record_match(state, &matched, event);
                 if matched.batched {
                     batched_this_pass.insert((obj_id, matched.trig_idx));
                 }
@@ -4591,7 +4695,11 @@ fn collect_pending_triggers_with_collection(
                     .map(|(id, _)| *id)
                     .collect();
                 for obj_id in shadow_population {
-                    if !live_battlefield_source_was_present_at_event(event, obj_id) {
+                    if !live_battlefield_source_was_present_at_event(
+                        event_idx,
+                        obj_id,
+                        &battlefield_entry_index,
+                    ) {
                         continue;
                     }
                     let Some(obj) = state.objects.get(&obj_id) else {
@@ -4676,7 +4784,9 @@ fn collect_pending_triggers_with_collection(
                 };
             if !matched_triggers.is_empty() {
                 for matched in matched_triggers {
-                    session.record_match(state, &matched, event);
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
                     if matched.batched {
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
                     }
@@ -4721,7 +4831,9 @@ fn collect_pending_triggers_with_collection(
                     )
                 };
                 for matched in matched_triggers {
-                    session.record_match(state, &matched, event);
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
                     if matched.batched {
                         batched_this_pass.insert((*exploiter, matched.trig_idx));
                     }
@@ -4847,7 +4959,9 @@ fn collect_pending_triggers_with_collection(
                     }
                 }
                 for matched in matched_triggers {
-                    session.record_match(state, &matched, event);
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
                     if matched.batched {
                         batched_this_pass.insert((observer_id, matched.trig_idx));
                     }
@@ -4904,7 +5018,9 @@ fn collect_pending_triggers_with_collection(
                 };
 
                 for matched in matched_triggers {
-                    session.record_match(state, &matched, event);
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
                     if matched.batched {
                         batched_this_pass.insert((obj_id, matched.trig_idx));
                     }
@@ -8174,7 +8290,7 @@ enum PreparedTriggerTargets {
 }
 
 fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> PreparedTriggerTargets {
-    let target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
+    let mut target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
         Ok(target_slots) => target_slots,
         Err(_) => {
             return if matches!(
@@ -8191,6 +8307,19 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
             };
         }
     };
+    // CR 603.3d: putting a triggered ability on the stack follows the spell
+    // process of CR 601.2c–d for choosing targets and dividing an effect, so a
+    // triggered divided effect ("deals N damage divided as you choose among any
+    // number of targets") offers at most one slot per divisible unit, the same
+    // cap `cast_spell` applies. CR 601.2d: each chosen target must receive at
+    // least one, so a target set wider than the pool has no legal division and
+    // the prompt would have no acceptable answer.
+    super::ability_utils::cap_distribution_target_slots(
+        state,
+        &trigger.ability,
+        trigger.distribute.as_ref(),
+        &mut target_slots,
+    );
 
     let mut prepared_state = state.clone();
     let mut prepared_trigger = trigger.clone();
@@ -12934,6 +13063,64 @@ fn check_trigger_constraint_with_ref(
     }
 }
 
+/// Re-checks the constraints whose fire-time truth is changed by recording an
+/// earlier candidate from the same collection pass.
+///
+/// All other constraints remain exclusively in the normal pre-fanout check.
+/// This intentionally consumes the constraint and source identity already
+/// retained by `MatchedTrigger`, rather than rediscovering a live definition
+/// after a zone change.
+fn matched_trigger_constraint_allows_admission(
+    state: &GameState,
+    matched: &MatchedTrigger,
+    event: &GameEvent,
+) -> bool {
+    use crate::types::ability::TriggerConstraint;
+
+    match matched.constraint.as_ref() {
+        Some(TriggerConstraint::OncePerTurn) => matched
+            .definition_ref
+            .as_ref()
+            .is_none_or(|key| !state.triggers_fired_this_turn.contains(key)),
+        Some(TriggerConstraint::OncePerGame) => matched
+            .definition_ref
+            .as_ref()
+            .is_none_or(|key| !state.triggers_fired_this_game.contains(key)),
+        Some(TriggerConstraint::OncePerOpponentPerTurn) => {
+            let GameEvent::LifeChanged { player_id, .. } = event else {
+                return false;
+            };
+            *player_id != matched.pending.controller
+                && state.active_player == *player_id
+                && matched.definition_ref.as_ref().is_none_or(|key| {
+                    !state
+                        .triggers_fired_this_turn_per_opponent
+                        .contains(&(key.clone(), *player_id))
+                })
+        }
+        Some(TriggerConstraint::MaxTimesPerTurn { max }) => {
+            matched.definition_ref.as_ref().is_none_or(|key| {
+                state
+                    .trigger_fire_counts_this_turn
+                    .get(key)
+                    .copied()
+                    .unwrap_or(0)
+                    < *max
+            })
+        }
+        Some(
+            TriggerConstraint::OnlyDuringYourTurn
+            | TriggerConstraint::OnlyDuringOpponentsTurn
+            | TriggerConstraint::OnlyDuringYourMainPhase
+            | TriggerConstraint::NthSpellThisTurn { .. }
+            | TriggerConstraint::NthDrawThisTurn { .. }
+            | TriggerConstraint::EventSourceControlledBy { .. }
+            | TriggerConstraint::AtClassLevel { .. },
+        )
+        | None => true,
+    }
+}
+
 /// CR 603.2-603.4 + CR 603.3d: could `entry`'s trigger on `source` still fire
 /// AND resolve to an effect if its triggering event happened right now? The
 /// single authority an AI policy uses to ask "is this on-battlefield payoff
@@ -15660,6 +15847,48 @@ pub mod tests {
     }
 
     #[test]
+    fn saga_entry_counter_is_inside_entry_boundary_but_prior_event_is_not() {
+        let saga = ObjectId(10);
+        let events = vec![
+            GameEvent::PermanentSacrificed {
+                object_id: ObjectId(9),
+                player_id: PlayerId(0),
+            },
+            GameEvent::CounterAdded {
+                object_id: saga,
+                counter_type: CounterType::Lore,
+                count: 1,
+                actor: PlayerId(0),
+            },
+            GameEvent::ZoneChanged {
+                object_id: saga,
+                from: None,
+                to: Zone::Battlefield,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    saga,
+                    None,
+                    Zone::Battlefield,
+                )),
+            },
+        ];
+        let boundaries = battlefield_entry_observation_indices(&events);
+
+        assert!(
+            !live_battlefield_source_was_present_at_event(0, saga, &boundaries),
+            "the entering Saga must not observe an unrelated pre-entry sacrifice"
+        );
+        assert!(
+            live_battlefield_source_was_present_at_event(1, saga, &boundaries),
+            "the Saga's intrinsic lore counter belongs to its entry lifetime"
+        );
+        assert!(live_battlefield_source_was_present_at_event(
+            2,
+            saga,
+            &boundaries
+        ));
+    }
+
+    #[test]
     fn abandon_ceased_pending_trigger_recovers_when_its_stack_firing_was_pruned() {
         let mut state = setup();
         let source = create_object(
@@ -17129,11 +17358,22 @@ pub mod tests {
         min_targets: usize,
         target: TargetFilter,
     ) -> ObjectId {
+        make_divided_damage_etb_source_with_amount(state, 4, min_targets, target)
+    }
+
+    /// "Deals `amount` damage divided as you choose among any number of
+    /// target …" as an ETB trigger on a 3/3 controlled by P0.
+    fn make_divided_damage_etb_source_with_amount(
+        state: &mut GameState,
+        amount: i32,
+        min_targets: usize,
+        target: TargetFilter,
+    ) -> ObjectId {
         let source = make_creature(state, PlayerId(0), "Divided Damage Source", 3, 3);
         let mut execute = AbilityDefinition::new(
             AbilityKind::Database,
             Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 4 },
+                amount: QuantityExpr::Fixed { value: amount },
                 target,
                 damage_source: None,
                 excess: None,
@@ -24618,6 +24858,491 @@ pub mod tests {
         );
     }
 
+    fn install_ledger_limited_combat_damage_trigger(
+        state: &mut GameState,
+        constraint: TriggerConstraint,
+    ) -> (ObjectId, GameEvent) {
+        let controller = PlayerId(0);
+        let defender = PlayerId(1);
+        let source = make_creature(state, controller, "Ledger watcher", 1, 1);
+        let attacker_a = make_creature(state, controller, "Ledger attacker A", 2, 2);
+        let attacker_b = make_creature(state, controller, "Ledger attacker B", 2, 2);
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.constraint = Some(constraint);
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        let source_object = state.objects.get_mut(&source).expect("source exists");
+        std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+        source_object.materialize_base_trigger_definitions();
+
+        (
+            source,
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: defender,
+                source_amounts: vec![(attacker_a, 2), (attacker_b, 2)],
+                total_damage: 4,
+            },
+        )
+    }
+
+    fn collect_transactional_trigger_candidates(
+        state: &mut GameState,
+        events: &[GameEvent],
+    ) -> (Vec<PendingTriggerContext>, Vec<TriggerCollectionOperation>) {
+        let mut session = TriggerCollectionSession::transactional(
+            TriggerCollectionOverlay::default(),
+            Vec::new(),
+        );
+        let pending = collect_pending_triggers_with_collection(
+            state,
+            events,
+            LogicalZoneTriggerCollection::Ordinary,
+            &mut session,
+        );
+        (pending, session.into_operation_journal())
+    }
+
+    fn assert_single_transactional_ledger_record(
+        journal: &[TriggerCollectionOperation],
+        pending: &[PendingTriggerContext],
+    ) {
+        assert_eq!(
+            pending.len(),
+            1,
+            "two qualifying candidates must admit exactly one pending trigger"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        TriggerCollectionOperation::RecordTriggerFired { .. }
+                    )
+                })
+                .count(),
+            1,
+            "the rejected candidate must not append a second ledger journal record"
+        );
+        assert!(
+            !journal.iter().any(|operation| {
+                matches!(
+                    operation,
+                    TriggerCollectionOperation::RecordBatchedZoneChanges { .. }
+                )
+            }),
+            "the rejected candidate must not append a batched-zone journal record"
+        );
+    }
+
+    #[test]
+    fn transactional_admission_rejection_leaves_no_local_or_batched_side_effect() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let source = make_creature(&mut state, controller, "Batched ledger watcher", 1, 1);
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        {
+            let source_object = state.objects.get_mut(&source).expect("source exists");
+            std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+            source_object.materialize_base_trigger_definitions();
+        }
+        let source_context =
+            trigger_source_context_for_latch(&state, state.objects.get(&source).unwrap());
+        let definition_ref = state.objects[&source].trigger_definition_ref(
+            state.objects[&source]
+                .trigger_definitions
+                .iter_all()
+                .next()
+                .expect("materialized trigger exists"),
+        );
+        let event = GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(state.objects[&source].snapshot_for_zone_change(
+                source,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            controller,
+        );
+        ability.set_trigger_source_recursive(source_context);
+        let matched = MatchedTrigger {
+            trig_idx: 0,
+            definition_ref: Some(definition_ref),
+            pending: PendingTrigger {
+                source_id: source,
+                controller,
+                condition: None,
+                ability: Box::new(ability),
+                timestamp: 0,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: Some(event.clone()),
+                modal: None,
+                mode_abilities: Vec::new(),
+                description: None,
+                may_trigger_origin: None,
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+            trigger_events: vec![event.clone()],
+            batched: true,
+            constraint: Some(TriggerConstraint::OncePerTurn),
+        };
+        let before = state.clone();
+        let mut session = TriggerCollectionSession::transactional(
+            TriggerCollectionOverlay::default(),
+            Vec::new(),
+        );
+        let mut batched_this_pass = std::collections::HashSet::new();
+        let mut pending = Vec::new();
+
+        for _ in 0..2 {
+            if !session.record_match(&mut state, &matched, &event) {
+                continue;
+            }
+            batched_this_pass.insert((source, matched.trig_idx));
+            pending.push(PendingTriggerContext::batched(
+                matched.pending.clone(),
+                matched.trigger_events.clone(),
+            ));
+        }
+        let journal = session.into_operation_journal();
+
+        assert_eq!(
+            pending.len(),
+            1,
+            "the rejected candidate never becomes pending"
+        );
+        assert_eq!(
+            batched_this_pass.len(),
+            1,
+            "the rejected candidate never reaches local batch dedup bookkeeping"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        TriggerCollectionOperation::RecordTriggerFired { .. }
+                    )
+                })
+                .count(),
+            1,
+            "the rejected candidate appends no trigger-fired journal operation"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        TriggerCollectionOperation::RecordBatchedZoneChanges { .. }
+                    )
+                })
+                .count(),
+            1,
+            "the rejected candidate appends no batched-zone journal operation"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.triggers_fired_this_turn, state.triggers_fired_this_turn,
+            "the retained journal replays the one admitted batched ledger edit cleanly"
+        );
+        assert_eq!(
+            replay.batched_zone_change_trigger_fired, state.batched_zone_change_trigger_fired,
+            "the retained journal replays the one admitted batched-zone edit cleanly"
+        );
+    }
+
+    #[test]
+    fn transactional_per_opponent_admission_rechecks_already_matched_candidates() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        state.active_player = opponent;
+        let source = make_creature(&mut state, controller, "Opponent ledger watcher", 1, 1);
+        let mut trigger = TriggerDefinition::new(TriggerMode::LifeLost);
+        trigger.constraint = Some(TriggerConstraint::OncePerOpponentPerTurn);
+        {
+            let source_object = state.objects.get_mut(&source).expect("source exists");
+            std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+            source_object.materialize_base_trigger_definitions();
+        }
+        let source_context =
+            trigger_source_context_for_latch(&state, state.objects.get(&source).unwrap());
+        let definition_ref = state.objects[&source].trigger_definition_ref(
+            state.objects[&source]
+                .trigger_definitions
+                .iter_all()
+                .next()
+                .expect("materialized trigger exists"),
+        );
+        let event = GameEvent::LifeChanged {
+            player_id: opponent,
+            amount: -1,
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            controller,
+        );
+        ability.set_trigger_source_recursive(source_context);
+        let matched = MatchedTrigger {
+            trig_idx: 0,
+            definition_ref: Some(definition_ref),
+            pending: PendingTrigger {
+                source_id: source,
+                controller,
+                condition: None,
+                ability: Box::new(ability),
+                timestamp: 0,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: Some(event.clone()),
+                modal: None,
+                mode_abilities: Vec::new(),
+                description: None,
+                may_trigger_origin: None,
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+            trigger_events: vec![event.clone()],
+            batched: false,
+            constraint: Some(TriggerConstraint::OncePerOpponentPerTurn),
+        };
+        let before = state.clone();
+        let mut session = TriggerCollectionSession::transactional(
+            TriggerCollectionOverlay::default(),
+            Vec::new(),
+        );
+        let mut pending = Vec::new();
+        let mut local_admissions = 0;
+        let mut batched_this_pass = std::collections::HashSet::new();
+
+        for candidate_event in [event.clone(), event] {
+            if !session.record_match(&mut state, &matched, &candidate_event) {
+                continue;
+            }
+            local_admissions += 1;
+            if matched.batched {
+                batched_this_pass.insert((source, matched.trig_idx));
+            }
+            pending.push(PendingTriggerContext::batched(
+                matched.pending.clone(),
+                matched.trigger_events.clone(),
+            ));
+        }
+        let journal = session.into_operation_journal();
+
+        assert_eq!(
+            local_admissions, 1,
+            "only the first matched candidate is admitted"
+        );
+        assert_eq!(
+            pending.len(),
+            1,
+            "the rejected candidate never becomes pending"
+        );
+        assert!(
+            batched_this_pass.is_empty(),
+            "the rejected non-batched candidate never mutates batch bookkeeping"
+        );
+        assert_eq!(
+            state.triggers_fired_this_turn_per_opponent.len(),
+            1,
+            "the second already-matched candidate cannot mutate the per-opponent ledger"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        TriggerCollectionOperation::RecordTriggerFired { .. }
+                    )
+                })
+                .count(),
+            1,
+            "the rejected candidate appends no trigger-fired journal operation"
+        );
+        assert!(
+            !journal.iter().any(|operation| {
+                matches!(
+                    operation,
+                    TriggerCollectionOperation::RecordBatchedZoneChanges { .. }
+                )
+            }),
+            "the rejected candidate appends no batched-zone journal operation"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.triggers_fired_this_turn_per_opponent,
+            state.triggers_fired_this_turn_per_opponent,
+            "the retained journal replays the one admitted per-opponent edit cleanly"
+        );
+    }
+
+    /// The admission boundary runs after a single aggregate combat-damage event
+    /// has expanded into two candidate `DamageDealt` contexts. Its first
+    /// successful record updates the staged ledger, so the second must be
+    /// rejected without becoming pending or entering the retained journal.
+    #[test]
+    fn transactional_once_per_turn_admits_one_of_two_expanded_damage_candidates() {
+        let mut state = setup();
+        let (_, event) = install_ledger_limited_combat_damage_trigger(
+            &mut state,
+            TriggerConstraint::OncePerTurn,
+        );
+        let before = state.clone();
+
+        let (pending, journal) = collect_transactional_trigger_candidates(&mut state, &[event]);
+
+        assert_single_transactional_ledger_record(&journal, &pending);
+        assert!(matches!(
+            pending[0].trigger_events.as_slice(),
+            [GameEvent::DamageDealt { .. }]
+        ));
+        assert_eq!(
+            state.triggers_fired_this_turn.len(),
+            1,
+            "the second expanded candidate must not mutate the once-per-turn ledger"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.triggers_fired_this_turn, state.triggers_fired_this_turn,
+            "the retained transactional journal replays the admitted ledger edit cleanly"
+        );
+    }
+
+    #[test]
+    fn transactional_once_per_game_admits_one_of_two_expanded_damage_candidates() {
+        let mut state = setup();
+        let (_, event) = install_ledger_limited_combat_damage_trigger(
+            &mut state,
+            TriggerConstraint::OncePerGame,
+        );
+        let before = state.clone();
+
+        let (pending, journal) = collect_transactional_trigger_candidates(&mut state, &[event]);
+
+        assert_single_transactional_ledger_record(&journal, &pending);
+        assert_eq!(
+            state.triggers_fired_this_game.len(),
+            1,
+            "the second expanded candidate must not mutate the once-per-game ledger"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.triggers_fired_this_game, state.triggers_fired_this_game,
+            "the retained transactional journal replays the admitted ledger edit cleanly"
+        );
+    }
+
+    #[test]
+    fn transactional_max_times_per_turn_admits_one_of_two_expanded_damage_candidates() {
+        let mut state = setup();
+        let (source, event) = install_ledger_limited_combat_damage_trigger(
+            &mut state,
+            TriggerConstraint::MaxTimesPerTurn { max: 1 },
+        );
+        let source_context =
+            trigger_source_context_for_latch(&state, state.objects.get(&source).unwrap());
+        let trigger = &state.objects[&source]
+            .trigger_definitions
+            .iter_all()
+            .next()
+            .expect("materialized trigger exists")
+            .definition;
+        let expanded = crate::game::trigger_matchers::matching_damage_done_events(
+            &event,
+            trigger,
+            &source_context,
+            &state,
+        );
+        assert_eq!(
+            expanded.len(),
+            2,
+            "one aggregate combat-damage event must fan out into two synthetic DamageDealt contexts before admission"
+        );
+        assert!(
+            expanded
+                .iter()
+                .all(|event| matches!(event, GameEvent::DamageDealt { .. })),
+            "the aggregate fanout must produce only synthetic DamageDealt contexts"
+        );
+        let before = state.clone();
+
+        let (pending, journal) = collect_transactional_trigger_candidates(&mut state, &[event]);
+
+        assert_single_transactional_ledger_record(&journal, &pending);
+        assert!(matches!(
+            pending[0].trigger_events.as_slice(),
+            [GameEvent::DamageDealt { .. }]
+        ));
+        assert_eq!(
+            state
+                .trigger_fire_counts_this_turn
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1],
+            "one aggregate combat-damage event expands to two candidates but records only one max-times firing"
+        );
+
+        let mut replay = before;
+        for operation in journal {
+            TriggerCollectionSession::apply_operation(&mut replay, operation);
+        }
+        assert_eq!(
+            replay.trigger_fire_counts_this_turn, state.trigger_fire_counts_this_turn,
+            "the retained transactional journal replays the admitted max-times edit cleanly"
+        );
+    }
+
     /// Issue #1304 — RUNTIME: Keeper of the Accord's intervening-if must compare
     /// the active player's creatures to the source controller's at opponent end
     /// step, not fail closed because the condition was never hoisted/parsed.
@@ -25017,6 +25742,50 @@ pub mod tests {
         assert_eq!(
             context.pending.ability.distribution, None,
             "preparation must leave the live pending trigger untouched"
+        );
+    }
+
+    /// CR 603.3d + CR 601.2c + CR 601.2d: a triggered "1 damage divided as you
+    /// choose among any number of target creatures" facing two legal targets
+    /// offers ONE slot, not two — the triggered ability follows the spell's
+    /// target-and-division process. Each chosen target must receive at least
+    /// one point, so a two-target choice could never be divided, and the
+    /// prompt it opened would have no answer `apply` accepts — the same cap
+    /// `cast_spell` already applies (issue #2856).
+    #[test]
+    fn divided_trigger_caps_target_slots_to_the_pool() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let _first = make_creature(&mut state, PlayerId(1), "First Target", 2, 2);
+        let _second = make_creature(&mut state, PlayerId(1), "Second Target", 2, 2);
+        let source = make_divided_damage_etb_source_with_amount(
+            &mut state,
+            1,
+            0,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+        );
+        let trigger_events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        let pending = collect_pending_triggers(&mut state, &trigger_events);
+        let [context] = pending.as_slice() else {
+            panic!("expected exactly one divided ETB trigger");
+        };
+
+        let PreparedTriggerTargets::NeedsPlayerChoice { target_slots } =
+            prepare_trigger_targets(&state, &context.pending)
+        else {
+            panic!("one slot with two legal targets must prompt the controller");
+        };
+        assert_eq!(
+            target_slots.len(),
+            1,
+            "a one-point pool offers one target slot, however many creatures are legal"
         );
     }
 
