@@ -44,12 +44,19 @@ export function TournamentListItem({ summary, onOpen }: TournamentListItemProps)
         <p className="truncate text-sm font-medium text-gray-200">{summary.name}</p>
         <p className="flex flex-wrap gap-x-3 text-xs text-gray-500">
           <span>{t("list.entrants", { count: summary.player_count })}</span>
-          <span>
-            {t("labels.roundOf", {
-              current: summary.current_round,
-              total: summary.total_rounds,
-            })}
-          </span>
+          {/* `current_round` is 0 from creation until the organizer starts
+              round 1, so a tournament in Registration would otherwise read
+              "Round 0 of 3" beside its own "Registration" badge. Suppressed
+              rather than re-worded: no catalog key describes the
+              not-yet-started case, and the status badge already says it. */}
+          {summary.current_round > 0 && (
+            <span>
+              {t("labels.roundOf", {
+                current: summary.current_round,
+                total: summary.total_rounds,
+              })}
+            </span>
+          )}
           <span>
             {"seats" in arity ? t(arity.key, { seats: arity.seats }) : t(arity.key)}
           </span>
