@@ -25,12 +25,17 @@ import { EVENT_SCHEMAS, type SanitizedEvent } from "./telemetry";
 
 // ── Bounds ─────────────────────────────────────────────────────────────────
 //
-// Every cap in this section counts BYTES of UTF-8, never characters, and
-// every enforcement site measures the same way: {@link readBoundedText} sums
-// the stream's chunk lengths before decoding, and the Durable Object's two
+// The three body caps — MAX_INFO_BYTES, MAX_ANNOUNCE_BYTES and
+// MAX_METRICS_BYTES — count BYTES of UTF-8, never characters, and every
+// enforcement site measures the same way: {@link readBoundedText} sums the
+// stream's chunk lengths before decoding, and the Durable Object's two
 // re-checks of a body it has already read encode it back. A `.length` check
 // on a decoded string would count UTF-16 code units, which for a body of
 // multi-byte text admits roughly three times the bytes the name promises.
+//
+// The other four caps here are not byte counts and do not claim to be: two
+// are durations, MAX_REPORTS_PER_BATCH is a count of reports, and
+// MAX_GAME_CODE_LEN is a count of characters. Each says so on its own doc.
 
 /** A row older than this is not listed and is reaped. Three minutes against
  *  phase-server's 60 s announce heartbeat: two heartbeats may be lost to a
@@ -171,6 +176,15 @@ const PROBE_OUTCOMES: readonly ProbeOutcome[] = [
   "game_completed",
   "game_abandoned",
 ];
+
+/** The outcomes that describe a GAME rather than a connection attempt.
+ *
+ *  One set, two consumers — the sanitiser's `game_code` gate and the fold's
+ *  announced-players guard. Written twice as a literal disjunction it would be
+ *  a silent trap: a fifth outcome added to one site and not the other would
+ *  drop every report of that outcome at the guard, with no type error and no
+ *  failing test that names it. */
+const GAME_OUTCOMES: ReadonlySet<ProbeOutcome> = new Set(["game_completed", "game_abandoned"]);
 
 /** One sanitised client report. Every field here survived the allow-list; a
  *  report object never carries anything else. */
@@ -533,8 +547,7 @@ export function sanitizeMetricsBatch(body: unknown): ServerProbeReport[] {
       report.rtt_ms = Math.round(Math.min(Math.max(rtt, 0), MAX_RTT_MS));
     }
     const gameCode = fields.game_code;
-    const isGameOutcome = outcome === "game_completed" || outcome === "game_abandoned";
-    if (isGameOutcome && typeof gameCode === "string" && gameCode.length > 0) {
+    if (GAME_OUTCOMES.has(report.outcome) && typeof gameCode === "string" && gameCode.length > 0) {
       report.game_code = truncate(gameCode, MAX_GAME_CODE_LEN);
     }
 
@@ -683,8 +696,7 @@ export function foldMetricReports(
       dropped += 1;
       continue;
     }
-    const isGameOutcome = report.outcome === "game_completed" || report.outcome === "game_abandoned";
-    if (isGameOutcome) {
+    if (GAME_OUTCOMES.has(report.outcome)) {
       // Peek WITHOUT materialising a bucket, so a rejected game outcome cannot
       // create the very bucket whose emptiness rejected it.
       const existing = counters.get(report.url) ?? known.get(report.url);

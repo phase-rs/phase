@@ -161,10 +161,18 @@ cmd_remove() {
 # read as a bug in the script rather than a fact about the deployment.
 skew_of() { # $1 = remote value, $2 = tree value, $3 = label
   local remote="$1" tree="$2" label="$3" diff
-  if [ -z "$remote" ]; then
-    printf '%s unknown' "$label"
-    return 0
-  fi
+  # Absent OR non-numeric, guarded together and BEFORE any arithmetic. The
+  # value comes from a document a third party serves, so it can be anything;
+  # `$((tree - remote))` on a non-numeric string is a fatal arithmetic error
+  # under `set -e`, which would abort the whole listing loop and leave every
+  # key after the offending one unprinted. One bad server must cost its own
+  # row, not the rest of the report.
+  case "$remote" in
+    ''|*[!0-9]*)
+      printf '%s unknown' "$label"
+      return 0
+      ;;
+  esac
   diff=$((tree - remote))
   if [ "$diff" -eq 0 ]; then
     printf '%s up to date' "$label"
@@ -193,11 +201,18 @@ cmd_list() {
     info="$(curl -sS -m 5 "https://${authority}${INFO_PATH}" 2>/dev/null || true)"
     remote_lobby="$(printf '%s' "$info" | jq -r '.lobby_protocol_version // empty' 2>/dev/null || true)"
     remote_protocol="$(printf '%s' "$info" | jq -r '.protocol_version // empty' 2>/dev/null || true)"
-    if [ -z "$remote_lobby" ] && [ -z "$remote_protocol" ]; then
-      # No parseable info document means the verification fetch the Worker
-      # makes on every announce would fail too, so the server cannot be listed
-      # even though its key is here.
-      skew="no info document"
+    if [ -z "$remote_lobby" ] || [ -z "$remote_protocol" ]; then
+      # EITHER value missing is enough. `ServerInfoDocument` declares `mode`,
+      # `protocol_version`, `lobby_protocol_version` and `server_version` all
+      # required, so a document carrying only some of them does not
+      # deserialize, the Worker's verify-by-fetch refuses the announce, and
+      # the server is never listed — a partial document is as fatal as no
+      # document at all, and the marker has to say so.
+      if [ -z "$remote_lobby" ] && [ -z "$remote_protocol" ]; then
+        skew="no info document"
+      else
+        skew="partial info document"
+      fi
       marker=" DROPPED-BY-WORKER?"
     else
       # BOTH constants, per row. They move independently — a full-game bump

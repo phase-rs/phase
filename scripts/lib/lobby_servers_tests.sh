@@ -263,7 +263,60 @@ case "$OUT" in
 esac
 rm -rf "$FIXTURE"
 
+# A remote version that is not a number at all. The value comes from a
+# document a third party serves, so it can be anything; before the guard,
+# bash's arithmetic aborted the whole run under `set -e` and every key AFTER
+# the offending one went unprinted. Two keys, so the abort is what is being
+# tested rather than just the bad row's wording.
+make_fixture
+printf '[{"name":"wss://bad.example.com/ws"},{"name":"wss://good.example.com/ws"}]\n' \
+  > "$FIXTURE/kv_list.json"
+printf '{"protocol_version":"1.2.3","lobby_protocol_version":%d}\n' \
+  "$TREE_LOBBY_PROTOCOL" > "$FIXTURE/info.json"
+run_script list
+if [ "$STATUS" -eq 0 ]; then
+  ok "a non-numeric remote version does not abort the listing"
+else
+  fail "a non-numeric remote version does not abort the listing (exit $STATUS, got: $OUT)"
+fi
+case "$OUT" in
+  *"protocol unknown"*) ok "a non-numeric version reports its own value as unknown" ;;
+  *) fail "a non-numeric version reports its own value as unknown (got: $OUT)" ;;
+esac
+# The point of the pair: the SECOND key must still be printed. Before the
+# guard, the loop died on the first row.
+case "$OUT" in
+  *"wss://good.example.com/ws"*) ok "a later key is still printed after a bad one" ;;
+  *) fail "a later key is still printed after a bad one (got: $OUT)" ;;
+esac
+# The other half of the row is unaffected — one bad number costs its own
+# label, not the row.
+case "$OUT" in
+  *"lobby up to date"*) ok "the readable half of a partly-bad document still reports" ;;
+  *) fail "the readable half of a partly-bad document still reports (got: $OUT)" ;;
+esac
+rm -rf "$FIXTURE"
+
 # ── V-U8g: list marks keys the Worker would drop ───────────────────────────
+# A PARTIAL info document. `ServerInfoDocument` requires all four fields, so a
+# document missing `lobby_protocol_version` does not deserialize, the Worker
+# refuses the announce, and the server is never listed — indistinguishable in
+# outcome from no document at all, and the marker must say so.
+make_fixture
+printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
+printf '{"mode":"Full","protocol_version":%d,"server_version":"0.9.1"}\n' \
+  "$TREE_PROTOCOL" > "$FIXTURE/info.json"
+run_script list
+case "$OUT" in
+  *"DROPPED-BY-WORKER?"*) ok "a partial info document is marked DROPPED-BY-WORKER?" ;;
+  *) fail "a partial info document is marked DROPPED-BY-WORKER? (got: $OUT)" ;;
+esac
+case "$OUT" in
+  *"partial info document"*) ok "a partial document is named as partial, not as absent" ;;
+  *) fail "a partial document is named as partial, not as absent (got: $OUT)" ;;
+esac
+rm -rf "$FIXTURE"
+
 # A key that fails the script's own shape check.
 make_fixture
 printf '[{"name":"wss://localhost/ws"}]\n' > "$FIXTURE/kv_list.json"
