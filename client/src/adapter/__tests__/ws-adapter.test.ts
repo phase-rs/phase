@@ -126,7 +126,7 @@ describe("WebSocketAdapter", () => {
   beforeEach(async () => {
     MockWebSocket.last = null;
     adapter = new WebSocketAdapter(
-      "ws://localhost:9374/ws",
+      "wss://localhost:9374/ws",
       "host",
       { main_deck: [], sideboard: [] },
     );
@@ -177,6 +177,20 @@ describe("WebSocketAdapter", () => {
     await expect(exported).rejects.toMatchObject({
       code: "WS_ERROR",
       message: "Only the game host can export authoritative state",
+      recoverable: false,
+    });
+  });
+
+  it("does not request an authoritative export over cleartext WebSocket", async () => {
+    const insecure = new WebSocketAdapter(
+      "ws://localhost:9374/ws",
+      "host",
+      { main_deck: [], sideboard: [] },
+    );
+
+    await expect(insecure.exportPersistenceState()).rejects.toMatchObject({
+      code: "WS_ERROR",
+      message: "Authoritative-state export requires a secure connection",
       recoverable: false,
     });
   });

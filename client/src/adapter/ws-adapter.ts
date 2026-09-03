@@ -1089,6 +1089,18 @@ export class WebSocketAdapter implements EngineAdapter {
    * this separately from ordinary redacted state broadcasts.
    */
   async exportPersistenceState(): Promise<string> {
+    // An unredacted engine envelope must not cross a cleartext WebSocket. The
+    // native sidecar is a local trusted transport rather than a network socket.
+    if (
+      !this.serverUrl.startsWith("wss://")
+      && !this.serverUrl.startsWith("native-engine://")
+    ) {
+      throw new AdapterError(
+        "WS_ERROR",
+        "Authoritative-state export requires a secure connection",
+        false,
+      );
+    }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
     }

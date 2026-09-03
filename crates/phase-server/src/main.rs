@@ -74,8 +74,8 @@ use server_core::protocol::{
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{
-    ActionResult, FullRuntime, GameSession, RevisionedActionResult, SessionActionError,
-    SessionManager,
+    ActionResult, FullRuntime, GameSession, HostingMode, RevisionedActionResult,
+    SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
@@ -6507,7 +6507,7 @@ async fn handle_client_message(
                 (Some(game_code), Some(PlayerId(0))) => {
                     let mut manager = state.lock().await;
                     match manager.sessions.get_mut(game_code) {
-                        Some(session) => {
+                        Some(session) if session.hosting == HostingMode::SingleUser => {
                             let mut snapshot = session.state.clone();
                             snapshot.capture_rng_word_pos();
                             match serde_json::to_string(&TrustedGameStateEnvelope::capture(
@@ -6521,6 +6521,11 @@ async fn handle_client_message(
                                 },
                             }
                         }
+                        Some(_) => ServerMessage::AuthoritativeStateExportFailed {
+                            message:
+                                "Authoritative state export is available only from a local host"
+                                    .to_string(),
+                        },
                         None => ServerMessage::AuthoritativeStateExportFailed {
                             message: "Game session is no longer available".to_string(),
                         },
