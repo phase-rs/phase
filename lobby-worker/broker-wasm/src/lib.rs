@@ -14,9 +14,10 @@
 
 use lobby_broker::{
     compare_announcement_to_info, info_url, normalize_announced_url, parse_lobby_client_message,
-    validate_announcement, Broker, BrokerEnv, ConnState, InfoMatch, InfoMismatchField,
+    score, validate_announcement, Broker, BrokerEnv, ConnState, InfoMatch, InfoMismatchField,
     LobbyClientMessage, LobbyServerMessage, Outbound, ParsedFrame, RawAnnouncement,
-    ServerAnnouncement, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH, PROTOCOL_VERSION,
+    ServerAnnouncement, ServerCounters, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH,
+    PROTOCOL_VERSION, RTT_BUCKET_EDGES_MS, SCORE_BUCKET_MS, SCORE_WINDOW_MS,
 };
 use rand::Rng;
 use serde::Serialize;
@@ -419,6 +420,77 @@ pub fn directory_info_url(announced_url: &str) -> Option<String> {
         .map(|url| info_url(&url))
 }
 
+/// The canonical `wss://` form of an announced address, or `None` when it is
+/// not one the directory would accept.
+///
+/// Exists so the allowlist and the stored rows are keyed by the SAME
+/// authority. The allowlist's keys are typed by a human, the row keys come out
+/// of [`directory_validate_announcement`]; without running the human's key
+/// through this, `wss://Host.Example:443/ws/` matches no row, lists nothing,
+/// and reports no error anywhere.
+#[wasm_bindgen]
+pub fn directory_normalize_url(raw: &str) -> Option<String> {
+    normalize_announced_url(raw)
+        .ok()
+        .map(|url| url.as_str().to_string())
+}
+
+/// A server's health score from its counters: `ServerCounters` JSON in,
+/// `Score` JSON — or the JSON literal `null` — out.
+///
+/// `null` covers both "no live evidence" (the core returned `None`) and
+/// "unreadable counters". A caller cannot distinguish them and has no reason
+/// to: both mean the same thing to a listing, and the alternative is a panic,
+/// which in wasm aborts the Durable Object.
+///
+/// `now_ms` is an `f64` because it crosses from JS `Date.now()`; a `u64` would
+/// arrive as a `BigInt` that cannot be mixed with JS number arithmetic without
+/// a conversion at every call site. Negative and non-finite inputs clamp to 0
+/// rather than wrapping.
+#[wasm_bindgen]
+pub fn directory_score(counters_json: &str, now_ms: f64) -> String {
+    let Ok(counters) = serde_json::from_str::<ServerCounters>(counters_json) else {
+        return "null".to_string();
+    };
+    let now = if now_ms.is_finite() && now_ms > 0.0 {
+        now_ms as u64
+    } else {
+        0
+    };
+    serde_json::to_string(&score(&counters, now)).expect("score always serializes")
+}
+
+/// Width of one counter bucket, in ms
+/// (`lobby_broker::directory::SCORE_BUCKET_MS`). The TypeScript fold cuts
+/// buckets on this; it is never a TypeScript literal.
+#[wasm_bindgen]
+pub fn directory_score_bucket_ms() -> f64 {
+    SCORE_BUCKET_MS as f64
+}
+
+/// The score's decay window, in ms
+/// (`lobby_broker::directory::SCORE_WINDOW_MS`). Rust weights by it; the
+/// TypeScript fold ages buckets out by it.
+#[wasm_bindgen]
+pub fn directory_score_window_ms() -> f64 {
+    SCORE_WINDOW_MS as f64
+}
+
+/// Upper edges of the RTT histogram's cells, in ms
+/// (`lobby_broker::directory::RTT_BUCKET_EDGES_MS`).
+///
+/// Exported for the same reason as the two constants above, and the drift it
+/// prevents is the least visible of the three: the TypeScript fold decides
+/// which cell a reported RTT lands in, and Rust reads the resulting histogram
+/// positionally. A TypeScript edge list one entry out of step would file every
+/// latency into the neighbouring cell, move every median, and fail no test on
+/// either side. The cell COUNT is derived from the length here as it is in
+/// Rust, so the two arrays cannot differ in size either.
+#[wasm_bindgen]
+pub fn directory_rtt_bucket_edges_ms() -> Vec<u32> {
+    RTT_BUCKET_EDGES_MS.to_vec()
+}
+
 fn result_json(r: CallResult) -> String {
     serde_json::to_string(&r).expect("call result always serializes")
 }
@@ -543,6 +615,17 @@ mod tests {
     fn directory_exports_match_the_core_verdicts() {
         assert_eq!(directory_version(), DIRECTORY_VERSION);
         assert_eq!(directory_info_path(), INFO_PATH);
+        // V-U14f. Every exported CONSTANT is asserted against its core, in one
+        // place, so the parity pattern is uniform rather than remembered per
+        // export. These three are the numbers TypeScript is forbidden to
+        // declare for itself; a drifting export would mis-cut every bucket or
+        // mis-file every latency and fail nothing else.
+        assert_eq!(directory_score_bucket_ms(), SCORE_BUCKET_MS as f64);
+        assert_eq!(directory_score_window_ms(), SCORE_WINDOW_MS as f64);
+        assert_eq!(
+            directory_rtt_bucket_edges_ms(),
+            RTT_BUCKET_EDGES_MS.to_vec()
+        );
 
         let raw = raw_announcement();
         let raw_json = serde_json::to_string(&raw).expect("raw announcement serializes");
@@ -629,5 +712,83 @@ mod tests {
             directory_info_url("wss://Host.Example:443/ws/"),
             Some(format!("https://host.example{INFO_PATH}"))
         );
+    }
+
+    /// V-U14e + V-U17e. The two directory exports that carry a VALUE across
+    /// the boundary (rather than a verdict or a constant) must agree with the
+    /// core function they wrap, and must answer hostile input with a value
+    /// rather than a panic — a panic in wasm aborts the Durable Object.
+    #[test]
+    fn directory_score_and_normalize_exports_match_their_cores() {
+        // One live hour-bucket. Built as JSON, not as a struct literal, so
+        // this also pins the field names the TypeScript fold has to write:
+        // a rename on either side lands here as a parse failure.
+        const NOW_MS: f64 = 3_600_000_000.0;
+        const COUNTERS: &str = r#"{"buckets":[{"start_ms":3600000000,"connect_attempts":100,
+            "connect_successes":100,"games_started":10,"games_completed":8,
+            "rtt_histogram":[0,100,0,0,0,0,0,0],"announced_players_max":4}]}"#;
+
+        let core = serde_json::from_str::<ServerCounters>(COUNTERS).expect("fixture parses");
+        let core_score = score(&core, NOW_MS as u64);
+        assert!(
+            core_score.as_ref().and_then(|s| s.value).is_some(),
+            "the fixture must be rankable, or the equality below is vacuous"
+        );
+        // Compared as STRINGS, not as `serde_json::Value`s. `Score`'s rates
+        // are `f32`, and widening one to `f64` through `to_value` renders
+        // `0.8` as `0.800000011920929` while serializing it directly renders
+        // `0.8` — a difference in the instrument, not in the export. The
+        // string is also what actually crosses the boundary, so this asserts
+        // the wire form rather than a re-interpretation of it.
+        assert_eq!(
+            directory_score(COUNTERS, NOW_MS),
+            serde_json::to_string(&core_score).expect("core score serializes")
+        );
+
+        // `null` for both kinds of nothing: unreadable counters, and counters
+        // whose every bucket has aged out of the window. Indistinguishable on
+        // purpose — a listing does the same thing with either.
+        assert_eq!(directory_score("{", 0.0), "null");
+        assert_eq!(directory_score(r#"{"buckets":[]}"#, NOW_MS), "null");
+        const AGED_OUT: &str = r#"{"buckets":[{"start_ms":3000000000,"connect_attempts":100,
+            "connect_successes":100,"games_started":0,"games_completed":0,
+            "rtt_histogram":[0,100,0,0,0,0,0,0],"announced_players_max":0}]}"#;
+        assert_eq!(directory_score(AGED_OUT, NOW_MS), "null");
+        // A negative or non-finite clock clamps to 0 rather than wrapping into
+        // a huge `u64`. Asserted as "same answer as now = 0", not as `null`:
+        // at now = 0 every stored bucket is in the FUTURE, and
+        // `bucket_weight`'s `saturating_sub` deliberately treats a
+        // future-dated bucket as brand new rather than as maximally aged.
+        assert_eq!(
+            directory_score(COUNTERS, -1.0),
+            directory_score(COUNTERS, 0.0)
+        );
+        assert_eq!(
+            directory_score(COUNTERS, f64::NAN),
+            directory_score(COUNTERS, 0.0)
+        );
+        assert_eq!(
+            directory_score(COUNTERS, f64::INFINITY),
+            directory_score(COUNTERS, 0.0)
+        );
+
+        // V-U17e. The allowlist normaliser is the SAME authority as the row
+        // key — an operator's spelling and the announcer's spelling of one
+        // address must produce one string, or the intersection silently
+        // under-lists.
+        assert_eq!(
+            directory_normalize_url("wss://Host.Example:443/ws/"),
+            Some("wss://host.example/ws".to_string())
+        );
+        assert_eq!(
+            directory_normalize_url("wss://host.example/ws"),
+            directory_normalize_url("wss://Host.Example:443/ws/")
+        );
+        // Hostile keys are dropped rather than listed: an operator can type
+        // anything into KV, and these are what the Worker refuses.
+        assert_eq!(directory_normalize_url("wss://localhost/ws"), None);
+        assert_eq!(directory_normalize_url("wss://evil@real.example/ws"), None);
+        assert_eq!(directory_normalize_url("ws://host.example/ws"), None);
+        assert_eq!(directory_normalize_url("wss://127.0.0.1/ws"), None);
     }
 }

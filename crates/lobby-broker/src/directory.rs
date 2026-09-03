@@ -256,15 +256,24 @@ impl DirectoryEntry {
     /// Timestamps are arguments, not clock reads, so this module stays
     /// WASM-safe and clock-free.
     ///
-    /// Reachability note for the phase that adds the row upsert: **no wasm
-    /// export reaches this today.** It takes a `&ServerAnnouncement`, which
-    /// the Worker cannot construct (that type has no `Deserialize`), and
-    /// nothing here wraps it in an export. That is not a foreclosure — the
-    /// upsert phase owns both this file and the boundary crate — but it is an
-    /// explicit choice to make: either add an export taking the raw body and
-    /// routing it through [`validate_announcement`] (the same pattern the
-    /// comparison export uses), or shape the row in TypeScript from the
-    /// validation DTO's `announcement` payload.
+    /// Reachability note, now SETTLED: **no wasm export reaches this, and the
+    /// upsert phase deliberately did not add one.** It takes a
+    /// `&ServerAnnouncement`, which the Worker cannot construct (that type has
+    /// no `Deserialize`). Of the two resolutions the previous phase left open,
+    /// the upsert phase chose the second: the Durable Object shapes its
+    /// storage row in TypeScript from the validation DTO's `announcement`
+    /// payload — which IS this crate's own serialisation of a value that has
+    /// already passed [`validate_announcement`], so TypeScript projects
+    /// columns and never validates. The row-shaping call is also absent from
+    /// the wasm calls the shell is chartered to own.
+    ///
+    /// So this constructor has no caller outside this module's tests today.
+    /// It is kept, not deleted, because it is the typed statement of what a
+    /// directory row IS, and because a native (non-Worker) directory shell
+    /// would reach for exactly it. A reader looking for the production
+    /// projection should read `lobby-worker/src/directory.ts`'s
+    /// `storedRowFromAnnouncement`, whose column list this mirrors minus
+    /// `score` (computed at read time, never stored).
     pub fn from_announcement(
         announcement: &ServerAnnouncement,
         first_seen_ms: u64,
@@ -295,10 +304,20 @@ pub enum InfoMatch {
 
 /// Which compared field disagreed. A typed field rather than a `bool` or a
 /// reason string, so a consumer across the wasm boundary can switch on it.
+///
+/// The two version selectors name *different* numbers and are deliberately
+/// separate variants: `ProtocolVersion` is the full-game wire surface
+/// ([`crate::PROTOCOL_VERSION`]) and `LobbyProtocolVersion` is the lobby
+/// message set ([`crate::LOBBY_PROTOCOL_VERSION`]), which move independently.
+/// Collapsing them into one `Version` selector would tell a listing client
+/// that a server disagrees about *a* version without saying which — and the
+/// two drive different client affordances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InfoMismatchField {
     Mode,
     ServerVersion,
+    ProtocolVersion,
+    LobbyProtocolVersion,
 }
 
 /// Normalise and validate an announced `wss://` URL, returning the canonical
@@ -457,15 +476,27 @@ pub fn validate_announcement(raw: &RawAnnouncement) -> Result<ServerAnnouncement
 /// Confront an announcement's claim with the info document fetched from the
 /// host it announced.
 ///
-/// `mode` is compared first and `server_version` second; the precedence is
-/// part of the contract, so a document differing in both reports
-/// [`InfoMismatchField::Mode`].
+/// `mode` is compared first, `server_version` second, `protocol_version`
+/// third and `lobby_protocol_version` fourth. The order is contractual rather
+/// than implementation-defined, so a document differing in both `mode` and
+/// `server_version` reports [`InfoMismatchField::Mode`], and one differing in
+/// both version numbers reports [`InfoMismatchField::ProtocolVersion`].
 ///
-/// **Neither protocol version is compared.** An announcement's
-/// `protocol_version` and `lobby_protocol_version` are therefore the
-/// announcer's *unverified word*, even though a client's "behind by N"
-/// affordance consumes exactly those numbers. Do not read a `Match` as
-/// evidence that the announced versions are real.
+/// The order is not arbitrary. `mode` and `server_version` describe *what the
+/// server is*, so disagreement there means the announcement is about a
+/// different server than the one answering at that address — an identity
+/// failure. Disagreement about a version number means one server's two
+/// documents disagree — a skew failure, typically a cache or a proxy serving a
+/// stale document. Reporting the identity failure first keeps the more serious
+/// diagnosis on top.
+///
+/// **All four fields are compared, and that buys exactly one thing.** A
+/// `Match` says the announcer controls the host it announced and that the
+/// host's two documents agree with each other. It does **not** make the
+/// numbers true: both documents are produced by the same announcer, so a
+/// `Match` is evidence of consistency and of control, never of correctness.
+/// A client's "behind by N" affordance consumes these numbers and inherits
+/// that limit.
 pub fn compare_announcement_to_info(
     announcement: &ServerAnnouncement,
     info: &ServerInfoDocument,
@@ -478,6 +509,16 @@ pub fn compare_announcement_to_info(
     if announcement.server_version != info.server_version {
         return InfoMatch::Mismatch {
             field: InfoMismatchField::ServerVersion,
+        };
+    }
+    if announcement.protocol_version != info.protocol_version {
+        return InfoMatch::Mismatch {
+            field: InfoMismatchField::ProtocolVersion,
+        };
+    }
+    if announcement.lobby_protocol_version != info.lobby_protocol_version {
+        return InfoMatch::Mismatch {
+            field: InfoMismatchField::LobbyProtocolVersion,
         };
     }
     InfoMatch::Match
@@ -496,6 +537,279 @@ pub fn info_url(url: &AnnouncedUrl) -> String {
     let rest = url.as_str().strip_prefix("wss://").unwrap_or(url.as_str());
     let authority = rest.split('/').next().unwrap_or(rest);
     format!("https://{authority}{INFO_PATH}")
+}
+
+// ── Health score ───────────────────────────────────────────────────────────
+//
+// Client-reported evidence about a listed server, decayed over a day and
+// folded into one 0–100 number plus the raw components it was built from.
+//
+// The whole computation lives here rather than in the Worker for the reason
+// the rest of this module does: it is a contract, every party must produce the
+// same number from the same evidence, and a directory that scored servers
+// differently from the client's own reading of the components would be
+// publishing an ordering nobody could check. The Worker owns the counters'
+// storage and their bucket arithmetic; this owns what the counters MEAN.
+//
+// Clock-free like everything else here: `now_ms` is an argument.
+
+/// Width of one counter bucket, in ms.
+///
+/// Not used by [`score`]'s own arithmetic — the fold sums whatever buckets it
+/// is handed, so a caller could supply half-hour buckets and the weighting
+/// would still be correct. It exists as the single source of truth for the
+/// TypeScript fold that CUTS the buckets, which reads it through the
+/// `directory_score_bucket_ms` wasm export rather than declaring its own
+/// number. A second declaration would silently mis-cut every bucket and fail
+/// no test.
+pub const SCORE_BUCKET_MS: u64 = 3_600_000;
+
+/// The decay window. Evidence older than this carries zero weight and is
+/// dropped by the fold, which is what bounds a server's stored counters at 24
+/// buckets. Both languages use it: Rust weights by it, the TypeScript fold
+/// ages buckets out by it.
+pub const SCORE_WINDOW_MS: u64 = 24 * SCORE_BUCKET_MS;
+
+/// Weighted samples below which [`Score::value`] is `None`.
+///
+/// `None` here means "not enough evidence to rank this server", NOT "no
+/// evidence": [`Score::samples`] is still populated, so a consumer can tell
+/// the two apart. See [`Score::value`].
+pub const SCORE_MIN_SAMPLES: u32 = 20;
+
+/// Upper edges of the RTT histogram's first seven cells, in ms. The eighth
+/// cell is the overflow (`>= 3200`), reported as `3200`.
+///
+/// A histogram rather than a mean because one 30 s outlier destroys a mean,
+/// and rather than a raw sample list because the store has to be aggregatable
+/// and decayable — a list is neither.
+pub const RTT_BUCKET_EDGES_MS: [u32; 7] = [50, 100, 200, 400, 800, 1600, 3200];
+
+/// Cell count of [`CounterBucket::rtt_histogram`]: one per edge plus the
+/// overflow. Derived, never typed twice, so the array cannot drift from the
+/// edge list.
+pub const RTT_CELLS: usize = RTT_BUCKET_EDGES_MS.len() + 1;
+
+/// Strength of the smoothing prior, in pseudo-observations. See [`smoothed`].
+const PRIOR_WEIGHT: f64 = 5.0;
+/// The rate the prior assumes before any evidence arrives — deliberately
+/// "no opinion", not "good".
+const PRIOR_RATE: f64 = 0.5;
+/// At or below this median RTT the latency component is a full 1.0.
+const RTT_FAST_MS: f64 = 100.0;
+/// At or above this median RTT the latency component is 0.0.
+const RTT_SLOW_MS: f64 = 1000.0;
+
+/// Component weights. Re-normalised over the components that actually have
+/// evidence, so a LobbyOnly broker — which can never start a game — is not
+/// dragged by a completion rate it has no way to earn.
+const W_SUCCESS: f64 = 0.5;
+const W_RTT: f64 = 0.3;
+const W_COMPLETION: f64 = 0.2;
+
+/// One hour of client-reported evidence about one server.
+///
+/// Buckets are cut by the Worker at [`SCORE_BUCKET_MS`] boundaries and folded
+/// whole; nothing here is queried by field, which is why the counters live in
+/// the Durable Object's key-value storage rather than in a second SQL table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterBucket {
+    /// Start of the bucket's window, epoch ms.
+    pub start_ms: u64,
+    pub connect_attempts: u32,
+    pub connect_successes: u32,
+    pub games_started: u32,
+    pub games_completed: u32,
+    /// Counts per [`RTT_BUCKET_EDGES_MS`] cell, last cell being the overflow.
+    pub rtt_histogram: [u32; RTT_CELLS],
+    /// Peak `current_players` this server ANNOUNCED during the window.
+    ///
+    /// Written by the announce path, never by a client report, and read by the
+    /// game-outcome guard: a server that never had a player online in a window
+    /// cannot have completed a game in it. That asymmetry is the point — it is
+    /// the one field in this struct a forger cannot raise.
+    pub announced_players_max: u32,
+}
+
+/// Every live bucket for one server. Bounded at 24 entries by the window: the
+/// fold drops buckets that have decayed to zero weight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerCounters {
+    pub buckets: Vec<CounterBucket>,
+}
+
+/// A server's health, and the evidence it was computed from.
+///
+/// The components ride along with the number deliberately: a client renders
+/// "slow" or "unreliable" from them, and must never recompute the score
+/// itself — one authority for the ordering, several readings of the same
+/// evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Score {
+    /// 0–100, or `None` when fewer than [`SCORE_MIN_SAMPLES`] weighted samples
+    /// remain.
+    ///
+    /// `None` with a populated [`Score::samples`] means "too little evidence
+    /// to rank"; [`score`] returning `None` at all means "no live evidence".
+    /// A consumer that treats an absent score as an absent `Score` will render
+    /// health hints off a three-sample window.
+    pub value: Option<u8>,
+    /// Weighted connect attempts plus games started, rounded. Always present,
+    /// including when [`Score::value`] is `None` — that is what makes the two
+    /// kinds of "no score" distinguishable.
+    pub samples: u32,
+    /// Raw, UNSMOOTHED connect success rate, 0–1. The smoothing prior applies
+    /// to the ranking number, not to the reported evidence.
+    pub success_rate: f32,
+    /// Raw, unsmoothed completed-of-started rate, 0–1. `0.0` when no game was
+    /// started in the window.
+    pub completion_rate: f32,
+    /// Upper edge of the histogram cell where the weighted median falls, or
+    /// `None` when no RTT was ever reported. `3200` means "at least 3200".
+    pub median_rtt_ms: Option<u32>,
+}
+
+/// Linear decay: full weight at the bucket's start, zero at
+/// [`SCORE_WINDOW_MS`].
+fn bucket_weight(now_ms: u64, start_ms: u64) -> f64 {
+    // `saturating_sub`, not a signed difference: a bucket whose `start_ms` is
+    // in the future (a skewed reporter, or a Worker clock behind a stored
+    // bucket) is treated as brand new rather than as maximally aged.
+    let age = now_ms.saturating_sub(start_ms) as f64;
+    let weight = 1.0 - age / SCORE_WINDOW_MS as f64;
+    if weight <= 0.0 {
+        0.0
+    } else {
+        weight.min(1.0)
+    }
+}
+
+/// A rate pulled towards [`PRIOR_RATE`] by [`PRIOR_WEIGHT`] pseudo-samples.
+///
+/// This is what makes decay MEAN something, and it was measured rather than
+/// assumed: re-weighting buckets leaves every *rate* unchanged under uniform
+/// ageing, so "identical counters with older timestamps score lower" is simply
+/// false without a prior. With one, aged evidence carries less weight against
+/// the prior, so a better-than-prior server decays towards it (measured
+/// 98 -> 95 over 12 h). It also stops a 1-of-1 perfect server outranking a
+/// 1000-of-1000 one.
+fn smoothed(numer: f64, denom: f64) -> f64 {
+    (numer + PRIOR_WEIGHT * PRIOR_RATE) / (denom + PRIOR_WEIGHT)
+}
+
+/// Fold a server's counters into a [`Score`] as of `now_ms`.
+///
+/// `None` when no live evidence remains at all — never reported, or every
+/// bucket aged past [`SCORE_WINDOW_MS`]. A server with evidence but too little
+/// of it returns `Some` with a `None` [`Score::value`]; see that field.
+///
+/// Clock-free: `now_ms` is injected, like every other timestamp in this
+/// module.
+pub fn score(counters: &ServerCounters, now_ms: u64) -> Option<Score> {
+    let mut attempts = 0.0;
+    let mut successes = 0.0;
+    let mut started = 0.0;
+    let mut completed = 0.0;
+    let mut rtt = [0.0f64; RTT_CELLS];
+
+    for bucket in &counters.buckets {
+        let weight = bucket_weight(now_ms, bucket.start_ms);
+        if weight == 0.0 {
+            continue;
+        }
+        attempts += weight * f64::from(bucket.connect_attempts);
+        successes += weight * f64::from(bucket.connect_successes);
+        started += weight * f64::from(bucket.games_started);
+        completed += weight * f64::from(bucket.games_completed);
+        for (cell, count) in bucket.rtt_histogram.iter().enumerate() {
+            rtt[cell] += weight * f64::from(*count);
+        }
+    }
+
+    let samples_f = attempts + started;
+    if samples_f <= 0.0 {
+        return None;
+    }
+
+    // Weighted median: the cell where the cumulative count crosses half,
+    // reported as that cell's upper edge.
+    let rtt_total: f64 = rtt.iter().sum();
+    let median_rtt_ms = if rtt_total > 0.0 {
+        let half = rtt_total / 2.0;
+        let mut cumulative = 0.0;
+        let mut cell = RTT_CELLS - 1;
+        for (index, count) in rtt.iter().enumerate() {
+            cumulative += count;
+            if cumulative >= half {
+                cell = index;
+                break;
+            }
+        }
+        // The overflow cell has no edge of its own and reports the last one,
+        // which is why `3200` reads as "at least 3200".
+        Some(RTT_BUCKET_EDGES_MS[cell.min(RTT_BUCKET_EDGES_MS.len() - 1)])
+    } else {
+        None
+    };
+
+    let success = smoothed(successes, attempts);
+    let completion = smoothed(completed, started);
+    let rtt_component = median_rtt_ms.map(|ms| {
+        let ms = f64::from(ms);
+        let raw = if ms <= RTT_FAST_MS {
+            1.0
+        } else if ms >= RTT_SLOW_MS {
+            0.0
+        } else {
+            (RTT_SLOW_MS - ms) / (RTT_SLOW_MS - RTT_FAST_MS)
+        };
+        // Smoothed on the same footing as the two rates, so a single fast
+        // sample does not buy a full latency component.
+        smoothed(raw * rtt_total, rtt_total)
+    });
+
+    // Re-normalise over the components that have evidence.
+    let mut weighted = 0.0;
+    let mut total_weight = 0.0;
+    if attempts > 0.0 {
+        weighted += W_SUCCESS * success;
+        total_weight += W_SUCCESS;
+    }
+    if started > 0.0 {
+        weighted += W_COMPLETION * completion;
+        total_weight += W_COMPLETION;
+    }
+    if let Some(component) = rtt_component {
+        weighted += W_RTT * component;
+        total_weight += W_RTT;
+    }
+
+    let samples = samples_f.round() as u32;
+    let value = if samples < SCORE_MIN_SAMPLES || total_weight == 0.0 {
+        None
+    } else {
+        Some(
+            (100.0 * (weighted / total_weight))
+                .round()
+                .clamp(0.0, 100.0) as u8,
+        )
+    };
+
+    Some(Score {
+        value,
+        samples,
+        success_rate: (if attempts > 0.0 {
+            successes / attempts
+        } else {
+            0.0
+        }) as f32,
+        completion_rate: (if started > 0.0 {
+            completed / started
+        } else {
+            0.0
+        }) as f32,
+        median_rtt_ms,
+    })
 }
 
 #[cfg(test)]
@@ -727,8 +1041,8 @@ mod tests {
         );
     }
 
-    /// V6. Both directions, plus the documented precedence and the documented
-    /// NON-coverage of the two protocol versions.
+    /// V6. Both directions, plus the documented precedence across all four
+    /// compared fields and the coverage of both version numbers.
     #[test]
     fn info_document_mismatch_is_reported_per_field() {
         let announcement = valid_announcement();
@@ -763,16 +1077,72 @@ mod tests {
             }
         );
 
-        // Pins the documented non-coverage: the protocol versions are NOT
-        // verified, so a document disagreeing about them still matches. If a
-        // later phase widens the comparison, this assertion must change
-        // visibly rather than the widening happening silently.
+        // Each version number alone. Asserted separately because the two are
+        // distinct selectors: a comparison that collapsed them into one
+        // `Version` field would report something plausible-looking here and
+        // still be wrong about which number a client should act on.
+        let mut other_protocol_only = matching_info();
+        other_protocol_only.protocol_version = 54;
+        assert_eq!(
+            compare_announcement_to_info(&announcement, &other_protocol_only),
+            InfoMatch::Mismatch {
+                field: InfoMismatchField::ProtocolVersion
+            }
+        );
+
+        let mut other_lobby_protocol_only = matching_info();
+        other_lobby_protocol_only.lobby_protocol_version = 3;
+        assert_eq!(
+            compare_announcement_to_info(&announcement, &other_lobby_protocol_only),
+            InfoMatch::Mismatch {
+                field: InfoMismatchField::LobbyProtocolVersion
+            }
+        );
+
+        // This case carries a contract forward. Phase 2 planted it asserting
+        // `Match` for exactly this fixture, with the instruction that a later
+        // phase widening the comparison must change the assertion VISIBLY
+        // rather than the widening happening silently. Phase 3 widened it, and
+        // this edit is that visible change: the same fixture now reports
+        // `ProtocolVersion`, because both numbers differ and the precedence
+        // reports the earlier one. The instruction still binds whatever is
+        // compared next — a `build_commit`, say — which must land as an edit
+        // here rather than sliding through a green suite.
         let mut other_protocol = matching_info();
         other_protocol.protocol_version = 54;
         other_protocol.lobby_protocol_version = 3;
         assert_eq!(
             compare_announcement_to_info(&announcement, &other_protocol),
-            InfoMatch::Match
+            InfoMatch::Mismatch {
+                field: InfoMismatchField::ProtocolVersion
+            }
+        );
+
+        // Two more multi-field documents, so the precedence is pinned across
+        // the whole order rather than only at its head. Together with the
+        // both-`mode`-and-`server_version` case above and the case
+        // immediately above, four of the six ordered pairs are asserted:
+        // `mode` before `server_version`, `mode` before `protocol_version`,
+        // `server_version` before `lobby_protocol_version`, and
+        // `protocol_version` before `lobby_protocol_version`.
+        let mut mode_and_protocol = matching_info();
+        mode_and_protocol.mode = ServerMode::LobbyOnly;
+        mode_and_protocol.protocol_version = 54;
+        assert_eq!(
+            compare_announcement_to_info(&announcement, &mode_and_protocol),
+            InfoMatch::Mismatch {
+                field: InfoMismatchField::Mode
+            }
+        );
+
+        let mut version_and_lobby_protocol = matching_info();
+        version_and_lobby_protocol.server_version = "0.9.0".to_string();
+        version_and_lobby_protocol.lobby_protocol_version = 3;
+        assert_eq!(
+            compare_announcement_to_info(&announcement, &version_and_lobby_protocol),
+            InfoMatch::Mismatch {
+                field: InfoMismatchField::ServerVersion
+            }
         );
 
         // Paired positive reach-guard: a function returning `Mismatch`
@@ -883,6 +1253,193 @@ mod tests {
         assert_eq!(
             entry.score, None,
             "a fresh row is unscored, not zero-scored"
+        );
+    }
+
+    /// One hour-bucket of connect evidence, all RTTs landing in one cell.
+    fn counter_bucket(
+        start_ms: u64,
+        attempts: u32,
+        successes: u32,
+        rtt_cell: usize,
+        rtt_count: u32,
+    ) -> CounterBucket {
+        let mut rtt_histogram = [0u32; RTT_CELLS];
+        rtt_histogram[rtt_cell] = rtt_count;
+        CounterBucket {
+            start_ms,
+            connect_attempts: attempts,
+            connect_successes: successes,
+            games_started: 0,
+            games_completed: 0,
+            rtt_histogram,
+            announced_players_max: 0,
+        }
+    }
+
+    fn counters(buckets: Vec<CounterBucket>) -> ServerCounters {
+        ServerCounters { buckets }
+    }
+
+    /// A `now` far from the epoch so `saturating_sub` is never what makes an
+    /// aged fixture look fresh.
+    const SCORE_NOW: u64 = 1_000 * SCORE_BUCKET_MS;
+
+    /// V-U14a. `None` means "no live evidence" — and the aged-out fixture is
+    /// what distinguishes that from "never reported", since both must be
+    /// `None` while a fresh fixture must not.
+    #[test]
+    fn score_is_none_without_live_evidence() {
+        assert_eq!(score(&counters(Vec::new()), SCORE_NOW), None);
+
+        // Every bucket past the window: weight 0, so nothing is summed.
+        let aged_out = counters(vec![counter_bucket(
+            SCORE_NOW - 25 * SCORE_BUCKET_MS,
+            100,
+            100,
+            1,
+            100,
+        )]);
+        assert_eq!(score(&aged_out, SCORE_NOW), None);
+
+        // Paired positive reach-guard: the same counters inside the window
+        // score, so a `score` returning `None` unconditionally fails here.
+        let fresh = counters(vec![counter_bucket(SCORE_NOW, 100, 100, 1, 100)]);
+        assert!(score(&fresh, SCORE_NOW).is_some());
+    }
+
+    /// V-U14b. Below the minimum, the VALUE is absent but the sample count is
+    /// not. This is the distinction the whole `Score` shape exists for: a
+    /// consumer must be able to tell "too little evidence to rank" from "no
+    /// evidence at all", and it can only do that if `samples` survives.
+    #[test]
+    fn score_below_the_minimum_has_no_value_but_a_visible_sample_count() {
+        let thin = counters(vec![counter_bucket(SCORE_NOW, 3, 3, 1, 3)]);
+        let thin_score = score(&thin, SCORE_NOW).expect("three samples are still live evidence");
+        assert_eq!(thin_score.value, None);
+        assert_eq!(thin_score.samples, 3);
+        // The components are populated too — a perfect 3-of-3 reads as 1.0
+        // even though it is not rankable.
+        assert_eq!(thin_score.success_rate, 1.0);
+        assert_eq!(thin_score.median_rtt_ms, Some(100));
+
+        // Paired positive: above the minimum the value appears.
+        let thick = counters(vec![counter_bucket(SCORE_NOW, 100, 100, 1, 100)]);
+        let thick_score = score(&thick, SCORE_NOW).expect("live evidence");
+        assert!(thick_score.value.is_some());
+        assert!(thick_score.samples >= SCORE_MIN_SAMPLES);
+    }
+
+    /// V-U14c. Identical counters, older timestamps, strictly lower score.
+    ///
+    /// This is the row that had to be measured rather than assumed: a pure
+    /// re-weighting of buckets leaves every RATE unchanged under uniform
+    /// ageing, so without the smoothing prior this assertion is false for a
+    /// perfectly reasonable implementation. It is the prior that makes aged
+    /// evidence decay towards it.
+    #[test]
+    fn score_decays_as_its_evidence_ages() {
+        let fresh = counters(vec![counter_bucket(SCORE_NOW, 100, 100, 1, 100)]);
+        let aged = counters(vec![counter_bucket(
+            SCORE_NOW - 12 * SCORE_BUCKET_MS,
+            100,
+            100,
+            1,
+            100,
+        )]);
+
+        let fresh_value = score(&fresh, SCORE_NOW)
+            .and_then(|s| s.value)
+            .expect("fresh evidence is rankable");
+        let aged_value = score(&aged, SCORE_NOW)
+            .and_then(|s| s.value)
+            .expect("12h-old evidence is still rankable");
+
+        assert!(
+            aged_value < fresh_value,
+            "identical counters 12h older must score strictly lower, got {aged_value} vs {fresh_value}"
+        );
+        // The unsmoothed component is deliberately NOT what decayed — the
+        // reported evidence is the raw rate; only the ranking number moves.
+        assert_eq!(score(&aged, SCORE_NOW).expect("aged").success_rate, 1.0);
+    }
+
+    /// V-U14d. Each component moves the number in the direction it should,
+    /// with everything else held equal.
+    ///
+    /// All four fixtures share their volume and `now_ms`, so the varied axis
+    /// is the only thing that can explain a difference.
+    #[test]
+    fn score_orders_by_success_latency_and_completion() {
+        let perfect = counters(vec![counter_bucket(SCORE_NOW, 100, 100, 1, 100)]);
+        let perfect_value = score(&perfect, SCORE_NOW)
+            .and_then(|s| s.value)
+            .expect("rankable");
+
+        // Success: same volume, half the connects land.
+        let unreliable = counters(vec![counter_bucket(SCORE_NOW, 100, 50, 1, 100)]);
+        let unreliable_value = score(&unreliable, SCORE_NOW)
+            .and_then(|s| s.value)
+            .expect("rankable");
+        assert!(
+            perfect_value > unreliable_value,
+            "100% success must outrank 50%, got {perfect_value} vs {unreliable_value}"
+        );
+
+        // Latency: same success, RTTs in the 1600-3200 cell instead of <=100.
+        let slow = counters(vec![counter_bucket(SCORE_NOW, 100, 100, 6, 100)]);
+        let slow_value = score(&slow, SCORE_NOW)
+            .and_then(|s| s.value)
+            .expect("rankable");
+        assert!(
+            perfect_value > slow_value,
+            "fast RTT must outrank slow, got {perfect_value} vs {slow_value}"
+        );
+
+        // Completion: the same perfect connects, plus games that mostly did
+        // not finish. The completion component only exists once games were
+        // started, which is what keeps a LobbyOnly broker out of it.
+        let mut abandons = counter_bucket(SCORE_NOW, 100, 100, 1, 100);
+        abandons.games_started = 10;
+        abandons.games_completed = 2;
+        let abandoning = counters(vec![abandons]);
+        let abandoning_score = score(&abandoning, SCORE_NOW).expect("rankable");
+        assert!(
+            abandoning_score.value.expect("rankable") < perfect_value,
+            "a poor completion rate must drag the score"
+        );
+        assert_eq!(abandoning_score.completion_rate, 0.2);
+        // The no-games case reports 0.0 completion and is NOT dragged by it —
+        // paired with the line above, this is what proves re-normalisation
+        // rather than a zero component being folded in.
+        assert_eq!(
+            score(&perfect, SCORE_NOW)
+                .expect("rankable")
+                .completion_rate,
+            0.0
+        );
+
+        // The median cell, pinned separately: the weighted cumulative count
+        // crosses half inside cell 3, so the reported median is that cell's
+        // upper edge. A histogram spread across cells is the only fixture that
+        // can catch an off-by-one in the crossing test.
+        let mut spread = counter_bucket(SCORE_NOW, 100, 100, 0, 0);
+        spread.rtt_histogram = [10, 10, 10, 40, 10, 10, 5, 5];
+        assert_eq!(
+            score(&counters(vec![spread]), SCORE_NOW)
+                .expect("rankable")
+                .median_rtt_ms,
+            Some(400)
+        );
+
+        // The overflow cell has no edge of its own and reports the last one.
+        let mut overflow = counter_bucket(SCORE_NOW, 100, 100, 7, 100);
+        overflow.connect_successes = 100;
+        assert_eq!(
+            score(&counters(vec![overflow]), SCORE_NOW)
+                .expect("rankable")
+                .median_rtt_ms,
+            Some(3200)
         );
     }
 }

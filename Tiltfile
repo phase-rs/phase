@@ -299,6 +299,29 @@ local_resource('pnpm-preflight',
     labels = ['lint'],
 )
 
+# scripts/lobby-servers.sh is the ONLY way a server is admitted to the official
+# directory's `GET /servers`, and each of its failure modes is silent: a ws://
+# key matches no row, a probe path that is not lobby_broker::directory::INFO_PATH
+# reports every server unreachable, and a dropped `--env preview` edits
+# PRODUCTION. crates/lobby-broker/src/directory.rs is a dep because the script
+# greps INFO_PATH out of it -- changing the constant must re-run this.
+#
+# Same venue and same limits as pnpm-preflight above: Tilt under the 'lint'
+# label, local-only, not CI. Enrolling it in CI needs a .github/workflows/**
+# edit, which is a hard stop for agent changes.
+#
+# No CARGO_TARGET_DIR and no cargo: pure bash against stubbed wrangler/curl in
+# a mktemp dir, so it cannot contend for a build lock.
+local_resource('lobby-servers',
+    cmd = 'bash scripts/lib/lobby_servers_tests.sh',
+    deps = ['scripts/lobby-servers.sh', 'scripts/lib/lobby_servers_tests.sh',
+            'crates/lobby-broker/src/directory.rs'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
 # ---------------------------------------------------------------------------
 # Data (manual trigger — click in UI to run)
 # ---------------------------------------------------------------------------
