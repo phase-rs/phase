@@ -28377,6 +28377,28 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
         )
 }
 
+/// CR 608.2c + CR 400.7j: a singular battlefield recall after a self-move
+/// antecedent — the nearest prior publishing clause is a ChangeZone whose
+/// target is the source itself ("Exile ~ / Exile this Saga / Exile <name>"),
+/// so "it" names the source object, not the chain tracked set. Nearest-first
+/// scan mirrors the `draw_object_count_filter` precedent; using the same
+/// publisher set as the tracked-set rewrite keeps both branches consistent
+/// about what "affected objects" means.
+fn nearest_publisher_is_self_move(defs: &[AbilityDefinition]) -> bool {
+    defs.iter()
+        .rev()
+        .find(|d| publishes_tracked_set_from_resolution(&d.effect))
+        .is_some_and(|d| {
+            matches!(
+                &*d.effect,
+                Effect::ChangeZone {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        })
+}
+
 /// CR 603.7 + CR 400.7: A return/put onto the battlefield publishes the moved
 /// objects as the chain tracked set (Storm Herald "those Auras", Returned cause).
 fn is_battlefield_return_effect(effect: &Effect) -> bool {
@@ -28863,6 +28885,18 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
         || free_cast_that_card_grant
 }
 
+/// CR 608.2c: the SINGULAR battlefield-recall anaphor — "return it " at a
+/// clause start with a battlefield mention. Splitting the plural axis out of
+/// [`contains_implicit_tracked_set_pronoun`] lets the assembly gate bind the
+/// singular pronoun to its named antecedent (CR 400.7j) while plural riders
+/// keep the chain-set binding.
+pub(crate) fn singular_battlefield_recall(lower: &str) -> bool {
+    tag::<_, _, OracleError<'_>>("return it ")
+        .parse(lower)
+        .is_ok()
+        && scan_contains_phrase(lower, "battlefield")
+}
+
 fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
     if let Effect::CreateDelayedTrigger {
         uses_tracked_set, ..
@@ -29180,6 +29214,26 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect, cast_anaphor_is_ex
             *target = tracked_set_filter();
         }
         _ => {}
+    }
+}
+
+/// CR 608.2c + CR 400.7j: singular battlefield recall after a self-move —
+/// "Exile ~, then return it to the battlefield" binds "it" to the source
+/// object itself (the thing the prior clause moved), not to the chain tracked
+/// set, whose membership may include unrelated riders (Cold Snap's tap leg).
+/// Non-recursive over CreateDelayedTrigger, mirroring
+/// [`rewrite_parent_targets_to_tracked_set`]: a delayed payload keeps its own
+/// CR 603.7c referent machinery (Aetherling, Otherworldly Journey).
+fn rewrite_singular_battlefield_recall_to_self(effect: &mut Effect) {
+    if let Effect::ChangeZone {
+        target,
+        destination: Zone::Battlefield,
+        ..
+    } = effect
+    {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::SelfRef;
+        }
     }
 }
 

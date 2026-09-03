@@ -10455,6 +10455,453 @@ fn same_chain_put_exiled_card_keeps_tracked_set() {
     );
 }
 
+// ── Singular battlefield-recall anaphor ──
+//
+// "Exile <self>, then return it to the battlefield" binds the recall leg to
+// `TargetFilter::SelfRef` (CR 608.2c English anaphora + CR 400.7j public-zone
+// findability) instead of the chain tracked set, whose membership picks up
+// unrelated riders (Shiva's Cold Snap tap leg). Plural / chosen-target /
+// delayed / first-clause recalls keep the sentinel binding.
+
+/// B1 — positive: Shiva's chapter III (verbatim FIN back-face Oracle) lowers
+/// to [broadcast tap of opponents' lands, self-exile, self-return front face
+/// up]. Every hostile test below (B4–B8) asserts its full positive chain shape
+/// first, so a parse failure cannot satisfy its negative vacuously.
+#[test]
+fn singular_battlefield_recall_shiva_chapter_iii_binds_self() {
+    let parsed = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter.)\n\
+         I, II — Mesmerize — Target creature can't be blocked this turn.\n\
+         III — Cold Snap — Tap all lands your opponents control. Exile Shiva, then return it to the battlefield (front face up).",
+        "Shiva, Warden of Ice",
+        &[],
+        &["Enchantment".to_string(), "Creature".to_string()],
+        &["Saga".to_string(), "Elemental".to_string()],
+    );
+    let chapter_iii = parsed
+        .triggers
+        .iter()
+        .find(|t| t.saga_chapter == Some(3))
+        .expect("Cold Snap must parse as the chapter III trigger");
+    let execute = chapter_iii
+        .execute
+        .as_deref()
+        .expect("chapter III trigger executes");
+    let legs = chain_effects(execute);
+    assert_eq!(legs.len(), 3, "tap/exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "leg[0] must be the broadcast tap of opponents' lands: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[1] must be the self-exile: {:?}",
+        legs[1]
+    );
+    assert!(
+        matches!(
+            &legs[2],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                enter_transformed: false,
+                ..
+            }
+        ),
+        "leg[2] must return the source itself front face up: {:?}",
+        legs[2]
+    );
+    assert!(!tree_has_unimplemented(execute));
+}
+
+/// B2 — positive contrast case: Jill's activated ability (verbatim FIN
+/// front-face Oracle) binds the transformed return to SelfRef. This is the
+/// shape the runtime repro exercises end-to-end.
+#[test]
+fn singular_battlefield_recall_jill_activation_binds_self_transformed() {
+    let parsed = parse_oracle_text(
+        "When Jill enters, return up to one other target nonland permanent to its owner's hand.\n\
+         {3}{U}{U}, {T}: Exile Jill, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
+        "Jill, Shiva's Dominant",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string(), "Noble".to_string(), "Warrior".to_string()],
+    );
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|a| a.kind == AbilityKind::Activated)
+        .expect("Jill's exile-and-return must parse as an activated ability");
+    let legs = chain_effects(activated);
+    assert_eq!(legs.len(), 2, "exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[0] must be the self-exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                enter_transformed: true,
+                ..
+            }
+        ),
+        "leg[1] must return Jill transformed: {:?}",
+        legs[1]
+    );
+    assert!(!tree_has_unimplemented(activated));
+}
+
+/// B3 — positive: Fable of the Mirror-Breaker's chapter III (verbatim Oracle)
+/// "Exile this Saga, then return it to the battlefield transformed" binds
+/// SelfRef + enter_transformed.
+#[test]
+fn singular_battlefield_recall_fable_chapter_iii_binds_self_transformed() {
+    let parsed = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter.)\n\
+         I — Create a 2/2 red Goblin Shaman creature token with \"Whenever this token attacks, create a Treasure token.\"\n\
+         II — You may discard up to two cards. If you do, draw that many cards.\n\
+         III — Exile this Saga, then return it to the battlefield transformed under your control.",
+        "Fable of the Mirror-Breaker",
+        &[],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    let chapter_iii = parsed
+        .triggers
+        .iter()
+        .find(|t| t.saga_chapter == Some(3))
+        .expect("Fable chapter III must parse as a trigger");
+    let execute = chapter_iii
+        .execute
+        .as_deref()
+        .expect("chapter III trigger executes");
+    let legs = chain_effects(execute);
+    assert_eq!(legs.len(), 2, "exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[0] must be the self-exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                enter_transformed: true,
+                ..
+            }
+        ),
+        "leg[1] must return the Saga transformed: {:?}",
+        legs[1]
+    );
+    assert!(!tree_has_unimplemented(execute));
+}
+
+/// B4 — hostile, plural: "return them" after a mass publisher keeps the
+/// chain-set binding on the recall leg. The "Exile them" clause keeps its
+/// ParentTarget (no pronoun detector fires for it; the gate never touches it).
+#[test]
+fn singular_battlefield_recall_plural_after_mass_exile_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile all creatures you control. Exile them, then return them to the battlefield.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&def);
+    assert_eq!(
+        legs.len(),
+        3,
+        "mass-exile/their-exile/return legs: {legs:?}"
+    );
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "leg[0] must be the mass exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "leg[1] must re-exile the exiled set: {:?}",
+        legs[1]
+    );
+    assert!(
+        matches!(
+            &legs[2],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "plural recall must keep TrackedSet(0): {:?}",
+        legs[2]
+    );
+}
+
+/// B5 — hostile, chosen antecedent: after "Exile target creature" (a
+/// chosen-target publisher, not a self-move) the singular recall keeps the
+/// chain tracked set.
+#[test]
+fn singular_battlefield_recall_after_chosen_target_exile_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile target creature, then return it to the battlefield.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&def);
+    assert_eq!(legs.len(), 2, "exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "leg[0] must be the chosen-target exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "recall after a chosen-target publisher must keep TrackedSet(0): {:?}",
+        legs[1]
+    );
+}
+
+/// B6 — hostile, delayed: the rewriter never descends into
+/// CreateDelayedTrigger, so the payload keeps its CR 603.7c ParentTarget
+/// referent with origin pinned to Exile at delayed-trigger creation
+/// (CR 603.7a; Aetherling / Otherworldly Journey shapes).
+#[test]
+fn singular_battlefield_recall_delayed_keeps_parent_target_payload() {
+    let def = parse_effect_chain(
+        "Exile ~, then return it to the battlefield at the beginning of the next end step.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&def);
+    assert_eq!(legs.len(), 2, "exile/delayed-return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[0] must be the self-exile: {:?}",
+        legs[0]
+    );
+    let Effect::CreateDelayedTrigger {
+        effect,
+        uses_tracked_set,
+        ..
+    } = &legs[1]
+    else {
+        panic!("expected CreateDelayedTrigger, got {:?}", legs[1]);
+    };
+    let Effect::ChangeZone {
+        origin: Some(Zone::Exile),
+        destination: Zone::Battlefield,
+        target: TargetFilter::ParentTarget,
+        ..
+    } = &*effect.effect
+    else {
+        panic!(
+            "delayed payload must keep ParentTarget with origin Exile, got {:?}",
+            effect.effect
+        );
+    };
+    assert!(*uses_tracked_set);
+}
+
+/// B7 — positive, nearest-publisher axis: The Great Work's chapter III
+/// (verbatim) has an earlier targeted exile, but the NEAREST publisher before
+/// the recall is the self-exile, so the recall binds SelfRef.
+#[test]
+fn singular_battlefield_recall_nearest_publisher_self_move_binds_self() {
+    let parsed = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter.)\n\
+         I — This Saga deals 3 damage to target opponent and each creature they control.\n\
+         II — Create three Treasure tokens.\n\
+         III — Until end of turn, you may cast instant and sorcery spells from any graveyard. If a spell cast this way would be put into a graveyard, exile it instead. Exile this Saga, then return it to the battlefield (front face up).",
+        "The Great Work",
+        &[],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    let chapter_iii = parsed
+        .triggers
+        .iter()
+        .find(|t| t.saga_chapter == Some(3))
+        .expect("The Great Work chapter III must parse as a trigger");
+    let execute = chapter_iii
+        .execute
+        .as_deref()
+        .expect("chapter III trigger executes");
+    let legs = chain_effects(execute);
+    assert_eq!(legs.len(), 4, "cast/exile/self-exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[2],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[2] must be the self-exile publisher: {:?}",
+        legs[2]
+    );
+    assert!(
+        matches!(
+            &legs[3],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "nearest publisher is the self-exile, so the recall binds SelfRef: {:?}",
+        legs[3]
+    );
+    assert!(!tree_has_unimplemented(execute));
+}
+
+/// B7-negative — with a typed-target leg as the NEAREST publisher, the
+/// singular recall keeps the chain tracked set (nearest-first scan does not
+/// see the earlier self-exile).
+#[test]
+fn singular_battlefield_recall_nearest_publisher_typed_target_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile ~. Exile target creature, then return it to the battlefield.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&def);
+    assert_eq!(
+        legs.len(),
+        3,
+        "self-exile/typed-exile/return legs: {legs:?}"
+    );
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[0] must be the self-exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "leg[1] must be the chosen-target exile: {:?}",
+        legs[1]
+    );
+    assert!(
+        matches!(
+            &legs[2],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "nearest publisher is the typed exile, so recall keeps TrackedSet(0): {:?}",
+        legs[2]
+    );
+}
+
+/// B8 — hostile, first clause: with no prior publisher the gate never fires
+/// and the recall keeps its unbound ParentTarget.
+#[test]
+fn singular_battlefield_recall_first_clause_without_publisher_stays_parent_target() {
+    let def = parse_effect_chain("Return it to the battlefield.", AbilityKind::Spell);
+    let legs = chain_effects(&def);
+    assert_eq!(legs.len(), 1, "single leg: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "unbound first-clause recall must stay ParentTarget: {:?}",
+        legs[0]
+    );
+}
+
 #[test]
 fn effect_draw() {
     let e = parse_effect("Draw two cards");

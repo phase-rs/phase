@@ -828,6 +828,7 @@ mod jace_wielder_empty_library_win;
 mod jagged_lightning_each_of_two_targets;
 mod jaws_of_defeat;
 mod jeskai_ascendancy_pump_untap_anaphora_6857;
+mod jill_shiva_cold_snap_return_prompt_pollution;
 mod json_smoke_test;
 mod judgment_bolt_where_x_damage_runtime;
 mod kaito_integration;
