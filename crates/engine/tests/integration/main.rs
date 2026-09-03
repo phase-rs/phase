@@ -247,6 +247,7 @@ mod escape_tunnel_landfall;
 mod esper_origins_flashback_transform;
 mod etali_primal_sickness_poison;
 mod etrata_cloak_enters_under_cloaker_5944;
+mod eureka_moment_draw_trigger_strands_optional_frame;
 mod evelyn_regression;
 mod excess_damage_quantity_channel;
 mod exchange_life_totals_cards;

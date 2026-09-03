@@ -9545,6 +9545,61 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     true
 }
 
+/// CR 603.3b + CR 608.2d: whether a resolution frame is live while a
+/// non-`Priority` prompt is open, so a freshly collected trigger batch must be
+/// PARKED into `deferred_triggers` rather than ordered now.
+///
+/// CR 603.3b places triggered abilities on the stack — and therefore orders
+/// them — only for abilities that triggered "since the last time a player
+/// received priority", i.e. at a priority boundary (CR 117.5, CR 704.3). A
+/// spell paused on one of its own CR 608.2d choices ("you may put a land card
+/// from your hand onto the battlefield") has NOT reached such a boundary: that
+/// choice is announced *while applying the effect*, and no player receives
+/// priority for it. Its earlier siblings' triggers are still "waiting to be put
+/// on the stack" (CR 704.3) and must stay parked until the resolution completes
+/// (CR 603.3 + CR 117.5). CR 608.2c is what keeps the later sentence part of
+/// the same resolution.
+///
+/// This is the collection-side counterpart of the `resolution_stack` clause of
+/// [`resolution_completion_can_settle`], which already refuses to DRAIN (or
+/// offer CR 603.3b ordering) for the same structural reason. It corresponds to
+/// that one clause only, narrowed to non-`Priority` waits. Of the other refusal
+/// conditions there, `pending_replacement` and the `handles` half are already
+/// guarded collection-side by the neighbouring disjuncts at this same fork;
+/// `is_pending_trigger_construction_active`, `pending_cost_move_resume`,
+/// `pending_deferred_life_cost_resume` and `pending_triggered_mana_resume` are
+/// not.
+///
+/// The `Priority` test keeps the guard off genuine CR 117.5 boundaries, where a
+/// batch must be ordered promptly rather than deferred; an unconditional guard
+/// is measurably rejected by
+/// `analysis::corpus_tests::drive_row_classifies_corpus_via_shared_pipeline`.
+/// The `resolution_stack` test is a deliberate narrowing to non-`Priority`
+/// waits that own a live frame — CR 508.2b / CR 510.3a put declare-attackers
+/// and combat-damage triggers on the stack before the active player gets
+/// priority, and this guard stays off those windows because no resolution
+/// frame is live there — measured indirectly by the P7 regression filter, not
+/// pinned by any assertion. No existing test distinguishes it: both
+/// single-conjunct-dropped variants pass the full ordering/combat regression
+/// filter, so this conjunct is pinned only by the unit rows in
+/// `resolution_frame_is_live_off_priority_requires_a_live_frame_and_a_non_priority_wait`.
+///
+/// Structural on purpose. The historical guard at the collection seam
+/// enumerated pause shapes via `engine_resolution_choices::handles`, which is
+/// an action-DISPATCH predicate; measured against the closed specification
+/// [`crate::types::resolution::DirectChoiceGate::matches`], it admits only four
+/// of the ten permitted (gate, prompt) pairs and misses `OptionalEffectChoice`,
+/// `OpponentMayChoice`, `ProliferateChoice` and the resolution-scoped sacrifice
+/// `PayCost`. Asking the frame stack covers every present and future
+/// direct-choice frame by construction, and covers every install route —
+/// including the frame-push wrappers that bypass
+/// `GameState::install_direct_choice_frame` entirely. It is added BESIDE
+/// `handles` at the fork rather than in place of it: `handles` still carries
+/// the resolution-owned prompts that own no frame.
+pub(crate) fn resolution_frame_is_live_off_priority(state: &GameState) -> bool {
+    !matches!(state.waiting_for, WaitingFor::Priority { .. }) && !state.resolution_stack.is_empty()
+}
+
 /// Which deferred-trigger drain, if any, a post-action seam owns.
 ///
 /// Every variant still goes through `resolution_completion_can_settle`, so the
@@ -21504,6 +21559,77 @@ pub mod tests {
             crate::types::ability::effect_variant_name(&sub.effect),
             "GainLife"
         );
+    }
+
+    /// CR 603.3b + CR 508.2b + CR 510.3a: the collection-side guard must fire
+    /// ONLY when a non-`Priority` wait is open AND a resolution frame is live.
+    /// Each row below is failed by a different over-broad predicate, so this
+    /// test — not any integration test — is what pins the two conjuncts.
+    #[test]
+    fn resolution_frame_is_live_off_priority_requires_a_live_frame_and_a_non_priority_wait() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::resolution::OptionalEffectFrame;
+
+        fn runner_with_source() -> (GameRunner, ObjectId) {
+            let mut scenario = GameScenario::new();
+            let source_id = scenario.add_creature(P0, "Frame Source", 2, 2).id();
+            (scenario.build(), source_id)
+        }
+
+        fn live_frame(source_id: ObjectId) -> OptionalEffectFrame {
+            OptionalEffectFrame {
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source_id,
+                    P0,
+                )),
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                trigger_match_count: None,
+            }
+        }
+
+        // Row 1 — a settled Priority window with a frame still live (mid-`RepeatFor`
+        // shape). Must be FALSE: dropping the `Priority` conjunct returns true here.
+        let (mut runner, source_id) = runner_with_source();
+        let state = runner.state_mut();
+        state.push_optional_effect_frame(live_frame(source_id));
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        assert!(!resolution_frame_is_live_off_priority(state));
+
+        // Row 2 — a non-`Priority` combat wait with an EMPTY frame stack
+        // (CR 508.2b / CR 510.3a). Must be FALSE: dropping the `resolution_stack`
+        // conjunct returns true here.
+        let (mut runner, _) = runner_with_source();
+        let state = runner.state_mut();
+        assert!(state.resolution_stack.is_empty());
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: Vec::new(),
+            valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        assert!(!resolution_frame_is_live_off_priority(state));
+
+        // Row 3 — POSITIVE REACH-GUARD: a direct-choice prompt above a live frame.
+        // Must be TRUE, so a predicate that always returns false fails too.
+        let (mut runner, source_id) = runner_with_source();
+        let state = runner.state_mut();
+        state.push_optional_effect_frame(live_frame(source_id));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: P0,
+            source_id,
+            description: None,
+            may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
+        };
+        assert!(resolution_frame_is_live_off_priority(state));
     }
 
     /// CR 400.7d: an emerge-cast permanent's ETB "instead create X of those
