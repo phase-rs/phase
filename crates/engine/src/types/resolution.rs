@@ -4052,7 +4052,34 @@ fn migrate_legacy_counter_removal_replacement_pause(state: &mut GameState) {
                     count,
                     ..
                 } => Some((*object_id, counter_type.clone(), *count)),
-                _ => None,
+                ProposedEvent::ZoneChange { .. }
+                | ProposedEvent::Damage { .. }
+                | ProposedEvent::Draw { .. }
+                | ProposedEvent::SearchFound { .. }
+                | ProposedEvent::Scry { .. }
+                | ProposedEvent::Mill { .. }
+                | ProposedEvent::CoinFlip { .. }
+                | ProposedEvent::Explore { .. }
+                | ProposedEvent::Connive { .. }
+                | ProposedEvent::Proliferate { .. }
+                | ProposedEvent::LifeGain { .. }
+                | ProposedEvent::LifeLoss { .. }
+                | ProposedEvent::AddCounter { .. }
+                | ProposedEvent::MoveCounter { .. }
+                | ProposedEvent::CreateToken { .. }
+                | ProposedEvent::TokenEntry { .. }
+                | ProposedEvent::Discard { .. }
+                | ProposedEvent::Tap { .. }
+                | ProposedEvent::Untap { .. }
+                | ProposedEvent::TurnFaceUp { .. }
+                | ProposedEvent::Destroy { .. }
+                | ProposedEvent::Sacrifice { .. }
+                | ProposedEvent::BeginTurn { .. }
+                | ProposedEvent::BeginPhase { .. }
+                | ProposedEvent::ProduceMana { .. }
+                | ProposedEvent::EmptyManaPool { .. }
+                | ProposedEvent::Planeswalk { .. }
+                | ProposedEvent::Attach { .. } => None,
             })
     else {
         return;
