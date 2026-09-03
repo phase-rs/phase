@@ -99,7 +99,10 @@ import {
   LOBBY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
 } from "../../../adapter/ws-adapter";
-import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../../config/multiplayerServer";
+import {
+  DEFAULT_MULTIPLAYER_SERVER_URL,
+  OFFICIAL_MULTIPLAYER_SERVER_URL,
+} from "../../../config/multiplayerServer";
 
 describe("HostSetup", () => {
   beforeEach(() => {
@@ -578,7 +581,7 @@ describe("HostSetup", () => {
         startWhenFull: false,
         password: "test-password",
         formatConfig: expect.objectContaining({ allow_debug_actions: true }),
-      }));
+      }), connectionMode === "server" ? DEFAULT_MULTIPLAYER_SERVER_URL : null);
     });
 
     it("clears a password when its named switch is turned off", async () => {
@@ -605,7 +608,7 @@ describe("HostSetup", () => {
         startWhenFull: true,
         password: "",
         formatConfig: expect.objectContaining({ allow_debug_actions: false }),
-      }));
+      }), connectionMode === "server" ? DEFAULT_MULTIPLAYER_SERVER_URL : null);
     });
   });
 
