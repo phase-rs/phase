@@ -1583,6 +1583,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             filter,
             min: _,
             max: _,
+            ..
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(chooser, target_ctx, mode));

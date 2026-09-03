@@ -8,8 +8,10 @@ use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::counter::{
-    parse_counter_anaphor, try_parse_double_effect, try_parse_move_counters_from,
-    try_parse_multiply_pt_effect, try_parse_put_counter, try_parse_remove_counter,
+    parse_counter_anaphor, remove_counter_exact_selection_count,
+    remove_counter_exact_target_multi_target, try_parse_double_effect,
+    try_parse_move_counters_from, try_parse_multiply_pt_effect, try_parse_put_counter,
+    try_parse_remove_counter,
 };
 use super::lower::{
     parse_for_each_multiplier_prefix, parse_multi_target_count_expr,
@@ -39,8 +41,9 @@ use crate::types::ability::{
     CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, ContinuousModification,
     ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp,
     Duration, Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef,
-    GrantedAbilityScope, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PerPlayerScope,
-    PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    GrantedAbilityScope, LibraryPosition, MultiTargetSpec, ObjectSelectionCardinality,
+    ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerScope,
+    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
     ReassembleControlMode, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
     TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
     ZoneOwner,
@@ -3270,7 +3273,7 @@ pub(super) fn parse_search_and_creation_ast(
                     colors,
                     keywords,
                     tapped,
-                    count,
+                    count: count.clone(),
                     attach_to,
                     static_abilities,
                     enters_attacking,
@@ -12567,6 +12570,43 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             }
             clause
         }
+        // CR 115.1d + CR 122.1: "remove a +1/+1 counter from each of two
+        // creatures you control" is an untargeted exact selection followed by
+        // removal from the selected set. It must not become a blank typed target
+        // filter, which the targeting layer correctly interprets as a player.
+        ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::RemoveCounter {
+            counter_type,
+            count,
+            target,
+            exact_selection: Some(selection_count),
+            multi_target: None,
+        }) => {
+            let removal = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RemoveCounter {
+                    counter_type: counter_type.clone(),
+                    count: count.clone(),
+                    target: TargetFilter::TrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                    },
+                },
+            );
+            let mut clause = parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter: target,
+                min: selection_count,
+                max: Some(selection_count),
+                cardinality: Some(ObjectSelectionCardinality::Exactly {
+                    count: selection_count,
+                }),
+                eligibility: Some(ObjectSelectionEligibility::RemovableCounter {
+                    counter_type,
+                    count,
+                }),
+            });
+            clause.sub_ability = Some(Box::new(removal));
+            clause
+        }
         // CR 608.2c: A tracked-set partition with a rest complement ("Put all
         // <filter> revealed this way into your hand and the rest into your
         // graveyard" — Winding Way). The primary mass move sends the chosen
@@ -12708,6 +12748,26 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             target,
             multi_target,
         }) => lower_put_counter_list(entries, target, multi_target),
+        // CR 601.2c + CR 122.1: The targeted fixed-count counterpart of the
+        // untargeted exact-selection grammar retains its announced target
+        // cardinality through lowering.
+        ImperativeFamilyAst::ZoneCounter(
+            ast @ ZoneCounterImperativeAst::RemoveCounter {
+                exact_selection: None,
+                multi_target: Some(_),
+                ..
+            },
+        ) => {
+            let multi_target = match &ast {
+                ZoneCounterImperativeAst::RemoveCounter { multi_target, .. } => {
+                    multi_target.clone()
+                }
+                _ => None,
+            };
+            let mut clause = parsed_clause(lower_zone_counter_ast(ast));
+            clause.multi_target = multi_target;
+            clause
+        }
         // CR 115.1c + CR 601.2c: "Choose target X and target Y" — two
         // independent target slots. Lowered to a primary `Effect::TargetOnly`
         // (slot A) with a chained `TargetOnly` sub_ability (slot B). At
@@ -13852,6 +13912,8 @@ pub(super) fn parse_zone_counter_ast(
                     counter_type,
                     count,
                     target,
+                    exact_selection: remove_counter_exact_selection_count(lower),
+                    multi_target: remove_counter_exact_target_multi_target(lower),
                 }),
                 _ => None,
             };
@@ -14041,6 +14103,8 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             counter_type,
             count,
             target,
+            exact_selection: _,
+            multi_target: _,
         } => Effect::RemoveCounter {
             counter_type,
             count,
@@ -16048,6 +16112,7 @@ mod tests {
                 counter_type: None,
                 count: QuantityExpr::Fixed { value: -1 },
                 target,
+                ..
             }) = result
             else {
                 panic!("{input}: expected anaphoric RemoveCounter (count -1), got {result:?}");
@@ -23310,5 +23375,59 @@ mod tests {
             ),
             "reach-guard: the printed assimilate phrase must produce the Assimilate node"
         );
+    }
+
+    /// SHAPE — CR 115.1d + CR 122.1: A fixed "each of two creatures" counter
+    /// removal is a resolution-time object selection, never two target slots
+    /// (and therefore never a player-target prompt).
+    #[test]
+    fn fixed_each_counter_removal_lowers_to_exact_tracked_set_selection() {
+        let text = "remove a +1/+1 counter from each of two creatures you control";
+        let ast = parse_imperative_family_ast(text, text, &mut ParseContext::default())
+            .expect("fixed untargeted counter-removal phrase must parse");
+        let clause = lower_imperative_family_ast(ast);
+        let Effect::ChooseObjectsIntoTrackedSet {
+            chooser,
+            filter,
+            min,
+            max,
+            cardinality,
+            eligibility,
+            ..
+        } = &clause.effect
+        else {
+            panic!(
+                "fixed each removal must lower to object selection: {:?}",
+                clause.effect
+            );
+        };
+        assert_eq!(*chooser, TargetFilter::Controller);
+        assert!(
+            matches!(filter, TargetFilter::Typed(_)),
+            "the selected objects must retain the creature filter, got {filter:?}"
+        );
+        assert_eq!(*min, 2);
+        assert_eq!(*max, Some(2));
+        assert_eq!(
+            *cardinality,
+            Some(ObjectSelectionCardinality::Exactly { count: 2 })
+        );
+        assert_eq!(
+            eligibility,
+            &Some(ObjectSelectionEligibility::RemovableCounter {
+                counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
+                count: QuantityExpr::Fixed { value: 1 },
+            })
+        );
+        let removal = clause
+            .sub_ability
+            .expect("selection must continue into the counter removal");
+        assert!(matches!(
+            *removal.effect,
+            Effect::RemoveCounter {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ));
     }
 }

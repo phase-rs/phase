@@ -6608,7 +6608,6 @@ mod tests {
             counter_removals,
             PendingCounterRemovalQueue {
                 remaining: Vec::new(),
-                source_id: ObjectId(115),
                 effect_kind: EffectKind::RemoveCounter,
                 source_ability_id: ObjectId(115),
                 total: 0,

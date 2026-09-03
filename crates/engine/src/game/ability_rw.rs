@@ -5811,6 +5811,7 @@ fn rw_effect(
             filter: _,
             min: _,
             max: _,
+            ..
         }
         | Effect::RingTemptsYou
         | Effect::TimeTravel

@@ -54149,6 +54149,7 @@ fn expose_the_culprit_mode2_lowers_to_choose_shuffle_cloak_chain() {
         filter,
         min,
         max,
+        ..
     } = &*head.effect
     else {
         panic!(
@@ -54217,6 +54218,7 @@ fn duneblast_lowers_choose_survivor_then_destroy_rest() {
         filter,
         min,
         max,
+        ..
     } = def.effect.as_ref()
     else {
         panic!("expected tracked-set survivor choice, got {:?}", def.effect);
@@ -54258,6 +54260,7 @@ fn mount_doom_lowers_choose_two_then_destroy_rest() {
         filter,
         min,
         max,
+        ..
     } = def.effect.as_ref()
     else {
         panic!("expected tracked-set survivor choice, got {:?}", def.effect);

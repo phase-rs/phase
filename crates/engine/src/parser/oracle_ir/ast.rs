@@ -1831,6 +1831,13 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: QuantityExpr,
         target: TargetFilter,
+        /// CR 115.1d + CR 122.1: A fixed `each of N <permanents>` phrase is
+        /// an untargeted resolution-time selection, not N target slots.
+        exact_selection: Option<u32>,
+        /// CR 601.2c: A fixed "each of N target <objects>" phrase keeps its
+        /// announced target cardinality instead of becoming an untargeted
+        /// resolution-time selection.
+        multi_target: Option<MultiTargetSpec>,
     },
     /// CR 122.1 + CR 608.2d (Clockspinning sentence 2): "Remove that counter ...
     /// or put another of those counters on it." The single target object is

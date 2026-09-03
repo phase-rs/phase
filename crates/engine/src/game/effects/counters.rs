@@ -14,8 +14,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice, DelayedTrigger, GameState,
     PendingCounterAddition, PendingCounterAdditionQueue, PendingCounterMove,
-    PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemovalQueue,
-    PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
+    PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemoval,
+    PendingCounterRemovalQueue, PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -2680,7 +2680,15 @@ pub fn resolve_remove(
         _ => (Some(CounterType::Plus1Plus1), 1),
     };
 
-    let targets = resolve_defined_or_targets(state, ability);
+    let targets = match &ability.effect {
+        Effect::RemoveCounter {
+            target:
+                target @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }),
+            ..
+        } => crate::game::targeting::resolved_object_ids_for_filter(state, ability, target),
+        _ => resolve_defined_or_targets(state, ability),
+    };
+    let mut remaining = Vec::new();
     for obj_id in targets {
         // Build the list of (counter_type, count) pairs to remove.
         let removals: Vec<(CounterType, u32)> = if let Some(counter_type) = &counter_type {
@@ -2728,27 +2736,23 @@ pub fn resolve_remove(
             }
         };
 
-        for (ct, counter_num) in removals {
-            // CR 614.1: Delegate to the single-authority remove pipeline so
-            // prevention/modification replacements apply and derived fields
-            // (obj.loyalty / obj.defense) stay in lockstep with the counter map.
-            remove_counter_with_replacement(state, obj_id, ct, counter_num, events);
-            // If a replacement requires player choice, suspend and bail — the
-            // continuation re-enters the remove pipeline after the choice resolves.
-            if matches!(
-                state.waiting_for,
-                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
-            ) {
-                return Ok(());
-            }
-        }
+        remaining.extend(removals.into_iter().filter_map(|(counter_type, count)| {
+            (count > 0).then_some(PendingCounterRemoval {
+                object_id: obj_id,
+                counter_type,
+                count,
+            })
+        }));
     }
 
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
+    let total = remaining.iter().map(|entry| entry.count).sum();
+    state.push_counter_removals(PendingCounterRemovalQueue {
+        remaining,
+        effect_kind: EffectKind::from(&ability.effect),
+        source_ability_id: ability.source_id,
+        total,
     });
+    drain_pending_counter_removals(state, events);
 
     Ok(())
 }
@@ -2879,13 +2883,16 @@ pub(crate) fn validate_and_queue_counter_removal(
     pending_effect: &ResolvedAbility,
 ) -> Result<(), EffectError> {
     let total = validate_counter_selection(available, selections)?;
-    let remaining: Vec<(CounterType, u32)> = selections
+    let remaining: Vec<PendingCounterRemoval> = selections
         .iter()
-        .map(|s| (s.counter_type.clone(), s.count))
+        .map(|s| PendingCounterRemoval {
+            object_id: source_id,
+            counter_type: s.counter_type.clone(),
+            count: s.count,
+        })
         .collect();
     state.push_counter_removals(PendingCounterRemovalQueue {
         remaining,
-        source_id,
         effect_kind: EffectKind::from(&pending_effect.effect),
         source_ability_id: pending_effect.source_id,
         total,
@@ -2903,7 +2910,12 @@ pub(crate) fn validate_and_queue_counter_removal(
 /// reading `QuantityRef::EventContextAmount` picks up the removed count.
 pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
     while let Some(mut queue) = state.active_counter_removals().cloned() {
-        let Some((counter_type, count)) = queue.remaining.first().cloned() else {
+        let Some(PendingCounterRemoval {
+            object_id,
+            counter_type,
+            count,
+        }) = queue.remaining.first().cloned()
+        else {
             // CR 608.2h: ordering invariant — stamp the total removed before the
             // terminating EffectResolved (and thus before the continuation drains).
             state.last_effect_count = Some(queue.total as i32);
@@ -2919,13 +2931,12 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
             continue;
         };
         queue.remaining.remove(0);
-        let source_id = queue.source_id;
         state
             .replace_active_counter_removals(queue)
             .expect("re-parked counter-removals queue must own the active frame");
         // CR 614.1: single-authority remove pipeline (applies prevention /
         // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
-        remove_counter_with_replacement(state, source_id, counter_type, count, events);
+        remove_counter_with_replacement(state, object_id, counter_type, count, events);
         // If a replacement needs a player choice, suspend — the ReplacementChoice
         // resume path re-invokes this drain to finish the remaining removals.
         if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
