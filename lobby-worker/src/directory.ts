@@ -180,10 +180,20 @@ const PROBE_OUTCOMES: readonly ProbeOutcome[] = [
 /** The outcomes that describe a GAME rather than a connection attempt.
  *
  *  One set, two consumers — the sanitiser's `game_code` gate and the fold's
- *  announced-players guard. Written twice as a literal disjunction it would be
- *  a silent trap: a fifth outcome added to one site and not the other would
- *  drop every report of that outcome at the guard, with no type error and no
- *  failing test that names it. */
+ *  announced-players guard. The trap this closes is the two sites DISAGREEING,
+ *  and it is worth naming both symptoms because they look nothing alike:
+ *
+ *    - fold has the outcome, sanitiser does not — no `game_code` is ever
+ *      attached, so the guard's `!report.game_code` drops every report of that
+ *      outcome;
+ *    - sanitiser has it, fold does not — the guard is skipped, the report
+ *      reaches the `switch` below, matches no arm (there is no `default`), and
+ *      is counted as accepted while incrementing nothing: a materialised
+ *      bucket and an Analytics Engine point for a report that moved no
+ *      counter.
+ *
+ *  Neither symptom is a type error, and neither has a test that names it. One
+ *  set is what makes the disagreement unrepresentable. */
 const GAME_OUTCOMES: ReadonlySet<ProbeOutcome> = new Set(["game_completed", "game_abandoned"]);
 
 /** One sanitised client report. Every field here survived the allow-list; a

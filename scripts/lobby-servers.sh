@@ -173,7 +173,12 @@ skew_of() { # $1 = remote value, $2 = tree value, $3 = label
       return 0
       ;;
   esac
-  diff=$((tree - remote))
+  # `10#` forces base 10. Bash reads a leading-zero digit string as OCTAL, so
+  # without it a remote reporting "010" scores as 8 — a wrong number, silently,
+  # from the same third-party document the guard above is defending against.
+  # `tree` needs no prefix: it is grepped out of this checkout's Rust source,
+  # not read from a document (see `read_constants`).
+  diff=$((tree - 10#$remote))
   if [ "$diff" -eq 0 ]; then
     printf '%s up to date' "$label"
   elif [ "$diff" -gt 0 ]; then
@@ -184,7 +189,8 @@ skew_of() { # $1 = remote value, $2 = tree value, $3 = label
 }
 
 cmd_list() {
-  local keys key added authority info remote_lobby remote_protocol skew marker
+  local keys key added authority info skew marker
+  local remote_lobby remote_protocol remote_mode remote_version
   keys="$(wrangler_kv key list | jq -r '.[].name')"
   if [ -z "$keys" ]; then
     echo "(the allowlist is empty — GET /servers lists nothing)"
@@ -201,14 +207,20 @@ cmd_list() {
     info="$(curl -sS -m 5 "https://${authority}${INFO_PATH}" 2>/dev/null || true)"
     remote_lobby="$(printf '%s' "$info" | jq -r '.lobby_protocol_version // empty' 2>/dev/null || true)"
     remote_protocol="$(printf '%s' "$info" | jq -r '.protocol_version // empty' 2>/dev/null || true)"
-    if [ -z "$remote_lobby" ] || [ -z "$remote_protocol" ]; then
-      # EITHER value missing is enough. `ServerInfoDocument` declares `mode`,
-      # `protocol_version`, `lobby_protocol_version` and `server_version` all
-      # required, so a document carrying only some of them does not
+    remote_mode="$(printf '%s' "$info" | jq -r '.mode // empty' 2>/dev/null || true)"
+    remote_version="$(printf '%s' "$info" | jq -r '.server_version // empty' 2>/dev/null || true)"
+    if [ -z "$remote_lobby" ] || [ -z "$remote_protocol" ] ||
+       [ -z "$remote_mode" ] || [ -z "$remote_version" ]; then
+      # ANY of the four missing is enough. `ServerInfoDocument` declares
+      # `mode`, `protocol_version`, `lobby_protocol_version` and
+      # `server_version` all required — none is `Option` and none has a serde
+      # default — so a document carrying only some of them does not
       # deserialize, the Worker's verify-by-fetch refuses the announce, and
-      # the server is never listed — a partial document is as fatal as no
-      # document at all, and the marker has to say so.
-      if [ -z "$remote_lobby" ] && [ -z "$remote_protocol" ]; then
+      # the server is never listed. All four are read for that reason, not
+      # only the two this script goes on to print: a document with perfect
+      # version numbers and no `mode` is exactly as dead as an empty one.
+      if [ -z "$remote_lobby" ] && [ -z "$remote_protocol" ] &&
+         [ -z "$remote_mode" ] && [ -z "$remote_version" ]; then
         skew="no info document"
       else
         skew="partial info document"

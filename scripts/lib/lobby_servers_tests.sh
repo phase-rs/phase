@@ -217,7 +217,7 @@ rm -rf "$FIXTURE"
 make_fixture
 printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
 printf '2026-09-02T21:14:07Z' > "$FIXTURE/kv_get.txt"
-printf '{"protocol_version":%d,"lobby_protocol_version":%d}\n' \
+printf '{"mode":"Full","server_version":"0.9.1","protocol_version":%d,"lobby_protocol_version":%d}\n' \
   "$TREE_PROTOCOL" "$TREE_LOBBY_PROTOCOL" > "$FIXTURE/info.json"
 run_script list
 case "$OUT" in
@@ -231,7 +231,7 @@ rm -rf "$FIXTURE"
 # the script rather than a fact about the deployment.
 make_fixture
 printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
-printf '{"protocol_version":%d,"lobby_protocol_version":%d}\n' \
+printf '{"mode":"Full","server_version":"0.9.1","protocol_version":%d,"lobby_protocol_version":%d}\n' \
   "$((TREE_PROTOCOL + 3))" "$((TREE_LOBBY_PROTOCOL + 1))" > "$FIXTURE/info.json"
 run_script list
 case "$OUT" in
@@ -253,7 +253,7 @@ rm -rf "$FIXTURE"
 # word twice here.
 make_fixture
 printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
-printf '{"protocol_version":%d,"lobby_protocol_version":%d}\n' \
+printf '{"mode":"Full","server_version":"0.9.1","protocol_version":%d,"lobby_protocol_version":%d}\n' \
   "$((TREE_PROTOCOL - 4))" "$TREE_LOBBY_PROTOCOL" > "$FIXTURE/info.json"
 run_script list
 case "$OUT" in
@@ -271,7 +271,7 @@ rm -rf "$FIXTURE"
 make_fixture
 printf '[{"name":"wss://bad.example.com/ws"},{"name":"wss://good.example.com/ws"}]\n' \
   > "$FIXTURE/kv_list.json"
-printf '{"protocol_version":"1.2.3","lobby_protocol_version":%d}\n' \
+printf '{"mode":"Full","server_version":"0.9.1","protocol_version":"1.2.3","lobby_protocol_version":%d}\n' \
   "$TREE_LOBBY_PROTOCOL" > "$FIXTURE/info.json"
 run_script list
 if [ "$STATUS" -eq 0 ]; then
@@ -297,7 +297,39 @@ case "$OUT" in
 esac
 rm -rf "$FIXTURE"
 
+# A leading-zero version string. Bash reads `010` as OCTAL 8 unless the
+# arithmetic forces base 10, so before the `10#` prefix this printed a skew of
+# 47 against a tree of 55 where the truth is 45 — a wrong number, silently,
+# from a third-party document.
+make_fixture
+printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
+printf '{"mode":"Full","server_version":"0.9.1","protocol_version":"010","lobby_protocol_version":%d}\n' \
+  "$TREE_LOBBY_PROTOCOL" > "$FIXTURE/info.json"
+run_script list
+case "$OUT" in
+  *"protocol behind by $((TREE_PROTOCOL - 10))"*)
+    ok "a leading-zero version is read as decimal, not octal" ;;
+  *) fail "a leading-zero version is read as decimal, not octal (got: $OUT)" ;;
+esac
+rm -rf "$FIXTURE"
+
 # ── V-U8g: list marks keys the Worker would drop ───────────────────────────
+# A document carrying BOTH version numbers and neither of the other two
+# required fields. Its versions look perfectly healthy, and it is exactly as
+# dead as an empty document: `ServerInfoDocument` requires `mode` and
+# `server_version` too, so it does not deserialize and the announce is
+# refused.
+make_fixture
+printf '[{"name":"wss://play.example.com/ws"}]\n' > "$FIXTURE/kv_list.json"
+printf '{"protocol_version":%d,"lobby_protocol_version":%d}\n' \
+  "$TREE_PROTOCOL" "$TREE_LOBBY_PROTOCOL" > "$FIXTURE/info.json"
+run_script list
+case "$OUT" in
+  *"DROPPED-BY-WORKER?"*) ok "a versions-only document is marked DROPPED-BY-WORKER?" ;;
+  *) fail "a versions-only document is marked DROPPED-BY-WORKER? (got: $OUT)" ;;
+esac
+rm -rf "$FIXTURE"
+
 # A PARTIAL info document. `ServerInfoDocument` requires all four fields, so a
 # document missing `lobby_protocol_version` does not deserialize, the Worker
 # refuses the announce, and the server is never listed — indistinguishable in

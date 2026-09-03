@@ -594,6 +594,25 @@ test("V-U13d: a game outcome needs a game code AND an announced-players window",
   // the next one through.
   assert.equal(noPlayers.counters.has(KNOWN_URL), false);
 
+  // The SAME guard, for the other game outcome. Asserted separately because
+  // the two are not interchangeable here: an unannounced `game_abandoned` that
+  // slipped past would inflate `games_started` without ever incrementing
+  // `games_completed`, which depresses the completion rate of a server that
+  // hosted nothing — the anti-spoof direction the guard exists for. A guard
+  // written to cover only `game_completed` passes every other assertion in
+  // this test.
+  const abandonNoPlayers = foldMetricReports(
+    sanitizeMetricsBatch(batch([{ ...report, outcome: "game_abandoned" }])),
+    new Map([[KNOWN_URL, { buckets: [emptyWindow] }]]),
+    now,
+    BUCKET_MS,
+    WINDOW_MS,
+    EDGES,
+  );
+  assert.equal(abandonNoPlayers.dropped, 1);
+  assert.equal(abandonNoPlayers.accepted.length, 0);
+  assert.equal(abandonNoPlayers.counters.has(KNOWN_URL), false);
+
   // A game code is required even when players were online.
   const populated = { ...emptyWindow, announced_players_max: 2 };
   const noCode = foldMetricReports(
