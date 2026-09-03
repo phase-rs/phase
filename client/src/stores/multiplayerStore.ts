@@ -11,7 +11,13 @@ import type {
   LobbyGame,
   LoopDetectionMode,
   MatchType,
+  PairingId,
   PlayerId,
+  PodOutcome,
+  TournamentCreatedReply,
+  TournamentJoinedReply,
+  TournamentSummary,
+  TournamentUpdateReply,
 } from "../adapter/types";
 import { AdapterError, AdapterErrorCode, isCustomGameFormat } from "../adapter/types";
 import { isFormatConfigShape } from "../adapter/format-config-shape";
@@ -35,6 +41,19 @@ import {
   type RegisterHostRequest,
   type ResolveResult,
 } from "../services/brokerClient";
+import {
+  createTournamentOver,
+  dropFromTournamentOver,
+  endTournamentOver,
+  getTournamentOver,
+  joinTournamentOver,
+  reportMatchResultOver,
+  startTournamentRoundOver,
+  subscribeTournamentsOver,
+  type CreateTournamentRequest,
+  type TournamentRpcResult,
+  type TournamentSubscriptionHandlers,
+} from "../services/tournamentClient";
 import {
   HandshakeError,
   openPhaseSocket,
@@ -134,10 +153,13 @@ let subscriptionFirstOpen: Promise<PhaseSocket | null> | null = null;
 
 /**
  * AbortControllers for in-flight join-adjacent RPCs (`resolveGuest`,
- * `lookupJoinTarget`). On the socket's `reconnecting` transition we abort
- * every pending call so the caller gets a `connection_lost` result
- * immediately rather than waiting for its own timeout. New calls after
- * reconnect use fresh controllers.
+ * `lookupJoinTarget`) and for every tournament RPC issued through
+ * {@link runTournamentRpc} (`createTournament`, `joinTournament`,
+ * `getTournament`, `startTournamentRound`, `reportMatchResult`,
+ * `dropFromTournament`, `endTournament`). On the socket's `reconnecting`
+ * transition we abort every pending call so the caller gets a
+ * `connection_lost` / `aborted` result immediately rather than waiting for its
+ * own timeout. New calls after reconnect use fresh controllers.
  */
 const pendingJoinRpcAborts: Set<AbortController> = new Set();
 
@@ -149,6 +171,10 @@ const pendingJoinRpcAborts: Set<AbortController> = new Set();
  * and only the *last* subscriber leaving sends `UnsubscribeLobby`. This
  * prevents the ref-counting bug where one caller's unsubscribe would
  * silence every other caller on the same shared socket.
+ *
+ * The reference count that governs the shared `SubscribeLobby` frame spans
+ * this set **and** {@link tournamentSubscribers}; see
+ * {@link lobbySubscriptionRefCount}.
  */
 const lobbySubscribers: Set<(games: LobbyGame[]) => void> = new Set();
 /** Most recent `LobbyUpdate` snapshot, used to seed new subscribers. */
@@ -162,6 +188,319 @@ export function findLobbyGameByCode(code: string): LobbyGame | undefined {
 /** Per-socket detach returned by `subscribeLobbyOver`. Re-bound on
  * reconnect; `null` when no socket is attached. */
 let lobbyAttachDetach: (() => void) | null = null;
+
+/**
+ * Registered tournament-broadcast subscribers. Handlers rather than one
+ * callback because the three broadcast streams (`TournamentListUpdate`,
+ * `TournamentUpdate`, `TournamentRemoved`) are independent and a caller
+ * usually renders only one of them.
+ *
+ * This set is the SECOND half of the shared-subscription reference count —
+ * see {@link lobbySubscriptionRefCount}.
+ */
+const tournamentSubscribers: Set<TournamentSubscriptionHandlers> = new Set();
+
+/**
+ * Most recent `TournamentListUpdate`, used to seed subscribers that attach
+ * after the push has already arrived.
+ *
+ * A verbatim cache, never a reduction: the broker sends the whole sorted list
+ * every time (`tournament_summaries()`) and there are no add/update/remove
+ * delta frames, so folding anything in here would be inventing a delta
+ * protocol the server does not speak. In particular `onTournamentRemoved` must
+ * NOT filter this array — a removed tournament stays in the cached list until
+ * the server's next `TournamentListUpdate` replaces it wholesale. Cleared
+ * whenever the shared subscription is released, so a reconnect can never serve
+ * a stale list.
+ */
+let tournamentListSnapshot: TournamentSummary[] | null = null;
+
+/** Per-socket detach returned by `subscribeTournamentsOver`. Re-bound on
+ *  reconnect; `null` when no socket is attached. Sends nothing by design —
+ *  the frames belong to {@link detachSharedSubscription}. */
+let tournamentAttachDetach: (() => void) | null = null;
+
+/**
+ * The single reference count governing the shared `SubscribeLobby` /
+ * `UnsubscribeLobby` pair.
+ *
+ * Broker-side those frames are per-CONNECTION, not per-subscriber:
+ * `SubscribeLobby` inserts this connection's sender into one delivery set
+ * (`AddSubscriber`) and `UnsubscribeLobby` removes it (`RemoveSubscriber`),
+ * so a single removal silences every stream riding this socket regardless of
+ * how many subscribes preceded it. Lobby and tournament subscribers therefore
+ * cannot each keep their own count — the last subscriber of EITHER kind is the
+ * one that may release.
+ *
+ * Derived from set membership rather than an incremented integer on purpose:
+ * `add`/`delete` are idempotent, so a double-subscribe cannot inflate the
+ * count and a double-release cannot drive it negative and strand the
+ * subscription. Callers (including React cleanups that may run twice) need no
+ * discipline for that to hold.
+ */
+function lobbySubscriptionRefCount(): number {
+  return lobbySubscribers.size + tournamentSubscribers.size;
+}
+
+/**
+ * Binds both listeners to `socket` and puts `SubscribeLobby` on the wire.
+ *
+ * The frame is emitted as a side effect of `subscribeLobbyOver`, which owns
+ * both frames (`services/brokerClient.ts`). Attaching the TOURNAMENT listener
+ * here — rather than when the first tournament subscriber appears — is
+ * load-bearing, not tidiness: `SubscribeLobby` triggers exactly one
+ * `ToSelf(TournamentListUpdate)`, there is no request that re-fetches the
+ * list, and the next list push only happens when some other actor mutates a
+ * tournament. A store that attached the tournament listener later would
+ * silently drop that one push whenever a lobby subscriber acquired the
+ * subscription first, and the tournament page would render an empty list
+ * indefinitely.
+ *
+ * For the same reason the two statements below are in this order and must
+ * stay in it: the tournament listener is registered BEFORE the statement that
+ * provokes the reply it needs to catch, because `subscribeLobbyOver`'s own
+ * `ws.send` is what puts `SubscribeLobby` on the wire. Binding it afterwards
+ * would happen to work only by relying on an unwritten, untested fact — that
+ * a `send` cannot deliver its reply within the same synchronous execution
+ * block — which a future refactor (an async `subscribeTournamentsOver`, a
+ * transport that dispatches on a microtask) could quietly invalidate. This
+ * ordering makes the invariant structural instead.
+ */
+function attachSharedSubscription(
+  socket: PhaseSocket,
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+): void {
+  tournamentAttachDetach = subscribeTournamentsOver(socket, {
+    onListUpdate: (tournaments) => {
+      tournamentListSnapshot = tournaments;
+      for (const h of tournamentSubscribers) h.onListUpdate?.(tournaments);
+    },
+    onTournamentUpdate: (code, view) => {
+      for (const h of tournamentSubscribers) h.onTournamentUpdate?.(code, view);
+    },
+    onTournamentRemoved: (code) => {
+      // The tournament is gone server-side; its tokens can never authorize
+      // anything again. Dropped here because this fan-out is the one place
+      // every `TournamentRemoved` arrives, and it stays attached for the whole
+      // life of the shared subscription — so the cleanup happens even when no
+      // page is currently subscribed. That lifetime is also why the helper
+      // must not write when it holds nothing for `code`.
+      //
+      // Deliberately does NOT touch `tournamentListSnapshot`: that cache is a
+      // verbatim copy of the server's last list push, and filtering it here
+      // would invent a delta protocol the broker does not speak.
+      forgetTournamentCredential(set, get, code);
+      for (const h of tournamentSubscribers) h.onTournamentRemoved?.(code);
+    },
+  });
+  lobbyAttachDetach = subscribeLobbyOver(socket, (games) => {
+    lobbySnapshot = games;
+    for (const cb of lobbySubscribers) cb(games);
+  });
+}
+
+/** Releases the shared subscription: detaches both listeners, sends
+ *  `UnsubscribeLobby` (via `subscribeLobbyOver`'s detach, which no-ops on a
+ *  socket that is no longer OPEN), and drops both cached snapshots. */
+function detachSharedSubscription(): void {
+  tournamentAttachDetach?.();
+  tournamentAttachDetach = null;
+  lobbyAttachDetach?.();
+  lobbyAttachDetach = null;
+  lobbySnapshot = null;
+  tournamentListSnapshot = null;
+}
+
+/**
+ * Acquires the shared subscription if it is not already bound to a socket.
+ * Call AFTER adding the new subscriber to its set.
+ *
+ * The predicate is "is it attached?", not "is the count exactly 1": across a
+ * reconnect the count is legitimately > 0 while the handle is null, and
+ * `onStateChange`'s "open" branch re-acquires through this same function.
+ */
+function acquireLobbySubscription(
+  socket: PhaseSocket,
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+): void {
+  if (lobbyAttachDetach !== null) return;
+  attachSharedSubscription(socket, set, get);
+}
+
+/**
+ * Releases the shared subscription once no subscriber of EITHER kind remains.
+ * Call AFTER removing the departing subscriber from its set.
+ */
+function releaseLobbySubscription(): void {
+  if (lobbySubscriptionRefCount() > 0) return;
+  detachSharedSubscription();
+}
+
+/**
+ * Drops a tournament's credentials, and genuinely no-ops when nothing is held
+ * for `code` — no `set` call, therefore no `persist` write.
+ *
+ * The presence test reads through `get` rather than being made inside the
+ * updater. Returning `{}` from a zustand updater does leave the state
+ * reference unchanged (so credential consumers do not re-render), but the
+ * `set` still runs and `persist` still serializes the whole partition to
+ * `localStorage`. This fan-out is attached for the entire life of the shared
+ * subscription and fires for every `TournamentRemoved` on the server —
+ * including the overwhelming majority this browser holds no credential for —
+ * so the miss path has to be free.
+ */
+function forgetTournamentCredential(
+  set: MultiplayerSet,
+  get: MultiplayerGet,
+  code: string,
+): void {
+  if (!(code in get().tournamentCredentials)) return;
+  set((state) => {
+    const next = { ...state.tournamentCredentials };
+    delete next[code];
+    return { tournamentCredentials: next };
+  });
+}
+
+/**
+ * Which authority a gated tournament RPC requires. A closed union naming the
+ * domain concept, not the storage field: adding a third authority later is a
+ * new member plus one compile error at the switch below, not a third runner.
+ */
+export type TournamentRole = "organizer" | "player";
+
+/**
+ * A gated action refused by THIS STORE, before any frame existed.
+ *
+ * Deliberately not `reason: "rejected"`. `TournamentRpcFailureReason` is the
+ * WIRE vocabulary — each of its four members documents something the transport
+ * or the broker did, and `"rejected"` specifically means "the broker answered
+ * `Error`; `message` is its text verbatim" (`services/tournamentClient.ts`).
+ * A local refusal contacted no broker and carries client-authored copy, so
+ * filing it under `"rejected"` would both falsify that contract and leave a
+ * consumer no way to tell the two apart except by matching English message
+ * text. `role` is carried so a consumer can pick its copy (and later, its
+ * i18n key) from a typed field rather than from the message.
+ *
+ * It lives here rather than as a fifth `TournamentRpcFailureReason` member
+ * because `tournamentClient.ts` is the wire layer and this is a store-level
+ * fact — and because that file is frozen by the time this store is written.
+ */
+export interface TournamentNotAuthorized {
+  ok: false;
+  reason: "not_authorized";
+  /** The authority that was required and not held. */
+  role: TournamentRole;
+  /** Human-readable fallback. Phase 3/5 replace this with a `t()` lookup keyed
+   *  off {@link TournamentNotAuthorized.role}; see the i18n boundary note. */
+  message: string;
+}
+
+/**
+ * What a token-gated tournament action resolves to: the wire result, widened
+ * by exactly one locally-produced failure member. Every failure member keeps
+ * the same `{ ok: false; reason; message }` skeleton, so `if (!r.ok)`
+ * narrowing works uniformly and `r.reason === "not_authorized"` narrows
+ * further to the member carrying `role`.
+ */
+export type GatedTournamentRpcResult<T> =
+  | TournamentRpcResult<T>
+  | TournamentNotAuthorized;
+
+/**
+ * Single authority for giving a tournament RPC its socket and its abort
+ * registration. Follows `resolveGuest` exactly: acquire lazily, register an
+ * `AbortController` so a `reconnecting` transition or a teardown cuts the wait
+ * short, and remove it in `finally`. It never closes a socket — the socket
+ * belongs to `ensureSubscriptionSocket` / `closeSubscriptionSocket`.
+ */
+async function runTournamentRpc<T>(
+  get: MultiplayerGet,
+  send: (
+    socket: PhaseSocket,
+    signal: AbortSignal,
+  ) => Promise<TournamentRpcResult<T>>,
+): Promise<TournamentRpcResult<T>> {
+  const socket = await get().ensureSubscriptionSocket();
+  if (!socket) {
+    return {
+      ok: false,
+      reason: "connection_lost",
+      message: "Lobby connection unavailable. Check your server address.",
+    };
+  }
+  const ac = new AbortController();
+  pendingJoinRpcAborts.add(ac);
+  try {
+    return await send(socket, ac.signal);
+  } finally {
+    pendingJoinRpcAborts.delete(ac);
+  }
+}
+
+/**
+ * Single authority for token-gated tournament RPCs. Resolves the required
+ * authority for `code` and refuses locally when it is absent — before any
+ * socket is opened, so a call with no credential costs nothing and puts
+ * nothing on the wire.
+ *
+ * Call sites never read `tournamentCredentials` themselves: a caller that
+ * inspects which token an action needs is one refactor away from sending the
+ * wrong tournament's token, and a caller that re-reads the map to explain a
+ * failure has become a second authority that can disagree with this one (the
+ * fan-out deletes entries asynchronously).
+ *
+ * Two distinguishable failure shapes, deliberately:
+ *  - `{reason: "not_authorized", role}` — decided HERE, from this store's own
+ *    map, with certainty. Nothing was sent.
+ *  - any `TournamentRpcFailureReason` — decided by the transport or the
+ *    broker. Note in particular that `"rejected"` inherits the caution below
+ *    and is NOT a reliable "the server refused me" signal.
+ *
+ * Caution for consumers (`services/tournamentClient.ts`, module header part 4):
+ * the four gated RPCs settle on a `TournamentUpdate` BROADCAST, which carries
+ * no request-vs-broadcast discriminator, so a wire-level `{ok:false}` here is
+ * not a reliable "the server rejected me" signal. Nothing in this store mutates
+ * state on a gated failure for exactly that reason.
+ */
+async function runGatedTournamentRpc<T>(
+  get: MultiplayerGet,
+  code: string,
+  role: TournamentRole,
+  send: (
+    socket: PhaseSocket,
+    token: string,
+    signal: AbortSignal,
+  ) => Promise<TournamentRpcResult<T>>,
+): Promise<GatedTournamentRpcResult<T>> {
+  const held = get().tournamentCredentials[code];
+  let token: string | undefined;
+  switch (role) {
+    case "organizer":
+      token = held?.organizerToken;
+      break;
+    case "player":
+      token = held?.playerToken;
+      break;
+  }
+  if (token === undefined) {
+    return {
+      ok: false,
+      reason: "not_authorized",
+      role,
+      message:
+        role === "organizer"
+          ? "You are not the organizer of this tournament."
+          : "You are not entered in this tournament.",
+    };
+  }
+  const heldToken = token;
+  return runTournamentRpc(get, (socket, signal) =>
+    send(socket, heldToken, signal),
+  );
+}
 
 export interface AiSeatConfig {
   seatIndex: number;
@@ -281,6 +620,15 @@ interface MultiplayerState {
   /** Last host-setup form choices, persisted across sessions. `null` until the
    *  player has hosted at least once. See {@link RememberedHostConfig}. */
   lastHostConfig: RememberedHostConfig | null;
+  /**
+   * Tournament code → bearer credentials this browser holds. Persisted:
+   * `organizer_token` and `player_token` are minted once in a point reply and
+   * never re-sent, so losing them is unrecoverable. A plain object, not a
+   * `Map` — `partialize` runs through JSON, where a `Map` serializes to `{}`.
+   * Bounded by {@link MAX_TOURNAMENT_CREDENTIALS}; entries are dropped on
+   * `TournamentRemoved`.
+   */
+  tournamentCredentials: Record<string, TournamentCredential>;
   playerSlots: PlayerSlot[];
   spectators: string[];
   isSpectator: boolean;
@@ -409,6 +757,56 @@ interface MultiplayerActions {
   subscribeLobby: (
     onUpdate: (games: LobbyGame[]) => void,
   ) => Promise<(() => void) | null>;
+  /**
+   * Subscribe to tournament broadcasts over the shared subscription socket.
+   * Returns a detach function, or `null` when the socket could not be opened.
+   *
+   * Shares ONE `SubscribeLobby` reference count with {@link subscribeLobby}:
+   * the first subscriber of either kind sends the frame and only the last one
+   * of either kind sends `UnsubscribeLobby`. Callers should not await the
+   * result before their cleanup can run — follow `LobbyView.tsx`'s
+   * `if (cancelled) { detach?.(); return; }` idiom.
+   */
+  subscribeTournaments: (
+    handlers: TournamentSubscriptionHandlers,
+  ) => Promise<(() => void) | null>;
+  /** Create a tournament and remember its organizer token. */
+  createTournament: (
+    req: CreateTournamentRequest,
+  ) => Promise<TournamentRpcResult<TournamentCreatedReply>>;
+  /** Join a tournament and remember its player token and player key. */
+  joinTournament: (
+    code: string,
+    displayName?: string,
+  ) => Promise<TournamentRpcResult<TournamentJoinedReply>>;
+  /** Fetch one tournament's current view. Ungated — codes are public. */
+  getTournament: (
+    code: string,
+  ) => Promise<TournamentRpcResult<TournamentUpdateReply>>;
+  /**
+   * Organizer-gated. When no organizer token is held for `code` this resolves
+   * `{ok:false, reason:"not_authorized", role:"organizer"}` locally, with no
+   * wire traffic — a shape distinct from every `TournamentRpcFailureReason`,
+   * so a consumer can pick "you are not the organizer" copy without inspecting
+   * `message`.
+   */
+  startTournamentRound: (
+    code: string,
+  ) => Promise<GatedTournamentRpcResult<TournamentUpdateReply>>;
+  /** Organizer-gated, same local-refusal contract. */
+  endTournament: (
+    code: string,
+  ) => Promise<GatedTournamentRpcResult<TournamentUpdateReply>>;
+  /** Player-gated; local refusal carries `role: "player"`. */
+  reportMatchResult: (
+    code: string,
+    pairingId: PairingId,
+    outcome: PodOutcome,
+  ) => Promise<GatedTournamentRpcResult<TournamentUpdateReply>>;
+  /** Player-gated, same local-refusal contract. */
+  dropFromTournament: (
+    code: string,
+  ) => Promise<GatedTournamentRpcResult<TournamentUpdateReply>>;
   /**
    * Join a server-hosted draft room. Creates a ServerDraftAdapter and uses
    * its joinDraft method, then stores the adapter and initial view.
@@ -540,6 +938,152 @@ export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = Object.fromEntr
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
+}
+
+/**
+ * Per-tournament bearer credentials this browser holds.
+ *
+ * The two token fields are independently optional on purpose, and this is NOT
+ * a discriminated union waiting to be tidied into one: an organizer may also
+ * join their own event, so one code can legitimately carry BOTH authorities at
+ * once. This is the normal path, not an exotic one — `CreateTournament` does
+ * not auto-join the creator, so an organizer who also wants to play issues a
+ * separate `JoinTournament` on the same code. Each token is minted by the
+ * broker in a point reply (`TournamentCreated.organizer_token`,
+ * `TournamentJoined.player_token`) and is never broadcast — losing it is
+ * unrecoverable, which is why this map is persisted rather than held in memory.
+ */
+export interface TournamentCredential {
+  /** Organizer authority for this code. Present iff this browser created it. */
+  organizerToken?: string;
+  /** Entrant authority for this code. Present iff this browser joined it. */
+  playerToken?: string;
+  /**
+   * The `player_key` this browser joined under — the identity every later
+   * `TournamentView` keys on (`PlayerSummary.player_key`). Stored beside the
+   * token rather than re-derived from `playerId` at read time so "which entrant
+   * am I in THIS event" stays answerable even if the ambient id ever changes.
+   */
+  playerKey?: string;
+  /** ms epoch of the last write. The eviction key; never rendered. */
+  updatedAt: number;
+}
+
+/**
+ * Cap on retained tournament credentials. Bounded because this map is
+ * persisted and grows once per event the player touches, with no natural
+ * shrink other than `TournamentRemoved` (which only fires while subscribed).
+ */
+export const MAX_TOURNAMENT_CREDENTIALS = 32;
+
+/**
+ * Trims the credential map to {@link MAX_TOURNAMENT_CREDENTIALS}, evicting
+ * least-recently-written first.
+ *
+ * `protect` is never evicted — without it a write made under a frozen or
+ * coarse clock (every entry sharing one `updatedAt`) could evict the very
+ * entry that caused the overflow, whenever that entry also happens to sort
+ * first by `code`.
+ *
+ * Ordering is `(updatedAt, code)`. `updatedAt` is the real key and carries the
+ * LRU semantics; `code` is a pure tiebreak, present so that a clock tie cannot
+ * hand the decision to `Object.keys`. Key order is not a safe fallback: JS
+ * enumerates *canonical array-index* string keys ("9", "40" — strings that
+ * round-trip through `ToString(ToUint32(k))`) in ascending numeric order ahead
+ * of every other key's insertion order, so an all-digit tournament code would
+ * otherwise make eviction depend on how the code happens to spell a number.
+ * Note this hazard applies only to unpadded codes: "0001" does not round-trip
+ * and is therefore insertion-ordered like any other string.
+ */
+function capTournamentCredentials(
+  map: Record<string, TournamentCredential>,
+  protect?: string,
+): Record<string, TournamentCredential> {
+  const codes = Object.keys(map);
+  const overflow = codes.length - MAX_TOURNAMENT_CREDENTIALS;
+  if (overflow <= 0) return map;
+
+  const victims = codes
+    .filter((code) => code !== protect)
+    .sort(
+      (a, b) =>
+        map[a].updatedAt - map[b].updatedAt || (a < b ? -1 : a > b ? 1 : 0),
+    )
+    .slice(0, overflow);
+
+  const next = { ...map };
+  for (const victim of victims) delete next[victim];
+  return next;
+}
+
+/**
+ * Returns a new credential map with `patch` merged into `code`'s entry.
+ *
+ * Merging, not replacing: create-then-join on the same code accumulates both
+ * authorities (see {@link TournamentCredential}). `now` is injectable so the
+ * eviction tests are deterministic.
+ */
+export function rememberTournamentCredential(
+  existing: Readonly<Record<string, TournamentCredential>>,
+  code: string,
+  patch: Omit<Partial<TournamentCredential>, "updatedAt">,
+  now: number = Date.now(),
+): Record<string, TournamentCredential> {
+  const merged: Record<string, TournamentCredential> = {
+    ...existing,
+    [code]: { ...existing[code], ...patch, updatedAt: now },
+  };
+  return capTournamentCredentials(merged, code);
+}
+
+/**
+ * Rehydration guard. Persisted state is external input (see this store's
+ * `merge`), so a blob may be hand-edited, truncated, or written by a build
+ * whose shape or cap differed. Entries carrying no authority at all are
+ * dropped: a credential with neither token is not a credential.
+ *
+ * Accepted edge case, stated rather than guarded: an array also satisfies the
+ * object check `isRecord` performs, so `normalizeTournamentCredentials([...])`
+ * clears the top-level guard and enumerates numeric indices as if they were
+ * tournament codes. Each such "entry" would still have to be an object
+ * carrying a string `organizerToken` or `playerToken` to survive the per-entry
+ * validation below, so the result is a narrow, harmless edge case rather than
+ * a functional gap.
+ *
+ * `isRecord` is deliberately NOT narrowed to fix this. It is file-local and in
+ * this phase's scope, but it has five other callers —
+ * `normalizeRememberedHostConfig`, the `formatConfig` / `deck_size` projection,
+ * the `loopDetection` guard and the seat validation — whose current behavior,
+ * array-acceptance included, is load-bearing for the remembered-host-config and
+ * migration paths. Tightening a shared predicate for one new caller's benefit is
+ * an unscoped behavior change to five unrelated call sites, which is not
+ * something this change should do as a side effect of adding a sixth.
+ */
+export function normalizeTournamentCredentials(
+  persisted: unknown,
+): Record<string, TournamentCredential> {
+  if (!isRecord(persisted)) return {};
+  const out: Record<string, TournamentCredential> = {};
+  for (const [code, raw] of Object.entries(persisted)) {
+    if (!isRecord(raw)) continue;
+    const organizerToken =
+      typeof raw.organizerToken === "string" ? raw.organizerToken : undefined;
+    const playerToken =
+      typeof raw.playerToken === "string" ? raw.playerToken : undefined;
+    const playerKey =
+      typeof raw.playerKey === "string" ? raw.playerKey : undefined;
+    if (organizerToken === undefined && playerToken === undefined) continue;
+    out[code] = {
+      ...(organizerToken !== undefined ? { organizerToken } : {}),
+      ...(playerToken !== undefined ? { playerToken } : {}),
+      ...(playerKey !== undefined ? { playerKey } : {}),
+      updatedAt:
+        typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt)
+          ? raw.updatedAt
+          : 0,
+    };
+  }
+  return capTournamentCredentials(out);
 }
 
 function isIntegerInRange(value: unknown, upperBound: number): value is number {
@@ -1002,6 +1546,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       toasts: new Map(),
       formatConfig: null,
       lastHostConfig: null,
+      tournamentCredentials: {},
       playerSlots: [],
       spectators: [],
       isSpectator: false,
@@ -1597,16 +2142,14 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                   const socket = subscriptionReconnect?.current() ?? null;
                   if (socket) {
                     set({ serverInfo: socket.serverInfo });
-                    // Re-attach the single multiplexed lobby listener if
-                    // any subscribers are registered. The first snapshot
-                    // from the server will overwrite `lobbySnapshot` and
-                    // fan-out; stale cached data is not authoritative
-                    // across a reconnect.
-                    if (lobbySubscribers.size > 0) {
-                      lobbyAttachDetach = subscribeLobbyOver(socket, (games) => {
-                        lobbySnapshot = games;
-                        for (const cb of lobbySubscribers) cb(games);
-                      });
+                    // Re-attach the shared subscription if anyone still wants
+                    // it — a tournament subscriber alone is reason enough, and
+                    // gating this on `lobbySubscribers` would leave a
+                    // tournament-only page silently dead after a reconnect.
+                    // The first snapshot from the server overwrites the caches;
+                    // stale data is not authoritative across a reconnect.
+                    if (lobbySubscriptionRefCount() > 0) {
+                      acquireLobbySubscription(socket, set, get);
                     }
                   }
                   settle(socket);
@@ -1617,9 +2160,17 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                   // use fresh controllers and are unaffected.
                   for (const ac of pendingJoinRpcAborts) ac.abort();
                   pendingJoinRpcAborts.clear();
-                  // Drop the handle to the old socket's listener; it
-                  // will be re-bound on the next "open".
+                  // Drop the handles to the old socket's listeners; they are
+                  // re-bound on the next "open". Not invoked: the old socket is
+                  // gone, and `subscribeLobbyOver`'s detach is `readyState`-
+                  // guarded, so calling it could only remove listeners from a
+                  // socket that is being discarded anyway.
                   lobbyAttachDetach = null;
+                  tournamentAttachDetach = null;
+                  // Both caches are per-socket-generation; a reconnect must not
+                  // seed a new subscriber from a pre-drop snapshot.
+                  lobbySnapshot = null;
+                  tournamentListSnapshot = null;
                 } else if (state === "offline") {
                   // Reconnect exhausted. Caller's `ensureSubscriptionSocket`
                   // resolves `null` so fallback UI renders. Also drain any
@@ -1641,10 +2192,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       closeSubscriptionSocket: () => {
         for (const ac of pendingJoinRpcAborts) ac.abort();
         pendingJoinRpcAborts.clear();
-        lobbyAttachDetach?.();
-        lobbyAttachDetach = null;
+        // Unconditional teardown of the shared subscription, both kinds.
+        // `detachSharedSubscription` nulls both handles and both snapshots.
+        detachSharedSubscription();
         lobbySubscribers.clear();
-        lobbySnapshot = null;
+        tournamentSubscribers.clear();
         subscriptionReconnect?.close();
         subscriptionReconnect = null;
       },
@@ -1719,32 +2271,115 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       subscribeLobby: async (onUpdate) => {
         const socket = await get().ensureSubscriptionSocket();
         if (!socket) return null;
-        const wasEmpty = lobbySubscribers.size === 0;
         lobbySubscribers.add(onUpdate);
-        // First subscriber sends `SubscribeLobby`. Later subscribers ride
-        // the same upstream attachment — sending the frame again per
-        // subscriber, then detaching on their own cleanup, would send
-        // `UnsubscribeLobby` on the shared socket and silence every
-        // other subscriber (the ref-counting bug this structure fixes).
-        if (wasEmpty) {
-          lobbyAttachDetach = subscribeLobbyOver(socket, (games) => {
-            lobbySnapshot = games;
-            for (const cb of lobbySubscribers) cb(games);
-          });
-        } else if (lobbySnapshot) {
-          // Immediate seed for late subscribers so they don't wait on
-          // the next server push to render anything.
+        // Acquire against the count that spans BOTH subscriber kinds: a
+        // tournament subscriber may already hold the subscription, in which
+        // case this must not re-send `SubscribeLobby`.
+        acquireLobbySubscription(socket, set, get);
+        if (lobbySnapshot) {
+          // Immediate seed so a late subscriber renders without waiting for
+          // the next server push. Unconditional (not an `else`): under the
+          // unified count the very first LOBBY subscriber can still arrive
+          // to an existing snapshot, because a tournament subscriber may
+          // have acquired the subscription first and the `LobbyUpdate` push
+          // may already have landed.
           onUpdate(lobbySnapshot);
         }
         return () => {
           lobbySubscribers.delete(onUpdate);
-          if (lobbySubscribers.size === 0) {
-            lobbyAttachDetach?.();
-            lobbyAttachDetach = null;
-            lobbySnapshot = null;
-          }
+          // Only the last subscriber of EITHER kind may release — see
+          // `lobbySubscriptionRefCount`.
+          releaseLobbySubscription();
         };
       },
+
+      subscribeTournaments: async (handlers) => {
+        const socket = await get().ensureSubscriptionSocket();
+        if (!socket) return null;
+        tournamentSubscribers.add(handlers);
+        // First subscriber of EITHER kind puts `SubscribeLobby` on the wire.
+        // That frame is not optional for tournaments: `AddSubscriber` is the
+        // only path into the broker's delivery set, and its
+        // `ToSelf(TournamentListUpdate)` is the only way this client ever
+        // learns the list without waiting on someone else's mutation.
+        acquireLobbySubscription(socket, set, get);
+        if (tournamentListSnapshot) {
+          handlers.onListUpdate?.(tournamentListSnapshot);
+        }
+        return () => {
+          tournamentSubscribers.delete(handlers);
+          releaseLobbySubscription();
+        };
+      },
+
+      createTournament: async (req) =>
+        runTournamentRpc(get, async (socket, signal) => {
+          const result = await createTournamentOver(socket, req, { signal });
+          if (result.ok) {
+            // Keyed by the code in the REPLY: `CreateTournament` carries no
+            // client-chosen code (the broker mints it), so the reply is the
+            // only authority for which tournament this token opens.
+            set((state) => ({
+              tournamentCredentials: rememberTournamentCredential(
+                state.tournamentCredentials,
+                result.value.code,
+                { organizerToken: result.value.organizer_token },
+              ),
+            }));
+          }
+          return result;
+        }),
+
+      joinTournament: async (code, displayName) =>
+        runTournamentRpc(get, async (socket, signal) => {
+          // Captured BEFORE the await so the credential records the key that
+          // was actually sent, not whatever `playerId` reads as afterwards.
+          const playerKey = get().playerId;
+          const result = await joinTournamentOver(
+            socket,
+            code,
+            playerKey,
+            displayName || get().displayName || "Player",
+            { signal },
+          );
+          if (result.ok) {
+            set((state) => ({
+              tournamentCredentials: rememberTournamentCredential(
+                state.tournamentCredentials,
+                result.value.code,
+                { playerToken: result.value.player_token, playerKey },
+              ),
+            }));
+          }
+          return result;
+        }),
+
+      getTournament: async (code) =>
+        runTournamentRpc(get, (socket, signal) =>
+          getTournamentOver(socket, code, { signal }),
+        ),
+
+      startTournamentRound: async (code) =>
+        runGatedTournamentRpc(get, code, "organizer", (socket, token, signal) =>
+          startTournamentRoundOver(socket, code, token, { signal }),
+        ),
+
+      endTournament: async (code) =>
+        runGatedTournamentRpc(get, code, "organizer", (socket, token, signal) =>
+          endTournamentOver(socket, code, token, { signal }),
+        ),
+
+      reportMatchResult: async (code, pairingId, outcome) =>
+        runGatedTournamentRpc(get, code, "player", (socket, token, signal) =>
+          reportMatchResultOver(socket, code, pairingId, token, outcome, {
+            signal,
+          }),
+        ),
+
+      dropFromTournament: async (code) =>
+        runGatedTournamentRpc(get, code, "player", (socket, token, signal) =>
+          dropFromTournamentOver(socket, code, token, { signal }),
+        ),
     }),
     {
       name: "phase-multiplayer",
@@ -1785,6 +2420,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           ...current,
           ...saved,
           lastHostConfig: normalizeRememberedHostConfig(saved.lastHostConfig),
+          tournamentCredentials: normalizeTournamentCredentials(
+            saved.tournamentCredentials,
+          ),
         };
       },
       partialize: (state) => ({
@@ -1792,6 +2430,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         displayName: state.displayName,
         serverAddress: state.serverAddress,
         lastHostConfig: state.lastHostConfig,
+        tournamentCredentials: state.tournamentCredentials,
       }),
     },
   ),
