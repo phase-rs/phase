@@ -73,7 +73,7 @@ export const CARD_PREVIEW_HOVER_DELAY_MIN = 0;
 export const CARD_PREVIEW_HOVER_DELAY_MAX = 1000;
 export const CARD_PREVIEW_HOVER_DELAY_STEP = 50;
 export type HudLayout = "inline" | "floating";
-export type LogDefaultState = "open" | "closed";
+export type LogPanelVisibility = "open" | "closed";
 export type BattlefieldCardDisplay = "art_crop" | "full_card";
 /** How the command zone (commander card, tax, emblems, commander damage) is laid
  *  out. "inline" = a bounded always-visible corner dock; "compact" = a collapsed
@@ -278,7 +278,7 @@ function buildDefaultPreferences(): PreferencesState {
     cardSize: "medium",
     hudLayout: "inline",
     followActiveOpponent: true,
-    logDefaultState: "closed",
+    logPanelLastChoice: "open",
     boardBackground: "auto-wubrg",
     customBackgroundUrl: "",
     vfxQuality: "full",
@@ -343,7 +343,7 @@ interface PreferencesState {
   cardSize: CardSizePreference;
   hudLayout: HudLayout;
   followActiveOpponent: boolean;
-  logDefaultState: LogDefaultState;
+  logPanelLastChoice: LogPanelVisibility;
   boardBackground: BoardBackground;
   customBackgroundUrl: string;
   vfxQuality: VfxQuality;
@@ -458,7 +458,7 @@ interface PreferencesActions {
   setOpponentHudDensity: (density: OpponentHudDensity) => void;
   setMultiplayerBoardLayout: (layout: MultiplayerBoardLayout) => void;
   setMultiplayerSplitLayoutNudgeDismissed: (dismissed: boolean) => void;
-  setLogDefaultState: (state: LogDefaultState) => void;
+  setLogPanelLastChoice: (state: LogPanelVisibility) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
   setVfxQuality: (quality: VfxQuality) => void;
@@ -604,7 +604,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setMultiplayerBoardLayout: (layout) => set({ multiplayerBoardLayout: layout }),
       setMultiplayerSplitLayoutNudgeDismissed: (dismissed) =>
         set({ multiplayerSplitLayoutNudgeDismissed: dismissed }),
-      setLogDefaultState: (state) => set({ logDefaultState: state }),
+      setLogPanelLastChoice: (state) => set({ logPanelLastChoice: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
       setVfxQuality: (quality) => set({ vfxQuality: quality }),
@@ -820,7 +820,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 33,
+      version: 34,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -895,6 +895,14 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          already dismissed for an existing user.
       // v32 → v33: Add logDockSide; existing and malformed stores reset to the
       //          prior fixed-right behavior.
+      // v33 → v34: Replace the configurable logDefaultState with logPanelLastChoice
+      //          — the game log now simply remembers how the user last left it and
+      //          there is no Gameplay control for it. Every existing store adopts
+      //          "open": for almost every store the old "closed" was the un-chosen
+      //          default rather than a deliberate choice, and closing the panel
+      //          once is now remembered. The legacy key is dropped so it cannot
+      //          linger in the persisted blob. Mobile never auto-opens regardless,
+      //          so this is a desktop-only behavior change.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -1086,6 +1094,12 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
 
         if (version < 33) {
           migrated = { ...migrated, logDockSide: "right" };
+        }
+
+        if (version < 34) {
+          const { logDefaultState: _legacyLogDefault, ...rest } = migrated;
+          void _legacyLogDefault;
+          migrated = { ...rest, logPanelLastChoice: "open" };
         }
 
         return {

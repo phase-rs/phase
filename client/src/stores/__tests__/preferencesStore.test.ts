@@ -11,7 +11,7 @@ describe("preferencesStore", () => {
         cardSize: "medium",
         hudLayout: "inline",
         followActiveOpponent: false,
-        logDefaultState: "closed",
+        logPanelLastChoice: "closed",
         logDockSide: "right",
         boardBackground: "auto-wubrg",
         vfxQuality: "full",
@@ -41,7 +41,7 @@ describe("preferencesStore", () => {
     expect(state.cardSize).toBe("medium");
     expect(state.hudLayout).toBe("inline");
     expect(state.followActiveOpponent).toBe(false);
-    expect(state.logDefaultState).toBe("closed");
+    expect(usePreferencesStore.getInitialState().logPanelLastChoice).toBe("open");
     expect(usePreferencesStore.getInitialState().logDockSide).toBe("right");
     expect(state.boardBackground).toBe("auto-wubrg");
     // Read the store's real initialization snapshot (the getInitialState idiom
@@ -129,12 +129,12 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().followActiveOpponent).toBe(true);
   });
 
-  it("setLogDefaultState updates log default state", () => {
+  it("setLogPanelLastChoice updates the remembered log visibility", () => {
     act(() => {
-      usePreferencesStore.getState().setLogDefaultState("open");
+      usePreferencesStore.getState().setLogPanelLastChoice("open");
     });
 
-    expect(usePreferencesStore.getState().logDefaultState).toBe("open");
+    expect(usePreferencesStore.getState().logPanelLastChoice).toBe("open");
   });
 
   it("persists the game-log dock side and reset restores the right dock", () => {
@@ -288,7 +288,7 @@ describe("preferencesStore", () => {
     const state = usePreferencesStore.getState();
     expect(state.cardSize).toBe("medium");
     expect(state.hudLayout).toBe("inline");
-    expect(state.logDefaultState).toBe("closed");
+    expect(state.logPanelLastChoice).toBe("closed");
     expect(state.boardBackground).toBe("auto-wubrg");
   });
 
@@ -314,7 +314,7 @@ describe("preferencesStore", () => {
   it("normalizes a current-version persisted locale before consumers can use it", () => {
     localStorage.setItem(
       "phase-preferences",
-      JSON.stringify({ state: { language: "pt-BR" }, version: 33 }),
+      JSON.stringify({ state: { language: "pt-BR" }, version: 34 }),
     );
 
     act(() => usePreferencesStore.persist.rehydrate());
@@ -325,7 +325,7 @@ describe("preferencesStore", () => {
   it("falls back from an unsupported current-version persisted locale", () => {
     localStorage.setItem(
       "phase-preferences",
-      JSON.stringify({ state: { language: "zh-Hans" }, version: 33 }),
+      JSON.stringify({ state: { language: "zh-Hans" }, version: 34 }),
     );
 
     act(() => usePreferencesStore.persist.rehydrate());
@@ -346,12 +346,24 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().logDockSide).toBe("right");
   });
 
+  it("migrates a pre-v34 closed log default to open", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { logDefaultState: "closed" }, version: 33 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().logPanelLastChoice).toBe("open");
+    expect(usePreferencesStore.getState()).not.toHaveProperty("logDefaultState");
+  });
+
   it.each([undefined, "middle", 7])("resets an invalid current log-dock value (%j) to right", (logDockSide) => {
     localStorage.setItem(
       "phase-preferences",
       JSON.stringify({
         state: logDockSide === undefined ? {} : { logDockSide },
-        version: 33,
+        version: 34,
       }),
     );
 
@@ -596,7 +608,6 @@ describe("preferencesStore", () => {
         cardSize: "large",
         hudLayout: "floating",
         followActiveOpponent: true,
-        logDefaultState: "open",
         boardBackground: "green",
       },
       version: 0,
@@ -612,7 +623,10 @@ describe("preferencesStore", () => {
     expect(state.cardSize).toBe("large");
     expect(state.hudLayout).toBe("floating");
     expect(state.followActiveOpponent).toBe(true);
-    expect(state.logDefaultState).toBe("open");
+    // `logPanelLastChoice` is deliberately NOT asserted here: the v33→v34 migration
+    // rewrites it unconditionally, so on this legacy blob it would pass whatever
+    // the seed said and would measure nothing. The real default is asserted via
+    // getInitialState() above, and the migration itself has its own test.
     expect(state.boardBackground).toBe("green");
   });
 

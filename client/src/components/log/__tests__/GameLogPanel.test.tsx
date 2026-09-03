@@ -89,7 +89,7 @@ describe("GameLogPanel", () => {
       gameState: buildGameState({ waiting_for: buildPriorityWaitingFor() }),
       logHistory: [entry(0, "Initial event")],
     });
-    usePreferencesStore.setState({ logDefaultState: "closed", logDockSide: "right" });
+    usePreferencesStore.setState({ logPanelLastChoice: "open", logDockSide: "right" });
     useUiStore.setState({
       logPanelOpen: true,
       flexEditMode: false,
@@ -233,6 +233,7 @@ describe("GameLogPanel", () => {
   });
 
   it("opens a closed panel when the game ends and can then be dismissed", () => {
+    usePreferencesStore.setState({ logPanelLastChoice: "closed" });
     useUiStore.setState({ logPanelOpen: false });
     render(<GameLogPanel />);
 
@@ -270,7 +271,7 @@ describe("GameLogPanel", () => {
     expect(screen.getByText("AI draws a card")).toBeInTheDocument();
   });
 
-  it("shares the panel node with drag behavior and closes only from outside interaction", () => {
+  it("shares the panel node with drag behavior and stays open through outside interaction", () => {
     render(<GameLogPanel />);
 
     const panel = screen.getByRole("region", { name: "Game log panel" });
@@ -279,7 +280,97 @@ describe("GameLogPanel", () => {
     fireEvent.mouseDown(panel);
     expect(useUiStore.getState().logPanelOpen).toBe(true);
     fireEvent.mouseDown(document.body);
+    expect(useUiStore.getState().logPanelOpen).toBe(true);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(useUiStore.getState().logPanelOpen).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close game log" }));
+
     expect(useUiStore.getState().logPanelOpen).toBe(false);
+  });
+
+  it("seeds the panel open on desktop from the shipped default", () => {
+    // Driven from the store's REAL default rather than a literal "open": with a
+    // literal this test would pass against the pre-change seed effect too and so
+    // would prove nothing about the shipped default. This way it goes red if the
+    // default ever flips back to "closed".
+    usePreferencesStore.setState({
+      logPanelLastChoice: usePreferencesStore.getInitialState().logPanelLastChoice,
+    });
+    useUiStore.setState({ logPanelOpen: false });
+
+    render(<GameLogPanel />);
+
+    expect(screen.getByRole("region", { name: "Game log panel" })).toBeInTheDocument();
+    expect(useUiStore.getState().logPanelOpen).toBe(true);
+  });
+
+  it("never seeds the panel open on a mobile viewport", () => {
+    setViewportWidth(800);
+    usePreferencesStore.setState({ logPanelLastChoice: "open" });
+    useUiStore.setState({ logPanelOpen: false });
+
+    render(<GameLogPanel />);
+
+    expect(screen.queryByRole("region", { name: "Game log panel" })).not.toBeInTheDocument();
+    expect(useUiStore.getState().logPanelOpen).toBe(false);
+  });
+
+  it("a stale open panel from a previous game does not survive into the next", () => {
+    // Exactly the state a previous game's game-over reveal leaves behind: the
+    // non-persisted uiStore still says open while the user's remembered choice
+    // is closed. The seed is authoritative, so it must close the panel.
+    usePreferencesStore.setState({ logPanelLastChoice: "closed" });
+    useUiStore.setState({ logPanelOpen: true });
+
+    render(<GameLogPanel />);
+
+    expect(useUiStore.getState().logPanelOpen).toBe(false);
+  });
+
+  it("re-applies the remembered choice on a rematch without remounting", () => {
+    usePreferencesStore.setState({ logPanelLastChoice: "closed" });
+    useUiStore.setState({ logPanelOpen: false });
+
+    render(<GameLogPanel />);
+
+    // Stand in for the game-over reveal, which opens the panel without the user.
+    act(() => useUiStore.getState().setLogPanelOpen(true));
+    expect(useUiStore.getState().logPanelOpen).toBe(true);
+
+    // A rematch starts a new session in place — the panel never unmounts.
+    act(() => {
+      useGameStore.setState({
+        gameSessionGeneration: useGameStore.getState().gameSessionGeneration + 1,
+      });
+    });
+
+    expect(useUiStore.getState().logPanelOpen).toBe(false);
+  });
+
+  it("does not remember the game-over reveal as a user choice", () => {
+    usePreferencesStore.setState({ logPanelLastChoice: "closed" });
+    useUiStore.setState({ logPanelOpen: false });
+
+    render(<GameLogPanel />);
+
+    act(() => {
+      useGameStore.setState({
+        gameState: buildGameState({ waiting_for: { type: "GameOver", data: { winner: 0 } } }),
+      });
+    });
+
+    expect(useUiStore.getState().logPanelOpen).toBe(true);
+    expect(usePreferencesStore.getState().logPanelLastChoice).toBe("closed");
+  });
+
+  it("remembers the closed choice when the header close button is clicked", () => {
+    render(<GameLogPanel />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close game log" }));
+
+    expect(useUiStore.getState().logPanelOpen).toBe(false);
+    expect(usePreferencesStore.getState().logPanelLastChoice).toBe("closed");
   });
 
   it("persists a desktop dock-side swap and reserves the matching game rail", () => {
@@ -303,6 +394,12 @@ describe("GameLogPanel", () => {
     usePreferencesStore.setState({ logDockSide: "left" });
 
     render(<GameLogPanel />);
+    // The session seed closes the panel on this mobile viewport. AnimatePresence
+    // would keep the exiting node queryable, so asserting on it would be green by
+    // accident; reopen explicitly so the assertions read a settled panel.
+    act(() => {
+      useUiStore.getState().setLogPanelOpen(true);
+    });
 
     const panel = screen.getByRole("region", { name: "Game log panel" });
     expect(panel).toHaveClass("right-0", "border-l", "w-[min(20rem,100vw)]");
