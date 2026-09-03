@@ -231,9 +231,26 @@ describe("serverMetrics", () => {
   // V-U12k
   it("installs the page-lifecycle drain once and flushes on hide", () => {
     const visibility = vi.spyOn(document, "visibilityState", "get");
+    // Hoisted ABOVE the first install so the handler OBJECT the installer
+    // passes is captured; the removal assertion below compares against that
+    // very object, not merely against "some function".
+    const addDoc = vi.spyOn(document, "addEventListener");
+    const removeDoc = vi.spyOn(document, "removeEventListener");
+    const removeWin = vi.spyOn(window, "removeEventListener");
     try {
       installServerMetricsLifecycle();
       installServerMetricsLifecycle();
+
+      // The exact function registered for `visibilitychange`. An inline arrow
+      // at the add site would make this a fresh object on every install, and
+      // the reset's by-reference removal would then silently take nothing off
+      // — which is the regression the module-scope hoist exists to prevent and
+      // which an `expect.any(Function)` assertion cannot see.
+      const visibilityCalls = addDoc.mock.calls.filter(
+        ([type]) => type === "visibilitychange",
+      );
+      expect(visibilityCalls).toHaveLength(1);
+      const installedHandler = visibilityCalls[0][1];
 
       reportConnectOutcome(URL_A, "connect_ok", 10);
       visibility.mockReturnValue("hidden");
@@ -264,38 +281,34 @@ describe("serverMetrics", () => {
       // an empty queue and the first drain already emptied it. Asserting a
       // send count here would be vacuous — it passes with or without the
       // removal — so what is measured is the live-listener balance instead.
-      const removeDoc = vi.spyOn(document, "removeEventListener");
-      const removeWin = vi.spyOn(window, "removeEventListener");
-      const addDoc = vi.spyOn(document, "addEventListener");
-      try {
-        __resetServerMetricsForTests();
-        // The reset takes both listeners off, by reference.
-        expect(removeDoc).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
-        expect(removeWin).toHaveBeenCalledWith("pagehide", expect.any(Function));
+      __resetServerMetricsForTests();
+      // The reset takes both listeners off BY REFERENCE: the `visibilitychange`
+      // removal is asserted against the very object the install registered, so
+      // a removal passing any other function fails here.
+      expect(removeDoc).toHaveBeenCalledWith("visibilitychange", installedHandler);
+      expect(removeWin).toHaveBeenCalledWith("pagehide", expect.any(Function));
 
-        installServerMetricsLifecycle();
-        // ...so the install that follows re-registers exactly one, leaving one
-        // live pair rather than two.
-        expect(
-          addDoc.mock.calls.filter(([type]) => type === "visibilitychange"),
-        ).toHaveLength(1);
-        expect(
-          removeDoc.mock.calls.filter(([type]) => type === "visibilitychange"),
-        ).toHaveLength(1);
+      installServerMetricsLifecycle();
+      // ...so across the whole case two installs added two listeners and the
+      // reset took one off: one live pair, not two.
+      expect(
+        addDoc.mock.calls.filter(([type]) => type === "visibilitychange"),
+      ).toHaveLength(2);
+      expect(
+        removeDoc.mock.calls.filter(([type]) => type === "visibilitychange"),
+      ).toHaveLength(1);
 
-        // And the drain still works through the freshly registered handler.
-        sendBeacon.mockClear();
-        reportConnectOutcome(URL_A, "connect_ok", 10);
-        visibility.mockReturnValue("hidden");
-        document.dispatchEvent(new Event("visibilitychange"));
-        expect(sendBeacon).toHaveBeenCalledTimes(1);
-      } finally {
-        removeDoc.mockRestore();
-        removeWin.mockRestore();
-        addDoc.mockRestore();
-      }
+      // And the drain still works through the freshly registered handler.
+      sendBeacon.mockClear();
+      reportConnectOutcome(URL_A, "connect_ok", 10);
+      visibility.mockReturnValue("hidden");
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(sendBeacon).toHaveBeenCalledTimes(1);
     } finally {
       visibility.mockRestore();
+      addDoc.mockRestore();
+      removeDoc.mockRestore();
+      removeWin.mockRestore();
     }
   });
 

@@ -64,7 +64,7 @@ import type { DirectorySource } from "../services/serverDirectory";
 //
 // THE INVARIANT THAT ACTUALLY MATTERS, and that this cycle must keep: no module
 // in it may reach INTO ANOTHER MODULE OF THE CYCLE during MODULE EVALUATION.
-// Every cross-module access in `serverMetrics`, `serverDirectory` and
+// Every cross-cycle access in `serverMetrics`, `serverDirectory` and
 // `serverDetection` sits inside a function body, so the cycle is resolved by
 // the time anything calls them. Intra-module top-level work is fine and does
 // happen — `serverDetection.ts:37`'s `DEFAULT_SERVER = SERVER_PRESETS[0].url`
