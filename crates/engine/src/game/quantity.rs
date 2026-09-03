@@ -6093,7 +6093,13 @@ fn resolve_counters_on_scope(
         ObjectScope::AmassedArmy => ability
             .and_then(|ability| ability.amassed_army_object.as_ref())
             .map(|snapshot| {
-                let live = state.objects.get(&snapshot.object_id);
+                // CR 400.7: the LIVE read is gated on the captured incarnation —
+                // an Army that changed zones and returned is a new object. The
+                // LKI fallbacks below are deliberately ungated (CR 608.2h: they
+                // report the departed Army's recorded counters).
+                let live = snapshot
+                    .live_object_id(state)
+                    .and_then(|id| state.objects.get(&id));
                 let on_battlefield =
                     live.is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
                 if on_battlefield {
@@ -6540,7 +6546,12 @@ where
         ObjectScope::AmassedArmy => ability
             .and_then(|a| a.amassed_army_object.as_ref())
             .and_then(|snapshot| {
-                read_object_pt_by_id(state, snapshot.object_id, &obj_extract, &lki_extract)
+                // CR 400.7: gate the live-by-id read on the captured
+                // incarnation; CR 608.2h keeps the snapshot LKI fallback
+                // ungated so a departed Army still reports its recorded P/T.
+                snapshot
+                    .live_object_id(state)
+                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
                     .or_else(|| lki_extract(&snapshot.lki))
             })
             .unwrap_or(0),

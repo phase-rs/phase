@@ -3448,17 +3448,18 @@ fn filter_inner_for_object(
                     .as_ref()
                     .or(ability.effect_context_object.as_ref())
             })
-            .is_some_and(|snapshot| {
-                snapshot.object_id == object_id && snapshot.is_current(state)
-            }),
+            .is_some_and(|snapshot| snapshot.live_object_id(state) == Some(object_id)),
         // CR 701.47c: "the amassed Army" / "the Army you amassed" — the Army
         // creature the current amass instruction chose, threaded via
         // `ability.amassed_army_object` (mirrors `CostPaidObject` immediately
         // above, minus the effect-context-object fallback: amass has no such
         // secondary carrier).
+        // CR 400.7: same live-reference guard as `CostPaidObject` above.
         TargetFilter::AmassedArmy => ability
             .and_then(|ability| ability.amassed_army_object.as_ref())
-            .is_some_and(|snapshot| snapshot.object_id == object_id),
+            .is_some_and(|snapshot| {
+                snapshot.live_object_id(state) == Some(object_id)
+            }),
         // CR 613.1f + CR 611.2c + CR 400.7: the FILTER source's last-remembered
         // card (`ChosenAttribute::Card`, written by `Effect::RememberCard`). Read
         // live each layer pass against `source_id` (the permanent that HAS the

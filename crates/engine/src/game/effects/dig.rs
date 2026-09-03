@@ -1683,6 +1683,12 @@ mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.mana_cost = ManaCost::generic(3);
         }
+        // CR 608.2h: this fixture exercises the LKI-only
+        // `ObjectScope::CostPaidObject` reader, which reads `snapshot.lki` and
+        // never validates currentness — so the literal `incarnation: 0` here is
+        // legacy/LKI compatibility coverage, not a live-reference binding. A
+        // live-object consumer would instead capture through
+        // `CostPaidObjectSnapshot::capture`.
         let sac_snapshot = CostPaidObjectSnapshot {
             object_id: sacrificed,
             lki: state

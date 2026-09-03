@@ -2105,10 +2105,12 @@ fn resolve_defined_or_targets(
     // counters on the exiled card"). Resolved from the recursively-stamped
     // `cost_paid_object`; mirrors the `resolved_targets` chokepoint arm.
     if let Some(TargetFilter::CostPaidObject) = target_spec {
+        // CR 400.7: the shared live-reference guard — a departed/returned
+        // referent yields nothing rather than a same-id object.
         return ability
             .cost_paid_object
             .iter()
-            .map(|snap| snap.object_id)
+            .filter_map(|snap| snap.live_object_id(state))
             .collect();
     }
 
@@ -7064,5 +7066,173 @@ mod tests {
                  pushed, so a later append still has a queue to land on"
             );
         }
+    }
+
+    /// CR 400.7 + CR 608.2k: End-to-end same-storage-id leave-and-return guard
+    /// for a LIVE `CostPaidObject` consumer.
+    ///
+    /// This resolves a real `PutCounter` effect rather than stopping at target
+    /// resolution, so it exercises the production boundary
+    /// (`resolve_defined_or_targets`) that a `resolved_targets`-only assertion
+    /// cannot reach. The referent is captured BEFORE it departs, the
+    /// incarnation change is asserted explicitly, and a live inherited parent
+    /// target plus an unrelated bystander are on the battlefield throughout —
+    /// so a regression cannot hide behind an empty board.
+    ///
+    /// Paired with
+    /// `cost_paid_object_counter_applies_to_referent_that_never_departed`,
+    /// which drives the same fixture down the acting branch.
+    #[test]
+    fn cost_paid_object_counter_skips_new_incarnation_after_same_id_round_trip() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::CostPaidObjectSnapshot;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let referent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Referent".to_string(),
+            Zone::Battlefield,
+        );
+        let parent_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Inherited Parent Target".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Capture BEFORE departure — capturing after the round trip would
+        // record the NEW incarnation and the test would pass either way.
+        let referent_obj = state.objects.get(&referent).expect("referent exists");
+        let incarnation_before = referent_obj.incarnation;
+        let snapshot = CostPaidObjectSnapshot::capture(
+            referent_obj,
+            referent_obj.snapshot_public_characteristics(),
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::CostPaidObject,
+            },
+            // A live inherited parent target is present, per the review spec.
+            vec![TargetRef::Object(parent_target)],
+            source,
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(snapshot);
+
+        // CR 400.7: battlefield -> graveyard -> battlefield, same storage id.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, referent, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, referent, Zone::Battlefield, &mut events);
+
+        let returned = state.objects.get(&referent).expect("row survives the move");
+        assert_eq!(
+            returned.zone,
+            Zone::Battlefield,
+            "fixture reach-guard: the id must be back on the battlefield, or the \
+             assertions below would hold for the wrong reason"
+        );
+        assert!(
+            returned.incarnation > incarnation_before,
+            "fixture reach-guard: the round trip must have bumped the incarnation \
+             ({} -> {})",
+            incarnation_before,
+            returned.incarnation
+        );
+
+        let resolved = resolve_defined_or_targets(&state, &ability);
+
+        assert!(
+            resolved.is_empty(),
+            "CR 400.7: the returned permanent is a new object, so the live \
+             counter consumer must act on nothing. Got {resolved:?}"
+        );
+        assert!(
+            !resolved.contains(&parent_target),
+            "the live inherited parent target must never be substituted"
+        );
+        assert!(
+            !resolved.contains(&bystander),
+            "the unrelated bystander must never be substituted"
+        );
+    }
+
+    /// CR 608.2k: Paired positive for
+    /// `cost_paid_object_counter_skips_new_incarnation_after_same_id_round_trip`.
+    /// Identical fixture — same live inherited parent target and bystander — but
+    /// the referent never departs, so the live consumer DOES act on it. Without
+    /// this, the negative above could pass simply by never reaching the arm.
+    #[test]
+    fn cost_paid_object_counter_applies_to_referent_that_never_departed() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::CostPaidObjectSnapshot;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let referent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Referent".to_string(),
+            Zone::Battlefield,
+        );
+        let parent_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Inherited Parent Target".to_string(),
+            Zone::Battlefield,
+        );
+        let _bystander = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+
+        let referent_obj = state.objects.get(&referent).expect("referent exists");
+        let snapshot = CostPaidObjectSnapshot::capture(
+            referent_obj,
+            referent_obj.snapshot_public_characteristics(),
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::CostPaidObject,
+            },
+            vec![TargetRef::Object(parent_target)],
+            source,
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(snapshot);
+
+        let resolved = resolve_defined_or_targets(&state, &ability);
+
+        assert_eq!(
+            resolved,
+            vec![referent],
+            "CR 608.2k: an undeparted cost-paid referent is still the counter \
+             subject, and the inherited parent target does not displace it"
+        );
     }
 }

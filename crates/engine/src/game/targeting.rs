@@ -817,9 +817,9 @@ pub fn resolved_targets(
             .cost_paid_object
             .as_ref()
             .or(ability.effect_context_object.as_ref())
-            .filter(|snap| snap.is_current(state))
+            .and_then(|snap| snap.live_object_id(state))
             .into_iter()
-            .map(|snap| TargetRef::Object(snap.object_id))
+            .map(TargetRef::Object)
             .collect();
     }
     // CR 701.47c: "the amassed Army" / "the Army you amassed" — resolves to
@@ -828,12 +828,16 @@ pub fn resolved_targets(
     // in `game/effects/mod.rs` from the `Amass` effect's own resolution).
     // Mirrors the `CostPaidObject` ladder immediately above: a resolution-local
     // referent read out of ability state, not the targeting pipeline.
+    // CR 400.7: the amassed Army is a captured live referent, so it takes the
+    // same shared identity guard as `CostPaidObject` above — an Army that
+    // changed zones and returned is a new object.
     if matches!(target_filter, TargetFilter::AmassedArmy) {
         return ability
             .amassed_army_object
             .as_ref()
+            .and_then(|snap| snap.live_object_id(state))
             .into_iter()
-            .map(|snap| TargetRef::Object(snap.object_id))
+            .map(TargetRef::Object)
             .collect();
     }
     // CR 701.20e: "it" / "that card" after a look-at or reveal instruction.

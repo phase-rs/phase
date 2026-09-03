@@ -2051,6 +2051,20 @@ fn finish_cost_object_moves(
         }
     }
 
+    // CR 400.7 + CR 608.2k: Every cost object move above is now complete, so
+    // re-pin the cost-paid referent to the incarnation the cost's own move
+    // produced. The binding seams capture BEFORE the move (their `lki` must
+    // record pre-move characteristics — CR 608.2h), and without this the
+    // reference would read as stale against the object its own cost just moved
+    // (Jhoira of the Ghitu: exile a card as a cost, then put counters on that
+    // exiled card). Only a LATER zone change makes it stale from here.
+    //
+    // Placed after the loop so it is correct regardless of how many zones the
+    // move traversed or whether a replacement effect redirected it; the
+    // `NeedsChoice` arm above returns early and re-enters here on resume.
+    let mut pending = pending;
+    pending.ability.repin_cost_paid_object_recursive(state);
+
     let waiting_for = match completion {
         PendingCostMoveCompletion::FinishPending => {
             finish_pending_cost_or_cast(state, player, pending, events)?
@@ -3363,6 +3377,13 @@ pub(crate) fn handle_sacrifice_for_cost(
         events,
         &crate::game::zones::departed_subset(state, chosen),
     );
+
+    // CR 400.7 + CR 608.2k: the sacrifice moves above are the cost's own, so
+    // re-pin the referent to the incarnation they produced (see
+    // `finish_cost_object_moves` for the same step on the shared move seam, and
+    // `CostPaidObjectSnapshot::repin_to_current_incarnation` for why the pin
+    // must not be assumed to advance by a fixed amount).
+    pending.ability.repin_cost_paid_object_recursive(state);
 
     if pending.activation_ability_index.is_some() {
         pending.mark_activation_cost_committed();

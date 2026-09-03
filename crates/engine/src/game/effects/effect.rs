@@ -680,14 +680,21 @@ fn register_transient_effect(
         Some(TargetFilter::CostPaidObject) | Some(TargetFilter::ParentTarget)
             if ability.targets.is_empty() && ability.cost_paid_object.is_some() =>
         {
-            if let Some(snap) = &ability.cost_paid_object {
+            // CR 400.7: resolve through the shared live-reference guard so a
+            // returned same-id object never receives the grant. A stale
+            // referent installs nothing.
+            if let Some(id) = ability
+                .cost_paid_object
+                .as_ref()
+                .and_then(|snap| snap.live_object_id(state))
+            {
                 install_transient(
                     state,
                     end_permission,
                     ability.source_id,
                     ability.controller,
                     duration.clone(),
-                    TargetFilter::SpecificObject { id: snap.object_id },
+                    TargetFilter::SpecificObject { id },
                     modifications.clone(),
                     static_def.condition.clone(),
                 );

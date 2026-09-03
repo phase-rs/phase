@@ -119,10 +119,14 @@ pub fn resolve(
             .filter(|id| matches_target_filter(state, *id, source_filter, &filter_ctx))
             .collect()
     } else if matches!(target_filter, TargetFilter::CostPaidObject) {
+        // CR 400.7: resolve through the shared live-reference guard — a
+        // referent that changed zones is a new object and must not become the
+        // copy source (no fallback to a same-id object).
         ability
             .cost_paid_object
             .as_ref()
-            .map(|snapshot| vec![snapshot.object_id])
+            .and_then(|snapshot| snapshot.live_object_id(state))
+            .map(|id| vec![id])
             .ok_or_else(|| {
                 EffectError::MissingParam("CopyTokenOf requires a cost-paid object".to_string())
             })?
