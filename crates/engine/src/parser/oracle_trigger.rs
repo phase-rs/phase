@@ -6062,8 +6062,9 @@ fn extract_if_condition_with_card_name(
     }
 
     // CR 603.4 + CR 601.2h: "if the amount of mana spent to cast it/that spell
-    // was less than/greater than its mana value" — intervening-if for mana-spent
-    // comparison triggers (Tokka & Rahzar, Liberator, Urza's Battlethopter).
+    // was/is less than/greater than its mana value | ~'s power | ~'s toughness"
+    // — intervening-if for mana-spent comparison triggers (Tokka & Rahzar,
+    // Terrible Twos; Liberator, Urza's Battlethopter).
     if let Some(result) = try_extract_mana_spent_comparison_condition(&lower, text) {
         return result;
     }
@@ -7546,14 +7547,20 @@ fn parse_no_mana_spent_clause(i: &str) -> OracleResult<'_, &str> {
     .parse(i)
 }
 
-/// CR 603.4 + CR 601.2h: Extract "if the amount of mana spent to cast it/that spell
-/// was less than/greater than its mana value" — intervening-if for mana-spent
-/// comparison triggers (Tokka & Rahzar, Liberator, Urza's Battlethopter).
+/// CR 603.4 + CR 601.2h: Extract "if the amount of mana spent to cast it/that
+/// spell was/is less than/greater than <subject>" — intervening-if for
+/// mana-spent comparison triggers.
+///
+/// `<subject>` is one of `its mana value` (the triggering spell's own mana
+/// value — Tokka & Rahzar, Terrible Twos), `~'s power`, or `~'s toughness`
+/// (the ability source's power/toughness — Liberator, Urza's Battlethopter).
+/// The subject determines the right-hand quantity, so it is parsed by the
+/// combinator rather than assumed here.
 fn try_extract_mana_spent_comparison_condition(
     lower: &str,
     text: &str,
 ) -> Option<(String, Option<TriggerCondition>)> {
-    let (before, comparator, rest) = scan_preceded(lower, |i| {
+    let (before, (comparator, rhs_qty), rest) = scan_preceded(lower, |i| {
         preceded(tag("if "), parse_mana_spent_comparison_clause).parse(i)
     })?;
 
@@ -7571,9 +7578,6 @@ fn try_extract_mana_spent_comparison_condition(
         scope: CastManaObjectScope::TriggeringSpell,
         metric: CastManaSpentMetric::Total,
     };
-    let rhs_qty = QuantityRef::ObjectManaValue {
-        scope: ObjectScope::EventSource,
-    };
 
     let cleaned = strip_condition_clause(text, clause_start, clause_len);
     Some((
@@ -7586,7 +7590,21 @@ fn try_extract_mana_spent_comparison_condition(
     ))
 }
 
-fn parse_mana_spent_comparison_clause(i: &str) -> OracleResult<'_, Comparator> {
+/// Parses the comparison clause body, returning both the comparator and the
+/// right-hand quantity being compared against.
+///
+/// Three independent axes compose here rather than being enumerated: the
+/// spell anaphor (`it` / `that spell` / `this spell`), the linking verb
+/// (`was` / `is`), and the comparison subject. The subject axis is what
+/// distinguishes the two card families that share this grammar:
+///
+/// * `its mana value` — the *triggering spell's* own mana value
+///   (`ObjectScope::EventSource`), e.g. Tokka & Rahzar, Terrible Twos.
+/// * `~'s power` / `~'s toughness` — the *ability source's* power or
+///   toughness (`ObjectScope::Source`), e.g. Liberator, Urza's
+///   Battlethopter. `normalize_card_name_refs` has already collapsed the
+///   printed card name to `~` by the time this parser runs.
+fn parse_mana_spent_comparison_clause(i: &str) -> OracleResult<'_, (Comparator, QuantityRef)> {
     let (i, _) = (
         tag("the amount of mana spent to cast "),
         alt((tag("it"), tag("that spell"), tag("this spell"))),
@@ -7598,8 +7616,31 @@ fn parse_mana_spent_comparison_clause(i: &str) -> OracleResult<'_, Comparator> {
         value(Comparator::GT, tag("greater than")),
     ))
     .parse(i)?;
-    let (i, _) = tag(" its mana value").parse(i)?;
-    Ok((i, comparator))
+    let (i, rhs) = preceded(
+        tag(" "),
+        alt((
+            value(
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::EventSource,
+                },
+                tag("its mana value"),
+            ),
+            value(
+                QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+                tag("~'s power"),
+            ),
+            value(
+                QuantityRef::Toughness {
+                    scope: ObjectScope::Source,
+                },
+                tag("~'s toughness"),
+            ),
+        )),
+    )
+    .parse(i)?;
+    Ok((i, (comparator, rhs)))
 }
 
 /// CR 603.4 + CR 102.1: Extract "if it's / it is / it isn't /

@@ -802,6 +802,7 @@ mod issue_8183_static_gate_fail_open;
 mod issue_8215_hellkite_courser;
 mod issue_822_erode_path_to_exile_search_controller;
 mod issue_828_full_throttle;
+mod issue_8302_liberator_mana_spent_power;
 mod issue_841_selvala_explorer_returned;
 mod issue_847_braids_cabal_minion;
 mod issue_852_torrential_gearhulk;

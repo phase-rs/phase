@@ -23271,6 +23271,84 @@ fn extract_mana_spent_comparison_condition_greater_than() {
     );
 }
 
+/// Issue #8302 — the comparison subject may be the *ability source's* power
+/// rather than the triggering spell's mana value. Before the rhs axis was
+/// parsed, `~'s power` failed the hardcoded `its mana value` tag, the whole
+/// extractor returned `None`, and the trigger lowered with `condition: None`
+/// — so every spell cast put a counter on Liberator regardless of mana spent.
+///
+/// Uses `parse_trigger_line` (not the pre-normalized clause) so the test also
+/// covers `normalize_card_name_refs` collapsing "Liberator's power" to
+/// "~'s power" ahead of this parser.
+#[test]
+fn liberator_mana_spent_greater_than_source_power_binds_intervening_if() {
+    let def = parse_trigger_line(
+        "Whenever you cast a spell, if the amount of mana spent to cast that spell is greater \
+         than Liberator's power, put a +1/+1 counter on Liberator.",
+        "Liberator, Urza's Battlethopter",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                    metric: crate::types::ability::CastManaSpentMetric::Total,
+                },
+            },
+            comparator: Comparator::GT,
+            // CR 113.7: the power compared against belongs to the ability's
+            // source (Liberator), not to the triggering spell.
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+        }),
+        "the intervening-if must survive parsing; a None condition makes the \
+         trigger fire on every spell cast"
+    );
+    // The condition clause must be consumed out of the effect text, leaving
+    // the counter effect intact.
+    let execute = def.execute.as_deref().expect("trigger must have an effect");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::PutCounter { .. }),
+        "expected PutCounter, got {:?}",
+        execute.effect
+    );
+}
+
+/// Hostile fixture for the two rhs axes the Liberator card itself does not
+/// exercise: the `toughness` subject and the `less than` comparator. Proves
+/// the fix is a grammar extension, not a "greater than ... power" special
+/// case. CR 702.191a's Increment wording pairs power with toughness, so the
+/// toughness arm is a real surface form for this clause shape.
+#[test]
+fn extract_mana_spent_comparison_condition_source_toughness_less_than() {
+    let (cleaned, cond) = extract_if_condition(
+        "if the amount of mana spent to cast it was less than ~'s toughness, draw a card",
+    );
+    assert_eq!(cleaned, "draw a card");
+    assert_eq!(
+        cond,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                    metric: crate::types::ability::CastManaSpentMetric::Total,
+                },
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Source,
+                },
+            },
+        })
+    );
+}
+
 // The extractor uses `scan_split_at_phrase`, so the clause doesn't have to
 // be at the start of the text. Covers the same positional flexibility the
 // word-form Adamant extractor already relies on.
