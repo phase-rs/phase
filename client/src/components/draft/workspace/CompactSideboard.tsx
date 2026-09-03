@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import type { CSSProperties } from "react";
+import type { CSSProperties, RefCallback } from "react";
 
 import type { DraftCardInstance, DraftPoolGroups } from "../../../adapter/draft-adapter";
 import type { CardHoverInfo } from "../../card/CardPreview";
@@ -25,6 +25,7 @@ interface CompactSideboardProps {
   preferences: Readonly<Record<DraftZone, DraftBoardPreferences>>;
   interactionLocked?: boolean;
   dropActive?: boolean;
+  registerCardArea?: RefCallback<HTMLElement>;
   dragController?: DraftWorkspaceDragController;
   touchDragEnabled?: boolean;
   collapsed?: boolean;
@@ -57,6 +58,7 @@ export function CompactSideboard({
   preferences,
   interactionLocked = false,
   dropActive = false,
+  registerCardArea,
   dragController,
   touchDragEnabled = false,
   collapsed = true,
@@ -206,15 +208,15 @@ export function CompactSideboard({
       data-zone="sideboard"
       data-responsive-sideboard-layout={responsiveLayout}
       data-sideboard-collapsed={collapsed ? "true" : "false"}
-      className={`min-w-0 overflow-hidden rounded-card border border-hairline text-fg shadow-[0_10px_26px_rgba(0,0,0,0.2)] ${tabletPortraitLayout && !collapsed ? "bg-slate-950" : "bg-black/18"} ${isLandscapeBuilderPhone || draftPhoneLayout || tabletLayout ? "flex h-full min-h-0 flex-col" : builderPhoneLayout ? "flex shrink-0 flex-col" : ""}`}
+      className={`min-w-0 ${dropActive ? "overflow-visible" : "overflow-hidden"} rounded-card border border-hairline text-fg shadow-[0_10px_26px_rgba(0,0,0,0.2)] ${tabletPortraitLayout && !collapsed ? "bg-slate-950" : "bg-black/18"} ${isLandscapeBuilderPhone || draftPhoneLayout || tabletLayout ? "flex h-full min-h-0 flex-col" : builderPhoneLayout ? "flex shrink-0 flex-col" : ""}`}
     >
-      <header className={sideRailCollapsed
-        ? "relative flex h-full min-h-0 flex-col items-center justify-start gap-1 bg-white/[0.035] px-1 py-2"
+      <header className={`relative z-10 ${sideRailCollapsed
+        ? "relative flex min-h-11 shrink-0 flex-col items-center justify-start gap-1 bg-white/[0.035] px-1 py-2"
         : draftPhoneLandscapeExpanded
           ? "flex shrink-0 flex-col items-start gap-1 border-b border-hairline bg-white/[0.035] px-2 py-1.5"
         : tabletPortraitCollapsed
-          ? "relative flex h-full min-h-0 items-center justify-center border-b border-hairline bg-slate-950 px-12 py-1"
-        : "flex min-h-11 shrink-0 items-center gap-2 border-b border-hairline bg-white/[0.035] px-2 py-1.5"}
+          ? "relative flex min-h-11 shrink-0 items-center justify-center border-b border-hairline bg-slate-950 px-12 py-1"
+        : "flex min-h-11 shrink-0 items-center gap-2 border-b border-hairline bg-white/[0.035] px-2 py-1.5"}`}
       >
         {sideRailCollapsed && (draftPhoneLandscapeSideRail
           ? <span className="relative z-10 mt-10">{sideboardToggle}</span>
@@ -253,21 +255,18 @@ export function CompactSideboard({
         {!sideRailCollapsed && !tabletPortraitCollapsed && !draftPhoneLandscapeExpanded && sideboardToggle}
       </header>
       {(!collapsibleCompactSideboard || !collapsed) && <div
+        ref={registerCardArea}
+        data-sideboard-card-area
+        data-drop-target="collapsed-sideboard"
+        data-drop-state={dropActive ? "active" : "idle"}
         data-sideboard-slot={builderPhoneLayout || scrollableCardLayout ? undefined : ""}
         data-sideboard-body={builderPhoneLayout || scrollableCardLayout ? "" : undefined}
-        className={scrollableCardLayout
+        className={`${scrollableCardLayout
           ? "relative min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain bg-black/12 p-2 thin-scrollbar"
           : builderPhoneLayout
             ? "relative shrink-0 overflow-visible bg-black/12 p-2"
-          : `relative grid min-w-0 bg-black/12 ${responsiveLayout === "desktop" || responsiveLayout === "phone-landscape" ? "aspect-[488/680]" : ""}`}
+            : `relative grid min-w-0 bg-black/12 ${responsiveLayout === "desktop" || responsiveLayout === "phone-landscape" ? "aspect-[488/680]" : ""}`} ${dropActive ? "draft-card-area-drop-active" : ""}`}
       >
-        {dropActive && (
-          <span
-            aria-hidden="true"
-            data-drop-highlight="active"
-            className="pointer-events-none absolute inset-0 z-20 border-2 border-white"
-          />
-        )}
         <span
           aria-hidden="true"
           data-card-height-baseline
@@ -368,6 +367,15 @@ export function CompactSideboard({
           </button>
         ))}
       </div>}
+      {collapsibleCompactSideboard && collapsed && (
+        <div
+          ref={registerCardArea}
+          data-sideboard-card-area
+          data-drop-target="collapsed-sideboard"
+          data-drop-state={dropActive ? "active" : "idle"}
+          className={`min-h-11 flex-1 ${dropActive ? "draft-card-area-drop-active" : ""}`}
+        />
+      )}
     </section>
   );
 }

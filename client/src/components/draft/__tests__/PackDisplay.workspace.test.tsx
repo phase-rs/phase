@@ -301,14 +301,16 @@ describe("PackDisplay local workspace controller", () => {
     alternateFaceState.values = {};
   });
 
-  it("uses_arcane_cyan_for_the_selected_pack_keyframe_without_the_old_green", () => {
+  it("uses_static_selected_pack_feedback_and_a_static_card_area_drop_glow", () => {
     const css = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
-    const keyframe = css.match(/@keyframes draft-pack-selected-glow \{[\s\S]*?\n\}/)?.[0];
+    const dropGlow = css.match(/@utility draft-card-area-drop-active \{[\s\S]*?\n\}/)?.[0];
 
     expect(css).toContain("--color-arcane: #38bdf8");
-    expect(keyframe).toContain("var(--color-arcane)");
-    expect(keyframe).toContain("rgb(56 189 248 / 0.55)");
-    expect(keyframe).not.toMatch(/(?:rgb|rgba)\(3,\s*139,\s*6/);
+    expect(css).not.toContain("@keyframes draft-pack-selected-glow");
+    expect(dropGlow).toContain("background-color: rgb(255 255 255 / 0.08)");
+    expect(dropGlow).toContain("inset 0 0 0 1px rgb(255 255 255 / 0.92)");
+    expect(dropGlow).toContain("0 0 18px 2px rgb(255 255 255 / 0.42)");
+    expect(dropGlow).not.toMatch(/\b(border|transform|animation)\b/);
   });
 
   it("renders_authoritative_sequence_once_and_preserves_duplicate_names_and_unknown_rarity", () => {
@@ -634,8 +636,8 @@ describe("PackDisplay local workspace controller", () => {
       "ring-2",
       "ring-arcane",
       "shadow-[0_0_7px_3px_#38bdf8]",
-      "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
     );
+    expect(cardElement).not.toHaveClass("motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]");
     expect(cardElement).not.toHaveClass("transition-all");
     expect(cardElement).not.toHaveClass("!duration-0");
 
@@ -775,11 +777,7 @@ describe("PackDisplay local workspace controller", () => {
     await vi.waitFor(() => expect(confirmPick).toHaveBeenCalledWith("deck"));
   });
 
-  it.each([
-    ["desktop", true],
-    ["phone-portrait", false],
-    ["tablet-landscape", false],
-  ] as const)("uses_the_reduced_hover_scale_only_for_%s", (responsiveLayout, hasDesktopHover) => {
+  it.each(["desktop", "phone-portrait", "tablet-landscape"] as const)("keeps_%s_pack_cards_geometry_stable_on_hover", (responsiveLayout) => {
     const rendered = render(
       <PackDisplay
         controller={controller()}
@@ -790,7 +788,8 @@ describe("PackDisplay local workspace controller", () => {
     );
     const packCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
 
-    expect(packCard.classList.contains("hover:scale-[1.05]")).toBe(hasDesktopHover);
+    expect(packCard).toHaveClass("cursor-pointer", "hover:ring-white/20");
+    expect(packCard.classList.contains("hover:scale-[1.05]")).toBe(false);
     expect(packCard.classList.contains("hover:scale-[1.08]")).toBe(false);
   });
 
@@ -1099,7 +1098,8 @@ describe("PackDisplay local workspace controller", () => {
     expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
     const firstCard = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"]')!;
     const cardButton = within(firstCard).getByRole("button", { name: "Same" });
-    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:scale-[1.05]", "hover:ring-white/20");
+    expect(firstCard).toHaveClass("select-none", "caret-transparent", "transition-all", "duration-150", "cursor-pointer", "hover:ring-white/20");
+    expect(firstCard).not.toHaveClass("hover:scale-[1.05]");
 
     fireEvent.click(cardButton, { detail: 1, pointerType: "mouse" });
     expect(selectCard).not.toHaveBeenCalled();
@@ -1113,8 +1113,8 @@ describe("PackDisplay local workspace controller", () => {
       "ring-2",
       "ring-arcane",
       "shadow-[0_0_7px_3px_#38bdf8]",
-      "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
     );
+    expect(firstCard).not.toHaveClass("motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]");
     expect(firstCard).not.toHaveClass("transition-all");
     expect(firstCard).not.toHaveClass("!duration-0");
     expect(firstCard).not.toHaveClass("scale-105");

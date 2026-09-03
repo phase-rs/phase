@@ -437,7 +437,7 @@ export function CardPoolBoard({
       touchDragEnabled={touchDragEnabled}
       touchScrollEnabled={touchScrollEnabled}
       makeDragSource={makeDragSource}
-      registerRoot={registerColumn?.(zone, column.column)}
+      registerCardArea={registerColumn?.(zone, column.column)}
       registerCard={(instanceId) => (element) => {
         if (element === null) cardRefs.current.delete(instanceId);
         else cardRefs.current.set(instanceId, element);

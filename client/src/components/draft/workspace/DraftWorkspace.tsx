@@ -530,11 +530,8 @@ export function DraftWorkspace({
           >
             {deck}
             {!deckCollapsed && !builderCompact && <section
-              ref={dragController?.registerCollapsedSideboard}
               aria-label={t("workspace.zone.sideboard")}
               data-zone="sideboard"
-              data-drop-target="collapsed-sideboard"
-              data-drop-state={sideboardDropActive ? "active" : "idle"}
               className={tabletPortraitLayout
                 ? sideboardCollapsed
                   ? "h-full min-h-0 min-w-0"
@@ -552,6 +549,7 @@ export function DraftWorkspace({
                 preferences={boardPreferences}
                 interactionLocked={interactionLocked}
                 dropActive={sideboardDropActive}
+                registerCardArea={dragController?.registerCollapsedSideboard}
                 collapsed={sideboardCollapsed}
                 {...(dragController === undefined ? {} : { dragController })}
                 onToggle={toggleSideboard}

@@ -131,8 +131,8 @@ describe("PackDisplay pod controller", () => {
       "ring-2",
       "ring-arcane",
       "shadow-[0_0_7px_3px_#38bdf8]",
-      "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
     );
+    expect(selected).not.toHaveClass("motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]");
     expect(selected).not.toHaveClass("!duration-0", "transition-all", "scale-105");
     expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Auto-pick" })).not.toBeInTheDocument();
