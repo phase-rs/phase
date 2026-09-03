@@ -93,7 +93,7 @@ dataset = "phase_telemetry"
 # Worker deploys with `GET /servers` returning an empty list.
 [[kv_namespaces]]
 binding = "SERVER_ALLOWLIST"
-id = "REPLACE_WITH_REAL_KV_NAMESPACE_ID"
+id = "20a08b21f9d64418b1f1ec8e09b3fcc1"
 
 # Per-IP rate limits for the two directory write endpoints. Three constraints,
 # all measured against the pinned wrangler (4.113.0) rather than assumed:
