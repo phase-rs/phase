@@ -147,6 +147,7 @@ interface DraftStep {
 
 interface RetainedCard {
   readonly card: DraftCardInstance;
+  readonly imageSrc: string | null;
   readonly sourceIndex: number;
   readonly requestOrder: number;
   readonly width: number;
@@ -184,8 +185,27 @@ const cardInfo = (card: DraftCardInstance): CardHoverInfo => ({
   sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
 });
 
+function RetainedPackCard({ entry, fallbackWidth }: { entry: RetainedCard; fallbackWidth: number }) {
+  const width = entry.width || fallbackWidth;
+  return (
+    <motion.div
+      data-instance-id={entry.card.instance_id}
+      data-visual-state="leaving"
+      initial={false}
+      style={{ width, height: entry.height || undefined, flexBasis: width, aspectRatio: "488 / 680" }}
+      className="shrink-0 overflow-hidden rounded-md ring-1 ring-amber-300/50"
+    >
+      {entry.imageSrc === null ? (
+        <span className="flex h-full items-center justify-center text-xs text-white/60">{entry.card.name}</span>
+      ) : (
+        <img src={entry.imageSrc} alt={entry.card.name} draggable={false} className="h-full w-full object-contain" />
+      )}
+    </motion.div>
+  );
+}
+
 function PackCard({
-  card, state, width, locked, local, doubleTapPickEnabled, doubleClickPickEnabled, allowTouchPackDrag, desktopLayout, onSelect, onDestination, onDoubleClickPick, onHover, makeDropSource,
+  card, state, width, locked, local, doubleTapPickEnabled, doubleClickPickEnabled, allowTouchPackDrag, desktopLayout, onSelect, onDestination, onDoubleClickPick, onHover, onImageSource, makeDropSource,
 }: {
   card: DraftCardInstance;
   state: CardVisualState;
@@ -200,6 +220,7 @@ function PackCard({
   onDestination(destination: DraftPickDestination): void;
   onDoubleClickPick(): void;
   onHover(info: CardHoverInfo | null): void;
+  onImageSource(instanceId: string, src: string): void;
   makeDropSource(): PackDropSource | null;
 }) {
   const { t } = useTranslation("draft");
@@ -212,6 +233,10 @@ function PackCard({
   const lastTouchTapAt = useRef<number | null>(null);
   const ignoreCompatibilityClickUntil = useRef(0);
   const longPress = useLongPress(() => onHover(cardInfo(card)), { delay: 500 });
+
+  useEffect(() => {
+    if (src !== null) onImageSource(card.instance_id, src);
+  }, [card.instance_id, onImageSource, src]);
 
   return (
     <motion.div
@@ -363,6 +388,7 @@ export function PackDisplay({
   const [states, setStates] = useState<Readonly<Record<string, CardVisualRecord>>>({});
   const [retained, setRetained] = useState<readonly RetainedCard[]>([]);
   const statesRef = useRef<Readonly<Record<string, CardVisualRecord>>>({});
+  const imageSourcesRef = useRef(new Map<string, string>());
   const viewRef = useRef(controller.view);
   const previousStepRef = useRef<DraftStep | null>(null);
   const requestOrder = useRef(0);
@@ -528,7 +554,8 @@ export function PackDisplay({
         }
         const live = new Set(viewRef.current?.current_pack?.map((card) => card.instance_id) ?? []);
         const departed = cards.flatMap((card, index): RetainedCard[] => live.has(card.instance_id) ? [] : [{
-          card, sourceIndex: indices[index], requestOrder: requestOrder.current,
+          card, imageSrc: imageSourcesRef.current.get(card.instance_id) ?? null,
+          sourceIndex: indices[index], requestOrder: requestOrder.current,
           width: sizes[index]?.width ?? 0, height: sizes[index]?.height ?? 0, token, generation, step,
         }]);
         setCardStates(ids, token, generation, null);
@@ -733,11 +760,7 @@ export function PackDisplay({
       >
         <AnimatePresence initial={false}>
           {slots.map((slot) => {
-            if (slot.kind === "retained") return (
-              <motion.div key={`retained:${slot.token}:${slot.card.instance_id}`} data-instance-id={slot.card.instance_id} data-visual-state="leaving" initial={false} style={{ width: slot.width || width, height: slot.height || undefined, flexBasis: slot.width || width, aspectRatio: "488 / 680" }} className="shrink-0 rounded-md ring-1 ring-amber-300/50">
-                <span className="flex h-full items-center justify-center text-xs text-white/60">{slot.card.name}</span>
-              </motion.div>
-            );
+            if (slot.kind === "retained") return <RetainedPackCard key={`retained:${slot.token}:${slot.card.instance_id}`} entry={slot} fallbackWidth={width} />;
             const card = slot.card;
             const selected = selectedCard === card.instance_id || additionalCards.includes(card.instance_id);
             const waiting = local?.pendingIntent?.kind !== "auto-pick" && local?.pendingIntent?.instanceIds.includes(card.instance_id);
@@ -762,6 +785,7 @@ export function PackDisplay({
                 else void request(chosenCards(card), "deck");
               }}
               onHover={onCardHover}
+              onImageSource={(instanceId, imageSrc) => imageSourcesRef.current.set(instanceId, imageSrc)}
               makeDropSource={() => {
                 if (local === null || locked) return null;
                 const cards = chosenCards(card);

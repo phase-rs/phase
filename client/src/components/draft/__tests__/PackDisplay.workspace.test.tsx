@@ -1200,6 +1200,7 @@ describe("PackDisplay local workspace controller", () => {
 
   it("renders_all_six_visual_states_with_drag_admission_waiting_and_token_precedence", () => {
     vi.useFakeTimers();
+    imageState.src = "https://images.example.test/same.jpg";
     let source!: PackDropSource;
     const localDrag = {
       ...dragController,
@@ -1238,7 +1239,9 @@ describe("PackDisplay local workspace controller", () => {
     act(() => acknowledgedSource.onAdmission({ kind: "dispatch", requestToken: "acknowledged", interactionGeneration: 4 }));
     rendered.rerender(<PackDisplay controller={{ ...initial, view: { ...view, current_pack: [cards[1]] } }} presentation={{ packScale: 1, setPackScale: vi.fn() }} onCardHover={vi.fn()} />);
     act(() => acknowledgedSource.onSettled({ kind: "outcome", outcome: { status: "acknowledged" } }));
-    expect(rendered.container.querySelector('[data-instance-id="unknown"][data-visual-state="leaving"]')).toBeInTheDocument();
+    const departure = rendered.container.querySelector<HTMLElement>('[data-instance-id="unknown"][data-visual-state="leaving"]')!;
+    expect(departure).toBeInTheDocument();
+    expect(within(departure).getByRole("img", { name: "Same" })).toHaveAttribute("src", imageState.src);
   });
 
   it("commits_submitting_before_real_drag_dispatch_then_renders_waiting_after_lock_publication", async () => {

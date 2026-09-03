@@ -1535,6 +1535,7 @@ describe("card pool board primitives", () => {
     );
     expect(columns).toHaveClass("min-w-0", "flex-1");
     expect(columns).not.toHaveClass("min-w-max");
+    expect(columns?.parentElement).toHaveClass("p-[18px]");
     expect(columns?.parentElement?.parentElement).toHaveClass("overflow-x-hidden");
   });
 
@@ -1572,6 +1573,7 @@ describe("card pool board primitives", () => {
     expect([...container.querySelectorAll<HTMLElement>("[data-board-column]")]
       .map((column) => column.dataset.boardColumn)).toEqual(["0", "1", "2", "3", "4", "5", "6"]);
     expect(container.querySelectorAll("header[aria-label^='Column ']")).toHaveLength(7);
+    expect(container.querySelector("[data-board-columns]")).toHaveClass("p-[18px]");
 
     rerender(
       <CardPoolBoard
