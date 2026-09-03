@@ -66,14 +66,24 @@ pub fn resolve(
     // ability controller, so bind the filter context controller to the
     // chooser (mirrors `pay.rs`'s payer-rebinding pattern).
     let ctx = FilterContext::from_ability_with_controller(ability, chooser);
-    let eligible = eligible_targets(state, ability, &filter, &ctx, eligibility.as_ref());
+    let eligible = eligible_targets(state, &filter, &ctx, eligibility.as_ref());
 
     // CR 609.3: If a resolving effect asks for more objects than are
     // available, the player chooses all that are available. Publish an
     // achievable runtime range at this trust seam so every consumer (engine,
     // AI, and client) sees the same liveness-preserving cardinality.
     let (min, max) = match cardinality {
-        Some(ObjectSelectionCardinality::Exactly { count }) => (count, Some(count)),
+        // CR 609.3: a mandatory instruction does as much as possible. An
+        // optional exact selection is screened before this resolver can run,
+        // so retain its exact published cardinality for that decision path.
+        Some(ObjectSelectionCardinality::Exactly { count }) if ability.optional => {
+            (count, Some(count))
+        }
+        Some(ObjectSelectionCardinality::Exactly { count }) => {
+            let available = u32::try_from(eligible.len()).unwrap_or(u32::MAX);
+            let achievable = count.min(available);
+            (achievable, Some(achievable))
+        }
         None => {
             let available = u32::try_from(eligible.len()).unwrap_or(u32::MAX);
             let max = max.map(|maximum| maximum.min(available));
@@ -107,7 +117,6 @@ pub fn resolve(
 /// optional-effect feasibility gate so they cannot disagree about availability.
 fn eligible_targets(
     state: &GameState,
-    ability: &ResolvedAbility,
     filter: &crate::types::ability::TargetFilter,
     ctx: &FilterContext,
     eligibility: Option<&ObjectSelectionEligibility>,
@@ -118,28 +127,15 @@ fn eligible_targets(
         .filter(|&&obj_id| matches_target_filter(state, obj_id, filter, ctx))
         .filter(|&&obj_id| match eligibility {
             None => true,
-            Some(ObjectSelectionEligibility::RemovableCounter {
-                counter_type,
-                count,
-            }) => {
-                let required = u32::try_from(
-                    crate::game::quantity::resolve_quantity_with_targets(state, count, ability)
-                        .max(1),
-                )
-                .unwrap_or(u32::MAX);
+            Some(ObjectSelectionEligibility::RemovableCounter { counter_type }) => {
                 state.objects.get(&obj_id).is_some_and(|object| {
-                    let removable = object.counters.iter().filter_map(|(kind, &available)| {
-                        (counter_type
+                    object.counters.iter().any(|(kind, &available)| {
+                        counter_type
                             .as_ref()
                             .is_none_or(|expected| expected == kind)
-                            && !counter_removal_blocked(state, obj_id, kind))
-                        .then_some(available)
-                    });
-                    if counter_type.is_some() {
-                        removable.into_iter().next().unwrap_or_default() >= required
-                    } else {
-                        removable.sum::<u32>() >= required
-                    }
+                            && available > 0
+                            && !counter_removal_blocked(state, obj_id, kind)
+                    })
                 })
             }
         })
@@ -167,7 +163,7 @@ pub(crate) fn optional_exact_selection_is_infeasible(
         return true;
     };
     let ctx = FilterContext::from_ability_with_controller(ability, chooser);
-    eligible_targets(state, ability, filter, &ctx, eligibility.as_ref()).len() < *count as usize
+    eligible_targets(state, filter, &ctx, eligibility.as_ref()).len() < *count as usize
 }
 
 #[cfg(test)]
@@ -203,7 +199,7 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 min: 2,
                 max: Some(2),
-                cardinality: None,
+                cardinality: Some(ObjectSelectionCardinality::Exactly { count: 2 }),
                 eligibility: None,
             },
         );
@@ -262,7 +258,6 @@ mod tests {
             cardinality: Some(ObjectSelectionCardinality::Exactly { count: 2 }),
             eligibility: Some(ObjectSelectionEligibility::RemovableCounter {
                 counter_type: Some(CounterType::Plus1Plus1),
-                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
             }),
         };
         let ability = ResolvedAbility::new(effect, Vec::new(), host, P0);
@@ -282,18 +277,9 @@ mod tests {
             .counters
             .insert(CounterType::Plus1Plus1, 1);
         assert!(
-            optional_exact_selection_is_infeasible(&state, &ability),
-            "one counter on each creature cannot pay a two-counter removal"
+            !optional_exact_selection_is_infeasible(&state, &ability),
+            "one removable counter on each creature makes both objects selectable"
         );
-        for creature in creatures {
-            state
-                .objects
-                .get_mut(&creature)
-                .expect("creature exists")
-                .counters
-                .insert(CounterType::Plus1Plus1, 2);
-        }
-        assert!(!optional_exact_selection_is_infeasible(&state, &ability));
     }
 
     /// CR 608.2c + CR 608.2d: An infeasible optional exact selection takes
@@ -316,7 +302,6 @@ mod tests {
                 cardinality: Some(ObjectSelectionCardinality::Exactly { count: 2 }),
                 eligibility: Some(ObjectSelectionEligibility::RemovableCounter {
                     counter_type: Some(CounterType::Plus1Plus1),
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 }),
             },
             Vec::new(),
@@ -334,14 +319,16 @@ mod tests {
     }
 
     /// CR 608.2c + CR 122.1: The exact selection's tracked set feeds the
-    /// removal continuation, so both selected creatures lose their counters.
+    /// removal continuation. `RemoveCounter` removes as many as possible from
+    /// each selected object, so one counter remains a legal selection for a
+    /// two-counter instruction.
     #[test]
-    fn exact_counter_selection_removes_from_every_selected_creature() {
+    fn exact_counter_selection_allows_partial_removal_from_every_selected_creature() {
         let removal = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::RemoveCounter {
                 counter_type: Some(CounterType::Plus1Plus1),
-                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::TrackedSet {
                     id: crate::types::identifiers::TrackedSetId(0),
                 },
@@ -357,7 +344,6 @@ mod tests {
                 cardinality: Some(ObjectSelectionCardinality::Exactly { count: 2 }),
                 eligibility: Some(ObjectSelectionEligibility::RemovableCounter {
                     counter_type: Some(CounterType::Plus1Plus1),
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 }),
             },
         )

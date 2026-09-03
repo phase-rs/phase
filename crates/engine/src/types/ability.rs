@@ -69,10 +69,7 @@ pub enum ObjectSelectionCardinality {
 /// be selected for a counter-removal instruction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObjectSelectionEligibility {
-    RemovableCounter {
-        counter_type: Option<CounterType>,
-        count: QuantityExpr,
-    },
+    RemovableCounter { counter_type: Option<CounterType> },
 }
 
 #[cfg(test)]

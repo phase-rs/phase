@@ -12599,10 +12599,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 cardinality: Some(ObjectSelectionCardinality::Exactly {
                     count: selection_count,
                 }),
-                eligibility: Some(ObjectSelectionEligibility::RemovableCounter {
-                    counter_type,
-                    count,
-                }),
+                eligibility: Some(ObjectSelectionEligibility::RemovableCounter { counter_type }),
             });
             clause.sub_ability = Some(Box::new(removal));
             clause
@@ -23416,7 +23413,6 @@ mod tests {
             eligibility,
             &Some(ObjectSelectionEligibility::RemovableCounter {
                 counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
-                count: QuantityExpr::Fixed { value: 1 },
             })
         );
         let removal = clause
