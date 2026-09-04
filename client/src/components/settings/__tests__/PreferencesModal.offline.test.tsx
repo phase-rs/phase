@@ -55,7 +55,7 @@ afterEach(() => {
 });
 
 describe("PreferencesModal offline cloud controls", () => {
-  it("places desktop offline preparation first in Data and hides it on web", () => {
+  it("places offline preparation first in Data, on web as well as desktop", () => {
     platform.desktop = true;
     renderPreferences();
 
@@ -67,10 +67,13 @@ describe("PreferencesModal offline cloud controls", () => {
     expect(visualPacks.compareDocumentPosition(cloudSync) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(cloudSync.compareDocumentPosition(data) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
 
+    // The browser needs this panel more than the desktop shell does, not less:
+    // it is where a player is most likely to enable Work Offline without ever
+    // having cached the images the board draws.
     cleanup();
     platform.desktop = false;
     renderPreferences();
-    expect(screen.queryByRole("heading", { name: "Offline preparation" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Offline preparation" })).toBeInTheDocument();
   });
 
   it("shows paused state and disables signed-out provider actions without invoking them", () => {

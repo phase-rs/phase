@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { manaSymbolSourceUrl } from "../services/scryfall.ts";
+import { manaSymbolSourceUrl, type ManaSymbolShard } from "../services/scryfall.ts";
 import { manaSymbolCandidate } from "../services/visualPacks/candidateKeys.ts";
 import { visualPackRepository } from "../services/visualPacks/repository.ts";
 import type {
@@ -16,9 +16,6 @@ export interface UseFixedVisualImageResult {
   source: CardImageSource | null;
   advanceFailedSource(failedSrc: string): void;
 }
-
-declare const manaSymbolShardBrand: unique symbol;
-export type ManaSymbolShard = string & { readonly [manaSymbolShardBrand]: true };
 
 /** Resolve one fixed visual without synthesizing responsive companion rungs. */
 export function useFixedVisualImage(

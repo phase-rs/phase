@@ -21,9 +21,10 @@ const ready = {
     preconCatalog: { status: "ready" as const },
     bundledAiCatalog: { status: "ready" as const },
     deckLibrary: { status: "not-installed" as const },
+    coreVisuals: { status: "ready" as const },
     nativeEngine: { status: "not-applicable" as const },
   },
-  visualPacks: { status: "not-installed" as const },
+  visualPacks: { status: "not-installed" as const, installedPacks: [] },
   requiredGaps: [],
 };
 
@@ -244,6 +245,40 @@ describe("OfflinePreparationSection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Prepare for Offline" }));
 
     await screen.findByText("This device is ready for offline local play.");
+  });
+
+  /** The gap this panel used to have: with nothing cached it rendered no card
+   *  image line at all, so a device with zero art still read as ready. */
+  it("warns when no card images are cached", async () => {
+    render(<OfflinePreparationSection nativeEngineEnabled={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Prepare for Offline" }));
+
+    await screen.findByText(/No card images are installed/);
+  });
+
+  it("names the card image packs that are cached", async () => {
+    mocks.prepare.mockResolvedValue({
+      ...ready,
+      visualPacks: { status: "ready" as const, installedPacks: ["curated", "deck_library"] },
+    });
+    render(<OfflinePreparationSection nativeEngineEnabled={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Prepare for Offline" }));
+
+    const cached = await screen.findByText(/Card images cached/);
+    expect(cached).toHaveTextContent("One image per card");
+    expect(cached).toHaveTextContent("Deck library");
+    expect(screen.queryByText(/No card images are installed/)).not.toBeInTheDocument();
+  });
+
+  it("lists the core visuals row in the readiness checklist", async () => {
+    render(<OfflinePreparationSection nativeEngineEnabled={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Prepare for Offline" }));
+
+    const checklist = await screen.findByRole("list", { name: "Offline readiness checklist" });
+    expect(checklist).toHaveTextContent("Card back and mana symbols");
   });
 
   it.each([

@@ -8,6 +8,7 @@ import {
 } from "../../services/offlinePreparation.ts";
 import { useConnectivityStore, useEffectiveOffline } from "../../stores/connectivityStore.ts";
 import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
+import { packLabel } from "./visual-packs/packLabels.ts";
 
 const CAPABILITIES: readonly OfflinePreparationCapabilityName[] = [
   "appShell",
@@ -16,6 +17,7 @@ const CAPABILITIES: readonly OfflinePreparationCapabilityName[] = [
   "preconCatalog",
   "bundledAiCatalog",
   "deckLibrary",
+  "coreVisuals",
   "nativeEngine",
 ];
 
@@ -31,9 +33,10 @@ function reconnectRequiredResult(): OfflinePreparationResult {
       preconCatalog: { status: "not-ready" },
       bundledAiCatalog: { status: "not-ready" },
       deckLibrary: { status: "not-ready" },
+      coreVisuals: { status: "not-ready" },
       nativeEngine: { status: "not-applicable" },
     },
-    visualPacks: { status: "not-installed" },
+    visualPacks: { status: "not-installed", installedPacks: [] },
     requiredGaps: [],
   };
 }
@@ -101,6 +104,7 @@ export function OfflinePreparationSection({ nativeEngineEnabled }: { nativeEngin
 
   const statusKey = preparing ? "preparing" : result?.status ?? "needs-preparation";
   const requiredGaps = result?.requiredGaps ?? [];
+  const installedArt = result?.visualPacks.installedPacks ?? [];
 
   return (
     <section className="rounded-[20px] border border-white/10 bg-black/18 p-4 shadow-[0_18px_54px_rgba(0,0,0,0.18)] backdrop-blur-md sm:p-5">
@@ -144,8 +148,22 @@ export function OfflinePreparationSection({ nativeEngineEnabled }: { nativeEngin
               </li>
             ))}
           </ul>
+          {/* Card art is reported, never required — a deck plays correctly with
+              none installed. Saying so plainly is the point: this panel used to
+              render nothing at all in the "not-installed" case, so a device with
+              zero images cached still read as ready. */}
+          {result.visualPacks.status === "not-installed" && (
+            <p className="mt-3 text-xs text-amber-200">{t("offlinePreparation.cardArtMissing")}</p>
+          )}
           {result.visualPacks.status === "warning" && (
             <p className="mt-3 text-xs text-amber-200">{t("offlinePreparation.visualWarning")}</p>
+          )}
+          {result.visualPacks.status === "ready" && installedArt.length > 0 && (
+            <p className="mt-3 text-xs text-slate-400">
+              {t("offlinePreparation.cardArtInstalled", {
+                packs: installedArt.map((pack) => packLabel(pack, t)).join(", "),
+              })}
+            </p>
           )}
         </>
       )}

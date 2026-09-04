@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { STORAGE_KEY_PREFIX } from "../../../../constants/storage.ts";
 import { usePreferencesStore, type ArtChainEntry, type CardArtOverride } from "../../../../stores/preferencesStore.ts";
 import type { DeckEntry } from "../../../deckParser.ts";
-import { CARD_BACK_URL, loadScryfallData, type PrintingEntry } from "../../../scryfall.ts";
+import { CARD_BACK_URL, MANA_SYMBOL_SHARDS, loadScryfallData, type PrintingEntry } from "../../../scryfall.ts";
 import { assetKey, packId } from "../../types.ts";
 import type { AssetKey, CatalogRoot, CuratedDrift, InstallSelector, OperationId, ProgressEvent, ResolutionResponse } from "../../types.ts";
 import type { ScryfallAssetDescriptor } from "../descriptors.ts";
@@ -199,17 +199,25 @@ function imageResponse(source: string): Response {
   return new Response(new TextEncoder().encode(source), { status: 200, headers: { "Content-Type": "image/jpeg" } });
 }
 
+/** `fetchImage` rejects a response whose Content-Type doesn't match the
+ *  descriptor's declared media, so mana-symbol SVGs need their own stub. */
+function svgResponse(source: string): Response {
+  return new Response(new TextEncoder().encode(source), { status: 200, headers: { "Content-Type": "image/svg+xml" } });
+}
+
 const fetchStub = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
   const source = String(input);
   requested.push(source);
   if (source === BULK_INDEX_URL) return jsonResponse({ data: [BULK_RECORD] });
   if (source === "/scryfall-data.json") return jsonResponse(CARDS);
   if (source === "/scryfall-printings.json") return jsonResponse(PRINTINGS);
-  // The `core` pack's only image, served with the SAME bytes as Bolt's newest
-  // normal rung. Content addressing then gives both packs one cache entry, so
-  // "an image another pack still uses" is a real shared path rather than a
-  // claim about one.
+  // The card back, served with the SAME bytes as Bolt's newest normal rung.
+  // Content addressing then gives both packs one cache entry, so "an image
+  // another pack still uses" is a real shared path rather than a claim about
+  // one.
   if (source === CARD_BACK_URL) return imageResponse(url(BOLT_NEW.id, "normal"));
+  // The `core` pack's other constituent: every finite mana-symbol SVG.
+  if (source.startsWith("https://svgs.scryfall.io/card-symbols/")) return svgResponse(source);
   if (source.startsWith("https://cards.scryfall.io/")) {
     if (held?.matches(source)) await held.gate;
     if (failImages || imagesServed >= imageBudget) return new Response("", { status: 503 });
@@ -325,10 +333,10 @@ async function failures(backend: ScryfallBrowserVisualPackBackend): Promise<Prog
   return events;
 }
 
-async function settle(backend: ScryfallBrowserVisualPackBackend, operation: OperationId): Promise<void> {
+async function settle(backend: ScryfallBrowserVisualPackBackend, operation: OperationId, timeout = 5000): Promise<void> {
   await vi.waitFor(async () => {
     expect((await backend.operationStatus(operation)).state).toBe("completed");
-  }, { timeout: 5000 });
+  }, { timeout });
 }
 
 async function startCurated(backend: ScryfallBrowserVisualPackBackend): Promise<{
@@ -357,9 +365,13 @@ async function installCurated(backend: ScryfallBrowserVisualPackBackend): Promis
 }
 
 async function installCore(backend: ScryfallBrowserVisualPackBackend): Promise<void> {
-  const response = await backend.start({ kind: "install", selector: { kind: "core" }, objectEstimate: 1 });
+  const objectEstimate = 1 + MANA_SYMBOL_SHARDS.length;
+  const response = await backend.start({ kind: "install", selector: { kind: "core" }, objectEstimate });
   if (response.status !== "started") throw new Error("core install did not start");
-  await settle(backend, response.operationId);
+  // The card back plus every finite mana-symbol SVG — an order of magnitude
+  // more objects than the 5s default budgets for, so this settle gets its own
+  // allowance rather than raising the shared default other callers rely on.
+  await settle(backend, response.operationId, 10000);
 }
 
 /** Every installed object a render-time asset lookup can actually reach. */
@@ -593,7 +605,7 @@ describe("curated delta install", () => {
     expect(cache.entries.has(soloPath)).toBe(false);
     const back = await backend.resolve([{ kind: "asset", key: assetKey("asset:v1:card_back:default") }]);
     expect(back.entries[0].matches).toHaveLength(1);
-  });
+  }, 10000);
 
   it("sweeps identically when a pack is removed rather than replaced", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
@@ -618,7 +630,7 @@ describe("curated delta install", () => {
     expect(await resolvedAssets(backend, first.descriptors)).toHaveLength(0);
     const back = await backend.resolve([{ kind: "asset", key: assetKey("asset:v1:card_back:default") }]);
     expect(back.entries[0].matches).toHaveLength(1);
-  });
+  }, 10000);
 
   it("clears rows and images stranded at a cancelled install's digest", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
@@ -724,7 +736,7 @@ describe("curated delta install", () => {
     } finally {
       restore();
     }
-  });
+  }, 10000);
 
   it("adopts content from a pack that is not curated", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
