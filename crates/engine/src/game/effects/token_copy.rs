@@ -122,14 +122,22 @@ pub fn resolve(
         // CR 400.7: resolve through the shared live-reference guard — a
         // referent that changed zones is a new object and must not become the
         // copy source (no fallback to a same-id object).
-        ability
-            .cost_paid_object
-            .as_ref()
-            .and_then(|snapshot| snapshot.live_object_id(state))
-            .map(|id| vec![id])
-            .ok_or_else(|| {
-                EffectError::MissingParam("CopyTokenOf requires a cost-paid object".to_string())
-            })?
+        // An ABSENT referent is a malformed ability (nothing was ever bound) and
+        // stays a parameter error. A PRESENT but stale referent is different:
+        // the object was bound and then became a new object (CR 400.7), so the
+        // copy has no legal source and resolves as a clean no-op through the
+        // empty-source path below, which still emits `EffectResolved`.
+        match ability.cost_paid_object.as_ref() {
+            None => {
+                return Err(EffectError::MissingParam(
+                    "CopyTokenOf requires a cost-paid object".to_string(),
+                ));
+            }
+            Some(snapshot) => snapshot
+                .live_object_id(state)
+                .map(|id| vec![id])
+                .unwrap_or_default(),
+        }
     } else if matches!(
         target_filter,
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }

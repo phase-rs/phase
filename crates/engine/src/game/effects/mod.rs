@@ -2215,6 +2215,7 @@ fn moved_object_context_from_events(
 /// general `ParentTarget` referent, but later "that player's" instructions may
 /// still identify the player from the move-time LKI snapshot.
 fn library_move_metadata_context_from_events(
+    state: &GameState,
     events: &[GameEvent],
 ) -> Option<CostPaidObjectSnapshot> {
     let mut moved = events.iter().filter_map(|event| match event {
@@ -2223,10 +2224,11 @@ fn library_move_metadata_context_from_events(
             from: Some(from_zone),
             to: Zone::Library,
             record,
-        } if is_public_zone(*from_zone) => Some(CostPaidObjectSnapshot {
-            object_id: *object_id,
-            lki: lki_snapshot_from_zone_change_record(record),
-        }),
+        } if is_public_zone(*from_zone) => Some(CostPaidObjectSnapshot::capture_departed(
+            state,
+            *object_id,
+            lki_snapshot_from_zone_change_record(record),
+        )),
         _ => None,
     });
     let first = moved.next()?;
@@ -12961,7 +12963,7 @@ fn resolve_chain_body(
                     effect_refs_parent_target_metadata(&sub.effect)
                         && !effect_requires_parent_target_object(&sub.effect)
                 })
-                .then(|| library_move_metadata_context_from_events(effect_events))
+                .then(|| library_move_metadata_context_from_events(state, effect_events))
                 .flatten()
         });
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);

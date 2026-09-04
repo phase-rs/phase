@@ -3069,7 +3069,18 @@ fn finish_sacrifice_for_cost(
             Some(pending),
             PendingSacrificeCostCompletion::SelectedNonSelf
             | PendingSacrificeCostCompletion::SelfRef,
-        ) => finish_pending_cost_or_cast(state, player, pending, events)?,
+        ) => {
+            // CR 400.7 + CR 608.2k: this is the RESUMED sacrifice path — the
+            // moves above completed after a replacement-effect choice, so
+            // re-pin here exactly as the non-paused paths do. A redirected
+            // sacrifice is precisely the case where the referent's incarnation
+            // cannot be predicted from the pre-move capture, so omitting this
+            // would leave the resumed cost reading as stale against the object
+            // its own cost just moved.
+            let mut pending = pending;
+            pending.ability.repin_cost_paid_object_recursive(state);
+            finish_pending_cost_or_cast(state, player, pending, events)?
+        }
         (None, PendingSacrificeCostCompletion::ResolutionOptionalPayment { frame, .. }) => {
             let mut frame = *frame;
             let Effect::PayCost { cost, .. } = &mut frame.ability.effect else {
