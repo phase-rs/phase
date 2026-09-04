@@ -994,7 +994,14 @@ export async function restoreGameState(
  */
 export async function dispatchResolveAll(requester: number): Promise<void> {
   await dispatchAction(
-    { type: "BeginResolveAll", data: { max_resolutions: 0 } },
+    // CR 117.3d: the button is the requester's own pre-commitment. `Own` cannot
+    // be blocked by a seat that declines or an AI seat that never answers;
+    // `Shared` (the table-wide consent proposal the engine uses for stack
+    // compression) is deliberately not reachable from this control.
+    {
+      type: "BeginResolveAll",
+      data: { max_resolutions: 0, scope: { type: "Own" } },
+    },
     requester,
   );
 }

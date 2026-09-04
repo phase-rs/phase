@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::types::ability::ControlWindow;
+use crate::types::actions::ResolveAllScope;
 use crate::types::game_state::{
     ActivePlayerControl, ActiveSearchDecisionAuthority, GameState, ResolveAllConsentRun,
     ScheduledTurnControl, WaitingFor,
@@ -411,7 +412,17 @@ pub(crate) fn resolve_all_consent_authority_matches_live(
         .into_iter()
         .collect();
 
-    frozen_representatives == live_representatives
+    // CR 117.4: a `Shared` run is a table-wide proposal, so a seat that became
+    // a priority participant after the snapshot would otherwise be bound by a
+    // consent it never gave — the live set must match exactly. An `Own` run
+    // binds only the requester and asks nobody, so it stays coherent as long as
+    // every seat it froze is still a live participant.
+    let membership_holds = match run.scope {
+        ResolveAllScope::Own => frozen_representatives.is_subset(&live_representatives),
+        ResolveAllScope::Shared => frozen_representatives == live_representatives,
+    };
+
+    membership_holds
         && run.participants.iter().all(|participant| {
             live_authorized_submitter_for_player(state, participant.representative)
                 == participant.authorized_submitter

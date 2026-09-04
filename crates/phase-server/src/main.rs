@@ -10286,7 +10286,10 @@ mod state_transport_derived_tests {
             apply(
                 &mut session.state,
                 PlayerId(0),
-                GameAction::BeginResolveAll { max_resolutions: 1 },
+                GameAction::BeginResolveAll {
+                    max_resolutions: 1,
+                    scope: ResolveAllScope::Shared,
+                },
             )
             .expect("priority holder may start Resolve All consent");
             let epoch = match session.state.waiting_for {

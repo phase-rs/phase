@@ -203,6 +203,11 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 57 — `GameAction::BeginResolveAll` gained `scope: ResolveAllScope` (`Own`
+ *      binds only the requester and resolves immediately; `Shared` opens the
+ *      table-wide consent protocol), and `PriorityPassingMode` gained
+ *      `FullControl`, which is now engine-authoritative rather than a
+ *      frontend-only toggle.
  * 56 — Host-only authoritative-state export request/response variants. Native
  *      P2P sends each player a redacted view, so the host must ask its local
  *      server for the trusted engine envelope rather than export that view.
@@ -391,7 +396,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 56;
+export const PROTOCOL_VERSION = 57;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

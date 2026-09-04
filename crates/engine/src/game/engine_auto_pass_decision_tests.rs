@@ -8,7 +8,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, PtValue, QuantityExpr,
     ResolvedAbility, StaticDefinition, TargetFilter,
 };
-use crate::types::actions::GameAction;
+use crate::types::actions::{GameAction, ResolveAllScope};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -2214,7 +2214,10 @@ fn resolve_all_supersedes_a_rechecking_ai_session_and_retains_auto_pass_baseline
     let result = apply(
         &mut state,
         PlayerId(0),
-        GameAction::BeginResolveAll { max_resolutions: 0 },
+        GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Shared,
+        },
     )
     .expect("the priority holder may replace an AI recheck with Resolve All");
 

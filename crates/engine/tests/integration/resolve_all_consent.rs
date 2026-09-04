@@ -22,12 +22,12 @@ use engine::types::ability::{
     ChoiceType, ControllerRef, CopyRetargetPermission, Effect, ResolvedAbility, TargetFilter,
     TargetRef, TargetSelectionMode, TypedFilter,
 };
-use engine::types::actions::{GameAction, ResolveAllConsentDecision};
+use engine::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AutoPassMode, GameState, PersistedGameState, StackEntry, StackEntryKind,
+    AutoPassMode, GameState, PersistedGameState, PriorityPassingMode, StackEntry, StackEntryKind,
     StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
     StackResolutionPolicy, StackResolutionSession, TurnBoundary, WaitingFor,
 };
@@ -52,7 +52,10 @@ fn begin(state: &mut GameState) -> u64 {
     apply(
         state,
         P0,
-        GameAction::BeginResolveAll { max_resolutions: 7 },
+        GameAction::BeginResolveAll {
+            max_resolutions: 7,
+            scope: ResolveAllScope::Shared,
+        },
     )
     .expect("priority holder may begin Resolve All consent");
     match &state.waiting_for {
@@ -171,6 +174,7 @@ fn browser_partial_priority_equip_grants_then_resolves_at_the_public_batch_seam(
         P0,
         GameAction::BeginResolveAll {
             max_resolutions: 100,
+            scope: ResolveAllScope::Shared,
         },
     )
     .expect("the human priority holder starts the browser Resolve All flow");
@@ -244,6 +248,7 @@ fn browser_partial_priority_equip_uses_the_shared_session_instead_of_a_prefix_pr
         P0,
         GameAction::BeginResolveAll {
             max_resolutions: 100,
+            scope: ResolveAllScope::Shared,
         },
     )
     .expect("the human priority holder starts Resolve All");
@@ -307,6 +312,100 @@ fn restored_mid_stack_priority_discards_an_orphaned_trigger_event_carrier() {
     assert!(restored.pending_trigger.is_none());
 }
 
+/// CR 117.3d: `ResolveAllScope::Own` binds the requester alone, so a table with
+/// AI seats can never park the requester on a consent prompt nobody answers.
+#[test]
+fn own_scope_resolves_without_asking_anyone() {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 3, 0x5E55_1017);
+    state.active_player = P2;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.stack.push_back(no_op_entry(1, P2));
+    state.stack.push_back(no_op_entry(2, P2));
+
+    let result = apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll {
+            max_resolutions: 1,
+            scope: ResolveAllScope::Own,
+        },
+    )
+    .expect("the priority holder begins Resolve All without anyone else's consent");
+
+    assert!(
+        !matches!(
+            state.waiting_for,
+            WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+        ),
+        "Own scope raises no consent prompt, got {:?}",
+        state.waiting_for
+    );
+    assert!(state.resolve_all_consent_run.is_none());
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::EffectResolved { .. }))
+            .count(),
+        1,
+        "the requester's own session resolves under its cap with no second party"
+    );
+    assert_eq!(state.stack.len(), 1);
+    for viewer in [P0, P1, P2] {
+        assert!(
+            !legal_actions_for_viewer(&state, viewer)
+                .0
+                .iter()
+                .any(|action| matches!(
+                    action,
+                    GameAction::RespondResolveAllConsent { .. }
+                        | GameAction::RevokeResolveAllConsent { .. }
+                )),
+            "{viewer:?} must not be offered a consent response"
+        );
+    }
+}
+
+/// CR 117.1: Full Control is a standing refusal to give up any window, and it
+/// must survive a session ANOTHER player installed — those passes are taken
+/// inside `run_auto_pass_loop` and never reach a frontend, so a client-only
+/// toggle could not have stopped them.
+#[test]
+fn full_control_holds_a_window_against_another_players_resolve_all() {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 3, 0xFC0_0DED);
+    state.active_player = P2;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.stack.push_back(no_op_entry(1, P2));
+    state.stack.push_back(no_op_entry(2, P2));
+    // P1 has nothing meaningful to do, so ONLY Full Control can hold their
+    // window — the meaningful-action gate would let the session pass them.
+    state
+        .priority_passing_modes
+        .insert(P1, PriorityPassingMode::FullControl);
+
+    apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Own,
+        },
+    )
+    .expect("P0 begins their own Resolve All");
+
+    assert!(
+        !state.stack.is_empty(),
+        "P1's Full Control must stop the session before it drains the stack"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P1),
+        "the window belongs to the Full Control player, got {:?}",
+        state.waiting_for
+    );
+}
+
 #[test]
 fn final_grant_materializes_the_ordinary_session_without_a_ready_latch() {
     let mut state = GameState::new_two_player(42);
@@ -343,7 +442,10 @@ fn final_grant_transfers_the_requested_cap_zero_as_unlimited() {
         let epoch = apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions },
+            GameAction::BeginResolveAll {
+                max_resolutions,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("priority holder begins")
         .waiting_for;
@@ -656,7 +758,10 @@ fn begin_resolve_all_refuses_to_replace_an_existing_resolution_session() {
     assert!(apply(
         &mut state,
         P0,
-        GameAction::BeginResolveAll { max_resolutions: 1 },
+        GameAction::BeginResolveAll {
+            max_resolutions: 1,
+            scope: ResolveAllScope::Shared
+        },
     )
     .is_err());
     assert_eq!(
@@ -869,7 +974,10 @@ fn decline_under_turn_control_restores_the_semantic_priority_snapshot() {
     apply(
         &mut state,
         P1,
-        GameAction::BeginResolveAll { max_resolutions: 7 },
+        GameAction::BeginResolveAll {
+            max_resolutions: 7,
+            scope: ResolveAllScope::Shared,
+        },
     )
     .expect("the controller may begin Resolve All for the controlled priority seat");
     let epoch = match state.waiting_for {
@@ -925,7 +1033,10 @@ fn eliminating_a_consent_representative_drops_the_run_and_restores_living_priori
     apply(
         &mut state,
         P0,
-        GameAction::BeginResolveAll { max_resolutions: 7 },
+        GameAction::BeginResolveAll {
+            max_resolutions: 7,
+            scope: ResolveAllScope::Shared,
+        },
     )
     .expect("priority holder may begin Resolve All consent");
     assert!(matches!(
@@ -1282,7 +1393,10 @@ fn ready_two_seat_state() -> GameState {
     apply(
         &mut state,
         P0,
-        GameAction::BeginResolveAll { max_resolutions: 1 },
+        GameAction::BeginResolveAll {
+            max_resolutions: 1,
+            scope: ResolveAllScope::Shared,
+        },
     )
     .expect("priority holder may begin Resolve All consent");
     let WaitingFor::ResolveAllConsent { epoch, .. } = state.waiting_for else {

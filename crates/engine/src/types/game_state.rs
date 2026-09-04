@@ -22,6 +22,7 @@ use super::ability::{
     TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
     TriggerDefinitionRef, TriggerEntry,
 };
+use super::actions::ResolveAllScope;
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
@@ -2092,6 +2093,15 @@ pub struct ResolveAllConsentRun {
     #[serde(default)]
     pub max_resolutions: StackResolutionBudget,
     pub priority_snapshot: ResolveAllPrioritySnapshot,
+    /// Which seats this run binds. `Own` runs cover only the requester, so the
+    /// live-authority check accepts them as a SUBSET of the current priority
+    /// participants; a `Shared` run is a table-wide proposal and must still
+    /// match the live set exactly, or a seat that became a participant after
+    /// the snapshot would be bound by a consent it never gave (CR 117.4).
+    /// Defaults to `Own` so a save written before this field existed cannot
+    /// silently acquire table-wide authority.
+    #[serde(default)]
+    pub scope: ResolveAllScope,
     pub participants: Vec<ResolveAllConsentParticipant>,
     /// The complete sparse auto-pass map captured before a fresh Resolve All
     /// run installs its temporary shared-resolution overlay. `None` identifies
@@ -15487,21 +15497,36 @@ pub enum AutoPassMode {
     },
 }
 
-/// How the engine recommends passing ordinary priority windows for one player.
+/// THE single per-player authority for auto-passing ordinary priority windows,
+/// as a graduated scale from "never" to "skip the low-use ones".
 ///
-/// This is an opt-in interface preference, not a change to priority itself:
-/// every recommended pass is still submitted as `GameAction::PassPriority` and
-/// resolved by the normal CR 117.3d / CR 117.4 engine path. `Standard` preserves
-/// the existing meaningful-action-aware recommendation ladder.
-/// `SkipLowUseWindows` adds a
+/// Two consumers read it, and they differ in force:
+///
+/// - `ai_support::auto_pass_recommended` — a *recommendation* to the frontend.
+///   Every recommended pass is still submitted as `GameAction::PassPriority`
+///   and resolved by the normal CR 117.3d / CR 117.4 path.
+/// - `game::engine`'s `run_auto_pass_loop` — *authoritative*. Passes taken here
+///   never reach a client, which is why `FullControl` has to live in engine
+///   state rather than in a frontend toggle: an auto-pass session installed by
+///   another player (Resolve All, CR 117.3d) drives this loop, and a
+///   client-only preference is invisible to it.
+///
+/// `Standard` is the meaningful-action-aware ladder. `SkipLowUseWindows` adds a
 /// narrow fast path for the active player's empty-stack Upkeep, Draw, and End
-/// priority windows; explicit phase stops, priority yields, and Full Control
-/// remain higher-authority user choices.
+/// windows. `FullControl` never auto-passes at all.
+///
+/// `FullControl` is deliberately NOT expressible as a `phase_stops` entry on
+/// every phase: `GameState::phase_stop_hit` is consulted only for empty-stack
+/// initial windows (`ai_support/mod.rs`), whereas Full Control must also hold a
+/// window while objects are on the stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum PriorityPassingMode {
     #[default]
     Standard,
     SkipLowUseWindows,
+    /// CR 117.1: hold every priority window this player receives. Outranks any
+    /// auto-pass session, including one another player installed.
+    FullControl,
 }
 
 /// CR 732.2a: user-controllable gate for the live combo (infinite-loop) detector.
@@ -36689,6 +36714,7 @@ mod tests {
         let run = ResolveAllConsentRun {
             epoch: 1,
             max_resolutions: StackResolutionBudget::Unlimited,
+            scope: ResolveAllScope::Own,
             priority_snapshot: ResolveAllPrioritySnapshot {
                 waiting_player: PlayerId(0),
                 priority_player: PlayerId(0),

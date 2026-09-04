@@ -1926,6 +1926,17 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         return false;
     }
 
+    // CR 117.1: Full Control is a standing refusal to give up ANY window, so no
+    // recommendation is ever issued. Deliberately ABOVE the CR 117.3d yield rung
+    // below — that rung is the one other place this function can answer `true`
+    // over a hold, and the engine-side gates in `game::engine` (which cover
+    // passes that never reach a frontend) do not consult yields. Ordering Full
+    // Control first is what keeps the recommendation and the authoritative loop
+    // from disagreeing about the same window.
+    if state.priority_passing_mode(mode_owner) == PriorityPassingMode::FullControl {
+        return false;
+    }
+
     // CR 117.3d: A standing priority yield for the top-of-stack trigger is an
     // explicit pre-commitment to pass. It deliberately overrides the castability
     // and meaningful-action holds below (including the issue #4388 opponent-turn
