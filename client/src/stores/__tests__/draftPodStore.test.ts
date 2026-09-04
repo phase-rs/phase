@@ -377,8 +377,8 @@ describe("draftPodStore", () => {
     });
 
     it("drops a delayed procedure response after its tournament format changes", async () => {
-      let resolveProcedure!: (value: unknown) => void;
-      mocks.draftProcedure.mockImplementationOnce(() => new Promise<unknown>((resolve) => {
+      let resolveProcedure!: (value: DraftProcedure | PromiseLike<DraftProcedure>) => void;
+      mocks.draftProcedure.mockImplementationOnce(() => new Promise<DraftProcedure>((resolve) => {
         resolveProcedure = resolve;
       }));
       useDraftPodStore.setState({
@@ -430,7 +430,7 @@ describe("draftPodStore", () => {
     });
 
     it("drops an original A success after A to B to A before replacement starts", async () => {
-      let resolveOriginal!: (value: Record<string, unknown>) => void;
+      let resolveOriginal!: (value: DraftProcedure | PromiseLike<DraftProcedure>) => void;
       mocks.draftProcedure.mockImplementationOnce(() => new Promise((resolve) => {
         resolveOriginal = resolve;
       }));
@@ -589,7 +589,7 @@ describe("draftPodStore", () => {
       ["resets", () => useDraftPodStore.getState().reset()],
       ["starts a newer procedure", () => useDraftPodStore.getState().refreshProcedure()],
     ])("does not host when recovery's procedure lookup is superseded by %s", async (_reason, supersede) => {
-      let resolveProcedure!: (value: Record<string, unknown>) => void;
+      let resolveProcedure!: (value: DraftProcedure | PromiseLike<DraftProcedure>) => void;
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
       mocks.draftProcedure.mockImplementationOnce(() => new Promise((resolve) => {
@@ -1056,7 +1056,7 @@ describe("draftPodStore", () => {
     }
 
     it("abandons a stale creation before fetching pools or hosting", async () => {
-      let resolveCreateProcedure!: (procedure: Record<string, unknown>) => void;
+      let resolveCreateProcedure!: (procedure: DraftProcedure | PromiseLike<DraftProcedure>) => void;
       const fetchMock = vi.fn();
       vi.stubGlobal("fetch", fetchMock);
       mocks.draftProcedure.mockImplementationOnce(() => new Promise((resolve) => {

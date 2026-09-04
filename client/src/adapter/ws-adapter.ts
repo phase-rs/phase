@@ -975,7 +975,7 @@ export class WebSocketAdapter implements EngineAdapter {
         );
         return;
       }
-      this.handleMessage(message);
+      this.handleMessage(message as { type: string; data?: unknown });
     };
 
     socket.ws.onerror = () => {
