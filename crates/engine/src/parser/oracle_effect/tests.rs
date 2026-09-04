@@ -44345,8 +44345,14 @@ fn choose_one_of_detects_shared_target_counter_choice() {
 
     // The shared "on up to one other target artifact" is a single cast-time
     // target lifted to a `TargetOnly` head; the up-to-one cap lives on the
-    // head, and the counter choice is the chained sub-ability whose branches
-    // act on `ParentTarget`.
+    // head, and the counter choice is the chained sub-ability.
+    //
+    // The branches name the head's first target SLOT, not a bare parent
+    // anaphor. CR 115.6 allows announcing zero targets for "up to one", and a
+    // bare anaphor with no chosen object falls back to the ability's own source
+    // — which this card excludes by name ("one OTHER target artifact"). See
+    // `inspirit_with_no_other_artifact_puts_no_counter_on_itself`, which
+    // measured a +1/+1 counter landing on the Spacecraft itself.
     assert!(
         matches!(&*ability.effect, Effect::TargetOnly { .. }),
         "expected TargetOnly head, got {:?}",
@@ -44375,7 +44381,7 @@ fn choose_one_of_detects_shared_target_counter_choice() {
         } => {
             assert_eq!(*counter_type, CounterType::Plus1Plus1);
             assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
-            assert_eq!(*target, TargetFilter::ParentTarget);
+            assert_eq!(*target, TargetFilter::ParentTargetSlot { index: 0 });
         }
         other => panic!("expected first branch PutCounter, got {other:?}"),
     }
@@ -44388,7 +44394,7 @@ fn choose_one_of_detects_shared_target_counter_choice() {
         } => {
             assert_eq!(*counter_type, CounterType::Generic("charge".to_string()));
             assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
-            assert_eq!(*target, TargetFilter::ParentTarget);
+            assert_eq!(*target, TargetFilter::ParentTargetSlot { index: 0 });
         }
         other => panic!("expected second branch PutCounter, got {other:?}"),
     }
@@ -44604,6 +44610,120 @@ fn choose_one_of_detects_from_among_counter_choice() {
             other => panic!("expected branch {i} PutCounter, got {other:?}"),
         }
     }
+}
+
+/// CR 122.1a + CR 122.1b + CR 608.2d: Elspeth Resplendent's +1 conjoins a
+/// FIXED counter with a chosen one — "Put a +1/+1 counter and a counter from
+/// among flying, first strike, lifelink, or vigilance on it". Both halves are
+/// already supported apart (Unexpected Fangs prints the conjoined pair of fixed
+/// kinds, Aragorn prints the bare from-among choice); only the combination fell
+/// to `Unimplemented`, so the whole ability did nothing.
+///
+/// Shape follows the card's printed ruling of 2022-04-29: "its controller
+/// chooses flying, first strike, lifelink, or vigilance, then that counter and
+/// the +1/+1 counter are placed on the target creature at the same time." So
+/// the CHOICE sits above both placements and the unconditional counter rides
+/// inside each branch — no player decision separates the two placements.
+#[test]
+fn choose_one_of_detects_fixed_counter_conjoined_with_from_among_choice() {
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    let ability = parse_effect_chain(
+        "Put a +1/+1 counter and a counter from among flying, first strike, lifelink, or vigilance on it.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(&*ability.effect, Effect::TargetOnly { .. }),
+        "expected TargetOnly head, got {:?}",
+        ability.effect
+    );
+
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("the choice must be chained under the shared target");
+    let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+        panic!(
+            "expected ChooseOneOf directly under the target, got {:?}",
+            choice.effect
+        );
+    };
+    assert_eq!(*chooser, PlayerFilter::Controller);
+    assert_eq!(branches.len(), 4, "four printed kinds");
+
+    let expected = [
+        KeywordKind::Flying,
+        KeywordKind::FirstStrike,
+        KeywordKind::Lifelink,
+        KeywordKind::Vigilance,
+    ];
+    for (i, kind) in expected.iter().enumerate() {
+        match &*branches[i].effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Keyword(*kind), "branch {i}");
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                // The parent's FIRST target slot, not a bare parent anaphor.
+                // The clause parsed here carries no "up to one" of its own —
+                // the conjoined form always names the slot. The optional-slot
+                // case that motivates it is pinned at runtime by
+                // `elspeth_plus_one_with_no_target_places_nothing`.
+                assert_eq!(*target, TargetFilter::ParentTargetSlot { index: 0 });
+            }
+            other => panic!("expected branch {i} PutCounter, got {other:?}"),
+        }
+
+        // The unconditional half rides inside the branch, after the chosen
+        // kind and with nothing in between.
+        let conjoined = branches[i]
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("branch {i} must carry the +1/+1 counter"));
+        assert!(
+            matches!(
+                &*conjoined.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    target: TargetFilter::ParentTargetSlot { index: 0 },
+                    ..
+                }
+            ),
+            "branch {i} must place the +1/+1 counter on the same slot, got {:?}",
+            conjoined.effect
+        );
+        assert!(
+            conjoined.sub_ability.is_none(),
+            "branch {i} places exactly the two counters"
+        );
+    }
+}
+
+/// The peel is what admits a `FromAmong` list without the "your choice of "
+/// marker. Without a fixed conjunct the marker is still required, so this bare
+/// text must stay unsupported.
+///
+/// This case is green on `main` too — it does not discriminate the fix. It is a
+/// bolt against later widening, and that was measured, not assumed: removing
+/// the `FromAmong` guard in `try_parse_put_counter_choice` makes this text
+/// supported and this test the only one that falls.
+#[test]
+fn from_among_without_marker_or_fixed_conjunct_stays_unsupported() {
+    let ability = parse_effect_chain(
+        "Put a counter from among flying, first strike, lifelink, or vigilance on it.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(&*ability.effect, Effect::Unimplemented { .. }),
+        "\"from among\" without the marker and without a fixed conjunct must stay a \
+         strict gap, got {:?}",
+        ability.effect
+    );
 }
 
 #[test]
