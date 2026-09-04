@@ -6877,10 +6877,24 @@ mod tests {
             session.state.resolve_all_consent_run.is_none(),
             "one run authorizes one batch and must not outlive it"
         );
+        // CR 117.3d: an `Own` run asks nobody, so the AI-grant round-trip that
+        // used to supply a second transition here no longer happens -- that
+        // round-trip is the defect this test's fixture reproduces. What must
+        // still hold is that the engine-owned runner published, and that no
+        // frame it published ever parked a player on a consent decision.
         assert!(
-            transitions.transitions.len() >= 2,
-            "expected the AI grant and session runner, got {}",
-            transitions.transitions.len()
+            !transitions.transitions.is_empty(),
+            "the engine-owned runner must publish the post-collapse state"
+        );
+        assert!(
+            transitions
+                .transitions
+                .iter()
+                .all(|(_, (broadcast_state, ..))| !matches!(
+                    broadcast_state.waiting_for,
+                    WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+                )),
+            "a published frame parked a player on a Resolve All consent decision"
         );
         assert!(
             transitions
