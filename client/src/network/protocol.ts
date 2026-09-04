@@ -101,8 +101,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       records TRANSMISSION cannot observe, since a send resolving true only
  *       means the bytes reached the channel. On the stale-drop branch of
  *       `state_update` it reports the NEWER revision the guest already holds,
- *       not the stale one it just discarded. The guest emits it now; no host
- *       consumes it yet. A v41 peer would not carry `state_ack` in
+ *       not the stale one it just discarded. The guest emits it and the host
+ *       ADVANCES each seat's redelivery entry off it (the entry is still
+ *       CREATED on an accepted handshake send, so a lost ack cannot disarm
+ *       the sweep). A v41 peer would not carry `state_ack` in
  *       VALID_TYPES, so `validateMessage` would throw, the throw would
  *       propagate out of `decodeWireMessage` into `peer.ts`'s catch, and
  *       every ack would be dropped with a console warning — a capability
