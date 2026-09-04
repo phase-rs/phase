@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DraftKind, DraftProcedure, TournamentFormat } from "../../adapter/draft-adapter";
+import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
 
 const mocks = vi.hoisted(() => ({
   clearActiveDraftPod: vi.fn(),
@@ -6,8 +8,7 @@ const mocks = vi.hoisted(() => ({
   inspectActiveDraftPod: vi.fn(),
   clearActiveDraftPodIfCurrent: vi.fn(),
   loadDraftHostSession: vi.fn(),
-  persistedDraftHostSessionState: vi.fn(() => "live"),
-  draftProcedure: vi.fn(),
+  draftProcedure: vi.fn<(kind: DraftKind, tournamentFormat: TournamentFormat) => Promise<DraftProcedure>>(),
   multiplayerState: {
     role: null as "host" | "guest" | null,
     phase: "idle",
@@ -26,13 +27,13 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../../services/draftPersistence", () => ({
+vi.mock("../../services/draftPersistence", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/draftPersistence")>()),
   clearActiveDraftPod: mocks.clearActiveDraftPod,
   loadActiveDraftPod: mocks.loadActiveDraftPod,
   inspectActiveDraftPod: mocks.inspectActiveDraftPod,
   clearActiveDraftPodIfCurrent: mocks.clearActiveDraftPodIfCurrent,
   loadDraftHostSession: mocks.loadDraftHostSession,
-  persistedDraftHostSessionState: mocks.persistedDraftHostSessionState,
 }));
 
 vi.mock("../multiplayerDraftStore", () => ({
@@ -88,36 +89,22 @@ const persistedSession = {
   seatTokens: { 0: "host" },
   seatNames: { 0: "Host" },
   kickedTokens: [],
-  draftStarted: true,
+  draftStarted: false,
   draftCode: "ABCDE",
-  draftSessionJson: "{}",
+  draftSessionJson: null,
   poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
 };
 
 describe("draftPodStore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.draftProcedure.mockResolvedValue({
-      pod_size: 8,
-      human_seats: 1,
-      min_pod_size: 2,
-      max_pod_size: 8,
-      allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
-      packs_per_player: 3,
-      cards_per_pick: 1,
-      distribution: "PickAndPass",
-      min_deck_size: 40,
-      cube_min_deck_size: 73,
-      post_draft_play: "TournamentPairings",
-      match_config: { best_of: 3 },
-    });
+    mocks.draftProcedure.mockResolvedValue(draftProcedureFixture());
     mocks.multiplayerState.role = null;
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.roomCode = null;
     mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
     mocks.multiplayerState.joinDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
     mocks.multiplayerConfig.hostingServer = "wss://phase.example/ws";
-    mocks.persistedDraftHostSessionState.mockReturnValue("live");
     mocks.inspectActiveDraftPod.mockReturnValue({
       type: "absent",
     });
@@ -128,6 +115,7 @@ describe("draftPodStore", () => {
   describe("offline orchestration boundary", () => {
     it.each([
       ["procedure entry", () => useDraftPodStore.getState().enterKind("Premier")],
+      ["entry procedure", () => useDraftPodStore.getState().enterKindForEntry("Premier")],
       ["procedure refresh", () => useDraftPodStore.getState().refreshProcedure()],
       ["pod creation", () => useDraftPodStore.getState().createPod()],
       ["pod join", () => useDraftPodStore.getState().joinPod()],
@@ -135,19 +123,23 @@ describe("draftPodStore", () => {
       ["host recovery", () => useDraftPodStore.getState().resumeHostedPod()],
     ])("does not begin %s while effective offline", async (_label, run) => {
       useConnectivityStore.setState({ forcedOffline: true });
+      useDraftPodStore.setState({ loadingPool: true });
 
       await run();
 
       expect(mocks.draftProcedure).not.toHaveBeenCalled();
       expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
-      expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
+      expect(useDraftPodStore.getState()).toMatchObject({
+        loadingPool: false,
+        configError: "offline.startUnavailable",
+      });
     });
   });
 
   describe("enterKind", () => {
     // Every axis but `pod_size` is inert here; only `pod_size` is read.
-    function procedure(podSize: number, cubeMinDeckSize = 73) {
-      return {
+    function procedure(podSize: number, cubeMinDeckSize = 73): DraftProcedure {
+      return draftProcedureFixture({
         pod_size: podSize,
         human_seats: 1,
         min_pod_size: 3,
@@ -159,8 +151,8 @@ describe("draftPodStore", () => {
         min_deck_size: 60,
         cube_min_deck_size: cubeMinDeckSize,
         post_draft_play: "CompleteImmediately",
-        match_config: { best_of: 1 },
-      };
+        match_config: { match_type: "Bo1" },
+      });
     }
 
     it("applies the kind and adopts the engine's pod-size default", async () => {
@@ -412,6 +404,7 @@ describe("draftPodStore", () => {
       expect(mocks.draftProcedure).toHaveBeenCalledWith("Premier", "Swiss");
 
       resolveProcedure({
+        ...draftProcedureFixture(),
         pod_size: 8,
         human_seats: 1,
         min_pod_size: 2,
@@ -423,7 +416,6 @@ describe("draftPodStore", () => {
         min_deck_size: 40,
         cube_min_deck_size: 83,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
       await refreshing;
 
@@ -449,6 +441,7 @@ describe("draftPodStore", () => {
       expect(mocks.draftProcedure).toHaveBeenCalledTimes(1);
 
       resolveOriginal({
+        ...draftProcedureFixture(),
         pod_size: 8,
         human_seats: 1,
         min_pod_size: 2,
@@ -460,7 +453,6 @@ describe("draftPodStore", () => {
         min_deck_size: 40,
         cube_min_deck_size: 97,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
       await original;
 
@@ -493,6 +485,7 @@ describe("draftPodStore", () => {
 
     it("publishes refreshed cache and dependent normalization atomically", async () => {
       mocks.draftProcedure.mockResolvedValue({
+        ...draftProcedureFixture(),
         pod_size: 4,
         human_seats: 1,
         min_pod_size: 3,
@@ -504,7 +497,6 @@ describe("draftPodStore", () => {
         min_deck_size: 40,
         cube_min_deck_size: 83,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
       useDraftPodStore.setState((prev) => ({
         config: { ...prev.config, podSize: 8 },
@@ -541,14 +533,28 @@ describe("draftPodStore", () => {
 
     it("treats a completed persisted snapshot as terminal and never re-hosts it", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
-      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
-      mocks.persistedDraftHostSessionState.mockReturnValue("terminal");
+      mocks.loadDraftHostSession.mockResolvedValue({
+        ...persistedSession,
+        draftStarted: true,
+        draftSessionJson: '{"status":"Complete"}',
+      });
 
       const outcome = await useDraftPodStore.getState().resumeHostedPod({ routeToken: 2 });
 
       expect(outcome).toBe("terminal");
       expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
       expect(mocks.clearActiveDraftPodIfCurrent).toHaveBeenCalled();
+    });
+
+    it("does not host when the recovery procedure lookup fails", async () => {
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+      mocks.draftProcedure.mockRejectedValue(new Error("wasm unavailable"));
+
+      await expect(useDraftPodStore.getState().resumeHostedPod()).resolves.toBe("invalid");
+
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().configError).toBe("wasm unavailable");
     });
 
     it("uses the snapshot rather than stale complete metadata as resume authority", async () => {
@@ -595,6 +601,7 @@ describe("draftPodStore", () => {
       expect(mocks.draftProcedure).toHaveBeenCalledOnce();
       supersede();
       resolveProcedure({
+        ...draftProcedureFixture(),
         pod_size: 8,
         human_seats: 1,
         min_pod_size: 2,
@@ -606,7 +613,6 @@ describe("draftPodStore", () => {
         min_deck_size: 40,
         cube_min_deck_size: 89,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
 
       await expect(resuming).resolves.toBe("superseded");
@@ -617,6 +623,7 @@ describe("draftPodStore", () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
       mocks.draftProcedure.mockResolvedValue({
+        ...draftProcedureFixture(),
         pod_size: 8,
         human_seats: 1,
         min_pod_size: 2,
@@ -628,7 +635,6 @@ describe("draftPodStore", () => {
         min_deck_size: 40,
         cube_min_deck_size: 89,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
 
       await expect(useDraftPodStore.getState().resumeHostedPod()).resolves.toBe("resumed");
@@ -661,6 +667,7 @@ describe("draftPodStore", () => {
         },
       });
       mocks.draftProcedure.mockResolvedValue({
+        ...draftProcedureFixture(),
         pod_size: 4,
         human_seats: 1,
         min_pod_size: 3,
@@ -672,7 +679,6 @@ describe("draftPodStore", () => {
         min_deck_size: 40,
         cube_min_deck_size: 89,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
       useDraftPodStore.setState({
         pendingProcedureDefault: {
@@ -908,6 +914,7 @@ describe("draftPodStore", () => {
   describe("createPod (cube branch)", () => {
     it("rejects an incompatible pool mode without publishing a matching cache key", async () => {
       mocks.draftProcedure.mockResolvedValue({
+        ...draftProcedureFixture(),
         pod_size: 8,
         human_seats: 1,
         min_pod_size: 2,
@@ -919,7 +926,6 @@ describe("draftPodStore", () => {
         min_deck_size: 40,
         cube_min_deck_size: 73,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
       useDraftPodStore.setState({
         poolMode: "cube",
@@ -1068,6 +1074,7 @@ describe("draftPodStore", () => {
       const creating = useDraftPodStore.getState().createPod();
       await useDraftPodStore.getState().enterKind("CommanderDraft");
       resolveCreateProcedure({
+        ...draftProcedureFixture(),
         pod_size: 8,
         human_seats: 8,
         min_pod_size: 2,
@@ -1078,7 +1085,6 @@ describe("draftPodStore", () => {
         distribution: "PickAndPass",
         min_deck_size: 40,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
 
       await creating;
@@ -1094,6 +1100,7 @@ describe("draftPodStore", () => {
     it("ships the host's pack order and one pool per distinct set", async () => {
       stubPools(["ISD", "DKA"]);
       mocks.draftProcedure.mockResolvedValue({
+        ...draftProcedureFixture(),
         pod_size: 8,
         human_seats: 1,
         min_pod_size: 2,
@@ -1104,7 +1111,6 @@ describe("draftPodStore", () => {
         distribution: "PickAndPass",
         min_deck_size: 40,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
       useDraftPodStore.setState((prev) => ({
         config: {
@@ -1140,6 +1146,7 @@ describe("draftPodStore", () => {
     it("uses the procedure's exact seat set before hosting", async () => {
       stubPools(["ISD"]);
       mocks.draftProcedure.mockResolvedValue({
+        ...draftProcedureFixture(),
         pod_size: 8,
         human_seats: 1,
         min_pod_size: 2,
@@ -1150,7 +1157,6 @@ describe("draftPodStore", () => {
         distribution: "PickAndPass",
         min_deck_size: 40,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
       useDraftPodStore.setState((prev) => ({
         config: {
@@ -1174,6 +1180,7 @@ describe("draftPodStore", () => {
     it("publishes a matching create cache only with normalized dependent state", async () => {
       stubPools(["ISD"]);
       mocks.draftProcedure.mockResolvedValue({
+        ...draftProcedureFixture(),
         pod_size: 4,
         human_seats: 1,
         min_pod_size: 4,
@@ -1185,7 +1192,6 @@ describe("draftPodStore", () => {
         min_deck_size: 40,
         cube_min_deck_size: 73,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
       useDraftPodStore.setState((prev) => ({
         config: {
@@ -1221,6 +1227,7 @@ describe("draftPodStore", () => {
     it("refuses a pack list naming a set with no pool data", async () => {
       stubPools(["ISD"]);
       mocks.draftProcedure.mockResolvedValue({
+        ...draftProcedureFixture(),
         pod_size: 8,
         human_seats: 1,
         min_pod_size: 2,
@@ -1231,7 +1238,6 @@ describe("draftPodStore", () => {
         distribution: "PickAndPass",
         min_deck_size: 40,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
       });
       useDraftPodStore.setState((prev) => ({
         config: {
@@ -1294,6 +1300,7 @@ describe("draftPodStore", () => {
       mocks.draftProcedure
         .mockReset()
         .mockResolvedValueOnce({
+          ...draftProcedureFixture(),
           pod_size: 8,
           human_seats: 1,
           min_pod_size: 2,
@@ -1304,7 +1311,6 @@ describe("draftPodStore", () => {
           distribution: "PickAndPass",
           min_deck_size: 40,
           post_draft_play: "TournamentPairings",
-          match_config: { best_of: 3 },
         })
         .mockRejectedValueOnce(new Error("new procedure failed"));
       useDraftPodStore.setState((prev) => ({
@@ -1351,20 +1357,8 @@ describe("draftPodStore", () => {
       }));
     }
 
-    function procedure() {
-      return {
-        pod_size: 8,
-        human_seats: 1,
-        min_pod_size: 2,
-        max_pod_size: 8,
-        allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
-        packs_per_player: 3,
-        cards_per_pick: 1,
-        distribution: "PickAndPass",
-        min_deck_size: 40,
-        post_draft_play: "TournamentPairings",
-        match_config: { best_of: 3 },
-      };
+    function procedure(): DraftProcedure {
+      return draftProcedureFixture();
     }
 
     it.each([
@@ -1508,6 +1502,55 @@ describe("draftPodStore", () => {
       await creating;
 
       expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+
+    it("keeps a held online creation from hosting after a later offline creation", async () => {
+      let resolveResponse!: (response: { ok: boolean; status: number; json: () => Promise<Record<string, unknown>> }) => void;
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      vi.stubGlobal("fetch", vi.fn(() => new Promise((resolve) => { resolveResponse = resolve; })));
+      configureSetPod();
+
+      const olderCreation = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(useDraftPodStore.getState().loadingPool).toBe(true));
+
+      useConnectivityStore.setState({ forcedOffline: true });
+      await useDraftPodStore.getState().createPod();
+      expect(useDraftPodStore.getState()).toMatchObject({
+        loadingPool: false,
+        configError: "offline.startUnavailable",
+      });
+
+      useConnectivityStore.setState({ forcedOffline: false });
+      resolveResponse({ ok: true, status: 200, json: async () => ({ tst: { code: "TST" } }) });
+      await olderCreation;
+
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+
+    it("starts a fresh host recovery after an offline resume retires a held attempt", async () => {
+      let resolveFirstLoad!: (session: typeof persistedSession) => void;
+      mocks.inspectActiveDraftPod.mockReturnValue({
+        type: "present",
+        meta: activeMeta,
+        capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt },
+      });
+      mocks.loadDraftHostSession
+        .mockImplementationOnce(() => new Promise((resolve) => { resolveFirstLoad = resolve; }))
+        .mockResolvedValueOnce(persistedSession);
+
+      const firstResume = useDraftPodStore.getState().resumeHostedPod();
+      await vi.waitFor(() => expect(mocks.loadDraftHostSession).toHaveBeenCalledOnce());
+
+      useConnectivityStore.setState({ forcedOffline: true });
+      await expect(useDraftPodStore.getState().resumeHostedPod()).resolves.toBe("offline");
+
+      useConnectivityStore.setState({ forcedOffline: false });
+      const recovered = useDraftPodStore.getState().resumeHostedPod();
+      await vi.waitFor(() => expect(mocks.loadDraftHostSession).toHaveBeenCalledTimes(2));
+      resolveFirstLoad(persistedSession);
+
+      await expect(firstResume).resolves.toBe("superseded");
+      await expect(recovered).resolves.toBe("resumed");
     });
 
     it.each(["fulfillment", "rejection"] as const)("keeps a stale procedure %s from overwriting a newer offline join", async (settlement) => {

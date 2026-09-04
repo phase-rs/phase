@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
 
 /**
  * The pod host's set selection, end to end through the page.
@@ -147,7 +148,7 @@ describe("DraftPodPage host set selection", () => {
     mocks.multiplayerState.view = null;
     mocks.multiplayerState.role = null;
     mocks.multiplayerState.roomCode = null;
-    mocks.draftProcedure.mockResolvedValue({
+    mocks.draftProcedure.mockResolvedValue(draftProcedureFixture({
       pod_size: 8,
       human_seats: 1,
       min_pod_size: 3,
@@ -157,8 +158,8 @@ describe("DraftPodPage host set selection", () => {
       cards_per_pick: 1,
       distribution: "PickAndPass",
       min_deck_size: 40,
-      match_config: { best_of: 1 },
-    });
+      match_config: { match_type: "Bo1" },
+    }));
     stubFetch();
     useDraftPodStore.getState().reset();
   });

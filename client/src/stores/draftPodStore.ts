@@ -235,8 +235,9 @@ let podOrchestrationGeneration = 0;
 
 function beginPodOrchestration(set?: (partial: Partial<DraftPodState>) => void): number {
   podOrchestrationGeneration += 1;
-  // A newer public operation retires any pool spinner owned by the older
-  // generation before that older continuation can settle.
+  // A newer public operation retires any pool spinner and deduplicated resume
+  // attempt owned by the older generation before its continuation can settle.
+  resumeHostedPodAttempt = null;
   set?.({ loadingPool: false });
   return podOrchestrationGeneration;
 }
@@ -342,6 +343,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     enterKind: async (kind) => {
       if (getEffectiveOffline()) {
+        beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
         return;
       }
@@ -382,6 +384,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     enterKindForEntry: async (kind) => {
       if (getEffectiveOffline()) {
+        beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
         return;
       }
@@ -396,6 +399,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     refreshProcedure: async () => {
       if (getEffectiveOffline()) {
+        beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
         return;
       }
@@ -465,6 +469,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     createPod: async () => {
       if (getEffectiveOffline()) {
+        beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
         return;
       }
@@ -653,6 +658,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     resumeHostedPod: async (options = {}) => {
       if (getEffectiveOffline()) {
+        beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
         return "offline";
       }
@@ -832,6 +838,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             return "offline";
           }
           set({ configError: err instanceof Error ? err.message : String(err) });
+          return "invalid";
         }
 
         const hostConfig: DraftPodHostConfig = {
@@ -877,6 +884,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     joinPod: async () => {
       if (getEffectiveOffline()) {
+        beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
         return;
       }
@@ -924,6 +932,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     startDraft: async () => {
       if (getEffectiveOffline()) {
+        beginPodOrchestration(set);
         set({ configError: DRAFT_OFFLINE_ERROR });
         return;
       }

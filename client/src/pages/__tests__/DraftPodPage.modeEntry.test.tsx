@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
 
 const mocks = vi.hoisted(() => ({
   draftProcedure: vi.fn(),
@@ -124,7 +125,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.view = null;
     mocks.loadActiveDraftPod.mockReturnValue(null);
-    mocks.draftProcedure.mockResolvedValue({
+    mocks.draftProcedure.mockResolvedValue(draftProcedureFixture({
       pod_size: 6,
       human_seats: 1,
       min_pod_size: 3,
@@ -136,8 +137,8 @@ describe("DraftPodPage ?kind= mode entry", () => {
       min_deck_size: 60,
       cube_min_deck_size: 53,
       post_draft_play: "CompleteImmediately",
-      match_config: { best_of: 1 },
-    });
+      match_config: { match_type: "Bo1" },
+    }));
     useDraftPodStore.getState().reset();
   });
 
@@ -229,7 +230,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     mocks.draftProcedure.mockImplementation(async (
       requestedKind: string,
       requestedTournamentFormat: string,
-    ) => ({
+    ) => draftProcedureFixture({
       pod_size: 8,
       human_seats: 1,
       min_pod_size: requestedKind === "CommanderDraft" ? 3 : 2,
@@ -248,7 +249,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
       post_draft_play: requestedKind === "CommanderDraft"
         ? "CompleteImmediately"
         : "TournamentPairings",
-      match_config: { best_of: 1 },
+      match_config: { match_type: "Bo1" },
     }));
 
     renderAt("/draft-pod");
@@ -275,7 +276,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     let resolveCommanderProcedure!: () => void;
     mocks.draftProcedure.mockImplementation((kind: string) => {
       if (kind !== "CommanderDraft") {
-        return Promise.resolve({
+        return Promise.resolve(draftProcedureFixture({
           pod_size: 8,
           human_seats: 1,
           min_pod_size: 2,
@@ -287,12 +288,12 @@ describe("DraftPodPage ?kind= mode entry", () => {
           min_deck_size: 60,
           cube_min_deck_size: 53,
           post_draft_play: "TournamentPairings",
-          match_config: { best_of: 1 },
-        });
+          match_config: { match_type: "Bo1" },
+        }));
       }
 
       return new Promise((resolve) => {
-        resolveCommanderProcedure = () => resolve({
+        resolveCommanderProcedure = () => resolve(draftProcedureFixture({
           pod_size: 4,
           human_seats: 1,
           min_pod_size: 3,
@@ -304,8 +305,8 @@ describe("DraftPodPage ?kind= mode entry", () => {
           min_deck_size: 60,
           cube_min_deck_size: 73,
           post_draft_play: "CompleteImmediately",
-          match_config: { best_of: 1 },
-        });
+          match_config: { match_type: "Bo1" },
+        }));
       });
     });
 
@@ -341,7 +342,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     let resolveHigher!: () => void;
     let resolveLower!: () => void;
     mocks.draftProcedure.mockImplementation((kind: string) => {
-      const base = {
+      const base = draftProcedureFixture({
         pod_size: 8,
         human_seats: 1,
         min_pod_size: 2,
@@ -353,8 +354,8 @@ describe("DraftPodPage ?kind= mode entry", () => {
         min_deck_size: 40,
         cube_min_deck_size: 53,
         post_draft_play: "TournamentPairings",
-        match_config: { best_of: 1 },
-      };
+        match_config: { match_type: "Bo1" },
+      });
       if (kind === "CommanderDraft") {
         return new Promise((resolve) => {
           resolveHigher = () => resolve({
@@ -407,7 +408,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
   });
 
   it("leaves cube setup only after an all-at-once procedure resolves", async () => {
-    mocks.draftProcedure.mockImplementation(async (kind: string) => ({
+    mocks.draftProcedure.mockImplementation(async (kind: string) => draftProcedureFixture({
       pod_size: 8,
       human_seats: 1,
       min_pod_size: 2,
@@ -419,7 +420,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
       min_deck_size: 40,
       cube_min_deck_size: 1,
       post_draft_play: "TournamentPairings",
-      match_config: { best_of: 1 },
+      match_config: { match_type: "Bo1" },
     }));
 
     const user = userEvent.setup();
