@@ -3648,6 +3648,66 @@ export class P2PGuestAdapter implements EngineAdapter {
     return this.snapshot;
   }
 
+  /** Report the highest revision this guest has actually APPLIED.
+   *
+   *  Called from every arm that accepts a state-bearing frame, and from the
+   *  stale-drop branch of `state_update`. A sender-side ledger records
+   *  TRANSMISSION — `send()` resolving true means the bytes reached the
+   *  channel, not that the guest ever applied them — so this is the only
+   *  frame that reports application. On the stale-drop branch `cachedRevision`
+   *  is still the NEWER revision the guest already holds, not the stale one it
+   *  just discarded, so the ack additionally reports being ahead of a resend.
+   *
+   *  Placement is NOT uniform and rests on no single criterion. `emit` does
+   *  not wrap its listeners in try/catch (unlike `peer.ts`, which wraps each
+   *  handler), so an ack sitting after an `emit` is suppressed by a throwing
+   *  subscriber — and whether that suppression is WANTED differs by arm.
+   *   - `state_update`: ack right after `cacheSnapshot`, before the emit. The
+   *     guest holds the state and serves `getState()` from there, so the ack
+   *     reports what the guest HAS, not what its UI has rendered. Acking after
+   *     the emit would be worse than merely late: a resent EQUAL revision is
+   *     not `<` the cached one, so it re-enters this same arm and throws
+   *     again — once a host consumes acks, that is a resend loop, not a heal.
+   *   - `game_setup` / `reconnect_ack`: ack AFTER `settleGameSetup`. Until
+   *     that promise settles `initializeGame()` has not resolved and the guest
+   *     cannot act at all, so here suppression is the wanted outcome: an
+   *     unacked seat is the honest report. Two limits on that, both real —
+   *     it covers only the setup frame itself, since a later `state_update`
+   *     acks from its own arm with no `gameSetupSettled` check; and a
+   *     redelivery rescues only a TRANSIENT throw, because a deterministic one
+   *     re-enters the same arm and throws again.
+   *
+   *  No-op when `cachedRevision` is null. Every host sender stamps `revision`
+   *  today, but the frame types declare it optional, so an unstamped
+   *  state-bearing frame would be applied and NOT acked, with no warning.
+   *
+   *  Authentication: all four call sites are on an authenticated session by
+   *  the time they reach here, but by two different routes.
+   *  `handleHostMessage`'s top-level guard already requires
+   *  `authenticatedSession === session` for every type except `game_setup`,
+   *  `reconnect_ack`, `reconnect_rejected`, `kick` and `host_left` — so the
+   *  two `state_update` sites are gated there before their arm is entered.
+   *  The other two arms are exempt from that guard precisely because they are
+   *  what ASSIGNS `authenticatedSession`, and each does so before its ack.
+   *
+   *  `send()` stamps `this.authority` when the guest holds one, so an ack
+   *  normally runs the host's `hasExactP2PAuthority` supersede check whose
+   *  failure path calls `rejectSuperseded` and closes the session. That is the
+   *  identical path an `action` already takes, so it is believed benign — but
+   *  it does mean this purely informational frame is capable of ending a
+   *  session, which is stated here rather than left latent. It also changes
+   *  the TIMING of that outcome: an `action` is user-driven, while an ack
+   *  rides every accepted broadcast, so a guest on a stale stamp would be
+   *  rejected on the next broadcast rather than on its next action. Both setup
+   *  arms refresh `this.authority` from the host's own frame before their ack
+   *  — conditionally, but the host stamps every outbound frame — so this is
+   *  not believed reachable.
+   */
+  private sendStateAck(): void {
+    if (this.cachedRevision === null) return;
+    this.send({ type: "state_ack", revision: this.cachedRevision });
+  }
+
   private async acceptTerminalResult(
     session: PeerSession,
     message: Extract<P2PMessage, { type: "terminal_result" }>,
@@ -3809,6 +3869,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.settleGameSetup({ events: msg.events });
+        this.sendStateAck();
         break;
       }
       case "reconnect_ack": {
@@ -3836,6 +3897,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         // a second time) are idempotent — the `gameSetupSettled` guard
         // prevents double-resolution.
         this.settleGameSetup({ events: [] });
+        this.sendStateAck();
         break;
       }
       case "reconnect_rejected": {
@@ -3891,10 +3953,14 @@ export class P2PGuestAdapter implements EngineAdapter {
           && this.cachedRevision !== null
           && msg.revision < this.cachedRevision
         ) {
+          // Ack the revision the guest HOLDS, not the one it just dropped, so
+          // the host learns this seat is ahead of what it resent.
+          this.sendStateAck();
           return;
         }
         this.cachedRevision = msg.revision ?? null;
         const updateSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
+        this.sendStateAck();
         if (this.pendingResolve) {
           this.pendingResolve({ events: msg.events, log_entries: msg.logEntries });
           this.pendingResolve = null;

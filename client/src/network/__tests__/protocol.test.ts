@@ -36,8 +36,8 @@ const viewerInteractionWithProducedMana = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v41", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(41);
+  it("pins the P2P wire protocol to v42", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(42);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -88,6 +88,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "lobby_progress", joined: 1, total: 3 },
     { type: "emote", emote: "🔥" },
     { type: "reconnect", playerToken: "token-123", wireProtocolVersion: WIRE_PROTOCOL_VERSION },
+    { type: "state_ack", revision: 17 },
     { type: "reconnect_rejected", reason: "Unknown token" },
     {
       type: "action_rejected",

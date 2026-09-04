@@ -96,6 +96,25 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  42 — New guest → host `state_ack` frame, carrying the highest state
+ *       revision the guest has actually APPLIED — the fact a host ledger that
+ *       records TRANSMISSION cannot observe, since a send resolving true only
+ *       means the bytes reached the channel. On the stale-drop branch of
+ *       `state_update` it reports the NEWER revision the guest already holds,
+ *       not the stale one it just discarded. The guest emits it now; no host
+ *       consumes it yet. A v41 peer would not carry `state_ack` in
+ *       VALID_TYPES, so `validateMessage` would throw, the throw would
+ *       propagate out of `decodeWireMessage` into `peer.ts`'s catch, and
+ *       every ack would be dropped with a console warning — a capability
+ *       loss, not a parse break of the surrounding session, though unlike 24
+ *       it is a whole frame rejected rather than an accepted frame missing an
+ *       additive field. Since
+ *       game_setup and reconnect_ack carry the version, first contact rejects
+ *       the skew rather than allowing that loss, so the drop path above is
+ *       unreachable in practice; it is stated because it is what the
+ *       handshake exists to prevent. That check lives in
+ *       `P2PGuestAdapter.handleHostMessage`, not in `validateMessage` — see
+ *       the paragraph above.
  *  40 — DerivedViews.room_half_identities publishes both halves of every
  *       battlefield Room in printed order, resolved through the COPIED halves
  *       for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
@@ -255,7 +274,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 41 as const;
+export const WIRE_PROTOCOL_VERSION = 42 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
@@ -285,6 +304,12 @@ export type P2PMessage = P2PAuthorityWire & (
       events: GameEvent[];
       logEntries?: GameLogEntry[];
     } & LegalActionsWire)
+  /** Guest → host: the highest state revision the guest has APPLIED, which a
+   * host ledger recording transmission cannot otherwise observe. Sent from
+   * every arm that accepts a state-bearing frame, and from the stale-drop
+   * branch of `state_update` — where it reports the newer revision the guest
+   * already holds, not the stale one it discarded. */
+  | { type: "state_ack"; revision: number }
   | { type: "action_rejected"; rejection: ActionRejection }
   | { type: "action_failed"; message: string }
   | { type: "action_noop" }
@@ -363,6 +388,7 @@ const VALID_TYPES = new Set([
   "interaction",
   "preview_mana_payment",
   "state_update",
+  "state_ack",
   "action_rejected",
   "action_failed",
   "action_noop",

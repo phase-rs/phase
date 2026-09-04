@@ -2962,6 +2962,140 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(emitted).not.toHaveBeenCalled();
   });
 
+  it("acks the revision the guest has applied, including the held one on a stale drop", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+
+    const ackedRevisions = async (): Promise<number[]> => {
+      await flushPromises();
+      return (await conn.getSentMessages())
+        .filter(
+          (m): m is { type: "state_ack"; revision: number } =>
+            typeof m === "object" && m !== null && (m as { type: string }).type === "state_ack",
+        )
+        .map((m) => m.revision);
+    };
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      revision: 8,
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+    expect(await ackedRevisions()).toEqual([8]);
+
+    await conn.simulateData({
+      type: "state_update",
+      revision: 9,
+      state: remoteState("current"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    expect(await ackedRevisions()).toEqual([8, 9]);
+
+    // The stale frame is dropped, but the guest still answers — with the
+    // NEWER revision it holds. A host ledger that records transmission cannot
+    // observe this; the ack is the only way it learns the seat is ahead.
+    await conn.simulateData({
+      type: "state_update",
+      revision: 8,
+      state: remoteState("stale"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    expect(await ackedRevisions()).toEqual([8, 9, 9]);
+
+    // A resumed session re-declares the seat's revision. No host consumes any
+    // `state_ack` yet — `handleGuestMessage` has no such case and falls to
+    // `default: break` — so this pins the guest half, which is the half this
+    // step owns.
+    await conn.simulateData({
+      type: "reconnect_ack",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      revision: 12,
+      state: remoteState("resumed"),
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    expect(await ackedRevisions()).toEqual([8, 9, 9, 12]);
+  });
+
+  it("still acks an applied state_update when a stateChanged listener throws", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+
+    // `P2PGuestAdapter.emit` does not wrap its listeners, so a throwing
+    // subscriber unwinds the rest of the arm — here, only an ack placed after
+    // the emit. It must already be on the wire: a resent EQUAL revision is not
+    // `<` the cached one, so it re-enters this same arm and throws again, and
+    // once a host consumes acks that is a resend loop rather than a heal. The
+    // seat itself is fine throughout; it holds the state and serves
+    // `getState()`.
+    adapter.onEvent((event) => {
+      if (event.type === "stateChanged") throw new Error("subscriber blew up");
+    });
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      revision: 3,
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+
+    await conn.simulateData({
+      type: "state_update",
+      revision: 4,
+      state: remoteState("current"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await flushPromises();
+
+    const acked = (await conn.getSentMessages())
+      .filter(
+        (m): m is { type: "state_ack"; revision: number } =>
+          typeof m === "object" && m !== null && (m as { type: string }).type === "state_ack",
+      )
+      .map((m) => m.revision);
+    expect(acked).toEqual([3, 4]);
+  });
+
   it("guest receive path resolves action_noop without replacing its cached snapshot", async () => {
     const { peer } = createFakePeer();
     const conn = new FakeDataConnection();
@@ -3866,14 +4000,14 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Revert 41 → 40 and BOTH halves red: the v40 frame stops being
-  // refused, and the v41 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v40" is also satisfied by a client
+  // bump. Revert 42 → 41 and BOTH halves red: the v41 frame stops being
+  // refused, and the v42 frame stops being admitted. The admitting half is
+  // the reach-guard — without it "refuses v41" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v40) and admits its own (v41)", async () => {
+  it("refuses the previous wire protocol (v41) and admits its own (v42)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(40));
+    await refusing.conn.simulateData(setupFrameAt(41));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -3885,7 +4019,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(41));
+    await admitting.conn.simulateData(setupFrameAt(42));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(
