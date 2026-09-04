@@ -29,7 +29,9 @@
 # sentinels in lobby-worker/wrangler.toml. Until that is done every command
 # here fails at wrangler, and the Worker deploys with an empty directory.
 #
-# Requires: wrangler (the pinned one in lobby-worker/node_modules), jq, curl.
+# Requires: node (for `npx`), jq, curl. Every wrangler call goes through `npx`
+# from lobby-worker/, which resolves the PINNED wrangler in that package's
+# node_modules/.bin — a bare `wrangler` is not on an operator's PATH.
 # Tests: scripts/lib/lobby_servers_tests.sh (Tilt resource `lobby-servers`,
 # label 'lint' — local-only, not CI).
 set -euo pipefail
@@ -95,7 +97,7 @@ wrangler_kv() {
   # Run from lobby-worker/ so wrangler finds its config, and always against
   # REMOTE storage: this script manages the deployed allowlist, never a local
   # simulator.
-  (cd "$ROOT/lobby-worker" && wrangler kv "$@" --binding "$BINDING" --remote \
+  (cd "$ROOT/lobby-worker" && npx wrangler kv "$@" --binding "$BINDING" --remote \
     ${ENV_ARGS[@]+"${ENV_ARGS[@]}"})
 }
 

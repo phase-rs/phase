@@ -9,8 +9,13 @@
 # `--env preview` that is not forwarded edits PRODUCTION. None of those
 # produces an error anywhere — the listing is just quietly wrong.
 #
-# `wrangler` and `curl` are stubbed on a narrowed PATH and record their argv,
-# so the assertions are about what the script WOULD send, not about Cloudflare.
+# `npx`, `wrangler` and `curl` are stubbed on a narrowed PATH and record their
+# argv, so the assertions are about what the script WOULD send, not about
+# Cloudflare. `npx` is stubbed because the script invokes `npx wrangler` rather
+# than a bare `wrangler` (the pinned binary lives in lobby-worker/node_modules
+# and is not on an operator's PATH). Without the shim the narrowed PATH has no
+# `npx` at all and every wrangler assertion below fails at exit 127 — measured,
+# not hypothesised.
 # jq's real directory is added to that PATH: the script parses `kv key list`
 # output with it, and stubbing a JSON parser would test the stub.
 #
@@ -39,6 +44,7 @@ ok()   { printf '  ok: %s\n' "$1";     PASS=$((PASS + 1)); }
 make_fixture() {
   FIXTURE="$(mktemp -d)"
   mkdir -p "$FIXTURE/bin"
+  : > "$FIXTURE/npx.log"
   : > "$FIXTURE/wrangler.log"
   : > "$FIXTURE/curl.log"
   : > "$FIXTURE/kv_list.json"
@@ -55,6 +61,17 @@ esac
 exit 0
 STUB
 
+  # Transparent shim: `npx <cmd> ...` runs the stubbed <cmd> from this same
+  # bin/, so every assertion below still reads the argv the script built. An
+  # unstubbed <cmd> execs nothing and exits 127, which is the honest signal.
+  cat > "$FIXTURE/bin/npx" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$FIXTURE/npx.log"
+CMD="\$1"
+shift
+exec "$FIXTURE/bin/\$CMD" "\$@"
+STUB
+
   cat > "$FIXTURE/bin/curl" <<STUB
 #!/bin/sh
 printf '%s\n' "\$*" >> "$FIXTURE/curl.log"
@@ -62,7 +79,7 @@ cat "$FIXTURE/info.json"
 exit 0
 STUB
 
-  chmod +x "$FIXTURE/bin/wrangler" "$FIXTURE/bin/curl"
+  chmod +x "$FIXTURE/bin/npx" "$FIXTURE/bin/wrangler" "$FIXTURE/bin/curl"
 }
 
 run_script() { # $@ = script args; stdout captured in OUT, exit in STATUS
@@ -95,6 +112,17 @@ fi
 make_fixture
 run_script add "wss://play.example.com/ws" --env preview
 if [ "$STATUS" -eq 0 ]; then ok "add exits 0"; else fail "add exits 0 (got $STATUS)"; fi
+
+# The wrangler stub sits on PATH, so a silent revert to a bare `wrangler` would
+# satisfy every argv assertion below and change nothing here. This is the only
+# line that fails on that revert — and it matters because a bare `wrangler` is
+# not on an operator's PATH at all: the pinned binary lives in
+# lobby-worker/node_modules and `npx`, run from that directory, is what resolves
+# it.
+case "$(cat "$FIXTURE/npx.log")" in
+  wrangler\ kv*) ok "add reaches wrangler through npx" ;;
+  *) fail "add reaches wrangler through npx (npx argv: $(cat "$FIXTURE/npx.log"))" ;;
+esac
 
 PUT_LINE="$(grep '^kv key put' "$FIXTURE/wrangler.log" || true)"
 case "$PUT_LINE" in
