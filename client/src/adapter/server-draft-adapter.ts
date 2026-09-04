@@ -1013,18 +1013,33 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.draftView = null;
     this.seatIndex = null;
     this.activeMatchId = null;
-    this.pendingResolve = null;
-    this.pendingReject = null;
+    if (this.pendingReject) {
+      this.pendingReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
+      );
+      this.pendingResolve = null;
+      this.pendingReject = null;
+    }
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
     );
     this.rejectPendingInteractionPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during interaction preview", true),
     );
-    this.draftResolve = null;
-    this.draftReject = null;
-    this.initResolve = null;
-    this.initReject = null;
+    if (this.draftReject) {
+      this.draftReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed during draft operation", true),
+      );
+      this.draftResolve = null;
+      this.draftReject = null;
+    }
+    if (this.initReject) {
+      this.initReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed before draft started", true),
+      );
+      this.initResolve = null;
+      this.initReject = null;
+    }
     this._serverInfo = null;
     this.emit({ type: "actionPendingChanged", pending: false });
     this.listeners = [];

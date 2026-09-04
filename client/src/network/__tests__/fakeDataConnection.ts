@@ -95,12 +95,29 @@ export class FakeDataConnection {
 
   /**
    * Hook fired once a sent frame has been decoded and backfilled into `sent`.
-   * Empty by default; subclasses override it to model peer behavior (e.g.
-   * feeding a `state_ack` back to the host). Overrides that start async work
+   * Subclasses override it to model peer behavior (e.g. feeding a `state_ack`
+   * back to the host); an override MUST call `super.onDecodedSend(msg)` so the
+   * base keep-alive reply below survives — unless it is deliberately modelling
+   * a peer that has stopped responding, as `SilentPeerConnection` in
+   * `peer.test.ts` does. Nothing enforces this. Overrides that start async work
    * should push the resulting promise onto `pendingDecodes` so
    * `getSentMessages()` awaits it.
+   *
+   * Default behavior: answer `ping` with `pong`. A live channel always does,
+   * and `peer.ts` now disconnects a session that sees no pong for 10s — so a
+   * fake that never ponged would model a DEAD peer, which is not what any
+   * caller of this class means by "a connection". The reply goes out through
+   * `simulateData` into the session's receive path, so it never appears in
+   * `sent`; tests asserting on `sent` are unaffected.
    */
-  protected onDecodedSend(_msg: P2PMessage): void {}
+  protected onDecodedSend(msg: P2PMessage): void {
+    if (msg.type !== "ping" || !this.open) return;
+    this.pendingDecodes.push(
+      this.simulateData({ type: "pong", timestamp: msg.timestamp }).catch((e) => {
+        console.warn("[FakeDataConnection] pong dispatch failed:", e);
+      }),
+    );
+  }
 
   close() {
     if (this.open) this.simulateClose();

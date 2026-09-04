@@ -104,8 +104,10 @@ const pendingQueue: PendingWork[] = [];
 
 /**
  * Identifies the game state for which the current dispatch pipeline is valid.
- * Restoring a saved game replaces the engine state wholesale, so work queued
- * for the old state must neither run nor release a newer dispatch's mutex.
+ * Restoring a saved game replaces the engine state wholesale, and a game-session
+ * boundary abandons it outright, so work queued for the old state must neither
+ * run nor release a newer dispatch's mutex. Bumped only by
+ * `abandonPendingDispatches`.
  */
 let dispatchGeneration = 0;
 
@@ -153,8 +155,22 @@ function sameBoundGameSession(
   return a?.adapter === b?.adapter && a?.generation === b?.generation;
 }
 
-/** Discard dispatch work that belongs to the game state being replaced. */
-function abandonDispatchesForStateRestore(): void {
+/**
+ * Discard every queued and in-flight dispatch and release the mutex.
+ *
+ * Two callers, both of which abandon the game the pending work belongs to:
+ * `restoreGameState` (the engine state is replaced wholesale) and
+ * `clearPromptOverlayState` (a game-session boundary). Bumping
+ * `dispatchGeneration` makes every downstream `isDispatchContextCurrent` guard
+ * decline, so a `processAction` continuation still in flight can neither commit
+ * nor release a newer dispatch's mutex. That covers the dispatch pipeline only:
+ * `dispatchInteraction` and `restoreGameState` commit without capturing the
+ * generation, so they are unaffected by the bump and can still write.
+ * Queued work is *resolved*, not rejected: a caller
+ * awaiting an action in an abandoned game has nothing to recover from and
+ * must not see a spurious rejection.
+ */
+export function abandonPendingDispatches(): void {
   dispatchGeneration += 1;
   inFlightLocalAction = null;
   isAnimating = false;
@@ -980,7 +996,7 @@ export async function restoreGameState(
   const { adapter, gameId } = useGameStore.getState();
   if (!adapter) return "No adapter available";
 
-  abandonDispatchesForStateRestore();
+  abandonPendingDispatches();
   try {
     await adapter.restoreState(state);
   } catch (err) {
