@@ -1027,12 +1027,9 @@ export class WebSocketAdapter implements EngineAdapter {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
       }
-      if (this.sessionIdentityRejected) return;
-      // Clear the "host waiting for opponent" latch on socket close —
-      // otherwise a host who received GameCreated, disconnected before
-      // GameStarted, and then reconnected through a different path would
-      // fire `opponentJoined` spuriously on the replayed GameStarted.
-      this.hostWaitingForOpponent = false;
+      // Settled above the identity-rejection guard: a close that arrives
+      // while the latch is set must still settle the caller's promise, or
+      // the submission hangs forever holding the dispatch mutex.
       if (this.pendingReject) {
         this.emit({ type: "actionPendingChanged", pending: false });
         this.pendingReject(
@@ -1041,6 +1038,16 @@ export class WebSocketAdapter implements EngineAdapter {
         this.pendingResolve = null;
         this.pendingReject = null;
       }
+      // Deliberately scoped to the submission slot. The seven reject helpers
+      // below still skip on the identity-rejected path; none of them holds the
+      // dispatch mutex, so none can freeze the board the way a parked
+      // submission does. Widening the hoist is a separate judgement.
+      if (this.sessionIdentityRejected) return;
+      // Clear the "host waiting for opponent" latch on socket close —
+      // otherwise a host who received GameCreated, disconnected before
+      // GameStarted, and then reconnected through a different path would
+      // fire `opponentJoined` spuriously on the replayed GameStarted.
+      this.hostWaitingForOpponent = false;
       this.rejectPendingManaPaymentPreviews(
         new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
       );
@@ -1324,8 +1331,13 @@ export class WebSocketAdapter implements EngineAdapter {
     this.playerToken = null;
     this._gameCode = null;
     this.fullSessionKey = null;
-    this.pendingResolve = null;
-    this.pendingReject = null;
+    if (this.pendingReject) {
+      this.pendingReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
+      );
+      this.pendingResolve = null;
+      this.pendingReject = null;
+    }
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
     );

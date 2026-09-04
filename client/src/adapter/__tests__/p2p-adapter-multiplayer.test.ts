@@ -561,6 +561,12 @@ class FakeOpenableConnection extends FakeDataConnection {
   }
 
   protected override onDecodedSend(msg: P2PMessage): void {
+    // `FakeDataConnection.onDecodedSend` documents that an override MUST call
+    // super, so the base keep-alive `pong` reply survives. No test in this file
+    // currently fails without it — no seat here holds an open channel for a
+    // full 10s of fake time — but an override that silently models a dead peer
+    // is a trap for the next test that does.
+    super.onDecodedSend(msg);
     this.ackDecodedSend(msg);
     if (this.refuseAfter !== null && this.refuseAfter === msg.type) {
       this.refuseAfter = null;
@@ -3316,6 +3322,101 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(emitted).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "stateChanged" }),
     );
+  });
+
+  /** A guest adapter past its `game_setup` handshake, ready to submit. */
+  async function joinedGuest(): Promise<{ adapter: P2PGuestAdapter; conn: FakeDataConnection }> {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+    return { adapter, conn };
+  }
+
+  it("guest submission the host never answers rejects at the timeout instead of parking forever", async () => {
+    const { adapter, conn } = await joinedGuest();
+
+    // The host lease fence applies the action and then sends NOTHING: no
+    // `state_update` (so no ack, no ledger entry, no redelivery sweep), and no
+    // `action_rejected`/`action_failed` either. The channel stays open and
+    // healthy — a liveness detector has nothing to find here.
+    const stranded = adapter.submitAction({ type: "PassPriority" }, 1);
+    let settled = false;
+    void stranded.catch(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(stranded).rejects.toMatchObject({
+      code: "P2P_ERROR",
+      recoverable: true,
+    });
+    // The host is silent, not gone: nothing was sent after the action frame.
+    expect((await conn.getSentMessages()).filter(
+      (message) => (message as { type?: string }).type === "action",
+    )).toHaveLength(1);
+  });
+
+  it("guest settles an action submission displaced by an interaction submission", async () => {
+    const { adapter, conn } = await joinedGuest();
+
+    // `dispatchInteraction` never touches `isAnimating`/`inFlightLocalAction`
+    // while `dispatchActionInternal` does, so an interaction submit can overlap
+    // an action submit and take the single slot from under it.
+    const displaced = adapter.submitAction({ type: "PassPriority" }, 1);
+    const displacing = adapter.submitInteraction({} as never, 1);
+
+    await expect(displaced).rejects.toMatchObject({
+      code: "P2P_ERROR",
+      recoverable: true,
+    });
+
+    // The displacing submission still settles normally off the next reply. The
+    // slot remains single and unkeyed: this does NOT make reply routing correct
+    // after a displacement, it only stops the displaced caller from parking.
+    await conn.simulateData({ type: "action_noop" });
+    await expect(displacing).resolves.toEqual({ events: [], log_entries: [] });
+  });
+
+  it("guest timeout from a settled submission never rejects a later, unrelated one", async () => {
+    const { adapter, conn } = await joinedGuest();
+
+    const first = adapter.submitAction({ type: "PassPriority" }, 1);
+    await conn.simulateData({ type: "action_noop" });
+    await expect(first).resolves.toEqual({ events: [], log_entries: [] });
+
+    // Sit just short of the FIRST submission's original 30s deadline, then park
+    // a second submission. A timeout armed on park but cleared only in the
+    // teardown helper survives the successful settle and fires below — against
+    // a submission the host has had barely a second to answer. The slot is
+    // unkeyed, so that rejection would hit whatever is parked, breaking normal
+    // play rather than fixing the freeze.
+    await vi.advanceTimersByTimeAsync(29_000);
+    const second = adapter.submitInteraction({} as never, 1);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await conn.simulateData({ type: "action_noop" });
+    await expect(second).resolves.toEqual({ events: [], log_entries: [] });
   });
 
   it("guest preserves a structured stale engine rejection from the host", async () => {

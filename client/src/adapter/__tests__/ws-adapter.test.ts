@@ -88,6 +88,35 @@ async function completeHandshake(adapter: WebSocketAdapter): Promise<MockWebSock
   return (adapter as unknown as { ws: MockWebSocket }).ws;
 }
 
+/**
+ * Starts observing `promise` immediately and returns a reader that yields the
+ * rejection reason — or the string `"never settled"` if the promise is still
+ * pending.
+ *
+ * Observation has to start before the first `await` so an already-rejected
+ * promise is handled in the same tick, and the drain is what turns an orphaned
+ * promise — the exact defect these settlement fixes prevent — into a readable
+ * assertion failure instead of a suite timeout.
+ *
+ * The reader yields a MACROTASK turn (`setTimeout(…, 0)`), not a microtask
+ * drain: that is strictly more generous than the settlement paths need, since
+ * both `dispose()` and `onclose` reject synchronously. The cost is that it
+ * couples the reader to real timers — a caller running it under
+ * `vi.useFakeTimers()` would hang. No current caller does; the only fake-timer
+ * scope in these suites is closed by a `finally { vi.useRealTimers(); }`.
+ */
+function trackRejection(promise: Promise<unknown>): () => Promise<unknown> {
+  let outcome: unknown = "never settled";
+  void promise.then(
+    (value) => { outcome = { resolvedWith: value }; },
+    (error) => { outcome = error; },
+  );
+  return async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return outcome;
+  };
+}
+
 // Shared session service relies on localStorage in test environments.
 vi.stubGlobal("localStorage", {
   getItem: vi.fn(() => null),
@@ -1745,6 +1774,51 @@ describe("WebSocketAdapter", () => {
       });
       expect(listener).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
       expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "aiDriverFault" }));
+    });
+
+    // `dispose()` used to null the submission handles instead of rejecting
+    // them, so the caller — which holds the module-level dispatch mutex —
+    // waited forever on a reply the closed socket could never deliver.
+    it("rejects an in-flight submitAction when the adapter is disposed", async () => {
+      const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+
+      adapter.dispose();
+
+      expect(await pending()).toMatchObject({
+        code: "WS_CLOSED",
+        message: "Adapter disposed during action",
+        recoverable: true,
+      });
+    });
+
+    // The `sessionIdentityRejected` guard used to sit ABOVE the pending
+    // submission block in `onclose`, so a close taken on the identity-rejected
+    // path abandoned an in-flight submission.
+    it("settles the pending submission on close even after session identity is rejected", async () => {
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameCreated",
+          data: {
+            game_code: "ABCD",
+            player_token: "tok",
+            // generation < 1 is rejected by `acceptFullSessionKey`, latching
+            // `sessionIdentityRejected`.
+            full_key: { game_code: "ABCD", generation: 0 },
+          },
+        }),
+      );
+      // Reach-guard: the latch really is set, otherwise this test would pass
+      // against the unguarded close path and prove nothing.
+      await expect(adapter.exportPersistenceState()).rejects.toThrow("Session identity rejected");
+
+      const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      ws.dispatchSynthetic("close");
+
+      expect(await pending()).toMatchObject({
+        code: "WS_CLOSED",
+        message: "Connection closed during action",
+      });
     });
 
     it("emits an error instead of throwing when a fire-and-forget send hits a closed socket", () => {
