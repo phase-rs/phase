@@ -635,6 +635,18 @@ const RECONNECT_STEADY_STATE_MS = 60_000;
  * guest has wrong; the user's recovery is a reload, not a retry. The
  * stale-state watchdog cannot help: for a guest, the adapter cache and the
  * screen go stale together, so the fingerprints match and its check returns.
+ *
+ * A SECOND residual is new here, and it belongs to the single unkeyed pending
+ * slot. Once this timer has rejected submission A, a retry B parks in that same
+ * slot, and A's late `state_update` settles B: its revision is NEWER than the
+ * guest's cached one, so the stale-revision guard above does not drop it. B's
+ * own frame then arrives, finds nothing pending, and emits `stateChanged`, so
+ * the board still converges — the cost is one early resolve carrying another
+ * action's events. Routing replies correctly needs a wire request id echoed on
+ * every settlement frame, i.e. a `WIRE_PROTOCOL_VERSION` bump, and is deferred.
+ * Do NOT instead widen the revision guard to drop such frames: dropping the
+ * frame that reports application is the deadlock the acceptance ledger exists
+ * to end.
  */
 const SUBMISSION_TIMEOUT_MS = 30_000;
 // A stale proposal leaves the prompt unchanged, so cap retries to prevent a

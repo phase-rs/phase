@@ -157,7 +157,14 @@ export function createPeerSession(
       // That is the intended trade. The alternative — concluding silence from a
       // gap the tick cannot explain — false-disconnects a healthy peer, which
       // is the harm this whole branch exists to prevent.
-      if (sinceLastTick >= PONG_TIMEOUT_MS) {
+      // `Date.now()` is wall-clock, so it can also move BACKWARD (an NTP step,
+      // a manual clock change, a VM restore). That strands `lastPongAt` in the
+      // future, and every later comparison then reads as "answered recently"
+      // until the clock catches up — the detector silently disables itself for
+      // the width of the jump. A negative gap is a discontinuity for the same
+      // reason an oversized one is: the tick observed no interval it can vouch
+      // for, so the elapsed time is no evidence about the peer. Re-baseline.
+      if (sinceLastTick >= PONG_TIMEOUT_MS || sinceLastTick < 0) {
         lastPongAt = now;
       } else if (now - lastPongAt >= PONG_TIMEOUT_MS) {
         handleDisconnect("Ping timeout");

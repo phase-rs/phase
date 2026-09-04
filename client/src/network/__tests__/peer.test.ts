@@ -365,4 +365,33 @@ describe("PeerSession keep-alive", () => {
       vi.useRealTimers();
     }
   });
+
+  it("re-baselines after the wall clock moves backward", async () => {
+    vi.useFakeTimers();
+    try {
+      const conn = new SilentPeerConnection();
+      const session = createPeerSession(conn as never);
+      const onDisconnect = vi.fn();
+      session.onDisconnect(onDisconnect);
+
+      // One healthy tick: 5s of silence, not yet the budget.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(onDisconnect).not.toHaveBeenCalled();
+
+      // The wall clock steps BACKWARD a minute (NTP correction, manual clock
+      // change, VM restore). `setSystemTime` moves pending deadlines with it,
+      // so ticks keep their 5s spacing — only `Date.now()` jumps.
+      vi.setSystemTime(Date.now() - 60_000);
+
+      // The peer has never ponged, so it must still be declared dead. Without
+      // the negative-gap re-baseline, `lastPongAt` is stranded a minute in the
+      // future and `now - lastPongAt` stays negative, so this detector would
+      // stay disabled until the clock caught up — the failure this guards.
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(onDisconnect).toHaveBeenCalledWith("Ping timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
