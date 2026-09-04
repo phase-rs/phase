@@ -171,9 +171,20 @@ export function ReplacementModal() {
                 key={candidateIndex}
                 value={candidateIndex}
                 whileDrag={{ scale: 1.03, zIndex: 20 }}
-                // `touch-none` keeps a touch-drag from scrolling the dialog
-                // instead of reordering (the codebase's established pattern).
-                className="flex touch-none cursor-grab items-start gap-2 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 active:cursor-grabbing"
+                // `!touch-none` (note the `!` — it emits `!important`) keeps a
+                // touch-drag reordering the list instead of scrolling the
+                // dialog. The bang is load-bearing and must not be "cleaned up":
+                // `Reorder.Item` writes its own INLINE `touch-action` for the
+                // drag axis (`pan-x` when `axis="y"`), and framer re-asserts it,
+                // so neither a plain `touch-none` class nor an inline
+                // `style={{ touchAction }}` survives — only an `!important` rule
+                // wins the cascade against it. Verified in-browser under touch
+                // emulation: without the bang the computed value is `pan-x` and
+                // a vertical touch-drag is claimed by page scroll. The
+                // codebase's other `touch-none` usages sit on plain elements
+                // driven by the hand-rolled pointer engine, where nothing
+                // competes with the class.
+                className="flex !touch-none cursor-grab items-start gap-2 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 active:cursor-grabbing"
                 {...(candidate ? hoverProps(candidate.source_id) : {})}
               >
                 <div className="flex-1 text-left">
