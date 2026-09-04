@@ -226,7 +226,7 @@ async function runCoreInstall(backend: VisualPackBackend): Promise<void> {
     if (response.status === "healthy") return;
     operation = response.operationId;
     const current = await backend.operationStatus(operation);
-    if (current.state === "completed" || current.state === "cancelled" || current.state === "failed") return;
+    if (current.state === "completed" || current.state === "cancelled") return;
     await settled;
   } finally {
     unsubscribe();

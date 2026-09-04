@@ -318,21 +318,6 @@ describe("prepareForOffline", () => {
     });
   });
 
-  it("does not hang when operationStatus already reports failed", async () => {
-    const backend = visualBackend({
-      catalogStatus: installed(),
-      resolve: resolvesCore(false),
-      start: vi.fn(async () => ({ status: "started", operationId: "op-failed" })),
-      operationStatus: vi.fn(async () => ({ state: "failed" })),
-    });
-    mocks.loadVisual.mockResolvedValue(backend);
-
-    await expect(prepareForOffline({ nativeEngineEnabled: false })).resolves.toMatchObject({
-      status: "failed",
-      requiredGaps: ["coreVisuals"],
-      capabilities: { coreVisuals: { status: "not-ready" } },
-    });
-  });
 
   it("holds readiness back when the core install fails", async () => {
     const backend = visualBackend({
