@@ -244,6 +244,7 @@ vi.mock("../services/deckCompatibility", () => ({
     unknown_cards: [],
     coverage: { total_unique: 1, supported_unique: 1, unsupported_cards: [] },
     color_identity: [],
+    color_distribution: [],
   })),
   evaluateDeckCompatibilityBatch: vi.fn(async () => ({})),
 }));

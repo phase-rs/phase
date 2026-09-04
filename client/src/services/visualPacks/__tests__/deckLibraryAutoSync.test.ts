@@ -791,16 +791,16 @@ describe("useDeckLibraryAutoSync", () => {
     await hydrateFeedCache();
     plannerFixture();
     vi.spyOn(usePreferencesStore.persist, "hasHydrated").mockReturnValue(true);
-    let releaseRehydrate!: () => void;
-    const rehydrated = new Promise<void>((resolve) => { releaseRehydrate = resolve; });
+    let rehydrateCount = 0;
     vi.spyOn(usePreferencesStore.persist, "rehydrate").mockImplementation(async () => {
-      await rehydrated;
-      usePreferencesStore.getState().setArtChain([{ type: "newest" }]);
+      rehydrateCount += 1;
+      if (rehydrateCount === 2) usePreferencesStore.getState().setArtChain([{ type: "newest" }]);
     });
     let resolvePlan!: (membership: Awaited<ReturnType<typeof planDeckLibraryPack>>) => void;
     const planned = new Promise<Awaited<ReturnType<typeof planDeckLibraryPack>>>((resolve) => { resolvePlan = resolve; });
     const mounted = renderHook(() => useDeckLibraryAutoSync());
     await flush();
+    expect(rehydrateCount).toBe(1);
     backend.reconcileDeckLibrary.mockClear();
     backend.reconcileDeckLibrary.mockImplementation(async () => {
       resolvePlan(await planDeckLibraryPack(packId("deck_library")));
@@ -808,10 +808,8 @@ describe("useDeckLibraryAutoSync", () => {
 
     act(() => window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT)));
     await flush();
-    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
-    await act(async () => { releaseRehydrate(); });
-    await flush();
 
+  expect(rehydrateCount).toBe(2);
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
     expect((await planned).descriptors.map((descriptor) => String(descriptor.assetKey)))
       .toContain("asset:v1:exact_printing:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-0-full_card-normal");

@@ -2202,6 +2202,7 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     this.rejectInitialization(error);
     this.rejectAuthoritativeStateExport(error);
+    this.rejectPregameMutation(error);
     this.emit({ type: "error", message: error.message });
     this.ws?.close();
     return false;

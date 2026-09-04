@@ -919,6 +919,7 @@ describe("WebSocketAdapter", () => {
       const attached = nativeAdapter.initializePregame();
       const nativeSocket = await completeHandshake(nativeAdapter);
       const exported = nativeAdapter.exportPersistenceState();
+      const slots = nativeAdapter.waitForPlayerSlots();
 
       nativeSocket.dispatchSynthetic(
         "message",
@@ -935,6 +936,7 @@ describe("WebSocketAdapter", () => {
 
       await expect(exported).rejects.toThrow("Server changed the Full session identity");
       await expect(attached).rejects.toThrow("Server changed the Full session identity");
+  await expect(slots).rejects.toThrow("Server changed the Full session identity");
       await expect(nativeAdapter.exportPersistenceState()).rejects.toThrow("Session identity rejected");
     });
 

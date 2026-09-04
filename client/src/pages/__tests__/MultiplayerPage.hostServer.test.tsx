@@ -100,6 +100,7 @@ vi.mock("../../services/deckCompatibility", () => ({
   evaluateDeckCompatibility: vi.fn(async () => ({
     selected_format_compatible: true,
     selected_format_reasons: [],
+    color_distribution: [],
   })),
 }));
 

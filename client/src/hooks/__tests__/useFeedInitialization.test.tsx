@@ -49,6 +49,18 @@ describe("useFeedInitialization", () => {
     expect(onlineSignal.aborted).toBe(true);
   });
 
+  it("reinitializes feeds when cloud restore replaces subscriptions", () => {
+    mocks.initializeFeeds.mockResolvedValue(undefined);
+    renderHook(() => useFeedInitialization(false));
+
+    act(() => window.dispatchEvent(new CustomEvent("phase:profile-replaced")));
+
+    expect(mocks.initializeFeeds).toHaveBeenCalledTimes(2);
+    expect(mocks.initializeFeeds).toHaveBeenLastCalledWith(
+      expect.objectContaining({ allowRefresh: true }),
+    );
+  });
+
   it("keeps AbortError and superseded failures silent", async () => {
     const first = deferred<void>();
     const second = deferred<void>();

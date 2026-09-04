@@ -321,6 +321,28 @@ describe("initializeFeeds", () => {
     expect(getDeckFeedOrigin("Test Deck")).toBe("cached");
   });
 
+  it("fetches a freshly restored subscription when its device-local cache is missing", async () => {
+    const restoredFeed = {
+      ...VALID_FEED,
+      decks: [{ ...VALID_FEED.decks[0], name: "Restored Feed Deck" }],
+    };
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([{
+      sourceId: "restored",
+      url: "https://example.com/restored.json",
+      type: "remote",
+      subscribedAt: 1,
+      lastRefreshedAt: Date.now(),
+      lastVersion: 1,
+    }]));
+    mockFetchByUrl({ ...ALL_BUNDLED_FEEDS, "restored.json": restoredFeed });
+
+    await initializeFeeds();
+
+    expect(getCachedFeed("restored")).toMatchObject({ id: "restored", decks: restoredFeed.decks });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Restored Feed Deck")).not.toBeNull();
+    expect(getDeckFeedOrigin("Restored Feed Deck")).toBe("restored");
+  });
+
   it("does not commit a deferred online fetch after its generation is aborted", async () => {
     const fetching = deferred<Response>();
     global.fetch = vi.fn(() => fetching.promise);

@@ -242,17 +242,18 @@ export async function initializeFeeds({ allowRefresh = true, signal }: Initializ
     }
   }
 
-  // Auto-refresh any subscription whose cache is older than FEED_STALE_AFTER_MS.
+  // Auto-refresh any subscription whose cache is older than FEED_STALE_AFTER_MS
+  // or missing on this device after a profile restore.
   // Applies to both bundled (local static assets) and remote (network) feeds.
   // Manual "Refresh all" / per-feed Refresh buttons bypass the TTL via refreshFeed().
   const now = Date.now();
   for (const sub of subs) {
     if (!subscribedIds.has(sub.sourceId)) continue;
 
+    const cached = getCachedFeed(sub.sourceId);
     const isStale = now - sub.lastRefreshedAt >= FEED_STALE_AFTER_MS;
-    if (!isStale) {
-      const cached = getCachedFeed(sub.sourceId);
-      if (cached) syncFeedDecksToStorage(cached);
+    if (!isStale && cached) {
+      syncFeedDecksToStorage(cached);
       continue;
     }
 

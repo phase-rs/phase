@@ -32,7 +32,10 @@ const mockWorkerClient = {
   buildAiCardSubset: vi.fn(),
   evaluateDeckCompatibility: vi
     .fn()
-    .mockResolvedValue({ standard: { compatible: true, reasons: [] } }),
+    .mockResolvedValue({
+      standard: { compatible: true, reasons: [] },
+      color_distribution: [],
+    }),
   evaluateDeckFormatGate: vi.fn().mockResolvedValue({ compatible: true, reasons: [] }),
   customFormatFromLobbyConfig: vi.fn().mockResolvedValue({ label: "My Format" }),
   formatConfigForCustomRules: vi.fn().mockResolvedValue({ format: "Custom:0" }),
@@ -501,7 +504,10 @@ describe("WasmAdapter", () => {
       const result = await adapter.checkDeckCompatibility(request);
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
       expect(mockWorkerClient.evaluateDeckCompatibility).toHaveBeenCalledWith(request);
-      expect(result).toEqual({ standard: { compatible: true, reasons: [] } });
+      expect(result).toEqual({
+        standard: { compatible: true, reasons: [] },
+        color_distribution: [],
+      });
     });
   });
 
@@ -536,6 +542,7 @@ describe("WasmAdapter", () => {
       const request = { main_deck: ["Forest"] };
       await expect(adapter.checkDeckCompatibility(request)).resolves.toEqual({
         standard: { compatible: true, reasons: [] },
+        color_distribution: [],
       });
       expect(mockWorkerClient.evaluateDeckCompatibility).toHaveBeenCalledWith(request);
     });
