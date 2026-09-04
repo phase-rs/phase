@@ -38,6 +38,7 @@ import {
   type NativeAiSeat,
   type NativeSessionAttachment,
 } from "./ws-adapter";
+import { PEER_CONNECT_OPTIONS, RECONNECT_DIAL_TIMEOUT_MS } from "../network/connection";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
 import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
@@ -4159,9 +4160,16 @@ export class P2PGuestAdapter implements EngineAdapter {
     if (this.terminated) return;
 
     try {
-      const conn = this.hostPeer.connect(this.hostPeerId);
+      // `PEER_CONNECT_OPTIONS` is not optional: without `reliable: true` this
+      // reconnect channel comes up UNORDERED, and every revision guard
+      // downstream assumes ordered delivery. The initial `joinRoom` dial has
+      // always carried them; this one did not.
+      const conn = this.hostPeer.connect(this.hostPeerId, PEER_CONNECT_OPTIONS);
       await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("connect timed out")), 10_000);
+        const timeout = setTimeout(
+          () => reject(new Error("connect timed out")),
+          RECONNECT_DIAL_TIMEOUT_MS,
+        );
         conn.on("open", () => {
           clearTimeout(timeout);
           resolve();

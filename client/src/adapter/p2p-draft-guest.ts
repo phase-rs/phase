@@ -17,7 +17,11 @@ import {
   createDraftPeerSession,
   type DraftPeerSession,
 } from "../network/draftPeerSession";
-import { parseRoomCode } from "../network/connection";
+import {
+  PEER_CONNECT_OPTIONS,
+  RECONNECT_DIAL_TIMEOUT_MS,
+  parseRoomCode,
+} from "../network/connection";
 import {
   deckSubmissionFingerprint,
   DRAFT_PROTOCOL_VERSION,
@@ -102,6 +106,13 @@ type DraftGuestEventListener = (event: DraftGuestEvent) => void;
 
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
+/**
+ * Budget for the *post-open* application handshake — the wait for the host's
+ * `draft_welcome` / `draft_reconnect_ack` after `attachSession` on an already
+ * open, ordered channel. Its cost is one application round trip, so it is not
+ * ICE-sensitive and stays at 10s. The reconnect *dial* budget is a different
+ * quantity and lives in `RECONNECT_DIAL_TIMEOUT_MS`.
+ */
 const FIRST_CONTACT_TIMEOUT_MS = 10_000;
 const LEAVE_ACK_TIMEOUT_MS = 10_000;
 
@@ -908,9 +919,15 @@ export class P2PDraftGuest {
 
   private openReconnectConnection(signal?: AbortSignal): Promise<DataConnection> {
     if (signal?.aborted) return Promise.reject(abortError());
-    const conn = this.guestPeer.connect(this.hostPeerId);
+    // Ordered delivery is not the default: without `reliable: true` PeerJS
+    // builds this channel with `ordered: false`, which a TURN relay will
+    // actually exercise.
+    const conn = this.guestPeer.connect(this.hostPeerId, PEER_CONNECT_OPTIONS);
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => finish(() => reject(new Error("connect timed out"))), FIRST_CONTACT_TIMEOUT_MS);
+      const timeout = setTimeout(
+        () => finish(() => reject(new Error("connect timed out"))),
+        RECONNECT_DIAL_TIMEOUT_MS,
+      );
       const onAbort = () => finish(() => reject(abortError()));
       const onOpen = () => finish(() => resolve(conn));
       const onError = (err: Error) => finish(() => reject(err));

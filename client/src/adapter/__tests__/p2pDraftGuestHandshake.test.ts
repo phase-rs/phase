@@ -55,6 +55,7 @@ vi.mock("../../network/draftPeerSession", () => ({
 vi.mock("../../services/draftPersistence", () => persistenceState);
 
 import { P2PDraftGuest } from "../p2p-draft-guest";
+import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { DRAFT_PROTOCOL_VERSION, validateDraftMessage } from "../../network/draftProtocol";
 
 const reconnectAck = {
@@ -710,5 +711,37 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[1]!.handler!(reconnectAck);
     await expect(second).resolves.toBeUndefined();
     expect(secondSettled).toBe(true);
+  });
+
+  it("dials the reconnect transport with the shared ordered-channel connect options", async () => {
+    // Unlike every other test here, this one needs a real `guestPeer`: the dial
+    // is `this.guestPeer.connect(...)`, which the shared `{} as never` peer
+    // cannot answer.
+    const connHandlers = new Map<string, (arg?: unknown) => void>();
+    const reconnectConn = {
+      on: vi.fn((event: string, handler: (arg?: unknown) => void) => {
+        connHandlers.set(event, handler);
+      }),
+    };
+    const connect = vi.fn(() => reconnectConn);
+    const guest = new P2PDraftGuest(
+      { connect } as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "opaque-token" },
+    );
+    const privateGuest = guest as unknown as {
+      openReconnectConnection: (signal?: AbortSignal) => Promise<unknown>;
+    };
+
+    const dial = privateGuest.openReconnectConnection();
+
+    // `reliable: true` is what PeerJS maps to `createDataChannel(…, { ordered
+    // }) `; an option-less dial silently yields an unordered channel that a
+    // TURN relay will actually reorder.
+    expect(connect).toHaveBeenCalledWith("phase2-ABCDE", PEER_CONNECT_OPTIONS);
+
+    connHandlers.get("open")!();
+    await expect(dial).resolves.toBe(reconnectConn);
   });
 });

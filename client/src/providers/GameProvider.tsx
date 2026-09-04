@@ -1004,7 +1004,12 @@ export function GameProvider({
             }
             // Dial target: `conn.peer` is the actual current host peer id;
             // reconnect reuses it rather than reconstructing a prefix.
-            const { conn, peer } = await joinRoom(code, signal, 10_000);
+            // No timeout override: `joinRoom`'s 30s default is sized for a
+            // relayed ICE negotiation. A 10s budget aborted TURN-relayed joins
+            // mid-negotiation, and it bought nothing for a mistyped code —
+            // that path rejects immediately on `peer-unavailable`, never on the
+            // timeout.
+            const { conn, peer } = await joinRoom(code, signal);
             hostPeerHandle = peer;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(

@@ -15,6 +15,7 @@ import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView, type P2PAdapt
 import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState, type PersistedGameState, type RestoredGameStateResult } from "../types";
 import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
+import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
@@ -3414,6 +3415,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     conn.simulateClose();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(connect).toHaveBeenCalledOnce();
+    // The reconnect dial must carry the same options as the initial join.
+    // Without `reliable: true` PeerJS builds the channel `ordered: false`, and
+    // the guest's revision guards drop reordered frames rather than
+    // resequencing them.
+    expect(connect).toHaveBeenCalledWith("host-peer", PEER_CONNECT_OPTIONS);
 
     adapter.dispose();
     reconnectConn.fireOpen();
