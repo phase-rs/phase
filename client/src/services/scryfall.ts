@@ -44,8 +44,22 @@ declare const manaSymbolShardBrand: unique symbol;
 /** A mana shard string admitted by the finite Scryfall card-symbol catalog. */
 export type ManaSymbolShard = string & { readonly [manaSymbolShardBrand]: true };
 
+/**
+ * The catalog below is the COMPLETE set published by Scryfall's `/symbology`
+ * endpoint — all 84 symbols, every one of which has an SVG asset.
+ *
+ * "Complete" is the definition on purpose, rather than "the ones we happen to
+ * have needed". A symbol missing from here is not merely un-rendered: it is
+ * also never installed by `coreDescriptors()`, so it breaks offline in exactly
+ * the way this catalog exists to prevent. `manaSymbolCatalog.test.ts` pins the
+ * full expected set against an independently-authored literal, because a test
+ * that derives its expectation from `MANA_SYMBOL_SHARDS` cannot see an omission.
+ */
 const SINGLE_MANA_SYMBOL_SHARDS = [
   "W", "U", "B", "R", "G", "C", "S", "T", "Q", "E", "P", "X", "Y", "Z", "A", "∞", "½", "CHAOS",
+  // One colored mana or two life, one-half white/red mana, one mana from a
+  // legendary source, one potential land drop, planeswalker, ticket counter.
+  "H", "HW", "HR", "L", "D", "PW", "TK",
 ] as const;
 const COMPOSITE_MANA_SYMBOL_SHARDS = [
   "W/U", "W/B", "U/B", "U/R", "B/R", "B/G", "R/W", "R/G", "G/W", "G/U",
@@ -53,6 +67,8 @@ const COMPOSITE_MANA_SYMBOL_SHARDS = [
   "W/P", "U/P", "B/P", "R/P", "G/P",
   "W/U/P", "W/B/P", "U/B/P", "U/R/P", "B/R/P", "B/G/P", "R/W/P", "R/G/P", "G/W/P", "G/U/P",
   "C/W", "C/U", "C/B", "C/R", "C/G",
+  // Colorless Phyrexian: one colorless mana or two life.
+  "C/P",
 ] as const;
 const FINITE_NUMERIC_MANA_SYMBOL_SHARDS: readonly string[] = [
   ...Array.from({ length: 21 }, (_, value) => String(value)),

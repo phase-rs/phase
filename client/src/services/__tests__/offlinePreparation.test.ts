@@ -49,8 +49,29 @@ function visualBackend(overrides: Record<string, unknown> = {}) {
     subscribeProgress: vi.fn(async () => () => undefined),
     start: vi.fn(async () => ({ status: "healthy" })),
     operationStatus: vi.fn(async () => ({ state: "completed" })),
+    remove: vi.fn(async () => ({ removed: [], revision: "1", cleanupIssues: [] })),
+    resolve: resolvesCore(true),
     ...overrides,
   };
+}
+
+/**
+ * A `resolve` answering that every requested candidate either is or is not
+ * backed by cached bytes in `core`.
+ *
+ * The real `resolve` admits an object only when `cache.match(path)` succeeds,
+ * so `matches: []` is exactly how an evicted or corrupt cache presents itself
+ * while the pack receipt is still on disk.
+ */
+function resolvesCore(present: boolean) {
+  return vi.fn(async (keys: { kind: string; key: string }[]) => ({
+    revision: "1",
+    entries: keys.map((key, ordinal) => ({
+      ordinal,
+      key,
+      matches: present ? [{ packId: "core", assetKey: `asset:${key.key}` }] : [],
+    })),
+  }));
 }
 
 /** `catalogStatus` reporting exactly these packs as installed. */
@@ -93,9 +114,9 @@ describe("prepareForOffline", () => {
       calls.push("assets");
       return assetsReady;
     });
-    // Core is already installed, so this stays a test of ORDER rather than of
-    // the install. The catalog is read twice on purpose: once to decide whether
-    // core needs installing, then again for the art inventory afterwards.
+    // Core resolves cleanly, so this stays a test of ORDER rather than of the
+    // install. The catalog is read once, by the art inventory: core is gated on
+    // `resolve`, and only consults the catalog when something is missing.
     const visual = visualBackend({
       catalogStatus: vi.fn(async () => {
         calls.push("catalog");
@@ -119,7 +140,7 @@ describe("prepareForOffline", () => {
 
     await expect(prepareForOffline({ nativeEngineEnabled: true })).resolves.toMatchObject({ status: "ready" });
 
-    expect(calls).toEqual(["shell", "assets", "visual", "catalog", "catalog", "verify", "native", "shell"]);
+    expect(calls).toEqual(["shell", "assets", "visual", "catalog", "verify", "native", "shell"]);
     expect(mocks.prepareNative).toHaveBeenCalledWith({ release: { version: "1.0.0" } });
   });
 
@@ -211,12 +232,12 @@ describe("prepareForOffline", () => {
   });
 
   it("installs the core pack when it is missing, rather than only reporting it", async () => {
-    // Installed only AFTER the install runs, which is what makes this a test of
-    // the install rather than of the report: the first read finds no core.
-    const catalogStatus = vi.fn()
-      .mockResolvedValueOnce({ status: "ready", summary: { installedPacks: [] } })
-      .mockResolvedValue({ status: "ready", summary: { installedPacks: [{ packId: "core" }] } });
-    const backend = visualBackend({ catalogStatus });
+    // Nothing resolves until the install has run, which is what makes this a
+    // test of the install rather than of the report.
+    const resolve = vi.fn()
+      .mockImplementationOnce(resolvesCore(false))
+      .mockImplementation(resolvesCore(true));
+    const backend = visualBackend({ catalogStatus: installed(), resolve });
     mocks.loadVisual.mockResolvedValue(backend);
 
     await expect(prepareForOffline({ nativeEngineEnabled: false })).resolves.toMatchObject({
@@ -232,7 +253,7 @@ describe("prepareForOffline", () => {
     });
   });
 
-  it("does not reinstall the core pack when it is already on disk", async () => {
+  it("does not reinstall the core pack when its assets are already drawable", async () => {
     const backend = visualBackend({ catalogStatus: installed("core") });
     mocks.loadVisual.mockResolvedValue(backend);
 
@@ -242,9 +263,65 @@ describe("prepareForOffline", () => {
     expect(backend.start).not.toHaveBeenCalled();
   });
 
+  /**
+   * The receipt outliving the bytes is the case a catalog-only check cannot
+   * see: Cache Storage was evicted, so `core` is installed and undrawable.
+   *
+   * The recovery must DROP the receipt first. Both `start()` paths key on that
+   * receipt standing at the current root — an install short-circuits to
+   * `healthy` and a repair filters its own selector out — so an install issued
+   * while it stands would report success and download nothing. That is
+   * recorded as MEASURED in `scryfallBackend.ts`, and asserting the order here
+   * is what stops the recovery from silently regressing into a no-op.
+   */
+  it("drops the stale receipt before reinstalling core when its cached bytes are gone", async () => {
+    const resolve = vi.fn()
+      .mockImplementationOnce(resolvesCore(false))
+      .mockImplementation(resolvesCore(true));
+    const order: string[] = [];
+    const backend = visualBackend({
+      catalogStatus: installed("core"),
+      resolve,
+      remove: vi.fn(async () => { order.push("remove"); return { removed: [], revision: "1", cleanupIssues: [] }; }),
+      start: vi.fn(async () => { order.push("start"); return { status: "healthy" }; }),
+    });
+    mocks.loadVisual.mockResolvedValue(backend);
+
+    await expect(prepareForOffline({ nativeEngineEnabled: false })).resolves.toMatchObject({
+      capabilities: { coreVisuals: { status: "ready" } },
+    });
+    expect(backend.remove).toHaveBeenCalledWith({ kind: "packs", packIds: ["core"] }, "reject_dependents");
+    expect(order).toEqual(["remove", "start"]);
+  });
+
+  it("does not drop a receipt that does not exist when first installing core", async () => {
+    const resolve = vi.fn()
+      .mockImplementationOnce(resolvesCore(false))
+      .mockImplementation(resolvesCore(true));
+    const backend = visualBackend({ catalogStatus: installed(), resolve, remove: vi.fn() });
+    mocks.loadVisual.mockResolvedValue(backend);
+
+    await expect(prepareForOffline({ nativeEngineEnabled: false })).resolves.toMatchObject({
+      capabilities: { coreVisuals: { status: "ready" } },
+    });
+    expect(backend.remove).not.toHaveBeenCalled();
+  });
+
+  it("stays not-ready when core assets are still missing after the operation", async () => {
+    const backend = visualBackend({ catalogStatus: installed("core"), resolve: resolvesCore(false) });
+    mocks.loadVisual.mockResolvedValue(backend);
+
+    await expect(prepareForOffline({ nativeEngineEnabled: false })).resolves.toMatchObject({
+      status: "failed",
+      requiredGaps: ["coreVisuals"],
+      capabilities: { coreVisuals: { status: "not-ready" } },
+    });
+  });
+
   it("holds readiness back when the core install fails", async () => {
     const backend = visualBackend({
       catalogStatus: installed(),
+      resolve: resolvesCore(false),
       start: vi.fn(async () => { throw new Error("network"); }),
     });
     mocks.loadVisual.mockResolvedValue(backend);
@@ -260,6 +337,9 @@ describe("prepareForOffline", () => {
     let emit: ((event: unknown) => void) | null = null;
     const backend = visualBackend({
       catalogStatus: installed(),
+      // Missing before the install, present after — otherwise the install path
+      // is never entered and there is no progress event to wait on.
+      resolve: vi.fn().mockImplementationOnce(resolvesCore(false)).mockImplementation(resolvesCore(true)),
       subscribeProgress: vi.fn(async (listener: (event: unknown) => void) => {
         emit = listener;
         return () => undefined;

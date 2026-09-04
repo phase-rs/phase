@@ -119,7 +119,7 @@ export function OfflinePreparationSection({ nativeEngineEnabled }: { nativeEngin
           type="button"
           onClick={() => { void prepare("prepare"); }}
           disabled={preparing}
-          className="rounded-[14px] border border-sky-400/40 bg-sky-500/14 px-4 py-2 text-sm font-medium text-sky-100 transition hover:bg-sky-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+          className="min-h-11 rounded-[14px] border border-sky-400/40 bg-sky-500/14 px-4 py-2 text-sm font-medium text-sky-100 transition hover:bg-sky-500/25 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {preparing ? t("offlinePreparation.preparing") : t("offlinePreparation.prepare")}
         </button>

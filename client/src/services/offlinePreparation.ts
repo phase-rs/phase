@@ -3,7 +3,14 @@ import { prepareOfflineAssets, type OfflineAssetsReadiness } from "./offlineAsse
 import { loadVisualPackBackend } from "./platform.ts";
 import { MANA_SYMBOL_SHARDS } from "./scryfall.ts";
 import type { VisualPackBackend } from "./visualPacks/backend.ts";
-import { packId, type CatalogStatus, type OperationId, type PackId } from "./visualPacks/types.ts";
+import { cardBackCandidate, manaSymbolCandidate } from "./visualPacks/candidateKeys.ts";
+import {
+  packId,
+  type CatalogStatus,
+  type OperationId,
+  type PackId,
+  type ResolutionKey,
+} from "./visualPacks/types.ts";
 import { checkAppShellReadiness, type AppShellReadiness } from "../pwa/registerServiceWorker.ts";
 import { getEffectiveOffline } from "../stores/connectivityStore.ts";
 
@@ -163,8 +170,37 @@ async function prepareVisualPacks(access: VisualPackAccess): Promise<OfflinePrep
   }
 }
 
+/** Every candidate key a board draws from the core pack, in the same form
+ *  `useManaSymbolImage` and the card-back hook look them up by. */
+function coreCandidateKeys(): ResolutionKey[] {
+  return [
+    { kind: "candidate", key: cardBackCandidate() },
+    ...MANA_SYMBOL_SHARDS.map((shard) => ({ kind: "candidate" as const, key: manaSymbolCandidate(shard) })),
+  ];
+}
+
 /**
- * Drives a core install to a terminal state.
+ * The core assets a board would fail to draw right now.
+ *
+ * `catalogStatus()` reports the pack RECEIPT, which survives Cache Storage
+ * eviction and corruption — so a receipt alone cannot say the pips are
+ * actually there. `resolve()` can: it admits an object only when
+ * `cache.match(object.path)` succeeds, and each match carries its `packId`,
+ * which is the pack-scoped integrity answer `verify()` does not give.
+ */
+async function missingCoreAssets(backend: VisualPackBackend): Promise<number> {
+  const keys = coreCandidateKeys();
+  const resolution = await backend.resolve(keys);
+  const resolved = new Set(
+    resolution.entries
+      .filter((entry) => entry.matches.some((match) => match.packId === CORE_PACK))
+      .map((entry) => entry.key.key),
+  );
+  return keys.length - resolved.size;
+}
+
+/**
+ * Drives a core install or repair to a terminal state.
  *
  * The subscription is opened BEFORE `start()`, so no event of this operation
  * can be emitted before there is a listener for it; events belonging to other
@@ -173,14 +209,13 @@ async function prepareVisualPacks(access: VisualPackAccess): Promise<OfflinePrep
  * `start()` launches `run()` without awaiting it, so an install that finished
  * between the two would otherwise leave this waiting on an event already sent.
  */
-async function installCorePack(backend: VisualPackBackend): Promise<OfflinePreparationCapability> {
+async function runCoreInstall(backend: VisualPackBackend): Promise<void> {
   let operation: OperationId | null = null;
-  let settle: (capability: OfflinePreparationCapability) => void = () => undefined;
-  const settled = new Promise<OfflinePreparationCapability>((resolve) => { settle = resolve; });
+  let settle: () => void = () => undefined;
+  const settled = new Promise<void>((resolve) => { settle = resolve; });
   const unsubscribe = await backend.subscribeProgress((event) => {
     if (operation === null || event.operation.operationId !== operation) return;
-    if (event.phase === "completed") settle({ status: "ready" });
-    if (event.phase === "failed" || event.phase === "cancelled") settle({ status: "not-ready" });
+    if (event.phase === "completed" || event.phase === "failed" || event.phase === "cancelled") settle();
   });
   try {
     const response = await backend.start({
@@ -188,12 +223,11 @@ async function installCorePack(backend: VisualPackBackend): Promise<OfflinePrepa
       selector: { kind: "core" },
       objectEstimate: CORE_OBJECT_ESTIMATE,
     });
-    if (response.status === "healthy") return { status: "ready" };
+    if (response.status === "healthy") return;
     operation = response.operationId;
     const current = await backend.operationStatus(operation);
-    if (current.state === "completed") return { status: "ready" };
-    if (current.state === "cancelled") return { status: "not-ready" };
-    return await settled;
+    if (current.state === "completed" || current.state === "cancelled") return;
+    await settled;
   } finally {
     unsubscribe();
   }
@@ -207,9 +241,13 @@ async function installCorePack(backend: VisualPackBackend): Promise<OfflinePrepa
  * inspecting one, and required rather than advisory, because core is what
  * every game screen draws regardless of deck or set: a mana cost with no pips
  * is unreadable, and no other pack carries them. It is also small enough
- * (~77 files) that routing the user to the Visual Packs panel to choose it
+ * (~85 files) that routing the user to the Visual Packs panel to choose it
  * would be ceremony rather than consent — the same judgement `prepareOffline`
  * already makes for the native engine and the deck-library pack.
+ *
+ * The verdict is decided by `missingCoreAssets`, NOT by the pack receipt, and
+ * both before and after any work: a receipt outlives the bytes it describes,
+ * so "installed" and "drawable offline" are different questions.
  */
 async function prepareCoreVisuals(access: VisualPackAccess): Promise<OfflinePreparationCapability> {
   // No backend at all is not a gap the user can close, so it must not hold
@@ -219,11 +257,22 @@ async function prepareCoreVisuals(access: VisualPackAccess): Promise<OfflinePrep
   if (access.kind === "unavailable") return { status: "not-ready" };
   const backend = access.backend;
   try {
-    const catalog = await backend.catalogStatus();
-    if (catalog.status === "ready" && catalog.summary.installedPacks.some((pack) => pack.packId === CORE_PACK)) {
-      return { status: "ready" };
+    if (await missingCoreAssets(backend) > 0) {
+      const catalog = await backend.catalogStatus();
+      const receipt = catalog.status === "ready"
+        && catalog.summary.installedPacks.some((pack) => pack.packId === CORE_PACK);
+      // A receipt whose bytes are gone cannot be refilled through `start()`:
+      // BOTH an install and a repair key on that receipt standing at the
+      // current root, so the install short-circuits to `healthy` and the
+      // repair filters its own selector out — see the `cacheContains` note in
+      // scryfallBackend.ts, which records this as MEASURED. Dropping the
+      // receipt first is the recovery that note prescribes, and it costs the
+      // same ~85 small files the install downloads anyway. Nothing declares a
+      // dependency on `core`, so the removal cannot be rejected.
+      if (receipt) await backend.remove({ kind: "packs", packIds: [CORE_PACK] }, "reject_dependents");
+      await runCoreInstall(backend);
     }
-    return await installCorePack(backend);
+    return await missingCoreAssets(backend) === 0 ? { status: "ready" } : { status: "not-ready" };
   } catch {
     return { status: "not-ready" };
   }
