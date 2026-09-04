@@ -245,6 +245,13 @@ struct CurseSpec {
     attach_to: PlayerId,
     oracle: &'static str,
     spite: u32,
+    /// CR 111.1 + CR 704.5d: when true the Aura is a TOKEN, so the CR 704.5m
+    /// sweep to the graveyard is followed — in the SAME state-based-action pass,
+    /// before triggers are collected — by the token ceasing to exist, which
+    /// REMOVES it from `state.objects` entirely. This is the object-EXISTENCE
+    /// axis, distinct from the attachment-IDENTITY axis the other hostile
+    /// fixtures probe.
+    token: bool,
 }
 
 struct RuntimeFixture {
@@ -322,6 +329,23 @@ fn run_player_loss_pass(specs: &[CurseSpec]) -> RuntimeFixture {
     }
     stage_spite(&mut runner, unrelated_aura, 7);
 
+    // CR 111.1: mark the token Auras. `GameScenario` has no token-Aura
+    // constructor, so this sets `GameObject::is_token` directly after
+    // `build()` — the same pattern the rest of the integration suite uses to
+    // make a staged permanent a token. It is set AFTER `stage_spite` and
+    // BEFORE the SBA pass so the CR 704.5d sweep sees a token that is fully
+    // staged, attached, and counter-bearing.
+    for (id, spec) in curses.iter().zip(specs.iter()) {
+        if spec.token {
+            runner
+                .state_mut()
+                .objects
+                .get_mut(id)
+                .expect("curse object must exist")
+                .is_token = true;
+        }
+    }
+
     // REACH-GUARD: every curse really is on the battlefield with its counters
     // staged BEFORE the pass, so a later +0 can never be blamed on an empty
     // counter stack or a card that never hit the battlefield.
@@ -339,6 +363,12 @@ fn run_player_loss_pass(specs: &[CurseSpec]) -> RuntimeFixture {
         assert!(
             live_attached_to(&runner, *id).is_some(),
             "REACH-GUARD: curse must start attached"
+        );
+        assert_eq!(
+            runner.state().objects[id].is_token,
+            spec.token,
+            "REACH-GUARD: the requested CR 111.1 token-ness must be live on the object \
+             pre-SBA, so a token row can never silently degrade into the non-token case"
         );
     }
 
@@ -389,6 +419,7 @@ fn a3_curse_of_vengeance_pays_out_lki_spite_when_enchanted_player_loses() {
         attach_to: P2,
         oracle: CURSE_OF_VENGEANCE_ORACLE,
         spite: 3,
+        token: false,
     }]);
 
     let curse = fixture.curses[0];
@@ -432,6 +463,7 @@ fn a3_hostile_unrelated_co_departing_aura_does_not_fire_for_player_loss() {
         attach_to: P2,
         oracle: CURSE_OF_VENGEANCE_ORACLE,
         spite: 3,
+        token: false,
     }]);
 
     // REACH-GUARD: the real Curse DID fire in this very pass.
@@ -471,12 +503,14 @@ fn a3_hostile_curse_on_surviving_player_does_not_fire_and_lki_is_restored() {
             attach_to: P2,
             oracle: CURSE_OF_VENGEANCE_ORACLE,
             spite: 3,
+            token: false,
         },
         CurseSpec {
             controller: P1,
             attach_to: P1,
             oracle: CURSE_OF_VENGEANCE_ORACLE,
             spite: 5,
+            token: false,
         },
     ]);
 
@@ -530,12 +564,14 @@ fn a3_hostile_two_curses_on_the_losing_player_pay_their_own_controllers() {
             attach_to: P2,
             oracle: CURSE_OF_VENGEANCE_ORACLE,
             spite: 3,
+            token: false,
         },
         CurseSpec {
             controller: P1,
             attach_to: P2,
             oracle: CURSE_OF_VENGEANCE_ORACLE,
             spite: 6,
+            token: false,
         },
     ]);
 
@@ -566,6 +602,79 @@ fn a3_hostile_two_curses_on_the_losing_player_pay_their_own_controllers() {
     );
 }
 
+/// A3 HOSTILE (v) / OBJECT-EXISTENCE AXIS: a TOKEN Curse of Vengeance attached
+/// to the losing player must still pay out its LKI spite count even though the
+/// object no longer exists in `state.objects` when triggers are collected.
+///
+/// WHY THIS IS A DISTINCT AXIS: hostile fixtures (i)-(iv) all probe the
+/// attachment-IDENTITY axis (Object host vs Player host vs surviving player vs
+/// multiple controllers) using NON-token Auras, which survive the pass in the
+/// graveyard. A token takes a strictly longer path inside the SAME CR 704.3
+/// state-based-action pass:
+///   1. CR 104.3b eliminates P2 at 0 life.
+///   2. CR 704.5m sweeps the now-illegally-attached Aura to its owner's graveyard.
+///   3. CR 704.5d then makes the token CEASE TO EXIST, removing it from
+///      `state.objects` outright — all before `process_triggers` runs.
+///
+/// The admission arm's guard therefore sees an ABSENT object, not an
+/// off-battlefield one. CR 603.10f still requires the trigger to fire, with the
+/// departure record's CR 608.2h last-known information supplying both the
+/// attachment identity and the spite count.
+///
+/// REVERT-FAILING ASSERTIONS: `P0 life == 20 + 4` and `P0 hand == 4`. With the
+/// pre-fix guard (`!...is_some_and(|o| o.zone != Zone::Battlefield)`) an absent
+/// object returns `false` from `is_some_and`, the `!` turns that into
+/// `continue`, and the token Curse is SKIPPED — measured `+0/+0`.
+///
+/// REACH-GUARDS (so a `+0/+0` can never be blamed on a dead fixture):
+///   - `PlayerLost{P2}` was emitted by the real SBA pass;
+///   - the staged spite count was live on the object pre-SBA (asserted inside
+///     `run_player_loss_pass`), as was its CR 111.1 token-ness;
+///   - the token is ABSENT from `state.objects` after the pass — this is what
+///     proves the test exercised the absent-object path rather than silently
+///     degrading into the already-covered non-token graveyard case.
+#[test]
+fn a3_hostile_token_curse_ceasing_to_exist_still_pays_out_lki_spite() {
+    let fixture = run_player_loss_pass(&[CurseSpec {
+        controller: P0,
+        attach_to: P2,
+        oracle: CURSE_OF_VENGEANCE_ORACLE,
+        spite: 4,
+        token: true,
+    }]);
+
+    let curse = fixture.curses[0];
+
+    // REACH-GUARD: the real CR 104.3b state-based loss happened.
+    assert!(
+        player_lost_emitted(&fixture.events, P2),
+        "REACH-GUARD: the real SBA pass must have emitted PlayerLost{{P2}}"
+    );
+
+    // REACH-GUARD / THE AXIS ITSELF: CR 704.5d removed the token from the game
+    // state entirely. If this ever became `true`, the test would have degraded
+    // into the non-token case that hostile fixture (i)-(iv) already cover, and
+    // the payout assertions below would prove nothing new.
+    assert!(
+        !fixture.runner.state().objects.contains_key(&curse),
+        "REACH-GUARD: CR 704.5d must have made the token cease to exist, so the \
+         admission arm sees an ABSENT object — this is the whole point of the row"
+    );
+
+    // THE FIX: absence must be treated as "not on the battlefield" and admitted.
+    assert_eq!(
+        life(&fixture.runner, P0),
+        20 + 4,
+        "CR 603.10f + CR 608.2h: a token Curse swept by CR 704.5m and then ceasing to \
+         exist under CR 704.5d must STILL gain its controller X = 4 (the LKI spite count)"
+    );
+    assert_eq!(
+        hand_size(&fixture.runner, P0),
+        4,
+        "CR 603.10f: the controller must still draw X = 4 cards for a token Curse"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // A4 — class-fix proof (U2 alone, independent of U1)
 // ---------------------------------------------------------------------------
@@ -584,6 +693,7 @@ fn a4_any_player_loss_aura_swept_in_the_same_pass_still_fires() {
         attach_to: P2,
         oracle: ANY_PLAYER_LOSS_ORACLE,
         spite: 0,
+        token: false,
     }]);
 
     let aura = fixture.curses[0];

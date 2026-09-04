@@ -4955,11 +4955,22 @@ fn collect_pending_triggers_with_collection(
                     continue;
                 }
                 // The live battlefield scan already covers observers still on
-                // the battlefield; this arm only admits objects it excluded.
-                if !state
+                // the battlefield; this arm only admits objects it excluded, so
+                // skip ONLY an object that is both present AND still on the
+                // battlefield.
+                //
+                // CR 704.5d: an ABSENT object must fall through to admission. A
+                // token Aura is swept to its owner's graveyard by CR 704.5m and
+                // then ceases to exist in the SAME state-based-action pass,
+                // before triggers are collected — so `state.objects` no longer
+                // holds it at all. Treating absence as "off the battlefield" is
+                // what CR 603.10f requires: the departure record (CR 608.2h last
+                // known information) remains the authority for what the observer
+                // was attached to, and it outlives the object itself.
+                if state
                     .objects
                     .get(observer_id)
-                    .is_some_and(|o| o.zone != Zone::Battlefield)
+                    .is_some_and(|o| o.zone == Zone::Battlefield)
                 {
                     continue;
                 }
