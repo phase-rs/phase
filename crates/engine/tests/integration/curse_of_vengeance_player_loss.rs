@@ -218,14 +218,24 @@ fn a1_sibling_loses_game_actors_still_parse() {
 /// A1 ADJACENT-NEGATIVE: `all_consuming` must keep an unrelated "enchanted
 /// creature" line out of the loses-game grammar.
 ///
-/// REACH-GUARD (non-vacuous): the paired positive above proves the new arm DOES
-/// match "enchanted player loses the game", so a `LosesGame` absence here is a
-/// real grammar boundary, not a dead parser.
+/// REACH-GUARD (non-vacuous): this must parse as the existing attached-creature
+/// `ChangesZone` trigger, so a `LosesGame` absence here is a real grammar
+/// boundary, not a dead parser.
 #[test]
 fn a1_enchanted_creature_dies_is_not_a_loses_game_trigger() {
     let parsed = parse_curse(
         "When enchanted creature dies, you gain 1 life.",
         "Adjacent Negative Probe",
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "REACH-GUARD: the adjacent negative must parse to one trigger"
+    );
+    assert_eq!(
+        parsed.triggers[0].mode,
+        TriggerMode::ChangesZone,
+        "REACH-GUARD: 'enchanted creature dies' must retain its existing ChangesZone parse"
     );
     assert!(
         parsed
@@ -284,7 +294,7 @@ fn run_player_loss_pass(specs: &[CurseSpec]) -> RuntimeFixture {
     }
 
     // Hostile fixture (i): an unrelated Aura attached to a 2/0 Bear. The Bear
-    // dies to the CR 704.5g toughness SBA in the SAME pass, so the Aura
+    // dies to the CR 704.5f toughness SBA in the SAME pass, so the Aura
     // co-departs — but its `record.attached_to` is an Object, never
     // `Player(P2)`, which is exactly the discrimination the new arm relies on.
     let bear = scenario.add_creature(P1, "Grizzly Bears", 2, 0).id();
@@ -333,8 +343,9 @@ fn run_player_loss_pass(specs: &[CurseSpec]) -> RuntimeFixture {
     // constructor, so this sets `GameObject::is_token` directly after
     // `build()` — the same pattern the rest of the integration suite uses to
     // make a staged permanent a token. It is set AFTER `stage_spite` and
-    // BEFORE the SBA pass so the CR 704.5d sweep sees a token that is fully
-    // staged, attached, and counter-bearing.
+    // BEFORE the SBA pass so the CR 704.5m sweep moves a fully staged,
+    // attached, and counter-bearing token Aura; CR 704.5d then makes it cease
+    // to exist.
     for (id, spec) in curses.iter().zip(specs.iter()) {
         if spec.token {
             runner
