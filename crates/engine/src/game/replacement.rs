@@ -9289,6 +9289,33 @@ fn enter_tapped_commute_class(effect: &Effect) -> Option<CommuteClass> {
     }
 }
 
+/// CR 614.1c: the `enter_tapped` commute class an ability CHAIN writes, walking
+/// `sub_ability` links so a self tap on a chained link is not missed by a
+/// root-only check.
+///
+/// Mirrors [`EventModifiers::event_modifiers_for_ability`] EXACTLY, including
+/// its stopping rule: that walk consumes only a contiguous prefix of
+/// event-modifier effects and breaks at the first non-modifier link, and it
+/// keeps the FIRST tap/untap it sees rather than the last. A tap sitting after
+/// a non-modifier effect (e.g. `Draw`) is therefore never applied as an entry
+/// modifier, so classifying it as an `enter_tapped` write would promise an
+/// ordering prompt that cannot change the outcome — a classifier/applier
+/// disagreement that is worse than the missing prompt it would be papering
+/// over. If the applier's traversal is ever widened, widen this in lockstep.
+fn chained_enter_tapped_commute_class(def: &AbilityDefinition) -> Option<CommuteClass> {
+    let mut current = Some(def);
+    while let Some(def) = current {
+        if let Some(commute) = enter_tapped_commute_class(&def.effect) {
+            return Some(commute);
+        }
+        if !EventModifiers::is_event_modifier_effect(&def.effect) {
+            return None;
+        }
+        current = def.sub_ability.as_deref();
+    }
+    None
+}
+
 /// CR 616.1: classify a candidate. A `null`-`execute` replacement is *not* a
 /// guaranteed no-op — it can carry an event-modifying side field
 /// (`quantity_modification` / `mana_modification` / `damage_modification`) that
@@ -9448,8 +9475,13 @@ fn candidate_materiality(
         //
         // The declined branch is the one that can collide: paying the cost runs
         // `execute` (here, nothing), so only the decline path writes the field.
+        // The decline branch is walked as a CHAIN, exactly like the `execute`
+        // path below: a self tap can sit on a `sub_ability` link rather than at
+        // the root ("...it enters tapped" composed after another clause), and a
+        // root-only check would classify that `Disjoint` and again suppress the
+        // ordering prompt.
         if let Some(decline) = replacement_mode_decline(&repl_def.mode) {
-            if let Some(commute) = enter_tapped_commute_class(&decline.effect) {
+            if let Some(commute) = chained_enter_tapped_commute_class(decline) {
                 return CandidateMateriality::Writes {
                     field: EventField::EnterTapped,
                     commute,

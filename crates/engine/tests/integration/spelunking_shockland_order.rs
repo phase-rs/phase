@@ -118,3 +118,282 @@ fn ordering_the_shockland_tap_last_still_enters_tapped() {
         "CR 616.1f: with the shock land's tap applied last the land enters tapped"
     );
 }
+
+/// CR 614.1c + CR 616.1e: the decline branch's self tap can sit on a CHAINED
+/// `sub_ability` rather than at the root ("...enters with a +1/+1 counter and
+/// enters tapped"). `candidate_materiality` must walk the decline chain the way
+/// the applier does, or the tap is classified `Disjoint` and the ordering
+/// prompt is suppressed exactly as it was for the root-level shock land.
+///
+/// The lead link is a SelfRef `PutCounter` — an event-modifier effect — because
+/// `EventModifiers::event_modifiers_for_ability` walks only a contiguous prefix
+/// of event modifiers. A non-modifier lead (e.g. `Draw`) stops the applier's
+/// walk, so a tap behind it is never applied and must NOT be classified as an
+/// `enter_tapped` write (see `chained_enter_tapped_commute_class`).
+///
+/// Goes RED if the decline walk is reduced to a root-only `decline.effect` check.
+#[test]
+fn chained_decline_tap_still_collides_with_an_untap_source() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, EffectScope, QuantityExpr,
+        ReplacementDefinition, ReplacementMode, TapStateChange, TargetFilter,
+    };
+    use engine::types::counter::CounterType;
+    use engine::types::replacements::ReplacementEvent;
+
+    // Decline branch: enter with a +1/+1 counter, THEN enter tapped. The lead
+    // link is itself an event modifier, so the applier's walk reaches the tap.
+    let chained_decline = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    ));
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Spelunking", "Lands you control enter untapped.");
+    let mut builder = scenario.add_land_to_hand(P0, "Chained Tapland");
+    builder.with_replacement_definition(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .mode(ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+                decline: Some(Box::new(chained_decline)),
+            })
+            .description(
+                "As ~ enters, you may pay 2 life. If you don't, it enters tapped.".to_string(),
+            ),
+    );
+    let land_id = builder.id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&land_id].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land_id,
+            card_id,
+        })
+        .expect("play land should succeed");
+
+    let mut rounds = 0;
+    while let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for {
+        let labels: Vec<String> = candidates.iter().map(|c| c.description.clone()).collect();
+        let pick = if let Some(i) = labels.iter().position(|d| d == "Decline") {
+            i
+        } else {
+            // Order the chained tap FIRST so Spelunking's untap applies last.
+            candidates
+                .iter()
+                .position(|c| c.source_name == "Chained Tapland")
+                .unwrap_or(0)
+        };
+        runner
+            .act(GameAction::ChooseReplacement { index: pick })
+            .expect("replacement choice should succeed");
+        rounds += 1;
+        assert!(rounds <= 6, "replacement prompt failed to terminate");
+    }
+
+    assert!(
+        rounds >= 2,
+        "CR 616.1e: a chained decline tap must still surface the ordering prompt, got {rounds} round(s)"
+    );
+    assert!(
+        !runner.state().objects[&land_id].tapped,
+        "CR 616.1f: with the untap applied last the land must enter untapped"
+    );
+}
+
+/// CR 616.1 restore migration: `ReplacementChoice::kind` is `#[serde(default)]`,
+/// so a save written before the field existed deserializes EVERY parked prompt
+/// as `Order` — including an optional "you may" accept/decline. The frontend
+/// keys its presentation off `kind`, so such a restore would render a sortable
+/// ordering list for a yes/no decision.
+///
+/// Simulates a legacy save by stripping `kind` from the serialized JSON, then
+/// asserts the restore re-derives it from the live pending replacement.
+///
+/// Goes RED if `migrate_restored_replacement_choice_kind` is removed from the
+/// shared load chokepoint.
+#[test]
+fn legacy_save_restores_an_optional_prompt_as_optional_not_ordering() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::game_state::{PersistedGameState, ReplacementChoiceKind};
+
+    // Park a shock land's optional pay-2-life prompt (no untap source, so this
+    // is a pure OptionalBranch decision).
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder = scenario.add_land_to_hand(P0, "Stomping Ground");
+    builder.from_oracle_text(SHOCK_LAND);
+    let land_id = builder.id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&land_id].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land_id,
+            card_id,
+        })
+        .expect("play land should succeed");
+
+    let WaitingFor::ReplacementChoice { kind, .. } = &runner.state().waiting_for else {
+        panic!("expected the shock land to park an optional replacement prompt");
+    };
+    assert_eq!(
+        *kind,
+        ReplacementChoiceKind::OptionalBranch,
+        "reach guard: a live park must classify the shock payment as OptionalBranch"
+    );
+
+    // Round-trip with `kind` stripped, exactly as a pre-field save would decode.
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused state serializes");
+    let legacy = saved.replace(r#""kind":{"type":"OptionalBranch"},"#, "");
+    assert_ne!(
+        legacy, saved,
+        "reach guard: the `kind` field must actually be stripped, or this test is vacuous"
+    );
+
+    let restored: PersistedGameState =
+        serde_json::from_str(&legacy).expect("the legacy state deserializes");
+    let runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
+
+    let WaitingFor::ReplacementChoice { kind, .. } = runner.state().waiting_for else {
+        panic!("the restored state must still carry the parked replacement prompt");
+    };
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::OptionalBranch,
+        "CR 616.1: a legacy save's optional prompt must restore as OptionalBranch, \
+         not as the serde default `Order` — otherwise the client renders a \
+         sortable ordering list for a yes/no decision"
+    );
+}
+
+/// CR 616.1 restore migration, search-found shape. Companion to the optional
+/// case above: a found-card destination prompt is a set of mutually exclusive
+/// alternatives, NOT a sequence, so a legacy save must not restore it as
+/// `Order` and render a sortable list.
+///
+/// Builds the parked prompt directly — a full search scenario is not needed to
+/// exercise the classification seam the migration re-derives through.
+///
+/// Goes RED if `migrate_restored_replacement_choice_kind` is removed from the
+/// shared load chokepoint.
+#[test]
+fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::game_state::{
+        PendingReplacement, PersistedGameState, ReplacementChoiceKind, ZoneDeliveryExileTracking,
+    };
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::proposed_event::{
+        BoundSearchFoundCandidate, BoundSearchFoundDisposition, ProposedEvent,
+        SearchFoundDisposition,
+    };
+    use engine::types::ReplacementId;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_enchantment_from_oracle(P0, "Search Rider", "")
+        .id();
+    let mut runner = scenario.build();
+
+    let rid = ReplacementId { source, index: 0 };
+    let found = runner.state().objects[&source].id;
+    let candidate = BoundSearchFoundCandidate {
+        replacement_id: rid,
+        disposition: BoundSearchFoundDisposition {
+            destination: Zone::Exile,
+            source: ObjectIncarnationRef {
+                object_id: source,
+                incarnation: runner.state().objects[&source].incarnation,
+            },
+            grant: None,
+        },
+        source_name: "Search Rider".to_string(),
+        description: "Exile it instead".to_string(),
+        is_optional: false,
+    };
+    let state = runner.state_mut();
+    state.pending_replacement = Some(PendingReplacement {
+        proposed: ProposedEvent::SearchFound {
+            searcher: P0,
+            library_owner: Some(P0),
+            object_id: found,
+            disposition: SearchFoundDisposition::Original,
+            applied: Default::default(),
+        },
+        sacrifice_provenance: None,
+        candidates: vec![rid],
+        search_found_candidates: vec![candidate],
+        depth: 0,
+        is_optional: false,
+        library_placement: None,
+        exile_controller: None,
+        exile_duration: None,
+        exile_tracking: ZoneDeliveryExileTracking::None,
+        excess_recipient: None,
+        lifelink_bonus: 0,
+        may_cost_paid: false,
+        may_cost_remaining: None,
+    });
+    let parked = engine::game::replacement::replacement_choice_waiting_for(P0, runner.state());
+    runner.state_mut().waiting_for = parked;
+
+    let WaitingFor::ReplacementChoice { kind, .. } = runner.state().waiting_for else {
+        panic!("expected a parked search-found replacement prompt");
+    };
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::SearchFoundDestination,
+        "reach guard: a live park must classify this as SearchFoundDestination, \
+         or the restore assertion below is vacuous"
+    );
+
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused state serializes");
+    let legacy = saved.replace(r#""kind":{"type":"SearchFoundDestination"},"#, "");
+    assert_ne!(
+        legacy, saved,
+        "reach guard: the `kind` field must actually be stripped, or this test is vacuous"
+    );
+
+    let restored: PersistedGameState =
+        serde_json::from_str(&legacy).expect("the legacy state deserializes");
+    let runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
+
+    let WaitingFor::ReplacementChoice { kind, .. } = runner.state().waiting_for else {
+        panic!("the restored state must still carry the parked replacement prompt");
+    };
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::SearchFoundDestination,
+        "CR 616.1: a legacy save's search-found prompt must restore as \
+         SearchFoundDestination, not as the serde default `Order`"
+    );
+}
