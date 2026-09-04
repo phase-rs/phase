@@ -47,7 +47,13 @@ export class FakeDataConnection {
       const idx = this.sent.length;
       this.sent.push({ type: "__pending__" });
       const decodePromise = decodeWireMessage(data).then(
-        (msg) => { this.sent[idx] = msg; },
+        (msg) => {
+          this.sent[idx] = msg;
+          // Fire AFTER the backfill so a subclass reaction (e.g. an
+          // auto-ack) can never appear in `sent` before the frame that
+          // provoked it.
+          this.onDecodedSend(msg);
+        },
         (err) => { console.warn("[FakeDataConnection] decode failed:", err); },
       );
       this.pendingDecodes.push(decodePromise);
@@ -80,8 +86,21 @@ export class FakeDataConnection {
     return this.sent;
   }
 
-  /** Decode promises in flight from the most recent `send(Uint8Array)` calls. */
-  private pendingDecodes: Promise<void>[] = [];
+  /**
+   * Decode promises in flight from the most recent `send(Uint8Array)` calls.
+   * `protected` so subclasses that react to a decoded frame can enqueue their
+   * own follow-on work and have `getSentMessages()` drain it.
+   */
+  protected pendingDecodes: Promise<void>[] = [];
+
+  /**
+   * Hook fired once a sent frame has been decoded and backfilled into `sent`.
+   * Empty by default; subclasses override it to model peer behavior (e.g.
+   * feeding a `state_ack` back to the host). Overrides that start async work
+   * should push the resulting promise onto `pendingDecodes` so
+   * `getSentMessages()` awaits it.
+   */
+  protected onDecodedSend(_msg: P2PMessage): void {}
 
   close() {
     if (this.open) this.simulateClose();

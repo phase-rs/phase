@@ -16,7 +16,7 @@ import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supports
 import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
-import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
+import { WIRE_PROTOCOL_VERSION, type P2PMessage } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
 
@@ -480,6 +480,63 @@ class FakeOpenableConnection extends FakeDataConnection {
   }
   fireOpen() {
     for (const h of this.openHandlers) h();
+  }
+
+  /**
+   * Every `state_ack` this fake fed back to the host, in emission order.
+   * Harness-only bookkeeping: the host records nothing for an inbound ack,
+   * so this is the only observation point for the auto-ack behavior.
+   */
+  readonly acksSent: P2PMessage[] = [];
+
+  /**
+   * Stop auto-acking. Callable at any point — including before
+   * `initializeGame` — so a test can model a seat that never acknowledges
+   * anything, not merely one that stops mid-game.
+   */
+  stopAcking() {
+    this.acking = false;
+  }
+
+  /**
+   * Default ON: a real guest acks every state-bearing frame it applies, and a
+   * seat that never acks reads as permanently behind. Defaulting off would
+   * change behavior in tests that have nothing to do with acknowledgement.
+   */
+  private acking = true;
+
+  protected override onDecodedSend(msg: P2PMessage): void {
+    if (!this.acking) return;
+    // A decode `.then` from a pre-close send can settle AFTER
+    // `simulateClose()`; dispatching an ack into a torn-down session would
+    // model something a real guest never does.
+    if (!this.open) return;
+    if (msg.type !== "game_setup" && msg.type !== "state_update" && msg.type !== "reconnect_ack") {
+      return;
+    }
+    // `revision` is optional on `state_update` and `reconnect_ack`; only
+    // `game_setup` always carries one. An ack without a revision is not a
+    // frame a real guest could produce.
+    if (msg.revision == null) return;
+    const ack = {
+      type: "state_ack" as const,
+      revision: msg.revision,
+      // A real guest stamps `authority` on every outbound frame, so an
+      // unstamped ack would skip the host's pre-switch authority guard.
+      ...(msg.authority ? { authority: msg.authority } : {}),
+    };
+    this.acksSent.push(ack);
+    // Enqueue on the inherited drain so `getSentMessages()` reaches the
+    // fixed point: an ack can provoke host sends, which enqueue more decodes.
+    // The `.catch` prevents an unhandled rejection when a test never awaits
+    // `getSentMessages()`, but it must stay LOUD: a silently dropped ack makes
+    // a seat read as un-acked, which would let a redelivery test pass for the
+    // wrong reason.
+    this.pendingDecodes.push(
+      this.simulateData(ack).catch((e) => {
+        console.warn("[FakeOpenableConnection] auto-ack dispatch failed:", e);
+      }),
+    );
   }
 }
 
@@ -1665,6 +1722,56 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockGetViewerSnapshot).toHaveBeenCalledTimes(2);
     expect(mockGetViewerSnapshot).toHaveBeenCalledWith(1);
     expect(mockGetViewerSnapshot).toHaveBeenCalledWith(2);
+  });
+
+  const isStateBearingWithRevision = (m: unknown): m is P2PMessage & { revision: number } =>
+    typeof m === "object"
+    && m !== null
+    && ["game_setup", "state_update", "reconnect_ack"].includes((m as { type: string }).type)
+    && typeof (m as { revision?: unknown }).revision === "number";
+
+  // Harness coverage for `FakeOpenableConnection`'s auto-ack. Nothing else in
+  // the suite observes it directly, so this test is the only thing standing
+  // between a silently-broken fake and every acceptance-semantics test built
+  // on top of it.
+  it("auto-acks every state-bearing frame the host sends, echoing its authority", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+
+    const sent = await guest.getSentMessages();
+    const stateBearing = sent.filter(isStateBearingWithRevision);
+    // Both a `game_setup` and at least one `state_update` must have flowed,
+    // or the ack assertion below would be vacuously satisfiable.
+    expect(stateBearing.map((m) => m.type)).toEqual(
+      expect.arrayContaining(["game_setup", "state_update"]),
+    );
+    // One ack per state-bearing frame, in order, carrying that frame's
+    // revision and the host's authority stamp verbatim.
+    expect(guest.acksSent).toEqual(
+      stateBearing.map((m) => ({
+        type: "state_ack",
+        revision: m.revision,
+        authority: m.authority,
+      })),
+    );
+
+    // The knob silences it: further host state changes provoke no new ack.
+    guest.stopAcking();
+    const ackCount = guest.acksSent.length;
+    const stateBearingCount = stateBearing.length;
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+    const afterStop = await guest.getSentMessages();
+    // Non-vacuity: the host really did send another state-bearing frame that
+    // the fake would have acked had the knob not been flipped.
+    expect(afterStop.filter(isStateBearingWithRevision).length).toBeGreaterThan(stateBearingCount);
+    expect(guest.acksSent).toHaveLength(ackCount);
+    adapter.dispose();
   });
 
   it("keeps a host zero-count debug create out of transition side effects", async () => {
