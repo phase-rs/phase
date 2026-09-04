@@ -892,6 +892,60 @@ fn persisted_pending_consent_decline_restores_the_captured_baseline() {
     assert!(restored.auto_pass.is_empty());
 }
 
+/// CR 117.4: a save written before `ResolveAllScope` existed carries no `scope`
+/// key at all, and `#[serde(default)]` must resolve that to `Own` -- the scope
+/// that binds only the requester. Defaulting a legacy run to `Shared` would
+/// silently hand it table-wide authority over seats that never consented, which
+/// is precisely what the field's default exists to prevent.
+///
+/// `begin` opens a SHARED run, so the captured payload really does carry a
+/// `scope`. That matters twice over: removing the key is what reconstructs a
+/// genuine pre-migration payload, and starting from `Shared` is what makes the
+/// assertion discriminating -- the default has to FLIP the value, not merely
+/// reproduce it. The `remove` is asserted because a fixture that never carried
+/// a `scope` would otherwise pass this test while proving nothing.
+#[test]
+fn a_pre_scope_save_restores_as_an_own_run() {
+    let mut state = GameState::new_two_player(431);
+    state.stack.push_back(no_op_entry(1, P0));
+    begin(&mut state);
+
+    let encoded = serde_json::to_string(&PersistedGameState::capture(state))
+        .expect("pending consent serializes");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&encoded).expect("the captured payload is valid JSON");
+    // A persisted payload is either a trusted envelope wrapping `state` or a
+    // bare raw state. `reject_legacy_raw_prompt_authority` reads it the same way.
+    let root = if doc.get("state").is_some() {
+        doc.get_mut("state").expect("just observed")
+    } else {
+        &mut doc
+    };
+    let run = root
+        .get_mut("resolve_all_consent_run")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("the captured payload carries the consent run");
+    assert!(
+        run.remove("scope").is_some(),
+        "the fixture must carry a scope for its removal to reconstruct a legacy save"
+    );
+
+    let persisted: PersistedGameState =
+        serde_json::from_str(&doc.to_string()).expect("a pre-scope save still deserializes");
+    let restored = persisted
+        .into_game_state()
+        .expect("a pre-scope save satisfies the checked restore contract");
+    assert_eq!(
+        restored
+            .resolve_all_consent_run
+            .as_ref()
+            .expect("the restored snapshot keeps its consent run")
+            .scope,
+        ResolveAllScope::Own,
+        "a legacy run must not acquire table-wide authority"
+    );
+}
+
 #[test]
 fn serialized_legacy_pending_grant_removes_its_mode_before_entering_ready() {
     let mut state = GameState::new_two_player(0x001E_6AC0);
