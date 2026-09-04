@@ -259,17 +259,21 @@ export function TournamentPage() {
    * Runs one gated action and reports its failure.
    *
    * The result is used for the failure alert only. It is **never** written to
-   * `view`. The four gated RPCs settle on a `TournamentUpdate` **broadcast**
-   * that carries no request-vs-broadcast discriminator
-   * (`services/tournamentClient.ts`, module header part 4), so `{ok:true}` may
-   * be another actor's view and `{ok:false}` may arrive after a foreign frame
-   * already settled the promise. The alert is therefore **best-effort**, and
-   * the rendered state is always the ambient subscription's. Do not "fix" this
-   * into an authoritative signal.
+   * `view`. The four gated RPCs now settle on the broker's own
+   * `TournamentActionAck` / `TournamentActionRejected` for **this exact
+   * request** (`services/tournamentClient.ts`, module header parts 3-4), so
+   * `{ok:false, reason:"rejected"}` is a reliable "the server refused *me*"
+   * signal, not another actor's frame arriving in its place. The one residual
+   * "not confirmed" case is `{reason:"unsupported"}`: against a peer too old
+   * to mint an ack, the frame is still sent and very likely performed, and
+   * this client simply cannot confirm it. `view` still comes only from the
+   * ambient subscription, as a layering choice — the fan-out owns state, this
+   * function owns the call — not as compensation for a signal that could not
+   * be trusted.
    *
-   * Best-effort is not the same as unscoped, though: the alert belongs to the
-   * tournament the action was dispatched for, so the write is gated on the
-   * page still showing that tournament — see `shownCode`.
+   * The alert is scoped, not unscoped, though: it belongs to the tournament
+   * the action was dispatched for, so the write is gated on the page still
+   * showing that tournament — see `shownCode`.
    */
   const run = useCallback(
     async (

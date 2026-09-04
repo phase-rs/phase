@@ -3594,6 +3594,54 @@ mod tests {
         );
     }
 
+    /// D6 — a gated frame refused at the inbound bounds guard, before any
+    /// handler runs, still settles the caller's own correlator.
+    ///
+    /// `request_id` is read in `Broker::handle` ahead of `guard_inbound`
+    /// specifically so this path is not a bare `Error`: a correlated caller
+    /// deliberately ignores an uncorrelated `Error` (client module header,
+    /// part 5), so a regression here would not fail loudly — it would hang
+    /// every correlated caller to its timeout on an oversized-token frame the
+    /// broker rejects instantly.
+    #[test]
+    fn a_guard_refused_gated_frame_still_settles_its_own_correlator() {
+        const REQUEST_ID: TournamentRequestId = TournamentRequestId(42);
+        let over_long = "t".repeat(crate::validation::MAX_TOKEN_LEN + 1);
+
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+
+        let correlated = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: over_long.clone(),
+                request_id: Some(REQUEST_ID),
+            },
+            &env,
+        );
+        let (id, message) = rejection_of(&correlated);
+        assert_eq!(id, REQUEST_ID);
+        assert!(!message.is_empty(), "a refusal must say why");
+
+        // Reach-guard: the SAME oversized frame, uncorrelated, still produces
+        // today's bare `Error` — proving the assertions above are about the
+        // correlator's presence, not about a broker that started wrapping
+        // every guard refusal in a tournament-shaped frame.
+        let uncorrelated = broker.handle(
+            &mut conn,
+            LobbyClientMessage::StartTournamentRound {
+                code: "TOUR01".into(),
+                organizer_token: over_long,
+                request_id: None,
+            },
+            &env,
+        );
+        assert!(is_error(&uncorrelated), "{uncorrelated:?}");
+    }
+
     // -- Row 5: the broker never short-circuits past the manager -------------
 
     #[test]
