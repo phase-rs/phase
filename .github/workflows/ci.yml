@@ -121,6 +121,18 @@ jobs:
         # checker against the evaluated commit.
         run: python3 scripts/check_action_pins_tests.py
 
+      - name: Action pin regression coverage
+        # Walks reusable-workflow and composite-action calls out of the
+        # release/deploy workflows: those run with deploy and signing secrets,
+        # so an action one call away from the edited file is the same exposure
+        # with less visibility. Pinning only top-level files would miss it.
+        #
+        # This runs from the pull request's checkout, so it is fast feedback and
+        # NOT the control: a commit can change a privileged workflow and this
+        # checker together. The authority is action-pin-audit.yml, which runs
+        # the default branch's copy of the checker against this commit.
+        run: python3 scripts/check_action_pins.py
+
       - name: Resolution-frame boundary guard
         # Full-tree guard: legacy resolution keys are reader/fixture-only, and
         # ResolutionStack mutation remains top-only or adjacent-pair scoped.

@@ -255,7 +255,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 40 as const;
+export const WIRE_PROTOCOL_VERSION = 41 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

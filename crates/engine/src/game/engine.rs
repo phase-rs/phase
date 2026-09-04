@@ -8,14 +8,14 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
     DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
-    TriggerOrderTemplateOp,
+    ResolveAllScope, TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
+    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError, PriorityPassingMode,
     ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
     StackEntry, StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
     StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, WaitingFor,
@@ -7973,6 +7973,24 @@ enum AutoPassDecision {
 /// interrupt logic is boundary-agnostic — both `EndOfCurrentTurn` and
 /// `MyNextTurnStart` behave identically within a priority window.
 fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassDecision {
+    // CR 117.1 + CR 723.5: Full Control is the player's standing refusal to have
+    // any window taken from them, and it outranks every auto-pass session —
+    // including one another player installed, which is what reaches this loop
+    // without ever consulting the frontend. Checked BEFORE the no-session `Exit`
+    // arm because `Exit` itself falls through to a pass when someone else holds
+    // a live `UntilStackEmpty` session. Preference ownership follows the
+    // authorized submitter, as it does in `auto_pass_recommended`.
+    if state.priority_passing_mode(turn_control::authorized_submitter_for_player(state, player))
+        == PriorityPassingMode::FullControl
+    {
+        // `Finish` also drops a stale session this player owns; both variants
+        // break the loop, so either way the window is theirs.
+        return if state.auto_pass.contains_key(&player) {
+            AutoPassDecision::Finish
+        } else {
+            AutoPassDecision::Break
+        };
+    }
     let Some(mode) = state.auto_pass.get(&player) else {
         return AutoPassDecision::Exit;
     };
@@ -8315,6 +8333,20 @@ fn stack_resolution_session_priority_decision(
         let Some(session) = state.stack_resolution_session.as_ref() else {
             return StackResolutionSessionPriorityDecision::NotActive;
         };
+        // CR 117.1: a Full Control holder is never auto-passed by a session —
+        // theirs or anyone else's. Scoped to `Automatic`: an EXPLICIT
+        // PassPriority is that player's own deliberate decision and still drives
+        // the session. This is the only gate covering a session REPRESENTATIVE,
+        // whose windows are otherwise passed without even the meaningful-action
+        // check below. (The no-session case is handled one layer out, by
+        // `priority_auto_pass_decision`.)
+        if matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
+            && state
+                .priority_passing_mode(turn_control::authorized_submitter_for_player(state, holder))
+                == PriorityPassingMode::FullControl
+        {
+            return StackResolutionSessionPriorityDecision::Pause;
+        }
 
         let current_representatives = super::topology::canonical_priority_representatives(
             state,
@@ -8862,6 +8894,7 @@ fn begin_resolve_all_consent(
     state: &mut GameState,
     priority_player: PlayerId,
     max_resolutions: u32,
+    scope: ResolveAllScope,
 ) -> Result<WaitingFor, EngineError> {
     match state
         .stack_resolution_session
@@ -8870,8 +8903,8 @@ fn begin_resolve_all_consent(
     {
         // An AI-issued recheck is an internal, provisional shortcut. An
         // explicit Resolve All proposal is the priority holder's replacement
-        // shortcut, so restore the saved preferences before asking every
-        // representative for the new proposal's consent.
+        // shortcut, so restore the saved preferences before installing the
+        // requester's own session below.
         Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction) => {
             take_and_restore_stack_resolution_session(state);
         }
@@ -8885,6 +8918,10 @@ fn begin_resolve_all_consent(
     super::priority::pass_priority_legality(state, priority_player)?;
     let current_representative =
         super::topology::priority_pass_representative(state, priority_player);
+    // CR 117.3d: `Own` binds the requester alone (no consent to ask,
+    // so nobody can block it); `Shared` opens the table-wide compression
+    // proposal, rotated so the requester is first and self-granted. See
+    // `ResolveAllScope`.
     let mut representatives = super::topology::priority_pass_participants(state);
     let Some(current_index) = representatives
         .iter()
@@ -8894,7 +8931,10 @@ fn begin_resolve_all_consent(
             "Resolve All requires a live priority representative".to_string(),
         ));
     };
-    representatives.rotate_left(current_index);
+    match scope {
+        ResolveAllScope::Own => representatives = vec![current_representative],
+        ResolveAllScope::Shared => representatives.rotate_left(current_index),
+    }
 
     let epoch = state.next_resolve_all_consent_epoch;
     let next_epoch = epoch.checked_add(1).ok_or_else(|| {
@@ -8907,6 +8947,7 @@ fn begin_resolve_all_consent(
     state.resolve_all_consent_run = Some(ResolveAllConsentRun {
         epoch,
         max_resolutions: StackResolutionBudget::from_legacy_max_resolutions(max_resolutions),
+        scope,
         priority_snapshot: ResolveAllPrioritySnapshot {
             waiting_player: priority_player,
             priority_player: state.priority_player,
@@ -8933,6 +8974,9 @@ fn begin_resolve_all_consent(
         ),
     });
 
+    // An `Own` run is single-participant and self-granted, so it materializes on
+    // the spot and never raises a consent prompt. A `Shared` run queues the
+    // remaining representatives for the table-wide compression proposal.
     if state
         .resolve_all_consent_run
         .as_ref()
@@ -9831,9 +9875,13 @@ fn apply_action(
             }
             return pass_installed_auto_pass_priority(state, *player, &mut events);
         }
-        (WaitingFor::Priority { player }, GameAction::BeginResolveAll { max_resolutions }) => {
-            begin_resolve_all_consent(state, *player, max_resolutions)?
-        }
+        (
+            WaitingFor::Priority { player },
+            GameAction::BeginResolveAll {
+                max_resolutions,
+                scope,
+            },
+        ) => begin_resolve_all_consent(state, *player, max_resolutions, scope)?,
         (
             WaitingFor::ResolveAllConsent {
                 epoch,
@@ -16662,6 +16710,14 @@ pub fn start_game_with_starting_player(
     state.active_player = starting_player;
     state.priority_player = starting_player;
     state.current_starting_player = starting_player;
+    // CR 103.8 + CR 500: the starting player takes their first turn HERE — turn 1
+    // is established inline rather than through `turns::start_next_turn`, which is
+    // where every later turn's per-player count is incremented. Without this the
+    // starting player's `turns_taken` stays one behind every other seat for the
+    // whole game, so `QuantityRef::TurnsTaken` ("the number of turns you've taken
+    // this game") and every "your Nth turn" condition read low for exactly the
+    // player who has taken the MOST turns.
+    state.players[starting_player.0 as usize].turns_taken += 1;
     // First-game default chooser is the starting player; BO3 restarts can pre-set this.
     if state.next_game_chooser.is_none() {
         state.next_game_chooser = Some(starting_player);
@@ -16718,6 +16774,10 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     state.active_player = starting_player;
     state.priority_player = starting_player;
     state.current_starting_player = starting_player;
+    // CR 103.8 + CR 500: see the matching increment in
+    // `start_game_with_starting_player` — turn 1 bypasses `turns::start_next_turn`,
+    // so the starting player's own first turn must be counted here.
+    state.players[starting_player.0 as usize].turns_taken += 1;
     state.phase = Phase::Untap;
 
     events.push(GameEvent::TurnStarted {
@@ -17138,7 +17198,7 @@ mod resolve_all_consent_session_tests {
         let mut state = GameState::new(FormatConfig::free_for_all(), 1, 0x51_1E);
         state.stack.push_back(no_op_entry(1, P0));
 
-        let waiting = begin_resolve_all_consent(&mut state, P0, 1)
+        let waiting = begin_resolve_all_consent(&mut state, P0, 1, ResolveAllScope::Shared)
             .expect("the sole representative is already unanimous");
 
         assert!(matches!(waiting, WaitingFor::Priority { player: P0 }));
@@ -17155,7 +17215,7 @@ mod resolve_all_consent_session_tests {
     fn two_headed_giant_final_grant_overlays_only_canonical_team_representatives() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0x2A6);
         state.stack.push_back(no_op_entry(1, P0));
-        let waiting = begin_resolve_all_consent(&mut state, P0, 7)
+        let waiting = begin_resolve_all_consent(&mut state, P0, 7, ResolveAllScope::Shared)
             .expect("the active team representative begins consent");
         let WaitingFor::ResolveAllConsent {
             epoch,

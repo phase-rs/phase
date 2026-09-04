@@ -2266,7 +2266,9 @@ mod tests {
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::ability::{Effect, ResolvedAbility, TargetRef};
-    use engine::types::actions::{PrecastCopyShortcutResponse, ResolveAllConsentDecision};
+    use engine::types::actions::{
+        PrecastCopyShortcutResponse, ResolveAllConsentDecision, ResolveAllScope,
+    };
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
     use engine::types::game_state::{
@@ -6799,10 +6801,12 @@ mod tests {
         (mgr, game_code, ai_player)
     }
 
-    /// A final AI consent grant enters the same fenced session used by direct
-    /// `UntilStackEmpty`, rather than creating a transport-owned Ready latch.
+    /// CR 117.3d: a human Resolve All at a table with AI seats enters the same
+    /// fenced session used by direct `UntilStackEmpty` without asking the AI for
+    /// anything. The AI seat owing a response is exactly what used to park the
+    /// human on a consent prompt they could not clear.
     #[test]
-    fn run_ai_advances_an_ai_granted_shared_session() {
+    fn resolve_all_at_an_ai_table_needs_no_ai_consent() {
         let (mut mgr, game_code, _ai_player) = ai_table_awaiting_one_consent();
         let session = mgr
             .sessions
@@ -6812,24 +6816,27 @@ mod tests {
         apply(
             &mut session.state,
             PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 1 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Own,
+            },
         )
-        .expect("the priority holder may start Resolve All consent");
+        .expect("the priority holder may start Resolve All");
         assert!(
-            matches!(
+            !matches!(
                 session.state.waiting_for,
-                WaitingFor::ResolveAllConsent { .. }
+                WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
             ),
-            "the AI representative must still owe a consent response, got {:?}",
+            "the human must never be parked on an AI's consent, got {:?}",
             session.state.waiting_for
         );
-
-        let transitions = session.run_ai();
-
         assert!(
-            transitions.transitions.len() >= 2,
-            "the grant and session runner must each produce a transition"
+            session.state.resolve_all_consent_run.is_none(),
+            "the requester's single-participant run materializes immediately"
         );
+
+        session.run_ai();
+
         assert!(session.state.stack.is_empty());
         assert!(session.state.resolve_all_consent_run.is_none());
         assert!(session.state.stack_resolution_session.is_none());
@@ -6852,17 +6859,12 @@ mod tests {
         apply(
             &mut session.state,
             PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 1 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Own,
+            },
         )
-        .expect("the priority holder may start Resolve All consent");
-        assert!(
-            matches!(
-                session.state.waiting_for,
-                WaitingFor::ResolveAllConsent { .. }
-            ),
-            "the AI representative must still owe a consent response, got {:?}",
-            session.state.waiting_for
-        );
+        .expect("the priority holder may start Resolve All");
 
         let transitions = session.run_ai();
 
@@ -6875,10 +6877,24 @@ mod tests {
             session.state.resolve_all_consent_run.is_none(),
             "one run authorizes one batch and must not outlive it"
         );
+        // CR 117.3d: an `Own` run asks nobody, so the AI-grant round-trip that
+        // used to supply a second transition here no longer happens -- that
+        // round-trip is the defect this test's fixture reproduces. What must
+        // still hold is that the engine-owned runner published, and that no
+        // frame it published ever parked a player on a consent decision.
         assert!(
-            transitions.transitions.len() >= 2,
-            "expected the AI grant and session runner, got {}",
-            transitions.transitions.len()
+            !transitions.transitions.is_empty(),
+            "the engine-owned runner must publish the post-collapse state"
+        );
+        assert!(
+            transitions
+                .transitions
+                .iter()
+                .all(|(_, (broadcast_state, ..))| !matches!(
+                    broadcast_state.waiting_for,
+                    WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+                )),
+            "a published frame parked a player on a Resolve All consent decision"
         );
         assert!(
             transitions
@@ -6889,17 +6905,17 @@ mod tests {
         );
     }
 
-    /// A human final grant also enters the same engine-owned session; it does
-    /// not leave a Ready latch for a separate client transport action.
+    /// The same rule read from the other side: an AI seat's Resolve All is that
+    /// seat's own pre-commitment too, so it never interrupts the human for a
+    /// consent decision and never leaves a Ready latch behind.
     #[test]
-    fn human_final_grant_uses_the_shared_session() {
+    fn an_ai_resolve_all_does_not_prompt_the_human() {
         let (mut mgr, game_code, ai_player) = ai_table_awaiting_one_consent();
         let session = mgr
             .sessions
             .get_mut(&game_code)
             .expect("the game retains its session");
-        // Flip the roles: the AI opens the run (auto-granting itself) so the
-        // remaining representative is the human.
+        // Flip the roles: the AI seat is the one starting Resolve All.
         session.state.priority_player = ai_player;
         session.state.waiting_for = WaitingFor::Priority { player: ai_player };
         session.state.priority_passes.clear();
@@ -6908,44 +6924,27 @@ mod tests {
         apply(
             &mut session.state,
             ai_player,
-            GameAction::BeginResolveAll { max_resolutions: 1 },
-        )
-        .expect("the priority holder may start Resolve All consent");
-        let WaitingFor::ResolveAllConsent {
-            epoch,
-            representative,
-        } = session.state.waiting_for
-        else {
-            panic!(
-                "expected a pending consent prompt, got {:?}",
-                session.state.waiting_for
-            );
-        };
-        assert_eq!(
-            representative,
-            PlayerId(0),
-            "the human must be the outstanding representative"
-        );
-
-        apply(
-            &mut session.state,
-            PlayerId(0),
-            GameAction::RespondResolveAllConsent {
-                epoch,
-                decision: ResolveAllConsentDecision::Grant,
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Own,
             },
         )
-        .expect("the human representative may grant");
+        .expect("the priority holder may start Resolve All");
+
+        assert!(
+            !matches!(
+                session.state.waiting_for,
+                WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+            ),
+            "the human is never asked to approve another seat's Resolve All, got {:?}",
+            session.state.waiting_for
+        );
         assert!(
             session.state.resolve_all_consent_run.is_none(),
-            "the final grant transfers authorization to the shared session"
+            "the requester's single-participant run materializes immediately"
         );
         assert!(session.state.stack.is_empty());
         assert!(session.state.stack_resolution_session.is_none());
-        assert!(!matches!(
-            session.state.waiting_for,
-            WaitingFor::ResolveAllReady { .. }
-        ));
     }
 
     /// Generic reconstruction deliberately preserves a coherent automation
@@ -7058,12 +7057,18 @@ mod tests {
             .sessions
             .get_mut(&game_code)
             .expect("the game retains its session");
+        // `Shared` is the scope that still opens a consent queue; a missing
+        // baseline is then what identifies the run as the legacy encoding this
+        // migration path repairs.
         apply(
             &mut session.state,
             PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 1 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Shared,
+            },
         )
-        .expect("the priority holder may start Resolve All consent");
+        .expect("the priority holder may start a shared Resolve All");
         let WaitingFor::ResolveAllConsent { epoch, .. } = session.state.waiting_for else {
             panic!("expected a pending consent prompt");
         };

@@ -613,7 +613,13 @@ export interface PhaseStop {
 }
 
 /** Standing engine preference for ordinary priority recommendations. */
-export type PriorityPassingMode = "Standard" | "SkipLowUseWindows";
+export type PriorityPassingMode = "Standard" | "SkipLowUseWindows" | "FullControl";
+
+/** CR 117.3d: which priority representatives a Resolve All request binds.
+ *  `Own` is the player-facing button — it pre-commits only the requester and so
+ *  can never be blocked by another seat. `Shared` opens the table-wide consent
+ *  protocol the engine uses for stack compression. */
+export type ResolveAllScope = { type: "Own" } | { type: "Shared" };
 
 export type Zone =
   | "Library"
@@ -2574,7 +2580,7 @@ export type PrecastCopyShortcutResponse =
 
 export type GameAction =
   | { type: "PassPriority" }
-  | { type: "BeginResolveAll"; data: { max_resolutions: number } }
+  | { type: "BeginResolveAll"; data: { max_resolutions: number; scope: ResolveAllScope } }
   | {
       type: "RespondResolveAllConsent";
       data: { epoch: number; decision: { type: "Grant" } | { type: "Decline" } };

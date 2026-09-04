@@ -968,11 +968,16 @@ pub enum GameAction {
         source_name: String,
         cost: crate::types::mana::ManaCost,
     },
-    /// Begins the table-consent protocol for the forthcoming Resolve All batch.
-    /// Phase 1 only records unanimous consent; it deliberately does not drive
-    /// priority or resolve the batch.
+    /// Begins a Resolve All batch. `scope` selects whether this binds only the
+    /// requester (`Own` — the player-facing button, resolves immediately) or
+    /// opens the table-wide consent protocol (`Shared` — engine stack
+    /// compression). See [`ResolveAllScope`].
     BeginResolveAll {
         max_resolutions: u32,
+        /// `#[serde(default)]` migrates payloads written before the scope
+        /// existed to `Own`, the weaker of the two authorities.
+        #[serde(default)]
+        scope: ResolveAllScope,
     },
     /// Answers the currently queued Resolve All consent prompt. `epoch` makes
     /// delayed transport submissions fail closed rather than answering a newer
@@ -996,6 +1001,33 @@ pub enum GameAction {
 pub enum ResolveAllConsentDecision {
     Grant,
     Decline,
+}
+
+/// CR 117.3d + CR 117.4: which priority representatives a Resolve All request
+/// binds.
+///
+/// `Own` is the player-facing shortcut: a pre-commitment to pass the
+/// REQUESTER'S OWN priority windows while the current stack cohort drains. One
+/// player can never decide another's passes, so it asks nobody and cannot be
+/// blocked by a seat that declines or (an AI seat) never answers. Every other
+/// seat keeps its ordinary windows and its non-representative meaningful-action
+/// protection in `stack_resolution_session_priority_decision`, so CR 117.4 still
+/// requires their real passes before anything resolves.
+///
+/// `Shared` is the table-wide compression proposal: it asks every representative
+/// for consent, and a unanimous grant makes them all representatives of one
+/// session. That is strictly stronger than `Own` — a representative's windows
+/// are passed WITHOUT the meaningful-action check — which is exactly what lets
+/// the engine collapse a stack whose other players could still have acted. It
+/// is opt-in for that reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ResolveAllScope {
+    /// Bind only the requester. The default so a payload written before this
+    /// field existed cannot silently acquire table-wide authority.
+    #[default]
+    Own,
+    Shared,
 }
 
 /// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the

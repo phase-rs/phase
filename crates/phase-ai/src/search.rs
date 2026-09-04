@@ -4517,6 +4517,7 @@ fn softmax_select_index(
 
 #[cfg(test)]
 mod tests {
+    use engine::types::actions::ResolveAllScope;
     use std::path::Path;
 
     use super::*;
@@ -5736,7 +5737,10 @@ mod tests {
         engine::game::engine::apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions: 5 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 5,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("the priority holder may propose Resolve All");
 
@@ -5761,7 +5765,10 @@ mod tests {
         engine::game::engine::apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions: 5 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 5,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("the priority holder may propose Resolve All");
 
@@ -5799,7 +5806,10 @@ mod tests {
         engine::game::engine::apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions: 5 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 5,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("the priority holder may propose Resolve All");
 

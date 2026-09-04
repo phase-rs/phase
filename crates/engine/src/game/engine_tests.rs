@@ -5515,6 +5515,39 @@ fn start_game_skips_draw_on_first_turn() {
     assert!(!state.players[0].hand.contains(&id));
 }
 
+// CR 103.8 + CR 500: the starting player TAKES their first turn, so it must
+// count toward `turns_taken` like every other turn. Turn 1 is established
+// inline by the game-start path rather than by `turns::start_next_turn`, so
+// before this was fixed the starting player stayed permanently one turn behind
+// every other seat — `QuantityRef::TurnsTaken` read low for exactly the player
+// who had taken the most turns.
+#[test]
+fn start_game_counts_the_starting_players_first_turn() {
+    for starting_player in [PlayerId(0), PlayerId(1)] {
+        let mut state = new_game(42);
+        start_game_with_starting_player(&mut state, starting_player);
+
+        assert_eq!(
+            state.players[starting_player.0 as usize].turns_taken, 1,
+            "the starting player's own first turn counts"
+        );
+        for player in state.players.iter() {
+            if player.id != starting_player {
+                assert_eq!(
+                    player.turns_taken, 0,
+                    "a player who has not had a turn yet counts none"
+                );
+            }
+        }
+    }
+
+    // `start_game_skip_mulligan` establishes turn 1 through the same inline
+    // path and must agree.
+    let mut state = new_game(42);
+    start_game_skip_mulligan(&mut state);
+    assert_eq!(state.players[0].turns_taken, 1);
+}
+
 #[test]
 fn start_game_emits_game_started_event() {
     let mut state = new_game(42);

@@ -3451,7 +3451,7 @@ mod tests {
         ContinuousModification, Duration, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
         TargetFilter, TargetRef,
     };
-    use engine::types::actions::ResolveAllConsentDecision;
+    use engine::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::counter::{CounterMatch, CounterType};
@@ -4740,6 +4740,8 @@ mod tests {
         state.resolve_all_consent_run = Some(ResolveAllConsentRun {
             epoch: EPOCH,
             max_resolutions: StackResolutionBudget::default(),
+            // A table-wide run: both seats are participants and both granted.
+            scope: ResolveAllScope::Shared,
             priority_snapshot: ResolveAllPrioritySnapshot {
                 waiting_player: PlayerId(0),
                 priority_player: PlayerId(0),
