@@ -1219,6 +1219,7 @@ export function MyDecks({
             : null,
           selected_format_reasons: [],
           color_identity: getPreconColorIdentity(candidate.preconDeck),
+          color_distribution: [],
           coverage: coverageFromPct(candidate.coveragePct),
         };
         return [];

@@ -10,7 +10,7 @@ import { ColorDistribution } from "../deck-builder/ColorDistribution";
 interface ManaCurveProps {
   pool: DraftCardInstance[];
   cards: string[];
-  colorValues: string[];
+  colorDistribution: readonly DeckColorDistributionEntry[];
   /**
    * Compact is a presentation-only variant for space-constrained summaries.
    * It deliberately retains the curve's meter semantics and translated title.
@@ -30,7 +30,7 @@ const COMPACT_MAX_BAR_HEIGHT = 24;
 
 // ── Component ───────────────────────────────────────────────────────────
 
-export function ManaCurve({ pool, cards, colorValues, presentation = "default" }: ManaCurveProps) {
+export function ManaCurve({ pool, cards, colorDistribution, presentation = "default" }: ManaCurveProps) {
   const { t } = useTranslation("draft");
   const compact = presentation === "compact";
   const maxBarHeight = compact ? COMPACT_MAX_BAR_HEIGHT : MAX_BAR_HEIGHT;
@@ -59,33 +59,6 @@ export function ManaCurve({ pool, cards, colorValues, presentation = "default" }
   }, [cards, pool]);
 
   const maxCount = Math.max(1, ...counts.map((b) => b.count));
-  const colorDistribution = useMemo(() => {
-    const countsByColor = new Map<string, number>();
-    let total = 0;
-
-    for (const identity of colorValues) {
-      for (const symbol of identity) {
-        const color = { W: "White", U: "Blue", B: "Black", R: "Red", G: "Green" }[symbol];
-        if (!color) continue;
-        countsByColor.set(color, (countsByColor.get(color) ?? 0) + 1);
-        total += 1;
-      }
-    }
-
-    if (total === 0) return [];
-
-    return ["White", "Blue", "Black", "Red", "Green"].flatMap((color) => {
-      const count = countsByColor.get(color) ?? 0;
-      if (count === 0) return [];
-      const percentage = (count / total) * 100;
-      return [{
-        color: color as DeckColorDistributionEntry["color"],
-        count,
-        percentage,
-        display_percentage: Math.round(percentage),
-      }];
-    });
-  }, [colorValues]);
 
   return (
     <div

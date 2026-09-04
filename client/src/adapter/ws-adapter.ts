@@ -950,7 +950,27 @@ export class WebSocketAdapter implements EngineAdapter {
     this.startPing();
 
     socket.ws.onmessage = (event) => {
-      this.handleMessage(JSON.parse(event.data as string));
+      let message: unknown;
+      try {
+        message = JSON.parse(event.data as string);
+      } catch {
+        this.rejectAuthoritativeStateExport(
+          new AdapterError("WS_ERROR", "Server sent an invalid WebSocket frame.", false),
+        );
+        return;
+      }
+      if (
+        typeof message !== "object"
+        || message === null
+        || !("type" in message)
+        || typeof message.type !== "string"
+      ) {
+        this.rejectAuthoritativeStateExport(
+          new AdapterError("WS_ERROR", "Server sent an invalid WebSocket frame.", false),
+        );
+        return;
+      }
+      this.handleMessage(message);
     };
 
     socket.ws.onerror = () => {
@@ -1103,6 +1123,9 @@ export class WebSocketAdapter implements EngineAdapter {
         "Authoritative-state export requires a secure connection",
         false,
       );
+    }
+    if (this.sessionIdentityRejected) {
+      throw new AdapterError("WS_ERROR", "Session identity rejected", false);
     }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
@@ -1902,6 +1925,12 @@ export class WebSocketAdapter implements EngineAdapter {
         break;
       }
 
+      default:
+        this.rejectAuthoritativeStateExport(
+          new AdapterError("WS_ERROR", "Server sent an unrecognized WebSocket frame.", false),
+        );
+        break;
+
       case "RequestRejected": {
         const data = msg.data as { reason?: unknown };
         this.emit({
@@ -2172,6 +2201,7 @@ export class WebSocketAdapter implements EngineAdapter {
       this.pingInterval = null;
     }
     this.rejectInitialization(error);
+    this.rejectAuthoritativeStateExport(error);
     this.emit({ type: "error", message: error.message });
     this.ws?.close();
     return false;

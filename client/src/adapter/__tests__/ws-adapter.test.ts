@@ -200,6 +200,41 @@ describe("WebSocketAdapter", () => {
     await expect(retried).resolves.toBe("{\"state\":{}}");
   });
 
+  it.each([
+    ["invalid JSON", "{"],
+    ["null", "null"],
+    ["scalar", "1"],
+    ["typeless object", "{}"],
+    ["non-string type", JSON.stringify({ type: 1 })],
+    ["unknown type", JSON.stringify({ type: "UnexpectedMessage" })],
+  ])("rejects a pending export for a %s frame and permits a retry", async (_label, frame) => {
+    const exported = adapter.exportPersistenceState();
+    ws.dispatchSynthetic("message", frame);
+
+    await expect(exported).rejects.toMatchObject({
+      code: "WS_ERROR",
+      recoverable: false,
+    });
+
+    const retried = adapter.exportPersistenceState();
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "AuthoritativeStateExport", data: { state: "{\"state\":{}}" } }),
+    );
+    await expect(retried).resolves.toBe("{\"state\":{}}");
+  });
+
+  it("ignores unknown frames when no authoritative export is pending", async () => {
+    ws.dispatchSynthetic("message", JSON.stringify({ type: "UnexpectedMessage" }));
+
+    const exported = adapter.exportPersistenceState();
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "AuthoritativeStateExport", data: { state: "{\"state\":{}}" } }),
+    );
+    await expect(exported).resolves.toBe("{\"state\":{}}");
+  });
+
   it("does not request an authoritative export over cleartext WebSocket", async () => {
     const insecure = new WebSocketAdapter(
       "ws://localhost:9374/ws",
@@ -860,6 +895,48 @@ describe("WebSocketAdapter", () => {
         },
       },
     );
+
+    it("settles an export when native session identity validation fails", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws",
+        "join",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Guest",
+        {
+          nativePregame: {
+            kind: "reconnect",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            gameCode: "NATIVE",
+            playerId: 1,
+            playerToken: "guest-token",
+            fullKey: { game_code: "NATIVE", generation: 1 },
+          },
+        },
+      );
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      const exported = nativeAdapter.exportPersistenceState();
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "SessionAttached",
+          data: {
+            game_code: "NATIVE",
+            player_id: 1,
+            player_token: "guest-token",
+            full_key: { game_code: "NATIVE", generation: 2 },
+          },
+        }),
+      );
+
+      await expect(exported).rejects.toThrow("Server changed the Full session identity");
+      await expect(attached).rejects.toThrow("Server changed the Full session identity");
+      await expect(nativeAdapter.exportPersistenceState()).rejects.toThrow("Session identity rejected");
+    });
 
     it("rejects a native seat attachment without a Full session key", async () => {
       const nativeAdapter = new WebSocketAdapter(

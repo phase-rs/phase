@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import type { DeckColorDistributionEntry } from "../../../services/deckCompatibility";
+import type { DeckCompatibilityResult } from "../../../services/deckCompatibility";
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
 import type { DraftWorkspaceState } from "../workspace/types";
 import { createDefaultDraftWorkspacePreferences } from "../workspace/workspacePreferences";
@@ -23,7 +24,8 @@ const compatibleResult = () => ({
   selected_format_compatible: true,
   selected_format_reasons: [],
   color_identity: [],
-});
+  color_distribution: [],
+} satisfies DeckCompatibilityResult);
 
 compatibilityHarness.evaluate.mockImplementation(async () => compatibleResult());
 
@@ -1416,7 +1418,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   it.each(["Quick", "Sealed", "Premier", "Traditional"] as const)(
-    "keeps %s compatibility inactive and submission neutral",
+    "keeps %s submission neutral while requesting engine-owned analysis",
     async (kind) => {
       const submitSpy = vi.fn();
       render(
@@ -1436,7 +1438,10 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       expect(submit).not.toBeDisabled();
       fireEvent.click(submit);
       await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
-      expect(compatibilityHarness.evaluate).not.toHaveBeenCalled();
+      expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
+        expect.objectContaining({ main: [{ count: 1, name: "Wind Drake" }] }),
+        { selectedFormat: null },
+      );
     },
   );
 
@@ -1568,7 +1573,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledWith(["Vehicle Commander"]));
   });
 
-  it("keeps workspace compatibility inactive when the engine requires no commanders", async () => {
+  it("keeps workspace submission neutral when the engine requires no commanders", async () => {
     const submitSpy = vi.fn();
     const fixture = workspaceDeckFixture();
     render(
@@ -1598,7 +1603,15 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     expect(submit).not.toBeDisabled();
     fireEvent.click(submit);
     await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
-    expect(compatibilityHarness.evaluate).not.toHaveBeenCalled();
+    expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        main: [
+          { count: 59, name: "Wind Drake" },
+          { count: 1, name: "Vehicle Commander" },
+        ],
+      }),
+      { selectedFormat: null },
+    );
   });
 
   it.each(["resolve", "reject"] as const)(
@@ -1654,12 +1667,18 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     },
   );
 
-  it("projects controlled COLORS per cached copy and keeps Wastes colorless", () => {
+  it("renders the engine distribution instead of conflicting cached color metadata", async () => {
     const azorius = { ...TEST_VIEW.pool[0], instance_id: "azorius", name: "Azorius Pair" };
     const red = { ...TEST_VIEW.pool[0], instance_id: "red", name: "Red Card" };
     const uncached = { ...TEST_VIEW.pool[0], instance_id: "uncached", name: "Uncached Card" };
-    compatibilityHarness.cardDataCache.set("Azorius Pair", { name: "Azorius Pair", cmc: 2, color_identity: ["W", "U"] });
-    compatibilityHarness.cardDataCache.set("Red Card", { name: "Red Card", cmc: 1, color_identity: ["R"] });
+    const distribution = [
+      { color: "White" as const, count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Blue" as const, count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Red" as const, count: 1, percentage: 20, display_percentage: 20 },
+    ];
+    compatibilityHarness.evaluate.mockResolvedValue({ ...compatibleResult(), color_distribution: distribution });
+    compatibilityHarness.cardDataCache.set("Azorius Pair", { name: "Azorius Pair", cmc: 2, color_identity: ["G"] });
+    compatibilityHarness.cardDataCache.set("Red Card", { name: "Red Card", cmc: 1, color_identity: ["G"] });
     compatibilityHarness.cardDataCache.set("Wastes", { name: "Wastes", cmc: 0, color_identity: [] });
     render(
       <LimitedDeckBuilder
@@ -1674,27 +1693,31 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       />,
     );
 
-    expect(compatibilityHarness.colorCaptures).toContainEqual([
-      { color: "White", count: 2, percentage: 40, display_percentage: 40 },
-      { color: "Blue", count: 2, percentage: 40, display_percentage: 40 },
-      { color: "Red", count: 1, percentage: 20, display_percentage: 20 },
-    ]);
+    await waitFor(() => {
+      expect(compatibilityHarness.colorCaptures).toContainEqual(distribution);
+    });
     expect(screen.getByText("W 40%")).toBeInTheDocument();
     expect(screen.getByText("U 40%")).toBeInTheDocument();
     expect(screen.getByText("R 20%")).toBeInTheDocument();
   });
 
   it.each(["phone-portrait", "phone-landscape", "tablet-landscape", "desktop"] as const)(
-    "projects workspace COLORS per instance with ordered ownership in %s",
-    (responsiveLayout) => {
+    "forwards the engine distribution unchanged in %s",
+    async (responsiveLayout) => {
     const azoriusCards = [0, 1].map((index) => ({
       ...TEST_VIEW.pool[0], instance_id: `azorius-${index}`, name: "Azorius Pair",
     }));
     const red = { ...TEST_VIEW.pool[0], instance_id: "red", name: "Red Card" };
     const uncached = { ...TEST_VIEW.pool[0], instance_id: "uncached", name: "Uncached Card" };
     const pool = [...azoriusCards, red, uncached];
-    compatibilityHarness.cardDataCache.set("Azorius Pair", { name: "Azorius Pair", cmc: 2, color_identity: ["W", "U"] });
-    compatibilityHarness.cardDataCache.set("Red Card", { name: "Red Card", cmc: 1, color_identity: ["R"] });
+    const distribution = [
+      { color: "White" as const, count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Blue" as const, count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Red" as const, count: 1, percentage: 20, display_percentage: 20 },
+    ];
+    compatibilityHarness.evaluate.mockResolvedValue({ ...compatibleResult(), color_distribution: distribution });
+    compatibilityHarness.cardDataCache.set("Azorius Pair", { name: "Azorius Pair", cmc: 2, color_identity: ["G"] });
+    compatibilityHarness.cardDataCache.set("Red Card", { name: "Red Card", cmc: 1, color_identity: ["G"] });
     compatibilityHarness.cardDataCache.set("Wastes", { name: "Wastes", cmc: 0, color_identity: [] });
     const placements = Object.fromEntries(pool.map((card, index) => [
       card.instance_id,
@@ -1723,11 +1746,9 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       />,
     );
 
-    expect(compatibilityHarness.colorCaptures).toContainEqual([
-      { color: "White", count: 2, percentage: 40, display_percentage: 40 },
-      { color: "Blue", count: 2, percentage: 40, display_percentage: 40 },
-      { color: "Red", count: 1, percentage: 20, display_percentage: 20 },
-    ]);
+    await waitFor(() => {
+      expect(compatibilityHarness.colorCaptures).toContainEqual(distribution);
+    });
     const layout = container.querySelector<HTMLElement>("[data-responsive-builder-layout]")!;
     const phone = responsiveLayout.startsWith("phone");
     const tablet = responsiveLayout === "tablet-landscape";

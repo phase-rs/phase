@@ -170,6 +170,7 @@ describe("MyDecks", () => {
         selected_format_compatible: true,
         selected_format_reasons: [],
         color_identity: ["U"],
+        color_distribution: [],
       },
       "Off Format": {
         standard: { compatible: true, reasons: [] },
@@ -179,6 +180,7 @@ describe("MyDecks", () => {
         selected_format_compatible: false,
         selected_format_reasons: ["Not Commander legal"],
         color_identity: ["R"],
+        color_distribution: [],
       },
     });
 
@@ -219,6 +221,7 @@ describe("MyDecks", () => {
         selected_format_compatible: true,
         selected_format_reasons: [],
         color_identity: ["U"],
+        color_distribution: [],
       },
       "Deck Beta": {
         standard: { compatible: false, reasons: [] },
@@ -228,6 +231,7 @@ describe("MyDecks", () => {
         selected_format_compatible: true,
         selected_format_reasons: [],
         color_identity: ["R"],
+        color_distribution: [],
       },
     });
 
@@ -258,6 +262,7 @@ describe("MyDecks", () => {
         selected_format_compatible: null,
         selected_format_reasons: [],
         color_identity: ["U"],
+        color_distribution: [],
       },
     });
 
@@ -299,6 +304,7 @@ describe("MyDecks", () => {
         selected_format_compatible: options?.selectedFormat === "PauperCommander" ? true : null,
         selected_format_reasons: [],
         color_identity: ["U", "G"],
+        color_distribution: [],
       },
       "Not PDH": {
         standard: { compatible: true, reasons: [] },
@@ -308,6 +314,7 @@ describe("MyDecks", () => {
         selected_format_compatible: options?.selectedFormat === "PauperCommander" ? false : null,
         selected_format_reasons: [],
         color_identity: ["R"],
+        color_distribution: [],
       },
     }));
 
@@ -406,6 +413,7 @@ describe("MyDecks", () => {
         selected_format_compatible: options?.selectedFormat === "Standard" ? false : null,
         selected_format_reasons: options?.selectedFormat === "Standard" ? ["Not Standard legal"] : [],
         color_identity: ["R"],
+        color_distribution: [],
       },
     }));
 
@@ -441,6 +449,7 @@ describe("MyDecks", () => {
         selected_format_compatible: null,
         selected_format_reasons: [],
         color_identity: ["U"],
+        color_distribution: [],
       },
     });
     const onSelectDeck = vi.fn();
@@ -500,6 +509,7 @@ describe("MyDecks", () => {
         selected_format_compatible: true,
         selected_format_reasons: [],
         color_identity: ["U"],
+        color_distribution: [],
       }]));
     });
     const onSelectDeck = vi.fn();
@@ -678,6 +688,7 @@ describe("MyDecks", () => {
         selected_format_compatible: false,
         selected_format_reasons: ["Not Standard legal"],
         color_identity: ["R"],
+        color_distribution: [],
       },
     });
     const onSelectDeck = vi.fn();
@@ -749,6 +760,7 @@ describe("MyDecks", () => {
         selected_format_compatible: true,
         selected_format_reasons: [],
         color_identity: ["U"],
+        color_distribution: [],
       },
     });
 

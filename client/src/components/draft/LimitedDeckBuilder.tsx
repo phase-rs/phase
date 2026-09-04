@@ -414,11 +414,13 @@ type CommanderDraftCompatibilityState =
   | { key: string; status: "error" };
 
 function useCommanderDraftCompatibility({
-  active,
+  enforceCompatibility,
+  selectedFormat,
   main,
   commanders,
 }: {
-  active: boolean;
+  enforceCompatibility: boolean;
+  selectedFormat: "CommanderDraft" | null;
   main: DeckEntry[];
   commanders: string[];
 }) {
@@ -428,7 +430,7 @@ function useCommanderDraftCompatibility({
     commander: commanders,
   }), [main, commanders]);
   const key = useMemo(() => JSON.stringify({
-    format: "CommanderDraft",
+    selectedFormat,
     main,
     sideboard: [],
     commander: commanders,
@@ -436,19 +438,14 @@ function useCommanderDraftCompatibility({
     schemeDeck: [],
     signatureSpell: [],
     companion: null,
-  }), [main, commanders]);
+  }), [selectedFormat, main, commanders]);
   const [state, setState] = useState<CommanderDraftCompatibilityState | null>(null);
   const generationRef = useRef(0);
 
   useEffect(() => {
     const generation = ++generationRef.current;
-    if (!active) {
-      setState(null);
-      return;
-    }
-
     setState({ key, status: "pending" });
-    evaluateDeckCompatibility(request, { selectedFormat: "CommanderDraft" })
+    evaluateDeckCompatibility(request, { selectedFormat })
       .then((result) => {
         if (generation === generationRef.current) {
           setState({ key, status: "resolved", result });
@@ -457,15 +454,16 @@ function useCommanderDraftCompatibility({
       .catch(() => {
         if (generation === generationRef.current) setState({ key, status: "error" });
       });
-  }, [active, key, request]);
+  }, [key, request]);
 
   const currentState = state?.key === key ? state : null;
   const result = currentState?.status === "resolved" ? currentState.result : null;
   return {
-    compatible: !active || result?.selected_format_compatible === true,
+    compatible: !enforceCompatibility || result?.selected_format_compatible === true,
     reasons: result?.selected_format_reasons ?? [],
-    pending: active && currentState?.status === "pending",
-    unavailable: active && currentState?.status === "error",
+    pending: enforceCompatibility && currentState?.status === "pending",
+    unavailable: enforceCompatibility && currentState?.status === "error",
+    colorDistribution: result?.color_distribution ?? [],
   };
 }
 
@@ -725,19 +723,15 @@ function ControlledDeckBuilder({
   });
   const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft" && designationRequired;
   const compatibility = useCommanderDraftCompatibility({
-    active: commanderDraftCompatibilityActive,
+    enforceCompatibility: commanderDraftCompatibilityActive,
+    selectedFormat: deckFormat,
     main: commanderDeckEntries,
     commanders,
   });
   const { cardDataCache } = useDeckCardData(
     commanderDeckEntries.map((entry) => entry.name),
   );
-  const colorValues = commanderDeckEntries.flatMap((entry) => {
-    const card = cardDataCache.get(entry.name);
-    return card
-      ? Array.from({ length: entry.count }, () => card.color_identity?.join("") ?? "")
-      : [];
-  });
+  const colorDistribution = compatibility.colorDistribution;
 
   const totalCards = mainDeck.length + totalLands;
   const minDeckSize = view?.min_deck_size ?? 40;
@@ -996,7 +990,7 @@ function ControlledDeckBuilder({
 
           {/* Mana curve */}
           <section>
-            <ManaCurve pool={pool} cards={mainDeck} colorValues={colorValues} />
+            <ManaCurve pool={pool} cards={mainDeck} colorDistribution={colorDistribution} />
           </section>
 
           {/* Actions */}
@@ -1122,19 +1116,15 @@ function WorkspaceDeckBuilder({
   });
   const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft";
   const compatibility = useCommanderDraftCompatibility({
-    active: commanderDraftCompatibilityActive,
+    enforceCompatibility: commanderDraftCompatibilityActive,
+    selectedFormat: deckFormat,
     main: commanderDeckEntries,
     commanders,
   });
   const { cardDataCache } = useDeckCardData(
     commanderDeckEntries.map((entry) => entry.name),
   );
-  const colorValues = commanderDeckEntries.flatMap((entry) => {
-    const card = cardDataCache.get(entry.name);
-    return card
-      ? Array.from({ length: entry.count }, () => card.color_identity?.join("") ?? "")
-      : [];
-  });
+  const colorDistribution = compatibility.colorDistribution;
   const totalLands = useMemo(
     () => deckCards.filter((card) => /\bland\b/i.test(card.type_line)).length
       + deckVirtualBasics.filter((card) => BASIC_LAND_NAMES.has(card.name)).length,
@@ -1448,7 +1438,7 @@ function WorkspaceDeckBuilder({
                     <ManaCurve
                       pool={pool}
                       cards={spellNames}
-                      colorValues={colorValues}
+                      colorDistribution={colorDistribution}
                       presentation="compact"
                     />
                   </div>
@@ -1497,7 +1487,7 @@ function WorkspaceDeckBuilder({
               <>
                 <div data-tablet-builder-summary className="grid grid-cols-4 gap-3 overflow-hidden">
                   <section className="col-span-3 min-w-0">
-                    <ManaCurve pool={pool} cards={spellNames} colorValues={colorValues} />
+                    <ManaCurve pool={pool} cards={spellNames} colorDistribution={colorDistribution} />
                   </section>
                   <section className="col-span-1 flex min-w-0 items-center justify-center">
                     <AverageManaCost cards={deckCards} />
@@ -1556,7 +1546,7 @@ function WorkspaceDeckBuilder({
               <ManaCurve
                 pool={pool}
                 cards={spellNames}
-                colorValues={colorValues}
+                colorDistribution={colorDistribution}
                 presentation="compact"
               />
             </aside>
@@ -1581,7 +1571,7 @@ function WorkspaceDeckBuilder({
             )}
 
             <section>
-              <ManaCurve pool={pool} cards={spellNames} colorValues={colorValues} />
+              <ManaCurve pool={pool} cards={spellNames} colorDistribution={colorDistribution} />
             </section>
 
             <section className="flex flex-col gap-4">
