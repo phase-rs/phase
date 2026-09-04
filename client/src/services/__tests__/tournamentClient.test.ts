@@ -6,7 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { repoRoot } from "../../adapter/__tests__/rustEnumVariants";
 import type { TournamentSummary, TournamentView } from "../../adapter/types";
 import type { PhaseSocket } from "../openPhaseSocket";
-import type { ServerInfo } from "../../adapter/ws-adapter";
+import {
+  LOBBY_PROTOCOL_VERSION,
+  MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK,
+  type ServerInfo,
+} from "../../adapter/ws-adapter";
 import {
   createTournamentOver,
   dropFromTournamentOver,
@@ -78,6 +82,24 @@ class MockWebSocket extends EventTarget {
   }
 }
 
+/**
+ * The default `serverInfo` models a CURRENT-generation broker, so
+ * `lobbyProtocolVersion` tracks the client's own `LOBBY_PROTOCOL_VERSION`
+ * export rather than a literal that would drift from it at the next bump.
+ *
+ * This default is load-bearing rather than cosmetic. `tournamentClient`'s
+ * capability gate treats an absent `lobbyProtocolVersion` as unsupported, so
+ * leaving the field off would make every gated-helper test in this file settle
+ * `{ok:false, reason:"unsupported"}` the moment it sent — quietly gutting the
+ * pending-request assertions rather than failing them. The old-broker path is
+ * reached only by tests that ask for it through the `Partial<ServerInfo>`
+ * override below.
+ *
+ * NOTE the deliberate asymmetry with the gate itself, which reads the frozen
+ * floor `MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK`. Both constants are 5 today and
+ * diverge at the next lobby bump; each site is written against the one that
+ * answers its own question.
+ */
 function makePhaseSocket(
   ws: MockWebSocket,
   serverInfo: Partial<ServerInfo> = {},
@@ -89,6 +111,7 @@ function makePhaseSocket(
       buildCommit: "test",
       protocolVersion: 1,
       mode: "LobbyOnly",
+      lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
       ...serverInfo,
     },
     close: () => ws.close(),
@@ -140,6 +163,14 @@ const FOREIGN_VIEW = makeView("InProgress", 3);
 
 const CODE = "AAA111";
 const OTHER_CODE = "BBB222";
+/**
+ * The tournament code every entry in {@link HELPERS} acts on, and the code the
+ * reply builders below mint their frames for. Named because the V6 group's
+ * whole premise is that the foreign broadcast it delivers carries THIS code —
+ * a different one would silently turn that row into a restatement of the
+ * adjacent different-code negative.
+ */
+const HELPER_CODE = "TOUR01";
 
 type Invoke = (
   socket: PhaseSocket,
@@ -152,25 +183,89 @@ interface HelperCase {
   invoke: Invoke;
   /**
    * The exact bytes the helper must put on the wire — copied verbatim from
-   * `every_client_variant_tag_is_known` in `crates/lobby-broker/src/protocol.rs:1143-1172`.
+   * `every_client_variant_tag_is_known` in `crates/lobby-broker/src/protocol.rs`.
+   *
+   * For a {@link HelperCase.gated} helper this is the frame **without** its
+   * `request_id`: the module mints that correlator from a private counter, so
+   * no test can predict its value. {@link sentFrameWithoutCorrelator} strips it
+   * back off for the byte comparison, and {@link sentCorrelator} asserts it was
+   * there and is a number.
    */
   frame: string;
-  /** A success frame this helper settles on. */
-  reply: (view: TournamentView) => string;
+  /**
+   * Whether this helper correlates its request. The four token-gated actions
+   * settle on `TournamentActionAck` / `TournamentActionRejected` carrying their
+   * own correlator; the other three keep tag + code matching and today's bare
+   * `Error` behavior.
+   */
+  gated: boolean;
+  /** A success frame this helper settles on, for the correlator it minted. */
+  reply: (view: TournamentView, requestId: number) => string;
 }
 
 const CREATED_REPLY = (view: TournamentView) =>
   JSON.stringify({
     type: "TournamentCreated",
-    data: { code: "TOUR01", organizer_token: "tok", view },
+    data: { code: HELPER_CODE, organizer_token: "tok", view },
   });
 const JOINED_REPLY = (view: TournamentView) =>
   JSON.stringify({
     type: "TournamentJoined",
-    data: { code: "TOUR01", player_token: "tok", view },
+    data: { code: HELPER_CODE, player_token: "tok", view },
   });
 const UPDATE_REPLY = (view: TournamentView) =>
-  JSON.stringify({ type: "TournamentUpdate", data: { code: "TOUR01", view } });
+  JSON.stringify({ type: "TournamentUpdate", data: { code: HELPER_CODE, view } });
+const ACK_REPLY = (view: TournamentView, requestId: number) =>
+  JSON.stringify({
+    type: "TournamentActionAck",
+    data: { request_id: requestId, code: HELPER_CODE, view },
+  });
+const REJECTED_REPLY = (message: string, requestId: number) =>
+  JSON.stringify({
+    type: "TournamentActionRejected",
+    data: { request_id: requestId, message },
+  });
+
+/** The first frame `ws` was asked to send, parsed. */
+function sentFrame(ws: MockWebSocket): {
+  type: string;
+  data: Record<string, unknown>;
+} {
+  const [payload] = ws.send.mock.calls[0] as [string];
+  return JSON.parse(payload) as { type: string; data: Record<string, unknown> };
+}
+
+/**
+ * The correlator the module minted for the frame it just sent. Asserting its
+ * type here is what keeps every correlated assertion in this file non-vacuous:
+ * a helper that stopped sending one would fail here rather than silently
+ * comparing `undefined` to `undefined`.
+ */
+function sentCorrelator(ws: MockWebSocket): number {
+  const { data } = sentFrame(ws);
+  expect(typeof data.request_id).toBe("number");
+  return data.request_id as number;
+}
+
+/**
+ * The frame just sent, with its minted correlator stripped back off, so what
+ * remains can be compared byte-for-byte against the Rust literal. The module
+ * appends `request_id` last, so removing it restores the original key order.
+ */
+function sentFrameWithoutCorrelator(ws: MockWebSocket): string {
+  const { type, data } = sentFrame(ws);
+  const { request_id: _correlator, ...rest } = data;
+  return JSON.stringify({ type, data: rest });
+}
+
+/** The success frame `helper` settles on, correlated when it needs to be. */
+function successFrame(
+  ws: MockWebSocket,
+  helper: HelperCase,
+  view: TournamentView,
+): string {
+  return helper.reply(view, helper.gated ? sentCorrelator(ws) : 0);
+}
 
 const HELPERS: HelperCase[] = [
   {
@@ -189,6 +284,7 @@ const HELPERS: HelperCase[] = [
       ),
     frame:
       '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3}}',
+    gated: false,
     reply: CREATED_REPLY,
   },
   {
@@ -196,19 +292,22 @@ const HELPERS: HelperCase[] = [
     invoke: (socket, opts) => joinTournamentOver(socket, "TOUR01", "key-a", "Alice", opts),
     frame:
       '{"type":"JoinTournament","data":{"code":"TOUR01","player_key":"key-a","display_name":"Alice"}}',
+    gated: false,
     reply: JOINED_REPLY,
   },
   {
     name: "getTournamentOver",
     invoke: (socket, opts) => getTournamentOver(socket, "TOUR01", opts),
     frame: '{"type":"GetTournament","data":{"code":"TOUR01"}}',
+    gated: false,
     reply: UPDATE_REPLY,
   },
   {
     name: "startTournamentRoundOver",
     invoke: (socket, opts) => startTournamentRoundOver(socket, "TOUR01", "tok", opts),
     frame: '{"type":"StartTournamentRound","data":{"code":"TOUR01","organizer_token":"tok"}}',
-    reply: UPDATE_REPLY,
+    gated: true,
+    reply: ACK_REPLY,
   },
   {
     name: "reportMatchResultOver",
@@ -223,21 +322,29 @@ const HELPERS: HelperCase[] = [
       ),
     frame:
       '{"type":"ReportMatchResult","data":{"code":"TOUR01","pairing_id":0,"player_token":"tok","outcome":{"Decisive":{"winner":"key-a","game_wins":{"key-a":2,"key-b":1}}}}}',
-    reply: UPDATE_REPLY,
+    gated: true,
+    reply: ACK_REPLY,
   },
   {
     name: "dropFromTournamentOver",
     invoke: (socket, opts) => dropFromTournamentOver(socket, "TOUR01", "tok", opts),
     frame: '{"type":"DropFromTournament","data":{"code":"TOUR01","player_token":"tok"}}',
-    reply: UPDATE_REPLY,
+    gated: true,
+    reply: ACK_REPLY,
   },
   {
     name: "endTournamentOver",
     invoke: (socket, opts) => endTournamentOver(socket, "TOUR01", "tok", opts),
     frame: '{"type":"EndTournament","data":{"code":"TOUR01","organizer_token":"tok"}}',
-    reply: UPDATE_REPLY,
+    gated: true,
+    reply: ACK_REPLY,
   },
 ];
+
+/** The four token-gated helpers, which correlate their requests. */
+const GATED = HELPERS.filter((helper) => helper.gated);
+/** The three helpers with genuine point replies, unchanged by correlation. */
+const UNCORRELATED = HELPERS.filter((helper) => !helper.gated);
 
 // ---------------------------------------------------------------------------
 // A. Request frames byte-match the Rust literals (matrix row 4)
@@ -246,7 +353,7 @@ const HELPERS: HelperCase[] = [
 describe("tournament request frames", () => {
   it.each(HELPERS)(
     "$name puts the exact protocol.rs literal on the wire",
-    async ({ invoke, frame }) => {
+    async ({ invoke, frame, gated }) => {
       const ws = new MockWebSocket();
       const controller = new AbortController();
       const promise = invoke(makePhaseSocket(ws), { signal: controller.signal });
@@ -254,7 +361,15 @@ describe("tournament request frames", () => {
       // Positive reach-guard: exactly one frame, byte-identical to the Rust
       // literal `every_client_variant_tag_is_known` sends.
       expect(ws.send).toHaveBeenCalledTimes(1);
-      expect(ws.send).toHaveBeenCalledWith(frame);
+      if (gated) {
+        // A gated frame carries exactly one field the Rust literal does not —
+        // the correlator, minted privately, appended last. Everything else must
+        // still match byte for byte.
+        expect(typeof sentCorrelator(ws)).toBe("number");
+        expect(sentFrameWithoutCorrelator(ws)).toBe(frame);
+      } else {
+        expect(ws.send).toHaveBeenCalledWith(frame);
+      }
 
       controller.abort();
       await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
@@ -296,12 +411,36 @@ describe("tournament request frames", () => {
       { signal: controller.signal },
     );
 
-    expect(ws.send).toHaveBeenCalledWith(
+    // Gated, so the minted correlator comes off before the byte comparison.
+    expect(sentFrameWithoutCorrelator(ws)).toBe(
       '{"type":"ReportMatchResult","data":{"code":"TOUR01","pairing_id":7,"player_token":"tok","outcome":"Draw"}}',
     );
 
     controller.abort();
     await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+  });
+
+  it("mints a distinct correlator for every gated call on one socket", async () => {
+    const ws = new MockWebSocket();
+    const socket = makePhaseSocket(ws);
+    const controller = new AbortController();
+    const opts = { signal: controller.signal };
+
+    const promises = GATED.map((helper) => helper.invoke(socket, opts));
+    const correlators = ws.send.mock.calls.map((call) => {
+      const [payload] = call as [string];
+      return (JSON.parse(payload) as { data: { request_id?: number } }).data
+        .request_id;
+    });
+
+    // Reach-guard: every gated helper really sent one, and every one is a
+    // number — so the uniqueness assertion below is not comparing `undefined`s.
+    expect(correlators).toHaveLength(GATED.length);
+    for (const correlator of correlators) expect(typeof correlator).toBe("number");
+    expect(new Set(correlators).size).toBe(GATED.length);
+
+    controller.abort();
+    await Promise.all(promises);
   });
 });
 
@@ -311,10 +450,10 @@ describe("tournament request frames", () => {
 // ---------------------------------------------------------------------------
 
 describe("tournament RPC settlement paths", () => {
-  it.each(HELPERS)("$name settles ok on its success frame", async ({ invoke, reply }) => {
+  it.each(HELPERS)("$name settles ok on its success frame", async (helper) => {
     const ws = new MockWebSocket();
-    const promise = invoke(makePhaseSocket(ws));
-    ws.deliver(reply(OWN_VIEW));
+    const promise = helper.invoke(makePhaseSocket(ws));
+    ws.deliver(successFrame(ws, helper, OWN_VIEW));
 
     const result = await promise;
     expect(result.ok).toBe(true);
@@ -325,7 +464,7 @@ describe("tournament RPC settlement paths", () => {
     expect(ws.close).not.toHaveBeenCalled();
   });
 
-  it.each(HELPERS)("$name settles rejected on a server Error", async ({ invoke }) => {
+  it.each(UNCORRELATED)("$name settles rejected on a server Error", async ({ invoke }) => {
     const ws = new MockWebSocket();
     const promise = invoke(makePhaseSocket(ws));
     ws.deliver(JSON.stringify({ type: "Error", data: { message: "Not the organizer" } }));
@@ -336,6 +475,65 @@ describe("tournament RPC settlement paths", () => {
       message: "Not the organizer",
     });
     expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  // V7 — a bare `Error` no longer settles a CORRELATED request. It provably
+  // belongs to some request on this socket but not provably to ours, so
+  // settling on it would be a false negative in place of the false positive
+  // correlation removes. The row above is this one's reach-guard: the very same
+  // frame still settles all three uncorrelated helpers.
+  it.each(GATED)(
+    "$name ignores a bare Error and settles on its own correlated refusal",
+    async ({ invoke }) => {
+      const ws = new MockWebSocket();
+      const promise = invoke(makePhaseSocket(ws));
+      const requestId = sentCorrelator(ws);
+
+      ws.deliver(JSON.stringify({ type: "Error", data: { message: "Not the organizer" } }));
+      expect(await settledOrPending(promise)).toBe("pending");
+      expect(ws.listenerCount("message")).toBe(1);
+
+      ws.deliver(REJECTED_REPLY("Not the organizer", requestId));
+      await expect(promise).resolves.toEqual({
+        ok: false,
+        reason: "rejected",
+        message: "Not the organizer",
+      });
+      expect(ws.listenerCount("message")).toBe(0);
+      expect(ws.close).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(GATED)(
+    "$name ignores a correlated refusal minted for a different request",
+    async ({ invoke }) => {
+      const ws = new MockWebSocket();
+      const promise = invoke(makePhaseSocket(ws));
+      const requestId = sentCorrelator(ws);
+
+      ws.deliver(REJECTED_REPLY("Not the organizer", requestId + 1));
+      expect(await settledOrPending(promise)).toBe("pending");
+      expect(ws.listenerCount("message")).toBe(1);
+
+      // Paired positive: our own id does settle it.
+      ws.deliver(REJECTED_REPLY("Not the organizer", requestId));
+      await expect(promise).resolves.toMatchObject({ ok: false, reason: "rejected" });
+    },
+  );
+
+  it("falls back to a generic message when a correlated refusal carries no text", async () => {
+    const ws = new MockWebSocket();
+    const promise = endTournamentOver(makePhaseSocket(ws), "TOUR01", "tok");
+    ws.deliver(
+      JSON.stringify({
+        type: "TournamentActionRejected",
+        data: { request_id: sentCorrelator(ws) },
+      }),
+    );
+
+    const result = await promise;
+    expect(result).toMatchObject({ ok: false, reason: "rejected" });
+    if (!result.ok) expect(result.message.length).toBeGreaterThan(0);
   });
 
   it.each(HELPERS)("$name settles aborted when its signal fires", async ({ invoke }) => {
@@ -484,56 +682,74 @@ describe("tournament reply correlation", () => {
     });
   });
 
-  describe("a foreign same-code broadcast settles a gated helper (B6)", () => {
-    it("settles with this caller's own view when no one else acts", async () => {
-      // Positive reach-guard for the whole group: the real settlement path is
-      // observed, so the tests below are not passing on "nothing ever settles".
-      const ws = new MockWebSocket();
-      const promise = endTournamentOver(makePhaseSocket(ws), CODE, "tok");
-      ws.deliver(JSON.stringify({ type: "TournamentUpdate", data: { code: CODE, view: OWN_VIEW } }));
-
-      const result = await promise;
-      expect(result.ok).toBe(true);
-      if (result.ok) expect(result.value.view).toEqual(OWN_VIEW);
-      expect(ws.listenerCount("message")).toBe(0);
-    });
-
-    it.each([
-      ["endTournamentOver", (socket: PhaseSocket) => endTournamentOver(socket, CODE, "tok")],
-      [
-        "reportMatchResultOver",
-        (socket: PhaseSocket) => reportMatchResultOver(socket, CODE, 3, "tok", "Draw"),
-      ],
-    ] as const)(
-      "%s settles with a foreign actor's view, and a later Error cannot re-settle it",
-      async (_label, invoke) => {
+  // V6 — THE MAINTAINER'S REGRESSION, client half. This group previously
+  // *characterized* the bug: it asserted `{ok: true}` on a foreign actor's
+  // view. Every one of those assertions is inverted here, so a regression in
+  // the correlation fails immediately rather than quietly re-passing.
+  describe("a foreign same-code broadcast no longer settles a gated helper (V6)", () => {
+    it.each(GATED)(
+      "$name settles on an ack carrying our own correlator",
+      async ({ invoke }) => {
+        // Positive reach-guard for the whole group: the real settlement path is
+        // observed, so the tests below are not passing on "nothing ever
+        // settles".
         const ws = new MockWebSocket();
         const promise = invoke(makePhaseSocket(ws));
-
-        // Byte-identical in shape to this caller's own would-be reply — the
-        // `data.code === code` filter matches it and cannot discriminate.
-        ws.deliver(
-          JSON.stringify({ type: "TournamentUpdate", data: { code: CODE, view: FOREIGN_VIEW } }),
-        );
+        ws.deliver(ACK_REPLY(OWN_VIEW, sentCorrelator(ws)));
 
         const result = await promise;
         expect(result.ok).toBe(true);
-        if (result.ok) expect(result.value.view).toEqual(FOREIGN_VIEW);
+        if (result.ok) {
+          expect((result.value as { view: TournamentView }).view).toEqual(OWN_VIEW);
+        }
+        expect(ws.listenerCount("message")).toBe(0);
+      },
+    );
 
-        // The real rejection for OUR request arrives after cleanup ran. It is
-        // dropped, and — the part that must not regress — no listener is left
-        // behind holding a settled promise's closure.
-        ws.deliver(JSON.stringify({ type: "Error", data: { message: "Not the organizer" } }));
-        await expect(promise).resolves.toMatchObject({ ok: true });
-        expect(await promise).toEqual(result);
+    it.each(GATED)(
+      "$name stays pending through a foreign same-code broadcast and a foreign ack, then settles on its own refusal",
+      async ({ invoke }) => {
+        const ws = new MockWebSocket();
+        const promise = invoke(makePhaseSocket(ws));
+        const requestId = sentCorrelator(ws);
+        // Premise guard: the broadcast below really is for the tournament this
+        // request acts on. Without this, a code mismatch would make the
+        // "stays pending" assertion pass for the wrong reason.
+        expect(sentFrame(ws).data.code).toBe(HELPER_CODE);
+
+        // The frame at the heart of the maintainer's finding: byte-identical
+        // in shape to this caller's own would-be broadcast, produced by another
+        // actor on the SAME tournament — `UPDATE_REPLY` carries `HELPER_CODE`,
+        // the very code every helper in `GATED` was invoked with, so the old
+        // tag + code filter matched it and settled this promise `{ok: true}`
+        // with FOREIGN_VIEW. A different code here would make this row a
+        // restatement of the adjacent different-code negative instead.
+        ws.deliver(UPDATE_REPLY(FOREIGN_VIEW));
+        expect(await settledOrPending(promise)).toBe("pending");
+        expect(ws.listenerCount("message")).toBe(1);
+
+        // Hostile negative: an ack IS a point reply, but this one answers a
+        // different request on the same socket.
+        ws.deliver(ACK_REPLY(FOREIGN_VIEW, requestId + 1));
+        expect(await settledOrPending(promise)).toBe("pending");
+        expect(ws.listenerCount("message")).toBe(1);
+
+        // The real answer for OUR request — the one that used to arrive with no
+        // listener left — now settles it, and leaves nothing behind.
+        ws.deliver(REJECTED_REPLY("Not the organizer", requestId));
+        await expect(promise).resolves.toEqual({
+          ok: false,
+          reason: "rejected",
+          message: "Not the organizer",
+        });
         expect(ws.listenerCount("message")).toBe(0);
         expect(ws.close).not.toHaveBeenCalled();
       },
     );
 
-    it("does not settle on a foreign broadcast for a different code", async () => {
-      // Adjacent negative: the code conjunct still discriminates tournaments,
-      // even though it cannot discriminate requests.
+    it("does not settle on a foreign broadcast for a different code either", async () => {
+      // Adjacent negative, retained: a different tournament's frame was never
+      // the ambiguous case, and must stay non-settling.
       const ws = new MockWebSocket();
       const promise = endTournamentOver(makePhaseSocket(ws), CODE, "tok");
 
@@ -547,6 +763,132 @@ describe("tournament reply correlation", () => {
       expect(await settledOrPending(promise)).toBe("pending");
       expect(ws.listenerCount("message")).toBe(1);
     });
+
+    it("still settles getTournamentOver on a racing same-code broadcast", async () => {
+      // The exposure the three uncorrelated helpers keep, and why it is benign
+      // for this one: the question it asks is `ToSelf`-shaped, so a foreign
+      // frame for the same tournament answers it correctly.
+      const ws = new MockWebSocket();
+      const promise = getTournamentOver(makePhaseSocket(ws), CODE);
+      ws.deliver(
+        JSON.stringify({ type: "TournamentUpdate", data: { code: CODE, view: FOREIGN_VIEW } }),
+      );
+
+      const result = await promise;
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.view).toEqual(FOREIGN_VIEW);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C2. The capability gate (V8, V9, V18, V22)
+// ---------------------------------------------------------------------------
+
+describe("gated actions against a broker that cannot answer them", () => {
+  it.each(GATED)(
+    "$name settles unsupported without waiting, and no later broadcast can flip it (V8)",
+    async ({ invoke }) => {
+      const ws = new MockWebSocket();
+      const socket = makePhaseSocket(ws, { lobbyProtocolVersion: 4 });
+      const promise = invoke(socket);
+
+      // The settlement is taken synchronously after the send, so the listener
+      // is already gone by the time a same-code broadcast could arrive — which
+      // is exactly the assertion: it cannot flip this to `{ok: true}`.
+      ws.deliver(UPDATE_REPLY(FOREIGN_VIEW));
+
+      const result = await promise;
+      expect(result).toMatchObject({ ok: false, reason: "unsupported" });
+      if (!result.ok) expect(result.message.length).toBeGreaterThan(0);
+      expect(ws.listenerCount("message")).toBe(0);
+      expect(ws.close).not.toHaveBeenCalled();
+    },
+  );
+
+  it("treats a peer that advertised no lobby version identically (V8, D8.3)", async () => {
+    // The deliberate divergence from `ws-adapter.ts`, which tolerates an absent
+    // version for session admission. A peer that never advertised one predates
+    // the version that introduced the ack, so it cannot answer one.
+    const ws = new MockWebSocket();
+    const result = await startTournamentRoundOver(
+      makePhaseSocket(ws, { lobbyProtocolVersion: undefined }),
+      "TOUR01",
+      "tok",
+    );
+    expect(result).toMatchObject({ ok: false, reason: "unsupported" });
+  });
+
+  it("still puts the frame on the wire at a version that cannot answer it (V9)", async () => {
+    const ws = new MockWebSocket();
+    await startTournamentRoundOver(
+      makePhaseSocket(ws, { lobbyProtocolVersion: 4 }),
+      "TOUR01",
+      "tok",
+    );
+
+    // D8(b): the action IS performed server-side; only the confirmation is
+    // lost. Refusing to send would break the feature outright during skew.
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    const sent = sentFrame(ws);
+    expect(sent.type).toBe("StartTournamentRound");
+    expect(sent.data).toMatchObject({ code: "TOUR01", organizer_token: "tok" });
+    expect(typeof sent.data.request_id).toBe("number");
+  });
+
+  // V22 — the threshold is a FLOOR frozen at the version that introduced the
+  // ack, not an equality against whatever this client currently speaks. The
+  // `6` row is the one that matters: a newer, fully-compatible broker must NOT
+  // be refused.
+  it.each([
+    ["one below the floor", 4, false],
+    ["exactly at the floor", 5, true],
+    ["above the floor (a future broker)", 6, true],
+  ] as const)(
+    "a peer %s reaches the correlated path = %s (V22)",
+    async (_label, lobbyProtocolVersion, correlated) => {
+      // These literals are meaningful only while the floor sits where it was
+      // frozen. If this fires, the floor moved — which is a decision to make,
+      // not a test to refresh.
+      expect(MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK).toBe(5);
+
+      const ws = new MockWebSocket();
+      const promise = startTournamentRoundOver(
+        makePhaseSocket(ws, { lobbyProtocolVersion }),
+        "TOUR01",
+        "tok",
+      );
+      // The frame goes out on both sides of the gate.
+      expect(ws.send).toHaveBeenCalledTimes(1);
+
+      if (!correlated) {
+        await expect(promise).resolves.toMatchObject({
+          ok: false,
+          reason: "unsupported",
+        });
+        expect(ws.listenerCount("message")).toBe(0);
+        return;
+      }
+
+      expect(await settledOrPending(promise)).toBe("pending");
+      ws.deliver(ACK_REPLY(OWN_VIEW, sentCorrelator(ws)));
+      const result = await promise;
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.view).toEqual(OWN_VIEW);
+    },
+  );
+
+  // V18 — the harness default must reach the correlated path, or every gated
+  // test above would settle `"unsupported"` on send and go vacuous.
+  it("reaches the correlated path on the harness default (V18)", async () => {
+    const ws = new MockWebSocket();
+    const promise = startTournamentRoundOver(makePhaseSocket(ws), "TOUR01", "tok");
+
+    expect(await settledOrPending(promise)).toBe("pending");
+    expect(ws.listenerCount("message")).toBe(1);
+
+    ws.deliver(ACK_REPLY(OWN_VIEW, sentCorrelator(ws)));
+    await expect(promise).resolves.toMatchObject({ ok: true });
   });
 });
 
@@ -751,6 +1093,16 @@ describe("tournamentClient source-level boundaries", () => {
   const SUBSCRIBE_FRAME_SEND = /\bsend\s*\([^)]*(?:Subscribe|Unsubscribe)Lobby/g;
   const SOCKET_SHUTDOWN_CALL = /\.close\s*\(/g;
   const SOCKET_FACTORY_CALL = /\bopenPhaseSocket\s*\(/g;
+  /**
+   * The capability gate compared against the version this client currently
+   * speaks, rather than against the frozen ack floor.
+   *
+   * Scoped to the comparison itself, not to the identifier: this module's own
+   * prose names `LOBBY_PROTOCOL_VERSION` while explaining why the gate must NOT
+   * be written against it, and that explanation has to stay legal.
+   */
+  const GATE_AGAINST_CURRENT_VERSION =
+    /lobbyProtocolVersion\s*<\s*LOBBY_PROTOCOL_VERSION/g;
 
   it("never sends SubscribeLobby or UnsubscribeLobby (seam S3)", () => {
     expect(SOURCE.match(SUBSCRIBE_FRAME_SEND)).toBeNull();
@@ -781,5 +1133,29 @@ describe("tournamentClient source-level boundaries", () => {
     // `openPhaseSocket` — as a type-only import — and that must stay allowed,
     // which is why the assertion above is call-scoped rather than whole-file.
     expect(SOURCE).toMatch(/import type \{ PhaseSocket \} from "\.\/openPhaseSocket";/);
+  });
+
+  // The tripwire for the D8.2 latent bug, and it has to be a STATIC one.
+  //
+  // The runtime V22 rows catch a gate written as an EQUALITY against the
+  // current version — the `lobbyProtocolVersion: 6` fixture fails immediately
+  // under that mistake. They cannot catch a gate written as
+  // `< LOBBY_PROTOCOL_VERSION`: measured, that form passes all three V22 rows
+  // today, because the floor and the current version are both 5, and only
+  // starts refusing fully-compatible brokers at the next lobby bump. This
+  // assertion closes exactly that window — it fails at the moment the mistake
+  // is made rather than months later, in a release, against servers that work.
+  it("never gates the ack on the version this client currently speaks", () => {
+    expect(SOURCE.match(GATE_AGAINST_CURRENT_VERSION)).toBeNull();
+
+    // Positive control — a regex that silently matches nothing cannot pass.
+    expect(
+      "lobbyProtocolVersion < LOBBY_PROTOCOL_VERSION;".match(GATE_AGAINST_CURRENT_VERSION),
+    ).not.toBeNull();
+
+    // Paired positive: the gate IS written against the frozen floor.
+    expect(SOURCE).toMatch(
+      /lobbyProtocolVersion\s*<\s*MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK/,
+    );
   });
 });

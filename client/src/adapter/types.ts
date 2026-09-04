@@ -4726,3 +4726,37 @@ export interface TournamentUpdateReply {
   code: string;
   view: TournamentView;
 }
+
+/**
+ * `LobbyServerMessage::TournamentActionAck`'s payload
+ * (`crates/lobby-broker/src/protocol.rs`). The requester-only acknowledgement of
+ * one gated tournament action.
+ *
+ * `request_id` is the correlator this client minted and the broker echoed —
+ * `TournamentRequestId` is `#[serde(transparent)]` over a `u64`, so it arrives
+ * as a plain number. It identifies a **request**, never a requester, and is
+ * never an authority: the organizer/player token remains the only permission.
+ *
+ * Carries no token. Unlike `TournamentCreated` / `TournamentJoined` this point
+ * reply mints nothing — the caller already holds the credential that authorized
+ * the action.
+ */
+export interface TournamentActionAckReply {
+  request_id: number;
+  code: string;
+  view: TournamentView;
+}
+
+/**
+ * `LobbyServerMessage::TournamentActionRejected`'s payload
+ * (`crates/lobby-broker/src/protocol.rs`). The requester-only refusal of one
+ * gated tournament action, carrying the same correlator the request did.
+ *
+ * One refusal shape rather than a rejected/failed pair: the lobby draws no
+ * distinction between kinds of refusal — every one is prose from the broker's
+ * single `fn error` — so `message` is that text verbatim. No token, no view.
+ */
+export interface TournamentActionRejectedReply {
+  request_id: number;
+  message: string;
+}

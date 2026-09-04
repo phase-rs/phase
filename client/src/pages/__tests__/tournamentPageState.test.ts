@@ -447,7 +447,7 @@ describe("viewerRelation", () => {
   });
 });
 
-// V8 (phase 5) — total over all six failure shapes, with the two
+// V8 (phase 5) — total over every failure shape, with the two
 // `not_authorized` roles landing on DIFFERENT keys (a mapping keyed on
 // `reason` alone would collapse them).
 describe("failureLabel", () => {
@@ -474,6 +474,16 @@ describe("failureLabel", () => {
       "errors.connectionLost",
     ],
     ["an abort", { ok: false, reason: "aborted", message: "cancelled" }, "errors.aborted"],
+    // V16 — the wire member added with correlated tournament settlement. The
+    // `never` terminal in `failureLabel` is a compile-time gate, so the row
+    // below is the runtime half: the arm really produces this key, and the key
+    // really resolves in the catalog (the `i18n.exists` case at the bottom of
+    // this block runs over this same table).
+    [
+      "an unsupported broker",
+      { ok: false, reason: "unsupported", message: "cannot confirm" },
+      "errors.unsupported",
+    ],
   ];
 
   it.each(cases)("maps %s to %s", (_label, failure, key) => {

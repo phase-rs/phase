@@ -142,6 +142,7 @@
     "timedOut": "O servidor não respondeu. Tenta novamente.",
     "connectionLost": "Ligação ao lobby perdida. Verifica o endereço do servidor.",
     "aborted": "Esse pedido foi cancelado.",
+    "unsupported": "O pedido foi enviado, mas este servidor é demasiado antigo para o confirmar. Verifica o torneio antes de tentares de novo.",
     "notFound": "Nenhum torneio com esse código."
   }
 }

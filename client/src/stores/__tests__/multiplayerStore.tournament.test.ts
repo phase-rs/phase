@@ -33,6 +33,7 @@ import {
   type TournamentCredential,
 } from "../multiplayerStore";
 import { openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
+import { LOBBY_PROTOCOL_VERSION } from "../../adapter/ws-adapter";
 import type {
   TournamentSummary,
   TournamentView,
@@ -96,6 +97,13 @@ function makeFakeSocket() {
         buildCommit: "test",
         mode: "LobbyOnly" as const,
         protocolVersion: 14,
+        // Models a current-generation broker, so it tracks the client's own
+        // export rather than a literal. Load-bearing: `tournamentClient`'s
+        // capability gate treats an absent lobby version as unsupported, so
+        // omitting this would make every gated store action in this file settle
+        // `{ok:false, reason:"unsupported"}` the instant it sent — quietly
+        // gutting the round-trip assertions instead of failing them.
+        lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
       },
       ws,
       close: socketClose,
@@ -126,6 +134,23 @@ function makeFakeSocket() {
         .map(([raw]) => JSON.parse(raw as string) as { type: string; data?: unknown })
         .filter((f) => f.type === tag)[nth],
   };
+}
+
+/**
+ * The correlator the wire layer minted for the nth `tag` frame this socket
+ * sent.
+ *
+ * The four token-gated actions settle only on a `TournamentActionAck` /
+ * `TournamentActionRejected` echoing this id, so a test that wants to settle
+ * one has to read the id off the frame that actually went out. Asserting the
+ * type here keeps that non-vacuous: a request that stopped carrying a
+ * correlator fails here rather than settling on an `undefined === undefined`
+ * match.
+ */
+function correlatorOf(fake: FakeSocket, tag: string, nth = 0): number {
+  const data = fake.frame(tag, nth)?.data as { request_id?: number } | undefined;
+  expect(typeof data?.request_id).toBe("number");
+  return data?.request_id as number;
 }
 
 type FakeSocket = ReturnType<typeof makeFakeSocket>;
@@ -804,9 +829,21 @@ describe("tournament store actions", () => {
       code: string;
       organizer_token: string;
     };
-    expect(sent).toEqual({ code: "BBB", organizer_token: "org-b" });
+    // Exact rather than partial: an extra field on a gated request would be a
+    // wire change, and the correlator is the only one there should be.
+    expect(sent).toEqual({
+      code: "BBB",
+      organizer_token: "org-b",
+      request_id: expect.any(Number),
+    });
 
-    fake.deliver("TournamentUpdate", { code: "BBB", view: viewFor("BBB") });
+    // The gated actions settle on their own correlated ack, not on the
+    // same-code broadcast any participant's action produces.
+    fake.deliver("TournamentActionAck", {
+      request_id: correlatorOf(fake, "StartTournamentRound"),
+      code: "BBB",
+      view: viewFor("BBB"),
+    });
     expect((await pending).ok).toBe(true);
 
     // A third code this browser holds nothing for is refused locally.
@@ -873,11 +910,16 @@ describe("tournament store actions", () => {
       pairing_id: 7,
       player_token: "ply-a",
       outcome: "Draw",
+      request_id: expect.any(Number),
     });
     // Never the organizer token, even though one is held for the same code.
     expect(sent.player_token).not.toBe("org-a");
 
-    fake.deliver("TournamentUpdate", { code: "AAA", view: viewFor("AAA") });
+    fake.deliver("TournamentActionAck", {
+      request_id: correlatorOf(fake, "ReportMatchResult"),
+      code: "AAA",
+      view: viewFor("AAA"),
+    });
     expect((await pending).ok).toBe(true);
   });
 
@@ -915,12 +957,18 @@ describe("tournament store actions", () => {
       expect(fake.send.mock.calls.length).toBe(framesBefore);
 
       // (b) Genuine server rejection — credential held, frame goes out, the
-      // broker answers `Error`.
+      // broker refuses THIS request by correlator. For a gated action that is
+      // now the only thing that produces `"rejected"`: a bare `Error` carries
+      // no correlator and is deliberately ignored, which is what makes this a
+      // reliable "the server refused me" signal rather than a guess.
       useMultiplayerStore.setState({ tournamentCredentials: { AAA: credential } });
       const pending = run();
       await flush();
       expect(fake.tally(frame)).toBe(1);
-      fake.deliver("Error", { message: "Tournament is not in progress" });
+      fake.deliver("TournamentActionRejected", {
+        request_id: correlatorOf(fake, frame),
+        message: "Tournament is not in progress",
+      });
       const wire = await pending;
 
       expect(wire.ok).toBe(false);
@@ -950,7 +998,10 @@ describe("tournament store actions", () => {
     const pending = store().endTournament("AAA");
     await flush();
     expect(fake.tally("EndTournament")).toBe(1);
-    fake.deliver("Error", { message: "nope" });
+    fake.deliver("TournamentActionRejected", {
+      request_id: correlatorOf(fake, "EndTournament"),
+      message: "nope",
+    });
     expect((await pending).ok).toBe(false);
     expect(store().tournamentCredentials).toEqual(before);
   });
@@ -1012,6 +1063,21 @@ describe("tournament store actions", () => {
       store().startTournamentRound("NOPE"), // local refusal path too
     ];
     await flush();
+    // Each gated call settles only on its OWN correlated refusal; the
+    // uncorrelated `getTournament` still settles on the bare `Error`, and the
+    // local refusal never reached the wire at all. Three settlement routes in
+    // one fixture, which is what makes the "socket untouched" claim total.
+    for (const tag of [
+      "StartTournamentRound",
+      "DropFromTournament",
+      "EndTournament",
+      "ReportMatchResult",
+    ]) {
+      fake.deliver("TournamentActionRejected", {
+        request_id: correlatorOf(fake, tag),
+        message: "done",
+      });
+    }
     fake.deliver("Error", { message: "done" });
     const results = await Promise.all(pending);
 

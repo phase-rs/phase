@@ -480,6 +480,7 @@ export type FailureLabel =
   | { readonly key: "errors.timedOut" }
   | { readonly key: "errors.connectionLost" }
   | { readonly key: "errors.aborted" }
+  | { readonly key: "errors.unsupported" }
   | { readonly key: "errors.serverRejected"; readonly message: string };
 
 /** The failure half of a gated action's result — also total over an ungated one. */
@@ -506,17 +507,23 @@ type TournamentFailure = Extract<
  * the code currently being viewed — and is rendered by the detail page alone.
  *
  * Terminates in a `const unreachable: never` binding and has no `default:`
- * arm, so a sixth failure member anywhere (a fifth
- * `TournamentRpcFailureReason`, or a second store-level refusal) fails the
- * build here rather than rendering a blank alert.
+ * arm, so any new failure member (another `TournamentRpcFailureReason` member,
+ * or a second store-level refusal) fails the build here rather than rendering
+ * a blank alert.
+ *
+ * The `unsupported` arm carries no variable on purpose: it reports that the
+ * request went out against a broker that cannot confirm it, and there is no
+ * broker text to pass through, because the broker was never asked to explain
+ * anything. Its copy must say "sent, not confirmed" rather than implying the
+ * action failed.
  *
  * The terminal binds the **discriminant** (`failure.reason`) rather than the
  * value, and that is forced rather than stylistic: `TournamentFailure` is not
  * a flat discriminated union. Its wire member declares
- * `reason: TournamentRpcFailureReason` — a four-member union *inside one
+ * `reason: TournamentRpcFailureReason` — a string-literal union *inside one
  * object type* — and TypeScript's narrowing can only eliminate whole union
  * members, never shrink a property union in place, so `failure` itself is
- * still that member after all four arms and `const unreachable: never =
+ * still that member after every arm and `const unreachable: never =
  * failure` does not compile. Narrowing the discriminant reference does work,
  * and it is the same gate: any new `reason` literal, from either member, lands
  * here as a `never` assignment error.
@@ -537,6 +544,7 @@ export function failureLabel(failure: TournamentFailure): FailureLabel {
     return { key: "errors.connectionLost" };
   }
   if (failure.reason === "aborted") return { key: "errors.aborted" };
+  if (failure.reason === "unsupported") return { key: "errors.unsupported" };
   const unreachable: never = failure.reason;
   return unreachable;
 }

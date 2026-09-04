@@ -375,18 +375,30 @@ export type TournamentRole = "organizer" | "player";
  * A gated action refused by THIS STORE, before any frame existed.
  *
  * Deliberately not `reason: "rejected"`. `TournamentRpcFailureReason` is the
- * WIRE vocabulary — each of its four members documents something the transport
- * or the broker did, and `"rejected"` specifically means "the broker answered
- * `Error`; `message` is its text verbatim" (`services/tournamentClient.ts`).
- * A local refusal contacted no broker and carries client-authored copy, so
- * filing it under `"rejected"` would both falsify that contract and leave a
- * consumer no way to tell the two apart except by matching English message
- * text. `role` is carried so a consumer can pick its copy (and later, its
- * i18n key) from a typed field rather than from the message.
+ * WIRE vocabulary — each of its five members documents something the transport
+ * or the broker did, and `"rejected"` specifically means "the broker refused
+ * this request; `message` is its text verbatim"
+ * (`services/tournamentClient.ts`). A local refusal contacted no broker and
+ * carries client-authored copy, so filing it under `"rejected"` would both
+ * falsify that contract and leave a consumer no way to tell the two apart
+ * except by matching English message text. `role` is carried so a consumer can
+ * pick its copy (and later, its i18n key) from a typed field rather than from
+ * the message.
  *
- * It lives here rather than as a fifth `TournamentRpcFailureReason` member
- * because `tournamentClient.ts` is the wire layer and this is a store-level
- * fact — and because that file is frozen by the time this store is written.
+ * It lives here rather than as a `TournamentRpcFailureReason` member because
+ * **nothing was sent** and because its sole input — `tournamentCredentials` —
+ * is a map this store itself owns and mutates. That is the axis the wire union
+ * actually draws: *whose fact the predicate reads*, not who evaluated it. Three
+ * of that union's members are evaluated client-side too, but each reads a
+ * transport- or broker-owned fact. `"unsupported"` joined it on exactly those
+ * grounds — the frame goes out, and the version it reads is advertised by the
+ * broker's own `ServerHello`.
+ *
+ * (An earlier version of this note also grounded the placement in
+ * `tournamentClient.ts` being frozen by the time this store was written. That
+ * ground has lapsed — the correlation fix reopened and rewrote that file — and
+ * is recorded here as lapsed so a future reader does not apply it. The two
+ * grounds above stand on their own.)
  */
 export interface TournamentNotAuthorized {
   ok: false;
@@ -456,14 +468,19 @@ async function runTournamentRpc<T>(
  *  - `{reason: "not_authorized", role}` — decided HERE, from this store's own
  *    map, with certainty. Nothing was sent.
  *  - any `TournamentRpcFailureReason` — decided by the transport or the
- *    broker. Note in particular that `"rejected"` inherits the caution below
- *    and is NOT a reliable "the server refused me" signal.
+ *    broker. `"rejected"` IS now a reliable "the server refused me" signal: the
+ *    four gated RPCs carry a `request_id` and settle only on a
+ *    `TournamentActionRejected` echoing this caller's own correlator
+ *    (`services/tournamentClient.ts`, module header part 4).
  *
- * Caution for consumers (`services/tournamentClient.ts`, module header part 4):
- * the four gated RPCs settle on a `TournamentUpdate` BROADCAST, which carries
- * no request-vs-broadcast discriminator, so a wire-level `{ok:false}` here is
- * not a reliable "the server rejected me" signal. Nothing in this store mutates
- * state on a gated failure for exactly that reason.
+ * Caution for consumers, in its corrected form: the reason a gated `{ok:false}`
+ * still must not be read as "the action did not happen" is `"unsupported"`.
+ * Against a broker below `MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK` the frame is
+ * sent and the broker very likely performs the action — this client just cannot
+ * confirm it. The other four wire reasons keep their existing meanings exactly.
+ * Nothing in this store mutates state on a gated failure, now as a layering
+ * choice (the fan-out owns state, this function owns the call) rather than as
+ * compensation for a signal that could not be trusted.
  */
 async function runGatedTournamentRpc<T>(
   get: MultiplayerGet,
