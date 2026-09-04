@@ -3747,9 +3747,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
             d.push(("chooser".into(), fmt_target(chooser)));
         }
-        Effect::Amass { subtype, count } => {
+        Effect::Amass {
+            subtype,
+            count,
+            player,
+        } => {
             d.push(("subtype".into(), subtype.clone()));
             d.push(("count".into(), fmt_quantity(count)));
+            d.push(("player".into(), fmt_target(player)));
         }
         Effect::Monstrosity { count } => {
             d.push(("counters".into(), fmt_quantity(count)));

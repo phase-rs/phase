@@ -386,6 +386,12 @@
     "viewResults": "Zobacz wyniki",
     "setIconAlt": "Ikona {{code}}"
   },
+  "offline": {
+    "unavailableTitle": "Draft wieloosobowy jest niedostępny offline.",
+    "unavailableDescription": "Połącz się ponownie lub wyłącz Tryb Offline, aby hostować, dołączyć, rozpocząć albo oglądać draft wieloosobowy.",
+    "startUnavailable": "Nie można rozpocząć draftu wieloosobowego offline. Połącz się ponownie lub wyłącz Tryb Offline, aby kontynuować.",
+    "watchUnavailable": "Nie można oglądać draftu wieloosobowego offline. Połącz się ponownie lub wyłącz Tryb Offline, aby kontynuować."
+  },
   "podPhase": {
     "lobby": "Poczekalnia",
     "drafting": "Draftowanie",
@@ -420,6 +426,7 @@
     "exportUrl": "URL eksportu CubeCobra",
     "exportUrlPlaceholder": "Wklej surowy URL eksportu lub wklej listę poniżej",
     "loadUrl": "Wczytaj URL",
+    "offlineUrlUnavailable": "Wczytywanie list kostki z adresu URL nie jest dostępne offline.",
     "deckAddables": "Karty dodawane do talii",
     "addablesStandardBasics": "Standardowe ziemie podstawowe",
     "addablesBasicsPlusCustom": "Ziemie podstawowe plus własne",

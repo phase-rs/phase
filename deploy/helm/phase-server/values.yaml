@@ -194,7 +194,7 @@ ingress:
   enabled: true
   className: traefik
   host: phase.example.com
-  # Only /ws, /health and /p2p-draft-backup are routed; /admin never is.
+  # Only /ws, /health, /info and /p2p-draft-backup are routed; /admin never is.
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"

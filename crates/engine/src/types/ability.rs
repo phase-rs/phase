@@ -16834,6 +16834,21 @@ pub enum Effect {
         /// Number of +1/+1 counters to place.
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 109.4 + CR 701.47a: which player performs this amass instruction
+        /// (puts the counters, chooses/creates the Army). Every printed
+        /// imperative "amass [subtype] N" card (Awaken the Erstwhile, Saruman,
+        /// the White Hand, …) has the ability's own controller amass, so the
+        /// default is `TargetFilter::Controller` and existing JSON (which omits
+        /// the field) keeps that reading. Azog, Moria's Ruin's "Its controller
+        /// amasses Goblins X" binds this to `TargetFilter::ParentTargetController`
+        /// — the controller of the creature Azog just destroyed, not Azog's own
+        /// controller — resolved through `resolve_player_for_context_ref`, the
+        /// same path `Discover.player` / `Manifest.target` already use.
+        #[serde(
+            default = "default_target_filter_controller",
+            skip_serializing_if = "is_target_filter_controller"
+        )]
+        player: TargetFilter,
     },
     /// CR 701.37a: Monstrosity N — if not monstrous, put N +1/+1 counters and become monstrous.
     Monstrosity {
@@ -18688,7 +18703,11 @@ impl Effect {
             // target via the same `is_context_ref()` filter the other player-axis
             // effects use.
             | Effect::Discover { player, .. }
-            | Effect::BlightEffect { player, .. } => Some(player),
+            | Effect::BlightEffect { player, .. }
+            // CR 701.47a: Amass's performer. The default `Controller` is a
+            // context ref, but a subject-targeted form ("target player amasses
+            // Goblins 2") must surface its chosen player like `Discover`.
+            | Effect::Amass { player, .. } => Some(player),
 
             // Digital-only Alchemy: `ApplyPerpetual.target` selects the modified
             // object (`~` → Any/source fallback; "that creature"/"the duplicate"
@@ -18964,7 +18983,6 @@ impl Effect {
             | Effect::AssembleContraptionOnSprocket { .. }
             | Effect::ProcessRadCounters
             | Effect::Incubate { .. }
-            | Effect::Amass { .. }
             | Effect::Monstrosity { .. }
             | Effect::Specialize
             | Effect::Renown { .. }

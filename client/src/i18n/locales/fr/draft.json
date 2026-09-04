@@ -386,6 +386,12 @@
     "viewResults": "Voir les résultats",
     "setIconAlt": "Icône {{code}}"
   },
+  "offline": {
+    "unavailableTitle": "Le draft multijoueur n’est pas disponible hors ligne.",
+    "unavailableDescription": "Reconnectez-vous ou désactivez le mode hors ligne pour héberger, rejoindre, démarrer ou regarder un draft multijoueur.",
+    "startUnavailable": "Il est impossible de démarrer un draft multijoueur hors ligne. Reconnectez-vous ou désactivez le mode hors ligne pour continuer.",
+    "watchUnavailable": "Il est impossible de regarder un draft multijoueur hors ligne. Reconnectez-vous ou désactivez le mode hors ligne pour continuer."
+  },
   "podPhase": {
     "lobby": "Salon",
     "drafting": "Draft",
@@ -420,6 +426,7 @@
     "exportUrl": "URL d'export CubeCobra",
     "exportUrlPlaceholder": "Collez une URL d'export brute, ou collez la liste ci-dessous",
     "loadUrl": "Charger l'URL",
+    "offlineUrlUnavailable": "Le chargement de listes de cube depuis une URL n'est pas disponible hors ligne.",
     "deckAddables": "Cartes ajoutables au deck",
     "addablesStandardBasics": "Terrains de base standard",
     "addablesBasicsPlusCustom": "Terrains de base plus personnalisés",

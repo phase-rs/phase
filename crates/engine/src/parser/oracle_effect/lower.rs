@@ -10925,7 +10925,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
 /// arm. Only the per-object power/toughness refs are rewritten; every other
 /// reference (object counts, mana value, non-`CostPaidObject` scopes) is left
 /// as-is so unrelated where-X bindings are never disturbed.
-fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
+pub(super) fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref {
             qty: QuantityRef::Power { scope } | QuantityRef::Toughness { scope },

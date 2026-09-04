@@ -263,35 +263,6 @@ mod legacy_trigger_definition_ref_map {
     }
 }
 
-/// Serde adapter for trigger occurrence ledgers. JSON object keys must be
-/// strings, while a `TriggerDefinitionRef` is structured identity; encode the
-/// map as an explicit entry list rather than flattening or guessing a key.
-mod trigger_definition_ref_map {
-    use super::*;
-
-    pub fn serialize<S, H>(
-        map: &HashMap<TriggerDefinitionRef, u32, H>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut entries: Vec<_> = map.iter().collect();
-        entries.sort_unstable_by_key(|(key, _)| *key);
-        entries.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<HashMap<TriggerDefinitionRef, u32>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Vec::<(TriggerDefinitionRef, u32)>::deserialize(deserializer)
-            .map(|entries| entries.into_iter().collect())
-    }
-}
-
 /// Deserializes the object store and validates the one legacy trigger shape
 /// that can be materialized without guessing: a complete ordered payload list
 /// proven by the persisted printed base slots. Runtime copied/granted payloads
@@ -17991,7 +17962,7 @@ declare_game_state! {
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
-        with = "trigger_definition_ref_map"
+        with = "crate::types::deterministic_serde::hash_map_entries"
     )]
     pub trigger_fire_counts_this_turn: HashMap<TriggerDefinitionRef, u32>,
     /// CR 603.2: Tracks per-opponent-per-turn firing for
@@ -27197,6 +27168,12 @@ mod tests {
 
     #[derive(Serialize)]
     struct TriggerRefFixture<'a> {
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_entries::serialize")]
+        values: &'a HashMap<TriggerDefinitionRef, u32, ReverseBuildHasher>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyTriggerRefFixture<'a> {
         #[serde(serialize_with = "legacy_trigger_definition_ref_map::serialize")]
         values: &'a HashMap<TriggerDefinitionRef, u32, ReverseBuildHasher>,
     }
@@ -27396,12 +27373,21 @@ mod tests {
             vec![2, 1, 0],
             "hostile trigger map must expose descending native iteration"
         );
+        let trigger_bytes = serde_json::to_string(&TriggerRefFixture {
+            values: &trigger_values,
+        })
+        .expect("trigger-ref fixture should serialize");
         assert_eq!(
-            serde_json::to_string(&TriggerRefFixture {
+            trigger_bytes,
+            r#"{"values":[[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":0}}},10],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":1}}},11],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":2}}},12]]}"#
+        );
+        assert_eq!(
+            trigger_bytes,
+            serde_json::to_string(&LegacyTriggerRefFixture {
                 values: &trigger_values,
             })
-            .expect("trigger-ref fixture should serialize"),
-            r#"{"values":[[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":0}}},10],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":1}}},11],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":2}}},12]]}"#
+            .expect("legacy trigger-ref oracle should serialize"),
+            "the shared adapter must preserve the established canonical bytes"
         );
         let trigger_round_trip = legacy_trigger_definition_ref_map::deserialize(
             &mut serde_json::Deserializer::from_str(

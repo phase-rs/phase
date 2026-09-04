@@ -172,6 +172,7 @@
     "signedInAs": "Sessão iniciada como {{name}}",
     "syncNow": "Sincronizar agora",
     "statusSyncing": "A sincronizar…",
+    "statusPaused": "A sincronização na nuvem está em pausa enquanto está offline.",
     "statusError": "Falha na sincronização",
     "lastSynced": "Última sincronização {{time}}",
     "never": "nunca",
@@ -211,6 +212,7 @@
   "visualPacks": {
     "title": "Catálogo visual off-line",
     "description": "Escolha quais imagens de cartões confiáveis serão mantidas neste dispositivo ou instale o catálogo atual completo.",
+    "offlineUnavailable": "Os downloads de rede não estão disponíveis off-line. Reconecte-se para atualizar o catálogo ou instalar, sincronizar, reparar ou retomar imagens.",
     "availability": {
       "loading": "Verificando o suporte do catálogo visual off-line…",
       "browser": "Os downloads de imagens offline não estão configurados nesta compilação.",
@@ -399,6 +401,21 @@
       "combat": "Tempo do dano de combate — quanto tempo bloqueadores e atacantes permanecem antes de o dano ser resolvido.",
       "banners": "Exibição do banner de início de turno."
     }
+  },
+  "offlinePreparation": {
+    "title": "Preparação offline",
+    "description": "Prepare este desktop para jogo local offline antes de ativar Trabalhar offline.",
+    "prepare": "Preparar para offline",
+    "preparing": "Preparando…",
+    "workOffline": "Trabalhar offline",
+    "checklistLabel": "Lista de preparação offline",
+    "visualWarning": "Os pacotes visuais instalados precisam de atenção. Abra Pacotes visuais para repará-los; o jogo local continua disponível.",
+    "incompleteTitle": "A preparação offline está incompleta",
+    "incompleteMessage": "Falta: {{capabilities}}. Ativar Trabalhar offline mesmo assim?",
+    "confirmOffline": "Ativar Trabalhar offline",
+    "states": { "needs-preparation": "Prepare este dispositivo antes de trabalhar offline.", "preparing": "Preparando capacidades de jogo local…", "ready": "Este dispositivo está pronto para jogo local offline.", "failed": "Algumas capacidades necessárias não estão prontas.", "reconnect-required": "Reconecte-se antes de preparar o jogo offline.", "reload-or-relaunch-required": "Recarregue o aplicativo ou reinicie o desktop e tente novamente." },
+    "capabilities": { "appShell": "Aplicativo", "browserEngine": "Motor do navegador e banco de cartas", "scryfallSearch": "Dados de busca", "preconCatalog": "Decks pré-construídos", "bundledAiCatalog": "Catálogo de decks de IA", "deckLibrary": "Biblioteca de decks instalada", "nativeEngine": "Motor nativo" },
+    "capabilityStates": { "ready": "Pronto", "not-ready": "Não pronto", "reload-required": "Recarga necessária", "not-applicable": "Não aplicável", "not-installed": "Não instalado" }
   },
   "artChain": {
     "emptyState": "Usando a arte padrão do Scryfall. Adicione regras abaixo para personalizar.",

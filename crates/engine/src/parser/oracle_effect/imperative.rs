@@ -15,7 +15,8 @@ use super::counter::{
 };
 use super::lower::{
     parse_for_each_multiplier_prefix, parse_multi_target_count_expr,
-    parse_where_x_quantity_expression, strip_leading_quantifier, strip_trailing_where_x,
+    parse_where_x_quantity_expression, rebind_cost_paid_object_pt_to_target,
+    strip_leading_quantifier, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -11140,7 +11141,9 @@ pub(super) fn parse_imperative_family_ast(
         // CR 701.53a: "incubate N"
         "incubate" => try_parse_incubate(lower).map(ImperativeFamilyAst::GainKeyword),
         // CR 701.47a: "amass [Type] N"
-        "amass" => try_parse_amass(text, lower).map(ImperativeFamilyAst::GainKeyword),
+        // allow-noncombinator: pre-existing grandfathered first-word match arm; only reformatted to two lines because the new `player` param (Azog, Moria's Ruin) pushed it past the line-length limit.
+        "amass" => try_parse_amass(text, lower, TargetFilter::Controller)
+            .map(ImperativeFamilyAst::GainKeyword),
         // CR 701.37a: "monstrosity N"
         "monstrosity" => try_parse_monstrosity(lower).map(ImperativeFamilyAst::GainKeyword),
         // CR 701.46a: "adapt N"
@@ -14161,12 +14164,23 @@ fn try_parse_incubate(lower: &str) -> Option<Effect> {
     Some(Effect::Incubate { count })
 }
 
-/// CR 701.47a: Parse "amass {Type} {N}" from Oracle text.
+/// CR 701.47a: Parse "amass {Type} {N}" (imperative) or "amasses {Type} {N}"
+/// (third-person, subject-shifted) from Oracle text.
 ///
 /// Handles all subtypes generically. The subtype is canonicalized from plural
 /// to singular form (e.g., "Zombies" -> "Zombie") via `parse_subtype`.
-fn try_parse_amass(text: &str, lower: &str) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("amass ").parse(lower).ok()?;
+///
+/// `player` is the `TargetFilter` naming which player performs the amass
+/// instruction — `TargetFilter::Controller` for the imperative "Amass Zombies
+/// 2" form (the ability's own controller amasses), or an anaphoric subject
+/// such as `TargetFilter::ParentTargetController` for Azog, Moria's Ruin's
+/// "Its controller amasses Goblins X" (the destroyed creature's controller,
+/// not Azog's). Resolved at runtime via `resolve_player_for_context_ref`
+/// (mirrors `Manifest.target` / `Discover.player`).
+pub(super) fn try_parse_amass(text: &str, lower: &str, player: TargetFilter) -> Option<Effect> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("amass "), tag("amasses ")))
+        .parse(lower)
+        .ok()?;
     let rest = rest.trim();
     if rest.is_empty() {
         return None;
@@ -14179,9 +14193,42 @@ fn try_parse_amass(text: &str, lower: &str) -> Option<Effect> {
 
     // CR 701.47a: Amass requires an explicit count after the subtype. If it
     // doesn't parse, surface as Unimplemented rather than amassing 1.
-    let count = parse_count_expr(remainder).map(|(q, _)| q)?;
+    let mut count = parse_count_expr(remainder).map(|(q, _)| q)?;
 
-    Some(Effect::Amass { subtype, count })
+    // CR 608.2c + CR 109.4 + CR 608.2h: when the amass PERFORMER anaphors a
+    // parent target ("its controller amasses ..." — Azog, Moria's Ruin), a
+    // same-clause "that creature's power/toughness" in the count is the SAME
+    // anaphor: the creature named by the parent effect's own object target
+    // (e.g. "destroy up to one other target creature"), not a cost/trigger
+    // referent. The shared where-X/CDA quantity grammar lowers the
+    // context-free phrase to `ObjectScope::CostPaidObject` (its
+    // sacrifice-cost / dies-trigger sense), which reads only
+    // `cost_paid_object` / `effect_context_object` snapshots populated when
+    // the parent effect actually moved the object to a public zone — so an
+    // indestructible/regenerated/prevented creature (never destroyed, no
+    // such snapshot) silently amasses 0 even though it is still sitting
+    // right there on the battlefield. Rebind to `ObjectScope::Target`, which
+    // reads the SAME inherited `ability.targets` slot `ParentTargetController`
+    // already resolves against (see `parent_target_controller`) and reads the
+    // object live while present, falling back to its LKI once it has left
+    // (CR 608.2h) — mirroring the identical rebind
+    // `rebind_cost_paid_object_pt_to_target` already performs for a targeted
+    // continuous grant's "that creature's power" (Xenagos, God of Revels).
+    // Gated on the parent-target player anaphor so a plain "you"/"they"
+    // amass (`player == Controller`, no parent-target dependency) is
+    // untouched.
+    if matches!(
+        player,
+        TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
+    ) {
+        rebind_cost_paid_object_pt_to_target(&mut count);
+    }
+
+    Some(Effect::Amass {
+        subtype,
+        count,
+        player,
+    })
 }
 
 /// CR 701.37a: Parse "monstrosity {N}" from Oracle text.
@@ -17773,12 +17820,21 @@ mod tests {
 
     #[test]
     fn parse_amass_zombies_2() {
-        let result = try_parse_amass("amass Zombies 2", "amass zombies 2");
+        let result = try_parse_amass(
+            "amass Zombies 2",
+            "amass zombies 2",
+            TargetFilter::Controller,
+        );
         assert!(result.is_some(), "Should parse 'amass Zombies 2'");
         match result.unwrap() {
-            Effect::Amass { subtype, count } => {
+            Effect::Amass {
+                subtype,
+                count,
+                player,
+            } => {
                 assert_eq!(subtype, "Zombie");
                 assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+                assert_eq!(player, TargetFilter::Controller);
             }
             other => panic!("Expected Amass, got {other:?}"),
         }
@@ -17786,10 +17842,10 @@ mod tests {
 
     #[test]
     fn parse_amass_orcs_3() {
-        let result = try_parse_amass("amass Orcs 3", "amass orcs 3");
+        let result = try_parse_amass("amass Orcs 3", "amass orcs 3", TargetFilter::Controller);
         assert!(result.is_some(), "Should parse 'amass Orcs 3'");
         match result.unwrap() {
-            Effect::Amass { subtype, count } => {
+            Effect::Amass { subtype, count, .. } => {
                 assert_eq!(subtype, "Orc");
                 assert!(matches!(count, QuantityExpr::Fixed { value: 3 }));
             }
@@ -17799,10 +17855,14 @@ mod tests {
 
     #[test]
     fn parse_amass_zombies_x() {
-        let result = try_parse_amass("amass Zombies X", "amass zombies x");
+        let result = try_parse_amass(
+            "amass Zombies X",
+            "amass zombies x",
+            TargetFilter::Controller,
+        );
         assert!(result.is_some(), "Should parse 'amass Zombies X'");
         match result.unwrap() {
-            Effect::Amass { subtype, count } => {
+            Effect::Amass { subtype, count, .. } => {
                 assert_eq!(subtype, "Zombie");
                 assert!(matches!(
                     count,
@@ -17824,13 +17884,14 @@ mod tests {
         let result = try_parse_amass(
             "amass Orcs X, where X is that spell's mana value",
             "amass orcs x, where x is that spell's mana value",
+            TargetFilter::Controller,
         );
         assert!(
             result.is_some(),
             "Should parse 'amass Orcs X, where X is ...'"
         );
         match result.unwrap() {
-            Effect::Amass { subtype, count } => {
+            Effect::Amass { subtype, count, .. } => {
                 assert_eq!(subtype, "Orc");
                 assert_eq!(
                     count,
@@ -17840,6 +17901,97 @@ mod tests {
                         }
                     }
                 );
+            }
+            other => panic!("Expected Amass, got {other:?}"),
+        }
+    }
+
+    /// Azog, Moria's Ruin: "Its controller amasses Goblins X, where X is that
+    /// creature's power" — the third-person "amasses" verb form binds `player`
+    /// to whatever `TargetFilter` the subject layer resolved (here
+    /// `ParentTargetController`, standing in for "its controller"), instead of
+    /// the imperative form's default `Controller`.
+    ///
+    /// CR 608.2c + CR 608.2h (maintainer review, PR #8011): when `player`
+    /// anaphors a parent target, "that creature's power" anaphors the SAME
+    /// parent target (the object the parent effect — e.g. "destroy up to one
+    /// other target creature" — established), not a cost/trigger-condition
+    /// snapshot. The shared where-X/CDA grammar lowers the context-free
+    /// phrase to `ObjectScope::CostPaidObject`; `try_parse_amass` rebinds it
+    /// to `ObjectScope::Target` (`rebind_cost_paid_object_pt_to_target`) so
+    /// the quantity reads the referenced creature LIVE while it remains on
+    /// the battlefield (indestructible, regenerated, or otherwise-prevented
+    /// destruction) and falls back to its LKI only once it has actually
+    /// left — mirroring the identical rebind already applied to Xenagos, God
+    /// of Revels's targeted "+X/+X where X is that creature's power" grant.
+    #[test]
+    fn parse_amasses_goblins_x_where_x_is_that_creatures_power_with_performer() {
+        let result = try_parse_amass(
+            "amasses Goblins X, where X is that creature's power",
+            "amasses goblins x, where x is that creature's power",
+            TargetFilter::ParentTargetController,
+        );
+        assert!(
+            result.is_some(),
+            "Should parse 'amasses Goblins X, where X is that creature's power'"
+        );
+        match result.unwrap() {
+            Effect::Amass {
+                subtype,
+                count,
+                player,
+            } => {
+                assert_eq!(subtype, "Goblin");
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Target,
+                        }
+                    },
+                    "X must bind to the parent target's power, read live while \
+                     present and via LKI once it has left — not a cost/trigger \
+                     snapshot that a non-destroyed target never populates"
+                );
+                assert_eq!(player, TargetFilter::ParentTargetController);
+            }
+            other => panic!("Expected Amass, got {other:?}"),
+        }
+    }
+
+    /// CR 701.47a: The plain imperative "amass [subtype] N" form (`player ==
+    /// Controller`, no parent-target dependency) must NOT be touched by the
+    /// `ParentTargetController`/`ParentTargetOwner`-gated rebind above — a
+    /// hypothetical "amass Goblins X, where X is that creature's power" with
+    /// `player: Controller` has no parent target to bind `Target` against, so
+    /// leaving it on the generic `CostPaidObject` (cost/trigger-condition)
+    /// referent is correct here.
+    #[test]
+    fn parse_amass_goblins_x_where_x_is_that_creatures_power_plain_controller_unrebound() {
+        let result = try_parse_amass(
+            "amass Goblins X, where X is that creature's power",
+            "amass goblins x, where x is that creature's power",
+            TargetFilter::Controller,
+        );
+        match result.expect("Should parse 'amass Goblins X, where X is that creature's power'") {
+            Effect::Amass {
+                subtype,
+                count,
+                player,
+            } => {
+                assert_eq!(subtype, "Goblin");
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::CostPaidObject,
+                        }
+                    },
+                    "a plain Controller-performed amass has no parent target to \
+                     rebind against, so the generic CostPaidObject referent \
+                     must survive unrebound"
+                );
+                assert_eq!(player, TargetFilter::Controller);
             }
             other => panic!("Expected Amass, got {other:?}"),
         }

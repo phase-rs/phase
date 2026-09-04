@@ -31,6 +31,7 @@ const HASH_SET: &str = "serialize_with=\"crate::types::deterministic_serde::hash
 const OPTION_HASH_SET: &str =
     "serialize_with=\"crate::types::deterministic_serde::option_hash_set\"";
 const HASH_MAP: &str = "serialize_with=\"crate::types::deterministic_serde::hash_map\"";
+const HASH_MAP_ENTRIES: &str = "with=\"crate::types::deterministic_serde::hash_map_entries\"";
 const OPTION_HASH_MAP: &str =
     "serialize_with=\"crate::types::deterministic_serde::option_hash_map\"";
 const VEC_HASH_MAP: &str = "serialize_with=\"crate::types::deterministic_serde::vec_hash_map\"";
@@ -52,7 +53,6 @@ enum Classification {
     Canonical(&'static str),
     SerdeSkip,
     DeserializeOnlyOrRuntime,
-    NonStringJsonMapKey,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -363,11 +363,16 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "im::HashMap<im::HashMap>",
         Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
     );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "trigger_fire_counts_this_turn",
+        "HashMap",
+        Classification::Canonical(HASH_MAP_ENTRIES),
+    );
     for (field, adapter) in [
-        (
-            "trigger_fire_counts_this_turn",
-            "with=\"trigger_definition_ref_map\"",
-        ),
         ("activated_abilities_this_turn", "with=\"tuple_key_map\""),
         ("activated_abilities_this_game", "with=\"tuple_key_map\""),
         ("ability_resolutions_this_turn", "with=\"tuple_key_map\""),
@@ -601,7 +606,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             None,
             "protection_start_exempt_attachments",
             "HashMap",
-            Classification::NonStringJsonMapKey,
+            Classification::Canonical(HASH_MAP_ENTRIES),
         ),
         (
             "src/game/game_object.rs",
@@ -1145,11 +1150,6 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
                 actual.serde
             ),
             Classification::DeserializeOnlyOrRuntime => {}
-            Classification::NonStringJsonMapKey => assert!(
-                !actual.serde.contains("deterministic_serde"),
-                "{id}: the non-string JSON key owner must not invent a generic wire adapter; actual serde={}",
-                actual.serde
-            ),
         }
     }
 
@@ -2295,7 +2295,7 @@ fn populated_stack_resolution_session_round_trips_deterministically_through_raw_
 }
 
 #[test]
-fn populated_protection_tuple_map_keeps_its_existing_non_string_json_key_failure() {
+fn protection_tuple_map_round_trips_deterministically_through_all_persistence_forms() {
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
     let mut object = GameObject::new(
         ObjectId(1),
@@ -2304,17 +2304,122 @@ fn populated_protection_tuple_map_keeps_its_existing_non_string_json_key_failure
         "Protection Fixture".to_string(),
         Zone::Battlefield,
     );
-    object.protection_start_exempt_attachments.insert(
-        (0, 0, ObjectId(2)),
-        ProtectionStartSnapshot {
-            resolved_quality: ProtectionTarget::Color(ManaColor::White),
-            attachment_ids: vec![ObjectId(3)],
-        },
+    assert!(
+        serde_json::to_value(&object)
+            .expect("empty protection fixture serializes")
+            .get("protection_start_exempt_attachments")
+            .is_none(),
+        "the empty transient map remains omitted"
     );
-    assert_eq!(object.protection_start_exempt_attachments.len(), 1);
+
+    let lower_key = (0, 2, ObjectId(1));
+    let lower_snapshot = ProtectionStartSnapshot {
+        resolved_quality: ProtectionTarget::Color(ManaColor::White),
+        attachment_ids: vec![ObjectId(3), ObjectId(4)],
+    };
+    let upper_key = (1, 0, ObjectId(1));
+    let upper_snapshot = ProtectionStartSnapshot {
+        resolved_quality: ProtectionTarget::CardType("Artifact".to_string()),
+        attachment_ids: vec![ObjectId(5)],
+    };
+    object
+        .protection_start_exempt_attachments
+        .insert(upper_key, upper_snapshot.clone());
+    object
+        .protection_start_exempt_attachments
+        .insert(lower_key, lower_snapshot.clone());
+    assert_eq!(object.protection_start_exempt_attachments.len(), 2);
     state.objects.insert(ObjectId(1), object);
 
-    let error = serde_json::to_value(&state)
-        .expect_err("the existing tuple-key map has no nonempty JSON representation");
-    assert_eq!(error.to_string(), "key must be a string");
+    let mut opposite_insertion = state.clone();
+    let opposite_map = &mut opposite_insertion
+        .objects
+        .get_mut(&ObjectId(1))
+        .expect("fixture object exists")
+        .protection_start_exempt_attachments;
+    opposite_map.clear();
+    opposite_map.insert(lower_key, lower_snapshot);
+    opposite_map.insert(upper_key, upper_snapshot);
+
+    let bare_bytes = serde_json::to_string(&state).expect("populated bare state serializes");
+    assert_eq!(
+        serde_json::to_string(&opposite_insertion)
+            .expect("opposite-insertion bare state serializes"),
+        bare_bytes,
+        "hash insertion order must not affect canonical state bytes"
+    );
+    let bare_value: serde_json::Value =
+        serde_json::from_str(&bare_bytes).expect("bare state bytes are JSON");
+    assert_eq!(
+        bare_value["objects"]["1"]["protection_start_exempt_attachments"],
+        serde_json::json!([
+            [
+                [0, 2, 1],
+                {
+                    "resolved_quality": {"Color": "White"},
+                    "attachment_ids": [3, 4]
+                }
+            ],
+            [
+                [1, 0, 1],
+                {
+                    "resolved_quality": {"CardType": "Artifact"},
+                    "attachment_ids": [5]
+                }
+            ]
+        ]),
+        "the nonempty field is a typed-key-sorted sequence of exact key/value tuples"
+    );
+
+    let bare_restored: GameState =
+        serde_json::from_str(&bare_bytes).expect("bare state round trips");
+    assert_eq!(
+        bare_restored
+            .objects
+            .get(&ObjectId(1))
+            .expect("restored bare object exists")
+            .protection_start_exempt_attachments,
+        state
+            .objects
+            .get(&ObjectId(1))
+            .expect("source fixture object exists")
+            .protection_start_exempt_attachments
+    );
+    assert_eq!(
+        serde_json::to_string(&bare_restored).expect("restored bare state reserializes"),
+        bare_bytes,
+        "bare-state bytes remain stable after restore"
+    );
+
+    for (persistence_name, persisted) in [
+        ("raw", PersistedGameState::Raw(Box::new(state.clone()))),
+        ("trusted", PersistedGameState::capture(state.clone())),
+    ] {
+        let bytes = serde_json::to_string(&persisted)
+            .unwrap_or_else(|error| panic!("{persistence_name} state serializes: {error}"));
+        let restored: PersistedGameState = serde_json::from_str(&bytes)
+            .unwrap_or_else(|error| panic!("{persistence_name} state deserializes: {error}"));
+        assert_eq!(
+            serde_json::to_string(&restored)
+                .unwrap_or_else(|error| panic!("{persistence_name} state reserializes: {error}")),
+            bytes,
+            "{persistence_name} persistence bytes remain stable after restore"
+        );
+        let restored = restored
+            .into_game_state()
+            .unwrap_or_else(|error| panic!("{persistence_name} state finalizes: {error}"));
+        assert_eq!(
+            restored
+                .objects
+                .get(&ObjectId(1))
+                .expect("restored persisted object exists")
+                .protection_start_exempt_attachments,
+            state
+                .objects
+                .get(&ObjectId(1))
+                .expect("source fixture object exists")
+                .protection_start_exempt_attachments,
+            "{persistence_name} persistence restores every protection snapshot"
+        );
+    }
 }

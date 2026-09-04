@@ -58,8 +58,42 @@ export AUDIO_BASE_URL="${AUDIO_BASE_URL:-$DATA_BASE_URL/audio}"
 if [ -f client/public/card-data.json ]; then
   echo "card data: bundling client/public/card-data.json (matches this checkout)"
 else
-  export CARD_DATA_URL="${CARD_DATA_URL:-$DATA_BASE_URL/card-data.json}"
-  echo "card data: $CARD_DATA_URL (run ./scripts/gen-card-data.sh to bundle your own instead)"
+  # Resolve the pool through card-data-meta.json rather than naming a file.
+  # The deployed pools are content-addressed, and the unversioned card-data.json
+  # is a stale relic that still answers 200 — pinning it hands the locally built
+  # engine a pool from an older schema, which serde rejects at load. That failure
+  # is swallowed into a console warning, so it reaches the user much later and in
+  # disguise, as "Card database not loaded" from the engine worker.
+  if [ -z "${CARD_DATA_URL:-}" ]; then
+    meta_url="$DATA_BASE_URL/card-data-meta.json"
+    if ! meta=$(curl -fsSL --connect-timeout 10 --max-time 60 "$meta_url"); then
+      echo "ERROR: could not fetch $meta_url to resolve the card pool." >&2
+      echo "  Set CARD_DATA_URL to a content-addressed card-data-<hash>.json, or" >&2
+      echo "  generate a pool matching this checkout: ./scripts/gen-card-data.sh" >&2
+      exit 2
+    fi
+    if ! card_data_file=$(printf '%s' "$meta" | jq -er '
+      if (.data_filename | type) == "string"
+        and (.data_filename | test("^card-data-[0-9a-f]{16}\\.json$"))
+      then .data_filename
+      else error("invalid data_filename")
+      end
+    '); then
+      echo "ERROR: $meta_url has no valid content-addressed .data_filename." >&2
+      echo "  Set CARD_DATA_URL to a content-addressed card-data-<hash>.json, or" >&2
+      echo "  generate a pool matching this checkout: ./scripts/gen-card-data.sh" >&2
+      exit 2
+    fi
+    export CARD_DATA_URL="$DATA_BASE_URL/$card_data_file"
+    # The pool matches the commit it was generated from, not necessarily this
+    # checkout. Print it so a schema mismatch is visible here rather than as a
+    # runtime load failure in the browser.
+    echo "card data: $CARD_DATA_URL"
+    echo "  (upstream pool generated at commit $(printf '%s' "$meta" | jq -r '.commit_short // "unknown"'); \
+run ./scripts/gen-card-data.sh to bundle one matching this checkout instead)"
+  else
+    echo "card data: $CARD_DATA_URL (caller-supplied)"
+  fi
 fi
 
 # ENGINE_WASM_URL is deliberately left unset so the engine is bundled locally

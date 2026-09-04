@@ -1,3 +1,5 @@
+import { getEffectiveOffline } from "../stores/connectivityStore";
+
 interface CubeCobraCard {
   name?: unknown;
   details?: {
@@ -15,6 +17,11 @@ interface CubeCobraExport {
 }
 
 const CUBECOBRA_HOSTS = new Set(["cubecobra.com", "www.cubecobra.com"]);
+
+/** Translation keys for frontend-authored Cube import errors. */
+export const CUBE_IMPORT_ERROR_KEYS = {
+  offline: "cubeSetup.offlineUrlUnavailable",
+} as const;
 
 function cubeCobraApiUrl(input: string): string | null {
   let url: URL;
@@ -73,6 +80,9 @@ function cubeCobraJsonToCountedList(data: CubeCobraExport): string {
 
 export async function fetchCubeList(url: string): Promise<string> {
   const trimmed = url.trim();
+  if (getEffectiveOffline()) {
+    throw new Error(CUBE_IMPORT_ERROR_KEYS.offline);
+  }
   const apiUrl = cubeCobraApiUrl(trimmed);
   const resp = await fetch(apiUrl ?? trimmed);
   if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);

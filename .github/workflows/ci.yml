@@ -107,6 +107,20 @@ jobs:
           fi
           ./scripts/check-engine-authorities.sh "$BASE"
 
+      - name: Release dispatch guard tests
+        # release.yml's recovery guard is release authorization: it decides
+        # whether a workflow_dispatch run may publish the tag it asks for. The
+        # tests read the guard's shell out of the committed workflow, so an edit
+        # that weakens it fails here instead of shipping unnoticed.
+        run: python3 scripts/release_dispatch_guard_tests.py
+
+      - name: Action pin checker unit tests
+        # Exercises the checker against throwaway repositories only; it does
+        # not walk this repository's own workflows. The gate over the real tree
+        # is action-pin-audit.yml, which runs the default branch's copy of this
+        # checker against the evaluated commit.
+        run: python3 scripts/check_action_pins_tests.py
+
       - name: Resolution-frame boundary guard
         # Full-tree guard: legacy resolution keys are reader/fixture-only, and
         # ResolutionStack mutation remains top-only or adjacent-pair scoped.

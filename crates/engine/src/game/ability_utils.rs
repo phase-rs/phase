@@ -4768,10 +4768,12 @@ fn quantity_expr_reads_target_object_pt(expr: &QuantityExpr) -> bool {
 
 fn effect_player_filter_is_parent_target_anaphor(effect: &Effect) -> bool {
     match effect {
-        Effect::GainLife { player, .. } => matches!(
-            player,
-            TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
-        ),
+        Effect::GainLife { player, .. } | Effect::Amass { player, .. } => {
+            matches!(
+                player,
+                TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
+            )
+        }
         _ => false,
     }
 }
@@ -4869,7 +4871,8 @@ fn effect_target_slot_filter(effect: &Effect) -> Option<TargetFilter> {
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::Sacrifice { count: amount, .. } => quantity_expr_target_slot_filter(amount),
+        | Effect::Sacrifice { count: amount, .. }
+        | Effect::Amass { count: amount, .. } => quantity_expr_target_slot_filter(amount),
         Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::SetTapState {

@@ -1840,9 +1840,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
-        Effect::Amass { count, subtype: _ } => {
+        Effect::Amass {
+            count,
+            subtype: _,
+            player,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
+            acc = acc.or(scan_target_filter(player, target_ctx, mode));
             acc
         }
         Effect::Monstrosity { count } => {

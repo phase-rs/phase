@@ -386,6 +386,12 @@
     "viewResults": "Vedi risultati",
     "setIconAlt": "Icona {{code}}"
   },
+  "offline": {
+    "unavailableTitle": "Il draft multigiocatore non è disponibile offline.",
+    "unavailableDescription": "Riconnettiti o disattiva la modalità offline per ospitare, unirti, avviare o guardare un draft multigiocatore.",
+    "startUnavailable": "Non puoi avviare un draft multigiocatore offline. Riconnettiti o disattiva la modalità offline per continuare.",
+    "watchUnavailable": "Non puoi guardare un draft multigiocatore offline. Riconnettiti o disattiva la modalità offline per continuare."
+  },
   "podPhase": {
     "lobby": "Lobby",
     "drafting": "Draft",
@@ -420,6 +426,7 @@
     "exportUrl": "URL di esportazione CubeCobra",
     "exportUrlPlaceholder": "Incolla un URL di esportazione raw, o incolla la lista qui sotto",
     "loadUrl": "Carica URL",
+    "offlineUrlUnavailable": "Il caricamento di liste cube da URL non è disponibile offline.",
     "deckAddables": "Carte aggiungibili al mazzo",
     "addablesStandardBasics": "Base standard",
     "addablesBasicsPlusCustom": "Base più personalizzate",

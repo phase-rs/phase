@@ -19,16 +19,33 @@ let engineModulePromise: Promise<EngineModule> | null = null;
 let wasmInitPromise: Promise<void> | null = null;
 let cardDbPromise: Promise<number> | null = null;
 
+/**
+ * A browser's module map retains failed dynamic imports for the document
+ * lifetime. Retrying this requires a page reload, unlike WASM initialization
+ * and card-data loading failures.
+ */
+export class EngineModuleReloadRequiredError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The engine module failed to load; reload the page to retry.");
+    this.name = "EngineModuleReloadRequiredError";
+    this.cause = cause;
+  }
+}
+
 async function loadEngineModule(): Promise<EngineModule> {
   if (!engineModulePromise) {
-    engineModulePromise = import("@wasm/engine");
+    engineModulePromise = import("@wasm/engine").catch((cause: unknown) => {
+      throw new EngineModuleReloadRequiredError(cause);
+    });
   }
   return engineModulePromise;
 }
 
 export async function ensureWasmInit(): Promise<void> {
   if (!wasmInitPromise) {
-    wasmInitPromise = (async () => {
+    const pending = (async () => {
       const engine = await loadEngineModule();
       if (__ENGINE_WASM_URL__) {
         await engine.default({ module_or_path: __ENGINE_WASM_URL__ });
@@ -36,13 +53,19 @@ export async function ensureWasmInit(): Promise<void> {
         await engine.default();
       }
     })();
+    wasmInitPromise = pending;
+    void pending.catch((error: unknown) => {
+      if (!(error instanceof EngineModuleReloadRequiredError) && wasmInitPromise === pending) {
+        wasmInitPromise = null;
+      }
+    });
   }
   return wasmInitPromise;
 }
 
 export async function ensureCardDatabase(): Promise<number> {
   if (!cardDbPromise) {
-    cardDbPromise = (async () => {
+    const pending = (async () => {
       await ensureWasmInit();
       const engine = await loadEngineModule();
       const resp = await fetch(__CARD_DATA_URL__);
@@ -50,8 +73,18 @@ export async function ensureCardDatabase(): Promise<number> {
         throw new Error(`Failed to load card-data.json (${resp.status})`);
       }
       const text = await resp.text();
-      return engine.load_card_database(text);
+      const loaded = await engine.load_card_database(text);
+      if (loaded <= 0) {
+        throw new Error("Failed to load card-data.json (no cards loaded)");
+      }
+      return loaded;
     })();
+    cardDbPromise = pending;
+    void pending.catch((error: unknown) => {
+      if (!(error instanceof EngineModuleReloadRequiredError) && cardDbPromise === pending) {
+        cardDbPromise = null;
+      }
+    });
   }
   return cardDbPromise;
 }

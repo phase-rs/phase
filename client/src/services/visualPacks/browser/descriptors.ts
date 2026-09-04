@@ -1,4 +1,4 @@
-import { cardCandidateGroups } from "../candidateKeys.ts";
+import { cardCandidateGroups, semanticCardCandidateGroups } from "../candidateKeys.ts";
 import type { VisualVariant } from "../candidateKeys.ts";
 import { assetKey } from "../types.ts";
 import type { AssetKey, CandidateKey, PackId, VisualImageRung, VisualPackMedia } from "../types.ts";
@@ -97,7 +97,15 @@ export function englishDescriptors(selectedPack: PackId, card: CardIdentity): Sc
       faceIndex,
       variant,
       rung,
-    }).flatMap((group) => group.keys)));
+    }).flatMap((group) => group.keys).concat(semanticCardCandidateGroups({
+      oracleId: card.oracleId,
+      sourceSetCode: card.set,
+      sourceCollectorNumber: card.collector,
+      cardName: card.name,
+      faceName: face.name,
+      variant,
+      rung,
+    }).flatMap((group) => group.keys))));
 }
 
 /**
@@ -123,7 +131,13 @@ export function canonicalDescriptors(
       faceIndex,
       variant,
       rung,
-    }).flatMap((group) => group.keys),
+    }).flatMap((group) => group.keys).concat(semanticCardCandidateGroups({
+      oracleId: card.oracleId,
+      cardName: card.name,
+      faceName: face.name,
+      variant,
+      rung,
+    }).flatMap((group) => group.keys)),
     sourceUrl: url,
     media: "image/jpeg" as const,
   }));

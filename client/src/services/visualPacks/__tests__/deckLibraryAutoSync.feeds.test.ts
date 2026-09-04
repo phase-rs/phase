@@ -43,11 +43,15 @@ import {
   hydrateFeedCache,
   setCachedFeed,
 } from "../../feedPersistence.ts";
-import { useDeckLibraryAutoSync } from "../deckLibraryAutoSync.ts";
+import { prepareDeckLibraryForOffline, useDeckLibraryAutoSync } from "../deckLibraryAutoSync.ts";
 import { invalidateDeckLibraryPack, planDeckLibraryPack } from "../deckLibraryPack.ts";
 import { packId } from "../types.ts";
 
-const backend = { reconcileDeckLibrary: vi.fn(async () => {}) };
+const backend = {
+  reconcileDeckLibrary: vi.fn(async () => {}),
+  setDeckLibraryBackgroundPaused: vi.fn(async () => {}),
+  prepareDeckLibraryForOffline: vi.fn(async () => "ready" as const),
+};
 
 function feed(id: string, decks: string[]): Feed {
   return {
@@ -138,6 +142,10 @@ beforeEach(() => {
   platform.load.mockResolvedValue(backend);
   backend.reconcileDeckLibrary.mockReset();
   backend.reconcileDeckLibrary.mockResolvedValue(undefined);
+  backend.setDeckLibraryBackgroundPaused.mockReset();
+  backend.setDeckLibraryBackgroundPaused.mockResolvedValue(undefined);
+  backend.prepareDeckLibraryForOffline.mockReset();
+  backend.prepareDeckLibraryForOffline.mockResolvedValue("ready");
   scryfall.cards = {};
   scryfall.printings = {};
   scryfall.oracleIds = new Map();
@@ -151,6 +159,67 @@ afterEach(() => {
 });
 
 describe("useDeckLibraryAutoSync feed freshness", () => {
+  it("completes preparation once when real freshness notifications publish new preferences and feeds", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockClear();
+    vi.spyOn(usePreferencesStore.persist, "rehydrate").mockImplementation(async () => {
+      usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    });
+    await idbSet("preparation", feed("preparation", []), {} as never);
+
+    const request = prepareDeckLibraryForOffline();
+    await flush();
+
+    await expect(request).resolves.toBe("ready");
+    expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
+  it("falls back to the hydrated feed cache when the startup freshness read fails", async () => {
+    await setCachedFeed("source", feed("source", ["Old Deck"]));
+    await hydrateFeedCache();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.mocked(idbEntries).mockRejectedValueOnce(new Error("offline IDB"));
+
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+
+    expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
+  it("keeps a newer external feed request pending when the startup read falls back", async () => {
+    await setCachedFeed("source", feed("source", ["Old Deck"]));
+    await hydrateFeedCache();
+    vi.mocked(idbEntries).mockClear();
+    const firstRead = deferred<Array<[IDBValidKey, Feed]>>();
+    const secondRead = deferred<Array<[IDBValidKey, Feed]>>();
+    vi.mocked(idbEntries)
+      .mockReturnValueOnce(firstRead.promise)
+      .mockReturnValueOnce(secondRead.promise);
+
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    act(() => window.dispatchEvent(new StorageEvent("storage", {
+      key: FEED_SUBSCRIPTIONS_KEY,
+      storageArea: localStorage,
+    })));
+    firstRead.reject(new Error("offline IDB"));
+    await flush();
+
+    expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(idbEntries)).toHaveBeenCalledTimes(2);
+    secondRead.resolve([["source", feed("source", ["New Deck"])]]);
+    await flush();
+    expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(2);
+    mounted.unmount();
+  });
+
   it("plans durable feed updates rather than stale hydrated feed candidates", async () => {
     const oldOracle = "11111111-1111-4111-8111-111111111111";
     const newOracle = "22222222-2222-4222-8222-222222222222";
@@ -217,12 +286,12 @@ describe("useDeckLibraryAutoSync feed freshness", () => {
     await flush();
 
     expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
-    expect(getCachedFeed("source")?.decks.map((deck) => deck.name)).toEqual(["Old Deck"]);
+    expect(getCachedFeed("source")?.decks.map((deck) => deck.name)).toEqual(["New Deck"]);
     expect(warning).toHaveBeenCalled();
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
 
-    act(() => window.dispatchEvent(new Event("online")));
+    act(() => window.dispatchEvent(new StorageEvent("storage", { key: PREFERENCES_KEY, storageArea: localStorage })));
     await flush();
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
     const membership = await plan.settled;
@@ -311,7 +380,7 @@ describe("useDeckLibraryAutoSync feed freshness", () => {
     mounted.unmount();
   });
 
-  it("refreshes durable feed membership before reconciling an event received during backend load", async () => {
+  it("buffers durable feed changes received while backend loading before its sole startup reconciliation", async () => {
     const oldOracle = "11111111-1111-4111-8111-111111111111";
     const newOracle = "22222222-2222-4222-8222-222222222222";
     configureCardData([["Old Deck", oldOracle], ["New Deck", newOracle]]);
@@ -326,16 +395,14 @@ describe("useDeckLibraryAutoSync feed freshness", () => {
     await flush();
     expect(platform.load).toHaveBeenCalledTimes(1);
 
+    backend.reconcileDeckLibrary.mockImplementation(async () => {
+      plan.observed(await planDeckLibraryPack(packId("deck_library")));
+    });
     act(() => window.dispatchEvent(new StorageEvent("storage", {
       key: FEED_SUBSCRIPTIONS_KEY,
       storageArea: localStorage,
     })));
     await act(async () => { loading.resolve(backend); });
-    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
-
-    backend.reconcileDeckLibrary.mockImplementation(async () => {
-      plan.observed(await planDeckLibraryPack(packId("deck_library")));
-    });
     await flush();
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
     const membership = await plan.settled;
@@ -381,7 +448,7 @@ describe("useDeckLibraryAutoSync feed freshness", () => {
     })));
     firstRead.resolve([["source", feed("source", ["Fresh Art"])] ]);
     await flush();
-    expect(rehydrate).toHaveBeenCalledTimes(1);
+    expect(rehydrate).toHaveBeenCalledTimes(2);
     expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
 
     secondRead.resolve([["source", feed("source", ["Fresh Art"])] ]);

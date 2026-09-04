@@ -23,14 +23,15 @@ import {
   setCachedFeed,
 } from "../../feedPersistence.ts";
 import type { PrintingEntry } from "../../scryfall.ts";
-import { useDeckLibraryAutoSync } from "../deckLibraryAutoSync.ts";
+import { prepareDeckLibraryForOffline, useDeckLibraryAutoSync } from "../deckLibraryAutoSync.ts";
+import { VisualPackBackendError } from "../backend.ts";
 import { planDeckLibraryPack } from "../deckLibraryPack.ts";
 import { packId } from "../types.ts";
 import type { CuratedCardEntry } from "../curatedMembership.ts";
 
 const platform = vi.hoisted(() => ({ load: vi.fn() }));
 const planner = vi.hoisted(() => ({ invalidate: vi.fn() }));
-const feedRefresh = vi.hoisted(() => ({ refresh: vi.fn(async () => {}) }));
+const feedRefresh = vi.hoisted(() => ({ refresh: vi.fn(async () => {}), subscribe: vi.fn() }));
 const planning = vi.hoisted(() => ({
   cards: {} as Record<string, CuratedCardEntry>,
   printings: {} as Record<string, PrintingEntry[]>,
@@ -42,10 +43,17 @@ const planning = vi.hoisted(() => ({
 }));
 
 vi.mock("../../platform.ts", () => ({ loadVisualPackBackend: platform.load }));
-vi.mock("../../feedPersistence.ts", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../feedPersistence.ts")>(),
-  refreshFeedCache: feedRefresh.refresh,
-}));
+vi.mock("../../feedPersistence.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../feedPersistence.ts")>();
+  return {
+    ...actual,
+    refreshFeedCache: feedRefresh.refresh,
+    subscribeFeedCache: (...args: Parameters<typeof actual.subscribeFeedCache>) => {
+      feedRefresh.subscribe();
+      return actual.subscribeFeedCache(...args);
+    },
+  };
+});
 vi.mock("../../scryfall.ts", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../scryfall.ts")>(),
   loadScryfallData: vi.fn(async () => planning.cards),
@@ -69,12 +77,23 @@ vi.mock("../deckLibraryPack.ts", async (importOriginal) => {
   };
 });
 
-const backend = { reconcileDeckLibrary: vi.fn(async () => {}) };
+const backend = {
+  reconcileDeckLibrary: vi.fn(async () => {}),
+  setDeckLibraryBackgroundPaused: vi.fn(async () => {}),
+  prepareDeckLibraryForOffline: vi.fn(async () => "ready" as const),
+};
 
 async function flush(): Promise<void> {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(500);
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function plannerFixture(): void {
@@ -118,10 +137,15 @@ beforeEach(() => {
   platform.load.mockReset();
   feedRefresh.refresh.mockReset();
   feedRefresh.refresh.mockResolvedValue(undefined);
+  feedRefresh.subscribe.mockReset();
   platform.load.mockResolvedValue(backend);
   planner.invalidate.mockReset();
   backend.reconcileDeckLibrary.mockReset();
   backend.reconcileDeckLibrary.mockResolvedValue(undefined);
+  backend.setDeckLibraryBackgroundPaused.mockReset();
+  backend.setDeckLibraryBackgroundPaused.mockResolvedValue(undefined);
+  backend.prepareDeckLibraryForOffline.mockReset();
+  backend.prepareDeckLibraryForOffline.mockResolvedValue("ready");
   planning.cards = {};
   planning.printings = {};
   planning.catalog = [];
@@ -139,10 +163,403 @@ afterEach(() => {
 });
 
 describe("useDeckLibraryAutoSync", () => {
+  it("rejects an imperative preparation request when no mounted scheduler owns the lifecycle", async () => {
+    await expect(prepareDeckLibraryForOffline()).rejects.toMatchObject({ kind: "unavailable" });
+  });
+
+  it("coalesces imperative preparation callers through the mounted lifecycle", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockClear();
+    const rehydrate = vi.spyOn(usePreferencesStore.persist, "rehydrate");
+    feedRefresh.refresh.mockClear();
+
+    const first = prepareDeckLibraryForOffline();
+    const second = prepareDeckLibraryForOffline();
+    expect(second).toBe(first);
+    await flush();
+    await expect(first).resolves.toBe("ready");
+
+    expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1);
+    expect(rehydrate).toHaveBeenCalledTimes(1);
+    expect(feedRefresh.refresh).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
+  it("rejects pending imperative preparation when its mounted generation unmounts", async () => {
+    await hydrateFeedCache();
+    const pending = new Promise<"ready">(() => {});
+    backend.prepareDeckLibraryForOffline.mockImplementationOnce(async () => pending);
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    const request = prepareDeckLibraryForOffline();
+    await flush();
+    await vi.waitFor(() => expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1));
+
+    mounted.unmount();
+
+    await expect(request).rejects.toEqual(new VisualPackBackendError("cancelled"));
+  });
+
+  it("rejects preparation when the mounted backend lacks the lifecycle and retries later", async () => {
+    await hydrateFeedCache();
+    platform.load.mockResolvedValue(null);
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+
+    const unavailable = prepareDeckLibraryForOffline();
+    const unavailableAssertion = expect(unavailable).rejects.toMatchObject({ kind: "unavailable" });
+    await flush();
+    await unavailableAssertion;
+
+    platform.load.mockResolvedValue(backend);
+    const retry = prepareDeckLibraryForOffline();
+    await flush();
+    await expect(retry).resolves.toBe("ready");
+    mounted.unmount();
+  });
+
+  it("rejects a failed fresh feed refresh and permits a later preparation retry", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    feedRefresh.refresh.mockRejectedValueOnce(new Error("offline"));
+
+    const failed = prepareDeckLibraryForOffline();
+    const failureAssertion = expect(failed).rejects.toMatchObject({ kind: "unavailable" });
+    await flush();
+    await failureAssertion;
+
+    const retry = prepareDeckLibraryForOffline();
+    await flush();
+    await expect(retry).resolves.toBe("ready");
+    mounted.unmount();
+  });
+
+  it("rejects unsuccessful fresh preference hydration and permits a later preparation retry", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    const rehydrate = vi.spyOn(usePreferencesStore.persist, "rehydrate").mockRejectedValueOnce(new Error("offline"));
+
+    const failed = prepareDeckLibraryForOffline();
+    const failureAssertion = expect(failed).rejects.toMatchObject({ kind: "unavailable" });
+    await flush();
+    await failureAssertion;
+    rehydrate.mockResolvedValue(undefined);
+
+    const retry = prepareDeckLibraryForOffline();
+    await flush();
+    await expect(retry).resolves.toBe("ready");
+    mounted.unmount();
+  });
+
+  it("retries after a resolved rehydrate leaves preferences unhydrated", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    const hydrated = vi.spyOn(usePreferencesStore.persist, "hasHydrated").mockReturnValue(false);
+
+    const request = prepareDeckLibraryForOffline();
+    const assertion = expect(request).rejects.toMatchObject({ kind: "unavailable" });
+    await flush();
+    await assertion;
+    hydrated.mockRestore();
+
+    const retry = prepareDeckLibraryForOffline();
+    await flush();
+    await expect(retry).resolves.toBe("ready");
+    mounted.unmount();
+  });
+
+  it("does not prepare until both explicit freshness stages settle", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockClear();
+    const rehydrate = deferred<void>();
+    const refresh = deferred<void>();
+    vi.spyOn(usePreferencesStore.persist, "rehydrate").mockImplementationOnce(async () => rehydrate.promise);
+    feedRefresh.refresh.mockImplementationOnce(async () => refresh.promise);
+
+    const request = prepareDeckLibraryForOffline();
+    await flush();
+    expect(backend.prepareDeckLibraryForOffline).not.toHaveBeenCalled();
+
+    rehydrate.resolve();
+    await flush();
+    expect(feedRefresh.refresh).toHaveBeenCalled();
+    expect(backend.prepareDeckLibraryForOffline).not.toHaveBeenCalled();
+
+    refresh.resolve();
+    await flush();
+    await expect(request).resolves.toBe("ready");
+    expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
+  it("repeats preference freshness when a newer explicit preference signal arrives during rehydration", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockClear();
+    const firstRehydrate = deferred<void>();
+    const secondRehydrate = deferred<void>();
+    const rehydrate = vi.spyOn(usePreferencesStore.persist, "rehydrate")
+      .mockImplementationOnce(async () => firstRehydrate.promise)
+      .mockImplementationOnce(async () => secondRehydrate.promise);
+
+    const request = prepareDeckLibraryForOffline();
+    await flush();
+    expect(rehydrate).toHaveBeenCalledTimes(1);
+    act(() => window.dispatchEvent(new StorageEvent("storage", {
+      key: PREFERENCES_KEY,
+      storageArea: localStorage,
+    })));
+    firstRehydrate.resolve();
+    await flush();
+    expect(backend.prepareDeckLibraryForOffline).not.toHaveBeenCalled();
+    await flush();
+    expect(rehydrate).toHaveBeenCalledTimes(2);
+    expect(backend.prepareDeckLibraryForOffline).not.toHaveBeenCalled();
+
+    secondRehydrate.resolve();
+    await flush();
+    await expect(request).resolves.toBe("ready");
+    expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
+  it("repeats feed freshness when a newer explicit feed signal arrives during refresh", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockClear();
+    feedRefresh.refresh.mockClear();
+    const firstRefresh = deferred<void>();
+    const secondRefresh = deferred<void>();
+    const refresh = feedRefresh.refresh
+      .mockImplementationOnce(async () => firstRefresh.promise)
+      .mockImplementationOnce(async () => secondRefresh.promise);
+
+    const request = prepareDeckLibraryForOffline();
+    await flush();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    act(() => window.dispatchEvent(new StorageEvent("storage", {
+      key: FEED_SUBSCRIPTIONS_KEY,
+      storageArea: localStorage,
+    })));
+    firstRefresh.resolve();
+    await flush();
+    expect(backend.prepareDeckLibraryForOffline).not.toHaveBeenCalled();
+    await flush();
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(backend.prepareDeckLibraryForOffline).not.toHaveBeenCalled();
+
+    secondRefresh.resolve();
+    await flush();
+    await expect(request).resolves.toBe("ready");
+    expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
+  it("retries stale backend fulfillment after a plain catalog input signal", async () => {
+    await hydrateFeedCache();
+    const pending = deferred<"ready">();
+    backend.prepareDeckLibraryForOffline.mockImplementationOnce(async () => pending.promise);
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+
+    const request = prepareDeckLibraryForOffline();
+    await flush();
+    await vi.waitFor(() => expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1));
+    act(() => localStorage.setItem(STORAGE_KEY_PREFIX + "Freshness", "{}"));
+    pending.resolve("ready");
+    await flush();
+    await expect(request).resolves.toBe("ready");
+    expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(2);
+    mounted.unmount();
+  });
+
+  it("forwards backend outcomes, retries typed errors, and ignores stale backend rejection", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockRejectedValueOnce(new VisualPackBackendError("network"));
+    const failed = prepareDeckLibraryForOffline();
+    const failureAssertion = expect(failed).rejects.toMatchObject({ kind: "network" });
+    await flush();
+    await failureAssertion;
+
+    const retry = prepareDeckLibraryForOffline();
+    await flush();
+    await expect(retry).resolves.toBe("ready");
+
+    backend.prepareDeckLibraryForOffline.mockResolvedValueOnce("not-installed" as never);
+    const absent = prepareDeckLibraryForOffline();
+    await flush();
+    await expect(absent).resolves.toBe("not-installed");
+
+    const pending = deferred<"ready">();
+    backend.prepareDeckLibraryForOffline.mockImplementationOnce(async () => pending.promise);
+    const stale = prepareDeckLibraryForOffline();
+    await flush();
+    act(() => localStorage.setItem(STORAGE_KEY_PREFIX + "RejectedFreshness", "{}"));
+    pending.reject(new VisualPackBackendError("network"));
+    await flush();
+    await expect(stale).resolves.toBe("ready");
+    mounted.unmount();
+  });
+
+  it("fences a deferred preference rehydrate when offline supersedes preparation", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(
+      ({ offline, feedReady }) => useDeckLibraryAutoSync(offline, feedReady),
+      { initialProps: { offline: false, feedReady: true } },
+    );
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockClear();
+    backend.setDeckLibraryBackgroundPaused.mockClear();
+    const rehydrate = deferred<void>();
+    vi.spyOn(usePreferencesStore.persist, "rehydrate").mockImplementationOnce(async () => rehydrate.promise);
+    const offline = prepareDeckLibraryForOffline();
+    const offlineAssertion = expect(offline).rejects.toMatchObject({ kind: "cancelled" });
+    await flush();
+    mounted.rerender({ offline: true, feedReady: true });
+    await offlineAssertion;
+    rehydrate.resolve();
+    await flush();
+    expect(backend.prepareDeckLibraryForOffline).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledWith(true));
+    expect(backend.setDeckLibraryBackgroundPaused).not.toHaveBeenCalledWith(false);
+    mounted.unmount();
+  });
+
+  it("fences a deferred feed refresh when feed initialization supersedes preparation", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(
+      ({ offline, feedReady }) => useDeckLibraryAutoSync(offline, feedReady),
+      { initialProps: { offline: false, feedReady: true } },
+    );
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockClear();
+    backend.setDeckLibraryBackgroundPaused.mockClear();
+    const refresh = deferred<void>();
+    feedRefresh.refresh.mockImplementationOnce(async () => refresh.promise);
+    const feedInitializing = prepareDeckLibraryForOffline();
+    const feedAssertion = expect(feedInitializing).rejects.toMatchObject({ kind: "cancelled" });
+    await flush();
+    mounted.rerender({ offline: false, feedReady: false });
+    await feedAssertion;
+    refresh.resolve();
+    await flush();
+    expect(backend.prepareDeckLibraryForOffline).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledWith(true));
+    expect(backend.setDeckLibraryBackgroundPaused).not.toHaveBeenCalledWith(false);
+    mounted.unmount();
+  });
+
+  it("fences deferred backend preparation after unmount", async () => {
+    await hydrateFeedCache();
+    const pending = deferred<"ready">();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockClear();
+    backend.prepareDeckLibraryForOffline.mockImplementationOnce(async () => pending.promise);
+    backend.setDeckLibraryBackgroundPaused.mockClear();
+
+    const request = prepareDeckLibraryForOffline();
+    const assertion = expect(request).rejects.toMatchObject({ kind: "cancelled" });
+    await flush();
+    await vi.waitFor(() => expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1));
+    mounted.unmount();
+    await assertion;
+    pending.resolve("ready");
+    await flush();
+    expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledWith(true));
+    expect(backend.setDeckLibraryBackgroundPaused).not.toHaveBeenCalledWith(false);
+  });
+
+  it("waits for ordinary reconciliation before preparation and leaves no trailing reconcile", async () => {
+    await hydrateFeedCache();
+    const ordinary = deferred<void>();
+    backend.reconcileDeckLibrary.mockImplementationOnce(async () => ordinary.promise);
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    await vi.waitFor(() => expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1));
+    const request = prepareDeckLibraryForOffline();
+    expect(backend.prepareDeckLibraryForOffline).not.toHaveBeenCalled();
+    ordinary.resolve();
+    await flush();
+    await expect(request).resolves.toBe("ready");
+    expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
+  it("absorbs real preference and feed-cache notifications produced by preparation freshness", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+    await flush();
+    backend.prepareDeckLibraryForOffline.mockClear();
+    vi.spyOn(usePreferencesStore.persist, "rehydrate").mockImplementation(async () => {
+      usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    });
+    feedRefresh.refresh.mockImplementation(async () => { await setCachedFeed("preparation", {} as never); });
+
+    const request = prepareDeckLibraryForOffline();
+    await flush();
+    await expect(request).resolves.toBe("ready");
+    expect(backend.prepareDeckLibraryForOffline).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
+  it("keeps automatic reconciliation paused while offline or feed initialization is not ready, including an aborted generation", async () => {
+    await hydrateFeedCache();
+    const offline = renderHook(() => useDeckLibraryAutoSync(true, true));
+    await flush();
+    expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledWith(true);
+    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
+    expect(feedRefresh.subscribe).not.toHaveBeenCalled();
+    backend.setDeckLibraryBackgroundPaused.mockClear();
+    await act(async () => { await setCachedFeed("offline-cache-write", {} as never); });
+    await flush();
+    expect(backend.setDeckLibraryBackgroundPaused).not.toHaveBeenCalled();
+    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
+    offline.unmount();
+
+    backend.setDeckLibraryBackgroundPaused.mockClear();
+    const pendingFeed = renderHook(() => useDeckLibraryAutoSync(false, false));
+    await flush();
+    expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledWith(true);
+    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
+    expect(feedRefresh.subscribe).not.toHaveBeenCalled();
+    pendingFeed.unmount();
+  });
+
+  it("unpauses once and starts one reconciliation only after the current feed generation settles", async () => {
+    await hydrateFeedCache();
+    const mounted = renderHook(
+      ({ ready }) => useDeckLibraryAutoSync(false, ready),
+      { initialProps: { ready: false } },
+    );
+    await flush();
+    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
+
+    mounted.rerender({ ready: true });
+    await flush();
+    expect(feedRefresh.subscribe).toHaveBeenCalledTimes(1);
+    expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenLastCalledWith(false);
+    expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
   it("waits for feed hydration, then performs the startup reconciliation once", async () => {
     const mounted = renderHook(() => useDeckLibraryAutoSync());
     await flush();
-    expect(platform.load).not.toHaveBeenCalled();
+    expect(platform.load).toHaveBeenCalledTimes(1);
+    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
 
     await act(async () => { await hydrateFeedCache(); });
     await flush();
@@ -247,7 +664,7 @@ describe("useDeckLibraryAutoSync", () => {
     expect(rehydrate).toHaveBeenCalled();
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
-    expect(rehydrate).toHaveBeenCalledTimes(1);
+    expect(rehydrate).toHaveBeenCalledTimes(2);
     mounted.unmount();
   });
 
@@ -306,18 +723,18 @@ describe("useDeckLibraryAutoSync", () => {
     await flush();
 
     expect(rehydrate).toHaveBeenCalledTimes(1);
-    expect(platform.load).not.toHaveBeenCalled();
+    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(rehydrate).toHaveBeenCalledTimes(1);
 
     hydrated.mockReturnValue(true);
     rehydrate.mockRejectedValueOnce(new Error("offline preferences"));
-    act(() => window.dispatchEvent(new Event("online")));
+    act(() => window.dispatchEvent(new StorageEvent("storage", { key: PREFERENCES_KEY, storageArea: localStorage })));
     await flush();
-    expect(platform.load).not.toHaveBeenCalled();
+    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
     expect(warning).toHaveBeenCalled();
 
-    act(() => window.dispatchEvent(new Event("online")));
+    act(() => window.dispatchEvent(new StorageEvent("storage", { key: PREFERENCES_KEY, storageArea: localStorage })));
     await flush();
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
     mounted.unmount();
@@ -425,7 +842,7 @@ describe("useDeckLibraryAutoSync", () => {
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
 
     planning.precons = {};
-    act(() => window.dispatchEvent(new Event("online")));
+    act(() => window.dispatchEvent(new StorageEvent("storage", { key: PREFERENCES_KEY, storageArea: localStorage })));
     await flush();
 
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(2);
@@ -443,9 +860,58 @@ describe("useDeckLibraryAutoSync", () => {
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
     expect(warning).toHaveBeenCalled();
 
-    act(() => window.dispatchEvent(new Event("online")));
+    act(() => window.dispatchEvent(new StorageEvent("storage", { key: PREFERENCES_KEY, storageArea: localStorage })));
     await flush();
     expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(2);
+    mounted.unmount();
+  });
+
+  it("retries one failed lifecycle unpause only after a later catalog signal", async () => {
+    await hydrateFeedCache();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    backend.setDeckLibraryBackgroundPaused.mockRejectedValueOnce(new Error("lifecycle unavailable"));
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+
+    await flush();
+    expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledTimes(1);
+    expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenLastCalledWith(false);
+    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledTimes(1);
+
+    act(() => localStorage.setItem(STORAGE_KEY_PREFIX + "RetryDeck", "{}"));
+    await flush();
+    await flush();
+
+    expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledTimes(2);
+    expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenLastCalledWith(false);
+    expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
+    mounted.unmount();
+  });
+
+  it("keeps catalog signals received during a pending lifecycle acquisition for one coalesced retry", async () => {
+    await hydrateFeedCache();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let rejectUnpause!: (error: Error) => void;
+    const pendingUnpause = new Promise<void>((_resolve, reject) => { rejectUnpause = reject; });
+    backend.setDeckLibraryBackgroundPaused.mockImplementationOnce(async () => pendingUnpause);
+    const mounted = renderHook(() => useDeckLibraryAutoSync());
+
+    await vi.waitFor(() => expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledTimes(1));
+    act(() => {
+      localStorage.setItem(STORAGE_KEY_PREFIX + "PendingRetryOne", "{}");
+      localStorage.setItem(STORAGE_KEY_PREFIX + "PendingRetryTwo", "{}");
+    });
+    await act(async () => { rejectUnpause(new Error("lifecycle unavailable")); });
+    await flush();
+    await flush();
+
+    expect(warning).toHaveBeenCalled();
+    expect(platform.load).toHaveBeenCalledTimes(1);
+    expect(backend.setDeckLibraryBackgroundPaused).toHaveBeenCalledTimes(2);
+    expect(backend.reconcileDeckLibrary).toHaveBeenCalledTimes(1);
     mounted.unmount();
   });
 
@@ -456,7 +922,7 @@ describe("useDeckLibraryAutoSync", () => {
     await flush();
     act(() => localStorage.setItem(STORAGE_KEY_PREFIX + "Deck", "{}"));
     await flush();
-    expect(platform.load).not.toHaveBeenCalled();
+    expect(backend.reconcileDeckLibrary).not.toHaveBeenCalled();
   });
 
   it("does not begin reconciliation after unmounting during backend load or preference rehydration", async () => {
@@ -515,8 +981,8 @@ describe("useDeckLibraryAutoSync", () => {
   it("wires the nonvisual coordinator exactly once in AppContent", () => {
     const source = readFileSync(resolve(process.cwd(), "src/App.tsx"), "utf8");
     expect(source).toMatch(/import \{ useDeckLibraryAutoSync \} from "\.\/services\/visualPacks\/deckLibraryAutoSync"/);
-    expect(source.match(/useDeckLibraryAutoSync\(\);/g)).toHaveLength(1);
+    expect(source.match(/useDeckLibraryAutoSync\(effectiveOffline, feedInitializationReady\);/g)).toHaveLength(1);
     expect(source.indexOf("useCloudSyncStore.getState().init()"))
-      .toBeLessThan(source.indexOf("useDeckLibraryAutoSync();"));
+      .toBeLessThan(source.indexOf("useDeckLibraryAutoSync(effectiveOffline, feedInitializationReady);"));
   });
 });

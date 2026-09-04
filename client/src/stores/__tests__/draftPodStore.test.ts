@@ -13,9 +13,16 @@ const mocks = vi.hoisted(() => ({
     phase: "idle",
     roomCode: null as string | null,
     hostDraft: vi.fn<(config: unknown) => Promise<boolean>>(async () => true),
+    joinDraft: vi.fn<(config: unknown) => Promise<boolean>>(async () => true),
   },
+  // Shaped like the real store's source model: `configuredBackupEndpoint`
+  // reads `hostingServer`, so a mock still carrying `serverAddress` would
+  // feed it `undefined` and the assertions below would pass for the wrong
+  // reason.
   multiplayerConfig: {
-    serverAddress: "wss://phase.example/ws",
+    hostingServer: "wss://phase.example/ws" as string | null,
+    userLobbySources: [],
+    sourceStatus: new Map(),
   },
 }));
 
@@ -29,6 +36,7 @@ vi.mock("../../services/draftPersistence", () => ({
 }));
 
 vi.mock("../multiplayerDraftStore", () => ({
+  DRAFT_OFFLINE_ERROR: "offline.startUnavailable",
   useMultiplayerDraftStore: {
     getState: () => mocks.multiplayerState,
   },
@@ -54,6 +62,7 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => ({
 }));
 
 import { useDraftPodStore } from "../draftPodStore";
+import { useConnectivityStore } from "../connectivityStore";
 
 const activeMeta = {
   id: "draft-1",
@@ -106,12 +115,33 @@ describe("draftPodStore", () => {
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.roomCode = null;
     mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
-    mocks.multiplayerConfig.serverAddress = "wss://phase.example/ws";
+    mocks.multiplayerState.joinDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
+    mocks.multiplayerConfig.hostingServer = "wss://phase.example/ws";
     mocks.persistedDraftHostSessionState.mockReturnValue("live");
     mocks.inspectActiveDraftPod.mockReturnValue({
       type: "absent",
     });
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
     useDraftPodStore.getState().reset();
+  });
+
+  describe("offline orchestration boundary", () => {
+    it.each([
+      ["procedure entry", () => useDraftPodStore.getState().enterKind("Premier")],
+      ["procedure refresh", () => useDraftPodStore.getState().refreshProcedure()],
+      ["pod creation", () => useDraftPodStore.getState().createPod()],
+      ["pod join", () => useDraftPodStore.getState().joinPod()],
+      ["draft start", () => useDraftPodStore.getState().startDraft()],
+      ["host recovery", () => useDraftPodStore.getState().resumeHostedPod()],
+    ])("does not begin %s while effective offline", async (_label, run) => {
+      useConnectivityStore.setState({ forcedOffline: true });
+
+      await run();
+
+      expect(mocks.draftProcedure).not.toHaveBeenCalled();
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
+    });
   });
 
   describe("enterKind", () => {
@@ -676,6 +706,48 @@ describe("draftPodStore", () => {
       expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ["offline", () => {
+        useConnectivityStore.setState({ forcedOffline: true });
+        throw new Error("IndexedDB unavailable");
+      }, "offline", "offline.startUnavailable"],
+      ["ordinary", () => { throw new Error("IndexedDB unavailable"); }, "invalid", "IndexedDB unavailable"],
+    ])("maps a rejected host session read by current ownership before %s handling", async (_label, reject, outcome, error) => {
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockImplementationOnce(async () => reject());
+
+      await expect(useDraftPodStore.getState().resumeHostedPod()).resolves.toBe(outcome);
+
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().configError).toBe(error);
+    });
+
+    it.each([
+      ["forced offline", { forcedOffline: true, browserOnline: true }],
+      ["browser offline", { forcedOffline: false, browserOnline: false }],
+    ] as const)("returns offline after a fulfilled hosted session read becomes %s", async (_label, connectivity) => {
+      let resolveSession!: (session: typeof persistedSession) => void;
+      mocks.inspectActiveDraftPod.mockReturnValue({
+        type: "present",
+        meta: activeMeta,
+        capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt },
+      });
+      mocks.loadDraftHostSession.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveSession = resolve;
+      }));
+
+      const resuming = useDraftPodStore.getState().resumeHostedPod();
+      await vi.waitFor(() => expect(mocks.loadDraftHostSession).toHaveBeenCalledOnce());
+      useConnectivityStore.setState(connectivity);
+      resolveSession(persistedSession);
+
+      await expect(resuming).resolves.toBe("offline");
+      expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+      expect(mocks.draftProcedure).not.toHaveBeenCalled();
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+
     it("deduplicates concurrent resume calls for the same hosted pod", async () => {
       let resolveSession!: (session: typeof persistedSession) => void;
       const sessionPromise = new Promise<typeof persistedSession>((resolve) => {
@@ -928,6 +1000,30 @@ describe("draftPodStore", () => {
       expect(dispatched.poolInput.data.cube_name).toBe("Test Cube");
       expect(dispatched.poolInput.data.cube_list_text).toBe("1 Lightning Bolt\n");
       expect((dispatched as { backupEndpoint?: string }).backupEndpoint).toBe("https://phase.example");
+    });
+
+    it("surfaces a current false host result for cube creation", async () => {
+      mocks.multiplayerState.hostDraft.mockResolvedValueOnce(false);
+      useDraftPodStore.setState({
+        poolMode: "cube",
+        cubeForm: {
+          cubeName: "Test Cube",
+          cubeListText: "1 Lightning Bolt\n",
+          settings: {
+            pod_size: 2,
+            pack_count: 1,
+            cards_per_pack: 2,
+            min_deck_size: 4,
+            addable_cards: { policy: "StandardBasics", custom: [] },
+          },
+        },
+        hostDisplayName: "Host",
+      });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      expect(useDraftPodStore.getState().configError).toBe("Unable to host draft pod");
     });
   });
 
@@ -1235,6 +1331,223 @@ describe("draftPodStore", () => {
       });
       await olderCreation;
       expect(useDraftPodStore.getState().loadingPool).toBe(false);
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("offline deferred orchestration settlement", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    function configureSetPod() {
+      useDraftPodStore.setState((prev) => ({
+        config: {
+          ...prev.config,
+          packs: [{ code: "TST", name: "Test Set" }],
+          setCode: "TST",
+        },
+        hostDisplayName: "Host",
+      }));
+    }
+
+    function procedure() {
+      return {
+        pod_size: 8,
+        human_seats: 1,
+        min_pod_size: 2,
+        max_pod_size: 8,
+        allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
+        packs_per_player: 3,
+        cards_per_pick: 1,
+        distribution: "PickAndPass",
+        min_deck_size: 40,
+        post_draft_play: "TournamentPairings",
+        match_config: { best_of: 3 },
+      };
+    }
+
+    it.each([
+      ["fulfillment", (resolve: (value: ReturnType<typeof procedure>) => void, _reject: (reason: Error) => void) => resolve(procedure())],
+      ["rejection", (_resolve: (value: ReturnType<typeof procedure>) => void, reject: (reason: Error) => void) => reject(new Error("wasm unavailable"))],
+    ])("keeps an offline procedure %s from starting pool work", async (_label, settle) => {
+      let resolveProcedure!: (value: ReturnType<typeof procedure>) => void;
+      let rejectProcedure!: (reason: Error) => void;
+      mocks.draftProcedure.mockImplementationOnce(() => new Promise((resolve, reject) => {
+        resolveProcedure = resolve;
+        rejectProcedure = reject;
+      }));
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      configureSetPod();
+
+      const creating = useDraftPodStore.getState().createPod();
+      await Promise.resolve();
+      expect(mocks.draftProcedure).toHaveBeenCalledOnce();
+      useConnectivityStore.setState({ forcedOffline: true });
+      settle(resolveProcedure, rejectProcedure);
+
+      await creating;
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
+    });
+
+    it("stops after a held pool response becomes offline", async () => {
+      let resolveResponse!: (response: { ok: boolean; status: number; json: () => Promise<Record<string, unknown>> }) => void;
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      const fetchMock = vi.fn(() => new Promise((resolve) => { resolveResponse = resolve; }));
+      vi.stubGlobal("fetch", fetchMock);
+      configureSetPod();
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      useConnectivityStore.setState({ browserOnline: false });
+      resolveResponse({ ok: true, status: 200, json: async () => ({ tst: { code: "TST" } }) });
+
+      await creating;
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState()).toMatchObject({ loadingPool: false, configError: "offline.startUnavailable" });
+    });
+
+    it("stops after a held pool JSON parse becomes offline", async () => {
+      let resolveJson!: (value: Record<string, unknown>) => void;
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: () => new Promise((resolve) => { resolveJson = resolve; }),
+      })));
+      configureSetPod();
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(resolveJson).toBeTypeOf("function"));
+      useConnectivityStore.setState({ forcedOffline: true });
+      resolveJson({ tst: { code: "TST" } });
+
+      await creating;
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState()).toMatchObject({ loadingPool: false, configError: "offline.startUnavailable" });
+    });
+
+    it.each([
+      ["response", { browserOnline: false }],
+      ["JSON", { forcedOffline: true }],
+    ] as const)("maps a rejected pool %s read to offline after connectivity changes", async (stage, connectivity) => {
+      let rejectRead!: (reason: Error) => void;
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      if (stage === "response") {
+        vi.stubGlobal("fetch", vi.fn(() => new Promise((_resolve, reject) => { rejectRead = reject; })));
+      } else {
+        vi.stubGlobal("fetch", vi.fn(async () => ({
+          ok: true,
+          status: 200,
+          json: () => new Promise((_resolve, reject) => { rejectRead = reject; }),
+        })));
+      }
+      configureSetPod();
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(rejectRead).toBeTypeOf("function"));
+      useConnectivityStore.setState(connectivity);
+      rejectRead(new Error(`${stage} unavailable`));
+
+      await creating;
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState()).toMatchObject({ loadingPool: false, configError: "offline.startUnavailable" });
+    });
+
+    it("maps a current false host result to offline after set-pool creation", async () => {
+      let resolveHost!: (value: boolean) => void;
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ tst: { code: "TST" } }) })));
+      mocks.multiplayerState.hostDraft.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveHost = resolve;
+      }));
+      configureSetPod();
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce());
+      useConnectivityStore.setState({ forcedOffline: true });
+      resolveHost(false);
+
+      await creating;
+      expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
+    });
+
+    it("maps a current false guest join result to offline", async () => {
+      let resolveJoin!: (value: boolean) => void;
+      mocks.multiplayerState.joinDraft.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveJoin = resolve;
+      }));
+      useDraftPodStore.setState({ joinCode: "ABCDE", guestDisplayName: "Alice" });
+
+      const joining = useDraftPodStore.getState().joinPod();
+      await vi.waitFor(() => expect(mocks.multiplayerState.joinDraft).toHaveBeenCalledOnce());
+      useConnectivityStore.setState({ browserOnline: false });
+      resolveJoin(false);
+
+      await joining;
+      expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
+    });
+
+    it("retires a stale pool spinner when a newer public orchestration starts", async () => {
+      let resolveResponse!: (response: { ok: boolean; status: number; json: () => Promise<Record<string, unknown>> }) => void;
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      const fetchMock = vi.fn(() => new Promise((resolve) => { resolveResponse = resolve; }));
+      vi.stubGlobal("fetch", fetchMock);
+      configureSetPod();
+
+      const creating = useDraftPodStore.getState().createPod();
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      expect(useDraftPodStore.getState().loadingPool).toBe(true);
+
+      await useDraftPodStore.getState().refreshProcedure();
+      expect(useDraftPodStore.getState().loadingPool).toBe(false);
+      resolveResponse({ ok: true, status: 200, json: async () => ({ tst: { code: "TST" } }) });
+      await creating;
+
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+
+    it.each(["fulfillment", "rejection"] as const)("keeps a stale procedure %s from overwriting a newer offline join", async (settlement) => {
+      let resolveProcedure!: (value: ReturnType<typeof procedure>) => void;
+      let rejectProcedure!: (reason: Error) => void;
+      mocks.draftProcedure.mockImplementationOnce(() => new Promise((resolve, reject) => {
+        resolveProcedure = resolve;
+        rejectProcedure = reject;
+      }));
+      let resolveJoin!: (value: boolean) => void;
+      mocks.multiplayerState.joinDraft.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveJoin = resolve;
+      }));
+
+      const entering = useDraftPodStore.getState().enterKind("CommanderDraft");
+      await vi.waitFor(() => expect(mocks.draftProcedure).toHaveBeenCalledOnce());
+      useDraftPodStore.getState().setJoinCode("ABCDE");
+      useDraftPodStore.getState().setGuestDisplayName("Alice");
+      const joining = useDraftPodStore.getState().joinPod();
+      await vi.waitFor(() => expect(mocks.multiplayerState.joinDraft).toHaveBeenCalledOnce());
+
+      useConnectivityStore.setState({ forcedOffline: true });
+      resolveJoin(false);
+      await joining;
+      const newerOffline = useDraftPodStore.getState();
+      expect(newerOffline).toMatchObject({
+        config: { kind: "CommanderDraft" },
+        loadingPool: false,
+        configError: "offline.startUnavailable",
+      });
+
+      if (settlement === "fulfillment") resolveProcedure(procedure());
+      else rejectProcedure(new Error("stale procedure failure"));
+      await entering;
+
+      expect(useDraftPodStore.getState()).toMatchObject({
+        config: newerOffline.config,
+        loadingPool: false,
+        configError: "offline.startUnavailable",
+      });
       expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
     });
   });

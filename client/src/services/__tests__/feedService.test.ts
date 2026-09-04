@@ -28,17 +28,22 @@ import {
   unsubscribe,
   getDeckFeedOrigin,
   refreshFeed,
+  refreshAllFeeds,
   adoptFeedDeck,
   feedDeckToParsedDeck,
   listSubscriptions,
   getCachedFeed,
   getFeedDecksByFeed,
+  FEED_ERROR_KEYS,
 } from "../feedService";
-import { _resetFeedCacheForTests } from "../feedPersistence";
+import { _resetFeedCacheForTests, setCachedFeed } from "../feedPersistence";
 import {
   STORAGE_KEY_PREFIX,
   ACTIVE_DECK_KEY,
+  FEED_SUBSCRIPTIONS_KEY,
 } from "../../constants/storage";
+import { set as idbSet, entries as idbEntries } from "idb-keyval";
+import { useConnectivityStore } from "../../stores/connectivityStore";
 
 const STARTER_FEED = {
   id: "starter-decks",
@@ -115,6 +120,7 @@ beforeEach(() => {
   getIdbDb().clear();
   _resetFeedCacheForTests();
   vi.restoreAllMocks();
+  useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
 });
 
 describe("validateFeed", () => {
@@ -218,6 +224,12 @@ function mockFetchByUrl(feedMap: Record<string, unknown>) {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe("initializeFeeds", () => {
   it("subscribes to bundled feeds and seeds decks on first run", async () => {
     mockFetchByUrl(ALL_BUNDLED_FEEDS);
@@ -263,6 +275,132 @@ describe("initializeFeeds", () => {
     const raw = localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")!;
     const deck = JSON.parse(raw);
     expect(deck.main[0].name).toBe("User Card");
+  });
+
+  it("hydrates and publishes every cached subscription offline without fetching or mutating subscriptions", async () => {
+    const cached = { ...VALID_FEED, id: "cached" };
+    await setCachedFeed("cached", cached);
+    const subscriptions = [{
+      sourceId: "cached",
+      url: "https://example.com/cached.json",
+      type: "remote" as const,
+      subscribedAt: 1,
+      lastRefreshedAt: 0,
+      lastVersion: 1,
+      error: "previous failure",
+    }];
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify(subscriptions));
+    global.fetch = vi.fn().mockRejectedValue(new Error("offline"));
+
+    await initializeFeeds({ allowRefresh: false });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).not.toBeNull();
+    expect(getDeckFeedOrigin("Test Deck")).toBe("cached");
+    expect(JSON.parse(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)!)).toEqual(subscriptions);
+  });
+
+  it("hydrates durable cached subscriptions from a cold offline start without fetching", async () => {
+    const cached = { ...VALID_FEED, id: "cached" };
+    getIdbDb().set("cached", cached);
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([{
+      sourceId: "cached",
+      url: "https://example.com/cached.json",
+      type: "remote",
+      subscribedAt: 1,
+      lastRefreshedAt: 0,
+      lastVersion: 1,
+    }]));
+    global.fetch = vi.fn();
+
+    await initializeFeeds({ allowRefresh: false });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(getCachedFeed("cached")).toEqual(cached);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).not.toBeNull();
+    expect(getDeckFeedOrigin("Test Deck")).toBe("cached");
+  });
+
+  it("does not commit a deferred online fetch after its generation is aborted", async () => {
+    const fetching = deferred<Response>();
+    global.fetch = vi.fn(() => fetching.promise);
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ signal: controller.signal });
+
+    await vi.waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    controller.abort();
+    fetching.resolve(new Response(JSON.stringify(STARTER_FEED), { status: 200 }));
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(getCachedFeed("starter-decks")).toBeNull();
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    expect(listSubscriptions()).toEqual([]);
+  });
+
+  it("uses stale cached data after an ordinary online refresh failure", async () => {
+    const cached = { ...VALID_FEED, id: "cached" };
+    await setCachedFeed("cached", cached);
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([{
+      sourceId: "cached",
+      url: "https://example.com/cached.json",
+      type: "remote",
+      subscribedAt: 1,
+      lastRefreshedAt: 0,
+      lastVersion: 1,
+    }]));
+    mockFetch({}, false);
+
+    await initializeFeeds();
+
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).not.toBeNull();
+    expect(getDeckFeedOrigin("Test Deck")).toBe("cached");
+  });
+
+  it("stops after hydration when an aborted generation was waiting for the durable cache", async () => {
+    const cached = { ...VALID_FEED, id: "cached" };
+    getIdbDb().set("cached", cached);
+    const subscriptions = [{
+      sourceId: "cached",
+      url: "https://example.com/cached.json",
+      type: "remote",
+      subscribedAt: 1,
+      lastRefreshedAt: 0,
+      lastVersion: 1,
+    }];
+    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify(subscriptions));
+    const reading = deferred<Array<[IDBValidKey, unknown]>>();
+    vi.mocked(idbEntries).mockReturnValueOnce(reading.promise);
+    global.fetch = vi.fn();
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ signal: controller.signal });
+
+    controller.abort();
+    reading.resolve([["cached", cached]]);
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(getCachedFeed("cached")).toEqual(cached);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    expect(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)).toBe(JSON.stringify(subscriptions));
+  });
+
+  it("finishes a staged local publication after aborting while cache persistence is pending", async () => {
+    const persisting = deferred<void>();
+    vi.mocked(idbSet).mockClear();
+    vi.mocked(idbSet).mockReturnValueOnce(persisting.promise);
+    mockFetch(STARTER_FEED);
+    const controller = new AbortController();
+    const initialization = initializeFeeds({ signal: controller.signal });
+
+    await vi.waitFor(() => expect(vi.mocked(idbSet)).toHaveBeenCalled());
+    controller.abort();
+    persisting.resolve();
+
+    await expect(initialization).rejects.toMatchObject({ name: "AbortError" });
+    expect(getCachedFeed("starter-decks")).not.toBeNull();
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).not.toBeNull();
+    expect(listSubscriptions()).toHaveLength(1);
+    expect(getDeckFeedOrigin("Test Deck")).toBe("starter-decks");
   });
 });
 
@@ -324,6 +462,64 @@ describe("subscribe", () => {
     await expect(subscribe("https://example.com/404.json")).rejects.toThrow(
       "Failed to fetch feed",
     );
+  });
+});
+
+describe("manual feed actions while offline", () => {
+  it("rejects registry and custom subscriptions without fetching or persisting", async () => {
+    const fetch = vi.fn();
+    global.fetch = fetch;
+    useConnectivityStore.getState().setForcedOffline(true);
+
+    await expect(subscribe("starter-decks")).rejects.toThrow(FEED_ERROR_KEYS.offline);
+    await expect(subscribe("https://example.com/feed.json")).rejects.toThrow(FEED_ERROR_KEYS.offline);
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(listSubscriptions()).toEqual([]);
+    expect(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)).toBeNull();
+    expect(getIdbDb().size).toBe(0);
+  });
+
+  it("preserves validation precedence and cached subscription state while offline", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+    const beforeSubscriptions = localStorage.getItem(FEED_SUBSCRIPTIONS_KEY);
+    const beforeDeck = localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck");
+    const beforeCache = getCachedFeed("test-feed");
+    const fetch = vi.fn();
+    global.fetch = fetch;
+    useConnectivityStore.getState().setForcedOffline(true);
+
+    await expect(refreshFeed("missing-feed")).rejects.toThrow('Not subscribed to feed "missing-feed"');
+    await expect(refreshFeed("test-feed")).rejects.toThrow(FEED_ERROR_KEYS.offline);
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)).toBe(beforeSubscriptions);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBe(beforeDeck);
+    expect(getCachedFeed("test-feed")).toEqual(beforeCache);
+  });
+
+  it("returns per-feed offline errors without mutating subscriptions, and still unsubscribes locally", async () => {
+    mockFetch(VALID_FEED);
+    await subscribe("https://example.com/feed.json");
+    const beforeSubscriptions = localStorage.getItem(FEED_SUBSCRIPTIONS_KEY);
+    const beforeDeck = localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck");
+    const fetch = vi.fn();
+    global.fetch = fetch;
+    useConnectivityStore.getState().setForcedOffline(true);
+
+    const results = await refreshAllFeeds();
+
+    expect(results.get("test-feed")).toMatchObject({ message: FEED_ERROR_KEYS.offline });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)).toBe(beforeSubscriptions);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBe(beforeDeck);
+
+    unsubscribe("test-feed");
+
+    expect(listSubscriptions()).toEqual([]);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).toBeNull();
+    expect(getCachedFeed("test-feed")).toBeNull();
   });
 });
 

@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 import { isDesktopTauri } from "./platform";
+import { getEffectiveOffline } from "../stores/connectivityStore";
 
 export type NativeEngineKey =
   | { release: { version: string } }
@@ -62,6 +63,37 @@ export function canAttemptNativeEngine(enabled: boolean): boolean {
  */
 let provisioningCalls = 0;
 const provisioningListeners = new Set<() => void>();
+let tauriInvoke: Promise<typeof import("@tauri-apps/api/core").invoke> | null = null;
+
+type NativeEngineIntent = "start_offline" | "prepare_for_offline";
+
+interface NativeEngineCapabilities {
+  intent_contract: 1;
+}
+
+// A desktop shell and its remote web content release independently. Cache the
+// read-only contract probe so a shell that predates intent support fails before
+// it receives an unfamiliar `ensure_native_engine` argument.
+let intentCapabilities: Promise<void> | null = null;
+
+function invokeTauri<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  tauriInvoke ??= import("@tauri-apps/api/core").then(({ invoke }) => invoke);
+  return tauriInvoke.then((invoke) =>
+    args === undefined ? invoke<T>(command) : invoke<T>(command, args),
+  );
+}
+
+function requireIntentCapabilities(): Promise<void> {
+  if (intentCapabilities) return intentCapabilities;
+
+  intentCapabilities = (async () => {
+    const capability = await invokeTauri<NativeEngineCapabilities>("native_engine_capabilities");
+    if (capability?.intent_contract !== 1) {
+      throw new Error("This desktop shell does not support native-engine offline preparation.");
+    }
+  })();
+  return intentCapabilities;
+}
 
 function setProvisioningCalls(next: number): void {
   provisioningCalls = next;
@@ -83,17 +115,36 @@ export function useNativeEngineProvisioning(): boolean {
 }
 
 /** Feature-detects the shell command at invocation time for plain-web fallback. */
-export async function ensureNativeEngine(key: NativeEngineKey): Promise<NativeEngineReady> {
+async function invokeNativeEngine(
+  key: NativeEngineKey,
+  intent?: NativeEngineIntent,
+): Promise<NativeEngineReady> {
   if (!isDesktopTauri()) {
     throw new Error("Native engine provisioning is available only in the desktop shell.");
   }
   setProvisioningCalls(provisioningCalls + 1);
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<NativeEngineReady>("ensure_native_engine", { key });
+    if (intent) await requireIntentCapabilities();
+    return await invokeTauri<NativeEngineReady>(
+      "ensure_native_engine",
+      intent ? { key, intent } : { key },
+    );
   } finally {
     setProvisioningCalls(provisioningCalls - 1);
   }
+}
+
+/**
+ * Ensures the local engine for the current connectivity policy. Online startup
+ * intentionally preserves the legacy omitted-intent payload for older shells.
+ */
+export function ensureNativeEngine(key: NativeEngineKey): Promise<NativeEngineReady> {
+  return invokeNativeEngine(key, getEffectiveOffline() ? "start_offline" : undefined);
+}
+
+/** Explicit desktop preparation used by the offline settings flow. */
+export function prepareNativeEngineForOffline(key: NativeEngineKey): Promise<NativeEngineReady> {
+  return invokeNativeEngine(key, "prepare_for_offline");
 }
 
 /** Returns progress emitted before this webview registered its listener. */

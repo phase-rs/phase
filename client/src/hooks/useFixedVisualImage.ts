@@ -7,6 +7,7 @@ import type {
   CandidateKey,
   CardImageSource,
 } from "../services/visualPacks/types.ts";
+import { useEffectiveOffline } from "../stores/connectivityStore.ts";
 import { nextImageSourceIndex } from "./imageSourceLadder.ts";
 
 export interface UseFixedVisualImageResult {
@@ -24,12 +25,13 @@ export function useFixedVisualImage(
   candidate: CandidateKey | null,
   remoteSrc: string | null,
 ): UseFixedVisualImageResult {
+  const effectiveOffline = useEffectiveOffline();
   const [repositoryRevision, setRepositoryRevision] = useState(
     visualPackRepository.currentRevision(),
   );
   const requestKey = useMemo(
-    () => JSON.stringify([candidate, remoteSrc, repositoryRevision]),
-    [candidate, remoteSrc, repositoryRevision],
+    () => JSON.stringify([candidate, remoteSrc, effectiveOffline, repositoryRevision]),
+    [candidate, remoteSrc, effectiveOffline, repositoryRevision],
   );
   const [stateRequestKey, setStateRequestKey] = useState<string | null>(null);
   const [sources, setSources] = useState<CardImageSource[]>([]);
@@ -62,6 +64,7 @@ export function useFixedVisualImage(
     void visualPackRepository.resolve({
       groups: [{ requested: [candidate] }],
       rung: "normal",
+      allowRemote: !effectiveOffline,
       remote: remoteSrc ? { src: remoteSrc } : null,
     }).then((result) => {
       if (cancelled) return;
@@ -73,7 +76,7 @@ export function useFixedVisualImage(
     return () => {
       cancelled = true;
     };
-  }, [candidate, remoteSrc, requestKey]);
+  }, [candidate, effectiveOffline, remoteSrc, requestKey]);
 
   const advanceFailedSource = useCallback((failedSrc: string) => {
     if (failedSources.current.generation !== requestKey) return;

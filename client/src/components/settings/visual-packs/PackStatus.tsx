@@ -58,6 +58,7 @@ interface PackStatusProps {
   removal: RemovalResponse | null;
   pendingActions: ReadonlySet<string>;
   durableMutationActive: boolean;
+  networkActionsDisabled: boolean;
   onVerify(mode: "metadata" | "full"): void;
   onRepair(ids: PackId[]): void;
   onRemoveSelected(ids: PackId[], launcher: HTMLButtonElement): void;
@@ -73,6 +74,7 @@ export function PackStatus({
   removal,
   pendingActions,
   durableMutationActive,
+  networkActionsDisabled,
   onVerify,
   onRepair,
   onRemoveSelected,
@@ -144,7 +146,7 @@ export function PackStatus({
       <div className="flex flex-wrap gap-2">
         <button type="button" disabled={pendingActions.has("verify:metadata")} onClick={() => onVerify("metadata")} className="min-h-11 rounded-[12px] border border-white/15 px-3 text-sm text-slate-100 disabled:opacity-40">{t("visualPacks.actions.verifyMetadata")}</button>
         <button type="button" disabled={pendingActions.has("verify:full")} onClick={() => onVerify("full")} className="min-h-11 rounded-[12px] border border-white/15 px-3 text-sm text-slate-100 disabled:opacity-40">{t("visualPacks.actions.verifyFull")}</button>
-        <button type="button" disabled={durableMutationActive || mutationPending || selectedIds.length === 0} onClick={() => onRepair(selectedIds)} className="min-h-11 rounded-[12px] border border-sky-400/40 px-3 text-sm text-sky-100 disabled:opacity-40">{t("visualPacks.actions.repair")}</button>
+        <button type="button" disabled={networkActionsDisabled || durableMutationActive || mutationPending || selectedIds.length === 0} onClick={() => onRepair(selectedIds)} className="min-h-11 rounded-[12px] border border-sky-400/40 px-3 text-sm text-sky-100 disabled:opacity-40">{t("visualPacks.actions.repair")}</button>
         <button type="button" disabled={durableMutationActive || mutationPending || selectedIds.length === 0} onClick={(event) => onRemoveSelected(selectedIds, event.currentTarget)} className="min-h-11 rounded-[12px] border border-rose-400/40 px-3 text-sm text-rose-100 disabled:opacity-40">{t("visualPacks.actions.removeSelected")}</button>
         <button type="button" disabled={durableMutationActive || mutationPending} onClick={(event) => onRemoveComplete(event.currentTarget)} className="min-h-11 rounded-[12px] border border-rose-400/40 px-3 text-sm text-rose-100 disabled:opacity-40">{t("visualPacks.actions.removeComplete")}</button>
         <button type="button" disabled={durableMutationActive || mutationPending} onClick={(event) => onRemoveAll(event.currentTarget)} className="min-h-11 rounded-[12px] border border-rose-400/40 px-3 text-sm text-rose-100 disabled:opacity-40">{t("visualPacks.actions.removeAll")}</button>

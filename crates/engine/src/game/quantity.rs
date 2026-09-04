@@ -6481,9 +6481,16 @@ where
         // chosen-target anaphor ("that creature's power" on a targeted grant —
         // Xenagos, God of Revels) is rebound to `ObjectScope::Target` at the
         // parser/lowering seam (`apply_where_x_continuous_modification`), so it
-        // never reaches this arm. `CostPaidObject` stays the specific
-        // cost/trigger/effect-context object (Greater Good, sacrifice-cost and
-        // trigger-event power refs depend on this).
+        // never reaches this arm. Likewise, "that creature's power" anaphoring
+        // a PARENT effect's own object target rather than a cost/trigger
+        // referent (Azog, Moria's Ruin's "its controller amasses Goblins X,
+        // where X is that creature's power" — "that creature" is the "destroy
+        // up to one other target creature" clause's own target, which may
+        // still be alive if the destroy was replaced or prevented) is rebound
+        // the same way, via `try_parse_amass`'s
+        // `rebind_cost_paid_object_pt_to_target` call. `CostPaidObject` stays
+        // the specific cost/trigger/effect-context object (Greater Good,
+        // sacrifice-cost and trigger-event power refs depend on this).
         ObjectScope::CostPaidObject => ability
             .and_then(|a| a.cost_paid_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))

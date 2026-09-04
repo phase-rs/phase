@@ -6,8 +6,11 @@
 //! ordered `Vec<Outbound>` of side effects for the transport shell to perform.
 //! No tokio, no axum, no `SystemTime`, no `rand` — so the identical logic runs
 //! in the native `phase-server` shell and a Cloudflare Durable Object (WASM).
+//! [`directory`] shares that same no-I/O constraint: it is the server-directory
+//! contract both shells (and, later, the client's TypeScript mirror) apply.
 
 pub mod broker;
+pub mod directory;
 pub mod env;
 pub mod inbound_guard;
 pub mod lobby;
@@ -19,6 +22,13 @@ pub mod validation;
 pub use broker::{
     check_build_commit, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Outbound,
     MAX_LOBBY_ENTRIES,
+};
+pub use directory::{
+    compare_announcement_to_info, info_url, normalize_announced_url, score, validate_announcement,
+    AnnouncedUrl, CounterBucket, InfoMatch, InfoMismatchField, RawAnnouncement, Score,
+    ServerAnnouncement, ServerCounters, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH,
+    MAX_ANNOUNCED_PLAYERS, MAX_SERVER_NAME_LEN, MAX_SERVER_URL_LEN, RTT_BUCKET_EDGES_MS,
+    SCORE_BUCKET_MS, SCORE_MIN_SAMPLES, SCORE_WINDOW_MS,
 };
 pub use env::BrokerEnv;
 pub use inbound_guard::{

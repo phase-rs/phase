@@ -16,6 +16,7 @@ import {
   useVisualPackManager,
   type FrozenConfirmation,
 } from "./useVisualPackManager.ts";
+import { useEffectiveOffline } from "../../../stores/connectivityStore.ts";
 
 function errorKey(kind: VisualPackErrorKind): string {
   switch (kind) {
@@ -70,6 +71,7 @@ function confirmationKeys(confirmation: FrozenConfirmation): { title: string; me
 
 export function VisualPackManager() {
   const { t, i18n } = useTranslation("settings");
+  const networkActionsDisabled = useEffectiveOffline();
   const manager = useVisualPackManager();
   const confirmationLauncherRef = useRef<HTMLButtonElement>(null);
   const durableFocusRef = useRef<HTMLHeadingElement>(null);
@@ -98,6 +100,7 @@ export function VisualPackManager() {
           {t("visualPacks.title")}
         </h3>
         <p className="mt-2 text-xs leading-relaxed text-slate-400">{t("visualPacks.description")}</p>
+        {networkActionsDisabled && <p className="mt-2 text-xs leading-relaxed text-amber-200">{t("visualPacks.offlineUnavailable")}</p>}
       </div>
       <div aria-live="polite" className="flex flex-col gap-4">
         {manager.availability.kind === "loading" && <p className="text-sm text-slate-300">{t("visualPacks.availability.loading")}</p>}
@@ -123,14 +126,14 @@ export function VisualPackManager() {
             <p className="text-sm text-amber-200">
               {t(manager.availability.kind === "empty" ? "visualPacks.availability.empty" : "visualPacks.availability.invalid")}
             </p>
-            <button type="button" disabled={manager.pendingActions.has("refresh")} onClick={manager.refresh} className="min-h-11 rounded-[12px] border border-sky-400/50 px-4 text-sm text-sky-100 disabled:opacity-40">
+            <button type="button" disabled={networkActionsDisabled || manager.pendingActions.has("refresh")} onClick={manager.refresh} className="min-h-11 rounded-[12px] border border-sky-400/50 px-4 text-sm text-sky-100 disabled:opacity-40">
               {manager.pendingActions.has("refresh") ? t("visualPacks.actions.refreshing") : t("visualPacks.actions.refresh")}
             </button>
           </div>
         )}
         {manager.availability.kind === "ready" && manager.summary && (
           <>
-            <button type="button" disabled={manager.pendingActions.has("refresh")} onClick={manager.refresh} className="min-h-11 self-start rounded-[12px] border border-sky-400/50 px-4 text-sm text-sky-100 disabled:opacity-40">
+            <button type="button" disabled={networkActionsDisabled || manager.pendingActions.has("refresh")} onClick={manager.refresh} className="min-h-11 self-start rounded-[12px] border border-sky-400/50 px-4 text-sm text-sky-100 disabled:opacity-40">
               {manager.pendingActions.has("refresh") ? t("visualPacks.actions.refreshing") : t("visualPacks.actions.refresh")}
             </button>
             {manager.operation && (
@@ -138,6 +141,7 @@ export function VisualPackManager() {
                 operation={manager.operation}
                 progressPhase={manager.progress?.phase ?? null}
                 pendingActions={manager.pendingActions}
+                networkActionsDisabled={networkActionsDisabled}
                 onCancel={manager.cancel}
                 onResume={manager.resume}
               />
@@ -162,6 +166,7 @@ export function VisualPackManager() {
               estimateProgress={manager.estimateProgress}
               pendingActions={manager.pendingActions}
               durableMutationActive={manager.durableMutationActive}
+              networkActionsDisabled={networkActionsDisabled}
               onSelectCurated={manager.resolveCuratedSelector}
               onSelectDeckLibrary={manager.resolveDeckLibrarySelector}
               onEstimate={manager.estimateInstall}
@@ -175,6 +180,7 @@ export function VisualPackManager() {
               removal={manager.removal}
               pendingActions={manager.pendingActions}
               durableMutationActive={manager.durableMutationActive}
+              networkActionsDisabled={networkActionsDisabled}
               onVerify={manager.verify}
               onRepair={manager.repair}
               onRemoveSelected={(ids, launcher) => {

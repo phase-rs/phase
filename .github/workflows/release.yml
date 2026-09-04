@@ -42,6 +42,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Why a recovery dispatch must come from the tag it releases, and what
+      # goes wrong otherwise, is in the script.
+      - name: Require a tag ref for recovery dispatches
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: ./scripts/require-tag-ref-dispatch.sh
+
       - name: Resolve tag and commit
         id: resolve
         env:
@@ -637,6 +647,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # Same gate as build-web-image: the release environment admits tag refs
+    # only, so a wrong-ref run publishes neither image rather than half a pair.
+    environment: release
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}

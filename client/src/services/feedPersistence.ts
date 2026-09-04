@@ -20,7 +20,7 @@ function getFeedStore(): ReturnType<typeof createStore> {
   return _store;
 }
 
-interface FeedCacheState {
+export interface FeedCacheState {
   cache: Record<string, Feed>;
   hydrated: boolean;
 }
@@ -29,6 +29,8 @@ const useFeedCacheStore = create<FeedCacheState>(() => ({
   cache: {},
   hydrated: false,
 }));
+
+let hydrationPromise: Promise<void> | undefined;
 
 // ── Sync access (for non-React callers invoked post-hydration) ──────────
 
@@ -72,6 +74,18 @@ export function useFeedCacheHydrated(): boolean {
   return useFeedCacheStore((s) => s.hydrated);
 }
 
+/** Imperative cache snapshot for background coordinators outside React render. */
+export function getFeedCacheState(): Readonly<FeedCacheState> {
+  return useFeedCacheStore.getState();
+}
+
+/** Observe the existing cache authority without subscribing a React render path. */
+export function subscribeFeedCache(
+  listener: (current: FeedCacheState, previous: FeedCacheState) => void,
+): () => void {
+  return useFeedCacheStore.subscribe(listener);
+}
+
 // ── Hydration + legacy migration ────────────────────────────────────────
 
 const LEGACY_FEED_CACHE_PREFIX = "phase-feed:";
@@ -109,19 +123,31 @@ export async function refreshFeedCache(): Promise<void> {
 export async function hydrateFeedCache(): Promise<void> {
   if (useFeedCacheStore.getState().hydrated) return;
 
-  let fromIdb: Record<string, Feed> = {};
-  try {
-    fromIdb = await readFeedCache();
-  } catch (err) {
-    console.warn("[hydrateFeedCache] IDB read failed:", err);
-    fromIdb = {};
-  }
+  if (hydrationPromise) return hydrationPromise;
 
-  const fromLegacy = await migrateLegacyFeedCache();
-  useFeedCacheStore.setState({
-    cache: { ...fromIdb, ...fromLegacy },
-    hydrated: true,
-  });
+  const before = useFeedCacheStore.getState().cache;
+  hydrationPromise = (async () => {
+    let fromIdb: Record<string, Feed> = {};
+    try {
+      fromIdb = await readFeedCache();
+    } catch (err) {
+      console.warn("[hydrateFeedCache] IDB read failed:", err);
+    }
+
+    const fromLegacy = await migrateLegacyFeedCache();
+    const durable = { ...fromIdb, ...fromLegacy };
+    const current = useFeedCacheStore.getState().cache;
+    const cache: Record<string, Feed> = {};
+    const ids = new Set([...Object.keys(before), ...Object.keys(current), ...Object.keys(durable)]);
+    for (const id of ids) {
+      const feed = current[id] !== before[id] ? current[id] : durable[id];
+      if (feed) cache[id] = feed;
+    }
+
+    useFeedCacheStore.setState({ cache, hydrated: true });
+  })();
+
+  return hydrationPromise;
 }
 
 async function migrateLegacyFeedCache(): Promise<Record<string, Feed>> {
@@ -160,5 +186,6 @@ async function migrateLegacyFeedCache(): Promise<Record<string, Feed>> {
 
 /** @internal Reset the in-memory cache. Tests only. */
 export function _resetFeedCacheForTests(): void {
+  hydrationPromise = undefined;
   useFeedCacheStore.setState({ cache: {}, hydrated: false });
 }

@@ -6952,6 +6952,11 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
 /// Also used by `gap_analysis` to classify unimplemented effect text.
 pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "add",
+    // CR 701.47a: Amass — "its controller amasses Goblins X" (Azog, Moria's
+    // Ruin). Subject-shifted amass clauses route through the
+    // PredicateAst::ImperativeFallback arm in `lower_subject_predicate_ast`,
+    // mirroring "manifest" below.
+    "amass",
     "attack",
     "become",
     "block",
