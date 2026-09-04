@@ -22249,6 +22249,56 @@ fn city_blessing_activation_restriction_does_not_emit_condition_warning() {
         )));
 }
 
+/// CR 309.7 + CR 602.5b: Sarevok's Tome — "Activate only if you've completed a
+/// dungeon". The shared grammar already recognized the phrase as
+/// `StaticCondition::CompletedADungeon`, but the restriction converter rejected
+/// it for lack of a `ParsedCondition` peer, so the clause stayed in the ability
+/// text and surfaced as a stranded `Effect::Unimplemented { name: "activate" }`
+/// sub-ability — leaving the ability activatable with NO dungeon requirement,
+/// which is a permissive misreading of the printed card.
+///
+/// Asserts both halves: the gate is present as an activation restriction, AND
+/// no `Unimplemented` remnant is left behind anywhere in the chain (the bug
+/// produced the second without the first).
+#[test]
+fn completed_dungeon_activation_restriction_gates_the_ability() {
+    let oracle = "When this artifact enters, you take the initiative.
+{T}: Add {C}. If you have the initiative, add {C}{C} instead.
+{3}, {T}: Exile cards from the top of your library until you exile a nonland card. You may cast that card without paying its mana cost. Activate only if you've completed a dungeon.";
+    let parsed = parse(oracle, "Sarevok's Tome", &[], &["Artifact"], &["Book"]);
+
+    let gated = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(*ability.effect, Effect::ExileFromTopUntil { .. }))
+        .expect("expected the exile-until activated ability");
+
+    assert!(
+        gated
+            .activation_restrictions
+            .iter()
+            .any(|restriction| matches!(
+                restriction,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::CompletedDungeon { specific: None })
+                }
+            )),
+        "dungeon gate missing: {:?}",
+        gated.activation_restrictions
+    );
+
+    // The consumed clause must leave no `Unimplemented` remnant in the chain.
+    let mut node = Some(gated);
+    while let Some(ability) = node {
+        assert!(
+            !matches!(*ability.effect, Effect::Unimplemented { .. }),
+            "stranded Unimplemented remnant: {:?}",
+            ability.effect
+        );
+        node = ability.sub_ability.as_deref();
+    }
+}
+
 /// CR 702.178a: "Max speed — [Ability]" means "As long as your speed is 4, this
 /// object has '[Ability]'." The ability is ABSENT below max speed, so the prefix
 /// lowers to an activation restriction (CR 602.5) — the same treatment CR 702.186b

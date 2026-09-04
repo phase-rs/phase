@@ -10993,6 +10993,28 @@ pub enum ParsedCondition {
     HasCityBlessing,
     /// CR 702.195b: True when the activating player has the enduring story designation.
     HasEnduringStory,
+    /// CR 309.7 + CR 602.5b: "Activate only if you've completed a dungeon"
+    /// (Sarevok's Tome, Precipitous Drop). True when the activating player has
+    /// completed at least one dungeon (`specific: None`) or the named dungeon
+    /// (`specific: Some(d)`). For the negative sense, wrap with `Not`.
+    ///
+    /// A player-designation leaf in the same sense as `HasCityBlessing` and
+    /// `HasEnduringStory` above: it reads a status off the scoped player and
+    /// carries no filter or quantity to approximate, which is why it converts
+    /// exactly rather than being rejected by
+    /// `static_condition_to_restriction_condition`. It stays a sibling of those
+    /// leaves rather than folding into them because each names its own CR rule
+    /// section (CR 309.7 here, CR 702.131c and CR 702.195b there).
+    ///
+    /// The restriction-layer reading of the same printed clause that
+    /// `StaticCondition::CompletedADungeon`, `TriggerCondition::CompletedDungeon`
+    /// and `AbilityCondition::CompletedDungeon` already read at their own layers.
+    /// All four delegate to the single truth function
+    /// `game::dungeon::has_completed_dungeon`, so the readings cannot drift.
+    CompletedDungeon {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        specific: Option<crate::game::dungeon::DungeonId>,
+    },
     /// CR 702.178a: True when the SOURCE's player has max speed — its
     /// controller on the battlefield, its owner anywhere else, per the "Max
     /// Speed" glossary entry (sense 2). Unlike its designation siblings above,

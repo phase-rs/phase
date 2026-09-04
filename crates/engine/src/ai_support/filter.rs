@@ -1084,6 +1084,11 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
         | ParsedCondition::HasEnduringStory
+        // CR 309.7: reads `state.dungeon_progress` for the scoped player (via
+        // `game::dungeon`) — a per-player completion set that only a dungeon
+        // card's removal from the game mutates. apply()-constant and
+        // controller-scoped, exactly like the two designation predicates above.
+        | ParsedCondition::CompletedDungeon { .. }
         // CR 702.179e: reads the controller's `speed` plus a controller-scoped
         // battlefield scan for the CR 101.1 cap-raising static (via
         // `game::speed`) — the same two apply()-constant sources as the
