@@ -891,11 +891,8 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     // the multi-word "put onto the battlefield" verb, with subtype filters
     // (Aura/Equipment/...) via `parse_type_phrase`. Replaces the prior
     // hand-rolled past-tense / single-word / top-level-type-only matcher.
-    if let Ok((rest, prefix)) = alt((
-        value("if ", tag::<_, _, OracleError<'_>>("if ")),
-        value("when ", tag("when ")),
-    ))
-    .parse(lower.as_str())
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("if "), tag("when "))).parse(lower.as_str())
     {
         use crate::parser::oracle_nom::condition as nom_cond;
         // CR 400.7 + CR 608.2c: active-voice reflexive gates that resolve to a
@@ -927,6 +924,28 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                 Some(AbilityCondition::ZoneChangedThisWay {
                     filter,
                     destination: Some(Zone::Battlefield),
+                }),
+                text[offset..].to_string(),
+            );
+        }
+        // CR 608.2c + CR 701.25a: active-voice "you put [type] into your
+        // graveyard this way" — the condition following a preceding
+        // "surveil N" instruction (Chandra, Chill of Compliance; Enlightened
+        // Confidant). Runs under both prefixes for the same reason as the
+        // put-onto-battlefield sibling above. Unlike discard/sacrifice/exile
+        // below (cause-bound: the graveyard is inherent to the verb), a
+        // surveilled card's fate is a genuine choice, so this clause stays
+        // destination-bound like put-onto-battlefield — a redirect away from
+        // the graveyard as the card moves defeats it.
+        if let Ok((after_clause, (filter, _negated))) =
+            nom_cond::parse_you_put_into_graveyard_this_way_clause(rest)
+        {
+            let body_lower = strip_reflexive_conditional_body_separator(after_clause);
+            let offset = text.len() - body_lower.len();
+            return (
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination: Some(Zone::Graveyard),
                 }),
                 text[offset..].to_string(),
             );
@@ -965,43 +984,47 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                 text[offset..].to_string(),
             );
         }
-        if prefix == "when " {
-            // CR 603.12 + CR 701.9a: "when you discard a card this way, [body]" —
-            // the reflexive gate created by a preceding "discard a card"
-            // instruction (Talion's Messenger, The Ancient One). The discard's
-            // hand → graveyard move publishes the card into
-            // `state.last_zone_changed_ids`, which `ZoneChangedThisWay` checks.
-            if let Ok((after_clause, (filter, _negated))) =
-                crate::parser::oracle_nom::condition::parse_you_discard_this_way_clause(rest)
-            {
-                let body_lower = strip_reflexive_conditional_body_separator(after_clause);
-                let offset = text.len() - body_lower.len();
-                return (
-                    Some(AbilityCondition::ZoneChangedThisWay {
-                        filter,
-                        destination: None,
-                    }),
-                    text[offset..].to_string(),
-                );
-            }
-            // CR 603.12 + CR 701.21a: "when you sacrifice one or more X this way,
-            // [body]" — the reflexive gate created by a preceding "sacrifice
-            // [quantifier] X" instruction (Nyssa of Traken). The sacrifice's
-            // battlefield → graveyard move publishes the permanents into
-            // `state.last_zone_changed_ids`, which `ZoneChangedThisWay` checks.
-            if let Ok((after_clause, (filter, _negated))) =
-                crate::parser::oracle_nom::condition::parse_you_sacrifice_this_way_clause(rest)
-            {
-                let body_lower = strip_reflexive_conditional_body_separator(after_clause);
-                let offset = text.len() - body_lower.len();
-                return (
-                    Some(AbilityCondition::ZoneChangedThisWay {
-                        filter,
-                        destination: None,
-                    }),
-                    text[offset..].to_string(),
-                );
-            }
+        // CR 701.9a: "if/when you discard a[n] X this way, [body]" —
+        // the condition following a preceding "discard a card" instruction.
+        // Runs under BOTH prefixes, like the put-onto-battlefield
+        // and exile siblings above: "When you discard a card this way, ..."
+        // (Talion's Messenger, The Ancient One) and "If you discard a land
+        // card this way, ..." (Silvan Reveler, issue #8122) are the same
+        // resolution-local condition in the two connectors —
+        // nothing about the discard-then-back-reference shape is tied to
+        // "when" specifically. The discard's hand → graveyard move publishes
+        // the card into `state.last_zone_changed_ids`, which `ZoneChangedThisWay` checks.
+        if let Ok((after_clause, (filter, _negated))) =
+            crate::parser::oracle_nom::condition::parse_you_discard_this_way_clause(rest)
+        {
+            let body_lower = strip_reflexive_conditional_body_separator(after_clause);
+            let offset = text.len() - body_lower.len();
+            return (
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination: None,
+                }),
+                text[offset..].to_string(),
+            );
+        }
+        // CR 701.21a: "if/when you sacrifice one or more X this
+        // way, [body]" — the condition following a preceding "sacrifice
+        // [quantifier] X" instruction (Nyssa of Traken). Runs under both
+        // prefixes for the same reason as the discard sibling above. The
+        // sacrifice's battlefield → graveyard move publishes the permanents
+        // into `state.last_zone_changed_ids`, which `ZoneChangedThisWay` checks.
+        if let Ok((after_clause, (filter, _negated))) =
+            crate::parser::oracle_nom::condition::parse_you_sacrifice_this_way_clause(rest)
+        {
+            let body_lower = strip_reflexive_conditional_body_separator(after_clause);
+            let offset = text.len() - body_lower.len();
+            return (
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    filter,
+                    destination: None,
+                }),
+                text[offset..].to_string(),
+            );
         }
     }
     (None, text.to_string())

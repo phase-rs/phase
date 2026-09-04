@@ -3,18 +3,18 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 48;
+const EXPECTED_PROTOCOL_VERSION = 57;
 // The LOBBY message-set version. Deliberately separate from the full-game
 // number above and deliberately NOT derived from it: a GameState-only bump must
 // not move the lobby's compatibility window. See the assertions at the bottom.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 2;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 4;
 // The P2P wire version. A THIRD independent surface: host/guest first-contact
 // frames carry it, and the same GameState shape change that moves
 // EXPECTED_PROTOCOL_VERSION must move this one too. It was previously ungated
 // here, so a full-game bump could ship with an unbumped P2P version and CI
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
-const EXPECTED_WIRE_PROTOCOL_VERSION = 36;
+const EXPECTED_WIRE_PROTOCOL_VERSION = 41;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
@@ -182,6 +182,58 @@ if (rustLobbyVersion !== EXPECTED_LOBBY_PROTOCOL_VERSION) {
 if (rustLobbyFloor > rustLobbyVersion) {
   console.error(
     `Lobby floor ${rustLobbyFloor} exceeds the lobby version ${rustLobbyVersion}: no client could connect.`,
+  );
+  process.exit(1);
+}
+
+// ── Directory announcement shape: a FOURTH constant surface ────────────────
+//
+// `DIRECTORY_VERSION` versions the ANNOUNCEMENT shape — the `POST /announce`
+// body Rust sends and the `GET /servers` envelope the client reads. It is
+// unrelated to all three wire protocols above: none of the lobby, full-game or
+// P2P message sets appears in a directory row. It moves only when
+// `RawAnnouncement` / `DirectoryRow` change shape, and both sides must move
+// together or a client silently ignores every listing.
+
+const EXPECTED_DIRECTORY_VERSION = 1;
+
+const directorySource = readFileSync(
+  resolve(root, "crates/lobby-broker/src/directory.rs"),
+  "utf8",
+);
+const clientDirectorySource = readFileSync(
+  resolve(root, "client/src/services/serverDirectory.ts"),
+  "utf8",
+);
+
+// Both regexes require a bare integer literal on the right-hand side, so a
+// future `DIRECTORY_VERSION = SOMETHING + 1` trips "Could not find protocol
+// version" rather than silently un-pinning the surface.
+const rustDirectoryVersion = extractVersion(
+  directorySource,
+  /pub\s+const\s+DIRECTORY_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;/,
+  "crates/lobby-broker/src/directory.rs",
+);
+const clientDirectoryVersion = extractVersion(
+  clientDirectorySource,
+  /export\s+const\s+DIRECTORY_VERSION\s*=\s*(\d+)\s*;/,
+  "client/src/services/serverDirectory.ts",
+);
+
+if (rustDirectoryVersion !== clientDirectoryVersion) {
+  console.error(
+    `Directory version mismatch: Rust=${rustDirectoryVersion}, client=${clientDirectoryVersion}`,
+  );
+  process.exit(1);
+}
+
+// Not redundant with the mismatch check above. A COORDINATED bump of both
+// sides — exactly what an auto-merge of two branches can produce silently —
+// passes consistency and fails here.
+if (rustDirectoryVersion !== EXPECTED_DIRECTORY_VERSION) {
+  console.error(
+    `Directory version must remain ${EXPECTED_DIRECTORY_VERSION}: got ${rustDirectoryVersion}. ` +
+      `Bump it ONLY for a RawAnnouncement/DirectoryRow shape change.`,
   );
   process.exit(1);
 }

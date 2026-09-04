@@ -6940,6 +6940,20 @@ fn prepare_spell_cast_with_variant_override_inner(
                 {
                     Some(crate::types::mana::ManaCost::zero())
                 }
+                // CR 118.9 + CR 119.4 + CR 305.1: Inside Information class — a
+                // `PlayFromExile` grant that ALSO authorizes land plays carries
+                // its alt cost directly on `alt_ability_cost` rather than as a
+                // standalone `ExileWithAltAbilityCost` permission (that would
+                // wrongly imply a SEPARATE cast route from the land-play grant).
+                // Zero the mana cost exactly like the sibling arm above; the
+                // `AbilityCost` body is paid by `check_additional_cost_or_pay`'s
+                // mirrored `PlayFromExile` arm. Land plays never reach this
+                // spell-casting cost pipeline, so they are unaffected.
+                crate::types::ability::CastingPermission::PlayFromExile {
+                    alt_ability_cost: Some(_),
+                    granted_to,
+                    ..
+                } if *granted_to == player => Some(crate::types::mana::ManaCost::zero()),
                 _ => None,
             })
             .or_else(|| {
@@ -11982,6 +11996,8 @@ pub(super) fn initiate_cast_during_resolution(
                 granted_to: Some(player),
                 resolution_cleanup: Some(cleanup),
                 duration: None,
+                // CR 611.2a: no duration, so no host to bind to.
+                source_id: None,
                 graveyard_replacement: graveyard_replacement.clone(),
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
@@ -22167,6 +22183,7 @@ mod castable_zone_authority_tests {
         );
 
         let permission = |granted_to: Option<PlayerId>| CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost: ManaCost::default(),
             cost_provenance: ExileGrantCostProvenance::Alternative,
             cast_transformed: false,
@@ -22227,6 +22244,7 @@ mod castable_zone_authority_tests {
         let bare = state.objects[&id].clone();
 
         let permission = |granted_to: Option<PlayerId>| CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost: ManaCost::default(),
             cost_provenance: ExileGrantCostProvenance::Alternative,
             cast_transformed: false,
@@ -22452,6 +22470,7 @@ mod castable_zone_authority_tests {
     fn the_graveyard_alt_cost_disjunct_refuses_a_land_and_admits_a_non_land() {
         let mut state = GameState::new_two_player(7);
         let permission = |granted_to: PlayerId| CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost: ManaCost::default(),
             cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cast_transformed: false,
@@ -22584,6 +22603,7 @@ mod castable_zone_authority_tests {
                 {
                     let obj = state.objects.get_mut(&id).expect("just inserted");
                     obj.casting_permissions = vec![CastingPermission::ExileWithAltCost {
+                        source_id: None,
                         cost: ManaCost::default(),
                         cost_provenance:
                             crate::types::ability::ExileGrantCostProvenance::Alternative,

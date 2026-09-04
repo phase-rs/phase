@@ -419,27 +419,53 @@ pub fn resolve(
     // "this turn", NOT a CR rule (CR 611.2a's no-duration case is "until the end
     // of the game"). Without it, `turns::execute_cleanup` — which reads `expiry`
     // alone — would leave every duration-less resolution shield immortal.
+    // CR 611.2a: refuse a stated lifetime this seam cannot enforce BEFORE the
+    // shield is built, from the one authority the parse-time honesty net also
+    // reads (`parser::oracle::demote_unenforceable_replacement_lifetimes`), so
+    // the two can never disagree about which shape is supported.
+    if prevention_shield_is_refused(prevention_duration.as_ref(), ability.duration.as_ref()) {
+        return Err(EffectError::InvalidParam(format!(
+            "PreventDamage: no enforceable lifetime for stated duration {:?} (CR 611.2a); \
+             the parser must lower this line to Effect::Unimplemented instead",
+            prevention_duration.as_ref().or(ability.duration.as_ref())
+        )));
+    }
     let expiry = match crate::game::effects::add_target_replacement::expiry_from_duration(
         prevention_duration.as_ref(),
-        ability.controller,
     ) {
         ReplacementDurationExpiry::Unstated => {
             crate::game::effects::add_target_replacement::expiry_from_duration(
                 ability.duration.as_ref(),
-                ability.controller,
             )
         }
         expiry => expiry,
     };
     match expiry {
         ReplacementDurationExpiry::Explicit(expiry) => shield = shield.expiry(expiry),
+        // CR 611.2a: the controller-scoped class, named here rather than
+        // re-derived inside the shared classification.
+        ReplacementDurationExpiry::ExplicitControllerNextTurn => {
+            shield = shield.expiry(
+                crate::types::ability::RestrictionExpiry::UntilPlayerNextTurn {
+                    player: ability.controller,
+                },
+            );
+        }
         ReplacementDurationExpiry::Unstated => {
             shield = shield.with_resolution_shield_expiry();
         }
+        // Unreachable: `prevention_shield_is_refused` returned above for both
+        // classes. Kept as its own arm so the match stays wildcard-free, and
+        // hard rather than `Ok(())` so a future route that bypasses the guard
+        // cannot resolve a printed prevention into nothing (CR 611.2a: neither
+        // a condition-bound nor an unsupported stated duration may be rewritten
+        // as an end-of-turn shield).
         ReplacementDurationExpiry::GateControlled | ReplacementDurationExpiry::Unsupported => {
-            // CR 611.2a: neither a condition-bound nor an unsupported stated
-            // duration may be rewritten as an end-of-turn shield.
-            return Ok(());
+            return Err(EffectError::InvalidParam(
+                "PreventDamage: unenforceable stated duration reached the shield builder \
+                 (CR 611.2a)"
+                    .to_string(),
+            ));
         }
     }
 
@@ -630,6 +656,46 @@ pub fn resolve(
         subject: None,
     });
     Ok(())
+}
+
+/// CR 611.2a + CR 615: does the prevention-shield seam refuse this stated
+/// lifetime? THE authority for that question, shared by two consumers:
+///
+/// * `resolve` above, which turns a refusal into a hard `EffectError` rather
+///   than a successful no-op; and
+/// * `parser::oracle::demote_unenforceable_replacement_lifetimes`, the
+///   post-lowering honesty net, which demotes a refused line to
+///   `Effect::Unimplemented` so no card reports the shape as supported.
+///
+/// The fallback order mirrors `resolve`'s exactly — the clause's own
+/// `prevention_duration` first, the resolving ability's duration only when the
+/// clause states none — so the net and the install seam cannot disagree about
+/// which shape is supported.
+///
+/// Both refused classes are genuinely unenforceable HERE, for different
+/// reasons: `Unsupported` has no expiry stamp at all, and `GateControlled`
+/// promises a runtime applicability gate that only the bare untap-prevention
+/// rider carries (`add_target_replacement::stamp_for_as_long_as_controlled_gate`)
+/// — a prevention shield has no such gate, so it would install with no lifetime
+/// the engine can end.
+///
+/// Reachable, measured over the parsed corpus: Old Fat Spider Can't See Me
+/// chapter II states "for as long as this Saga remains on the battlefield" on a
+/// prevention clause, which lands in the refused set. Before this guard it
+/// resolved successfully and installed nothing.
+pub(crate) fn prevention_shield_is_refused(
+    prevention_duration: Option<&crate::types::ability::Duration>,
+    ability_duration: Option<&crate::types::ability::Duration>,
+) -> bool {
+    use crate::game::effects::add_target_replacement::expiry_from_duration;
+    let effective = match expiry_from_duration(prevention_duration) {
+        ReplacementDurationExpiry::Unstated => expiry_from_duration(ability_duration),
+        stated => stated,
+    };
+    matches!(
+        effective,
+        ReplacementDurationExpiry::GateControlled | ReplacementDurationExpiry::Unsupported
+    )
 }
 
 #[cfg(test)]
@@ -1209,6 +1275,91 @@ mod tests {
                 amount: PreventionAmount::Next(3)
             }
         ));
+    }
+
+    /// CR 611.2a: a stated prevention window this seam cannot enforce must FAIL
+    /// the resolution — installing nothing and reporting success is the defect.
+    ///
+    /// Printed member, measured over the parsed corpus: Old Fat Spider Can't See
+    /// Me chapter II, "prevent all damage that would be dealt to … for as long as
+    /// this Saga remains on the battlefield". The parse-time net
+    /// (`parser::oracle::demote_unenforceable_replacement_lifetimes`) lowers that
+    /// line to `Effect::Unimplemented` before it can reach here, so this test pins
+    /// the SEAM rather than the pipeline: a route that bypasses the net must not
+    /// be able to resolve a printed prevention into nothing.
+    ///
+    /// Both carriers CR 611.2a names are exercised — the ability-level window
+    /// (`ability.duration`) and the effect grammar's own (`prevention_duration`) —
+    /// because `prevention_shield_is_refused` reads them in that fallback order.
+    /// Sibling of
+    /// `add_target_replacement::tests::stated_unrepresentable_duration_does_not_install_a_shield`.
+    #[test]
+    fn stated_host_duration_does_not_install_a_prevention_shield() {
+        use crate::types::ability::Duration;
+
+        // Ability-level carrier, `Unsupported` class: the printed Old Fat Spider
+        // wording. `WhileHostOnBattlefield` ends on phase-out (CR 702.26f), which
+        // no expiry stamp this seam can build reproduces.
+        let mut state = GameState::new_two_player(42);
+        let saga = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Old Fat Spider Can't See Me".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = make_prevent_ability(
+            saga,
+            PreventionAmount::All,
+            PreventionScope::AllDamage,
+            vec![],
+        );
+        ability.duration = Some(Duration::WhileHostOnBattlefield);
+
+        resolve(&mut state, &ability, &mut Vec::new()).expect_err(
+            "CR 611.2a: an unenforceable stated prevention window must FAIL the \
+             resolution, not succeed with no shield",
+        );
+        assert!(
+            state.objects[&saga].replacement_definitions.is_empty(),
+            "CR 611.2a: the refused window must not be shortened to the \
+             end-of-turn fallback"
+        );
+
+        // Effect-level carrier, `GateControlled` class: the control wording earns
+        // its gate only on the bare untap rider
+        // (`add_target_replacement::stamp_for_as_long_as_controlled_gate`); a
+        // prevention shield has no such gate, so it too is refused here.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Gated Prevention".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: Some(Duration::WhileControllingHost),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).expect_err(
+            "CR 611.2a: a control-gated window on a shield that carries no gate \
+             must FAIL the resolution",
+        );
+        assert!(
+            state.objects[&source].replacement_definitions.is_empty(),
+            "CR 611.2a: the refused window must not install an ungated shield"
+        );
     }
 
     #[test]

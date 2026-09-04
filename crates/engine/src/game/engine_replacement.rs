@@ -1708,16 +1708,24 @@ fn handle_persist_chosen_attribute_choice(
                     .to_string(),
             )
         })?;
+    let duration_subject = crate::types::identifiers::ObjectIncarnationRef::from_object(
+        state.objects.get(&host_id).ok_or_else(|| {
+            EngineError::InvalidAction(
+                "PersistChosenAttribute copy choice resolved after its Aura host left the game"
+                    .to_string(),
+            )
+        })?,
+    );
 
     // CR 707.2c + CR 613.1a + CR 611.2a: install the copy as a transient
     // continuous effect sourced from the Aura, applied to the host, ending
     // when the Aura leaves the battlefield (`UntilHostLeavesPlay` prunes on
-    // `tce.source_id` leaving — the Aura). `duration_subject_id` tracks the
+    // `tce.source_id` leaving — the Aura). `duration_subject` tracks the
     // host for any recipient-relative duration reads (harmless here).
     let copy = super::effects::become_copy::PrecomputedCopyValues {
         source_id,
         controller,
-        duration_subject_id: host_id,
+        duration_subject,
         duration: crate::types::ability::Duration::UntilHostLeavesPlay,
         values,
         display_source,
@@ -2519,11 +2527,7 @@ pub(super) fn apply_post_replacement_effect(
             let mut resolved =
                 build_resolved_from_def_with_targets(real_work, source_id, controller, targets);
             resolved.set_replacement_applied_recursive(replacement_applied);
-            let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
-            return match &state.waiting_for {
-                WaitingFor::Priority { .. } => None,
-                wf => Some(wf.clone()),
-            };
+            return resolve_post_replacement_chain(state, &resolved, events);
         } else {
             return Some(WaitingFor::CopyTargetChoice {
                 player: controller,
@@ -2585,11 +2589,38 @@ pub(super) fn apply_post_replacement_effect(
     let mut resolved =
         build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
     resolved.set_replacement_applied_recursive(replacement_applied);
-    let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
+    resolve_post_replacement_chain(state, &resolved, events)
+}
+
+/// CR 608.2c: execute instructions in the order written.
+/// CR 615.5: a prevention effect's additional effect occurs immediately after
+/// the prevention.
+///
+/// Engine invariant: isolate `state.waiting_for` so caller-owned prompts cannot
+/// suspend the child chain or be mistaken for new child input.
+fn resolve_post_replacement_chain(
+    state: &mut GameState,
+    resolved: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    // CR 117.2e: this is an internal execution sentinel, not a priority grant.
+    // Isolate before running the chain: an inherited resolution choice would
+    // otherwise park its synchronous tail, even if the first effect completed.
+    let caller_wait = std::mem::replace(
+        &mut state.waiting_for,
+        WaitingFor::Priority {
+            player: state.priority_player,
+        },
+    );
+    let _ = effects::resolve_ability_chain(state, resolved, events, 0);
 
     match &state.waiting_for {
-        WaitingFor::Priority { .. } => None,
-        wf => Some(wf.clone()),
+        WaitingFor::Priority { .. } => {
+            state.waiting_for = caller_wait;
+            None
+        }
+        // A new child prompt may have exactly the same payload as caller_wait.
+        waiting_for => Some(waiting_for.clone()),
     }
 }
 
@@ -2892,12 +2923,7 @@ fn apply_post_replacement_resolved_effect(
 ) -> Option<WaitingFor> {
     let mut resolved = resolved.clone();
     resolved.set_replacement_applied_recursive(replacement_applied);
-    let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
-
-    match &state.waiting_for {
-        WaitingFor::Priority { .. } => None,
-        wf => Some(wf.clone()),
-    }
+    resolve_post_replacement_chain(state, &resolved, events)
 }
 
 /// CR 608.3: Complete post-resolution work for a permanent spell whose ETB
@@ -2950,13 +2976,27 @@ pub(crate) fn apply_pending_spell_resolution(
         }
     }
 
-    super::room::unlock_door_designation(
-        state,
-        ctx.object_id,
-        ctx.controller,
-        crate::game::game_object::RoomDoor::Left,
-        events,
-    );
+    // CR 709.5d: the replacement-choice resume path delivers the same entry as
+    // the ordinary resolution tail in `stack.rs`, so it asks the same single
+    // authority. Previously it granted `RoomDoor::Left` unconditionally — no
+    // door check and no Room check: every permanent spell that paused for a
+    // replacement choice and then entered as a copy of a Room (Copy
+    // Enchantment, Mirrormade, Estrid's Invocation) was handed a designation
+    // although neither of ITS halves was cast, which is exactly the case
+    // CR 709.5d's last sentence covers.
+    if let Some(cast_door) = state
+        .objects
+        .get(&ctx.object_id)
+        .and_then(super::room::cast_half_designation)
+    {
+        super::room::unlock_door_designation(
+            state,
+            ctx.object_id,
+            ctx.controller,
+            cast_door,
+            events,
+        );
+    }
 
     // CR 702.185a: Warp delayed trigger setup.
     if ctx.casting_variant == CastingVariant::Warp {
@@ -3080,7 +3120,7 @@ pub(super) fn apply_etb_counters(
     true
 }
 
-pub(super) fn find_copy_targets(
+pub fn find_copy_targets(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,
@@ -5751,6 +5791,408 @@ mod tests {
         );
         assert!(!targets.contains(&unmarked_exile));
         assert!(!targets.contains(&bf_creature));
+    }
+
+    fn inherited_replacement_waits(source: ObjectId, other: ObjectId) -> [WaitingFor; 2] {
+        [
+            WaitingFor::AssignCombatDamage {
+                player: PlayerId(0),
+                attacker_id: source,
+                total_damage: 2,
+                blockers: vec![crate::types::game_state::DamageSlot {
+                    blocker_id: other,
+                    lethal_minimum: 2,
+                }],
+                assignment_modes: vec![Default::default()],
+                trample: None,
+                defending_player: PlayerId(1),
+                attack_target: crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                pw_loyalty: None,
+                pw_controller: None,
+            },
+            WaitingFor::ScryChoice {
+                player: PlayerId(0),
+                cards: vec![other],
+            },
+        ]
+    }
+
+    #[test]
+    fn post_replacement_public_answer_distinguishes_template_copy_and_child_choice() {
+        let mut initial = GameState::new_two_player(42);
+        let source = install_optional_replacement(&mut initial, ReplacementEvent::GainLife);
+        let scry_card = create_object(
+            &mut initial,
+            CardId(10),
+            PlayerId(1),
+            "Scry card".to_string(),
+            Zone::Library,
+        );
+        let chosen = create_object(
+            &mut initial,
+            CardId(11),
+            PlayerId(0),
+            "Exiled copy source".to_string(),
+            Zone::Exile,
+        );
+        initial
+            .cards_exiled_with_source_this_turn
+            .insert(source, vec![chosen]);
+        for effect in [
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: Some(TargetFilter::Controller),
+            },
+            Effect::BecomeCopy {
+                target: TargetFilter::ExiledCardByIndex { index: 0 },
+                recipient: TargetFilter::SelfRef,
+                duration: Some(crate::types::ability::Duration::Permanent),
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
+            },
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ] {
+            let mut state = initial.clone();
+            let mut template = AbilityDefinition::new(AbilityKind::Spell, effect.clone());
+            template.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: Some(TargetFilter::Controller),
+                },
+            )));
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions[0]
+                .execute = Some(Box::new(template));
+            let mut events = Vec::new();
+            let ReplacementResult::NeedsChoice(player) = replacement_mod::replace_event(
+                &mut state,
+                ProposedEvent::LifeGain {
+                    player_id: PlayerId(1),
+                    amount: 1,
+                    applied: HashSet::new(),
+                },
+                &mut events,
+            ) else {
+                panic!("optional replacement must request an actual choice")
+            };
+            assert_eq!(player, PlayerId(1), "the source controller must choose");
+            assert_ne!(
+                player, state.active_player,
+                "the replacement's controller must differ from the active player"
+            );
+            state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept the replacement through the public reducer");
+            if matches!(effect, Effect::Scry { .. }) {
+                assert_eq!(
+                    state.waiting_for,
+                    WaitingFor::ScryChoice {
+                        player: PlayerId(1),
+                        cards: vec![scry_card]
+                    }
+                );
+                assert_eq!(state.players[1].life, 20, "child tail waits for its answer");
+                assert!(
+                    !state.resolution_stack.is_empty(),
+                    "real input retains its owner"
+                );
+                apply_as_current(
+                    &mut state,
+                    GameAction::SelectCards {
+                        cards: vec![scry_card],
+                    },
+                )
+                .expect("answer the actual child choice");
+            }
+            if matches!(effect, Effect::BecomeCopy { .. }) {
+                assert_eq!(state.objects[&source].name, "Exiled copy source");
+            }
+            let initial_loss = if matches!(effect, Effect::LoseLife { .. }) {
+                2
+            } else {
+                0
+            };
+            assert_eq!(
+                state.players[1].life,
+                15 - initial_loss,
+                "each instruction runs once for its controller"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(
+                state.resolution_stack.is_empty(),
+                "synchronous work cannot own the answered replacement prompt"
+            );
+            apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("ordinary priority after replacement");
+            assert_eq!(state.players[1].life, 15 - initial_loss);
+        }
+    }
+
+    #[test]
+    fn post_replacement_synchronous_chains_restore_inherited_waits() {
+        for tail_amount in [None, Some(3)] {
+            let mut initial = GameState::new_two_player(42);
+            let source = make_creature(&mut initial, PlayerId(1), "Replacement source");
+            let other = make_creature(&mut initial, PlayerId(0), "Other object");
+            let mut template = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: Some(TargetFilter::Controller),
+                },
+            );
+            if let Some(value) = tail_amount {
+                template.sub_ability = Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::LoseLife {
+                        amount: QuantityExpr::Fixed { value },
+                        target: Some(TargetFilter::Controller),
+                    },
+                )));
+            }
+            let resolved = build_resolved_from_def_with_targets(
+                &template,
+                source,
+                PlayerId(1),
+                vec![TargetRef::Object(source)],
+            );
+            for continuation in [
+                PostReplacementContinuation::Template(Box::new(template)),
+                PostReplacementContinuation::Resolved(Box::new(resolved)),
+            ] {
+                for caller_wait in inherited_replacement_waits(source, other) {
+                    let mut state = initial.clone();
+                    state.waiting_for = caller_wait.clone();
+                    state.install_ready_continuation(continuation.clone());
+                    let mut events = Vec::new();
+                    let waiting = apply_pending_post_replacement_effect(
+                        &mut state,
+                        Some(source),
+                        None,
+                        None,
+                        &mut events,
+                    );
+
+                    // CR 608.2c: every instruction completes in written order;
+                    // an inherited resolution choice cannot park the tail.
+                    assert_eq!(state.players[1].life, 18 - tail_amount.unwrap_or(0));
+                    assert_eq!(state.players[0].life, 20);
+                    assert!(
+                        waiting.is_none(),
+                        "completed child must not claim caller input"
+                    );
+                    assert_eq!(state.waiting_for, caller_wait);
+                    assert!(
+                        state.resolution_stack.is_empty(),
+                        "no false paused drain or tail"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn post_replacement_identical_scry_prompt_resumes_context_tail_once() {
+        let mut initial = GameState::new_two_player(42);
+        let shield = make_creature(&mut initial, PlayerId(0), "Replacement source");
+        let damage_source = make_creature(&mut initial, PlayerId(1), "Damage source");
+        let recipient = make_creature(&mut initial, PlayerId(0), "Damage recipient");
+        // These creatures must survive the public answer's state-based actions.
+        for id in [shield, damage_source, recipient] {
+            let object = initial.objects.get_mut(&id).unwrap();
+            object.power = Some(2);
+            object.toughness = Some(2);
+            object.base_power = Some(2);
+            object.base_toughness = Some(2);
+            object.base_card_types = object.card_types.clone();
+        }
+        let scry_card = create_object(
+            &mut initial,
+            CardId(10),
+            PlayerId(0),
+            "Scry card".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut initial,
+            CardId(11),
+            PlayerId(1),
+            "Source controller draw".to_string(),
+            Zone::Library,
+        );
+        let mut counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::PostReplacementDamageTarget,
+            },
+        );
+        counters.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::PostReplacementSourceController,
+            },
+        )));
+        let mut template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        template.sub_ability = Some(Box::new(counters));
+        let resolved = build_resolved_from_def_with_targets(
+            &template,
+            shield,
+            PlayerId(0),
+            vec![TargetRef::Object(shield)],
+        );
+        for continuation in [
+            PostReplacementContinuation::Template(Box::new(template)),
+            PostReplacementContinuation::Resolved(Box::new(resolved)),
+        ] {
+            let mut state = initial.clone();
+            let caller_wait = WaitingFor::ScryChoice {
+                player: PlayerId(0),
+                cards: vec![scry_card],
+            };
+            state.waiting_for = caller_wait.clone();
+            state.install_ready_continuation(continuation);
+            let drain = state
+                .active_post_replacement_drains_mut()
+                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+                .expect("replacement context is resident");
+            drain.source = Some(shield);
+            drain.event_source = Some(damage_source);
+            drain.event_target = Some(TargetRef::Object(recipient));
+            let mut events = Vec::new();
+            let waiting = apply_pending_post_replacement_effect(
+                &mut state,
+                Some(shield),
+                None,
+                Some(ReplacementEvent::DamageDone),
+                &mut events,
+            );
+
+            assert_eq!(
+                waiting,
+                Some(caller_wait.clone()),
+                "new identical prompt still belongs to child"
+            );
+            assert_eq!(state.waiting_for, caller_wait);
+            assert!(matches!(
+                state
+                    .active_post_replacement_drains()
+                    .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+                    .map(|drain| &drain.status),
+                Some(crate::types::game_state::DrainStatus::Paused)
+            ));
+            assert!(
+                state.objects[&recipient].counters.is_empty(),
+                "tail must wait for answer"
+            );
+            assert!(state.players[1].hand.is_empty());
+
+            let answer = apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: vec![scry_card],
+                },
+            )
+            .expect("public scry answer resumes the child");
+            // CR 615.5: the paused rider retains the prevented event's target
+            // and source controller until every instruction has completed.
+            assert_eq!(
+                state.objects[&recipient]
+                    .counters
+                    .get(&CounterType::Plus1Plus1),
+                Some(&3)
+            );
+            assert!(state.objects[&shield].counters.is_empty());
+            assert!(state.objects[&damage_source].counters.is_empty());
+            assert_eq!(state.players[1].hand.len(), 1);
+            assert!(state.players[0].hand.is_empty());
+            assert_eq!(answer.events.iter().filter(|event| matches!(event,
+                GameEvent::CounterAdded { object_id, count: 3, .. } if *object_id == recipient
+            )).count(), 1);
+            assert!(
+                state.resolution_stack.is_empty(),
+                "answered child retires its context"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("normal priority resumes");
+            assert_eq!(state.players[1].hand.len(), 1, "tail must not run twice");
+            assert_eq!(
+                state.objects[&recipient]
+                    .counters
+                    .get(&CounterType::Plus1Plus1),
+                Some(&3)
+            );
+        }
+    }
+
+    #[test]
+    fn post_replacement_predetermined_copy_restores_wait_and_completes_tail() {
+        for caller_wait_index in 0..2 {
+            let mut state = GameState::new_two_player(42);
+            let source = make_creature(&mut state, PlayerId(0), "Copy recipient");
+            let chosen = make_creature(&mut state, PlayerId(1), "Chosen copy source");
+            let caller_wait =
+                inherited_replacement_waits(source, chosen)[caller_wait_index].clone();
+            state.waiting_for = caller_wait.clone();
+            let mut template = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::SpecificObject { id: chosen },
+                    recipient: TargetFilter::SelfRef,
+                    duration: Some(crate::types::ability::Duration::Permanent),
+                    mana_value_limit: None,
+                    additional_modifications: Vec::new(),
+                },
+            );
+            template.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: Some(TargetFilter::Controller),
+                },
+            )));
+            state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(
+                template,
+            )));
+            let mut events = Vec::new();
+            let waiting = apply_pending_post_replacement_effect(
+                &mut state,
+                Some(source),
+                None,
+                Some(ReplacementEvent::ChangeZone),
+                &mut events,
+            );
+
+            assert_eq!(
+                state.objects[&source].name, "Chosen copy source",
+                "predetermined copy actually executes"
+            );
+            assert_eq!(
+                state.players[0].life, 18,
+                "copy's synchronous tail completes"
+            );
+            assert_eq!(state.players[1].life, 20);
+            assert!(waiting.is_none());
+            assert_eq!(state.waiting_for, caller_wait);
+            assert!(state.resolution_stack.is_empty());
+        }
     }
 
     /// 2026-05-09 audit M4 regression: the unified

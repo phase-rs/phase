@@ -293,7 +293,7 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
         TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
     };
-    use crate::types::actions::{GameAction, ResolveAllConsentDecision};
+    use crate::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
@@ -540,7 +540,10 @@ mod tests {
         initial.stack.push_back(no_op_entry(1, PlayerId(0)));
         let mut log = ReplayLog::new(header);
 
-        let begin = GameAction::BeginResolveAll { max_resolutions: 0 };
+        let begin = GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Shared,
+        };
         let mut consent = initial.clone();
         apply(&mut consent, PlayerId(0), begin.clone())
             .expect("P0 can begin Resolve All from priority");
@@ -698,7 +701,10 @@ mod tests {
             );
         }
 
-        let begin = GameAction::BeginResolveAll { max_resolutions: 0 };
+        let begin = GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Shared,
+        };
         apply(&mut initial, PlayerId(0), begin).expect("P0 begins Resolve All consent");
         let WaitingFor::ResolveAllConsent { epoch, .. } = initial.waiting_for else {
             panic!(

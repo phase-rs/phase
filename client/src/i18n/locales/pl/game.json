@@ -605,6 +605,8 @@
     "chooseXInputAria": "Wpisz wartość X",
     "decreaseX": "Zmniejsz wartość X",
     "increaseX": "Zwiększ wartość X",
+    "maximum": "Maks.",
+    "setXToMaximum": "Ustaw X na maksimum",
     "minMax": "min {{min}} / maks {{max}}",
     "maxOnly": "maks {{max}}",
     "amountOutOfRange": "Wpisz liczbę całkowitą od {{min}} do {{max}}",
@@ -660,7 +662,9 @@
   },
   "storm": {
     "copies_one": "Sztorm: {{count}} kopia",
-    "copies_other": "Sztorm: {{count}} kopie"
+    "copies_other": "Sztorm: {{count}} kopie",
+    "count_one": "Licznik sztormu: {{count}} kopia",
+    "count_other": "Licznik sztormu: {{count}} kopie"
   },
   "opponentHud": {
     "ally": "Sojusznik",
@@ -822,6 +826,8 @@
   },
   "log": {
     "title": "Dziennik gry",
+    "dockLeft": "Zadokuj dziennik gry po lewej",
+    "dockRight": "Zadokuj dziennik gry po prawej",
     "noEvents": "Brak zdarzeń",
     "closeLog": "Zamknij dziennik gry",
     "verbosityFull": "pełny",
@@ -1104,7 +1110,10 @@
       "subtitlePreparedCopy": "Rzucić przygotowany czar?",
       "subtitleActivate": "Aktywować tę zdolność?",
       "subtitlePlay": "Wybierz, jak zagrać tę kartę",
-      "subtitleChoose": "Wybierz zdolność do aktywowania"
+      "subtitleChoose": "Wybierz zdolność do aktywowania",
+      "unlockThisDoor": "Odblokuj te drzwi",
+      "unlockHalf": "Odblokuj {{name}}",
+      "unlockHalfWithCost": "Odblokuj {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Przekręć, aby dodać manę",
@@ -1616,6 +1625,9 @@
       "selectAll": "Zaznacz wszystko",
       "invert": "Odwróć",
       "clear": "Wyczyść",
+      "searchLabel": "Filtruj",
+      "searchPlaceholder": "Nazwa karty",
+      "searchCardsAria": "Filtruj karty według nazwy",
       "sortLabel": "Sortuj",
       "groupLabel": "Grupuj",
       "optNone": "Brak",
@@ -2041,6 +2053,7 @@
     "diagnostic": "diagnostyka: {{reason}}",
     "showDetails": "Pokaż szczegóły",
     "exportGameState": "Eksportuj stan gry",
+    "exportClientSnapshot": "Eksportuj migawkę klienta",
     "exported": "Wyeksportowano",
     "exportFailed": "Eksport nie powiódł się",
     "copyDiagnostic": "Kopiuj diagnostykę",

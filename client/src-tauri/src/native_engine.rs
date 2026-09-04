@@ -23,8 +23,8 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::native_bridge::BridgeHandle;
 use crate::native_engine_contract::{
-    NativeEngineError, NativeEngineKey, NativeEngineProgress, NativeEngineProgressPhase,
-    NativeEngineReady,
+    NativeEngineCapabilities, NativeEngineError, NativeEngineIntent, NativeEngineKey,
+    NativeEngineProgress, NativeEngineProgressPhase, NativeEngineReady,
 };
 
 #[cfg(unix)]
@@ -46,6 +46,7 @@ const SPAWN_RECORD_FILE: &str = "native-engine-spawn-record.json";
 const RELEASE_RATCHET_FILE: &str = "native-engine-highest-release-version.json";
 const PREVIEW_RATCHET_FILE: &str = "native-engine-preview-generated-at.json";
 const MANIFEST_DATA_FILE: &str = "manifest-data.json";
+const SIGNED_MANIFEST_ENVELOPE_FILE: &str = "signed-manifest-envelope.json";
 const RELEASE_ORIGIN: &str = "https://phase-rs.dev";
 const PREVIEW_ORIGIN: &str = "https://preview.phase-rs.dev";
 const PROGRESS_EVENT: &str = "native-engine-progress";
@@ -255,6 +256,12 @@ struct StoredManifestData {
     data: Vec<DataFile>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct StoredSignedManifestEnvelope {
+    manifest: Vec<u8>,
+    signature: Vec<u8>,
+}
+
 struct NativeEngineFiles {
     app_directory: PathBuf,
     base: PathBuf,
@@ -331,12 +338,169 @@ impl NativeEngineFiles {
     fn manifest_data(&self, key: &NativeEngineKey) -> PathBuf {
         self.key_directory(key).join(MANIFEST_DATA_FILE)
     }
+
+    fn signed_manifest_envelope(&self, key: &NativeEngineKey) -> PathBuf {
+        self.key_directory(key).join(SIGNED_MANIFEST_ENVELOPE_FILE)
+    }
 }
 
 struct ResolvedArtifact {
     binary_url: String,
     binary_signature_url: String,
     data: Vec<DataFile>,
+    fetched_envelope: Option<StoredSignedManifestEnvelope>,
+}
+
+struct PreparedSpawnPlan {
+    binary: PathBuf,
+    data_directory: PathBuf,
+    arguments: Vec<String>,
+    preflight: ArtifactPreflight,
+}
+
+struct DataPreflight {
+    entry: DataFile,
+    cache_is_valid: bool,
+    destination_is_valid: bool,
+}
+
+struct ArtifactPreflight {
+    binary_is_valid: bool,
+    data: Vec<DataPreflight>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecycleDecision {
+    RetainAndVerify,
+    ReturnReady,
+    RefuseWithoutSideEffects,
+    Replace,
+    CleanStale,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArtifactResolutionOrder {
+    BeforePersistedLifecycle,
+    AfterPersistedLifecycle,
+}
+
+enum PersistedRecordOutcome {
+    Continue,
+    Retain(SpawnRecord),
+    ReturnReady(NativeEngineReady),
+}
+
+fn adopt_persisted_record(state: &mut NativeEngineState, record: SpawnRecord) -> NativeEngineReady {
+    let ready = NativeEngineReady { port: record.port };
+    state.running = Some(RunningEngine::Adopted(record));
+    ready
+}
+
+fn artifact_resolution_order(
+    key: &NativeEngineKey,
+    intent: NativeEngineIntent,
+) -> ArtifactResolutionOrder {
+    match (key, intent) {
+        (NativeEngineKey::Preview { .. }, NativeEngineIntent::StartOnline)
+        | (NativeEngineKey::Preview { .. }, NativeEngineIntent::PrepareForOffline) => {
+            ArtifactResolutionOrder::BeforePersistedLifecycle
+        }
+        (NativeEngineKey::Release { .. }, _)
+        | (NativeEngineKey::Preview { .. }, NativeEngineIntent::StartOffline) => {
+            ArtifactResolutionOrder::AfterPersistedLifecycle
+        }
+    }
+}
+
+fn lifecycle_decision(
+    intent: NativeEngineIntent,
+    requested: &NativeEngineKey,
+    current: &NativeEngineKey,
+    healthy: bool,
+) -> LifecycleDecision {
+    if !healthy {
+        return LifecycleDecision::CleanStale;
+    }
+    if current == requested {
+        return match intent {
+            NativeEngineIntent::PrepareForOffline => LifecycleDecision::RetainAndVerify,
+            NativeEngineIntent::StartOnline | NativeEngineIntent::StartOffline => {
+                LifecycleDecision::ReturnReady
+            }
+        };
+    }
+    if intent == NativeEngineIntent::PrepareForOffline {
+        LifecycleDecision::RefuseWithoutSideEffects
+    } else {
+        LifecycleDecision::Replace
+    }
+}
+
+fn preparation_conflicts(
+    requested: &NativeEngineKey,
+    held: Option<(&NativeEngineKey, bool)>,
+    record: Option<(&NativeEngineKey, bool)>,
+) -> bool {
+    held.is_some_and(|(current, healthy)| healthy && current != requested)
+        || record.is_some_and(|(current, healthy)| healthy && current != requested)
+}
+
+fn require_preparation_preflight(
+    requested: &NativeEngineKey,
+    held: Option<(&NativeEngineKey, bool)>,
+    record: Option<(&NativeEngineKey, bool)>,
+) -> Result<(), NativeEngineError> {
+    if preparation_conflicts(requested, held, record) {
+        return Err(NativeEngineError::Health {
+            detail: "a healthy native engine for a different key is already running".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn after_preparation_preflight<T>(
+    intent: NativeEngineIntent,
+    requested: &NativeEngineKey,
+    held: Option<(&NativeEngineKey, bool)>,
+    record: Option<(&NativeEngineKey, bool)>,
+    continue_with: impl FnOnce() -> Result<T, NativeEngineError>,
+) -> Result<T, NativeEngineError> {
+    if intent == NativeEngineIntent::PrepareForOffline {
+        require_preparation_preflight(requested, held, record)?;
+    }
+    continue_with()
+}
+
+fn apply_persisted_record_lifecycle(
+    state: &mut NativeEngineState,
+    files: &NativeEngineFiles,
+    requested: &NativeEngineKey,
+    intent: NativeEngineIntent,
+    record: Option<(SpawnRecord, bool)>,
+    resolved_before_record: Option<&ResolvedArtifact>,
+) -> Result<PersistedRecordOutcome, NativeEngineError> {
+    let Some((record, healthy)) = record else {
+        return Ok(PersistedRecordOutcome::Continue);
+    };
+    match lifecycle_decision(intent, requested, &record.key, healthy) {
+        LifecycleDecision::ReturnReady => {
+            if let Some(resolved) = resolved_before_record {
+                persist_fetched_envelope(files, requested, resolved)?;
+            }
+            Ok(PersistedRecordOutcome::ReturnReady(adopt_persisted_record(
+                state, record,
+            )))
+        }
+        LifecycleDecision::RetainAndVerify => Ok(PersistedRecordOutcome::Retain(record)),
+        LifecycleDecision::RefuseWithoutSideEffects => Err(NativeEngineError::Health {
+            detail: "a healthy native engine for a different key is already running".to_owned(),
+        }),
+        LifecycleDecision::Replace | LifecycleDecision::CleanStale => {
+            kill_recorded_process_if_ours(&record, files);
+            clear_spawn_record(files)?;
+            Ok(PersistedRecordOutcome::Continue)
+        }
+    }
 }
 
 enum RunningEngine {
@@ -461,14 +625,17 @@ fn abort_all_native_engine_bridges(bridges: &mut BTreeMap<u64, BridgeHandle>) {
 pub async fn ensure_native_engine(
     app: AppHandle,
     key: NativeEngineKey,
+    intent: Option<NativeEngineIntent>,
 ) -> Result<NativeEngineReady, NativeEngineError> {
     let progress_app = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || ensure_native_engine_sync(&app, key))
-        .await
-        .map_err(|error| NativeEngineError::Internal {
-            detail: error.to_string(),
-        })
-        .and_then(|result| result);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        ensure_native_engine_sync(&app, key, intent.unwrap_or(NativeEngineIntent::StartOnline))
+    })
+    .await
+    .map_err(|error| NativeEngineError::Internal {
+        detail: error.to_string(),
+    })
+    .and_then(|result| result);
     // Single authority for the terminal phase. `ensure_native_engine_sync`
     // returns early on both the healthy-in-process and adopted-record paths,
     // so emitting `Ready` inside it would leave those runs ending on a
@@ -482,6 +649,12 @@ pub async fn ensure_native_engine(
         Err(_) => emit_progress(&progress_app, NativeEngineProgressPhase::Failed, None),
     }
     result
+}
+
+/// Read-only version-skew boundary for remote web content.
+#[tauri::command]
+pub fn native_engine_capabilities() -> NativeEngineCapabilities {
+    NativeEngineCapabilities { intent_contract: 1 }
 }
 
 /// Returns the latest provisioning progress for listeners that register late.
@@ -507,11 +680,12 @@ pub fn stop_native_engine_on_exit(app: &AppHandle) {
 fn ensure_native_engine_sync(
     app: &AppHandle,
     key: NativeEngineKey,
+    intent: NativeEngineIntent,
 ) -> Result<NativeEngineReady, NativeEngineError> {
     key.validate()?;
     let files = NativeEngineFiles::from_app(app)?;
-    fs::create_dir_all(&files.base).map_err(NativeEngineError::storage)?;
     let client = http_client()?;
+    let fetch = |url: &str| fetch_bytes(&client, url);
     let mut state = engine_state()
         .lock()
         .map_err(|error| NativeEngineError::Internal {
@@ -520,17 +694,67 @@ fn ensure_native_engine_sync(
 
     check_release_ratchet(&files, &key)?;
 
-    if let Some(running) = state.running.as_mut() {
-        if running.key() == &key && health_passes(&client, running.port()) {
-            return Ok(NativeEngineReady {
-                port: running.port(),
-            });
-        }
-    }
+    // Preparation must protect every potentially live owner before it mutates
+    // disk or lifecycle state. A persisted record can outlive this process, so
+    // checking only `state.running` would still permit a remote manifest write
+    // or stale cleanup to disturb a healthy different-key engine.
+    let held_snapshot = state.running.as_ref().map(|running| {
+        (
+            running.key().clone(),
+            health_passes(&client, running.port()),
+        )
+    });
+    let persisted_record = read_spawn_record(&files)?;
+    // This is deliberately after the preparation conflict preflight: refusing
+    // to prepare must leave even an absent cache directory untouched.
+    after_preparation_preflight(
+        intent,
+        &key,
+        held_snapshot
+            .as_ref()
+            .map(|(held_key, healthy)| (held_key, *healthy)),
+        persisted_record
+            .as_ref()
+            .map(|record| (&record.key, health_passes(&client, record.port))),
+        || {
+            if intent != NativeEngineIntent::PrepareForOffline {
+                fs::create_dir_all(&files.base).map_err(NativeEngineError::storage)
+            } else {
+                Ok(())
+            }
+        },
+    )?;
 
-    if let Some(running) = state.running.take() {
-        stop_running_engine(running, &files, &mut state.bridges);
-        clear_spawn_record(&files)?;
+    let held_is_healthy_for_key = if let Some(running) = state.running.as_mut() {
+        match lifecycle_decision(
+            intent,
+            &key,
+            running.key(),
+            health_passes(&client, running.port()),
+        ) {
+            LifecycleDecision::ReturnReady => {
+                return Ok(NativeEngineReady {
+                    port: running.port(),
+                });
+            }
+            LifecycleDecision::RetainAndVerify => true,
+            LifecycleDecision::RefuseWithoutSideEffects => {
+                return Err(NativeEngineError::Health {
+                    detail: "a healthy native engine for a different key is already running"
+                        .to_owned(),
+                });
+            }
+            LifecycleDecision::Replace | LifecycleDecision::CleanStale => false,
+        }
+    } else {
+        false
+    };
+
+    if !held_is_healthy_for_key {
+        if let Some(running) = state.running.take() {
+            stop_running_engine(running, &files, &mut state.bridges);
+            clear_spawn_record(&files)?;
+        }
     }
 
     emit_progress(
@@ -538,42 +762,79 @@ fn ensure_native_engine_sync(
         NativeEngineProgressPhase::Resolving,
         Some(key.directory_name()),
     );
-    let preview_resolved = match key {
-        NativeEngineKey::Preview { .. } => Some(resolve_artifact(app, &client, &files, &key)?),
-        NativeEngineKey::Release { .. } => None,
+    let preview_resolved = match artifact_resolution_order(&key, intent) {
+        ArtifactResolutionOrder::BeforePersistedLifecycle => {
+            Some(resolve_artifact(app, &fetch, &files, &key, intent)?)
+        }
+        ArtifactResolutionOrder::AfterPersistedLifecycle => None,
     };
 
-    if let Some(record) = read_spawn_record(&files)? {
-        let healthy = health_passes(&client, record.port);
-        if can_adopt(&record, &key, healthy) {
-            let port = record.port;
-            state.running = Some(RunningEngine::Adopted(record));
-            return Ok(NativeEngineReady { port });
-        }
-        kill_recorded_process_if_ours(&record, &files);
-        clear_spawn_record(&files)?;
-    }
+    let persisted_outcome = apply_persisted_record_lifecycle(
+        &mut state,
+        &files,
+        &key,
+        intent,
+        persisted_record.map(|record| {
+            let healthy = health_passes(&client, record.port);
+            (record, healthy)
+        }),
+        preview_resolved.as_ref(),
+    )?;
+    let retained_record = match persisted_outcome {
+        PersistedRecordOutcome::Continue => None,
+        PersistedRecordOutcome::Retain(record) => Some(record),
+        PersistedRecordOutcome::ReturnReady(ready) => return Ok(ready),
+    };
 
     let resolved = match preview_resolved {
         Some(resolved) => resolved,
-        None => resolve_artifact(app, &client, &files, &key)?,
+        None => resolve_artifact(app, &fetch, &files, &key, intent)?,
     };
+    let repair_allowed = !held_is_healthy_for_key && retained_record.is_none();
 
-    let binary_path = provision_binary(app, &client, &files, &key, &resolved)?;
+    let spawn_plan = provision_resolved_artifact(
+        Some(app),
+        &fetch,
+        &files,
+        &key,
+        &resolved,
+        intent,
+        repair_allowed,
+    )?;
 
-    emit_progress(app, NativeEngineProgressPhase::DownloadingData, None);
-    assemble_data(&client, Some(app), &files, &key, &resolved.data)?;
+    if held_is_healthy_for_key {
+        let port = state.running.as_ref().expect("checked above").port();
+        if health_passes(&client, port) {
+            persist_release_ratchet(&files, &key)?;
+            return Ok(NativeEngineReady { port });
+        }
+        if let Some(running) = state.running.take() {
+            stop_running_engine(running, &files, &mut state.bridges);
+            clear_spawn_record(&files)?;
+        }
+    }
+    if !held_is_healthy_for_key {
+        if let Some(record) = retained_record {
+            if health_passes(&client, record.port) {
+                persist_release_ratchet(&files, &key)?;
+                return Ok(adopt_persisted_record(&mut state, record));
+            }
+            kill_recorded_process_if_ours(&record, &files);
+            clear_spawn_record(&files)?;
+            abort_all_native_engine_bridges(&mut state.bridges);
+        }
+    }
 
     emit_progress(app, NativeEngineProgressPhase::Spawning, None);
     let port = reserve_port()?;
     let (mut child, stdin) = spawn_server(
-        &binary_path,
-        &files.data_directory(&key),
+        &spawn_plan.binary,
+        &spawn_plan.data_directory,
         &files.games_db(&key),
         &files.log_directory(),
         &files.startup_log(),
         port,
-        key.origin(),
+        &spawn_plan.arguments,
     )?;
     if let Err(error) = wait_for_health(&client, port, &mut child) {
         let running = RunningEngine::Child {
@@ -639,12 +900,149 @@ fn http_client() -> Result<Client, NativeEngineError> {
         })
 }
 
-fn resolve_artifact(
+fn resolve_artifact<F>(
     app: &AppHandle,
-    client: &Client,
+    fetch: &F,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    intent: NativeEngineIntent,
+) -> Result<ResolvedArtifact, NativeEngineError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, NativeEngineError>,
+{
+    if intent == NativeEngineIntent::StartOffline {
+        return resolve_cached_artifact(files, key);
+    }
+
+    emit_progress(
+        app,
+        NativeEngineProgressPhase::Verifying,
+        Some(
+            match key {
+                NativeEngineKey::Release { .. } => "release data manifest",
+                NativeEngineKey::Preview { .. } => "preview server manifest",
+            }
+            .to_owned(),
+        ),
+    );
+    resolve_online_artifact(fetch, files, key)
+}
+
+fn resolve_online_artifact<F>(
+    fetch: &F,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+) -> Result<ResolvedArtifact, NativeEngineError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, NativeEngineError>,
+{
+    resolve_online_artifact_with_key(SERVER_ARTIFACT_PUBLIC_KEY, fetch, files, key)
+}
+
+fn resolve_online_artifact_with_key<F>(
+    public_key: &str,
+    fetch: &F,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+) -> Result<ResolvedArtifact, NativeEngineError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, NativeEngineError>,
+{
+    let manifest_url = match key {
+        NativeEngineKey::Release { version } => {
+            format!("https://data.phase-rs.dev/desktop/release-server-v{version}.json")
+        }
+        NativeEngineKey::Preview { .. } => {
+            "https://data.phase-rs.dev/desktop/preview-server.json".to_owned()
+        }
+    };
+    let envelope = fetch_signed_manifest_with_key(public_key, fetch, &manifest_url)?;
+    let mut resolved = resolved_artifact_from_envelope_with_key(public_key, files, key, &envelope)?;
+    resolved.fetched_envelope = Some(envelope);
+    Ok(resolved)
+}
+
+fn persist_fetched_envelope(
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    resolved: &ResolvedArtifact,
+) -> Result<(), NativeEngineError> {
+    let Some(envelope) = &resolved.fetched_envelope else {
+        return Ok(());
+    };
+    write_json_atomically(&files.signed_manifest_envelope(key), envelope)?;
+    if let NativeEngineKey::Preview { .. } = key {
+        persist_preview_ratchet(files, &preview_generated_at(&envelope.manifest)?)?;
+    }
+    Ok(())
+}
+
+fn resolve_cached_artifact(
     files: &NativeEngineFiles,
     key: &NativeEngineKey,
 ) -> Result<ResolvedArtifact, NativeEngineError> {
+    resolve_cached_artifact_with_key(SERVER_ARTIFACT_PUBLIC_KEY, files, key)
+}
+
+fn resolve_cached_artifact_with_key(
+    public_key: &str,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+) -> Result<ResolvedArtifact, NativeEngineError> {
+    let envelope = read_signed_manifest_envelope(files, key)?;
+    let resolved = resolved_artifact_from_envelope_with_key(public_key, files, key, &envelope)?;
+    if let NativeEngineKey::Preview { .. } = key {
+        persist_preview_ratchet(files, &preview_generated_at(&envelope.manifest)?)?;
+    }
+    Ok(resolved)
+}
+
+fn read_signed_manifest_envelope(
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+) -> Result<StoredSignedManifestEnvelope, NativeEngineError> {
+    let path = files.signed_manifest_envelope(key);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(NativeEngineError::Manifest {
+                detail: "the exact native-engine signed manifest is not cached".to_owned(),
+            });
+        }
+        Err(error) => return Err(NativeEngineError::storage(error)),
+    };
+    serde_json::from_slice(&bytes).map_err(|error| NativeEngineError::Verification {
+        detail: format!("invalid cached signed manifest envelope: {error}"),
+    })
+}
+
+fn fetch_signed_manifest_with_key<F>(
+    public_key: &str,
+    fetch: &F,
+    manifest_url: &str,
+) -> Result<StoredSignedManifestEnvelope, NativeEngineError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, NativeEngineError>,
+{
+    let envelope = StoredSignedManifestEnvelope {
+        manifest: fetch(manifest_url)?,
+        signature: fetch(&format!("{manifest_url}.minisig"))?,
+    };
+    verify_signature_with_key(public_key, &envelope.manifest, &envelope.signature)?;
+    Ok(envelope)
+}
+
+fn preview_generated_at(manifest: &[u8]) -> Result<String, NativeEngineError> {
+    Ok(PreviewManifest::parse(manifest)?.generated_at)
+}
+
+fn resolved_artifact_from_envelope_with_key(
+    public_key: &str,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    envelope: &StoredSignedManifestEnvelope,
+) -> Result<ResolvedArtifact, NativeEngineError> {
+    verify_signature_with_key(public_key, &envelope.manifest, &envelope.signature)?;
     match key {
         NativeEngineKey::Release { version } => {
             let asset = format!(
@@ -654,31 +1052,18 @@ fn resolve_artifact(
             );
             let base =
                 format!("https://github.com/phase-rs/phase/releases/download/v{version}/{asset}");
-            let manifest_url =
-                format!("https://data.phase-rs.dev/desktop/release-server-v{version}.json");
-            emit_progress(
-                app,
-                NativeEngineProgressPhase::Verifying,
-                Some("release data manifest".to_owned()),
-            );
-            let manifest =
-                ReleaseManifest::parse(&fetch_verified_bytes(client, &manifest_url)?, version)?;
+            let manifest = ReleaseManifest::parse(&envelope.manifest, version)?;
             Ok(ResolvedArtifact {
                 binary_url: base.clone(),
                 binary_signature_url: format!("{base}.minisig"),
                 data: manifest.data,
+                fetched_envelope: None,
             })
         }
         NativeEngineKey::Preview { fingerprint } => {
-            let manifest_url = "https://data.phase-rs.dev/desktop/preview-server.json";
-            emit_progress(
-                app,
-                NativeEngineProgressPhase::Verifying,
-                Some("preview server manifest".to_owned()),
-            );
-            let manifest = PreviewManifest::parse(&fetch_verified_bytes(client, manifest_url)?)?;
+            let manifest = PreviewManifest::parse(&envelope.manifest)?;
             let entry = manifest.entry_for(fingerprint)?;
-            accept_preview_manifest(files, &manifest.generated_at)?;
+            check_preview_ratchet(files, &manifest.generated_at)?;
             let target = target_triple()?;
             let binary = entry
                 .binaries
@@ -690,58 +1075,67 @@ fn resolve_artifact(
                 binary_url: binary.url.clone(),
                 binary_signature_url: binary.sig_url.clone(),
                 data: entry.data.clone(),
+                fetched_envelope: None,
             })
         }
     }
-}
-
-fn fetch_verified_bytes(client: &Client, url: &str) -> Result<Vec<u8>, NativeEngineError> {
-    let bytes = fetch_bytes(client, url)?;
-    let signature = fetch_bytes(client, &format!("{url}.minisig"))?;
-    verify_signature(&bytes, &signature)?;
-    Ok(bytes)
 }
 
 /// Reuses a previously verified server binary for the same typed key. The
 /// minisign signature is retained alongside the executable so every launch
 /// still verifies what it is about to execute; a missing or invalid cache is
 /// simply replaced from the first-party artifact source.
-fn provision_binary(
-    app: &AppHandle,
-    client: &Client,
+fn provision_binary_with_key<F>(
+    public_key: &str,
+    app: Option<&AppHandle>,
+    fetch: &F,
     files: &NativeEngineFiles,
     key: &NativeEngineKey,
     resolved: &ResolvedArtifact,
-) -> Result<PathBuf, NativeEngineError> {
+    intent: NativeEngineIntent,
+    repair_allowed: bool,
+    binary_is_valid: bool,
+) -> Result<PathBuf, NativeEngineError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, NativeEngineError>,
+{
     let binary_path = files.binary(key);
-    if cached_binary_is_verified(files, key)? {
+    if binary_is_valid {
         return Ok(binary_path);
     }
+    if intent == NativeEngineIntent::StartOffline {
+        return Err(NativeEngineError::Verification {
+            detail: "the exact native-engine binary is missing or invalid offline".to_owned(),
+        });
+    }
+    if !repair_allowed {
+        return Err(NativeEngineError::Verification {
+            detail: "native-engine binary repair would replace a file used by the healthy engine"
+                .to_owned(),
+        });
+    }
 
-    emit_progress(
-        app,
-        NativeEngineProgressPhase::DownloadingBinary,
-        Some(key.directory_name()),
-    );
-    let binary = fetch_bytes(client, &resolved.binary_url)?;
-    let signature = fetch_bytes(client, &resolved.binary_signature_url)?;
-    emit_progress(
-        app,
-        NativeEngineProgressPhase::Verifying,
-        Some("server binary".to_owned()),
-    );
-    verify_signature(&binary, &signature)?;
+    if let Some(app) = app {
+        emit_progress(
+            app,
+            NativeEngineProgressPhase::DownloadingBinary,
+            Some(key.directory_name()),
+        );
+    }
+    let binary = fetch(&resolved.binary_url)?;
+    let signature = fetch(&resolved.binary_signature_url)?;
+    if let Some(app) = app {
+        emit_progress(
+            app,
+            NativeEngineProgressPhase::Verifying,
+            Some("server binary".to_owned()),
+        );
+    }
+    verify_signature_with_key(public_key, &binary, &signature)?;
     write_atomically(&binary_path, &binary)?;
     write_atomically(&files.binary_signature(key), &signature)?;
     make_executable(&binary_path)?;
     Ok(binary_path)
-}
-
-fn cached_binary_is_verified(
-    files: &NativeEngineFiles,
-    key: &NativeEngineKey,
-) -> Result<bool, NativeEngineError> {
-    cached_binary_is_verified_with_key(SERVER_ARTIFACT_PUBLIC_KEY, files, key)
 }
 
 fn cached_binary_is_verified_with_key(
@@ -783,10 +1177,6 @@ fn fetch_bytes(client: &Client, url: &str) -> Result<Vec<u8>, NativeEngineError>
                 detail: format!("{url}: {error}"),
             })
     })
-}
-
-fn verify_signature(bytes: &[u8], signature: &[u8]) -> Result<(), NativeEngineError> {
-    verify_signature_with_key(SERVER_ARTIFACT_PUBLIC_KEY, bytes, signature)
 }
 
 fn verify_signature_with_key(
@@ -863,7 +1253,7 @@ fn persist_release_ratchet(
     Ok(())
 }
 
-fn accept_preview_manifest(
+fn check_preview_ratchet(
     files: &NativeEngineFiles,
     generated_at: &str,
 ) -> Result<(), NativeEngineError> {
@@ -883,6 +1273,14 @@ fn accept_preview_manifest(
             });
         }
     }
+    Ok(())
+}
+
+fn persist_preview_ratchet(
+    files: &NativeEngineFiles,
+    generated_at: &str,
+) -> Result<(), NativeEngineError> {
+    parse_generated_at(generated_at)?;
     write_json_atomically(
         &files.preview_ratchet(),
         &PreviewRatchet {
@@ -891,27 +1289,107 @@ fn accept_preview_manifest(
     )
 }
 
+#[cfg(test)]
+fn accept_preview_manifest(
+    files: &NativeEngineFiles,
+    generated_at: &str,
+) -> Result<(), NativeEngineError> {
+    check_preview_ratchet(files, generated_at)?;
+    persist_preview_ratchet(files, generated_at)
+}
+
 fn parse_generated_at(value: &str) -> Result<OffsetDateTime, NativeEngineError> {
     OffsetDateTime::parse(value, &Rfc3339).map_err(NativeEngineError::manifest)
 }
 
-fn assemble_data(
-    client: &Client,
+fn preflight_artifacts_with_key(
+    public_key: &str,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    resolved: &ResolvedArtifact,
+) -> Result<ArtifactPreflight, NativeEngineError> {
+    Ok(ArtifactPreflight {
+        binary_is_valid: cached_binary_is_verified_with_key(public_key, files, key)?,
+        data: preflight_data(files, key, &resolved.data)?,
+    })
+}
+
+fn preflight_data(
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    entries: &[DataFile],
+) -> Result<Vec<DataPreflight>, NativeEngineError> {
+    validate_data_files(entries)?;
+    entries
+        .iter()
+        .map(|entry| {
+            Ok(DataPreflight {
+                entry: entry.clone(),
+                cache_is_valid: file_matches_sha256(
+                    &files.cache_blob(&entry.sha256),
+                    &entry.sha256,
+                )?,
+                destination_is_valid: file_matches_sha256(
+                    &files.data_directory(key).join(&entry.name),
+                    &entry.sha256,
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn require_retained_destinations(preflight: &ArtifactPreflight) -> Result<(), NativeEngineError> {
+    if !preflight.binary_is_valid {
+        return Err(NativeEngineError::Verification {
+            detail: "native-engine binary repair would replace a file used by the healthy engine"
+                .to_owned(),
+        });
+    }
+    if let Some(data) = preflight
+        .data
+        .iter()
+        .find(|data| !data.destination_is_valid)
+    {
+        return Err(NativeEngineError::Verification {
+            detail: format!(
+                "native-engine data destination {} would be replaced while healthy",
+                data.entry.name
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn assemble_data<F>(
+    fetch: &F,
     app: Option<&AppHandle>,
     files: &NativeEngineFiles,
     key: &NativeEngineKey,
-    data: &[DataFile],
-) -> Result<(), NativeEngineError> {
-    validate_data_files(data)?;
+    data: &[DataPreflight],
+    intent: NativeEngineIntent,
+    repair_allowed: bool,
+) -> Result<(), NativeEngineError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, NativeEngineError>,
+{
+    if intent == NativeEngineIntent::StartOffline {
+        if let Some(data) = data.iter().find(|data| !data.cache_is_valid) {
+            return Err(NativeEngineError::Verification {
+                detail: format!(
+                    "cached native-engine data {} is missing or invalid",
+                    data.entry.name
+                ),
+            });
+        }
+    }
     let data_directory = files.data_directory(key);
     fs::create_dir_all(&data_directory).map_err(NativeEngineError::storage)?;
     ensure_writable(&data_directory)?;
-    for entry in data {
+    for data in data {
+        let entry = &data.entry;
         let cache_blob = files.cache_blob(&entry.sha256);
-        if !cache_blob
-            .try_exists()
-            .map_err(NativeEngineError::storage)?
-        {
+        let destination = data_directory.join(&entry.name);
+        if !data.cache_is_valid {
             if let Some(app) = app {
                 emit_progress(
                     app,
@@ -919,20 +1397,155 @@ fn assemble_data(
                     Some(entry.name.clone()),
                 );
             }
-            let bytes = fetch_bytes(client, &entry.url)?;
+            let bytes = fetch(&entry.url)?;
             verify_sha256(&bytes, &entry.sha256)?;
             write_atomically(&cache_blob, &bytes)?;
         }
-        let destination = data_directory.join(&entry.name);
-        remove_file_if_exists(&destination)?;
-        link_or_copy(&cache_blob, &destination)?;
+        if !data.destination_is_valid {
+            if !repair_allowed {
+                return Err(NativeEngineError::Verification {
+                    detail: format!(
+                        "native-engine data destination {} would be replaced while healthy",
+                        entry.name
+                    ),
+                });
+            }
+            remove_file_if_exists(&destination)?;
+            link_or_copy(&cache_blob, &destination)?;
+        }
+        verify_sha256(
+            &fs::read(&destination).map_err(NativeEngineError::storage)?,
+            &entry.sha256,
+        )?;
     }
     write_json_atomically(
         &files.manifest_data(key),
         &StoredManifestData {
-            data: data.to_vec(),
+            data: data.iter().map(|data| data.entry.clone()).collect(),
         },
     )
+}
+
+fn file_matches_sha256(path: &Path, expected: &str) -> Result<bool, NativeEngineError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(verify_sha256(&bytes, expected).is_ok()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(NativeEngineError::storage(error)),
+    }
+}
+
+fn plan_spawn_with_key(
+    public_key: &str,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    resolved: &ResolvedArtifact,
+    intent: NativeEngineIntent,
+    repair_allowed: bool,
+) -> Result<PreparedSpawnPlan, NativeEngineError> {
+    let preflight = preflight_artifacts_with_key(public_key, files, key, resolved)?;
+    if !repair_allowed {
+        require_retained_destinations(&preflight)?;
+    }
+    Ok(PreparedSpawnPlan {
+        binary: files.binary(key),
+        data_directory: files.data_directory(key),
+        arguments: server_arguments(key.origin(), intent),
+        preflight,
+    })
+}
+
+fn apply_spawn_plan_with_key<F>(
+    public_key: &str,
+    app: Option<&AppHandle>,
+    fetch: &F,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    resolved: &ResolvedArtifact,
+    intent: NativeEngineIntent,
+    repair_allowed: bool,
+    plan: &PreparedSpawnPlan,
+) -> Result<(), NativeEngineError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, NativeEngineError>,
+{
+    let binary = provision_binary_with_key(
+        public_key,
+        app,
+        fetch,
+        files,
+        key,
+        resolved,
+        intent,
+        repair_allowed,
+        plan.preflight.binary_is_valid,
+    )?;
+    debug_assert_eq!(binary, plan.binary);
+    if let Some(app) = app {
+        emit_progress(app, NativeEngineProgressPhase::DownloadingData, None);
+    }
+    assemble_data(
+        fetch,
+        app,
+        files,
+        key,
+        &plan.preflight.data,
+        intent,
+        repair_allowed,
+    )?;
+    Ok(())
+}
+
+fn provision_resolved_artifact<F>(
+    app: Option<&AppHandle>,
+    fetch: &F,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    resolved: &ResolvedArtifact,
+    intent: NativeEngineIntent,
+    repair_allowed: bool,
+) -> Result<PreparedSpawnPlan, NativeEngineError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, NativeEngineError>,
+{
+    provision_resolved_artifact_with_key(
+        SERVER_ARTIFACT_PUBLIC_KEY,
+        app,
+        fetch,
+        files,
+        key,
+        resolved,
+        intent,
+        repair_allowed,
+    )
+}
+
+fn provision_resolved_artifact_with_key<F>(
+    public_key: &str,
+    app: Option<&AppHandle>,
+    fetch: &F,
+    files: &NativeEngineFiles,
+    key: &NativeEngineKey,
+    resolved: &ResolvedArtifact,
+    intent: NativeEngineIntent,
+    repair_allowed: bool,
+) -> Result<PreparedSpawnPlan, NativeEngineError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, NativeEngineError>,
+{
+    let plan = plan_spawn_with_key(public_key, files, key, resolved, intent, repair_allowed)?;
+    persist_fetched_envelope(files, key, resolved)?;
+    apply_spawn_plan_with_key(
+        public_key,
+        app,
+        fetch,
+        files,
+        key,
+        resolved,
+        intent,
+        repair_allowed,
+        &plan,
+    )?;
+    Ok(plan)
 }
 
 fn ensure_writable(directory: &Path) -> Result<(), NativeEngineError> {
@@ -1019,7 +1632,7 @@ fn spawn_server(
     log_directory: &Path,
     startup_log: &Path,
     port: u16,
-    origin: &str,
+    arguments: &[String],
 ) -> Result<(Child, ChildStdin), NativeEngineError> {
     fs::create_dir_all(log_directory).map_err(NativeEngineError::storage)?;
     let startup_log = OpenOptions::new()
@@ -1033,16 +1646,7 @@ fn spawn_server(
         .env("PORT", port.to_string())
         .env("PHASE_DATA_DIR", data_directory)
         .env("PHASE_GAMES_DB", games_db)
-        .args([
-            "--bind",
-            "127.0.0.1",
-            "--exit-on-stdin-close",
-            // A desktop shell hosts one local player: keep the suspended solo
-            // game resumable until replaced (no stale purge, no reconnect expiry).
-            "--single-user",
-            "--allowed-origin",
-            origin,
-        ])
+        .args(arguments)
         .arg("--log-dir")
         .arg(log_directory)
         .stdin(Stdio::piped())
@@ -1064,6 +1668,23 @@ fn spawn_server(
         detail: "native engine stdin pipe was unavailable".to_owned(),
     })?;
     Ok((child, stdin))
+}
+
+fn server_arguments(origin: &str, intent: NativeEngineIntent) -> Vec<String> {
+    let mut arguments = vec![
+        "--bind".to_owned(),
+        "127.0.0.1".to_owned(),
+        "--exit-on-stdin-close".to_owned(),
+        // A desktop shell hosts one local player: keep the suspended solo
+        // game resumable until replaced (no stale purge, no reconnect expiry).
+        "--single-user".to_owned(),
+        "--allowed-origin".to_owned(),
+        origin.to_owned(),
+    ];
+    if intent != NativeEngineIntent::StartOnline {
+        arguments.push("--no-data-download".to_owned());
+    }
+    arguments
 }
 
 fn wait_for_health(client: &Client, port: u16, child: &mut Child) -> Result<(), NativeEngineError> {
@@ -1115,6 +1736,7 @@ fn clear_spawn_record(files: &NativeEngineFiles) -> Result<(), NativeEngineError
     remove_file_if_exists(&files.spawn_record())
 }
 
+#[cfg(test)]
 fn can_adopt(record: &SpawnRecord, requested: &NativeEngineKey, healthy: bool) -> bool {
     record.key == *requested && healthy
 }
@@ -1422,13 +2044,22 @@ fn emit_progress(app: &AppHandle, phase: NativeEngineProgressPhase, detail: Opti
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::Duration};
+    use std::{cell::RefCell, fs, time::Duration};
 
     use super::*;
 
     const TEST_PUBLIC_KEY: &str = "RWRkGDPsxuBykSbl2mdODJL2Wa/o8ow/1LHjD7Vg8ucmQEM4loTWhAyw";
     const TEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRURkGDPsxuBykQ6p3ycswk/p9Fz+J1mcc/Upp6IqSVJs79jQN6+zqHp6eacgwWwzh1wzX5J7dEsr645KO34Otj6mVlBJ37dahwc=\ntrusted comment: timestamp:1784645991\tfile:fixture.bin\thashed\nAd07FDyWa2WfkYAA776JZtBLynAeiVzEfCFPDtS+KNovBOF6dS9w/YV1jerLhEGlX2oJHujsY2hPCN+hmKiwDg==";
     const TEST_BYTES: &[u8] = b"native-engine-test-fixture\n";
+    // Generated locally for this test fixture with `minisign -G -W` and only
+    // this public key/signature are retained; the temporary private key was
+    // never added to the repository.
+    const TEST_MANIFEST_PUBLIC_KEY: &str =
+        "RWShXyki5XOg0I93KFq/y1ZmJM80FRzQ2yw7POGQ9KSjxscp/2FDTqNU";
+    const TEST_RELEASE_MANIFEST: &[u8] = br#"{"schema":1,"channel":"release","version":"1.2.3","generated_at":"2026-01-01T00:00:00Z","data":[]}"#;
+    const TEST_RELEASE_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRUShXyki5XOg0GM/CqvIehBL/PgNuvRzKsR+fjxvdYZq3TWNW5QrsDlAsSCra8g3dGsB5V2Kf6QwUO9jjYbCwznNEpfqNJkHAwE=\ntrusted comment: timestamp:1788355523\tfile:release.json\thashed\nxYDP6Cn8xpjf4DJ3dwQ5UUXEAlRK15QJyis1l2/TFXc4kxRRgmxJwIAJ1nwuk4zM6nrob0dsIEJIRv5l265OBw==";
+    const TEST_PREVIEW_MANIFEST: &[u8] = br#"{"schema":1,"channel":"preview","generated_at":"2026-01-02T00:00:00Z","current":"0123456789abcdef","previous":null,"fingerprints":{"0123456789abcdef":{"commit":"abc","binaries":{"aarch64-apple-darwin":{"url":"https://example.test/macos","sig_url":"https://example.test/macos.minisig"},"x86_64-pc-windows-msvc":{"url":"https://example.test/windows","sig_url":"https://example.test/windows.minisig"},"x86_64-unknown-linux-musl":{"url":"https://example.test/linux","sig_url":"https://example.test/linux.minisig"}},"data":[]}}}"#;
+    const TEST_PREVIEW_MANIFEST_SIGNATURE: &str = "untrusted comment: signature from minisign secret key\nRUShXyki5XOg0Hztqsw1GFwxMgrX5o0/vRLNsbcGz32R1gVODVfUg+ZR4L/PreI9Nsu8u+BGPoGHYw5CNXQlpWHn6ndKe/vFVwM=\ntrusted comment: timestamp:1788355523\tfile:preview.json\thashed\nQwTR8roTR23UbV+hOm3MZMChfMFtZzbZHFH3fPLoPSp6y0HH2zxx7Jqo2/51r+4oeKjzyjptqWFOXk+1mdRaDQ==";
 
     fn test_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -1546,6 +2177,239 @@ mod tests {
     }
 
     #[test]
+    fn signed_release_envelope_is_exact_key_scoped_and_tamper_evident() {
+        let files = test_files("signed-release-envelope");
+        let envelope = StoredSignedManifestEnvelope {
+            manifest: TEST_RELEASE_MANIFEST.to_vec(),
+            signature: TEST_RELEASE_MANIFEST_SIGNATURE.as_bytes().to_vec(),
+        };
+        let key = release_key("1.2.3");
+        assert!(resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &key,
+            &envelope,
+        )
+        .is_ok());
+        assert!(resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &release_key("1.2.4"),
+            &envelope,
+        )
+        .is_err());
+        assert!(resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &preview_key("0123456789abcdef"),
+            &envelope,
+        )
+        .is_err());
+        let mut tampered = envelope;
+        tampered.manifest.push(b'!');
+        assert!(resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &key,
+            &tampered,
+        )
+        .is_err());
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn signed_manifest_fetch_uses_manifest_then_signature_and_rejects_tampering() {
+        let requested = RefCell::new(Vec::new());
+        let fetch = |url: &str| {
+            requested.borrow_mut().push(url.to_owned());
+            match url {
+                "https://example.test/release.json" => Ok(TEST_RELEASE_MANIFEST.to_vec()),
+                "https://example.test/release.json.minisig" => {
+                    Ok(TEST_RELEASE_MANIFEST_SIGNATURE.as_bytes().to_vec())
+                }
+                _ => Err(NativeEngineError::Download {
+                    detail: "unexpected fixture URL".to_owned(),
+                }),
+            }
+        };
+
+        let envelope = fetch_signed_manifest_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &fetch,
+            "https://example.test/release.json",
+        )
+        .unwrap();
+        assert_eq!(
+            requested.into_inner(),
+            [
+                "https://example.test/release.json",
+                "https://example.test/release.json.minisig"
+            ]
+        );
+        assert_eq!(envelope.manifest, TEST_RELEASE_MANIFEST);
+
+        let tampered_fetch = |url: &str| {
+            if url.ends_with(".minisig") {
+                Ok(TEST_RELEASE_MANIFEST_SIGNATURE.as_bytes().to_vec())
+            } else {
+                Ok(b"tampered".to_vec())
+            }
+        };
+        assert!(fetch_signed_manifest_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &tampered_fetch,
+            "https://example.test/release.json",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn online_resolution_fetches_its_channel_and_never_falls_back_to_cached_envelope() {
+        let files = test_files("online-resolution");
+        let release = release_key("1.2.3");
+        write_json_atomically(
+            &files.signed_manifest_envelope(&release),
+            &StoredSignedManifestEnvelope {
+                manifest: b"stale cached content".to_vec(),
+                signature: b"stale cached signature".to_vec(),
+            },
+        )
+        .unwrap();
+        let requested = RefCell::new(Vec::new());
+        let fetch = |url: &str| {
+            requested.borrow_mut().push(url.to_owned());
+            match url {
+                "https://data.phase-rs.dev/desktop/release-server-v1.2.3.json" => {
+                    Ok(TEST_RELEASE_MANIFEST.to_vec())
+                }
+                "https://data.phase-rs.dev/desktop/release-server-v1.2.3.json.minisig" => {
+                    Ok(TEST_RELEASE_MANIFEST_SIGNATURE.as_bytes().to_vec())
+                }
+                _ => Err(NativeEngineError::Download {
+                    detail: "unexpected fixture URL".to_owned(),
+                }),
+            }
+        };
+
+        let resolved =
+            resolve_online_artifact_with_key(TEST_MANIFEST_PUBLIC_KEY, &fetch, &files, &release)
+                .unwrap();
+        assert_eq!(
+            read_signed_manifest_envelope(&files, &release)
+                .unwrap()
+                .manifest,
+            b"stale cached content"
+        );
+        persist_fetched_envelope(&files, &release, &resolved).unwrap();
+        assert_eq!(
+            requested.into_inner(),
+            [
+                "https://data.phase-rs.dev/desktop/release-server-v1.2.3.json",
+                "https://data.phase-rs.dev/desktop/release-server-v1.2.3.json.minisig"
+            ]
+        );
+        let stored = read_signed_manifest_envelope(&files, &release).unwrap();
+        assert_eq!(stored.manifest, TEST_RELEASE_MANIFEST);
+        let invalid_fetch = |url: &str| {
+            if url.ends_with(".minisig") {
+                Ok(TEST_RELEASE_MANIFEST_SIGNATURE.as_bytes().to_vec())
+            } else {
+                Ok(b"tampered manifest".to_vec())
+            }
+        };
+        assert!(resolve_online_artifact_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &invalid_fetch,
+            &files,
+            &release,
+        )
+        .is_err());
+        assert_eq!(
+            read_signed_manifest_envelope(&files, &release)
+                .unwrap()
+                .manifest,
+            TEST_RELEASE_MANIFEST
+        );
+
+        let preview = preview_key("0123456789abcdef");
+        let preview_fetch = |url: &str| match url {
+            "https://data.phase-rs.dev/desktop/preview-server.json" => {
+                Ok(TEST_PREVIEW_MANIFEST.to_vec())
+            }
+            "https://data.phase-rs.dev/desktop/preview-server.json.minisig" => {
+                Ok(TEST_PREVIEW_MANIFEST_SIGNATURE.as_bytes().to_vec())
+            }
+            _ => Err(NativeEngineError::Download {
+                detail: "release URL was used for preview".to_owned(),
+            }),
+        };
+        let preview_resolved = resolve_online_artifact_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &preview_fetch,
+            &files,
+            &preview,
+        )
+        .unwrap();
+        assert!(!files.signed_manifest_envelope(&preview).exists());
+        assert!(!files.preview_ratchet().exists());
+        persist_fetched_envelope(&files, &preview, &preview_resolved).unwrap();
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn signed_preview_envelope_is_channel_fingerprint_and_ratchet_exact() {
+        let files = test_files("signed-preview-envelope");
+        let key = preview_key("0123456789abcdef");
+        let envelope = StoredSignedManifestEnvelope {
+            manifest: TEST_PREVIEW_MANIFEST.to_vec(),
+            signature: TEST_PREVIEW_MANIFEST_SIGNATURE.as_bytes().to_vec(),
+        };
+        assert!(resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &key,
+            &envelope,
+        )
+        .is_ok());
+        assert!(resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &preview_key("fedcba9876543210"),
+            &envelope,
+        )
+        .is_err());
+        assert!(resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &release_key("1.2.3"),
+            &envelope,
+        )
+        .is_err());
+
+        write_json_atomically(&files.signed_manifest_envelope(&key), &envelope).unwrap();
+        assert!(!files.preview_ratchet().exists());
+        resolve_cached_artifact_with_key(TEST_MANIFEST_PUBLIC_KEY, &files, &key).unwrap();
+        assert!(files.preview_ratchet().exists());
+        fs::remove_file(files.preview_ratchet()).unwrap();
+        write_json_atomically(
+            &files.preview_ratchet(),
+            &PreviewRatchet {
+                generated_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+        )
+        .unwrap();
+        resolve_cached_artifact_with_key(TEST_MANIFEST_PUBLIC_KEY, &files, &key).unwrap();
+        assert_eq!(
+            read_json_optional::<PreviewRatchet>(&files.preview_ratchet())
+                .unwrap()
+                .unwrap()
+                .generated_at,
+            "2026-01-02T00:00:00Z"
+        );
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
     fn cached_binary_requires_its_matching_signature() {
         let files = test_files("binary-cache");
         let key = release_key("1.2.3");
@@ -1563,6 +2427,49 @@ mod tests {
     }
 
     #[test]
+    fn signed_manifest_envelopes_are_atomic_and_exact_key_scoped() {
+        let files = test_files("signed-envelope");
+        let release = release_key("1.2.3");
+        let preview = preview_key("0123456789abcdef");
+        let envelope = StoredSignedManifestEnvelope {
+            manifest: b"manifest".to_vec(),
+            signature: b"signature".to_vec(),
+        };
+
+        write_json_atomically(&files.signed_manifest_envelope(&release), &envelope).unwrap();
+
+        let restored = read_json_optional::<StoredSignedManifestEnvelope>(
+            &files.signed_manifest_envelope(&release),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(restored.manifest, b"manifest");
+        assert_eq!(restored.signature, b"signature");
+        assert!(read_json_optional::<StoredSignedManifestEnvelope>(
+            &files.signed_manifest_envelope(&preview)
+        )
+        .unwrap()
+        .is_none());
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn offline_resolution_requires_the_exact_cached_signed_envelope() {
+        let files = test_files("offline-envelope");
+        assert!(matches!(
+            resolve_cached_artifact(&files, &release_key("1.2.3")),
+            Err(NativeEngineError::Manifest { .. })
+        ));
+        let key = release_key("1.2.3");
+        write_atomically(&files.signed_manifest_envelope(&key), b"not-json").unwrap();
+        assert!(matches!(
+            read_signed_manifest_envelope(&files, &key),
+            Err(NativeEngineError::Verification { .. })
+        ));
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
     fn cache_hash_atomic_write_and_data_assembly_work() {
         let files = test_files("cache-assembly");
         let key = release_key("1.2.3");
@@ -1571,10 +2478,313 @@ mod tests {
         verify_sha256(bytes, &file.sha256).unwrap();
         write_atomically(&files.cache_blob(&file.sha256), bytes).unwrap();
         assert_eq!(fs::read(files.cache_blob(&file.sha256)).unwrap(), bytes);
-        let client = http_client().unwrap();
-        assemble_data(&client, None, &files, &key, std::slice::from_ref(&file)).unwrap();
+        let no_fetch = |_url: &str| -> Result<Vec<u8>, NativeEngineError> {
+            panic!("valid local data must not fetch")
+        };
+        assemble_data(
+            &no_fetch,
+            None,
+            &files,
+            &key,
+            &preflight_data(&files, &key, std::slice::from_ref(&file)).unwrap(),
+            NativeEngineIntent::StartOnline,
+            true,
+        )
+        .unwrap();
         let destination = files.data_directory(&key).join(&file.name);
-        assert_eq!(fs::read(destination).unwrap(), bytes);
+        assert_eq!(fs::read(&destination).unwrap(), bytes);
+        remove_file_if_exists(&destination).unwrap();
+        assemble_data(
+            &no_fetch,
+            None,
+            &files,
+            &key,
+            &preflight_data(&files, &key, std::slice::from_ref(&file)).unwrap(),
+            NativeEngineIntent::StartOffline,
+            true,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), bytes);
+        write_atomically(&files.cache_blob(&file.sha256), b"tampered").unwrap();
+        assert!(matches!(
+            assemble_data(
+                &no_fetch,
+                None,
+                &files,
+                &key,
+                &preflight_data(&files, &key, std::slice::from_ref(&file)).unwrap(),
+                NativeEngineIntent::StartOffline,
+                false,
+            ),
+            Err(NativeEngineError::Verification { .. })
+        ));
+        assert_eq!(
+            fs::read(files.cache_blob(&file.sha256)).unwrap(),
+            b"tampered"
+        );
+        write_atomically(&files.cache_blob(&file.sha256), b"tampered").unwrap();
+        write_atomically(&destination, b"tampered").unwrap();
+        assert!(matches!(
+            assemble_data(
+                &no_fetch,
+                None,
+                &files,
+                &key,
+                &preflight_data(&files, &key, std::slice::from_ref(&file)).unwrap(),
+                NativeEngineIntent::StartOffline,
+                true,
+            ),
+            Err(NativeEngineError::Verification { .. })
+        ));
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn preparation_repairs_an_invalid_blob_without_replacing_a_valid_destination() {
+        let files = test_files("prepare-blob-repair");
+        let key = release_key("1.2.3");
+        let bytes = b"card data";
+        let file = data_file("card-data.json", bytes);
+        let destination = files.data_directory(&key).join(&file.name);
+        write_atomically(&destination, bytes).unwrap();
+        write_atomically(&files.cache_blob(&file.sha256), b"corrupt").unwrap();
+        let preflight = preflight_data(&files, &key, std::slice::from_ref(&file)).unwrap();
+        assert!(!preflight[0].cache_is_valid);
+        assert!(preflight[0].destination_is_valid);
+        let fetches = RefCell::new(0);
+        let fetch = |_url: &str| {
+            *fetches.borrow_mut() += 1;
+            Ok(bytes.to_vec())
+        };
+
+        assemble_data(
+            &fetch,
+            None,
+            &files,
+            &key,
+            &preflight,
+            NativeEngineIntent::PrepareForOffline,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(*fetches.borrow(), 1);
+        assert_eq!(fs::read(&destination).unwrap(), bytes);
+        assert_eq!(fs::read(files.cache_blob(&file.sha256)).unwrap(), bytes);
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn spawn_plan_uses_verified_cache_offline_without_fetching() {
+        let files = test_files("offline-spawn-plan");
+        let key = release_key("1.2.3");
+        let data = data_file("card-data.json", b"card data");
+        write_atomically(&files.binary(&key), TEST_BYTES).unwrap();
+        write_atomically(&files.binary_signature(&key), TEST_SIGNATURE.as_bytes()).unwrap();
+        write_atomically(&files.cache_blob(&data.sha256), b"card data").unwrap();
+        let resolved = ResolvedArtifact {
+            binary_url: "https://example.test/server".to_owned(),
+            binary_signature_url: "https://example.test/server.minisig".to_owned(),
+            data: vec![data.clone()],
+            fetched_envelope: None,
+        };
+        let fetches = RefCell::new(0);
+        let no_fetch = |_url: &str| -> Result<Vec<u8>, NativeEngineError> {
+            *fetches.borrow_mut() += 1;
+            Err(NativeEngineError::Download {
+                detail: "offline must not fetch".to_owned(),
+            })
+        };
+
+        let plan = provision_resolved_artifact_with_key(
+            TEST_PUBLIC_KEY,
+            None,
+            &no_fetch,
+            &files,
+            &key,
+            &resolved,
+            NativeEngineIntent::StartOffline,
+            true,
+        )
+        .unwrap();
+        assert_eq!(*fetches.borrow(), 0);
+        assert_eq!(plan.binary, files.binary(&key));
+        assert_eq!(
+            fs::read(plan.data_directory.join(&data.name)).unwrap(),
+            b"card data"
+        );
+        assert!(plan
+            .arguments
+            .iter()
+            .any(|argument| argument == "--no-data-download"));
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn offline_spawn_plan_rejects_invalid_binary_or_blob_without_fetching() {
+        let files = test_files("offline-invalid-spawn-plan");
+        let key = release_key("1.2.3");
+        let data = data_file("card-data.json", b"card data");
+        let resolved = ResolvedArtifact {
+            binary_url: "https://example.test/server".to_owned(),
+            binary_signature_url: "https://example.test/server.minisig".to_owned(),
+            data: vec![data.clone()],
+            fetched_envelope: None,
+        };
+        let fetches = RefCell::new(0);
+        let fetch = |_url: &str| -> Result<Vec<u8>, NativeEngineError> {
+            *fetches.borrow_mut() += 1;
+            Ok(TEST_BYTES.to_vec())
+        };
+        assert!(matches!(
+            provision_resolved_artifact_with_key(
+                TEST_PUBLIC_KEY,
+                None,
+                &fetch,
+                &files,
+                &key,
+                &resolved,
+                NativeEngineIntent::StartOffline,
+                true,
+            ),
+            Err(NativeEngineError::Verification { .. })
+        ));
+        assert_eq!(*fetches.borrow(), 0);
+
+        write_atomically(&files.binary(&key), TEST_BYTES).unwrap();
+        write_atomically(&files.binary_signature(&key), TEST_SIGNATURE.as_bytes()).unwrap();
+        write_atomically(&files.data_directory(&key).join(&data.name), b"card data").unwrap();
+        assert!(matches!(
+            provision_resolved_artifact_with_key(
+                TEST_PUBLIC_KEY,
+                None,
+                &fetch,
+                &files,
+                &key,
+                &resolved,
+                NativeEngineIntent::StartOffline,
+                true,
+            ),
+            Err(NativeEngineError::Verification { .. })
+        ));
+        assert_eq!(*fetches.borrow(), 0);
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn retained_preparation_preflights_every_destination_before_fetching_or_replacing() {
+        let files = test_files("retained-preparation-preflight");
+        let key = release_key("1.2.3");
+        let data = data_file("card-data.json", b"card data");
+        write_atomically(&files.binary(&key), TEST_BYTES).unwrap();
+        write_atomically(&files.binary_signature(&key), TEST_SIGNATURE.as_bytes()).unwrap();
+        write_atomically(&files.cache_blob(&data.sha256), b"corrupt").unwrap();
+        let resolved = ResolvedArtifact {
+            binary_url: "https://example.test/server".to_owned(),
+            binary_signature_url: "https://example.test/server.minisig".to_owned(),
+            data: vec![data.clone()],
+            fetched_envelope: None,
+        };
+        let fetches = RefCell::new(0);
+        let fetch = |_url: &str| -> Result<Vec<u8>, NativeEngineError> {
+            *fetches.borrow_mut() += 1;
+            Ok(b"card data".to_vec())
+        };
+
+        assert!(matches!(
+            provision_resolved_artifact_with_key(
+                TEST_PUBLIC_KEY,
+                None,
+                &fetch,
+                &files,
+                &key,
+                &resolved,
+                NativeEngineIntent::PrepareForOffline,
+                false,
+            ),
+            Err(NativeEngineError::Verification { .. })
+        ));
+        assert_eq!(*fetches.borrow(), 0);
+        assert!(!files.data_directory(&key).exists());
+
+        write_atomically(&files.data_directory(&key).join(&data.name), b"card data").unwrap();
+        provision_resolved_artifact_with_key(
+            TEST_PUBLIC_KEY,
+            None,
+            &fetch,
+            &files,
+            &key,
+            &resolved,
+            NativeEngineIntent::PrepareForOffline,
+            false,
+        )
+        .unwrap();
+        assert_eq!(*fetches.borrow(), 1);
+        assert_eq!(
+            fs::read(files.data_directory(&key).join(&data.name)).unwrap(),
+            b"card data"
+        );
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn online_spawn_plan_repairs_missing_or_corrupt_binary_and_reuses_valid_cache() {
+        let files = test_files("online-spawn-plan");
+        let key = release_key("1.2.3");
+        let resolved = ResolvedArtifact {
+            binary_url: "https://example.test/server".to_owned(),
+            binary_signature_url: "https://example.test/server.minisig".to_owned(),
+            data: Vec::new(),
+            fetched_envelope: None,
+        };
+        let requests = RefCell::new(Vec::new());
+        let fetch = |url: &str| {
+            requests.borrow_mut().push(url.to_owned());
+            if url.ends_with(".minisig") {
+                Ok(TEST_SIGNATURE.as_bytes().to_vec())
+            } else {
+                Ok(TEST_BYTES.to_vec())
+            }
+        };
+
+        provision_resolved_artifact_with_key(
+            TEST_PUBLIC_KEY,
+            None,
+            &fetch,
+            &files,
+            &key,
+            &resolved,
+            NativeEngineIntent::StartOnline,
+            true,
+        )
+        .unwrap();
+        assert_eq!(requests.borrow().len(), 2);
+        requests.borrow_mut().clear();
+        provision_resolved_artifact_with_key(
+            TEST_PUBLIC_KEY,
+            None,
+            &fetch,
+            &files,
+            &key,
+            &resolved,
+            NativeEngineIntent::StartOnline,
+            true,
+        )
+        .unwrap();
+        assert!(requests.borrow().is_empty());
+        write_atomically(&files.binary(&key), b"corrupt").unwrap();
+        provision_resolved_artifact_with_key(
+            TEST_PUBLIC_KEY,
+            None,
+            &fetch,
+            &files,
+            &key,
+            &resolved,
+            NativeEngineIntent::StartOnline,
+            true,
+        )
+        .unwrap();
+        assert_eq!(requests.borrow().len(), 2);
         fs::remove_dir_all(files.app_directory).unwrap();
     }
 
@@ -1643,9 +2853,383 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_decisions_preserve_preparation_safety_and_clean_stale_state() {
+        let requested = release_key("2.0.0");
+        let other = release_key("1.0.0");
+        let files = test_files("preparation-preflight");
+        assert!(!files.base.exists());
+        let effects = RefCell::new(Vec::new());
+        assert!(matches!(
+            after_preparation_preflight(
+                NativeEngineIntent::PrepareForOffline,
+                &requested,
+                Some((&other, true)),
+                None,
+                || {
+                    effects
+                        .borrow_mut()
+                        .push("create/ratchet/envelope/artifact");
+                    Ok(())
+                },
+            ),
+            Err(NativeEngineError::Health { .. })
+        ));
+        assert!(effects.borrow().is_empty());
+        assert!(!files.base.exists());
+        assert!(matches!(
+            after_preparation_preflight(
+                NativeEngineIntent::PrepareForOffline,
+                &requested,
+                None,
+                Some((&other, true)),
+                || {
+                    effects.borrow_mut().push("clear-record/abort-bridges");
+                    Ok(())
+                },
+            ),
+            Err(NativeEngineError::Health { .. })
+        ));
+        assert!(effects.borrow().is_empty());
+        assert!(!files.base.exists());
+        fs::remove_dir_all(files.app_directory).unwrap();
+        assert_eq!(
+            lifecycle_decision(
+                NativeEngineIntent::PrepareForOffline,
+                &requested,
+                &requested,
+                true,
+            ),
+            LifecycleDecision::RetainAndVerify
+        );
+        assert_eq!(
+            lifecycle_decision(
+                NativeEngineIntent::PrepareForOffline,
+                &requested,
+                &other,
+                true,
+            ),
+            LifecycleDecision::RefuseWithoutSideEffects
+        );
+        assert_eq!(
+            lifecycle_decision(
+                NativeEngineIntent::StartOffline,
+                &requested,
+                &requested,
+                false,
+            ),
+            LifecycleDecision::CleanStale
+        );
+        assert_eq!(
+            lifecycle_decision(NativeEngineIntent::StartOnline, &requested, &other, true,),
+            LifecycleDecision::Replace
+        );
+    }
+
+    #[test]
+    fn orchestration_resolves_preview_before_adoption_and_release_after_adoption() {
+        assert_eq!(
+            artifact_resolution_order(&release_key("1.2.3"), NativeEngineIntent::StartOnline,),
+            ArtifactResolutionOrder::AfterPersistedLifecycle
+        );
+        assert_eq!(
+            artifact_resolution_order(
+                &preview_key("0123456789abcdef"),
+                NativeEngineIntent::StartOnline,
+            ),
+            ArtifactResolutionOrder::BeforePersistedLifecycle
+        );
+        assert_eq!(
+            artifact_resolution_order(
+                &preview_key("0123456789abcdef"),
+                NativeEngineIntent::PrepareForOffline,
+            ),
+            ArtifactResolutionOrder::BeforePersistedLifecycle
+        );
+        assert_eq!(
+            artifact_resolution_order(
+                &preview_key("0123456789abcdef"),
+                NativeEngineIntent::StartOffline,
+            ),
+            ArtifactResolutionOrder::AfterPersistedLifecycle
+        );
+    }
+
+    #[test]
+    fn persisted_record_lifecycle_adopts_release_without_a_remote_resolution() {
+        let files = test_files("release-record-adoption");
+        let key = release_key("1.2.3");
+        let record = SpawnRecord {
+            pid: 123,
+            port: 9374,
+            key: key.clone(),
+        };
+        write_spawn_record(&files, &record).unwrap();
+        let (abort, _registration) = futures_util::future::AbortHandle::new_pair();
+        let (outbound, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = NativeEngineState::default();
+        state.bridges.insert(1, BridgeHandle::new(abort, outbound));
+
+        let outcome = apply_persisted_record_lifecycle(
+            &mut state,
+            &files,
+            &key,
+            NativeEngineIntent::StartOnline,
+            Some((record, true)),
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            PersistedRecordOutcome::ReturnReady(NativeEngineReady { port: 9374 })
+        ));
+        assert_eq!(state.running.as_ref().unwrap().key(), &key);
+        assert_eq!(state.running.as_ref().unwrap().port(), 9374);
+        assert!(state.bridges.contains_key(&1));
+        assert_eq!(read_spawn_record(&files).unwrap().unwrap().key, key);
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn preview_record_adoption_persists_verified_envelope_and_ratchet_before_returning() {
+        let files = test_files("preview-record-adoption");
+        let key = preview_key("0123456789abcdef");
+        let envelope = StoredSignedManifestEnvelope {
+            manifest: TEST_PREVIEW_MANIFEST.to_vec(),
+            signature: TEST_PREVIEW_MANIFEST_SIGNATURE.as_bytes().to_vec(),
+        };
+        let mut resolved = resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &key,
+            &envelope,
+        )
+        .unwrap();
+        resolved.fetched_envelope = Some(envelope);
+        let record = SpawnRecord {
+            pid: 123,
+            port: 9374,
+            key: key.clone(),
+        };
+        let mut state = NativeEngineState::default();
+
+        let outcome = apply_persisted_record_lifecycle(
+            &mut state,
+            &files,
+            &key,
+            NativeEngineIntent::StartOnline,
+            Some((record, true)),
+            Some(&resolved),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            PersistedRecordOutcome::ReturnReady(NativeEngineReady { port: 9374 })
+        ));
+        assert!(files.signed_manifest_envelope(&key).exists());
+        assert_eq!(
+            read_json_optional::<PreviewRatchet>(&files.preview_ratchet())
+                .unwrap()
+                .unwrap()
+                .generated_at,
+            "2026-01-02T00:00:00Z"
+        );
+        assert_eq!(state.running.as_ref().unwrap().key(), &key);
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn fetched_preview_authority_persists_after_preflight_and_before_artifact_apply() {
+        let files = test_files("preview-authority-before-apply");
+        let key = preview_key("0123456789abcdef");
+        let envelope = StoredSignedManifestEnvelope {
+            manifest: TEST_PREVIEW_MANIFEST.to_vec(),
+            signature: TEST_PREVIEW_MANIFEST_SIGNATURE.as_bytes().to_vec(),
+        };
+        let mut resolved = resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &key,
+            &envelope,
+        )
+        .unwrap();
+        resolved.fetched_envelope = Some(envelope);
+        let fetches = RefCell::new(0);
+        let fetch = |url: &str| {
+            assert!(files.signed_manifest_envelope(&key).exists());
+            assert!(files.preview_ratchet().exists());
+            *fetches.borrow_mut() += 1;
+            if url.ends_with(".minisig") {
+                Ok(TEST_SIGNATURE.as_bytes().to_vec())
+            } else {
+                Ok(TEST_BYTES.to_vec())
+            }
+        };
+
+        provision_resolved_artifact_with_key(
+            TEST_PUBLIC_KEY,
+            None,
+            &fetch,
+            &files,
+            &key,
+            &resolved,
+            NativeEngineIntent::PrepareForOffline,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(*fetches.borrow(), 2);
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn retained_preflight_refusal_leaves_prior_preview_authority_untouched() {
+        let files = test_files("retained-preflight-authority");
+        let key = preview_key("0123456789abcdef");
+        let prior = StoredSignedManifestEnvelope {
+            manifest: b"prior authority".to_vec(),
+            signature: b"prior signature".to_vec(),
+        };
+        write_json_atomically(&files.signed_manifest_envelope(&key), &prior).unwrap();
+        let envelope = StoredSignedManifestEnvelope {
+            manifest: TEST_PREVIEW_MANIFEST.to_vec(),
+            signature: TEST_PREVIEW_MANIFEST_SIGNATURE.as_bytes().to_vec(),
+        };
+        let mut resolved = resolved_artifact_from_envelope_with_key(
+            TEST_MANIFEST_PUBLIC_KEY,
+            &files,
+            &key,
+            &envelope,
+        )
+        .unwrap();
+        resolved.fetched_envelope = Some(envelope);
+        let fetches = RefCell::new(0);
+        let fetch = |_url: &str| -> Result<Vec<u8>, NativeEngineError> {
+            *fetches.borrow_mut() += 1;
+            Ok(TEST_BYTES.to_vec())
+        };
+
+        assert!(matches!(
+            provision_resolved_artifact_with_key(
+                TEST_PUBLIC_KEY,
+                None,
+                &fetch,
+                &files,
+                &key,
+                &resolved,
+                NativeEngineIntent::PrepareForOffline,
+                false,
+            ),
+            Err(NativeEngineError::Verification { .. })
+        ));
+        assert_eq!(*fetches.borrow(), 0);
+        assert_eq!(
+            read_signed_manifest_envelope(&files, &key)
+                .unwrap()
+                .manifest,
+            b"prior authority"
+        );
+        assert!(!files.preview_ratchet().exists());
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn retained_preparation_adopts_the_full_record_without_aborting_bridges() {
+        let files = test_files("retained-record-adoption");
+        let key = release_key("1.2.3");
+        let record = SpawnRecord {
+            pid: 123,
+            port: 9374,
+            key: key.clone(),
+        };
+        let (abort, _registration) = futures_util::future::AbortHandle::new_pair();
+        let (outbound, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = NativeEngineState::default();
+        state.bridges.insert(1, BridgeHandle::new(abort, outbound));
+
+        let outcome = apply_persisted_record_lifecycle(
+            &mut state,
+            &files,
+            &key,
+            NativeEngineIntent::PrepareForOffline,
+            Some((record, true)),
+            None,
+        )
+        .unwrap();
+        let PersistedRecordOutcome::Retain(record) = outcome else {
+            panic!("healthy exact preparation must retain the full record");
+        };
+        let ready = adopt_persisted_record(&mut state, record);
+
+        assert_eq!(ready.port, 9374);
+        assert_eq!(state.running.as_ref().unwrap().key(), &key);
+        assert!(state.bridges.contains_key(&1));
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
+    fn persisted_preparation_refusal_preserves_running_record_and_bridges() {
+        let files = test_files("record-refusal");
+        let requested = release_key("1.2.3");
+        let other = release_key("2.0.0");
+        let retained = SpawnRecord {
+            pid: 111,
+            port: 9374,
+            key: requested.clone(),
+        };
+        let conflicting = SpawnRecord {
+            pid: 222,
+            port: 9375,
+            key: other.clone(),
+        };
+        write_spawn_record(&files, &conflicting).unwrap();
+        let (abort, _registration) = futures_util::future::AbortHandle::new_pair();
+        let (outbound, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = NativeEngineState {
+            running: Some(RunningEngine::Adopted(retained)),
+            bridges: BTreeMap::from([(1, BridgeHandle::new(abort, outbound))]),
+            next_bridge_id: 2,
+        };
+
+        assert!(matches!(
+            apply_persisted_record_lifecycle(
+                &mut state,
+                &files,
+                &requested,
+                NativeEngineIntent::PrepareForOffline,
+                Some((conflicting, true)),
+                None,
+            ),
+            Err(NativeEngineError::Health { .. })
+        ));
+        assert_eq!(state.running.as_ref().unwrap().key(), &requested);
+        assert!(state.bridges.contains_key(&1));
+        assert_eq!(read_spawn_record(&files).unwrap().unwrap().key, other);
+        fs::remove_dir_all(files.app_directory).unwrap();
+    }
+
+    #[test]
     fn health_timeout_constant_is_short_and_bounded() {
         assert!(HEALTH_TIMEOUT >= Duration::from_secs(10));
         assert!(HEALTH_TIMEOUT <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn offline_and_preparation_server_arguments_disable_child_data_downloads() {
+        let online = server_arguments(RELEASE_ORIGIN, NativeEngineIntent::StartOnline);
+        let offline = server_arguments(RELEASE_ORIGIN, NativeEngineIntent::StartOffline);
+        let preparation = server_arguments(RELEASE_ORIGIN, NativeEngineIntent::PrepareForOffline);
+
+        assert!(!online
+            .iter()
+            .any(|argument| argument == "--no-data-download"));
+        assert!(offline
+            .iter()
+            .any(|argument| argument == "--no-data-download"));
+        assert!(preparation
+            .iter()
+            .any(|argument| argument == "--no-data-download"));
     }
 
     #[test]

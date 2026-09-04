@@ -83,6 +83,19 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
     doubles: ["player_count", "ai_count"],
   },
   route_view: { blobs: ["route"], doubles: [] },
+  // Server-directory probe results, written by the lobby DO from
+  // `POST /servers/metrics` (see `directory.ts`), not by a client telemetry
+  // batch. Columns are appended, never inserted — AE columns are positional
+  // and permanent.
+  //
+  // Two consequences worth stating rather than discovering. Declaring the
+  // schema here also makes `server_probe` an acceptable event on
+  // `POST /telemetry`; that is intentional and harmless, because AE is a
+  // write-only dashboard sink that no counter and no score ever reads — the
+  // score is folded from the DO's own storage, and a forged AE point cannot
+  // reach it. And `rtt_ms` is `0` for every outcome that carries no latency,
+  // which per this file's `toDouble` convention means "unknown", never "0 ms".
+  server_probe: { blobs: ["url", "outcome", "game_code"], doubles: ["rtt_ms"] },
 };
 
 /** A validated, column-resolved event ready to become an AE data point. */

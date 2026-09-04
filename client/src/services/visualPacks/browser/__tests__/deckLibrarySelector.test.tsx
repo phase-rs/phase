@@ -6,11 +6,13 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { VisualPackManager } from "../../../../components/settings/visual-packs/VisualPackManager.tsx";
-import { VisualPackBackendError } from "../../backend.ts";
+import { isDeckLibraryBackgroundLifecycle, VisualPackBackendError, type VisualPackBackend } from "../../backend.ts";
+import { CARD_CANDIDATE_PROJECTION_VERSION, semanticCardCandidateGroups } from "../../candidateKeys.ts";
 import { assetKey, catalogRoot, estimatedImageBytes, minimumImageBytes, operationId, packId } from "../../types.ts";
 import type { DeckLibraryInstallSelector, InstallSelector, ProgressEvent } from "../../types.ts";
 import type { ScryfallAssetDescriptor } from "../descriptors.ts";
-import { ScryfallBrowserVisualPackBackend } from "../scryfallBackend.ts";
+import { setScryfallTransactionGateForTests, ScryfallBrowserVisualPackBackend } from "../scryfallBackend.ts";
+
 
 const DATABASE = "phase-visual-packs-scryfall-v1";
 const PLANNED_DIGEST = catalogRoot("a".repeat(64));
@@ -126,8 +128,59 @@ const MOVED = descriptor("second", "https://cards.example/second-new.jpg");
 const THIRD = descriptor("third", "https://cards.example/third.jpg");
 const FOURTH = descriptor("fourth", "https://cards.example/fourth.jpg");
 
+function projectedDescriptor(
+  value: ScryfallAssetDescriptor,
+  oracleId: string,
+  cardName: string,
+  faceName: string,
+): ScryfallAssetDescriptor {
+  return {
+    ...value,
+    candidateKeys: semanticCardCandidateGroups({
+      oracleId,
+      sourceSetCode: "M21",
+      sourceCollectorNumber: "123",
+      cardName,
+      faceName,
+      variant: "full_card",
+      rung: "normal",
+    }).flatMap((group) => group.keys),
+  };
+}
+
+const PROJECTED_FIRST = projectedDescriptor(FIRST, "11111111-abcd-4111-8111-111111111111", "First", "First Face");
+const PROJECTED_SECOND = projectedDescriptor(SECOND, "22222222-abcd-4222-8222-222222222222", "Second", "Second Face");
+
+function contentFields(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    root: row.root,
+    packId: row.packId,
+    assetKey: row.assetKey,
+    sourceUrl: row.sourceUrl,
+    object: row.object,
+    byteLength: row.byteLength,
+    media: row.media,
+    path: row.path,
+  };
+}
+
+async function makeDeckLibraryReceiptLegacy(version?: number): Promise<void> {
+  const database = await openDB(DATABASE);
+  const receipt = await database.get("packs", DECK_LIBRARY);
+  if (!receipt) throw new Error("deck-library receipt was not installed");
+  const legacyReceipt = { ...receipt } as { candidateProjectionVersion?: number } & typeof receipt;
+  if (version === undefined) delete legacyReceipt.candidateProjectionVersion;
+  else legacyReceipt.candidateProjectionVersion = version;
+  await database.put("packs", legacyReceipt);
+  for (const row of await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)) {
+    await database.put("objects", { ...row, candidateKeys: [] });
+  }
+  database.close();
+}
+
 async function seedPack(pack: ReturnType<typeof packId>, root: ReturnType<typeof catalogRoot>): Promise<void> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   await database.put("packs", { id: pack, packId: pack, root, dependencies: [], operationId: OPERATION });
   database.close();
 }
@@ -138,7 +191,7 @@ async function seedObject(
   value: ScryfallAssetDescriptor,
   sourceUrl = value.sourceUrl,
 ): Promise<void> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   await database.put("objects", {
     id: `${root}:${pack}:${value.assetKey}`,
     root,
@@ -152,6 +205,14 @@ async function seedObject(
     path: `/objects/${value.assetKey}`,
   });
   database.close();
+}
+
+async function installDeckLibrary(backend: ScryfallBrowserVisualPackBackend): Promise<void> {
+  const started = await backend.start({
+    kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+  });
+  if (started.status !== "started") throw new Error("deck-library install did not start");
+  await vi.waitFor(async () => expect((await backend.operationStatus(started.operationId)).state).toBe("completed"));
 }
 
 describe("deck-library selector and drift contract", () => {
@@ -171,6 +232,7 @@ describe("deck-library selector and drift contract", () => {
     releaseCacheDelete = null;
     failImages = false;
     failedImage = null;
+    setScryfallTransactionGateForTests(null);
     platform.load.mockReset();
     vi.stubGlobal("caches", { open: async () => cache } as unknown as CacheStorage);
     fetchMock = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
@@ -203,6 +265,7 @@ describe("deck-library selector and drift contract", () => {
     vi.unstubAllGlobals();
     Reflect.deleteProperty(globalThis.navigator, "locks");
     Reflect.deleteProperty(globalThis.navigator, "storage");
+    setScryfallTransactionGateForTests(null);
   });
 
   it("registers deck_library as an installable validated identity", () => {
@@ -213,6 +276,19 @@ describe("deck-library selector and drift contract", () => {
     expect(selector).toEqual({ kind: "deck_library", membershipDigest: PLANNED_DIGEST });
     expect(installSelector).toBe(selector);
     expect(() => packId("deck-library")).toThrow("invalid PackId");
+  });
+
+  it("requires both background lifecycle methods before narrowing the optional capability", () => {
+    const pauseOnly = {
+      setDeckLibraryBackgroundPaused: async () => {},
+    } as unknown as VisualPackBackend;
+    const complete = {
+      setDeckLibraryBackgroundPaused: async () => {},
+      prepareDeckLibraryForOffline: async () => "ready" as const,
+    } as unknown as VisualPackBackend;
+
+    expect(isDeckLibraryBackgroundLifecycle(pauseOnly)).toBe(false);
+    expect(isDeckLibraryBackgroundLifecycle(complete)).toBe(true);
   });
 
   it("delegates explicit selector resolution to the shared deck-library planner", async () => {
@@ -257,7 +333,7 @@ describe("deck-library selector and drift contract", () => {
       refresh: 1,
     });
 
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     expect(await database.get("packs", CURATED)).toMatchObject({ root: CURATED_DIGEST });
     expect(await database.getAllFromIndex("objects", "by-pack", CURATED)).toHaveLength(1);
     database.close();
@@ -318,7 +394,7 @@ describe("deck-library selector and drift contract", () => {
       objectEstimate: 0,
     })).rejects.toMatchObject({ kind: "conflict" });
 
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     expect(await database.getAll("operations")).toEqual([]);
     database.close();
   });
@@ -331,7 +407,7 @@ describe("deck-library selector and drift contract", () => {
     await vi.waitFor(async () => expect((await backend.operationStatus(installed.operationId)).state).toBe("completed"));
     await expect(backend.start({ kind: "repair", packIds: [DECK_LIBRARY] })).resolves.toEqual({ status: "healthy" });
 
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const [row, healthy] = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     database.close();
     if (!row || !healthy) throw new Error("deck-library install wrote too few receipt rows");
@@ -351,7 +427,7 @@ describe("deck-library selector and drift contract", () => {
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(row.sourceUrl);
     expect(revisions).toContain("repair");
     expect((await backend.resolve([{ kind: "asset", key: row.assetKey }])).entries[0].matches).toHaveLength(1);
-    const afterRepair = await openDB(DATABASE, 1);
+    const afterRepair = await openDB(DATABASE);
     expect(await afterRepair.get("objects", healthy.id)).toMatchObject({ path: healthyPath, object: healthyObject });
     afterRepair.close();
     expect(cache.entries.has(healthyPath)).toBe(true);
@@ -365,13 +441,15 @@ describe("deck-library selector and drift contract", () => {
     if (installed.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(installed.operationId)).state).toBe("completed"));
 
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const [corrupt, legacy] = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     if (!corrupt || !legacy) throw new Error("deck-library install wrote too few rows");
     const original = cache.entries.get(corrupt.path);
     if (!original) throw new Error("corrupt fixture cache entry is missing");
     const originalBytes = new Uint8Array(await original.arrayBuffer());
-    cache.entries.set(corrupt.path, new Response(new Uint8Array(originalBytes.byteLength), { headers: { "Content-Type": "image/jpeg" } }));
+    const sameLengthCorruption = originalBytes.slice();
+    sameLengthCorruption[0] ^= 0xff;
+    cache.entries.set(corrupt.path, new Response(sameLengthCorruption, { headers: { "Content-Type": "image/jpeg" } }));
     fetchMock.mockClear();
     const repair = await backend.start({ kind: "repair", packIds: [DECK_LIBRARY] });
     if (repair.status !== "started") throw new Error("corrupt deck-library repair did not start");
@@ -392,7 +470,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (installed.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(installed.operationId)).state).toBe("completed"));
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const [receipt] = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     if (!receipt) throw new Error("deck-library install wrote no receipt row");
     const core = packId("core");
@@ -430,7 +508,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (installed.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(installed.operationId)).state).toBe("completed"));
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const rows = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     database.close();
     const row = rows.find((entry) => entry.sourceUrl === SECOND.sourceUrl);
@@ -459,7 +537,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (installed.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(installed.operationId)).state).toBe("completed"));
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const rows = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     database.close();
     const row = rows.find((entry) => entry.sourceUrl === SECOND.sourceUrl);
@@ -494,7 +572,7 @@ describe("deck-library selector and drift contract", () => {
     if (empty.status !== "started") throw new Error("empty deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(empty.operationId)).state).toBe("completed"));
 
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     expect(await database.get("packs", DECK_LIBRARY)).toMatchObject({ root: EMPTY_DIGEST });
     expect(await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toEqual([]);
     database.close();
@@ -517,7 +595,7 @@ describe("deck-library selector and drift contract", () => {
     expect(requested).toContain(MOVED.sourceUrl);
     expect(requested).toContain(THIRD.sourceUrl);
     expect(requested).not.toContain(FIRST.sourceUrl);
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const rows = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     expect(rows.map((row) => row.assetKey).sort()).toEqual([FIRST, MOVED, THIRD].map((value) => value.assetKey).sort());
     expect(rows.every((row) => row.root === EMPTY_DIGEST)).toBe(true);
@@ -561,13 +639,13 @@ describe("deck-library selector and drift contract", () => {
     });
     if (started.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => {
-      const database = await openDB(DATABASE, 1);
+      const database = await openDB(DATABASE);
       const rows = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
       database.close();
       expect(rows).toHaveLength(1);
     });
 
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const [shared] = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     if (!shared) throw new Error("first image was not written");
     const core = packId("core");
@@ -578,13 +656,13 @@ describe("deck-library selector and drift contract", () => {
     const cancelling = backend.cancel(started.operationId);
     releaseSecondImage?.();
     await cancelling;
-    const beforeRemoval = await openDB(DATABASE, 1);
+    const beforeRemoval = await openDB(DATABASE);
     expect(await beforeRemoval.get("packs", DECK_LIBRARY)).toBeUndefined();
     expect(await beforeRemoval.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).not.toEqual([]);
     beforeRemoval.close();
 
     await backend.remove({ kind: "packs", packIds: [DECK_LIBRARY] }, "reject_dependents");
-    const afterRemoval = await openDB(DATABASE, 1);
+    const afterRemoval = await openDB(DATABASE);
     expect(await afterRemoval.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toEqual([]);
     afterRemoval.close();
     expect(cache.entries.has(shared.path)).toBe(true);
@@ -596,7 +674,7 @@ describe("deck-library selector and drift contract", () => {
     const sharedPath = "/visual-packs/v1/shared-second.jpg";
     await seedPack(core, OBJECT_DIGEST);
     await seedObject(core, OBJECT_DIGEST, SECOND);
-    const setup = await openDB(DATABASE, 1);
+    const setup = await openDB(DATABASE);
     const coreRows = await setup.getAllFromIndex("objects", "by-pack", core);
     const [coreRow] = coreRows;
     if (!coreRow) throw new Error("core donor was not seeded");
@@ -610,26 +688,26 @@ describe("deck-library selector and drift contract", () => {
     });
     if (started.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => {
-      const database = await openDB(DATABASE, 1);
+      const database = await openDB(DATABASE);
       expect(await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toHaveLength(1);
       database.close();
     });
     await vi.waitFor(() => expect(releaseCacheMatch).not.toBeNull());
-    const activeRows = await openDB(DATABASE, 1);
+    const activeRows = await openDB(DATABASE);
     const [firstRow] = await activeRows.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     activeRows.close();
     if (!firstRow) throw new Error("first-install row was not written");
 
     const removing = backend.remove({ kind: "packs", packIds: [DECK_LIBRARY] }, "reject_dependents");
     await vi.waitFor(async () => {
-      const database = await openDB(DATABASE, 1);
+      const database = await openDB(DATABASE);
       expect((await database.get("operations", started.operationId))?.state).toBe("cancelled");
       database.close();
     });
     releaseCacheMatch?.();
     await removing;
 
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     expect(await after.get("packs", DECK_LIBRARY)).toBeUndefined();
     expect(await after.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toEqual([]);
     after.close();
@@ -642,7 +720,7 @@ describe("deck-library selector and drift contract", () => {
     await backend.refreshCatalog();
     await seedPack(DECK_LIBRARY, PLANNED_DIGEST);
     await seedObject(DECK_LIBRARY, PLANNED_DIGEST, FIRST);
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const [stored] = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     database.close();
     if (!stored) throw new Error("seed object was not written");
@@ -722,7 +800,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (initial.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const [shared] = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     if (!shared) throw new Error("deck-library install wrote no rows");
     const core = packId("core");
@@ -737,7 +815,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (delta.status !== "started") throw new Error("deck-library delta did not start");
     await vi.waitFor(async () => {
-      const rows = await openDB(DATABASE, 1);
+      const rows = await openDB(DATABASE);
       expect((await rows.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).some((row) => row.root === EMPTY_DIGEST)).toBe(true);
       rows.close();
     });
@@ -747,7 +825,7 @@ describe("deck-library selector and drift contract", () => {
     await cancelling;
 
     await backend.remove({ kind: "packs", packIds: [DECK_LIBRARY] }, "reject_dependents");
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     expect(await after.get("packs", DECK_LIBRARY)).toBeUndefined();
     expect(await after.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toEqual([]);
     after.close();
@@ -762,7 +840,7 @@ describe("deck-library selector and drift contract", () => {
     if (first.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(first.operationId)).state).toBe("completed"));
     const abandonedPath = "/visual-packs/v1/deck-library-abandoned.jpg";
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     await database.put("objects", {
       id: `${INSTALLED_DIGEST}:${DECK_LIBRARY}:${REMOVED.assetKey}`,
       root: INSTALLED_DIGEST,
@@ -799,7 +877,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (delta.status !== "started") throw new Error("deck-library delta did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(delta.operationId)).state).toBe("completed"));
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     expect((await after.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).every((row) => row.root === EMPTY_DIGEST)).toBe(true);
     after.close();
     expect(cache.entries.has(abandonedPath)).toBe(false);
@@ -820,9 +898,854 @@ describe("deck-library selector and drift contract", () => {
     expect(state.plan).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(persistence).not.toHaveBeenCalled();
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     expect(await database.getAll("operations")).toEqual([]);
     database.close();
+  });
+
+  it("reports not-installed without planning, fetching, writing, or creating work", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    await expect(backend.prepareDeckLibraryForOffline()).resolves.toBe("not-installed");
+
+    expect(state.invalidate).not.toHaveBeenCalled();
+    expect(state.plan).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    const database = await openDB(DATABASE);
+    expect(await database.getAll("operations")).toEqual([]);
+    expect(await database.getAll("packs")).toEqual([]);
+    expect(await database.getAll("objects")).toEqual([]);
+    database.close();
+  });
+
+  it("awaits reconciliation and verifies the final installed receipt is current", async () => {
+    state.cardDataResident = true;
+    installWebLocks();
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    await expect(backend.prepareDeckLibraryForOffline()).resolves.toBe("ready");
+  });
+
+  it("reprojects a v1 same-root Deck Catalog from verified cache bytes without image fetches", async () => {
+    state.cardDataResident = true;
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await makeDeckLibraryReceiptLegacy(1);
+    const database = await openDB(DATABASE);
+    const beforeReceipt = await database.get("packs", DECK_LIBRARY);
+    const beforeRows = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
+    const beforeBytes = await Promise.all(beforeRows.map(async (row) => {
+      const response = await cache.match(row.path);
+      if (!response) throw new Error("installed cache entry is missing");
+      return [row.path, new Uint8Array(await response.arrayBuffer())] as const;
+    }));
+    database.close();
+    const revisions: string[] = [];
+    await backend.subscribeRevision((event) => revisions.push(event.cause));
+    fetchMock.mockClear();
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    await expect(backend.prepareDeckLibraryForOffline()).resolves.toBe("ready");
+
+    const after = await openDB(DATABASE);
+    const receipt = await after.get("packs", DECK_LIBRARY);
+    const rows = await after.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
+    after.close();
+    expect(beforeReceipt).toMatchObject({ root: PLANNED_DIGEST, candidateProjectionVersion: 1 });
+    expect(receipt).toMatchObject({
+      root: PLANNED_DIGEST,
+      optInGeneration: beforeReceipt?.optInGeneration,
+      candidateProjectionVersion: CARD_CANDIDATE_PROJECTION_VERSION,
+    });
+    expect(rows.map(contentFields)).toEqual(beforeRows.map(contentFields));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(revisions).toEqual(["install"]);
+    for (const [path, bytes] of beforeBytes) {
+      const response = await cache.match(path);
+      if (!response) throw new Error("reprojection removed a cache entry");
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+    }
+    for (const descriptor of state.membership.descriptors) {
+      const row = rows.find((entry) => entry.assetKey === descriptor.assetKey);
+      expect(row?.candidateKeys).toEqual(descriptor.candidateKeys);
+      const resolved = await backend.resolve(descriptor.candidateKeys.map((key) => ({ kind: "candidate" as const, key })));
+      expect(resolved.entries.every((entry) => entry.matches.length === 1)).toBe(true);
+    }
+  });
+
+  it("does no reconciliation work for a current v2 same-root candidate projection", async () => {
+    state.cardDataResident = true;
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    const database = await openDB(DATABASE);
+    const beforeOperations = await database.getAll("operations");
+    const beforeRows = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
+    database.close();
+    const revisions: string[] = [];
+    await backend.subscribeRevision((event) => revisions.push(event.cause));
+    fetchMock.mockClear();
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    await backend.reconcileDeckLibrary();
+
+    const after = await openDB(DATABASE);
+    expect(await after.getAll("operations")).toEqual(beforeOperations);
+    expect(await after.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toEqual(beforeRows);
+    after.close();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(revisions).toEqual([]);
+  });
+
+  it("fully verifies matching-key bytes before a current projection can complete", async () => {
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    const database = await openDB(DATABASE);
+    const receipt = await database.get("packs", DECK_LIBRARY);
+    const [first] = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
+    if (!receipt || !first) throw new Error("deck-library install did not persist receipt and rows");
+    const legacyReceipt = { ...receipt } as { candidateProjectionVersion?: number } & typeof receipt;
+    delete legacyReceipt.candidateProjectionVersion;
+    await database.put("packs", legacyReceipt);
+    const cached = await cache.match(first.path);
+    if (!cached) throw new Error("deck-library cache entry is missing");
+    const corrupted = new Uint8Array(await cached.arrayBuffer());
+    corrupted[0] ^= 0xff;
+    cache.entries.set(first.path, new Response(corrupted, { headers: { "Content-Type": "image/jpeg" } }));
+    database.close();
+    fetchMock.mockClear();
+
+    const started = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (started.status !== "started") throw new Error("legacy same-root install did not create projection work");
+    await vi.waitFor(async () => expect((await backend.operationStatus(started.operationId)).state).toBe("completed"));
+
+    expect(await backend.operationStatus(started.operationId)).toMatchObject({ objectTotal: 2, objectsPromoted: 2 });
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(PROJECTED_FIRST.sourceUrl);
+    const after = await openDB(DATABASE);
+    expect(await after.get("packs", DECK_LIBRARY)).toMatchObject({
+      operationId: started.operationId,
+      candidateProjectionVersion: CARD_CANDIDATE_PROJECTION_VERSION,
+    });
+    after.close();
+  });
+
+  it.each([
+    "missing cache bytes",
+    "same-length corrupt cache bytes",
+    "malformed content digest",
+    "zero byte length",
+    "positive wrong byte length",
+    "unsafe byte length",
+    "noncanonical cache path",
+    "mismatched row root",
+    "mismatched row pack",
+    "mismatched row asset",
+    "mismatched source URL",
+    "mismatched media",
+  ] as const)("downloads instead of metadata-reusing %s", async (invalidity) => {
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await makeDeckLibraryReceiptLegacy();
+    const database = await openDB(DATABASE);
+    const id = `${PLANNED_DIGEST}:${DECK_LIBRARY}:${PROJECTED_FIRST.assetKey}`;
+    const row = await database.get("objects", id) as unknown as Record<string, unknown>;
+    if (!row) throw new Error("deck-library row was not installed");
+    switch (invalidity) {
+      case "missing cache bytes":
+        cache.entries.delete(row.path as string);
+        break;
+      case "same-length corrupt cache bytes": {
+        const response = await cache.match(row.path as string);
+        if (!response) throw new Error("deck-library cache entry is missing");
+        const corrupt = new Uint8Array(await response.arrayBuffer());
+        corrupt[0] ^= 0xff;
+        cache.entries.set(row.path as string, new Response(corrupt, { headers: { "Content-Type": "image/jpeg" } }));
+        break;
+      }
+      case "malformed content digest":
+        await database.put("objects", { ...row, object: "not-a-content-digest" });
+        break;
+      case "zero byte length":
+        await database.put("objects", { ...row, byteLength: 0 });
+        break;
+      case "positive wrong byte length":
+        await database.put("objects", { ...row, byteLength: (row.byteLength as number) + 1 });
+        break;
+      case "unsafe byte length":
+        await database.put("objects", { ...row, byteLength: Number.MAX_SAFE_INTEGER + 1 });
+        break;
+      case "noncanonical cache path":
+        await database.put("objects", { ...row, path: "/not-a-visual-pack-path" });
+        break;
+      case "mismatched row root":
+        await database.put("objects", { ...row, root: INSTALLED_DIGEST });
+        break;
+      case "mismatched row pack":
+        await database.put("objects", { ...row, packId: CURATED });
+        break;
+      case "mismatched row asset":
+        await database.put("objects", { ...row, assetKey: assetKey("asset:v1:canonical_card:mismatched") });
+        break;
+      case "mismatched source URL":
+        await database.put("objects", { ...row, sourceUrl: "https://cards.example/wrong.jpg" });
+        break;
+      case "mismatched media":
+        await database.put("objects", { ...row, media: "image/svg+xml" });
+        break;
+    }
+    database.close();
+    fetchMock.mockClear();
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    await backend.reconcileDeckLibrary();
+
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(PROJECTED_FIRST.sourceUrl);
+    const after = await openDB(DATABASE);
+    expect(await after.get("packs", DECK_LIBRARY)).toMatchObject({
+      candidateProjectionVersion: CARD_CANDIDATE_PROJECTION_VERSION,
+    });
+    expect(await after.get("objects", id)).toMatchObject({
+      candidateKeys: PROJECTED_FIRST.candidateKeys,
+      sourceUrl: PROJECTED_FIRST.sourceUrl,
+      media: PROJECTED_FIRST.media,
+    });
+    after.close();
+  });
+
+  it("leaves a legacy receipt unstamped when projection recovery fails", async () => {
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await makeDeckLibraryReceiptLegacy();
+    const database = await openDB(DATABASE);
+    const row = await database.get("objects", `${PLANNED_DIGEST}:${DECK_LIBRARY}:${PROJECTED_FIRST.assetKey}`);
+    if (!row) throw new Error("deck-library row was not installed");
+    cache.entries.delete(row.path);
+    database.close();
+    failImages = true;
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
+
+    const after = await openDB(DATABASE);
+    const receipt = await after.get("packs", DECK_LIBRARY) as { candidateProjectionVersion?: number } | undefined;
+    after.close();
+    expect(receipt?.candidateProjectionVersion).toBeUndefined();
+  });
+
+  it("supersedes a v1 nonterminal operation that already promoted its receipt", async () => {
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await makeDeckLibraryReceiptLegacy(1);
+    const database = await openDB(DATABASE);
+    const [completed] = await database.getAll("operations");
+    const receipt = await database.get("packs", DECK_LIBRARY);
+    if (!completed || !receipt) throw new Error("deck-library installation was not persisted");
+    const legacyOperationId = operationId("9".repeat(32));
+    const legacyOperation = {
+      ...completed,
+      id: legacyOperationId,
+      state: "downloading" as const,
+      completedRevision: null,
+      deckLibraryGeneration: receipt.optInGeneration,
+      background: true,
+      candidateProjectionVersion: 1,
+    } as { candidateProjectionVersion?: number } & typeof completed;
+    await database.put("operations", legacyOperation);
+    await database.put("packs", { ...receipt, operationId: legacyOperationId, candidateProjectionVersion: 1 });
+    database.close();
+    fetchMock.mockClear();
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    await backend.reconcileDeckLibrary();
+
+    const after = await openDB(DATABASE);
+    const superseded = await after.get("operations", legacyOperationId) as { candidateProjectionVersion?: number; state: string } | undefined;
+    const fresh = (await after.getAll("operations")).find((operation) =>
+      operation.id !== completed.id && operation.id !== legacyOperationId);
+    const finalReceipt = await after.get("packs", DECK_LIBRARY);
+    after.close();
+    expect(superseded).toMatchObject({ state: "cancelled" });
+    expect(superseded?.candidateProjectionVersion).toBe(1);
+    expect(fresh).toMatchObject({
+      state: "completed",
+      candidateProjectionVersion: CARD_CANDIDATE_PROJECTION_VERSION,
+    });
+    expect(finalReceipt).toMatchObject({
+      operationId: fresh?.id,
+      candidateProjectionVersion: CARD_CANDIDATE_PROJECTION_VERSION,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("cancels v1 Deck Catalog work before automatic or manual resume", async () => {
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    const initial = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(initial);
+    const database = await openDB(DATABASE);
+    const [completed] = await database.getAll("operations");
+    if (!completed) throw new Error("deck-library installation did not persist an operation");
+    const automaticOperationId = operationId("8".repeat(32));
+    const automatic = {
+      ...completed,
+      id: automaticOperationId,
+      state: "downloading" as const,
+      completedRevision: null,
+      background: false,
+      repairDescriptors: [PROJECTED_FIRST],
+      candidateProjectionVersion: 1,
+    } as { candidateProjectionVersion?: number } & typeof completed;
+    await database.put("operations", automatic);
+    database.close();
+    fetchMock.mockClear();
+
+    const recreated = await ScryfallBrowserVisualPackBackend.create();
+
+    const afterAutomatic = await openDB(DATABASE);
+    const cancelledAutomatic = await afterAutomatic.get("operations", automaticOperationId);
+    expect(cancelledAutomatic).toMatchObject({ state: "cancelled" });
+    expect(cancelledAutomatic?.candidateProjectionVersion).toBe(1);
+    const manualOperationId = operationId("7".repeat(32));
+    const manual = {
+      ...automatic,
+      id: manualOperationId,
+    };
+    await afterAutomatic.put("operations", manual);
+    afterAutomatic.close();
+
+    await expect(recreated.start({ kind: "resume", operationId: manualOperationId })).rejects.toMatchObject({ kind: "cancelled" });
+
+    const afterManual = await openDB(DATABASE);
+    const cancelledManual = await afterManual.get("operations", manualOperationId);
+    expect(cancelledManual).toMatchObject({ state: "cancelled" });
+    expect(cancelledManual?.candidateProjectionVersion).toBe(1);
+    afterManual.close();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves a legacy projection marker when a deck-library repair verifies and restores bytes", async () => {
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await makeDeckLibraryReceiptLegacy();
+    const database = await openDB(DATABASE);
+    const [row] = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
+    database.close();
+    if (!row) throw new Error("deck-library row was not installed");
+    cache.entries.delete(row.path);
+
+    const repaired = await backend.start({ kind: "repair", packIds: [DECK_LIBRARY] });
+    if (repaired.status !== "started") throw new Error("deck-library repair did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(repaired.operationId)).state).toBe("completed"));
+
+    const after = await openDB(DATABASE);
+    const receipt = await after.get("packs", DECK_LIBRARY) as { candidateProjectionVersion?: number } | undefined;
+    after.close();
+    expect(receipt?.candidateProjectionVersion).toBeUndefined();
+  });
+
+  it("does not stamp projection intent when cancellation wins after receipt promotion", async () => {
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    holdSecondImage = true;
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const started = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (started.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
+    let cancelling: Promise<unknown> | null = null;
+    setScryfallTransactionGateForTests((phase) => {
+      if (phase === "finish-before-write" && !cancelling) cancelling = backend.cancel(started.operationId);
+    });
+    releaseSecondImage?.();
+    await vi.waitFor(() => expect(cancelling).not.toBeNull());
+    await cancelling;
+
+    const database = await openDB(DATABASE);
+    const receipt = await database.get("packs", DECK_LIBRARY) as { candidateProjectionVersion?: number } | undefined;
+    database.close();
+    expect((await backend.operationStatus(started.operationId)).state).toBe("cancelled");
+    expect(receipt?.candidateProjectionVersion).toBeUndefined();
+  });
+
+  it("rewrites stale candidates on a resumed projection without double-counting completed objects", async () => {
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [PROJECTED_FIRST, PROJECTED_SECOND] };
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await makeDeckLibraryReceiptLegacy();
+    const partialDatabase = await openDB(DATABASE);
+    const second = await partialDatabase.get("objects", `${PLANNED_DIGEST}:${DECK_LIBRARY}:${PROJECTED_SECOND.assetKey}`);
+    if (!second) throw new Error("deck-library row was not installed");
+    cache.entries.delete(second.path);
+    partialDatabase.close();
+    failedImage = PROJECTED_SECOND.sourceUrl;
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
+
+    const database = await openDB(DATABASE);
+    const [partial] = (await database.getAll("operations")).filter((operation) =>
+      operation.state === "downloading" && operation.candidateProjectionVersion === CARD_CANDIDATE_PROJECTION_VERSION);
+    database.close();
+    if (!partial) throw new Error("projection operation did not remain resumable");
+    expect(partial.objectsPromoted).toBe(1);
+    failedImage = null;
+
+    await backend.reconcileDeckLibrary();
+
+    expect(await backend.operationStatus(partial.id)).toMatchObject({ state: "completed", objectsPromoted: 2 });
+  });
+
+  it("waits for an actual changed-membership worker before preparation is ready", async () => {
+    state.cardDataResident = true;
+    installWebLocks();
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    holdSecondImage = true;
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    const preparing = backend.prepareDeckLibraryForOffline();
+    let settled = false;
+    void preparing.then(() => { settled = true; });
+    await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
+    expect(settled).toBe(false);
+    releaseSecondImage?.();
+
+    await expect(preparing).resolves.toBe("ready");
+  });
+
+  it("maps unmeasured and residual deck-library drift to deterministic preparation errors", async () => {
+    state.cardDataResident = true;
+    installWebLocks();
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    const drift = vi.spyOn(backend, "deckLibraryDrift");
+
+    drift.mockResolvedValueOnce(null);
+    await expect(backend.prepareDeckLibraryForOffline()).rejects.toMatchObject({ kind: "unavailable" });
+
+    drift.mockResolvedValueOnce({ membershipDigest: PLANNED_DIGEST, installedDigest: PLANNED_DIGEST, add: 1, remove: 0, refresh: 0 });
+    await expect(backend.prepareDeckLibraryForOffline()).rejects.toMatchObject({ kind: "conflict" });
+
+    drift.mockResolvedValueOnce({ membershipDigest: PLANNED_DIGEST, installedDigest: PLANNED_DIGEST, add: 0, remove: 1, refresh: 0 });
+    await expect(backend.prepareDeckLibraryForOffline()).rejects.toMatchObject({ kind: "conflict" });
+
+    drift.mockResolvedValueOnce({ membershipDigest: PLANNED_DIGEST, installedDigest: PLANNED_DIGEST, add: 0, remove: 0, refresh: 1 });
+    await expect(backend.prepareDeckLibraryForOffline()).rejects.toMatchObject({ kind: "conflict" });
+
+    drift.mockResolvedValueOnce({ membershipDigest: EMPTY_DIGEST, installedDigest: PLANNED_DIGEST, add: 0, remove: 0, refresh: 0 });
+    await expect(backend.prepareDeckLibraryForOffline()).rejects.toMatchObject({ kind: "conflict" });
+  });
+
+  it("rejects preparation when its final receipt root differs from the measured installed root", async () => {
+    state.cardDataResident = true;
+    installWebLocks();
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    vi.spyOn(backend, "deckLibraryDrift").mockImplementationOnce(async () => {
+      const database = await openDB(DATABASE);
+      const receipt = await database.get("packs", DECK_LIBRARY);
+      if (!receipt) throw new Error("expected deck-library receipt");
+      await database.put("packs", { ...receipt, root: EMPTY_DIGEST });
+      database.close();
+      return { membershipDigest: PLANNED_DIGEST, installedDigest: PLANNED_DIGEST, add: 0, remove: 0, refresh: 0 };
+    });
+
+    await expect(backend.prepareDeckLibraryForOffline()).rejects.toMatchObject({ kind: "conflict" });
+  });
+
+  it("propagates reconciliation failure and permits a later preparation retry", async () => {
+    state.cardDataResident = true;
+    installWebLocks();
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    vi.spyOn(backend, "reconcileDeckLibrary").mockRejectedValueOnce(new VisualPackBackendError("network"));
+
+    await expect(backend.prepareDeckLibraryForOffline()).rejects.toMatchObject({ kind: "network" });
+    await expect(backend.prepareDeckLibraryForOffline()).resolves.toBe("ready");
+  });
+
+  it("returns not-installed when the receipt disappears after deferred drift", async () => {
+    state.cardDataResident = true;
+    installWebLocks();
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    const drift = deferred<Awaited<ReturnType<typeof backend.deckLibraryDrift>>>();
+    const driftMethod = vi.spyOn(backend, "deckLibraryDrift").mockReturnValueOnce(drift.promise);
+
+    const removed = backend.prepareDeckLibraryForOffline();
+    await vi.waitFor(() => expect(driftMethod).toHaveBeenCalledTimes(1));
+    const database = await openDB(DATABASE);
+    await database.delete("packs", DECK_LIBRARY);
+    database.close();
+    drift.resolve({ membershipDigest: PLANNED_DIGEST, installedDigest: PLANNED_DIGEST, add: 0, remove: 0, refresh: 0 });
+    await expect(removed).resolves.toBe("not-installed");
+  });
+
+  it("cancels preparation when paused during deferred drift", async () => {
+    state.cardDataResident = true;
+    installWebLocks();
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    const pausedDrift = deferred<Awaited<ReturnType<typeof backend.deckLibraryDrift>>>();
+    const driftMethod = vi.spyOn(backend, "deckLibraryDrift").mockReturnValueOnce(pausedDrift.promise);
+    const paused = backend.prepareDeckLibraryForOffline();
+    const pausedAssertion = expect(paused).rejects.toMatchObject({ kind: "cancelled" });
+    await vi.waitFor(() => expect(driftMethod).toHaveBeenCalledTimes(1));
+    await backend.setDeckLibraryBackgroundPaused(true);
+    pausedDrift.resolve({ membershipDigest: PLANNED_DIGEST, installedDigest: PLANNED_DIGEST, add: 0, remove: 0, refresh: 0 });
+    await pausedAssertion;
+  });
+
+  it("cancels preparation when paused then resumed during deferred drift", async () => {
+    state.cardDataResident = true;
+    installWebLocks();
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    const pausedDrift = deferred<Awaited<ReturnType<typeof backend.deckLibraryDrift>>>();
+    const driftMethod = vi.spyOn(backend, "deckLibraryDrift").mockReturnValueOnce(pausedDrift.promise);
+    const paused = backend.prepareDeckLibraryForOffline();
+    const pausedAssertion = expect(paused).rejects.toMatchObject({ kind: "cancelled" });
+    await vi.waitFor(() => expect(driftMethod).toHaveBeenCalledTimes(1));
+    await backend.setDeckLibraryBackgroundPaused(true);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    pausedDrift.resolve({ membershipDigest: PLANNED_DIGEST, installedDigest: PLANNED_DIGEST, add: 0, remove: 0, refresh: 0 });
+    await pausedAssertion;
+  });
+
+  it("rejects preparation when the receipt opt-in generation is replaced during drift", async () => {
+    state.cardDataResident = true;
+    installWebLocks();
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installDeckLibrary(backend);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    const replacementMethod = vi.spyOn(backend, "deckLibraryDrift").mockImplementationOnce(async () => {
+      const replacementReceipt = await openDB(DATABASE);
+      const receipt = await replacementReceipt.get("packs", DECK_LIBRARY);
+      if (!receipt) throw new Error("expected deck-library receipt");
+      await replacementReceipt.put("packs", {
+        ...receipt,
+        optInGeneration: operationId("1".repeat(32)),
+      });
+      replacementReceipt.close();
+      return { membershipDigest: PLANNED_DIGEST, installedDigest: PLANNED_DIGEST, add: 0, remove: 0, refresh: 0 };
+    });
+    const replacement = backend.prepareDeckLibraryForOffline();
+    const replacementAssertion = expect(replacement).rejects.toMatchObject({ kind: "conflict" });
+    await vi.waitFor(() => expect(replacementMethod).toHaveBeenCalledTimes(1));
+    await replacementAssertion;
+  });
+
+  it("starts background reconciliation paused until the scheduler lifecycle unpauses it", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, THIRD] };
+    installWebLocks();
+    fetchMock.mockClear();
+
+    await backend.reconcileDeckLibrary();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await backend.setDeckLibraryBackgroundPaused(false);
+    await backend.reconcileDeckLibrary();
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(THIRD.sourceUrl);
+  });
+
+  it("does not create a background operation when lifecycle suspension wins during selection", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, THIRD] };
+    state.plan.mockClear();
+    const planned = deferred<typeof state.membership>();
+    state.plan.mockImplementationOnce(async () => planned.promise);
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    const reconciling = backend.reconcileDeckLibrary();
+    await vi.waitFor(() => expect(state.plan).toHaveBeenCalled());
+    const pausing = backend.setDeckLibraryBackgroundPaused(true);
+    planned.resolve(state.membership);
+    await Promise.all([reconciling, pausing]);
+
+    const database = await openDB(DATABASE);
+    expect((await database.getAll("operations")).filter((operation) => operation.background)).toEqual([]);
+    database.close();
+  });
+
+  it("suspends an active background download and resumes it only after the queued lifecycle unpause", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    holdSecondImage = true;
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    const reconciling = backend.reconcileDeckLibrary();
+    await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
+    const pausing = backend.setDeckLibraryBackgroundPaused(true);
+    const resuming = backend.setDeckLibraryBackgroundPaused(false);
+    const whileSuspended = backend.reconcileDeckLibrary();
+    releaseSecondImage?.();
+    await Promise.all([reconciling, pausing, resuming, whileSuspended]);
+
+    const paused = await openDB(DATABASE);
+    const operation = (await paused.getAll("operations")).find((entry) => entry.background);
+    paused.close();
+    if (!operation) throw new Error("background operation was not persisted");
+    expect(operation.state).toBe("downloading");
+
+    holdSecondImage = false;
+    await backend.reconcileDeckLibrary();
+    await vi.waitFor(async () => expect((await backend.operationStatus(operation.id)).state).toBe("completed"));
+  });
+
+  it("transfers a live background worker to explicit Resume so a later pause cannot abort it", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    holdSecondImage = true;
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    const reconciling = backend.reconcileDeckLibrary();
+    await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
+    const database = await openDB(DATABASE);
+    const operation = (await database.getAll("operations")).find((entry) => entry.background);
+    database.close();
+    if (!operation) throw new Error("background operation was not persisted");
+
+    const resumed = await backend.start({ kind: "resume", operationId: operation.id });
+    expect(resumed).toMatchObject({ status: "started", operationId: operation.id });
+    let pauseResolved = false;
+    const pausing = backend.setDeckLibraryBackgroundPaused(true).then(() => { pauseResolved = true; });
+    await vi.waitFor(() => expect(pauseResolved).toBe(true));
+    releaseSecondImage?.();
+    await Promise.all([reconciling, pausing]);
+    await vi.waitFor(async () => expect((await backend.operationStatus(operation.id)).state).toBe("completed"));
+    const after = await openDB(DATABASE);
+    expect((await after.get("operations", operation.id))?.background).toBe(false);
+    after.close();
+  });
+
+  it("does not interrupt an ordinary manual worker when background work pauses", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    holdSecondImage = true;
+    const started = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (started.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
+
+    await backend.setDeckLibraryBackgroundPaused(true);
+    releaseSecondImage?.();
+    await vi.waitFor(async () => expect((await backend.operationStatus(started.operationId)).state).toBe("completed"));
+  });
+
+  it("rolls back finalization when suspension lands after its final write and resumes once after unpausing", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    const beforeFinalization = await openDB(DATABASE);
+    const revisionBeforeFinalization = (await beforeFinalization.get("state", "state"))?.revision;
+    beforeFinalization.close();
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    const revisions: string[] = [];
+    await backend.subscribeRevision((event) => revisions.push(event.revision));
+    let pausing: Promise<void> | null = null;
+    setScryfallTransactionGateForTests((phase) => {
+      if (phase === "finish-before-commit") pausing ??= backend.setDeckLibraryBackgroundPaused(true);
+    });
+    const reconciling = backend.reconcileDeckLibrary();
+    await vi.waitFor(() => expect(pausing).not.toBeNull());
+    await Promise.all([reconciling, pausing]);
+
+    const suspended = await openDB(DATABASE);
+    const receipt = await suspended.get("packs", DECK_LIBRARY);
+    const revision = (await suspended.get("state", "state"))?.revision;
+    const operation = (await suspended.getAll("operations")).find((entry) => entry.background);
+    if (!receipt || !operation) throw new Error("background finalization did not persist its receipt and operation");
+    expect(receipt.root).toBe(EMPTY_DIGEST);
+    expect(revision).toBe(revisionBeforeFinalization);
+    expect(operation.state).toBe("finalizing");
+    suspended.close();
+    expect(revisions).toEqual([]);
+
+    setScryfallTransactionGateForTests(null);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    await backend.reconcileDeckLibrary();
+    await vi.waitFor(async () => expect((await backend.operationStatus(operation.id)).state).toBe("completed"));
+    expect(revisions).toHaveLength(1);
+  });
+
+  it("rolls back pack promotion when suspension lands after its final write", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    const beforePromotion = await openDB(DATABASE);
+    const receiptBeforePromotion = await beforePromotion.get("packs", DECK_LIBRARY);
+    const revisionBeforePromotion = (await beforePromotion.get("state", "state"))?.revision;
+    beforePromotion.close();
+    if (!receiptBeforePromotion) throw new Error("deck-library install did not persist a receipt");
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    let pausing: Promise<void> | null = null;
+    setScryfallTransactionGateForTests((phase) => {
+      if (phase === "complete-pack-before-commit") pausing ??= backend.setDeckLibraryBackgroundPaused(true);
+    });
+    const reconciling = backend.reconcileDeckLibrary();
+    await vi.waitFor(() => expect(pausing).not.toBeNull());
+    await Promise.all([reconciling, pausing]);
+
+    const suspended = await openDB(DATABASE);
+    const operation = (await suspended.getAll("operations")).find((entry) => entry.background);
+    expect(await suspended.get("packs", DECK_LIBRARY)).toEqual(receiptBeforePromotion);
+    expect((await suspended.get("state", "state"))?.revision).toBe(revisionBeforePromotion);
+    expect(operation).toMatchObject({ state: "downloading", packsPromoted: 0 });
+    suspended.close();
+
+    setScryfallTransactionGateForTests(null);
+    await backend.setDeckLibraryBackgroundPaused(false);
+    await backend.reconcileDeckLibrary();
+    if (!operation) throw new Error("background operation was not persisted");
+    await vi.waitFor(async () => expect((await backend.operationStatus(operation.id)).state).toBe("completed"));
+  });
+
+  it("rolls back same-root automatic ownership reclaim when suspension lands before transaction commit", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    failImages = true;
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+    await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
+    const failed = await openDB(DATABASE);
+    const operation = (await failed.getAll("operations")).find((entry) => entry.background);
+    failed.close();
+    if (!operation) throw new Error("background operation was not persisted");
+    const failures: ProgressEvent[] = [];
+    await backend.subscribeProgress((event) => { if (event.phase === "failed") failures.push(event); });
+    const manual = await backend.start({ kind: "resume", operationId: operation.id });
+    if (manual.status !== "started") throw new Error("manual resume did not start");
+    await vi.waitFor(() => expect(failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: expect.objectContaining({ operationId: operation.id }) }),
+    ])));
+    await vi.waitFor(async () => {
+      const database = await openDB(DATABASE);
+      expect((await database.get("operations", operation.id))?.background).toBe(false);
+      database.close();
+    });
+
+    let pausing: Promise<void> | undefined;
+    setScryfallTransactionGateForTests((phase) => {
+      if (phase === "selector-before-commit") pausing ??= backend.setDeckLibraryBackgroundPaused(true);
+    });
+    const reconciling = backend.reconcileDeckLibrary();
+    await vi.waitFor(() => expect(pausing).toBeDefined());
+    if (!pausing) throw new Error("selector gate did not suspend lifecycle");
+    await Promise.all([reconciling, pausing]);
+
+    const suspended = await openDB(DATABASE);
+    expect(await suspended.get("operations", operation.id)).toMatchObject({ state: "downloading", background: false });
+    expect((await suspended.getAll("operations")).filter((entry) => entry.background)).toEqual([]);
+    suspended.close();
+
+    setScryfallTransactionGateForTests(null);
+    failImages = false;
+    await backend.setDeckLibraryBackgroundPaused(false);
+    await backend.reconcileDeckLibrary();
+    await vi.waitFor(async () => expect((await backend.operationStatus(operation.id)).state).toBe("completed"));
+  });
+
+  it("rolls back different-root cancellation when suspension lands before transaction commit", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    failImages = true;
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+    await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
+    const failed = await openDB(DATABASE);
+    const operation = (await failed.getAll("operations")).find((entry) => entry.background);
+    failed.close();
+    if (!operation) throw new Error("background operation was not persisted");
+    state.membership = { membershipDigest: PLANNED_DIGEST, descriptors: [FIRST, SECOND] };
+
+    let pausing: Promise<void> | undefined;
+    setScryfallTransactionGateForTests((phase) => {
+      if (phase === "selector-before-commit") pausing ??= backend.setDeckLibraryBackgroundPaused(true);
+    });
+    const reconciling = backend.reconcileDeckLibrary();
+    await vi.waitFor(() => expect(pausing).toBeDefined());
+    if (!pausing) throw new Error("selector gate did not suspend lifecycle");
+    await Promise.all([reconciling, pausing]);
+
+    const suspended = await openDB(DATABASE);
+    expect(await suspended.get("operations", operation.id)).toMatchObject({ state: "downloading", background: true });
+    expect((await suspended.getAll("operations")).filter((entry) => entry.state === "downloading")).toHaveLength(1);
+    suspended.close();
+
+    setScryfallTransactionGateForTests(null);
+    failImages = false;
+    await backend.setDeckLibraryBackgroundPaused(false);
+    await backend.reconcileDeckLibrary();
+    await vi.waitFor(async () => expect((await backend.operationStatus(operation.id)).state).toBe("cancelled"));
   });
 
   it("reconciles an installed deck-library delta without requesting persistence", async () => {
@@ -832,7 +1755,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (initial.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
-    const before = await openDB(DATABASE, 1);
+    const before = await openDB(DATABASE);
     const generation = (await before.get("packs", DECK_LIBRARY))?.optInGeneration;
     before.close();
 
@@ -850,6 +1773,7 @@ describe("deck-library selector and drift contract", () => {
       value: { persisted: vi.fn(async () => false), persist: persistence, estimate: vi.fn(async () => ({})) },
     });
     installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
 
     await backend.reconcileDeckLibrary();
 
@@ -857,7 +1781,7 @@ describe("deck-library selector and drift contract", () => {
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(THIRD.sourceUrl);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain(FIRST.sourceUrl);
     expect(persistence).not.toHaveBeenCalled();
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     expect(await after.get("packs", DECK_LIBRARY)).toMatchObject({
       root: EMPTY_DIGEST,
       optInGeneration: generation,
@@ -873,11 +1797,12 @@ describe("deck-library selector and drift contract", () => {
     if (initial.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
     state.plan.mockClear();
+    await backend.setDeckLibraryBackgroundPaused(false);
 
     await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "unavailable" });
 
     expect(state.plan).not.toHaveBeenCalled();
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     expect(await database.getAll("operations")).toHaveLength(1);
     database.close();
   });
@@ -889,7 +1814,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (initial.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const receipt = await database.get("packs", DECK_LIBRARY);
     const rows = await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     const operations = await database.getAll("operations");
@@ -909,10 +1834,11 @@ describe("deck-library selector and drift contract", () => {
     state.plan.mockRejectedValueOnce(new VisualPackBackendError("network"));
     installWebLocks();
     fetchMock.mockClear();
+    await backend.setDeckLibraryBackgroundPaused(false);
 
     await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
 
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     expect(await after.get("packs", DECK_LIBRARY)).toEqual(receipt);
     expect(await after.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toEqual(rows);
     expect(await after.getAll("operations")).toEqual(operations);
@@ -928,7 +1854,7 @@ describe("deck-library selector and drift contract", () => {
 
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, THIRD] };
     await backend.reconcileDeckLibrary();
-    const recovered = await openDB(DATABASE, 1);
+    const recovered = await openDB(DATABASE);
     expect(await recovered.get("packs", DECK_LIBRARY)).toMatchObject({ root: EMPTY_DIGEST });
     recovered.close();
     expect(revisions).toHaveLength(1);
@@ -946,6 +1872,10 @@ describe("deck-library selector and drift contract", () => {
     holdSecondImage = true;
     installWebLocks();
     fetchMock.mockClear();
+    await Promise.all([
+      first.setDeckLibraryBackgroundPaused(false),
+      second.setDeckLibraryBackgroundPaused(false),
+    ]);
     const firstRevisions: string[] = [];
     const secondRevisions: string[] = [];
     await first.subscribeRevision((event) => firstRevisions.push(event.revision));
@@ -958,7 +1888,7 @@ describe("deck-library selector and drift contract", () => {
     await Promise.all([fromFirst, fromSecond]);
 
     expect(fetchMock.mock.calls.filter(([input]) => String(input) === MOVED.sourceUrl)).toHaveLength(1);
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     expect(await database.get("packs", DECK_LIBRARY)).toMatchObject({ root: EMPTY_DIGEST });
     expect((await database.getAll("operations")).filter((operation) => operation.background)).toHaveLength(1);
     database.close();
@@ -977,6 +1907,10 @@ describe("deck-library selector and drift contract", () => {
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
     holdSecondImage = true;
     installWebLocks();
+    await Promise.all([
+      first.setDeckLibraryBackgroundPaused(false),
+      second.setDeckLibraryBackgroundPaused(false),
+    ]);
 
     const d2 = first.reconcileDeckLibrary();
     await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
@@ -986,7 +1920,7 @@ describe("deck-library selector and drift contract", () => {
     holdSecondImage = false;
     await Promise.all([d2, d1]);
 
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     expect(await database.get("packs", DECK_LIBRARY)).toMatchObject({ root: PLANNED_DIGEST });
     database.close();
   });
@@ -1002,6 +1936,10 @@ describe("deck-library selector and drift contract", () => {
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
     holdSecondImage = true;
     installWebLocks();
+    await Promise.all([
+      first.setDeckLibraryBackgroundPaused(false),
+      second.setDeckLibraryBackgroundPaused(false),
+    ]);
 
     const d2 = first.reconcileDeckLibrary();
     await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
@@ -1011,7 +1949,7 @@ describe("deck-library selector and drift contract", () => {
     releaseSecondImage?.();
     await Promise.all([d2, d3]);
 
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     expect(await database.get("packs", DECK_LIBRARY)).toMatchObject({ root: INSTALLED_DIGEST });
     const background = (await database.getAll("operations")).filter((operation) => operation.background);
     expect(background).toHaveLength(2);
@@ -1032,9 +1970,10 @@ describe("deck-library selector and drift contract", () => {
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
     failImages = true;
     installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
 
     await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
-    const failed = await openDB(DATABASE, 1);
+    const failed = await openDB(DATABASE);
     const operation = (await failed.getAll("operations")).find((entry) => entry.background);
     failed.close();
     expect(operation).toMatchObject({ state: "downloading" });
@@ -1042,6 +1981,117 @@ describe("deck-library selector and drift contract", () => {
     failImages = false;
     const recreated = await ScryfallBrowserVisualPackBackend.create();
     if (!operation) throw new Error("background operation was not persisted");
+    expect((await recreated.operationStatus(operation.id)).state).toBe("downloading");
+    await recreated.setDeckLibraryBackgroundPaused(false);
+    await recreated.reconcileDeckLibrary();
+    await vi.waitFor(async () => expect((await recreated.operationStatus(operation.id)).state).toBe("completed"));
+  });
+
+  it("does not restart an inactive failed background worker when pause wins during its failure bookkeeping", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    holdSecondImage = true;
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+
+    const rawDatabase = Reflect.get(backend, "database") as {
+      get(store: string, key: unknown): Promise<unknown>;
+    };
+    const originalGet = rawDatabase.get.bind(rawDatabase);
+    let holdFailureRead = false;
+    let failureReadStarted = false;
+    let releaseFailureRead!: () => void;
+    const failureRead = new Promise<void>((resolve) => { releaseFailureRead = resolve; });
+    const get = vi.spyOn(rawDatabase, "get").mockImplementation(async (store, key) => {
+      if (holdFailureRead && store === "operations" && !failureReadStarted) {
+        failureReadStarted = true;
+        await failureRead;
+      }
+      return originalGet(store, key);
+    });
+
+    const first = backend.reconcileDeckLibrary();
+    await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
+    holdFailureRead = true;
+    failImages = true;
+    releaseSecondImage?.();
+    await vi.waitFor(() => expect(failureReadStarted).toBe(true));
+
+    const rawBackend = backend as unknown as {
+      runAndWait(selectedOperation: ReturnType<typeof operationId>, background: boolean): Promise<void>;
+    };
+    const runAndWait = vi.spyOn(rawBackend, "runAndWait");
+    const queued = backend.reconcileDeckLibrary();
+    await vi.waitFor(() => expect(runAndWait).toHaveBeenCalledTimes(1));
+    const pause = backend.setDeckLibraryBackgroundPaused(true);
+    const fetchesBeforeSettlement = fetchMock.mock.calls.length;
+    releaseFailureRead();
+    await Promise.allSettled([first, queued, pause]);
+    expect(fetchMock).toHaveBeenCalledTimes(fetchesBeforeSettlement);
+    runAndWait.mockRestore();
+    get.mockRestore();
+
+    failImages = false;
+    holdSecondImage = false;
+    await backend.setDeckLibraryBackgroundPaused(false);
+    await backend.reconcileDeckLibrary();
+    const persisted = await openDB(DATABASE);
+    const operation = (await persisted.getAll("operations")).find((entry) => entry.background);
+    persisted.close();
+    if (!operation) throw new Error("background operation was not persisted");
+    await vi.waitFor(async () => expect((await backend.operationStatus(operation.id)).state).toBe("completed"));
+  });
+
+  it("reclaims a manual retry queued before its failure and leaves recreation default-paused", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const initial = await backend.start({
+      kind: "install", selector: { kind: "deck_library", membershipDigest: PLANNED_DIGEST }, objectEstimate: 2,
+    });
+    if (initial.status !== "started") throw new Error("deck-library install did not start");
+    await vi.waitFor(async () => expect((await backend.operationStatus(initial.operationId)).state).toBe("completed"));
+    state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
+    failImages = true;
+    installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
+    await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
+    const failed = await openDB(DATABASE);
+    const operation = (await failed.getAll("operations")).find((entry) => entry.background);
+    failed.close();
+    if (!operation) throw new Error("background operation was not persisted");
+
+    const failures: ProgressEvent[] = [];
+    await backend.subscribeProgress((event) => { if (event.phase === "failed") failures.push(event); });
+    holdSecondImage = true;
+    const manual = await backend.start({ kind: "resume", operationId: operation.id });
+    expect(manual).toMatchObject({ status: "started", operationId: operation.id });
+    await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
+    const manualOwned = await openDB(DATABASE);
+    expect((await manualOwned.get("operations", operation.id))?.background).toBe(false);
+    manualOwned.close();
+    const automatic = backend.reconcileDeckLibrary();
+    releaseSecondImage?.();
+    holdSecondImage = false;
+    await expect(automatic).rejects.toMatchObject({ kind: "network" });
+    await vi.waitFor(() => expect(failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: expect.objectContaining({ operationId: operation.id }) }),
+    ])));
+    const reclaimed = await openDB(DATABASE);
+    expect((await reclaimed.get("operations", operation.id))?.background).toBe(true);
+    reclaimed.close();
+    await backend.setDeckLibraryBackgroundPaused(true);
+
+    failImages = false;
+    fetchMock.mockClear();
+    const recreated = await ScryfallBrowserVisualPackBackend.create();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await recreated.operationStatus(operation.id)).state).toBe("downloading");
+    await recreated.setDeckLibraryBackgroundPaused(false);
+    await recreated.reconcileDeckLibrary();
     await vi.waitFor(async () => expect((await recreated.operationStatus(operation.id)).state).toBe("completed"));
   });
 
@@ -1055,8 +2105,9 @@ describe("deck-library selector and drift contract", () => {
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
     failImages = true;
     installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
     await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
-    const failed = await openDB(DATABASE, 1);
+    const failed = await openDB(DATABASE);
     const operation = (await failed.getAll("operations")).find((entry) => entry.background);
     failed.close();
     if (!operation) throw new Error("background operation was not persisted");
@@ -1087,9 +2138,10 @@ describe("deck-library selector and drift contract", () => {
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED, THIRD, FOURTH] };
     failedImage = FOURTH.sourceUrl;
     installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
     await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
 
-    const failed = await openDB(DATABASE, 1);
+    const failed = await openDB(DATABASE);
     const d2Row = (await failed.getAllFromIndex("objects", "by-pack", DECK_LIBRARY))
       .find((row) => row.root === EMPTY_DIGEST && row.sourceUrl === MOVED.sourceUrl);
     const d2OnlyRow = (await failed.getAllFromIndex("objects", "by-pack", DECK_LIBRARY))
@@ -1116,7 +2168,7 @@ describe("deck-library selector and drift contract", () => {
     fetchMock.mockClear();
     await expect(backend.reconcileDeckLibrary()).resolves.toBeUndefined();
 
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     expect(await after.get("packs", DECK_LIBRARY)).toMatchObject({ root: PLANNED_DIGEST });
     const d1Rows = await after.getAllFromIndex("objects", "by-pack", DECK_LIBRARY);
     expect(d1Rows.map((row) => row.assetKey).sort()).toEqual([FIRST.assetKey, SECOND.assetKey].sort());
@@ -1143,8 +2195,9 @@ describe("deck-library selector and drift contract", () => {
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
     failImages = true;
     installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
     await expect(backend.reconcileDeckLibrary()).rejects.toMatchObject({ kind: "network" });
-    const beforeRemoval = await openDB(DATABASE, 1);
+    const beforeRemoval = await openDB(DATABASE);
     const failed = (await beforeRemoval.getAll("operations")).find((operation) => operation.background);
     beforeRemoval.close();
     if (!failed) throw new Error("background operation was not persisted");
@@ -1154,7 +2207,7 @@ describe("deck-library selector and drift contract", () => {
     failImages = false;
     const recreated = await ScryfallBrowserVisualPackBackend.create();
     expect((await recreated.operationStatus(failed.id)).state).toBe("cancelled");
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     expect(await after.get("packs", DECK_LIBRARY)).toBeUndefined();
     expect(await after.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toEqual([]);
     after.close();
@@ -1170,18 +2223,19 @@ describe("deck-library selector and drift contract", () => {
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
     holdSecondImage = true;
     installWebLocks();
+    await backend.setDeckLibraryBackgroundPaused(false);
     const active = backend.reconcileDeckLibrary();
     await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
     const removing = backend.remove({ kind: "packs", packIds: [DECK_LIBRARY] }, "reject_dependents");
     await vi.waitFor(async () => {
-      const database = await openDB(DATABASE, 1);
+      const database = await openDB(DATABASE);
       expect(await database.get("packs", DECK_LIBRARY)).toBeUndefined();
       database.close();
     });
     releaseSecondImage?.();
     await Promise.allSettled([active, removing]);
 
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     expect(await after.get("packs", DECK_LIBRARY)).toBeUndefined();
     expect(await after.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toEqual([]);
     expect((await after.getAll("operations")).some((operation) => operation.background && operation.state === "cancelled")).toBe(true);
@@ -1199,20 +2253,24 @@ describe("deck-library selector and drift contract", () => {
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
     holdSecondImage = true;
     installWebLocks();
+    await Promise.all([
+      first.setDeckLibraryBackgroundPaused(false),
+      second.setDeckLibraryBackgroundPaused(false),
+    ]);
 
     const active = first.reconcileDeckLibrary();
     await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
     const queued = second.reconcileDeckLibrary();
     const removing = second.remove({ kind: "packs", packIds: [DECK_LIBRARY] }, "reject_dependents");
     await vi.waitFor(async () => {
-      const database = await openDB(DATABASE, 1);
+      const database = await openDB(DATABASE);
       expect(await database.get("packs", DECK_LIBRARY)).toBeUndefined();
       database.close();
     });
     releaseSecondImage?.();
     await Promise.allSettled([removing, active, queued]);
 
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     expect(await database.get("packs", DECK_LIBRARY)).toBeUndefined();
     expect(await database.getAllFromIndex("objects", "by-pack", DECK_LIBRARY)).toEqual([]);
     expect((await database.getAll("operations")).filter((operation) => operation.background))
@@ -1227,7 +2285,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (initial.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await first.operationStatus(initial.operationId)).state).toBe("completed"));
-    const before = await openDB(DATABASE, 1);
+    const before = await openDB(DATABASE);
     const initialReceipt = await before.get("packs", DECK_LIBRARY);
     before.close();
     if (!initialReceipt) throw new Error("deck-library install wrote no receipt");
@@ -1236,11 +2294,15 @@ describe("deck-library selector and drift contract", () => {
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
     holdSecondImage = true;
     installWebLocks();
+    await Promise.all([
+      first.setDeckLibraryBackgroundPaused(false),
+      second.setDeckLibraryBackgroundPaused(false),
+    ]);
     const oldGeneration = first.reconcileDeckLibrary();
     await vi.waitFor(() => expect(releaseSecondImage).not.toBeNull());
     const removing = second.remove({ kind: "packs", packIds: [DECK_LIBRARY] }, "reject_dependents");
     await vi.waitFor(async () => {
-      const database = await openDB(DATABASE, 1);
+      const database = await openDB(DATABASE);
       expect(await database.get("packs", DECK_LIBRARY)).toBeUndefined();
       database.close();
     });
@@ -1256,7 +2318,7 @@ describe("deck-library selector and drift contract", () => {
     await Promise.allSettled([oldGeneration]);
     await vi.waitFor(async () => expect((await second.operationStatus(reinstall.operationId)).state).toBe("completed"));
 
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     const reinstalled = await after.get("packs", DECK_LIBRARY);
     expect(reinstalled).toMatchObject({ root: PLANNED_DIGEST, operationId: reinstall.operationId });
     expect(reinstalled?.optInGeneration).not.toBe(initialReceipt.optInGeneration ?? initialReceipt.operationId);
@@ -1285,26 +2347,30 @@ describe("deck-library selector and drift contract", () => {
     const second = await ScryfallBrowserVisualPackBackend.create();
     state.membership = { membershipDigest: EMPTY_DIGEST, descriptors: [FIRST, MOVED] };
     installWebLocks();
+    await Promise.all([
+      first.setDeckLibraryBackgroundPaused(false),
+      second.setDeckLibraryBackgroundPaused(false),
+    ]);
 
     const reconciling = first.reconcileDeckLibrary();
     await vi.waitFor(async () => {
-      const database = await openDB(DATABASE, 1);
+      const database = await openDB(DATABASE);
       expect((await database.get("packs", DECK_LIBRARY))?.root).toBe(EMPTY_DIGEST);
       database.close();
     });
     const removing = second.remove({ kind: "packs", packIds: [DECK_LIBRARY] }, "reject_dependents");
     await vi.waitFor(async () => {
-      const database = await openDB(DATABASE, 1);
+      const database = await openDB(DATABASE);
       expect(await database.get("packs", DECK_LIBRARY)).toBeUndefined();
       database.close();
     });
-    const afterRemoval = await openDB(DATABASE, 1);
+    const afterRemoval = await openDB(DATABASE);
     const revision = (await afterRemoval.get("state", "state"))?.revision;
     afterRemoval.close();
     releaseFinish();
     await Promise.all([removing, reconciling]);
 
-    const after = await openDB(DATABASE, 1);
+    const after = await openDB(DATABASE);
     expect(await after.get("packs", DECK_LIBRARY)).toBeUndefined();
     expect((await after.get("state", "state"))?.revision).toBe(revision);
     after.close();
@@ -1318,7 +2384,7 @@ describe("deck-library selector and drift contract", () => {
     });
     if (initial.status !== "started") throw new Error("deck-library install did not start");
     await vi.waitFor(async () => expect((await initialBackend.operationStatus(initial.operationId)).state).toBe("completed"));
-    const database = await openDB(DATABASE, 1);
+    const database = await openDB(DATABASE);
     const receipt = await database.get("packs", DECK_LIBRARY);
     const current = await database.get("state", "state");
     if (!receipt || !current?.catalog) throw new Error("deck-library install did not persist receipt and catalog");
@@ -1337,6 +2403,7 @@ describe("deck-library selector and drift contract", () => {
       completedRevision: null,
       deckLibraryGeneration: receipt.optInGeneration ?? receipt.operationId,
       background: true,
+      candidateProjectionVersion: CARD_CANDIDATE_PROJECTION_VERSION,
     });
     database.close();
     installWebLocks();
@@ -1360,12 +2427,14 @@ describe("deck-library selector and drift contract", () => {
     };
     try {
       const recreated = await ScryfallBrowserVisualPackBackend.create();
+      await recreated.setDeckLibraryBackgroundPaused(false);
+      void recreated.reconcileDeckLibrary();
       await finishStarted;
       const progress: ProgressEvent[] = [];
       const revisions: string[] = [];
       await recreated.subscribeProgress((event) => progress.push(event));
       await recreated.subscribeRevision((event) => revisions.push(event.revision));
-      const changed = await openDB(DATABASE, 1);
+      const changed = await openDB(DATABASE);
       const changedReceipt = await changed.get("packs", DECK_LIBRARY);
       if (!changedReceipt) throw new Error("deck-library receipt disappeared before generation fence");
       await changed.put("packs", { ...changedReceipt, operationId: operationId("1".repeat(32)) });
@@ -1378,7 +2447,7 @@ describe("deck-library selector and drift contract", () => {
         error: null,
       }));
       expect(revisions).toEqual([]);
-      const after = await openDB(DATABASE, 1);
+      const after = await openDB(DATABASE);
       expect((await after.get("state", "state"))?.revision).toBe(current.revision);
       after.close();
     } finally {

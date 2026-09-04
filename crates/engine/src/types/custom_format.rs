@@ -8,7 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::format::{GameFormat, RangeOfInfluenceConfig, SideboardPolicy};
+use crate::types::format::{
+    DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SideboardPolicy,
+};
 
 /// Lightweight, `Copy`, per-`GameState` transport tag for a custom format.
 /// The full ruleset never needs a registry round-trip within one game — see
@@ -17,6 +19,17 @@ use crate::types::format::{GameFormat, RangeOfInfluenceConfig, SideboardPolicy};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CustomFormatId(pub u16);
+
+/// The reserved id every Axis-A "save the current lobby setup as a custom
+/// format" definition carries (see [`CustomFormatDef::from_lobby_config`]).
+/// A lobby save is ad-hoc and client-persisted — it is never registered in
+/// [`custom_format_registry`], so it has no registry-stable id of its own and
+/// must not be able to impersonate one. Reserving a single sentinel (rather
+/// than letting a lobby save pick an arbitrary id) makes that impersonation
+/// unrepresentable, and is enforced in the other direction by
+/// [`assert_no_lobby_save_sentinel_collision`]: no bundled preset may ever
+/// claim this id.
+pub const LOBBY_SAVE_CUSTOM_FORMAT_ID: CustomFormatId = CustomFormatId(0);
 
 /// An MTGJSON-style set code (e.g. "MH3", "LEA"). Distinct from a bare
 /// `String` so a card-pool restriction list can't be confused with any other
@@ -113,7 +126,11 @@ pub enum LegendRuleScope {
     PreM14AnyController,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Default` is every axis at its modern value — the rule set an Axis-A
+/// lobby save always declares (it models no historical paper ruleset), and
+/// the only one `passes_legacy_axis_gate` accepts while
+/// `IMPLEMENTED_LEGACY_AXES` is empty.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LegacyRuleSet {
     pub mana_burn: ManaBurnPolicy,
     pub damage_timing: CombatDamageTiming,
@@ -202,7 +219,16 @@ pub struct StructuralRules {
     pub starting_life: i32,
     pub min_players: u8,
     pub max_players: u8,
-    pub deck_size: u16,
+    /// CR 100.5 / CR 903.5a: the DECLARED deck-size rule, typed exactly like
+    /// the `FormatConfig.deck_size` field it mirrors 1:1. A bare `u16` could
+    /// not round-trip which [`DeckSizeRule`] variant a format uses — a saved
+    /// Commander-shaped format (`Exactly(100)`) and a saved Commander-Draft-
+    /// shaped one (`Minimum(60)`) would both collapse to a number, and the
+    /// resolver rebuilding a `FormatConfig` from these rules would have to
+    /// guess the missing half of the rule. CR 903.13f(1) is exactly the case
+    /// where guessing is wrong (a command-zone format with no maximum), which
+    /// is why `FormatConfig` itself stopped inferring it.
+    pub deck_size: DeckSizeRule,
     pub singleton: bool,
     pub command_zone_mode: CommandZoneMode,
     #[serde(default)]
@@ -214,6 +240,18 @@ pub struct StructuralRules {
     /// the real resolver is Phase 1c's widening (see
     /// `docs/proposals/custom-format-engine/IMPLEMENTATION_PLAN.md`).
     pub sideboard_policy: SideboardPolicy,
+    /// CR 100.2a / CR 100.2b / CR 903.5b: the DECLARED default
+    /// deck-construction copy ceiling, before per-card printed overrides and
+    /// the basic-land exemption (both applied by
+    /// `game::deck_validation::max_deck_copies`). A direct-copy mirror of
+    /// `FormatConfig.default_deck_copy_limit` (Phase 1b), exactly like
+    /// `sideboard_policy` above mirrors `FormatConfig.sideboard_policy`:
+    /// without it, a lobby save would silently discard the source format's
+    /// real ceiling and the resolver would have nothing to rebuild it from
+    /// but `GameFormat::Custom(_).default_deck_copy_limit()`'s fail-closed
+    /// `UpTo(1)` fallback — the same silent-data-loss bug `sideboard_policy`
+    /// exists to prevent.
+    pub default_deck_copy_limit: DeckCopyLimit,
 }
 
 /// Legality/era rules. `legal_sets: None` means unrestricted (every card
@@ -269,6 +307,236 @@ impl std::fmt::Display for FormatConfigError {
 }
 
 impl std::error::Error for FormatConfigError {}
+
+/// How many characters `short_label_from_name` keeps. `FormatMetadata`'s
+/// hand-curated `short_label`s ("STD", "CMD", "2HG") are all exactly three,
+/// and the frontend's own unrecognized-format fallback is
+/// `format.slice(0, 3).toUpperCase()` — this is that same derivation, moved
+/// into the engine so an Axis-A save carries a real engine-supplied value
+/// instead of the display layer computing one.
+const SHORT_LABEL_LEN: usize = 3;
+
+/// Derives a compact badge code from an arbitrary user-supplied format name:
+/// the first [`SHORT_LABEL_LEN`] alphanumeric characters of the trimmed name,
+/// uppercased. A name with fewer than that many alphanumeric characters
+/// yields a shorter code — a deliberate, documented deviation from the
+/// "always exactly three" convention every hand-curated built-in happens to
+/// satisfy, because there is no meaningful three-character abbreviation to
+/// invent for a two-character name. `from_lobby_config` rejects an entirely
+/// empty trimmed name outright, so this never returns an empty string on its
+/// production path.
+fn short_label_from_name(name: &str) -> String {
+    name.trim()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(SHORT_LABEL_LEN)
+        .collect::<String>()
+        .to_uppercase()
+}
+
+/// Builds the one-line human description an Axis-A save has no human curator
+/// to write, from the structural rules' own field values — so two different
+/// `StructuralRules` describe themselves differently rather than sharing a
+/// static placeholder. Mirrors the built-in phrasing style
+/// (`"100-card singleton, 2–4 players"`, `"Tournament 1v1 Commander, 30
+/// life"`): short comma-joined structural fragments, no terminal punctuation.
+///
+/// The contributing fields are deck size (with its [`DeckSizeRule`] variant
+/// preserved — "at least N" is not the same claim as "exactly N"), singleton,
+/// the player-count range, starting life, and the command zone / team-based
+/// flags when set. `sideboard_policy`/`default_deck_copy_limit` are
+/// deliberately omitted: they are deck-construction validation inputs, not
+/// table-shape facts, and the built-in descriptions this mirrors never
+/// mention them either.
+fn derive_structural_description(structural: &StructuralRules) -> String {
+    let mut parts = Vec::new();
+
+    // CR 100.5 vs CR 903.5a: an exact-size rule and a floor are different
+    // claims, so the description must not flatten them into one phrasing.
+    let deck = match structural.deck_size {
+        DeckSizeRule::Exactly(n) => format!("{n}-card"),
+        DeckSizeRule::Minimum(n) => format!("{n}-card minimum"),
+    };
+    parts.push(if structural.singleton {
+        format!("{deck} singleton")
+    } else {
+        deck
+    });
+
+    parts.push(if structural.min_players == structural.max_players {
+        format!("{}-player", structural.min_players)
+    } else {
+        format!(
+            "{}\u{2013}{} players",
+            structural.min_players, structural.max_players
+        )
+    });
+
+    parts.push(format!("{} life", structural.starting_life));
+
+    // CR 408.1: the command zone is a distinct game area, so its presence is
+    // a table-shape fact worth surfacing.
+    if matches!(
+        structural.command_zone_mode,
+        CommandZoneMode::Enabled { .. }
+    ) {
+        parts.push("command zone".to_string());
+    }
+    if structural.team_based {
+        parts.push("team-based".to_string());
+    }
+
+    parts.join(", ")
+}
+
+impl CustomFormatDef {
+    /// Axis A: captures a lobby's live, fully-resolved built-in
+    /// `FormatConfig` as a saved custom-format DEFINITION (never an active
+    /// `FormatConfig` — [`crate::types::format::FormatConfig::for_custom_rules`]
+    /// is the reverse direction, applied only when a player later selects
+    /// this definition to start a game).
+    ///
+    /// Every structural field is read from `config`'s own RESOLVED, stored
+    /// fields — never from a bare `GameFormat` method. `sideboard_policy()`
+    /// and `default_deck_copy_limit()` both return a disclosed fail-closed
+    /// fallback for `GameFormat::Custom`, and more importantly a lobby host
+    /// may have tuned a field away from its format default; reading the
+    /// method would silently save something the host never configured.
+    ///
+    /// `legality` is left at defaults (`legal_sets: None`, empty
+    /// banned/restricted, default `LegacyRuleSet`): a lobby save models no
+    /// published paper ruleset, so it has no card-pool or era intent to
+    /// declare. `reprint_policy: None` / `printing_fidelity: NotApplicable`
+    /// for the same reason.
+    ///
+    /// Returns `Err` rather than silently dropping data whenever `config` is
+    /// a state this conversion cannot faithfully represent.
+    ///
+    /// Two `FormatConfig` fields are deliberately NOT captured, per the
+    /// charter's own accounting: `archenemy_player` is per-seating table
+    /// state, not a format rule (and the only format that sets it is
+    /// rejected below anyway), and `supplies_fixed_deck` is always `false`
+    /// for every custom format — no custom-format use case for an
+    /// engine-supplied fixed deck exists, and the only built-in that sets it
+    /// (Momir) is likewise rejected below.
+    pub fn from_lobby_config(
+        name: String,
+        config: &FormatConfig,
+    ) -> Result<Self, FormatConfigError> {
+        // Re-saving an already-custom format is out of scope for Axis A: the
+        // source's `legality` (legal_sets/banned/restricted/legacy) has no
+        // home in this conversion, which always writes defaults, so the save
+        // would silently drop it. `from_source_format` below would reject
+        // `Custom` too, but only when the command-zone branch is reached —
+        // check it up front so the rejection does not depend on the source's
+        // command-zone flag.
+        if let GameFormat::Custom(id) = config.format {
+            return Err(FormatConfigError(format!(
+                "from_lobby_config cannot save Custom({}) as a new custom format — the source's \
+                 own legality rules (legal_sets/banned/restricted/legacy) have no representation \
+                 in a lobby save and would be silently dropped",
+                id.0
+            )));
+        }
+
+        if name.trim().is_empty() {
+            return Err(FormatConfigError(
+                "from_lobby_config requires a non-empty format name — there is nothing to label \
+                 the saved format with"
+                    .to_string(),
+            ));
+        }
+        // Normalize once, right after validating: the emptiness check above
+        // already treats leading/trailing whitespace as insignificant, so the
+        // stored `label` should match that judgment rather than preserving
+        // whitespace the validation itself ignored.
+        let name = name.trim().to_string();
+
+        // Closes the general defect class documented on
+        // `GameFormat::has_unrepresentable_auxiliary_deck_component`: Planechase
+        // (CR 901.15a, shared planar deck), Archenemy (CR 904.3, scheme deck),
+        // and Momir (CR 109.4c / CR 114.1, game-start emblem) each get an
+        // auxiliary deck/component from `deck_loading.rs` keyed on this exact
+        // `GameFormat` literal, with no `StructuralRules` field able to carry
+        // it forward. Checked ahead of the command-zone/eligibility match
+        // below because Planechase's `command_zone` is `false` — it would
+        // otherwise fall straight through to `CommandZoneMode::Disabled` and
+        // save "successfully," silently losing the planar deck. Archenemy and
+        // Momir are also caught here now (previously only by the `(true,
+        // None)` arm below, which this predicate makes unreachable for them —
+        // left in place as a defensive fallback for any future built-in that
+        // sets `command_zone: true` without a commander concept).
+        if config.format.has_unrepresentable_auxiliary_deck_component() {
+            return Err(FormatConfigError(format!(
+                "from_lobby_config cannot save {} as a custom format — its deck_loading.rs \
+                 behavior grants an auxiliary deck or component (a shared planar deck, a scheme \
+                 deck, or a game-start emblem) keyed on this literal format, and StructuralRules \
+                 has no representation for it",
+                config.format
+            )));
+        }
+
+        let eligibility_rule = CommanderEligibilityRule::from_source_format(config.format)?;
+        let command_zone_mode = match (config.command_zone, eligibility_rule) {
+            (true, Some(eligibility_rule)) => CommandZoneMode::Enabled {
+                commander_damage_threshold: config.commander_damage_threshold,
+                eligibility_rule,
+            },
+            // Defensive fallback: among today's built-ins, only Archenemy and
+            // Momir reach this arm (both `command_zone: true` with no
+            // eligibility rule), and both are already rejected above by
+            // `has_unrepresentable_auxiliary_deck_component`. Kept so a future
+            // command-zone format added to `CommanderEligibilityRule::from_source_format`'s
+            // `Ok(None)` bucket without also being added to that predicate
+            // still fails closed here instead of silently resolving to
+            // `CommandZoneMode::Disabled`.
+            (true, None) => {
+                return Err(FormatConfigError(format!(
+                    "from_lobby_config cannot save {} as a custom format — its command zone holds \
+                     format-specific objects rather than a commander, and StructuralRules has no \
+                     representation for them",
+                    config.format
+                )))
+            }
+            // No command zone: `eligibility_rule` (if the source format even
+            // has one) is meaningless without one, so nothing is dropped.
+            (false, _) => CommandZoneMode::Disabled,
+        };
+
+        let structural = StructuralRules {
+            starting_life: config.starting_life,
+            min_players: config.min_players,
+            max_players: config.max_players,
+            deck_size: config.deck_size,
+            singleton: config.singleton,
+            command_zone_mode,
+            range_of_influence: config.range_of_influence.clone(),
+            team_based: config.team_based,
+            sideboard_policy: config.sideboard_policy,
+            default_deck_copy_limit: config.default_deck_copy_limit,
+        };
+        let description = derive_structural_description(&structural);
+        let short_label = short_label_from_name(&name);
+
+        Ok(CustomFormatDef {
+            rules: CustomFormatRules {
+                id: LOBBY_SAVE_CUSTOM_FORMAT_ID,
+                structural,
+                legality: LegalityRules {
+                    legal_sets: None,
+                    banned: Vec::new(),
+                    restricted: Vec::new(),
+                    legacy: LegacyRuleSet::default(),
+                },
+            },
+            label: name,
+            short_label,
+            description,
+            reprint_policy: None,
+            printing_fidelity: PrintingFidelity::NotApplicable,
+        })
+    }
+}
 
 /// Engine-consistency invariant: `format == GameFormat::Custom(id) ⟺
 /// custom_rules == Some(rules) && rules.id == id`. Phase 1a checks only this
@@ -326,10 +594,26 @@ fn declared_legacy_axes(rules: &LegacyRuleSet) -> Vec<LegacyAxis> {
     axes
 }
 
-/// Registration gate (a): every axis a def declares as non-default must be
-/// in `IMPLEMENTED_LEGACY_AXES`, or the def is rejected.
-pub fn passes_legacy_axis_gate(def: &CustomFormatDef) -> bool {
-    declared_legacy_axes(&def.rules.legality.legacy)
+/// Registration gate (a): every axis a rule set declares as non-default must
+/// be in `IMPLEMENTED_LEGACY_AXES`, or it is rejected.
+///
+/// Takes the `LegacyRuleSet` rather than the whole `CustomFormatDef` because
+/// that is all it has ever read, and because it has a second caller that
+/// holds no `CustomFormatDef` at all: `FormatConfig`'s `Deserialize` impl,
+/// which sees only a `CustomFormatRules` (display metadata never travels on
+/// an active config). Both callers must apply the identical gate — a
+/// deserialized custom format that declares an unimplemented axis would
+/// otherwise get behavior the engine silently does not enforce.
+///
+/// Deliberately asymmetric with `legal_sets`/`banned`/`restricted`, which are
+/// NOT gated: those are declarative card-pool data the evaluator either
+/// applies in full or not at all, so there is no partial-implementation risk.
+/// A `LegacyRuleSet` axis instead promises runtime behavior (mana burn, the
+/// legend rule's scope, Wish reach) that may not be built yet, so declaring
+/// one the engine does not implement silently misrepresents how the game will
+/// actually play.
+pub fn passes_legacy_axis_gate(rules: &LegacyRuleSet) -> bool {
+    declared_legacy_axes(rules)
         .into_iter()
         .all(|axis| IMPLEMENTED_LEGACY_AXES.contains(&axis))
 }
@@ -344,13 +628,44 @@ pub fn passes_reprint_fidelity_gate(def: &CustomFormatDef) -> bool {
         )
 }
 
+/// Registration gate (c): no bundled preset may claim
+/// [`LOBBY_SAVE_CUSTOM_FORMAT_ID`], which is reserved for Axis-A lobby saves.
+/// A collision would make a client-persisted ad-hoc save indistinguishable
+/// from a registry-stable preset — `GameFormat::label()` would report the
+/// preset's name for someone else's save, and (once Phase 1d's evaluator
+/// lands) a save could inherit a preset's banned/restricted lists.
+///
+/// A real `assert!`, not a `debug_assert!`: neither the `release` nor the
+/// `server-release` profile in the workspace `Cargo.toml` overrides
+/// `debug-assertions`, so a `debug_assert!` here would be compiled out of
+/// every shipped binary — precisely the builds where a preset added later
+/// must not be able to silently shadow the sentinel. The preset list is a
+/// hardcoded, developer-authored constant, so this can only fire on a
+/// programming error, never on user input.
+pub fn assert_no_lobby_save_sentinel_collision(presets: &[CustomFormatDef]) {
+    for def in presets {
+        assert!(
+            def.rules.id != LOBBY_SAVE_CUSTOM_FORMAT_ID,
+            "custom-format preset {:?} (short_label {:?}) claims CustomFormatId({}), which is \
+             reserved as LOBBY_SAVE_CUSTOM_FORMAT_ID for Axis-A lobby saves — give the preset a \
+             different id",
+            def.label,
+            def.short_label,
+            LOBBY_SAVE_CUSTOM_FORMAT_ID.0,
+        );
+    }
+}
+
 /// Authoritative list of bundled custom-format presets, filtered through
 /// both registration gates. Empty in Phase 1a — no presets exist until a
 /// later phase introduces them.
 pub fn custom_format_registry() -> Vec<CustomFormatDef> {
     let presets: Vec<CustomFormatDef> = Vec::new();
+    assert_no_lobby_save_sentinel_collision(&presets);
     presets
         .into_iter()
-        .filter(|def| passes_legacy_axis_gate(def) && passes_reprint_fidelity_gate(def))
+        .filter(|def| {
+            passes_legacy_axis_gate(&def.rules.legality.legacy) && passes_reprint_fidelity_gate(def)
+        })
         .collect()
 }

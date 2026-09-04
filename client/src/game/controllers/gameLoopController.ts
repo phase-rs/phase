@@ -7,6 +7,7 @@ import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { shouldAutoPass } from "../autoPass";
 import { dispatchAction } from "../dispatch";
 import { createAIController, type AISeatBinding } from "./aiController";
+import { createStaleStateWatchdog } from "../staleStateWatchdog";
 import type { OpponentController } from "./types";
 
 const AUTO_PASS_BEAT_MS = 200;
@@ -46,6 +47,9 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
   let active = false;
   let opponentController: OpponentController | null = null;
+  // Heals a screen that missed a state delivery (all modes: the adapter is
+  // always the newest state this client holds, so the check is uniform).
+  const staleStateWatchdog = createStaleStateWatchdog();
   let unsubscribe: (() => void) | null = null;
   let autoPassTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -134,11 +138,14 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
     // Process current state immediately
     onWaitingForChanged();
+
+    staleStateWatchdog.start();
   }
 
   function stop(): void {
     active = false;
 
+    staleStateWatchdog.stop();
     clearAutoPassTimeout();
 
     if (opponentController) {

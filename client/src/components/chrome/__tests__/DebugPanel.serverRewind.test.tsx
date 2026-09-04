@@ -41,6 +41,8 @@ const storeState = {
 };
 
 vi.mock("../../../stores/gameStore", () => ({
+  canExportAuthoritativeState: (mode: GameMode | null) =>
+    mode === "ai" || mode === "local" || mode === "native-ai",
   useGameStore: Object.assign(
     vi.fn((selector: (s: typeof storeState) => unknown) => selector(storeState)),
     { getState: () => storeState, setState: vi.fn() },

@@ -1,5 +1,8 @@
 import type {
+  DeckCopyLimit,
+  FormatConfig,
   GameFormat,
+  SideboardPolicy,
   TokenCharacteristics,
   TokenImageRef,
   TokenPtProvenance,
@@ -16,16 +19,33 @@ let engineModulePromise: Promise<EngineModule> | null = null;
 let wasmInitPromise: Promise<void> | null = null;
 let cardDbPromise: Promise<number> | null = null;
 
+/**
+ * A browser's module map retains failed dynamic imports for the document
+ * lifetime. Retrying this requires a page reload, unlike WASM initialization
+ * and card-data loading failures.
+ */
+export class EngineModuleReloadRequiredError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The engine module failed to load; reload the page to retry.");
+    this.name = "EngineModuleReloadRequiredError";
+    this.cause = cause;
+  }
+}
+
 async function loadEngineModule(): Promise<EngineModule> {
   if (!engineModulePromise) {
-    engineModulePromise = import("@wasm/engine");
+    engineModulePromise = import("@wasm/engine").catch((cause: unknown) => {
+      throw new EngineModuleReloadRequiredError(cause);
+    });
   }
   return engineModulePromise;
 }
 
 export async function ensureWasmInit(): Promise<void> {
   if (!wasmInitPromise) {
-    wasmInitPromise = (async () => {
+    const pending = (async () => {
       const engine = await loadEngineModule();
       if (__ENGINE_WASM_URL__) {
         await engine.default({ module_or_path: __ENGINE_WASM_URL__ });
@@ -33,13 +53,19 @@ export async function ensureWasmInit(): Promise<void> {
         await engine.default();
       }
     })();
+    wasmInitPromise = pending;
+    void pending.catch((error: unknown) => {
+      if (!(error instanceof EngineModuleReloadRequiredError) && wasmInitPromise === pending) {
+        wasmInitPromise = null;
+      }
+    });
   }
   return wasmInitPromise;
 }
 
 export async function ensureCardDatabase(): Promise<number> {
   if (!cardDbPromise) {
-    cardDbPromise = (async () => {
+    const pending = (async () => {
       await ensureWasmInit();
       const engine = await loadEngineModule();
       const resp = await fetch(__CARD_DATA_URL__);
@@ -47,8 +73,18 @@ export async function ensureCardDatabase(): Promise<number> {
         throw new Error(`Failed to load card-data.json (${resp.status})`);
       }
       const text = await resp.text();
-      return engine.load_card_database(text);
+      const loaded = await engine.load_card_database(text);
+      if (loaded <= 0) {
+        throw new Error("Failed to load card-data.json (no cards loaded)");
+      }
+      return loaded;
     })();
+    cardDbPromise = pending;
+    void pending.catch((error: unknown) => {
+      if (!(error instanceof EngineModuleReloadRequiredError) && cardDbPromise === pending) {
+        cardDbPromise = null;
+      }
+    });
   }
   return cardDbPromise;
 }
@@ -271,15 +307,15 @@ export async function companionCandidates(request: unknown): Promise<string[]> {
 }
 
 /**
- * CR 100.2a / CR 903.5b: A card's per-card deck-construction copy-limit override
- * as a discriminated union, or `null` when the default four-of / singleton limit
- * applies. `Unlimited` is a unit variant with no `data` field — switch on `type`,
- * never destructure `data` unconditionally. The engine is the single authority;
- * the frontend never re-parses Oracle text.
+ * Engine-owned deck-construction unions, re-exported so deck-builder callers
+ * keep a single import site. `DeckCopyLimit` is a card's / format's copy
+ * ceiling (CR 100.2a / CR 903.5b) and `SideboardPolicy` a format's sideboard
+ * rule (CR 100.4a). Both are discriminated unions whose unit variants carry no
+ * `data` field — always switch on `type`, never destructure `data`
+ * unconditionally. The engine is the single authority; the frontend never
+ * re-parses Oracle text or hardcodes a cap.
  */
-export type DeckCopyLimit =
-  | { type: "Unlimited" }
-  | { type: "UpTo"; data: number };
+export type { DeckCopyLimit, SideboardPolicy } from "../adapter/types";
 
 /**
  * Query the engine for a card's deck-construction copy-limit override. Returns
@@ -293,46 +329,39 @@ export async function deckCopyLimit(name: string): Promise<DeckCopyLimit | null>
 }
 
 /**
- * CR 100.2a / CR 903.5b: How many copies of a card a deck in `format` may hold
- * across main deck, sideboard, and command zone combined (CR 100.4a).
+ * CR 100.2a / CR 903.5b: How many copies of a card a deck built under
+ * `formatConfig` may hold across main deck, sideboard, and command zone
+ * combined (CR 100.4a).
  *
  * Unlike `deckCopyLimit` (which reports only a card's printed override), this
  * is the resolved ceiling — the engine has already applied the basic-land
  * exemption, the printed override, and the format default. Compare a combined
  * count against it directly; never re-derive four-of / singleton client-side.
+ *
+ * Pass the registry's `default_config`, not a bare format string: only the
+ * config carries a custom format's declared copy limit.
  */
 export async function maxDeckCopies(
   name: string,
-  format: GameFormat,
+  formatConfig: FormatConfig,
 ): Promise<DeckCopyLimit> {
   await ensureCardDatabase();
   const engine = await loadEngineModule();
-  return engine.maxDeckCopies(name, format) as DeckCopyLimit;
+  return engine.maxDeckCopies(name, formatConfig) as DeckCopyLimit;
 }
 
 /**
- * CR 100.4a: Per-format sideboard policy as a discriminated union.
- *
- * `Forbidden` and `Unlimited` are unit variants and do not carry a `data`
- * field — always exhaustive-switch on `type`, never destructure `data`
- * unconditionally.
- */
-export type SideboardPolicy =
-  | { type: "Forbidden" }
-  | { type: "Limited"; data: number }
-  | { type: "Unlimited" };
-
-/**
- * Query the engine for the sideboard policy of a given format. The engine is
- * the single authority for these rules — the frontend never hardcodes 15
- * or any other cap.
+ * Query the engine for the sideboard policy of a resolved `FormatConfig`. The
+ * engine is the single authority for these rules — the frontend never hardcodes
+ * 15 or any other cap. Pass the registry's `default_config`, not a bare format
+ * string: only the config carries a custom format's declared policy.
  */
 export async function sideboardPolicyForFormat(
-  format: GameFormat,
+  formatConfig: FormatConfig,
 ): Promise<SideboardPolicy> {
   await ensureWasmInit();
   const engine = await loadEngineModule();
-  return engine.sideboardPolicyForFormat(format) as SideboardPolicy;
+  return engine.sideboardPolicyForFormat(formatConfig) as SideboardPolicy;
 }
 
 /**

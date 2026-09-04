@@ -5,7 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::database::legality::LegalityFormat;
 use crate::types::custom_format::{
-    custom_format_registry, CustomFormatId, CustomFormatRules, FormatConfigError,
+    custom_format_registry, passes_legacy_axis_gate, CommandZoneMode, CustomFormatId,
+    CustomFormatRules, FormatConfigError,
 };
 use crate::types::player::PlayerId;
 
@@ -235,6 +236,26 @@ pub enum DeckCopyLimit {
     UpTo(u32),
 }
 
+impl DeckCopyLimit {
+    /// CR 100.2a / CR 100.2b / CR 903.5b: whether `self` can never admit more
+    /// copies of a card than `ceiling` would. `Unlimited` permits no more
+    /// copies than `Unlimited` only; any `UpTo(n)` permits no more than any
+    /// equal-or-looser ceiling. This is a pure permissiveness comparison —
+    /// never use it to decide "which format is bigger" in any other sense.
+    ///
+    /// The single authority `FormatConfig`'s `Deserialize` impl uses to
+    /// reject a built-in format's payload from declaring a copy ceiling
+    /// looser than `GameFormat::default_deck_copy_limit()` actually allows.
+    pub fn permits_no_more_than(self, ceiling: Self) -> bool {
+        match (self, ceiling) {
+            (DeckCopyLimit::Unlimited, DeckCopyLimit::Unlimited) => true,
+            (DeckCopyLimit::UpTo(_), DeckCopyLimit::Unlimited) => true,
+            (DeckCopyLimit::Unlimited, DeckCopyLimit::UpTo(_)) => false,
+            (DeckCopyLimit::UpTo(n), DeckCopyLimit::UpTo(m)) => n <= m,
+        }
+    }
+}
+
 /// A format's deck-size legality rule: either a floor with no ceiling, or an
 /// exact count that is simultaneously the minimum and the maximum.
 ///
@@ -357,6 +378,16 @@ fn default_sideboard_policy_fallback() -> SideboardPolicy {
     SideboardPolicy::Forbidden
 }
 
+/// CR 100.2a / CR 100.2b / CR 903.5b: Fail-closed default for
+/// `FormatConfig.default_deck_copy_limit` on a payload serialized before
+/// this field existed. `UpTo(1)` — the same value
+/// `GameFormat::Custom(_).default_deck_copy_limit()` already discloses as
+/// its own fail-closed fallback — is the tightest possible cap, so a stale
+/// payload under-permits rather than silently over-permitting extra copies.
+fn default_deck_copy_limit_fallback() -> DeckCopyLimit {
+    DeckCopyLimit::UpTo(1)
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(remote = "Self")]
@@ -408,6 +439,20 @@ pub struct FormatConfig {
     /// any payload serialized before this field existed.
     #[serde(default = "default_sideboard_policy_fallback")]
     pub sideboard_policy: SideboardPolicy,
+    /// Engine-derived, stored per-format default deck-construction copy
+    /// ceiling (CR 100.2a / CR 100.2b / CR 903.5b), before per-card printed
+    /// overrides and the basic-land exemption — both applied by
+    /// `game::deck_validation::max_deck_copies`, the single query authority.
+    /// Mirrors `uses_commander`/`supplies_fixed_deck`/`sideboard_policy`'s
+    /// stored-field pattern: real consumers must read this field, never
+    /// `GameFormat::default_deck_copy_limit()` directly — for a built-in
+    /// format the two always agree, but for `GameFormat::Custom` the bare
+    /// method has no way to see the real declared limit sitting in
+    /// `custom_rules.structural` and would silently discard it.
+    /// `#[serde(default)]` fails closed (`UpTo(1)`) for any payload
+    /// serialized before this field existed.
+    #[serde(default = "default_deck_copy_limit_fallback")]
+    pub default_deck_copy_limit: DeckCopyLimit,
     /// Capability flag: when true, the server (and other transport gates)
     /// permit `GameAction::Debug(_)` from any player in this session. Off by
     /// default. Orthogonal to format — a sandbox Commander game plays
@@ -460,36 +505,114 @@ impl<'de> Deserialize<'de> for FormatConfig {
         D: Deserializer<'de>,
     {
         let config = Self::deserialize(deserializer)?;
-        // `command_zone`/`commander_damage_threshold`/`uses_commander`/
-        // `singleton`/`sideboard_policy` etc. are this struct's own independently-serialized
-        // runtime fields — for a built-in format they're always consistent
-        // because a `FormatConfig::x()` builder derived them together. For
-        // `Custom` there is no such builder yet: `custom_rules.structural`
-        // (a `CommandZoneMode`-discriminated declaration) and these bare
-        // runtime fields are two independently-writable representations of
-        // the same thing, and nothing here cross-checks them — a
-        // matching-`custom_rules.id` payload could still declare
-        // `CommandZoneMode::Disabled` while separately setting
-        // `command_zone: true`. Rather than accept that inconsistency (or
-        // partially validate it in a way a later phase would have to widen
-        // anyway), reject `Custom` outright at this single boundary until a
-        // real resolver — landing with Axis A/Axis B registration — can
-        // derive every runtime field FROM `custom_rules.structural` instead
-        // of accepting them independently. `GameFormat::Custom` remains
-        // fully constructible in-memory (for schema tests, and for that
-        // future resolver to build) — only external deserialization of an
-        // ACTIVE `FormatConfig` is refused.
-        if matches!(config.format, GameFormat::Custom(_)) {
-            return Err(serde::de::Error::custom(
-                "GameFormat::Custom cannot be activated via external FormatConfig \
-                 deserialization yet — no resolver exists to derive/validate this struct's \
-                 runtime fields (command_zone, uses_commander, commander_damage_threshold, \
-                 singleton, sideboard_policy, ...) from custom_rules.structural, so two independently-writable \
-                 representations of the same state could disagree; this lands in a later phase",
-            ));
-        }
         crate::types::custom_format::validate_custom_rules_consistency(&config)
             .map_err(serde::de::Error::custom)?;
+        // `validate_custom_rules_consistency` has already established the
+        // `format == Custom(id) <=> custom_rules == Some(rules with that id)`
+        // biconditional, so `Some(_)` here means a Custom config and `None`
+        // means a built-in one.
+        match &config.custom_rules {
+            Some(rules) => {
+                // `command_zone`/`commander_damage_threshold`/
+                // `uses_commander`/`singleton`/`sideboard_policy`/... are this
+                // struct's own independently-serialized runtime fields. For a
+                // built-in format they are always consistent because a
+                // `FormatConfig::x()` builder derived them together; for
+                // `Custom`, `custom_rules.structural` and these bare fields
+                // are two independently-writable representations of the same
+                // state. Phase 1a rejected every Custom payload outright
+                // because no resolver existed to reconcile them. One does
+                // now: re-derive the whole config from `custom_rules` and
+                // demand equality, so the declaration is authoritative and no
+                // payload can smuggle in a runtime field its own
+                // `StructuralRules` does not entail.
+                if !passes_legacy_axis_gate(&rules.legality.legacy) {
+                    return Err(serde::de::Error::custom(
+                        "FormatConfig.custom_rules declares a LegacyRuleSet axis the engine does \
+                         not implement yet — accepting it would promise historical rules \
+                         behavior (mana burn, combat-damage timing, Wish reach, legend-rule \
+                         scope) that no engine code enforces",
+                    ));
+                }
+                let mut expected = FormatConfig::for_custom_rules(rules);
+                // `allow_debug_actions` is the one field the resolver cannot
+                // derive: it is a session capability (sandbox debug actions),
+                // orthogonal to format, chosen per game rather than declared
+                // by the ruleset. Every other field must match exactly.
+                expected.allow_debug_actions = config.allow_debug_actions;
+                if config != expected {
+                    // Reports the derived target values rather than dumping
+                    // both whole structs: `custom_rules.legality`'s
+                    // banned/restricted/legal_sets lists are caller-sized and
+                    // have no business in an error string.
+                    return Err(serde::de::Error::custom(format!(
+                        "FormatConfig for {} contradicts its own custom_rules.structural — every \
+                         runtime field must be exactly what FormatConfig::for_custom_rules \
+                         derives from the declared rules (allow_debug_actions excepted). Derived: \
+                         starting_life {}, players {}-{}, deck_size {:?}, singleton {}, \
+                         command_zone {}, commander_damage_threshold {:?}, uses_commander {}, \
+                         team_based {}, archenemy_player {:?}, supplies_fixed_deck {}, \
+                         sideboard_policy {:?}, default_deck_copy_limit {:?}, \
+                         range_of_influence set {}",
+                        config.format,
+                        expected.starting_life,
+                        expected.min_players,
+                        expected.max_players,
+                        expected.deck_size,
+                        expected.singleton,
+                        expected.command_zone,
+                        expected.commander_damage_threshold,
+                        expected.uses_commander,
+                        expected.team_based,
+                        expected.archenemy_player,
+                        expected.supplies_fixed_deck,
+                        expected.sideboard_policy,
+                        expected.default_deck_copy_limit,
+                        expected.range_of_influence.is_some(),
+                    )));
+                }
+            }
+            None => {
+                // CR 100.2a / CR 100.2b / CR 903.5b: a built-in format's
+                // default deck-copy ceiling is fixed by the Comprehensive
+                // Rules, not by the payload. Reject a declared value more
+                // permissive than GameFormat::default_deck_copy_limit() —
+                // without this, a client could submit
+                // {"format":"Standard","default_deck_copy_limit":{"type":"Unlimited"},...}
+                // and have every consumer that reads this stored field
+                // (starting with max_deck_copies, and after this same PR's
+                // admission fix, every evaluate_*/quick_* dispatch function
+                // too) disclose or enforce that forged, looser ceiling.
+                //
+                // Deliberately NOT a strict-equality check:
+                // default_deck_copy_limit ships its own
+                // #[serde(default = "default_deck_copy_limit_fallback")]
+                // fallback (UpTo(1)) for payloads serialized before this
+                // field existed. UpTo(1) is never looser than any real format
+                // default, so permits_no_more_than accepts it — a
+                // strict-equality reject would instead turn every legacy
+                // Standard/Pioneer/.../Planechase/Archenemy save, replay, or
+                // persisted game state into a hard deserialize failure, which
+                // is worse than the bug this check exists to close. (The
+                // Custom branch above CAN demand strict equality: no Custom
+                // FormatConfig has ever been accepted at this boundary, so
+                // there are no legacy Custom payloads to keep compatible
+                // with.)
+                let real_limit = config.format.default_deck_copy_limit();
+                if !config
+                    .default_deck_copy_limit
+                    .permits_no_more_than(real_limit)
+                {
+                    return Err(serde::de::Error::custom(format!(
+                        "FormatConfig.default_deck_copy_limit is {:?}, which is more permissive \
+                         than {} allows ({real_limit:?}) — a built-in format's default copy limit \
+                         is fixed by the Comprehensive Rules; a payload may declare an \
+                         equal-or-stricter value but never a looser one",
+                        config.default_deck_copy_limit, config.format,
+                    )));
+                }
+            }
+        }
         Ok(config)
     }
 }
@@ -761,6 +884,57 @@ impl GameFormat {
             // No custom-format use case for an engine-supplied fixed deck
             // exists today — a real one would need its own design, analogous
             // to Momir's Madness.
+            GameFormat::Custom(_) => false,
+        }
+    }
+
+    /// True for a built-in format whose `game::deck_loading` behavior grants
+    /// an auxiliary deck or component keyed on this literal `GameFormat`
+    /// variant, with no `StructuralRules` field able to represent it: a
+    /// shared communal planar deck (Planechase, CR 901.15a,
+    /// `load_shared_planar_deck`), a supplementary scheme deck (Archenemy,
+    /// CR 904.3, `load_shared_scheme_deck`), or a game-start emblem (Momir,
+    /// CR 109.4c / CR 114.1, `grant_emblem`). A custom-format definition
+    /// modeled after one of these would resolve to a config that looks
+    /// structurally sound but never receives the grant, since
+    /// `deck_loading.rs` checks `state.format_config.format ==
+    /// GameFormat::X` directly rather than reading any `StructuralRules`
+    /// field.
+    ///
+    /// Used by `custom_format::CustomFormatDef::from_lobby_config` to reject
+    /// all three as lobby-config sources. Archenemy and Momir both also set
+    /// `command_zone: true` with no `CommanderEligibilityRule`, so they are
+    /// independently unrepresentable for that reason too; Planechase's
+    /// `command_zone` is `false`, so this predicate is the only guard that
+    /// reaches it.
+    pub fn has_unrepresentable_auxiliary_deck_component(self) -> bool {
+        match self {
+            GameFormat::Planechase | GameFormat::Archenemy | GameFormat::Momir => true,
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Commander
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::CommanderDraft => false,
+            // Exhaustive rather than `matches!`, matching `supplies_fixed_deck`'s
+            // style: a future built-in that grants its own deck_loading.rs
+            // auxiliary component must force a deliberate `true`/`false` choice
+            // here, not silently default to unrepresented. No custom-format use
+            // case for this exists today.
             GameFormat::Custom(_) => false,
         }
     }
@@ -1123,6 +1297,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Standard.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Standard.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1144,6 +1319,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: true,
             sideboard_policy: GameFormat::Commander.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Commander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1182,6 +1358,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: true,
             sideboard_policy: GameFormat::CommanderDraft.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::CommanderDraft.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1275,6 +1452,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::TinyLeaders.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::TinyLeaders.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1300,6 +1478,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Oathbreaker.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Oathbreaker.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1338,6 +1517,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: true,
             sideboard_policy: GameFormat::Brawl.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Brawl.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1370,6 +1550,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::FreeForAll.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::FreeForAll.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1393,6 +1574,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Limited.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Limited.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1419,6 +1601,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Momir.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Momir.default_deck_copy_limit(),
             supplies_fixed_deck: true,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1440,6 +1623,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::TwoHeadedGiant.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::TwoHeadedGiant.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1464,6 +1648,7 @@ impl FormatConfig {
             archenemy_player: None,
             uses_commander: false,
             sideboard_policy: GameFormat::Planechase.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Planechase.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1487,6 +1672,7 @@ impl FormatConfig {
             archenemy_player: Some(PlayerId(0)),
             uses_commander: false,
             sideboard_policy: GameFormat::Archenemy.sideboard_policy(),
+            default_deck_copy_limit: GameFormat::Archenemy.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
             custom_rules: None,
@@ -1550,11 +1736,90 @@ impl FormatConfig {
             }
         })
     }
+
+    /// The single authoritative `CustomFormatRules -> FormatConfig` resolver:
+    /// turns a saved definition (an Axis-A lobby save, or an Axis-B registry
+    /// preset once those exist) into the live, active config a game actually
+    /// runs on. The counterpart to `for_format` for custom formats, and the
+    /// inverse of `custom_format::CustomFormatDef::from_lobby_config`.
+    ///
+    /// Total and infallible, unlike `for_format`: a `CustomFormatRules` value
+    /// carries every structural field this needs, so there is no
+    /// "unresolvable" input to report. That totality is load-bearing — the
+    /// `Deserialize` impl below re-derives an expected config with this
+    /// function and demands equality, which only works if every ingress
+    /// produces exactly one config per rule set.
+    ///
+    /// Field mapping:
+    /// - Direct copies from `rules.structural`: `starting_life`,
+    ///   `min_players`, `max_players`, `deck_size`, `singleton`,
+    ///   `range_of_influence`, `team_based`, `sideboard_policy`,
+    ///   `default_deck_copy_limit`.
+    /// - `CommandZoneMode`-derived (CR 408.1 / CR 903.10a): `Disabled` gives
+    ///   `command_zone: false`, `commander_damage_threshold: None`,
+    ///   `uses_commander: false`. `Enabled` gives `command_zone: true`, the
+    ///   declared threshold unchanged, and `uses_commander:
+    ///   threshold.is_some()` — NOT unconditionally `true`, because a command
+    ///   zone without a commander-damage threshold is a real, supported
+    ///   format class (Tiny Leaders, Oathbreaker), and `uses_commander`'s own
+    ///   contract is `command_zone && commander_damage_threshold.is_some()`.
+    ///   `eligibility_rule` is not mirrored at all: `FormatConfig` has no
+    ///   such field, and the commander-eligibility check reads it from
+    ///   `custom_rules.structural` directly.
+    /// - Fixed: `format`/`custom_rules` are set consistently (satisfying
+    ///   `validate_custom_rules_consistency` by construction);
+    ///   `supplies_fixed_deck: false` (no custom-format use case for an
+    ///   engine-supplied fixed deck exists — a deliberate exclusion, not an
+    ///   oversight); `archenemy_player: None` (per-seating table state, not a
+    ///   format rule); `allow_debug_actions: false` (a session capability
+    ///   orthogonal to format — apply `with_sandbox()` afterwards).
+    pub fn for_custom_rules(rules: &CustomFormatRules) -> FormatConfig {
+        let structural = &rules.structural;
+        let (command_zone, commander_damage_threshold) = match structural.command_zone_mode {
+            CommandZoneMode::Disabled => (false, None),
+            CommandZoneMode::Enabled {
+                commander_damage_threshold,
+                ..
+            } => (true, commander_damage_threshold),
+        };
+        FormatConfig {
+            format: GameFormat::Custom(rules.id),
+            starting_life: structural.starting_life,
+            min_players: structural.min_players,
+            max_players: structural.max_players,
+            deck_size: structural.deck_size,
+            singleton: structural.singleton,
+            command_zone,
+            commander_damage_threshold,
+            range_of_influence: structural.range_of_influence.clone(),
+            team_based: structural.team_based,
+            archenemy_player: None,
+            // CR 903.10a / CR 704.6c: the commander-damage SBA exists only
+            // when a threshold does.
+            uses_commander: command_zone && commander_damage_threshold.is_some(),
+            supplies_fixed_deck: false,
+            sideboard_policy: structural.sideboard_policy,
+            default_deck_copy_limit: structural.default_deck_copy_limit,
+            allow_debug_actions: false,
+            custom_rules: Some(Box::new(rules.clone())),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deck_copy_limit_permits_no_more_than_is_a_sound_permissiveness_order() {
+        use DeckCopyLimit::*;
+        assert!(Unlimited.permits_no_more_than(Unlimited));
+        assert!(!Unlimited.permits_no_more_than(UpTo(4)));
+        assert!(UpTo(4).permits_no_more_than(Unlimited));
+        assert!(UpTo(1).permits_no_more_than(UpTo(4)));
+        assert!(UpTo(4).permits_no_more_than(UpTo(4)));
+        assert!(!UpTo(5).permits_no_more_than(UpTo(4)));
+    }
 
     #[test]
     fn format_config_standard() {
@@ -1567,6 +1832,7 @@ mod tests {
         assert!(!config.command_zone);
         assert_eq!(config.commander_damage_threshold, None);
         assert!(!config.team_based);
+        assert_eq!(config.default_deck_copy_limit, DeckCopyLimit::UpTo(4));
     }
 
     #[test]
@@ -1580,6 +1846,7 @@ mod tests {
         assert!(config.command_zone);
         assert_eq!(config.commander_damage_threshold, Some(21));
         assert!(!config.team_based);
+        assert_eq!(config.default_deck_copy_limit, DeckCopyLimit::UpTo(1));
     }
 
     /// CR 903.5a vs CR 903.13f(1): the two command-zone deck-size rules are
@@ -2066,6 +2333,12 @@ mod tests {
                 "{:?}: registry default disagrees with sideboard_policy predicate",
                 meta.format
             );
+            assert_eq!(
+                meta.default_config.default_deck_copy_limit,
+                meta.format.default_deck_copy_limit(),
+                "{:?}: registry default disagrees with default_deck_copy_limit predicate",
+                meta.format
+            );
         }
         // Variants not in the user-facing registry still respect the invariant.
         for format in [GameFormat::TwoHeadedGiant, GameFormat::Limited] {
@@ -2073,6 +2346,10 @@ mod tests {
             assert_eq!(config.uses_commander, format.uses_commander().unwrap());
             assert_eq!(config.supplies_fixed_deck, format.supplies_fixed_deck());
             assert_eq!(config.sideboard_policy, format.sideboard_policy());
+            assert_eq!(
+                config.default_deck_copy_limit,
+                format.default_deck_copy_limit()
+            );
         }
     }
 

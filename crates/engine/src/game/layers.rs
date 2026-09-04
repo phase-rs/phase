@@ -292,94 +292,303 @@ pub fn prune_until_next_upkeep_effects(state: &mut GameState, active_player: Pla
     }
 }
 
-/// CR 514.2: Remove durational casting permissions whose
-/// `Duration::UntilEndOfTurn` expires at cleanup. Called from the cleanup step
-/// alongside `prune_end_of_turn_effects`.
-// CR 611.2a: Consumers of the `duration`-bearing variants — `PlayFromExile`
-// (impulse-draw, Light Up the Stage class) and `ExileWithAltCost`
-// (Rebound, CR 702.88a).
+/// CR 500.4 + CR 514.2: the lifecycle seams at which a casting permission can
+/// expire. Exactly one prune runs at each seam.
 ///
-/// Variants without a `duration` field (`AdventureCreature`,
-/// `ExileWithEnergyCost`, `WarpExile`, `Plotted`, `Foretold`) and
-/// `ExileWithAltCost { duration: None }` (Airbending, Suspend, Discover,
-/// Cascade) persist until the object leaves exile (handled by
-/// `zones::apply_zone_exit_cleanup`).
-pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
+/// The seam is the axis each prune used to encode by repeating a per-variant,
+/// per-duration arm list of its own. Naming it makes the mapping a single
+/// wildcard-free table (`permission_duration_expires_at`) instead of one
+/// hand-written list per prune.
+///
+/// The two shapes that shipped wrong are different failures, and only the
+/// second is a list omission:
+///
+///   * `ExileWithAltAbilityCost` appeared in every prune's list — but only in
+///     the retain-`true` arm, because the variant carried no `duration` field
+///     to match on. A per-variant list cannot express "this variant should have
+///     a lifetime and does not"; reading a permission through
+///     `CastingPermission::lifetime` does, because the field is the thing the
+///     accessor must produce.
+///   * `UntilNextStepOf { step: Untap }` was a duration shape present in the
+///     lists and owned by no prune at all. The seam table makes that a visible
+///     hole rather than an arm nobody wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PermissionSeam {
+    /// CR 514.2: the cleanup step.
+    Cleanup,
+    /// CR 500.4: the untap step of the turn beginning. (CR 502.3 is the untap
+    /// turn-based action itself; the expiry authority is CR 500.4.)
+    UntapStep,
+    /// CR 503.1: the upkeep step.
+    UpkeepStep,
+    /// CR 513.1: the end step.
+    EndStep,
+}
+
+impl PermissionSeam {
+    /// CR 500.4: the seam that owns a named step, or `None` when no
+    /// casting-permission prune runs at that step.
+    ///
+    /// Wildcard-free over `Phase`: a step gaining a prune must be recorded here
+    /// rather than silently inheriting `None`.
+    const fn for_step(step: Phase) -> Option<Self> {
+        match step {
+            Phase::Untap => Some(Self::UntapStep),
+            Phase::Upkeep => Some(Self::UpkeepStep),
+            Phase::End => Some(Self::EndStep),
+            // No prune keys on a duration that NAMES one of these steps, so a
+            // permission whose stated duration does has no expiry authority and
+            // is refused at grant time by
+            // `casting_permission_duration_is_enforceable` rather than granted
+            // unbounded. A code fact, not a rule one, so it carries no CR
+            // number.
+            //
+            // `Phase::Cleanup` is the one worth stating: `PermissionSeam::Cleanup`
+            // exists and `prune_end_of_turn_casting_permissions` runs there, but
+            // it is reached by `UntilEndOfTurn` (CR 514.2), never by a duration
+            // that names the step — `oracle_nom::duration::parse_next_step_name`
+            // reads "end step", "upkeep" and "untap step" and nothing else.
+            Phase::Draw
+            | Phase::PreCombatMain
+            | Phase::BeginCombat
+            | Phase::DeclareAttackers
+            | Phase::DeclareBlockers
+            | Phase::CombatDamage
+            | Phase::EndCombat
+            | Phase::PostCombatMain
+            | Phase::Cleanup => None,
+        }
+    }
+}
+
+/// CR 611.2a: can a turn boundary ever key on this `PlayerScope` at all?
+///
+/// **The single authority for that question**, consumed from both sides of it:
+/// [`permission_scope_selects`] asks it per prune run ("does it key on THIS
+/// active player?"), [`casting_permission_duration_is_enforceable`] asks it
+/// once at the grant ("could any run ever key on it?"). Answering it twice is
+/// what let a grant carrying `UntilNextTurnOf { player: Target }` or
+/// `UntilNextStepOf { step: End, player: Target }` pass the grant-site guard and
+/// then never end — no prune selects those scopes, so the permission stayed
+/// forever. That is the same shape of hole this change closes for
+/// `UntilNextStepOf { step: Untap }`.
+///
+/// `UntilEndOfNextTurnOf` is NOT answered here, and deliberately: it is ARMED
+/// rather than selected, and `prune_untap_step_casting_permissions` arms it for
+/// `PlayerScope::Controller` alone — stricter than keyability, which would also
+/// admit `AnyTurn` and `SpecificPlayer`. That arm asks the arming condition
+/// directly.
+///
+/// The three `true` scopes name a player a turn boundary can resolve.
+/// `Controller` and `AnyTurn` are the two
+/// `oracle_nom::duration::step_deadline_scope` emits from Oracle text.
+/// `SpecificPlayer` names its player outright and so needs no keying; its only
+/// producer is `effects::force_attack`, which builds no permissions, so that
+/// arm is written for the shape rather than for a card. The rest are
+/// target/recipient-relative, resolved where the effect is installed and never
+/// at a turn boundary.
+fn permission_scope_is_keyable(scope: &PlayerScope) -> bool {
+    match scope {
+        PlayerScope::AnyTurn | PlayerScope::Controller | PlayerScope::SpecificPlayer { .. } => true,
+        PlayerScope::ScopedPlayer
+        | PlayerScope::Target
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::AllPlayers { .. }
+        | PlayerScope::RecipientController
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer => false,
+    }
+}
+
+/// CR 611.2a: does a `PlayerScope` on a permission duration select
+/// `active_player`?
+///
+/// `keyed` is the permission's own `PermissionLifetime::keyed_player`. Which
+/// scopes can be keyed at all is not decided here — that is
+/// [`permission_scope_is_keyable`], so the grant-site guard cannot disagree
+/// with this table.
+fn permission_scope_selects(
+    scope: &PlayerScope,
+    keyed: Option<PlayerId>,
+    active_player: Option<PlayerId>,
+) -> bool {
+    if !permission_scope_is_keyable(scope) {
+        return false;
+    }
+    match scope {
+        // CR 611.2a: the stated duration names no player, so it ends at the
+        // first occurrence of the step, whoever's turn it is (CR 500.4).
+        PlayerScope::AnyTurn => true,
+        PlayerScope::Controller => keyed.is_some() && keyed == active_player,
+        PlayerScope::SpecificPlayer { id } => active_player == Some(*id),
+        // Already refused above. Listed rather than swept into `_` so a new
+        // scope has to answer in BOTH functions.
+        PlayerScope::ScopedPlayer
+        | PlayerScope::Target
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::AllPlayers { .. }
+        | PlayerScope::RecipientController
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer => false,
+    }
+}
+
+/// CR 611.2a: does `duration` end at `seam` for `active_player`?
+///
+/// **This is the single expiry table for casting permissions.** The match is
+/// wildcard-free, so a new `Duration` variant is a COMPILE ERROR here and must
+/// state its seam — the guard the four separate arm lists could not give.
+fn permission_duration_expires_at(
+    seam: PermissionSeam,
+    duration: &Duration,
+    keyed: Option<PlayerId>,
+    active_player: Option<PlayerId>,
+) -> bool {
+    match duration {
+        // CR 514.2: ends as the cleanup step begins.
+        Duration::UntilEndOfTurn => seam == PermissionSeam::Cleanup,
+        // CR 511.2: "Effects that last 'until end of combat' expire at the end
+        // of the combat phase." No casting-permission prune runs there, so
+        // cleanup catches this defensively — unchanged behavior.
+        Duration::UntilEndOfCombat => seam == PermissionSeam::Cleanup,
+        // CR 500.4: "As a step or phase begins, if there are effects that last
+        // until that step or phase, those effects expire." For "until your next
+        // turn" that instant is the keyed player's untap step.
+        Duration::UntilNextTurnOf { player } => {
+            seam == PermissionSeam::UntapStep
+                && permission_scope_selects(player, keyed, active_player)
+        }
+        // CR 514.2: "until the end of your next turn" is ARMED at the untap
+        // step (rewritten to `UntilEndOfTurn` by
+        // `prune_untap_step_casting_permissions`) and ended by the cleanup arm
+        // above. It never expires directly, at any seam.
+        Duration::UntilEndOfNextTurnOf { .. } => false,
+        Duration::UntilNextStepOf { step, player } => {
+            PermissionSeam::for_step(*step) == Some(seam)
+                && permission_scope_selects(player, keyed, active_player)
+        }
+        // CR 611.2a + CR 611.2b: host-bound lifetimes end on the battlefield
+        // exit / control change / phase-out of their host, not at a turn
+        // boundary — `prune_host_left_casting_permissions` and
+        // `prune_lapsed_host_bound_casting_permissions`.
+        Duration::UntilHostLeavesPlay
+        | Duration::WhileControllingHost
+        | Duration::WhileHostOnBattlefield => false,
+        // CR 611.2b: ended by the same lapse pass, which re-evaluates the
+        // condition against the live game state.
+        Duration::ForAsLongAs { .. } => false,
+        // CR 607.2a: ended by
+        // `exile_links::expire_until_source_exiles_another_card_durations` when
+        // the linked source exiles another card — which reads the permission
+        // through `CastingPermission::lifetime`, so every variant that can carry
+        // the duration is ended, not just the one a hand-written pattern named.
+        Duration::UntilSourceExilesAnotherCard => false,
+        // CR 610.3: ended by the monarch zone-change duration in
+        // `zone_pipeline`, not by a turn boundary.
+        Duration::UntilOpponentBecomesMonarch => false,
+        // CR 611.2a: no stated end.
+        Duration::Permanent => false,
+    }
+}
+
+/// CR 611.2a: is there ANY authority that ends `duration` on a casting
+/// permission?
+///
+/// Asked once where a grant is created, so a permission whose stated lifetime
+/// nothing can enforce is refused instead of being attached as an unbounded
+/// one. A code-reachable wrong lifetime is not made safe by the absence of a
+/// printed card that reaches it.
+///
+/// Wildcard-free for the same reason as `permission_duration_expires_at`: a new
+/// `Duration` variant must answer this before it can be granted.
+pub(crate) fn casting_permission_duration_is_enforceable(
+    duration: &Duration,
+    exile_resident: bool,
+) -> bool {
+    match duration {
+        Duration::UntilEndOfTurn
+        | Duration::UntilEndOfCombat
+        | Duration::UntilHostLeavesPlay
+        | Duration::WhileControllingHost
+        | Duration::WhileHostOnBattlefield
+        | Duration::UntilSourceExilesAnotherCard
+        | Duration::Permanent => true,
+        // CR 500.4: a turn-boundary deadline ends only if a prune can key on
+        // its scope. `permission_scope_is_keyable` is the authority
+        // `permission_duration_expires_at` already consumes, asked here too so
+        // a scope cannot be unselectable at the table and enforceable here.
+        Duration::UntilNextTurnOf { player } => permission_scope_is_keyable(player),
+        // CR 514.2: this shape is ARMED rather than expired — rewritten to
+        // `UntilEndOfTurn` at the untap step, which is why the expiry table
+        // answers `false` for it at every seam. The arming in
+        // `prune_untap_step_casting_permissions` matches
+        // `PlayerScope::Controller` alone, so any other scope is never armed
+        // and never ends: nothing would revoke the permission.
+        Duration::UntilEndOfNextTurnOf { player } => {
+            matches!(player, PlayerScope::Controller)
+        }
+        // CR 611.2b: enforceable ONLY on an exile-resident grant, and this is
+        // the one arm where residency decides.
+        //
+        // No pass in this file evaluates the condition (see
+        // `prune_lapsed_host_bound_casting_permissions` for why). The single
+        // authority that ends the shape is `zones::apply_zone_exit_cleanup`,
+        // which clears casting permissions when the card leaves EXILE — and
+        // that is exactly the condition every printed member of the shape
+        // states ("it/they remain exiled"), so for them the answer is right
+        // rather than merely convenient.
+        //
+        // An IN-PLACE grant — the card stays in the graveyard or the hand
+        // (Emry, Electrodominance, Resourceful Collector) — never reaches that
+        // cleanup, so nothing at all would end it. Answering `false` here is
+        // what makes the grant site fall back to the cleanup-step default it
+        // used before this field was plumbed through, instead of turning a
+        // permission that expired at end of turn into one that never expires.
+        Duration::ForAsLongAs { .. } => exile_resident,
+        // CR 500.4: only a step with a prune, AND a scope that prune can key
+        // on, can end a step-scoped permission. Asking only the step was the
+        // same half-answer as above.
+        Duration::UntilNextStepOf { step, player } => {
+            PermissionSeam::for_step(*step).is_some() && permission_scope_is_keyable(player)
+        }
+        // CR 610.3: the monarch duration is implemented for exile-return links
+        // (`zone_pipeline::ExileLinkKind::UntilOpponentBecomesMonarch`), not for
+        // casting permissions — no pass revokes a permission when an opponent
+        // becomes the monarch.
+        Duration::UntilOpponentBecomesMonarch => false,
+    }
+}
+
+/// Run one seam's expiry over every casting permission in the game.
+fn prune_casting_permissions_at(
+    state: &mut GameState,
+    seam: PermissionSeam,
+    active: Option<PlayerId>,
+) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.casting_permissions.retain(|p| match p {
-            CastingPermission::PlayFromExile {
-                duration: Duration::UntilEndOfTurn,
-                ..
-            } => false,
-            // CR 514.2: UntilEndOfCombat should have been pruned at end of combat,
-            // but if it leaked to cleanup, prune it here defensively.
-            CastingPermission::PlayFromExile {
-                duration: Duration::UntilEndOfCombat,
-                ..
-            } => false,
-            CastingPermission::PlayFromExile {
-                duration:
-                    Duration::UntilNextTurnOf { .. }
-                    | Duration::UntilSourceExilesAnotherCard
-                    | Duration::Permanent,
-                ..
-            } => true,
-            // CR 513.1: `UntilNextStepOf { step: End }` is expired by
-            // `prune_end_step_casting_permissions` at the End phase entry,
-            // NOT at cleanup. Retain here.
-            CastingPermission::PlayFromExile {
-                duration:
-                    Duration::UntilNextStepOf {
-                        step: Phase::End, ..
-                    },
-                ..
-            } => true,
-            // UntilHostLeavesPlay / ForAsLongAs / UntilNextStepOf { step: Untap }
-            // / UntilNextStepOf { step: Upkeep }: these are pruned by their own
-            // systems (zone-exit cleanup, condition re-evaluation, untap step,
-            // and `prune_upkeep_step_casting_permissions` at the Upkeep phase).
-            // Retain here — they are not end-of-turn.
-            CastingPermission::PlayFromExile { .. } => true,
-            // CR 702.88a: Rebound's upkeep recast offer carries
-            // `duration: Some(UntilEndOfTurn)` so the granted "cast this
-            // card without paying its mana cost" permission expires at the
-            // end of the same turn if the controller declines or fails to
-            // cast it. Mirrors the PlayFromExile arms above so all
-            // durational casting permissions share the same pruning
-            // semantics.
-            CastingPermission::ExileWithAltCost {
-                duration: Some(Duration::UntilEndOfTurn),
-                ..
-            } => false,
-            // CR 514.2: defensive — same handling as PlayFromExile.
-            CastingPermission::ExileWithAltCost {
-                duration: Some(Duration::UntilEndOfCombat),
-                ..
-            } => false,
-            // CR 513.1: end-step duration handled by
-            // `prune_end_step_casting_permissions`; retain here.
-            CastingPermission::ExileWithAltCost {
-                duration:
-                    Some(Duration::UntilNextStepOf {
-                        step: Phase::End, ..
-                    }),
-                ..
-            } => true,
-            // Other durational shapes (UntilNextTurnOf, Permanent, etc.)
-            // and the standing `duration: None` form persist here.
-            CastingPermission::AdventureCreature
-            | CastingPermission::ExileWithAltCost { .. }
-            | CastingPermission::ExileWithAltAbilityCost { .. }
-            | CastingPermission::ExileWithEnergyCost
-            | CastingPermission::WarpExile { .. }
-            // CR 702.170d: Plotted persists across turns (that is the whole
-            // point of Plot — cast "on a later turn"); never pruned at cleanup.
-            | CastingPermission::Plotted { .. }
-            // CR 702.143a: Foretold permissions likewise persist while the
-            // card remains in exile so it can be cast on a later turn.
-            | CastingPermission::Foretold { .. } => true,
+        obj.casting_permissions.retain(|p| {
+            let lifetime = p.lifetime();
+            match lifetime.duration {
+                Some(d) => !permission_duration_expires_at(seam, d, lifetime.keyed_player, active),
+                None => true,
+            }
         });
     }
+}
+
+/// CR 514.2: Remove durational casting permissions whose duration ends at the
+/// cleanup step. Called from the cleanup step alongside
+/// `prune_end_of_turn_effects`.
+///
+/// Takes no player: the only durations this seam owns — `UntilEndOfTurn` and
+/// the defensive `UntilEndOfCombat` — state no player (CR 514.2 ends them for
+/// everyone at the same cleanup step), so `permission_scope_selects` is never
+/// reached from here. Passing `None` makes that explicit instead of handing in
+/// an active player the table would silently ignore.
+pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
+    prune_casting_permissions_at(state, PermissionSeam::Cleanup, None);
     // CR 601.2a + CR 603.7 + CR 611.2a: Garbage-collect single-use consumed
     // markers whose grant has expired. After the prune above, drop any consumed
     // tracked-set entry that no longer has a live single-use `PlayFromExile`
@@ -404,246 +613,78 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
         .retain(|group| live_single_use_groups.contains(group));
 }
 
-/// CR 514.2: Remove durational casting permissions granted to
-/// `active_player` whose `Duration::UntilNextTurnOf { Controller }` expires
-/// at that player's untap step. Called from the untap step alongside
-/// `prune_until_next_turn_effects`.
-// CR 611.2a: Consumers of the `duration`-bearing variants — `PlayFromExile`
-// (impulse-draw, Light Up the Stage class) and `ExileWithAltCost`
-// (Rebound, CR 702.88a).
-pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_player: PlayerId) {
+/// CR 500.4 + CR 514.2: the untap-step seam for casting permissions.
+///
+/// Two jobs at one seam, in order:
+///
+/// 1. **Arm** `UntilEndOfNextTurnOf { Controller }` grants keyed on
+///    `active_player` by rewriting them to `UntilEndOfTurn`, so the cleanup
+///    prune ends them at the end of THIS turn (CR 514.2) rather than at its
+///    beginning.
+/// 2. **Expire** every permission whose duration ends at the untap step:
+///    `UntilNextTurnOf` ("until your next turn") and
+///    `UntilNextStepOf { step: Untap }` ("until the next untap step" / "until
+///    its controller's next untap step"). CR 500.4 is the authority for both —
+///    "As a step or phase begins, if there are effects that last until that
+///    step or phase, those effects expire." CR 502.3 describes the untap
+///    turn-based action and says nothing about effects ending.
+///
+/// The second shape had no prune before: the parser emits it
+/// (`oracle_nom::duration::step_deadline_scope` pairs `ObjectController` with
+/// `Phase::Untap`) and `prune_controller_untap_step_effects` — the only pass
+/// the untap transition invoked that keyed on an untap-step deadline — retains
+/// `state.transient_continuous_effects` only, which is not where a casting
+/// permission lives.
+pub fn prune_untap_step_casting_permissions(state: &mut GameState, active_player: PlayerId) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        // CR 514.2: arm "until the end of your next turn" play-permissions when
-        // the grantee's next turn begins — convert to `UntilEndOfTurn` so the
-        // cleanup-step prune (`prune_end_of_turn_casting_permissions`) ends them
-        // at this turn's cleanup, letting the cards be played throughout the
-        // grantee's next turn (Light Up the Stage class).
         for p in obj.casting_permissions.iter_mut() {
-            if let CastingPermission::PlayFromExile {
+            // CR 514.2: arming keys on the GRANTEE — "until the end of THEIR
+            // next turn" names the player the grant was made to, not the player
+            // a `PlayerScope::Controller` deadline resolves "your" against. See
+            // `CastingPermission::lifetime_mut` for why the two differ and what
+            // collapsing them costs (Suspend Aggression).
+            let (Some(duration), grantee) = p.lifetime_mut() else {
+                continue;
+            };
+            if matches!(
                 duration,
-                granted_to,
-                ..
-            } = p
-            {
-                if *granted_to == active_player
-                    && matches!(
-                        duration,
-                        Duration::UntilEndOfNextTurnOf {
-                            player: PlayerScope::Controller
-                        }
-                    )
-                {
-                    *duration = Duration::UntilEndOfTurn;
+                Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller
                 }
-            }
-            // CR 514.2: same arming for durational `ExileWithAltCost`
-            // (Rebound-class). `granted_to` is `Option<PlayerId>`; only
-            // arm when set and matching the active player.
-            if let CastingPermission::ExileWithAltCost {
-                duration: Some(d),
-                granted_to: Some(g),
-                ..
-            } = p
+            ) && grantee == Some(active_player)
             {
-                if *g == active_player
-                    && matches!(
-                        d,
-                        Duration::UntilEndOfNextTurnOf {
-                            player: PlayerScope::Controller
-                        }
-                    )
-                {
-                    *d = Duration::UntilEndOfTurn;
-                }
+                *duration = Duration::UntilEndOfTurn;
             }
         }
-
-        obj.casting_permissions.retain(|p| match p {
-            // CR 514.2 + CR 611.2a: "until your next turn" expires at the
-            // *granting effect's controller's* next untap step. For a normal
-            // impulse grant `granted_to == exiled_by_ability_controller ==
-            // controller`, so this is unchanged. For a per-owner grant
-            // (`PermissionGrantee::ObjectOwner`) where each card's `granted_to`
-            // is its own owner but "your" refers to the activator (Memory
-            // Vessel: "Until your next turn, players may play cards they exiled
-            // this way"), the expiry must key on the activator, carried by
-            // `exiled_by_ability_controller`. This mirrors the identical
-            // controller-keyed expiry the End-step prune already applies to
-            // `UntilNextStepOf { End }` grants (Rocco, Street Chef).
-            CastingPermission::PlayFromExile {
-                duration:
-                    Duration::UntilNextTurnOf {
-                        player: PlayerScope::Controller,
-                    },
-                granted_to,
-                exiled_by_ability_controller,
-                ..
-            } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
-            // CR 513.1 + CR 611.2a/b: `UntilNextStepOf { step: End }` is
-            // expired by `prune_end_step_casting_permissions` at the end
-            // step, NOT at the untap step. Retain here.
-            CastingPermission::PlayFromExile {
-                duration:
-                    Duration::UntilNextStepOf {
-                        step: Phase::End, ..
-                    },
-                ..
-            } => true,
-            // CR 514.2: durational `ExileWithAltCost` with
-            // `UntilNextTurnOf { Controller }` granted to the active
-            // player expires at their untap step (mirrors PlayFromExile).
-            CastingPermission::ExileWithAltCost {
-                duration:
-                    Some(Duration::UntilNextTurnOf {
-                        player: PlayerScope::Controller,
-                    }),
-                granted_to: Some(g),
-                ..
-            } => *g != active_player,
-            // CR 513.1: end-step duration is handled by
-            // `prune_end_step_casting_permissions`; retain here.
-            CastingPermission::ExileWithAltCost {
-                duration:
-                    Some(Duration::UntilNextStepOf {
-                        step: Phase::End, ..
-                    }),
-                ..
-            } => true,
-            CastingPermission::PlayFromExile { .. }
-            | CastingPermission::AdventureCreature
-            | CastingPermission::ExileWithAltCost { .. }
-            | CastingPermission::ExileWithAltAbilityCost { .. }
-            | CastingPermission::ExileWithEnergyCost
-            | CastingPermission::WarpExile { .. }
-            // CR 702.170d: Plotted persists across turns; never pruned at the
-            // untap step. Retention is zone-scoped (see zones::apply_zone_exit_cleanup).
-            | CastingPermission::Plotted { .. }
-            | CastingPermission::Foretold { .. } => true,
-        });
     }
+    prune_casting_permissions_at(state, PermissionSeam::UntapStep, Some(active_player));
 }
 
-/// CR 513.1: Remove durational casting permissions granted to
-/// `active_player` whose `Duration::UntilNextStepOf { step: End, player: Controller }`
-/// expires at that player's next end step. Called at the start of the
-/// End phase in `turns.rs::auto_advance`.
-// CR 611.2a: Consumers of the `duration`-bearing variants — `PlayFromExile`
-// (Rocco, Street Chef class) and `ExileWithAltCost` (Rebound, CR 702.88a).
+/// CR 513.1: the end-step seam for casting permissions. Called at the start of
+/// the End phase in `turns.rs::auto_advance`.
 ///
-/// CR 513.2 ordering: this prune runs BEFORE end-step triggers fire, so a
-/// new grant created by an end-step trigger (e.g., Rocco, Street Chef) is
-/// NOT wiped by the same end step's prune — the new trigger cannot back up
-/// per CR 513.2, so the new permission lands AFTER the prune completes.
+/// CR 513.2 ordering: this prune runs BEFORE end-step triggers fire, so a new
+/// grant created by an end-step trigger (e.g. Rocco, Street Chef) is NOT wiped
+/// by the same end step's prune — the new trigger cannot back up per CR 513.2,
+/// so the new permission lands AFTER the prune completes.
 ///
-/// 2023-05-12 Wizards ruling on Rocco, Street Chef: the permission outlives
-/// the granting permanent leaving the battlefield. This prune keys off the
-/// permission's `granted_to`, not the source object's presence on the
-/// battlefield.
+/// 2023-05-12 Wizards ruling on Rocco, Street Chef: the permission outlives the
+/// granting permanent leaving the battlefield. The seam table keys on the
+/// permission's own `keyed_player`, never on the source object's presence.
 pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: PlayerId) {
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.casting_permissions.retain(|p| match p {
-            CastingPermission::PlayFromExile {
-                duration:
-                    Duration::UntilNextStepOf {
-                        step: Phase::End,
-                        player: PlayerScope::Controller,
-                    },
-                granted_to,
-                exiled_by_ability_controller,
-                ..
-            } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
-            // CR 513.1: durational `ExileWithAltCost` with
-            // `UntilNextStepOf { End, Controller }` granted to the active
-            // player expires at their end step (mirrors PlayFromExile).
-            CastingPermission::ExileWithAltCost {
-                duration:
-                    Some(Duration::UntilNextStepOf {
-                        step: Phase::End,
-                        player: PlayerScope::Controller,
-                    }),
-                granted_to: Some(g),
-                ..
-            } => *g != active_player,
-            CastingPermission::PlayFromExile { .. }
-            | CastingPermission::AdventureCreature
-            | CastingPermission::ExileWithAltCost { .. }
-            | CastingPermission::ExileWithAltAbilityCost { .. }
-            | CastingPermission::ExileWithEnergyCost
-            | CastingPermission::WarpExile { .. }
-            | CastingPermission::Plotted { .. }
-            | CastingPermission::Foretold { .. } => true,
-        });
-    }
+    prune_casting_permissions_at(state, PermissionSeam::EndStep, Some(active_player));
 }
 
-/// CR 500.4 + CR 503.1: Remove durational casting permissions granted to
-/// `active_player` whose `Duration::UntilNextStepOf { step: Upkeep, player: Controller }`
-/// expires as that player's upkeep step begins. Called from
-/// `turns.rs::auto_advance` at the Upkeep phase, next to
+/// CR 500.4 + CR 503.1: the upkeep-step seam for casting permissions. Called
+/// from `turns.rs::auto_advance` at the Upkeep phase, next to
 /// `prune_until_next_upkeep_effects`.
 ///
-/// Exact mirror of `prune_end_step_casting_permissions` one step axis over,
-/// including its `exiled_by_ability_controller`-before-`granted_to` keying. It
-/// is the *casting-permission* half of the upkeep deadline: Elkin Bottle and
-/// Grinning Totem lower "Until the beginning of your next upkeep, you may play
-/// that card" to `CastingPermission::PlayFromExile { duration: … Upkeep … }`, not
-/// to a transient continuous effect, so without this the play permission would
-/// never expire — `prune_end_of_turn_casting_permissions`'s catch-all
-/// deliberately retains every non-end-step durational shape for its own system
-/// to handle, and before this function the upkeep shape had no such system.
+/// Elkin Bottle and Grinning Totem lower "Until the beginning of your next
+/// upkeep, you may play that card" to a casting permission, not to a transient
+/// continuous effect, so without this seam the play permission would never
+/// expire.
 pub fn prune_upkeep_step_casting_permissions(state: &mut GameState, active_player: PlayerId) {
-    for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.casting_permissions.retain(|p| match p {
-            CastingPermission::PlayFromExile {
-                duration:
-                    Duration::UntilNextStepOf {
-                        step: Phase::Upkeep,
-                        player: PlayerScope::Controller,
-                    },
-                granted_to,
-                exiled_by_ability_controller,
-                ..
-            } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
-            // CR 503.1: durational `ExileWithAltCost` mirrors `PlayFromExile`,
-            // exactly as it does for the end-step deadline.
-            CastingPermission::ExileWithAltCost {
-                duration:
-                    Some(Duration::UntilNextStepOf {
-                        step: Phase::Upkeep,
-                        player: PlayerScope::Controller,
-                    }),
-                granted_to: Some(g),
-                ..
-            } => *g != active_player,
-            // CR 611.2a: the turn-AGNOSTIC stated duration names no player, so
-            // it expires at the first upkeep step and is not keyed on
-            // `active_player` at all.
-            CastingPermission::PlayFromExile {
-                duration:
-                    Duration::UntilNextStepOf {
-                        step: Phase::Upkeep,
-                        player: PlayerScope::AnyTurn,
-                    },
-                ..
-            } => false,
-            CastingPermission::ExileWithAltCost {
-                duration:
-                    Some(Duration::UntilNextStepOf {
-                        step: Phase::Upkeep,
-                        player: PlayerScope::AnyTurn,
-                    }),
-                ..
-            } => false,
-            CastingPermission::PlayFromExile { .. }
-            | CastingPermission::AdventureCreature
-            | CastingPermission::ExileWithAltCost { .. }
-            | CastingPermission::ExileWithAltAbilityCost { .. }
-            | CastingPermission::ExileWithEnergyCost
-            | CastingPermission::WarpExile { .. }
-            | CastingPermission::Plotted { .. }
-            | CastingPermission::Foretold { .. } => true,
-        });
-    }
+    prune_casting_permissions_at(state, PermissionSeam::UpkeepStep, Some(active_player));
 }
 
 /// Remove transient `UntilNextTurnOf { Controller }` effects whose controller's
@@ -762,10 +803,272 @@ pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
     let before = state.transient_continuous_effects.len();
     state
         .transient_continuous_effects
-        .retain(|e| !(e.duration == Duration::UntilHostLeavesPlay && e.source_id == departed_id));
+        .retain(|e| !(e.duration.ends_when_host_leaves_play() && e.source_id == departed_id));
     if state.transient_continuous_effects.len() != before {
         state.layers_dirty.mark_full();
     }
+}
+
+/// CR 611.2a + CR 400.7: revoke every casting permission whose lifetime was
+/// bound to `departed_id` remaining on the battlefield.
+///
+/// `prune_host_left_effects` above retains only `transient_continuous_effects`.
+/// A host-bound casting permission is not stored there — it lives on the exiled
+/// object as a `GameObject::casting_permissions` entry — so it needs its own
+/// pass at the same lifecycle point. Without one, "you may play that card for
+/// as long as you control [this permanent]" (Gwen Stacy, Victor Mancha)
+/// survives its host indefinitely.
+///
+/// All three host readings end here, because all three end when the host
+/// leaves the battlefield: `UntilHostLeavesPlay` ("until ~ leaves the
+/// battlefield") ends ONLY here, while `WhileHostOnBattlefield` (CR 611.2b,
+/// "for as long as ~ remains on the battlefield" — Intet, the Dreamer; The Day
+/// of the Doctor) also ends on a phase-out and `WhileControllingHost`
+/// (CR 611.2b, "for as long as you control ~") also ends on a control change
+/// or phase-out, both of which
+/// `prune_lapsed_host_bound_casting_permissions` observes.
+/// `Duration::ends_when_host_leaves_play` is the shared predicate, so no
+/// reading can be dropped from this path by omission.
+///
+/// Every permission form is read through `CastingPermission::lifetime`, so all
+/// three lifetime-bearing forms are covered by construction: the cast half
+/// (`ExileWithAltCost`), the non-mana alternative-cost half
+/// (`ExileWithAltAbilityCost`, Nashi, Moon Sage's Scion) and the CR 305.1 land-play
+/// companion (`PlayFromExile`) that `cast_from_zone::record_lingering_permissions`
+/// emits alongside the cast grant. Pruning only some of them would leave a land
+/// playable from exile after its granting permanent died, or the reverse.
+///
+/// A grant carrying `source_id: None` is retained: its host is unknown, so
+/// there is nothing to compare against `departed_id`. Since
+/// `grant_permission::resolve` stamps every `None` host slot, the live case for
+/// that arm is a host-bound grant deserialized from a snapshot written before
+/// `source_id` existed on its variant. (The standing durationless grants —
+/// Suspend, Discover, Cascade, Airbending — are retained one step earlier, by
+/// carrying no duration at all, and are ended by
+/// `zones::apply_zone_exit_cleanup` when the card leaves exile.)
+pub fn prune_host_left_casting_permissions(state: &mut GameState, departed_id: ObjectId) {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        obj.casting_permissions.retain(|p| {
+            let lifetime = p.lifetime();
+            let host_bound = lifetime
+                .duration
+                .is_some_and(Duration::ends_when_host_leaves_play);
+            !(host_bound && lifetime.source_id == Some(departed_id))
+        });
+    }
+}
+
+/// CR 611.2b: revoke every casting permission whose stated lifetime has ended
+/// while its host is still on the battlefield.
+///
+/// `Duration::WhileControllingHost` — "for as long as you control ~" — ends
+/// this way, and it is neither a turn boundary nor a zone change, so no pass in
+/// this file reached it before now. Six printed cards state that wording in the
+/// same sentence as a play/cast permission: Gwen Stacy, Hama, the Bloodbender;
+/// Kotose, the Silent Spider; Lightning, Security Sergeant; Taster of Wares and
+/// Victor Mancha, Runaway. All six are creatures, so the host is always a
+/// permanent.
+///
+/// CR 611.2b works this exact case through in its own Master Thief example:
+/// "If you lose control of Master Thief before the ability resolves, it does
+/// nothing, because its duration — as long as you control Master Thief — was
+/// over before the effect began." That is why this is a CONTINUOUS re-check and
+/// not an event hook: CR 611.2b requires the effect to do nothing when the
+/// duration is already over at grant time, which an exit-event hook cannot see.
+/// `replacement::controller_controls_source_gate` is the single authority —
+/// shared with the `ControllerControlsSource` replacement condition — and covers
+/// all three legs: host on the battlefield, host still controlled by the
+/// grantee, host phased in (CR 702.26f).
+///
+/// `Duration::ForAsLongAs { condition }` is deliberately NOT evaluated here.
+/// Measured over the parsed corpus: NO permission carrying that shape states a
+/// condition about the granting source, which is the only object this pass has.
+/// Every one of them except Resourceful Collector's states a "remains exiled"
+/// leg — most of them alone, three (Dead Man's Chest, Petty Larceny, Shadow of
+/// the Enemy) inside an `And[remains exiled, …]` whose second leg is not
+/// evaluated. That leg is exactly what `zones::apply_zone_exit_cleanup` already
+/// enforces, by clearing the permission when the card leaves exile.
+/// Resourceful Collector is the exception: "for as long as it's in your
+/// graveyard" is about the GRANTED card's zone.
+///
+/// Evaluating any of them against `source_id` would ask the question of the
+/// wrong object; refusing the shape would drop every one of them. Binding a
+/// permission's condition to the granted card is a separate piece of
+/// provenance, and a separate change.
+///
+/// Runs inside `evaluate_layers` after the Layer-2 control board is finalized,
+/// next to `prune_lapsed_controller_controls_source`, so the control question is
+/// asked of the same finalized board that pass uses.
+///
+/// A grant with no `source_id` or no `keyed_player` is retained: the pass has no
+/// host or no player to evaluate against. That is the deserialized-legacy case
+/// and the durationless standing grants, both of which end elsewhere.
+pub(crate) fn prune_lapsed_host_bound_casting_permissions(state: &mut GameState) {
+    // READ pass: `controller_controls_source_gate` borrows `&GameState`, so
+    // collect the lapsed identities first and mutate afterwards — the same
+    // read/mutate split as `prune_lapsed_controller_controls_source`.
+    let mut lapsed: Vec<(ObjectId, usize)> = Vec::new();
+    for (obj_id, obj) in state.objects.iter() {
+        for (idx, p) in obj.casting_permissions.iter().enumerate() {
+            let lifetime = p.lifetime();
+            let (Some(duration), Some(source)) = (lifetime.duration, lifetime.source_id) else {
+                continue;
+            };
+            let still_live = match duration {
+                // CR 611.2b: control, presence and phasing — all three legs.
+                Duration::WhileControllingHost => {
+                    let Some(player) = lifetime.keyed_player else {
+                        continue;
+                    };
+                    crate::game::replacement::controller_controls_source_gate(state, source, player)
+                }
+                // CR 611.2b + CR 702.26f: the presence leg. Deliberately NOT
+                // the control gate above — "for as long as ~ remains on the
+                // battlefield" (Intet, the Dreamer; The Day of the Doctor) is
+                // not ended by a control change, so asking the control question
+                // here would revoke it too early.
+                //
+                // Phasing IS part of presence, though: CR 702.26f — "effects
+                // with 'for as long as' durations that track that permanent
+                // (see rule 611.2b) end when that permanent phases out because
+                // they can no longer see it." CR 702.26d leaves zone and
+                // controller untouched, so the zone check alone would keep this
+                // grant alive across a Teferi's Protection.
+                Duration::WhileHostOnBattlefield => state.objects.get(&source).is_some_and(|o| {
+                    o.zone == crate::types::zones::Zone::Battlefield && o.is_phased_in()
+                }),
+                // CR 611.2a + CR 702.26d: the EVENT deadline ("until ~ leaves
+                // the battlefield") ends only at the host's battlefield exit —
+                // `prune_host_left_casting_permissions` on that event. A
+                // phase-out is not that event, so this pass must not touch it.
+                //
+                // Every other shape ends somewhere else, and each names where.
+                // Listed rather than swept into `_` so a new `Duration` variant
+                // is a compile error here too. Every match this PR introduces
+                // over the enum is wildcard-free, this one included — one of them
+                // behind a wildcard would silently retain a new shape forever,
+                // which is why none of them has one.
+                Duration::UntilHostLeavesPlay
+                | Duration::UntilEndOfTurn
+                | Duration::UntilEndOfCombat
+                | Duration::UntilNextTurnOf { .. }
+                | Duration::UntilEndOfNextTurnOf { .. }
+                | Duration::UntilNextStepOf { .. }
+                | Duration::ForAsLongAs { .. }
+                | Duration::UntilSourceExilesAnotherCard
+                | Duration::UntilOpponentBecomesMonarch
+                | Duration::Permanent => continue,
+            };
+            if !still_live {
+                lapsed.push((*obj_id, idx));
+            }
+        }
+    }
+    if lapsed.is_empty() {
+        return;
+    }
+    // MUTATE pass — owned data only. Indices are removed high-to-low per object
+    // so an earlier removal cannot shift a later index.
+    lapsed.sort_unstable_by(|a, b| b.cmp(a));
+    for (obj_id, idx) in lapsed {
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
+            if idx < obj.casting_permissions.len() {
+                obj.casting_permissions.remove(idx);
+            }
+        }
+    }
+}
+
+/// CR 611.2b: drop transient continuous effects whose `WhileControllingHost`
+/// duration has ended, rather than only declining to apply them.
+///
+/// `transient_effect_is_live` already refuses to apply such an effect, but many
+/// consumers walk `state.transient_continuous_effects` directly without that
+/// filter — `static_abilities.rs`, `casting.rs`, `turns.rs`, `visibility.rs`,
+/// `effects/attach.rs`, `mana_payment.rs`, `end_continuous_effect.rs`,
+/// `derived_views.rs` and more; the list is a sample, not a census. For the
+/// PRESENCE reading those consumers are covered for free, because
+/// `prune_host_left_effects`
+/// REMOVES the effect from the vector on the battlefield exit. The control
+/// reading has no such event, so without this removal the filtered and the
+/// unfiltered consumers would answer the same question differently — the exact
+/// split `transient_effect_is_live`'s doc claims to rule out.
+///
+/// Removal rather than suppression matches how the sibling presence reading is
+/// handled — `prune_host_left_effects` removes on the exit event — and keeps a
+/// later re-gain of control from silently reviving the effect. CR 611.2b's own
+/// wording is about the grant window ("… and doesn't begin again during that
+/// spell or ability's resolution, the effect does nothing"), so it is cited
+/// here as the rule that ends the duration, not as a quotation about revival.
+///
+/// Runs at the same seam as `prune_lapsed_host_bound_casting_permissions`,
+/// inside `evaluate_layers` after the Layer-2 control board is finalized. Like
+/// `prune_lapsed_controller_controls_source` it does NOT mark layers dirty: it
+/// is already inside the pass, and marking would re-enter it.
+pub(crate) fn prune_lapsed_host_bound_effects(state: &mut GameState) {
+    if !state.transient_continuous_effects.iter().any(|e| {
+        matches!(
+            e.duration,
+            Duration::WhileControllingHost | Duration::WhileHostOnBattlefield
+        )
+    }) {
+        return;
+    }
+    // CR 611.2b: an effect is ENDED here, not suppressed. Both legs below are
+    // lapses that no zone change reports, so nothing else would remove the
+    // entry: `WhileControllingHost` lapses on a control change with the host
+    // still on the battlefield, `WhileHostOnBattlefield` lapses on the host's
+    // phase-out (CR 702.26f). The event deadline is NOT ended here — see the
+    // match arm below for why.
+    //
+    // Suppressing instead (declining to apply while the gate is false) is
+    // wrong twice over: CR 611.2b ends the duration rather than pausing it, so
+    // a later re-gain of control must not revive the effect, and the consumers
+    // that walk `transient_continuous_effects` without
+    // `transient_effect_is_live` would keep applying it meanwhile.
+    let lapsed: Vec<u64> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|e| match e.duration {
+            Duration::WhileControllingHost => {
+                !crate::game::replacement::controller_controls_source_gate(
+                    state,
+                    e.source_id,
+                    e.controller,
+                )
+            }
+            // CR 611.2b + CR 702.26f: the presence reading ends when its host
+            // is phased out — "effects with 'for as long as' durations that
+            // track that permanent (see rule 611.2b) end when that permanent
+            // phases out because they can no longer see it." The battlefield
+            // check keeps the arm honest if the exit event was missed; the
+            // phase-out is the leg only this pass can see.
+            Duration::WhileHostOnBattlefield => !state.objects.get(&e.source_id).is_some_and(|o| {
+                o.zone == crate::types::zones::Zone::Battlefield && o.is_phased_in()
+            }),
+            // CR 611.2a + CR 702.26d: the EVENT deadline ("until ~ leaves the
+            // battlefield") is NOT ended here. A phase-out is not the host
+            // leaving the battlefield, so it keeps running across one;
+            // `prune_host_left_effects` ends it on the exit event itself.
+            Duration::UntilHostLeavesPlay
+            | Duration::UntilEndOfTurn
+            | Duration::UntilEndOfCombat
+            | Duration::UntilNextTurnOf { .. }
+            | Duration::UntilEndOfNextTurnOf { .. }
+            | Duration::UntilNextStepOf { .. }
+            | Duration::ForAsLongAs { .. }
+            | Duration::UntilSourceExilesAnotherCard
+            | Duration::UntilOpponentBecomesMonarch
+            | Duration::Permanent => false,
+        })
+        .map(|e| e.id)
+        .collect();
+    if lapsed.is_empty() {
+        return;
+    }
+    state
+        .transient_continuous_effects
+        .retain(|e| !lapsed.contains(&e.id));
 }
 
 /// Remove transient effects bound to a specific affected object that has left the battlefield.
@@ -2631,6 +2934,13 @@ pub fn evaluate_layers(state: &mut GameState) {
     // `layers_dirty = Clean` is set unconditionally below, so a mark would be
     // dead code — consistency relies on the in-pass live+base mutation.
     prune_lapsed_controller_controls_source(state);
+    // CR 611.2b: the transient-effect half of the same question, then the
+    // casting-permission half. Both run at the same seam and against the same
+    // finalized Layer-2 control board, so a control change — or a phase-out,
+    // CR 702.26f — ends an effect, a permission and a replacement condition at
+    // the same moment rather than at three different ones.
+    prune_lapsed_host_bound_effects(state);
+    prune_lapsed_host_bound_casting_permissions(state);
 
     // CR 611.3a + CR 611.3b: refresh the source-level enabling-condition truth
     // cache from this fully-derived board. Placed AFTER the ring-normalization
@@ -5648,13 +5958,17 @@ fn for_each_static_effect_source(
         }
     }
 
-    // CR 113.6 + CR 113.6b: Statics that opt into non-battlefield functional
-    // zones (Incarnation cycle — Anger/Filth/Brawn/Wonder/Valor — "as long as
-    // this card is in your graveyard, ...") must be collected from wherever the
-    // source currently lives. `active_continuous_effects_from_static_definitions`
-    // applies the zone-of-function gate per-static, so scanning every object
-    // outside the battlefield / command-zone passes already covered above is
-    // safe: battlefield-default statics filter themselves out.
+    // CR 113.6 + CR 113.6b + CR 604.3: Statics that opt into non-battlefield
+    // functional zones (Incarnation cycle — Anger/Filth/Brawn/Wonder/Valor —
+    // "as long as this card is in your graveyard, ...") must be collected
+    // from wherever the source currently lives, and so must characteristic-
+    // defining abilities (CDAs), which function in all zones by definition
+    // (CR 604.3) rather than through an opt-in `active_zones` list.
+    // `active_continuous_effects_from_static_definitions` applies the
+    // zone-of-function gate per-static (including the CDA all-zones rule via
+    // `static_functions_in_zone`), so scanning every object outside the
+    // battlefield / command-zone passes already covered above is safe:
+    // battlefield-default statics filter themselves out.
     for obj in state.objects.values() {
         // Battlefield objects were already processed above (phased-out gate
         // included). Command-zone sources (emblems, face-up conspiracies, and
@@ -5669,12 +5983,18 @@ fn for_each_static_effect_source(
             continue;
         }
         // Cheap pre-check: only scan objects that carry at least one
-        // opt-in-zone static. Avoids iterating libraries/hands full of
-        // ordinary cards on every layer recomputation.
+        // opt-in-zone static OR a characteristic-defining ability. Avoids
+        // iterating libraries/hands full of ordinary cards on every layer
+        // recomputation. A CDA (`characteristic_defining`) must be included
+        // here even though it typically carries an empty `active_zones` list
+        // (CR 604.3: CDAs function in all zones by definition, not by opt-in
+        // list) — otherwise a source whose ONLY static is a bare CDA would
+        // never even reach `active_continuous_effects_from_static_definitions`
+        // to have that CDA evaluated off-battlefield.
         if !obj
             .static_definitions
             .iter_all()
-            .any(|def| !def.active_zones.is_empty())
+            .any(|def| !def.active_zones.is_empty() || def.characteristic_defining)
         {
             continue;
         }
@@ -5700,6 +6020,7 @@ pub(crate) fn active_continuous_effects_from_static_source(
         source.controller,
         source.timestamp,
         source.static_definitions.as_slice(),
+        StaticZoneAdmission::LiveSource,
     )
 }
 
@@ -5719,6 +6040,7 @@ pub(crate) fn active_continuous_effects_from_base_static_source(
         source.controller,
         source.timestamp,
         &static_definitions,
+        StaticZoneAdmission::PreFilteredBaseStatic,
     )
 }
 
@@ -5745,22 +6067,54 @@ fn static_condition_has_source_zone_gate(condition: &StaticCondition) -> bool {
     }
 }
 
+/// CR 113.6 + CR 113.6b: Which zone-of-function screening a call into
+/// `active_continuous_effects_from_static_definitions` has already applied to
+/// the `static_definitions` it's handed. The function has two callers with
+/// different provenance, so a single unconditional gate can't serve both:
+///
+/// - `active_continuous_effects_from_static_source` hands it a source's LIVE
+///   `static_definitions`, unfiltered — nothing upstream has screened them by
+///   zone, so the shared `functioning_abilities::static_functions_in_zone`
+///   gate must run here (`LiveSource`). Without it, a source visited only
+///   because ONE of its static definitions opts into a non-battlefield zone
+///   (Gwaihir the Windlord's cost-reduction static lists `[Hand, Stack,
+///   Command, Graveyard, Exile, Library]`) leaked every OTHER definition on
+///   that same source too — including one with empty `active_zones` that
+///   should default to battlefield-only, like "Other Birds you control have
+///   vigilance." (issue #8158). `static_functions_in_zone` itself resolves
+///   this as a three-way split, not two: a characteristic-defining ability
+///   (`characteristic_defining`) functions in all zones unconditionally per
+///   CR 604.3 — even though it too carries empty `active_zones` — while a
+///   plain empty-`active_zones` definition without the CDA flag stays
+///   battlefield-only, and a non-empty `active_zones` list is the explicit
+///   opt-in case. So a CDA visited only because a sibling definition on the
+///   same source opts into a non-battlefield zone is correctly admitted on
+///   its own CR 604.3 authority rather than rejected alongside the plain
+///   battlefield-only case.
+/// - `active_continuous_effects_from_base_static_source` hands it
+///   `base_static_definitions` already screened by
+///   `base_static_can_source_off_zone_keyword_query`, which intentionally
+///   admits a self-referential (`affected: SelfRef`) definition off-zone for
+///   "what would this object's own characteristics be" queries
+///   (`off_zone_characteristics.rs`, e.g. Dream Devourer). Re-running the
+///   ordinary gate here would reject exactly what that pre-filter meant to
+///   admit, so `PreFilteredBaseStatic` skips it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StaticZoneAdmission {
+    LiveSource,
+    PreFilteredBaseStatic,
+}
+
 fn active_continuous_effects_from_static_definitions(
     state: &GameState,
     source_id: ObjectId,
     controller: PlayerId,
     timestamp: u64,
     static_definitions: &[StaticDefinition],
+    admission: StaticZoneAdmission,
 ) -> Vec<ActiveContinuousEffect> {
     let mut effects = Vec::new();
-    // CR 113.6 + CR 113.6b: A static's functional zone is the battlefield by
-    // default (empty `active_zones`). A non-empty `active_zones` lists the
-    // non-battlefield zones in which the static functions (e.g., Incarnation
-    // cycle: "as long as this card is in your graveyard, ..."). If the source
-    // is currently outside every declared zone, the static contributes no
-    // effects.
     let source_obj = state.objects.get(&source_id);
-    let source_zone = source_obj.map(|o| o.zone);
     for (def_idx, def) in static_definitions.iter().enumerate() {
         if def.mode != StaticMode::Continuous {
             continue;
@@ -5768,20 +6122,39 @@ fn active_continuous_effects_from_static_definitions(
 
         // CR 709.5 + CR 709.5c: on the battlefield a locked Room half doesn't
         // have its rules text — a door-stamped static contributes no
-        // continuous effects while its half is locked. This gather bypasses
-        // `functioning_abilities::static_functions_in_zone` (see the module
-        // doc there), so the shared door authority is applied here too.
+        // continuous effects while its half is locked. `static_functions_in_zone`
+        // (below) also applies this door check for `LiveSource`, but it stays
+        // here unconditionally because it remains the ONLY door check for
+        // `PreFilteredBaseStatic`, which skips the block below.
         if source_obj.is_some_and(|obj| !crate::game::room::door_text_functions(obj, def.room_door))
         {
             continue;
         }
 
-        // CR 113.6 + CR 113.6b: Zone-of-function gate.
-        if !def.active_zones.is_empty() {
-            let Some(zone) = source_zone else { continue };
-            if !def.active_zones.contains(&zone) {
-                continue;
-            }
+        // CR 113.6 + CR 113.6b: Zone-of-function gate. `LiveSource` delegates
+        // to the shared `functioning_abilities::static_functions_in_zone`
+        // authority — the same predicate
+        // `active_combat_assignment_rule_effects_from_static_definitions`
+        // (below) already uses — so a definition with empty `active_zones`
+        // correctly defaults to battlefield-only even when this source was
+        // only visited because a DIFFERENT definition on it opts into a
+        // non-battlefield zone, UNLESS the definition is itself a CDA, which
+        // `static_functions_in_zone` admits unconditionally per CR 604.3
+        // (checked there, not duplicated here, so all six call sites that
+        // delegate to it — not just this one — get the CDA exception; see
+        // that function's doc comment for the full three-way split). A source
+        // that has since vanished from `state.objects` (`source_obj: None`)
+        // is treated as functioning nowhere, same as the door check above.
+        // `PreFilteredBaseStatic` already had this screening applied by its
+        // caller and must not be gated again (see `StaticZoneAdmission`).
+        let admitted = match admission {
+            StaticZoneAdmission::LiveSource => source_obj.is_some_and(|obj| {
+                crate::game::functioning_abilities::static_functions_in_zone(obj, def)
+            }),
+            StaticZoneAdmission::PreFilteredBaseStatic => true,
+        };
+        if !admitted {
+            continue;
         }
 
         let retained_condition = def.condition.clone();
@@ -6242,12 +6615,52 @@ pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinu
             return false;
         }
     }
-    // UntilHostLeavesPlay: skip if source is no longer on the battlefield
-    if tce.duration == Duration::UntilHostLeavesPlay
+    // CR 611.2a: every host-bound lifetime — the event deadline and both
+    // state readings — is dead once the source has left the battlefield.
+    if tce.duration.ends_when_host_leaves_play()
         && !state
             .objects
             .get(&tce.source_id)
             .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+    {
+        return false;
+    }
+    // CR 611.2b + CR 702.26f: the presence-bound state reading ("for as long
+    // as ~ remains on the battlefield") additionally ends when its host phases
+    // out — "effects with 'for as long as' durations that track that permanent
+    // (see rule 611.2b) end when that permanent phases out because they can no
+    // longer see it." The event deadline (`UntilHostLeavesPlay`, "until ~
+    // leaves the battlefield") is deliberately NOT asked this question: a
+    // phase-out is not the host leaving the battlefield (CR 702.26d), so that
+    // reading keeps running across one, and ending it here would be wrong for
+    // every event-bound card. The wording now lives on the variant itself, so
+    // this filter no longer has to conflate the two.
+    //
+    // This check only declines to APPLY the effect; the ENDING that CR 702.26f
+    // demands — a later phase-in must not revive it — is
+    // `prune_lapsed_host_bound_effects`' presence arm, the same
+    // filter-plus-removal split the control reading below uses.
+    if tce.duration == Duration::WhileHostOnBattlefield
+        && !state
+            .objects
+            .get(&tce.source_id)
+            .is_some_and(|obj| obj.is_phased_in())
+    {
+        return false;
+    }
+
+    // CR 611.2b: the control-bound reading additionally ends when another
+    // player gains control of the source, or when it phases out (CR 702.26f).
+    // `controller_controls_source_gate` is the single authority for all three
+    // legs and is already shared with the `ControllerControlsSource`
+    // replacement condition, so the duration and the condition can never
+    // disagree about when this window closed.
+    if tce.duration == Duration::WhileControllingHost
+        && !crate::game::replacement::controller_controls_source_gate(
+            state,
+            tce.source_id,
+            tce.controller,
+        )
     {
         return false;
     }
@@ -6381,11 +6794,19 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 ///   own CR 611.3a gate riding along on the transient
 ///   (`effects/counter.rs::apply_source_static`).
 ///
-/// [`transient_effect_is_live`] consults this pair plus two gates that read no
-/// layer-writable characteristic at all — the CR 400.7 recipient-incarnation
-/// check and the `UntilHostLeavesPlay` source-zone check — which is why they
-/// are outside this iterator and outside [`live_characteristic_reads`]: a zone
-/// or identity change is not something layers 1-7 can write.
+/// [`transient_effect_is_live`] consults this pair plus four gates that sit
+/// outside this iterator and outside [`live_characteristic_reads`]. Three read
+/// no layer-writable characteristic at all — the CR 400.7
+/// recipient-incarnation check, the host source-zone check
+/// (`ends_when_host_leaves_play`) and the CR 702.26f `WhileHostOnBattlefield`
+/// phased-in check — because a zone, identity or phasing change is not
+/// something layers 1-7 can write. The fourth, the CR 611.2b
+/// `WhileControllingHost` control gate, does read one (the source's
+/// controller, layer 2) and is still not registered here: the effect it gates
+/// is REMOVED by `prune_lapsed_host_bound_effects` inside `evaluate_layers`,
+/// the same seam and the same treatment as the pre-existing sibling question
+/// `prune_lapsed_controller_controls_source`, which is likewise absent from
+/// [`live_characteristic_reads`].
 ///
 /// Every consumer that EVALUATES whether this effect is live walks the pair
 /// through here: [`transient_effect_is_live`] (via
@@ -6452,7 +6873,15 @@ fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) 
             // Infiltrator) when it diverges from `affected`; otherwise the
             // affected object (Shield Broker's recipient-relative control
             // duration, where the recipient IS the tracked object).
-            let recipient = tce.duration_subject.unwrap_or(*id);
+            let recipient = match tce.duration_subject {
+                // CR 400.7 + CR 611.2b: an explicit duration subject is an
+                // exact object binding, not a rediscoverable storage id. A
+                // zone change makes the old target a new object, so its
+                // duration cannot be sustained by a later incarnation.
+                Some(subject) if subject.is_current(state) => subject.object_id,
+                Some(_) => return false,
+                None => *id,
+            };
             evaluate_condition_with_recipient(
                 state,
                 condition,
@@ -6677,11 +7106,37 @@ fn collect_transient_combat_assignment_rule_effects(
     effects: &mut Vec<ActiveCombatAssignmentRuleEffect>,
 ) {
     for tce in &state.transient_continuous_effects {
-        if tce.duration == Duration::UntilHostLeavesPlay
+        // CR 611.2a: same presence question, same answer — see
+        // `transient_effect_is_live`.
+        if tce.duration.ends_when_host_leaves_play()
             && !state
                 .objects
                 .get(&tce.source_id)
                 .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+        {
+            continue;
+        }
+        // CR 611.2b + CR 702.26f: same phasing leg for the presence-bound
+        // state reading as `transient_effect_is_live` — this collector answers
+        // the identical liveness question for combat assignment rules and must
+        // not answer it differently for a phased-out host.
+        if tce.duration == Duration::WhileHostOnBattlefield
+            && !state
+                .objects
+                .get(&tce.source_id)
+                .is_some_and(|obj| obj.is_phased_in())
+        {
+            continue;
+        }
+        // CR 611.2b: same control leg as `transient_effect_is_live`, same
+        // authority — this collector answers the identical liveness question
+        // for combat assignment rules and must not answer it differently.
+        if tce.duration == Duration::WhileControllingHost
+            && !crate::game::replacement::controller_controls_source_gate(
+                state,
+                tce.source_id,
+                tce.controller,
+            )
         {
             continue;
         }
@@ -10224,6 +10679,138 @@ mod tests {
                  graveyard still functions from the graveyard"
             );
         }
+    }
+
+    /// CR 604.3 + CR 113.6 + CR 113.6b: PR #8229 review (HIGH finding).
+    /// `static_functions_in_zone` is a three-way split — CDA (all zones,
+    /// unconditional), opt-in off-zone (non-empty `active_zones`), and plain
+    /// (empty `active_zones`, battlefield-only) — not the two-way split the
+    /// original #8158 fix assumed. A CDA carries an empty `active_zones` list
+    /// (see `parser/oracle_static/cda.rs`'s constructors: `.cda()` never
+    /// pairs with `.active_zones(...)`), so without the `characteristic_defining`
+    /// check, `static_functions_in_zone` would apply the plain battlefield-only
+    /// default to it — rejecting a CDA exactly like an ordinary printed static,
+    /// which contradicts CR 604.3's unconditional "function in all zones."
+    ///
+    /// Mirrors `combat_assignment_rule_effects_respect_zone_of_function_active_zones`
+    /// immediately above, and Gwaihir the Windlord's own real shape: a Hand
+    /// source with TWO static definitions, one opt-in off-zone (so
+    /// `for_each_static_effect_source`'s off-zone candidate scan visits the
+    /// source at all) and one that must be independently zone-gated on its
+    /// OWN terms (there, a plain empty-`active_zones` grant that must stay
+    /// battlefield-only; here, a CDA with empty `active_zones` that must
+    /// function anyway). Exercises both fixed call sites directly:
+    /// `for_each_static_effect_source`'s pre-check (bullet 1) via the
+    /// `visited` probe, and `StaticZoneAdmission::LiveSource` (bullet 2) via
+    /// `active_continuous_effects_from_static_source`'s returned modifications.
+    #[test]
+    fn cda_admitted_off_battlefield_via_sibling_broad_zone_static() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Hand CDA Source".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            // Sibling opt-in off-zone static (mirrors Gwaihir's cost
+            // reducer): non-empty `active_zones` including Hand. Its mode
+            // and effect are irrelevant to this test — only its presence,
+            // which is what makes `for_each_static_effect_source`'s
+            // pre-check visit this Hand source at all.
+            let sibling = StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])
+                .active_zones(vec![Zone::Hand]);
+            Arc::make_mut(&mut obj.base_static_definitions).push(sibling.clone());
+            obj.static_definitions.push(sibling);
+
+            // The CDA under test: empty `active_zones` (as every real CDA
+            // constructor emits — see `parser/oracle_static/cda.rs`),
+            // `characteristic_defining: true`.
+            let cda = StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::SetDynamicPower {
+                    value: QuantityExpr::Fixed { value: 3 },
+                }])
+                .cda();
+            Arc::make_mut(&mut obj.base_static_definitions).push(cda.clone());
+            obj.static_definitions.push(cda);
+        }
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(&mut state);
+
+        // Bullet 1: the off-zone candidate scan must visit this Hand source
+        // because of its sibling's non-empty `active_zones`, exactly as
+        // Gwaihir's cost reducer admits Gwaihir itself.
+        let mut visited = Vec::new();
+        for_each_static_effect_source(&state, |_state, obj| visited.push(obj.id));
+        assert!(
+            visited.contains(&source_id),
+            "the off-zone candidate scan must visit a Hand source that \
+             carries a sibling static with non-empty `active_zones`"
+        );
+
+        // Bullet 2: `StaticZoneAdmission::LiveSource` must admit the CDA
+        // definition specifically — not just visit the source. Before this
+        // fix, `static_functions_in_zone` rejected it under the plain
+        // empty-`active_zones` battlefield-only default.
+        let source_obj = state.objects.get(&source_id).unwrap();
+        let effects = active_continuous_effects_from_static_source(&state, source_obj);
+        assert!(
+            effects.iter().any(|e| {
+                e.characteristic_defining
+                    && matches!(
+                        e.modification,
+                        ContinuousModification::SetDynamicPower { .. }
+                    )
+            }),
+            "CR 604.3: a characteristic-defining ability functions in all \
+             zones — the CDA's `SetDynamicPower` modification must be \
+             admitted while its source sits in Hand, reached via its OWN \
+             CR 604.3 authority rather than rejected under the plain \
+             empty-`active_zones` battlefield-only default that correctly \
+             still applies to its non-CDA sibling shape"
+        );
+    }
+
+    /// CR 604.3: the command-zone source walk must admit a non-emblem CDA
+    /// without requiring an explicit `active_zones: [Command]` opt-in. This
+    /// drives the normal source index and layer evaluation and observes the
+    /// CDA's continuous modification on a battlefield object.
+    #[test]
+    fn command_zone_cda_reaches_layer_pipeline() {
+        let mut state = setup();
+        let target_id = make_creature(&mut state, "CDA Observer", 2, 2, PlayerId(0));
+        let source_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Command CDA Source".to_string(),
+            Zone::Command,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            let cda = StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: target_id })
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }])
+                .cda();
+            Arc::make_mut(&mut source.base_static_definitions).push(cda.clone());
+            source.static_definitions.push(cda);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&target_id].keywords.contains(&Keyword::Flying),
+            "a non-emblem Command-zone CDA must be collected and applied by the production layer pipeline"
+        );
     }
 
     /// Helper: creatures you control filter
@@ -16030,6 +16617,78 @@ mod tests {
         );
     }
 
+    /// CR 702.26f vs CR 702.26d: with the SAME phased-out host, the
+    /// presence-bound state reading is ENDED — removed from the vector, not
+    /// merely skipped — while the event deadline keeps running AND keeps
+    /// applying.
+    ///
+    /// DISCRIMINATING both ways: dropping the presence arm of
+    /// `prune_lapsed_host_bound_effects` (or collapsing the parser split so
+    /// the wording never reaches `WhileHostOnBattlefield`) reds the first
+    /// half; asking the phasing question of every host-bound duration — the
+    /// over-reach a previous review round shipped and reverted — reds the
+    /// second.
+    #[test]
+    fn a_phased_out_host_ends_the_presence_effect_and_spares_the_event_deadline() {
+        let mut state = setup();
+        let host = make_creature(&mut state, "Phasing Host", 2, 2, PlayerId(0));
+        let ts = state.next_timestamp();
+        for (id, duration) in [
+            (1, Duration::WhileHostOnBattlefield),
+            (2, Duration::UntilHostLeavesPlay),
+        ] {
+            state
+                .transient_continuous_effects
+                .push_back(TransientContinuousEffect {
+                    id,
+                    source_id: host,
+                    controller: PlayerId(0),
+                    timestamp: ts,
+                    duration,
+                    affected: TargetFilter::SelfRef,
+                    affected_recipient: None,
+                    modifications: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }],
+                    condition: None,
+                    duration_subject: None,
+                    end_permission: None,
+                    source_name: String::new(),
+                });
+        }
+
+        let mut events = Vec::new();
+        crate::game::phasing::phase_out_object(
+            &mut state,
+            host,
+            crate::game::game_object::PhaseOutCause::Directly,
+            &mut events,
+        );
+        assert!(
+            !state.objects[&host].is_phased_in(),
+            "reach-guard: the production phase-out must actually phase the host out"
+        );
+
+        prune_lapsed_host_bound_effects(&mut state);
+        let survivors: Vec<u64> = state
+            .transient_continuous_effects
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            survivors,
+            vec![2],
+            "CR 702.26f ends the presence reading; CR 702.26d spares the event deadline"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|e| transient_effect_is_live(&state, e)),
+            "the surviving event-deadline effect must still APPLY across the phase-out"
+        );
+    }
+
     // CR 110.5d: a tapped source that has left the battlefield is neither tapped
     // nor untapped — `SourceIsTapped` must evaluate false once it is off-battlefield.
     #[test]
@@ -17460,6 +18119,7 @@ mod tests {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
@@ -17468,6 +18128,401 @@ mod tests {
         assert!(
             state.objects[&exiled].casting_permissions.is_empty(),
             "UntilEndOfTurn PlayFromExile should expire at cleanup"
+        );
+    }
+
+    /// Build an `ExileWithAltCost` with only the two fields this prune reads.
+    fn alt_cost_permission(
+        duration: Option<Duration>,
+        source_id: Option<ObjectId>,
+    ) -> CastingPermission {
+        CastingPermission::ExileWithAltCost {
+            cost: crate::types::mana::ManaCost::zero(),
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: None,
+            resolution_cleanup: None,
+            duration,
+            source_id,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        }
+    }
+
+    /// CR 611.2b: whether a `ForAsLongAs` lifetime can be enforced depends on
+    /// WHERE the grant sits, and this is the only arm of
+    /// `casting_permission_duration_is_enforceable` for which that is true.
+    ///
+    /// `zones::apply_zone_exit_cleanup` is the shape's only authority and it
+    /// fires when the card leaves EXILE. An in-place grant — the card stays in
+    /// the graveyard or the hand — never reaches it, so nothing would end the
+    /// permission; answering `false` there is what makes
+    /// `cast_from_zone::record_lingering_permissions` fall back to the
+    /// cleanup-step default instead of attaching an unbounded grant.
+    ///
+    /// Pinned as a predicate rather than through a card, deliberately: the one
+    /// printed card that reaches the in-place arm is Resourceful Collector,
+    /// whose grant hangs off a random permanent pick at the beginning of the
+    /// end step, which no fixture can force. The revert-to-red is direct —
+    /// changing the arm back to an unconditional `true` fails the second
+    /// assertion.
+    #[test]
+    fn for_as_long_as_is_enforceable_only_on_an_exile_resident_grant() {
+        let condition = Duration::ForAsLongAs {
+            condition: StaticCondition::None,
+        };
+        assert!(
+            casting_permission_duration_is_enforceable(&condition, true),
+            "an exile-resident grant is ended by `zones::apply_zone_exit_cleanup`"
+        );
+        assert!(
+            !casting_permission_duration_is_enforceable(&condition, false),
+            "an in-place grant never leaves exile, so nothing would end it"
+        );
+        // Residency changes nothing for any other shape — the seams that own
+        // them do not care where the card sits.
+        for other in [
+            Duration::UntilEndOfTurn,
+            Duration::UntilHostLeavesPlay,
+            Duration::WhileControllingHost,
+            Duration::Permanent,
+        ] {
+            assert_eq!(
+                casting_permission_duration_is_enforceable(&other, true),
+                casting_permission_duration_is_enforceable(&other, false),
+                "residency must only matter for ForAsLongAs, but it moved {other:?}"
+            );
+        }
+    }
+
+    /// CR 611.2a: the grant-site guard and the expiry table answer the same
+    /// question, so a turn deadline no seam can ever fire on must not pass the
+    /// guard.
+    ///
+    /// `permission_scope_is_keyable` is the shared authority. Without it the
+    /// guard read only the VARIANT — and, for `UntilNextStepOf`, only the STEP.
+    /// `UntilEndOfNextTurnOf { player: Target }` is a shape
+    /// `oracle_nom::duration::parse_during_body` produces and
+    /// `with_clause_duration` routes onto a permission node; it was admitted as
+    /// enforceable, then never armed by
+    /// `prune_untap_step_casting_permissions` (which matches
+    /// `PlayerScope::Controller` alone) and never selected at any seam. An
+    /// unbounded permission — the same hole this change closes for
+    /// `UntilNextStepOf { step: Untap }`.
+    ///
+    /// No printed card pairs these variants with an unkeyable scope today —
+    /// every TURN-DEADLINE permission node in the corpus carries `Controller`;
+    /// the rest of the permission nodes carry no player scope at all — so the
+    /// assertions are at the predicate rather than through a fixture.
+    #[test]
+    fn a_turn_deadline_no_seam_can_key_is_refused_at_the_grant() {
+        let unkeyable = [
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Target,
+            },
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Target,
+            },
+            Duration::UntilNextStepOf {
+                step: Phase::End,
+                player: PlayerScope::Target,
+            },
+        ];
+        for duration in &unkeyable {
+            // First: no seam ends it, asked for every seam and every keying.
+            for seam in [
+                PermissionSeam::Cleanup,
+                PermissionSeam::UntapStep,
+                PermissionSeam::UpkeepStep,
+                PermissionSeam::EndStep,
+            ] {
+                for keyed in [None, Some(PlayerId(0)), Some(PlayerId(1))] {
+                    for active in [None, Some(PlayerId(0)), Some(PlayerId(1))] {
+                        assert!(
+                            !permission_duration_expires_at(seam, duration, keyed, active),
+                            "no seam may end {duration:?}, so the guard below must refuse it"
+                        );
+                    }
+                }
+            }
+            // Therefore the grant site must refuse it instead of attaching an
+            // unbounded permission — in either residency.
+            for exile_resident in [false, true] {
+                assert!(
+                    !casting_permission_duration_is_enforceable(duration, exile_resident),
+                    "{duration:?} is ended by nothing and must not be enforceable \
+                     (exile_resident = {exile_resident})"
+                );
+            }
+        }
+
+        // Positive control: the same three variants with a scope a prune CAN
+        // key on stay enforceable, so the guard refuses the SCOPE and not the
+        // variant.
+        for duration in [
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilNextStepOf {
+                step: Phase::End,
+                player: PlayerScope::Controller,
+            },
+        ] {
+            assert!(
+                casting_permission_duration_is_enforceable(&duration, false),
+                "{duration:?} is armed or selected and must stay enforceable"
+            );
+        }
+    }
+
+    /// CR 702.26f: a host-bound permission ends when its host PHASES OUT, even
+    /// though phasing changes neither zone nor controller (CR 702.26d).
+    ///
+    /// "Effects with 'for as long as' durations that track that permanent (see
+    /// rule 611.2b) end when that permanent phases out because they can no
+    /// longer see it." Both STATE readings track the permanent, so both legs of
+    /// `prune_lapsed_host_bound_casting_permissions` must ask. The control leg
+    /// gets it from `replacement::controller_controls_source_gate`, which
+    /// already carries the check; the presence leg
+    /// (`WhileHostOnBattlefield`) asks here. The event deadline
+    /// (`UntilHostLeavesPlay`) tracks nothing — CR 702.26d — and the companion
+    /// test below pins that this pass leaves it alone.
+    ///
+    /// DISCRIMINATING: the first assertion pins that a phased-IN host retains
+    /// the grant, so dropping the `is_phased_in()` call reds the second while a
+    /// prune that revoked unconditionally reds the first.
+    ///
+    /// The phase-out itself goes through the production entry point,
+    /// `game::phasing::phase_out_object` — the same call
+    /// `effects::phase_out::resolve` makes for Clever Concealment, Spectral
+    /// Adversary, Teferi's Protection and the rest. Setting `phase_status` by
+    /// hand would prove only that this predicate reads the field, not that the
+    /// engine's own phase-out reaches it.
+    ///
+    /// Unit-level rather than card-level because the grant path is already
+    /// covered end-to-end by
+    /// `a_lifetime_already_over_at_grant_time_produces_no_permission`; this
+    /// test isolates the phase-out leg against an installed permission.
+    #[test]
+    fn presence_bound_permission_ends_when_its_host_phases_out() {
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Presence Host".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+        state.objects.get_mut(&exiled).unwrap().casting_permissions = vec![alt_cost_permission(
+            Some(Duration::WhileHostOnBattlefield),
+            Some(host),
+        )];
+
+        prune_lapsed_host_bound_casting_permissions(&mut state);
+        assert_eq!(
+            state.objects[&exiled].casting_permissions.len(),
+            1,
+            "a phased-in host on the battlefield keeps the grant alive"
+        );
+
+        let mut events = Vec::new();
+        crate::game::phasing::phase_out_object(
+            &mut state,
+            host,
+            crate::game::game_object::PhaseOutCause::Directly,
+            &mut events,
+        );
+        assert!(
+            !state.objects[&host].is_phased_in(),
+            "reach-guard: the production phase-out must actually phase the host out"
+        );
+
+        prune_lapsed_host_bound_casting_permissions(&mut state);
+        assert!(
+            state.objects[&exiled].casting_permissions.is_empty(),
+            "CR 702.26f: the host phased out, so the tracking duration ended"
+        );
+    }
+
+    /// CR 702.26d: the EVENT deadline ("until ~ leaves the battlefield") is
+    /// not a "for as long as" duration, so a phase-out — which is not the host
+    /// leaving the battlefield — must NOT end it.
+    ///
+    /// DISCRIMINATING counterpart to the presence test above: an
+    /// implementation that asked the phasing question of every host-bound
+    /// duration (the exact over-reach a previous round shipped and reverted)
+    /// reds this while keeping that one green.
+    #[test]
+    fn event_deadline_permission_survives_its_hosts_phase_out() {
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Deadline Host".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+        state.objects.get_mut(&exiled).unwrap().casting_permissions = vec![alt_cost_permission(
+            Some(Duration::UntilHostLeavesPlay),
+            Some(host),
+        )];
+
+        let mut events = Vec::new();
+        crate::game::phasing::phase_out_object(
+            &mut state,
+            host,
+            crate::game::game_object::PhaseOutCause::Directly,
+            &mut events,
+        );
+        assert!(
+            !state.objects[&host].is_phased_in(),
+            "reach-guard: the production phase-out must actually phase the host out"
+        );
+
+        prune_lapsed_host_bound_casting_permissions(&mut state);
+        assert_eq!(
+            state.objects[&exiled].casting_permissions.len(),
+            1,
+            "CR 702.26d: a phase-out is not the host leaving the battlefield, \
+             so the event deadline keeps running"
+        );
+    }
+
+    /// CR 611.2a + CR 702.26d: the EVENT deadline ("until ~ leaves the
+    /// battlefield") is deliberately skipped by the continuous lapse pass —
+    /// nothing but the host's actual battlefield exit may end it. The exit
+    /// hook (`zones::apply_zone_exit_cleanup` →
+    /// `prune_host_left_casting_permissions`) is therefore its ONLY authority,
+    /// and this is the test that discriminates that wiring. The two
+    /// `host_departure_*` integration tests do NOT: their
+    /// `WhileControllingHost` grants are also revoked by the continuous lapse
+    /// pass, so they stay green without the exit hook.
+    ///
+    /// DISCRIMINATING both ways: dropping the
+    /// `prune_host_left_casting_permissions` call from the exit cleanup reds
+    /// the second assertion; a lapse pass that grabbed the event deadline (the
+    /// over-reach) reds the first.
+    #[test]
+    fn an_event_deadline_permission_ends_only_at_the_hosts_battlefield_exit() {
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Deadline Host".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+        state.objects.get_mut(&exiled).unwrap().casting_permissions = vec![alt_cost_permission(
+            Some(Duration::UntilHostLeavesPlay),
+            Some(host),
+        )];
+
+        prune_lapsed_host_bound_casting_permissions(&mut state);
+        assert_eq!(
+            state.objects[&exiled].casting_permissions.len(),
+            1,
+            "CR 702.26d: with the host still on the battlefield, no continuous \
+             pass may end an event deadline"
+        );
+
+        crate::game::zones::apply_zone_exit_cleanup(
+            &mut state,
+            host,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Vec::new(),
+        );
+        assert!(
+            state.objects[&exiled].casting_permissions.is_empty(),
+            "CR 611.2a: the host's battlefield exit is the deadline — the exit \
+             hook must revoke the permission"
+        );
+    }
+
+    /// CR 611.2a + CR 400.7: the departing host revokes the permissions IT
+    /// granted — and only those.
+    ///
+    /// The three retained entries are the over-pruning guard. Without them a
+    /// prune that ignored `source_id` entirely, or one that treated `None` as a
+    /// match, would still pass the two positive assertions.
+    #[test]
+    fn host_left_prune_revokes_only_the_departing_hosts_permissions() {
+        let mut state = setup();
+        let host = ObjectId(9_001);
+        let other_host = ObjectId(9_002);
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+
+        let play_from_exile = |duration, source_id| CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
+            mode: crate::types::ability::CardPlayMode::Play,
+            duration,
+            granted_to: PlayerId(0),
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+            source_id,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: None,
+            alt_ability_cost: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        };
+
+        let permissions = &mut state.objects.get_mut(&exiled).unwrap().casting_permissions;
+        // Revoked: both halves of the departing host's own grant.
+        permissions.push(alt_cost_permission(
+            Some(Duration::UntilHostLeavesPlay),
+            Some(host),
+        ));
+        permissions.push(play_from_exile(Duration::UntilHostLeavesPlay, Some(host)));
+        // Retained: another permanent's grant with the same duration.
+        permissions.push(alt_cost_permission(
+            Some(Duration::UntilHostLeavesPlay),
+            Some(other_host),
+        ));
+        // Retained, and a stated limit: a grant deserialized before `source_id`
+        // existed has no host to compare against.
+        permissions.push(alt_cost_permission(
+            Some(Duration::UntilHostLeavesPlay),
+            None,
+        ));
+        // Retained: a standing exile-resident grant (Suspend, Discover) carries
+        // no duration and is pruned by `zones::apply_zone_exit_cleanup` instead.
+        permissions.push(alt_cost_permission(None, Some(host)));
+
+        prune_host_left_casting_permissions(&mut state, host);
+
+        let remaining = &state.objects[&exiled].casting_permissions;
+        assert_eq!(
+            remaining.len(),
+            3,
+            "exactly the two host-bound grants issued by `host` are revoked"
+        );
+        assert_eq!(
+            remaining[0],
+            alt_cost_permission(Some(Duration::UntilHostLeavesPlay), Some(other_host)),
+            "another permanent's grant with the same duration must survive"
+        );
+        assert_eq!(
+            remaining[1],
+            alt_cost_permission(Some(Duration::UntilHostLeavesPlay), None),
+            "a grant with no recorded host must survive — there is nothing to match"
+        );
+        assert_eq!(
+            remaining[2],
+            alt_cost_permission(None, Some(host)),
+            "a durationless standing grant is not this pass's business"
         );
     }
 
@@ -17492,6 +18547,7 @@ mod tests {
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
         perms.push(CastingPermission::PlayFromExile {
@@ -17508,6 +18564,7 @@ mod tests {
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
         perms.push(CastingPermission::AdventureCreature);
@@ -17518,6 +18575,82 @@ mod tests {
             state.objects[&exiled].casting_permissions.len(),
             3,
             "non-UntilEndOfTurn permissions must survive cleanup"
+        );
+    }
+
+    /// CR 514.2: arming keys on the GRANTEE, not on the player a
+    /// `PlayerScope::Controller` deadline resolves "your" against.
+    ///
+    /// Suspend Aggression prints "For each of those cards, ITS OWNER may play
+    /// it until the end of THEIR next turn", and lowers with
+    /// `PermissionGrantee::ObjectOwner`: `granted_to` is the card's owner while
+    /// `exiled_by_ability_controller` is the activator. Memory Vessel prints
+    /// the other shape — "Until YOUR next turn, players may play cards they
+    /// exiled this way" — and its `UntilNextTurnOf { Controller }` deadline is
+    /// keyed the other way round (`PermissionLifetime::keyed_player`).
+    ///
+    /// Reading the arming through the deadline's key arms the grant on the
+    /// ACTIVATOR's untap step, which extends it by a full turn cycle.
+    ///
+    /// DISCRIMINATING: both assertions are needed. The first fails if arming
+    /// keys on `exiled_by_ability_controller`; the second fails if it keys on
+    /// nothing at all.
+    #[test]
+    fn arming_keys_on_the_grantee_not_on_the_granting_ability_controller() {
+        let per_owner_grant = |state: &mut GameState, exiled| {
+            state
+                .objects
+                .get_mut(&exiled)
+                .unwrap()
+                .casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                    mode: crate::types::ability::CardPlayMode::Play,
+                    duration: Duration::UntilEndOfNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
+                    // The card's OWNER is the grantee ...
+                    granted_to: PlayerId(1),
+                    frequency: crate::types::statics::CastFrequency::Unlimited,
+                    source_id: None,
+                    invalidation: None,
+                    // ... while the ACTIVATOR granted it.
+                    exiled_by_ability_controller: Some(PlayerId(0)),
+                    mana_spend_permission: None,
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
+                    cast_cost_raise: None,
+                    alt_ability_cost: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                });
+        };
+        let armed = |state: &GameState, exiled| {
+            matches!(
+                state.objects[&exiled].casting_permissions[0],
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn,
+                    ..
+                }
+            )
+        };
+
+        let mut state = setup();
+        let exiled = make_exiled_card(&mut state, PlayerId(1));
+        per_owner_grant(&mut state, exiled);
+        prune_untap_step_casting_permissions(&mut state, PlayerId(0));
+        assert!(
+            !armed(&state, exiled),
+            "the ACTIVATOR's untap step must not arm a grant made to someone else"
+        );
+
+        let mut state = setup();
+        let exiled = make_exiled_card(&mut state, PlayerId(1));
+        per_owner_grant(&mut state, exiled);
+        prune_untap_step_casting_permissions(&mut state, PlayerId(1));
+        assert!(
+            armed(&state, exiled),
+            "the GRANTEE's untap step arms it (CR 514.2)"
         );
     }
 
@@ -17552,11 +18685,12 @@ mod tests {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
         // Untap step of the grantee's next turn: armed to UntilEndOfTurn, kept.
-        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        prune_untap_step_casting_permissions(&mut state, PlayerId(0));
         let perms = &state.objects[&exiled].casting_permissions;
         assert_eq!(
             perms.len(),
@@ -17696,11 +18830,12 @@ mod tests {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
         // Neither the grantee's untap step nor an OPPONENT's upkeep reaches it.
-        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        prune_untap_step_casting_permissions(&mut state, PlayerId(0));
         prune_upkeep_step_casting_permissions(&mut state, PlayerId(1));
         assert_eq!(
             state.objects[&exiled].casting_permissions.len(),
@@ -17847,6 +18982,7 @@ mod tests {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
         state
@@ -17870,11 +19006,12 @@ mod tests {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
         // Active player is P0 — only P0's permission should expire.
-        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        prune_untap_step_casting_permissions(&mut state, PlayerId(0));
 
         assert!(
             state.objects[&card_a].casting_permissions.is_empty(),
@@ -17910,10 +19047,11 @@ mod tests {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
 
-        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        prune_untap_step_casting_permissions(&mut state, PlayerId(0));
 
         assert_eq!(
             state.objects[&exiled].casting_permissions.len(),
@@ -18052,6 +19190,46 @@ mod tests {
             !bear_obj.has_keyword(&Keyword::Haste),
             "Without a Mountain, the compound condition fails and Haste is not granted"
         );
+    }
+
+    /// CR 113.6a + CR 604.3: a characteristic-defining ability functions in
+    /// every zone.
+    /// This exercises the shared layer-source gather directly: a Hand source
+    /// with only an empty-`active_zones` CDA must survive both the off-zone
+    /// candidate pre-check and the LiveSource per-definition admission gate.
+    #[test]
+    fn live_layer_gather_admits_characteristic_defining_static_from_hand() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Off-Zone CDA".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::SetDynamicPower {
+                        value: QuantityExpr::Fixed { value: 7 },
+                    }])
+                    .cda(),
+            );
+
+        let effects = collect_shared_active_continuous_effects(&state);
+        assert!(effects.iter().any(|effect| {
+            effect.source_id == source
+                && effect.characteristic_defining
+                && matches!(
+                    &effect.modification,
+                    ContinuousModification::SetDynamicPower { .. }
+                )
+        }));
     }
 
     /// CR 709.5 + CR 123.6c + CR 613.1c: Room door-gated naming must precede

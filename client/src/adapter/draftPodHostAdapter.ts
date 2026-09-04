@@ -123,6 +123,8 @@ export interface DraftPodHostConfig {
   persistenceId?: string;
   /** Resume from a specific room code (re-hosts on the same PeerJS ID). */
   preferredRoomCode?: string;
+  /** HTTP origin of the selected phase-server for best-effort P2P backups. */
+  backupEndpoint?: string;
   /** Abort signal for cancellation during setup. */
   signal?: AbortSignal;
 }
@@ -257,10 +259,11 @@ export class DraftPodHostAdapter {
       //    `CardFace`, so with no database draft-wasm refuses rather than
       //    shipping an unjudged deck. A Set pool for any of the four
       //    CR 905.1a kinds still reads its pool from JSON and needs no
-      //    database.
+      //    database. A Chaos pool is set-backed too: draft-wasm resolves its
+      //    private assignments from supplied pool JSON and needs no card DB.
       //
-      //    The kind gate is required, not stylistic: widening this to ALL Set
-      //    pools would turn the landed "skips the CARD_DB fetch for Set pods"
+      //    The kind gate is required, not stylistic: widening this to all
+      //    set-backed pools would turn the landed "skips the CARD_DB fetch for Set pods"
       //    row (fixture `kind: "Premier"`) red.
       if (config.poolInput.type === "Cube" || config.kind === "CommanderDraft") {
         const resp = await fetch(__CARD_DATA_URL__);
@@ -288,6 +291,7 @@ export class DraftPodHostAdapter {
         undefined, // default grace period
         config.persistenceId,
         hostResult.roomCode,
+        config.backupEndpoint,
       );
       pendingHost = host;
 

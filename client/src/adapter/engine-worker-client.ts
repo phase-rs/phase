@@ -224,6 +224,20 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
   }
 
+  /** Always-definite deck/format verdict for ENFORCING callers. See
+   *  `WasmAdapter.evaluateDeckFormatGate`. */
+  async evaluateDeckFormatGate(request: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "evaluateDeckFormatGate", request });
+  }
+
+  async customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "customFormatFromLobbyConfig", name, formatConfig });
+  }
+
+  async formatConfigForCustomRules(customRules: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "formatConfigForCustomRules", customRules });
+  }
+
   async getCardFaceData(cardName: string): Promise<unknown> {
     return this.request<unknown>({ type: "getCardFaceData", cardName });
   }

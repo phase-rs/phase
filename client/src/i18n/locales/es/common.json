@@ -5,6 +5,10 @@
     "close": "Cerrar",
     "closeNamed": "Cerrar {{name}}"
   },
+  "debug": {
+    "exportAuthoritative": "Exportar estado de juego autoritativo",
+    "exportAuthoritativeTitle": "Descarga el estado propiedad del motor que se usa para diagnosticar y restaurar esta partida"
+  },
   "quantityRef": {
     "highestNumber": "el número más alto",
     "lowestNumber": "el número más bajo",
@@ -78,7 +82,8 @@
     "clickModeButton": "Botón de modo clic",
     "shown": "Visible",
     "hidden": "Oculto",
-    "resume": "Reanudar",
+    "openGameLog": "Abrir el registro de la partida",
+    "closeGameLog": "Cerrar el registro de la partida",
     "settings": "Ajustes",
     "boardLayoutSplit": "Dividido",
     "boardLayoutLegacy": "Legacy",

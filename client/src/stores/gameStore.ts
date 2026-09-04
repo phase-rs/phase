@@ -99,6 +99,8 @@ interface GameModeTraits {
   readonly authority: EngineAuthority;
   readonly company: TableCompany;
   readonly seat: SeatSource;
+  /** Whether this client can request the unredacted state from its authority. */
+  readonly mayExportAuthoritativeState: boolean;
 }
 
 /**
@@ -113,14 +115,14 @@ interface GameModeTraits {
  * `spectate` is `remote-humans` by the *game* it observes, not by the observer.
  */
 export const GAME_MODE_TRAITS: Record<GameMode, GameModeTraits> = {
-  "ai": { authority: "client", company: "solo", seat: "seat-zero" },
-  "local": { authority: "client", company: "solo", seat: "seat-zero" },
-  "native-ai": { authority: "wire", company: "solo", seat: "seat-zero" },
-  "online": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
-  "p2p-host": { authority: "wire", company: "remote-humans", seat: "seat-zero" },
-  "p2p-join": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
-  "draft-match": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
-  "spectate": { authority: "wire", company: "remote-humans", seat: "no-seat" },
+  "ai": { authority: "client", company: "solo", seat: "seat-zero", mayExportAuthoritativeState: true },
+  "local": { authority: "client", company: "solo", seat: "seat-zero", mayExportAuthoritativeState: true },
+  "native-ai": { authority: "wire", company: "solo", seat: "seat-zero", mayExportAuthoritativeState: true },
+  "online": { authority: "wire", company: "remote-humans", seat: "wire-assigned", mayExportAuthoritativeState: false },
+  "p2p-host": { authority: "wire", company: "remote-humans", seat: "seat-zero", mayExportAuthoritativeState: true },
+  "p2p-join": { authority: "wire", company: "remote-humans", seat: "wire-assigned", mayExportAuthoritativeState: false },
+  "draft-match": { authority: "wire", company: "remote-humans", seat: "wire-assigned", mayExportAuthoritativeState: false },
+  "spectate": { authority: "wire", company: "remote-humans", seat: "no-seat", mayExportAuthoritativeState: false },
 };
 
 /** True when the authoritative engine state lives off this client — i.e. the
@@ -161,6 +163,16 @@ export function isAuthorityRemote(mode: GameMode | null): boolean {
  */
 export function hasRemoteHumans(mode: GameMode | null): boolean {
   return mode !== null && GAME_MODE_TRAITS[mode].company === "remote-humans";
+}
+
+/**
+ * Whether this client may download the engine's unredacted persistence envelope.
+ * Only the client that owns the P2P authority may export from a shared table.
+ * Guests and spectators receive redacted views, while the host's local WASM
+ * engine or native server owns the unredacted persistence envelope.
+ */
+export function canExportAuthoritativeState(mode: GameMode | null): boolean {
+  return mode !== null && GAME_MODE_TRAITS[mode].mayExportAuthoritativeState;
 }
 
 /**

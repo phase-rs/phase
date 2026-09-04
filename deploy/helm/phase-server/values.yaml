@@ -33,8 +33,8 @@ server:
   logJson: true
   rustLog: info
   # Existing Secret holding PHASE_ADMIN_TOKEN. Leave empty to keep /admin/*
-  # unmounted (404). /admin is never routed through the Ingress; reach it with
-  # `kubectl port-forward svc/<release> 9374`.
+  # unmounted (404). /admin is never routed through the Ingress, with or without
+  # the SPA; reach it with `kubectl port-forward svc/<release> 9374`.
   adminTokenSecret: ""
   adminTokenSecretKey: token
   # Per-process admission caps (PHASE_MAX_CONNECTIONS / PHASE_MAX_GAMES). Empty
@@ -51,6 +51,107 @@ persistence:
   size: 2Gi
   storageClass: ""     # "" = cluster default
   existingClaim: ""
+
+# PHASE_LOG_DIR: main log (phase-server.log) + one file pair per game
+# (games/<code>.*) for diagnosis. Off by default — nothing writes here until
+# enabled. `dir` must be a subdirectory of PHASE_DATA_DIR (/var/lib/phase-server):
+# logs land on the same per-ordinal `data` PVC already mounted, so no second or
+# shared (RWX) volume is needed.
+logging:
+  enabled: false
+  dir: /var/lib/phase-server/logs
+  # Sidecar that serves `dir` read-only for diagnosis (autoindex on). Never
+  # routed through the public Ingress or allowed by NetworkPolicy — reach it
+  # the same way as /admin: `kubectl port-forward svc/<release>[-<ordinal>]
+  # <server.port>` (see README).
+  server:
+    image:
+      repository: nginxinc/nginx-unprivileged
+      tag: 1.27-alpine
+      # Multi-arch index digest for the tag above, pinned so a registry-side
+      # retag can't change what's pulled without a reviewed values.yaml change.
+      # Re-resolve with: docker buildx imagetools inspect nginxinc/nginx-unprivileged:<tag>
+      digest: sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
+    # The image's own non-root uid/gid; change together if you swap the image.
+    runAsUser: 101
+    runAsGroup: 101
+    port: 8080
+    resources:
+      requests: { cpu: 5m, memory: 8Mi }
+      limits: { memory: 32Mi }
+
+# Serve the phase web client (the SPA) from this release, so one install is a
+# complete site: frontend on `/`, game server on /ws. Off by default — with
+# `enabled: false` this chart renders exactly as it did before the feature.
+#
+# The SPA is a container image holding a prebuilt `client/dist`; nginx.conf and
+# config.js come from a ConfigMap, not the image, so the config stays generic
+# across whatever `web.image.repository` is set to (same reasoning as the logs
+# sidecar). Build one with `scripts/build-selfhost-web.sh` + `web/Dockerfile`.
+#
+# AVAILABILITY COUPLING, deliberate and worth knowing before you enable it: the
+# SPA runs as a sidecar in the game server's pod, so an unpullable or
+# crashlooping web image makes the whole pod NotReady and drops it from the
+# Service — taking /ws and /health down with it, on every ordinal at once under
+# podManagementPolicy: Parallel. `enabled: false` is the rollback lever. Pinning
+# `digest` keeps that risk at deploy time rather than runtime.
+web:
+  enabled: false
+  image:
+    repository: ghcr.io/phase-rs/phase-web
+    # An immutable reference is required: set `digest`, or affirm mutability
+    # with `followServerTag: true`. The render fails if you do neither, so
+    # enabling the SPA cannot silently add a mutable pull to the pod that
+    # serves /ws — a tag that moves under you takes the game server down with
+    # the site, since both are containers in one pod.
+    digest: ""          # sha256:... — the default, and the immutable choice
+    # Affirmative opt-in to a mutable tag that tracks the server image.
+    # Choose this when something bumps `image.tag` for you (a release
+    # automation, a GitOps sync) and you want the SPA to move with it: the tag
+    # falls back through image.tag to "v<Chart.appVersion>", so the SPA and the
+    # server resolve to the same version by construction rather than by an
+    # operator remembering. They must stay within one protocol-version step of
+    # each other — a client accepts only [PROTOCOL_VERSION-1, PROTOCOL_VERSION]
+    # and the server advertises one number blind in an unprompted ServerHello —
+    # so a pinned digest that outlives two releases is a site that loads and
+    # then cannot connect. Mutually exclusive with `digest` and with `tag`:
+    # either would win over the tracking you asked for.
+    #
+    # Requires image.tag to be set; the render fails otherwise. With image.tag
+    # empty the tag falls back to "v<Chart.appVersion>", a constant this chart
+    # carries rather than the release you are deploying, and no phase-web image
+    # is published for releases older than the job that publishes it — so
+    # "tracking" would name an image that never existed.
+    followServerTag: false
+    # Pin one specific tag. Requires `digest` (a tag alone is mutable) and
+    # cannot be combined with `followServerTag`.
+    tag: ""
+  server:
+    # The image's own non-root uid/gid; change together if you swap the image.
+    runAsUser: 101
+    runAsGroup: 101
+    # Must differ from service.port, metrics.port and logging.server.port: they
+    # are listeners in one pod network namespace. >1024 because the image runs
+    # unprivileged. Unlike the logs sidecar this one binds 0.0.0.0 — it is the
+    # public site, not an operator-only autoindex.
+    port: 8081
+    resources:
+      requests: { cpu: 10m, memory: 16Mi }
+      limits: { memory: 64Mi }
+  # Where the SPA sends players by default, as a wss:// URL. Rendered into
+  # /config.js and read at runtime, so one generic image serves every
+  # deployment without a rebuild. Empty = leave the image's build-time default
+  # (the official lobby, which brokers browser-hosted P2P games). Set this to
+  # this release's own public /ws endpoint to make server-run games the default.
+  defaultMultiplayerServerUrl: ""
+  # Traefik rate limiting for the SPA route. The game API's limiter is sized for
+  # API calls (20 req/s), and a cold SPA load is tens of asset requests at once,
+  # so the web route deliberately does not share that bucket. Leave disabled
+  # unless you want asset-burst limits of your own.
+  rateLimit:
+    enabled: false
+    average: 200
+    burst: 400
 
 resources:
   requests:
@@ -93,7 +194,7 @@ ingress:
   enabled: true
   className: traefik
   host: phase.example.com
-  # Only /ws, /health and /p2p-draft-backup are routed; /admin never is.
+  # Only /ws, /health, /info and /p2p-draft-backup are routed; /admin never is.
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
@@ -131,6 +232,15 @@ traefik:
         burst: 10
     headers:
       stsSeconds: 31536000
+    # gzip/br/zstd response compression (Traefik picks by Accept-Encoding).
+    # Applied to every routed path EXCEPT /ws (see
+    # phase-server.commonMiddlewares / phase-server.middlewareRefs in
+    # _helpers.tpl): a WebSocket upgrade's 101 response carries no body to
+    # compress, so this mirrors the split crates/phase-server/src/main.rs
+    # makes for CompressionLayer, keeping /ws off both layers' compression
+    # for the same reason.
+    compress:
+      minResponseBodyBytes: 1024
     # Middleware names (namespace-name@kubernetescrd) appended to all routes.
     extra: []
 

@@ -8,6 +8,23 @@ import type {
 import { dispatchActionForGameSession } from "../game/dispatch";
 import { useGameStore } from "../stores/gameStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
+import { useUiStore } from "../stores/uiStore";
+
+/**
+ * The mode the engine must hold for this player.
+ *
+ * CR 117.1: Full Control is a standing refusal to give up any priority window,
+ * so it has to be engine state, not a frontend flag. An auto-pass session
+ * another player installed (Resolve All) is driven inside the engine's own
+ * priority loop and never consults a client, so a purely local toggle could not
+ * stop it. It stays a per-session `uiStore` toggle in the UI — this only
+ * projects it onto the synced preference while it is on.
+ */
+function effectivePriorityPassingMode(): PriorityPassingMode {
+  return useUiStore.getState().fullControl
+    ? "FullControl"
+    : usePreferencesStore.getState().priorityPassingMode;
+}
 
 type LastSent = {
   adapter: EngineAdapter;
@@ -62,7 +79,8 @@ async function drainGameplayPreferenceSync(): Promise<void> {
       } = useGameStore.getState();
       if (!adapter || !gameState) continue;
 
-      const { phaseStops: stops, priorityPassingMode: mode } = usePreferencesStore.getState();
+      const stops = usePreferencesStore.getState().phaseStops;
+      const mode = effectivePriorityPassingMode();
       const sent = successfulSendFor(adapter, generation);
 
       if (!sent.stops || !phaseStopsEqual(sent.stops, stops)) {
@@ -95,7 +113,7 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         continue;
       }
 
-      const currentMode = usePreferencesStore.getState().priorityPassingMode;
+      const currentMode = effectivePriorityPassingMode();
       if (currentMode !== mode) {
         syncRequested = true;
         continue;
@@ -116,7 +134,7 @@ async function drainGameplayPreferenceSync(): Promise<void> {
 
         if (
           isCurrentSession(adapter, generation)
-          && usePreferencesStore.getState().priorityPassingMode === mode
+          && effectivePriorityPassingMode() === mode
         ) {
           lastSent = { ...successfulSendFor(adapter, generation), mode };
         } else {
@@ -152,10 +170,23 @@ export function useGameplayPreferencesSync(): void {
       { fireImmediately: true },
     );
     const unsubPreferences = usePreferencesStore.subscribe(sendGameplayPreferences);
+    // Full Control lives in `uiStore` (a per-session toggle, not a persisted
+    // preference), so it needs its own subscription to reach the engine.
+    // `uiStore` is a plain zustand store with no `subscribeWithSelector`
+    // middleware, so the selector overload is unavailable — hence the explicit
+    // previous-value guard, which also keeps unrelated UI state changes from
+    // re-dispatching the preference.
+    let lastFullControl = useUiStore.getState().fullControl;
+    const unsubFullControl = useUiStore.subscribe((state) => {
+      if (state.fullControl === lastFullControl) return;
+      lastFullControl = state.fullControl;
+      sendGameplayPreferences();
+    });
 
     return () => {
       unsubGame();
       unsubPreferences();
+      unsubFullControl();
     };
   }, []);
 }

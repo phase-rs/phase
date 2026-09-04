@@ -9,6 +9,7 @@ import {
   useGameStore,
 } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { useUiStore } from "../../stores/uiStore";
 
 vi.mock("../../game/dispatch", () => ({ dispatchActionForGameSession: vi.fn() }));
 
@@ -28,6 +29,7 @@ describe("useGameplayPreferencesSync", () => {
       engineCommitEpoch: 0,
       gameSessionGeneration: nextGameSessionGeneration(),
     });
+    useUiStore.setState({ fullControl: false });
   });
 
   afterEach(() => cleanup());
@@ -119,5 +121,42 @@ describe("useGameplayPreferencesSync", () => {
 
     act(() => usePreferencesStore.getState().setPhaseStops([]));
     await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
+  });
+
+  it("overrides the synced mode while Full Control is on, and restores it when off", async () => {
+    useGameStore.setState({ adapter, gameState, engineCommitEpoch: 1 });
+    renderHook(() => useGameplayPreferencesSync());
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2));
+    expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+      { type: "SetPriorityPassingMode", data: { mode: "Standard" } },
+      adapter,
+      expect.any(Number),
+    );
+
+    // Full Control lives in `uiStore`, not `preferencesStore`, so it reaches the
+    // engine only through its own subscription.
+    act(() => useUiStore.getState().toggleFullControl());
+    await waitFor(() => {
+      expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+        { type: "SetPriorityPassingMode", data: { mode: "FullControl" } },
+        adapter,
+        expect.any(Number),
+      );
+    });
+
+    // An unrelated `uiStore` write must not re-dispatch: the subscription is a
+    // plain (non-selector) one guarded on the previous `fullControl` value.
+    const callsAfterOverride = vi.mocked(dispatchActionForGameSession).mock.calls.length;
+    act(() => useUiStore.setState({ selectedCardIds: [] }));
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(callsAfterOverride);
+
+    act(() => useUiStore.getState().toggleFullControl());
+    await waitFor(() => {
+      expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+        { type: "SetPriorityPassingMode", data: { mode: "Standard" } },
+        adapter,
+        expect.any(Number),
+      );
+    });
   });
 });

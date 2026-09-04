@@ -43,6 +43,12 @@ interface SetSelectorProps {
   /** Sealed events must name exactly `defaultPackCount` boosters. */
   fixedPackCount?: boolean;
   /**
+   * Select a distinct candidate pool rather than an ordered booster lineup.
+   * Chaos assignment is resolved by the host engine; this component only
+   * collects the candidate set intent.
+   */
+  candidatePool?: boolean;
+  /**
    * Text on the start button. Defaults to "Start Draft"; Sealed passes its own
    * word, since the same selector runs both events.
    */
@@ -95,6 +101,7 @@ export function SetSelector({
   onStartDraft,
   defaultPackCount,
   fixedPackCount = false,
+  candidatePool = false,
   startLabel,
   singleSet = false,
 }: SetSelectorProps) {
@@ -154,8 +161,13 @@ export function SetSelector({
   // can open. This also applies to flexible drafts: a short list repeats its
   // last set, but a longer list is rejected by the selection authority.
   useEffect(() => {
-    setPacks((current) => current.slice(0, defaultPackCount));
-  }, [defaultPackCount]);
+    setPacks((current) => {
+      if (!candidatePool) return current.slice(0, defaultPackCount);
+      return current.filter(
+        (pack, index) => current.findIndex((candidate) => candidate.code === pack.code) === index,
+      );
+    });
+  }, [candidatePool, defaultPackCount]);
 
   // The pack list grows and shrinks above the set grid; keep the grid still.
   const packListRef = useRef<HTMLDivElement | null>(null);
@@ -167,18 +179,21 @@ export function SetSelector({
   // selection that cannot start. Naming FEWER is fine: a short sequence repeats
   // its last entry, which is how one click still fills every pack.
   const packLimit = defaultPackCount;
-  const isFull = !singleSet && packs.length >= packLimit;
-  const canStart = fixedPackCount ? packs.length === defaultPackCount : packs.length > 0;
+  const isFull = !singleSet && !candidatePool && packs.length >= packLimit;
+  const canStart = !candidatePool && fixedPackCount
+    ? packs.length === defaultPackCount
+    : packs.length > 0;
 
   const appendPack = useCallback(
     (set: AvailableSet) => {
       setPacks((current) =>
-        current.length >= packLimit
+        (!candidatePool && current.length >= packLimit)
+          || (candidatePool && current.some((pack) => pack.code === set.code))
           ? current
           : [...current, { code: set.code, name: set.name }],
       );
     },
-    [packLimit],
+    [candidatePool, packLimit],
   );
 
   /**
@@ -219,6 +234,7 @@ export function SetSelector({
           packs={packs}
           packLimit={packLimit}
           fixedPackCount={fixedPackCount}
+          candidatePool={candidatePool}
           defaultPackCount={defaultPackCount}
           canStart={canStart}
           startLabel={startLabel ?? t("setSelector.startDraft")}
@@ -234,10 +250,12 @@ export function SetSelector({
       <div className="flex flex-col gap-2">
         <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
           {singleSet
-            ? t("setSelector.chooseSet")
+          ? t("setSelector.chooseSet")
             : isFull
               ? t("setSelector.packsFull")
-              : t("setSelector.addPackFromSet")}
+              : candidatePool
+                ? t("setSelector.addCandidateSet")
+                : t("setSelector.addPackFromSet")}
         </h3>
 
         {error && (
@@ -273,7 +291,9 @@ export function SetSelector({
                     disabled={isFull}
                     label={singleSet
                       ? t("setSelector.draftSet", { name: set.name })
-                      : t("setSelector.addPackOf", { name: set.name })}
+                      : candidatePool
+                        ? t("setSelector.addCandidate", { name: set.name })
+                        : t("setSelector.addPackOf", { name: set.name })}
                     onAdd={() =>
                       singleSet
                         ? onStartDraft([{ code: set.code, name: set.name }])
@@ -295,6 +315,7 @@ function PackList({
   packs,
   packLimit,
   fixedPackCount,
+  candidatePool,
   defaultPackCount,
   canStart,
   startLabel,
@@ -308,6 +329,7 @@ function PackList({
   packs: DraftPackChoice[];
   packLimit: number;
   fixedPackCount: boolean;
+  candidatePool: boolean;
   defaultPackCount: number;
   canStart: boolean;
   startLabel: string;
@@ -326,7 +348,7 @@ function PackList({
     <div ref={containerRef} className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-          {t("setSelector.packOrder")}
+          {candidatePool ? t("setSelector.candidateSets") : t("setSelector.packOrder")}
         </h3>
         <div className="flex items-center gap-2">
           {packs.length > 0 && (
@@ -351,7 +373,9 @@ function PackList({
 
       {packs.length === 0 ? (
         <p className="rounded-[16px] border border-dashed border-white/10 bg-black/12 px-4 py-5 text-sm text-white/40">
-          {fixedPackCount
+          {candidatePool
+            ? t("setSelector.emptyCandidates")
+            : fixedPackCount
             ? t("setSelector.emptyPacksFixed", { count: defaultPackCount })
             : t("setSelector.emptyPacks", { count: defaultPackCount })}
         </p>
@@ -372,34 +396,38 @@ function PackList({
                 {pack.code}
               </span>
               <div className="flex shrink-0 items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => onMove(index, -1)}
-                  disabled={index === 0}
-                  aria-label={t("setSelector.movePackEarlier", { number: index + 1 })}
-                  className={menuButtonClass({
-                    tone: "neutral",
-                    size: "icon",
-                    ghost: true,
-                    disabled: index === 0,
-                  })}
-                >
-                  ↑
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onMove(index, 1)}
-                  disabled={index === packs.length - 1}
-                  aria-label={t("setSelector.movePackLater", { number: index + 1 })}
-                  className={menuButtonClass({
-                    tone: "neutral",
-                    size: "icon",
-                    ghost: true,
-                    disabled: index === packs.length - 1,
-                  })}
-                >
-                  ↓
-                </button>
+                {!candidatePool && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => onMove(index, -1)}
+                      disabled={index === 0}
+                      aria-label={t("setSelector.movePackEarlier", { number: index + 1 })}
+                      className={menuButtonClass({
+                        tone: "neutral",
+                        size: "icon",
+                        ghost: true,
+                        disabled: index === 0,
+                      })}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onMove(index, 1)}
+                      disabled={index === packs.length - 1}
+                      aria-label={t("setSelector.movePackLater", { number: index + 1 })}
+                      className={menuButtonClass({
+                        tone: "neutral",
+                        size: "icon",
+                        ghost: true,
+                        disabled: index === packs.length - 1,
+                      })}
+                    >
+                      ↓
+                    </button>
+                  </>
+                )}
                 <button
                   type="button"
                   onClick={() => onRemove(index)}
@@ -414,7 +442,7 @@ function PackList({
         </ol>
       )}
 
-      {lastPack && remaining > 0 && (
+      {!candidatePool && lastPack && remaining > 0 && (
         <button
           type="button"
           onClick={onFillRemaining}
@@ -433,7 +461,9 @@ function PackList({
       )}
 
       <p className="text-xs text-white/35">
-        {fixedPackCount
+        {candidatePool
+          ? t("setSelector.candidateCount", { selected: packs.length })
+          : fixedPackCount
           ? t("setSelector.packCountFixed", {
               selected: packs.length,
               required: defaultPackCount,

@@ -99,15 +99,15 @@ jobs:
       draft_pools_hash16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
       engine_fingerprint: ${{ steps.engine-fingerprint.outputs.fingerprint }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache-shared-key: rust-tool
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -142,7 +142,7 @@ jobs:
         # missing); a restore-keys fallback would pin the file-existence-gated
         # fetches to stale data forever.
         id: mtgjson-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: data/mtgjson
           key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
@@ -211,7 +211,7 @@ jobs:
         # "the data is whole" gate. cache-hit gating skips a redundant save,
         # which would otherwise just warn that the key already exists.
         if: ${{ steps.mtgjson-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: data/mtgjson
           key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
@@ -230,7 +230,7 @@ jobs:
         # NO restore-keys: every input to the output is in the key, so an
         # inexact hit is by construction a stale pool.
         id: draft-pools-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: client/public/draft-pools.json
           key: mtgjson-draft-pools-${{ steps.mtgjson-key.outputs.draft_pools_suffix }}
@@ -267,7 +267,7 @@ jobs:
         # file-existence-gated, so the next run fetches only the sets that are
         # still missing and regenerates a complete pool.
         if: ${{ steps.draft-pools-cache.outputs.cache-hit != 'true' && steps.draft-sets.outputs.failed == '0' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: client/public/draft-pools.json
           key: mtgjson-draft-pools-${{ steps.mtgjson-key.outputs.draft_pools_suffix }}
@@ -313,7 +313,7 @@ jobs:
         # The publication job runs on a fresh runner. Transfer only its
         # generated inputs so the preview-server matrix can overlap Scryfall,
         # audit, compression, and R2 work instead of re-generating card data.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: preview-inputs
           path: |
@@ -344,15 +344,15 @@ jobs:
       actions: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache-shared-key: rust-tool
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -365,13 +365,13 @@ jobs:
         # Exact-key-only: the generators skip downloads for existing files, so
         # a stale restore-key hit would pin the staging payload to old data.
         id: scryfall-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: data/scryfall
           key: scryfall-${{ steps.cache-keys.outputs.day }}
 
       - name: Download preview inputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: preview-inputs
 
@@ -412,7 +412,7 @@ jobs:
         # NO restore-keys: every input to the output is in the key, so an
         # inexact hit is by construction a stale map.
         id: locale-images-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: client/public/scryfall-images.v2.*.json
           key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
@@ -432,7 +432,7 @@ jobs:
         # Banked the moment the maps exist, so the AllSetFiles download is never
         # paid twice for the same inputs even if a later step fails.
         if: ${{ steps.locale-images-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: client/public/scryfall-images.v2.*.json
           key: mtgjson-locale-images-v2-${{ steps.mtgjson-key.outputs.suffix }}-${{ steps.cache-keys.outputs.day }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
@@ -442,7 +442,7 @@ jobs:
         # it here keeps a later failure from re-hitting the Scryfall API on the
         # next run — the throttle flakiness this cache exists to avoid.
         if: ${{ steps.scryfall-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: data/scryfall
           key: scryfall-${{ steps.cache-keys.outputs.day }}
@@ -566,11 +566,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
@@ -581,7 +581,7 @@ jobs:
           # authoritative.
           rustflags: ""
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: wasm-bindgen-cli@0.2.121
 
@@ -591,7 +591,7 @@ jobs:
       # build-wasm.sh's assert_wasm_stack guard parses the shipped wasm's memory
       # section with node; declare the dependency explicitly (release.yml already
       # sets up node for its build-wasm job).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -599,7 +599,7 @@ jobs:
         run: ./scripts/build-wasm.sh release
 
       - name: Upload WASM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm
           path: client/src/wasm/*
@@ -640,11 +640,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
@@ -653,7 +653,7 @@ jobs:
           # RUSTFLAGS would override them.
           rustflags: ""
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           # Must match the pinned wasm-bindgen crate version in
           # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
@@ -663,7 +663,7 @@ jobs:
         uses: ./.github/actions/binaryen
 
       - name: Deploy preview lobby Worker
-        uses: cloudflare/wrangler-action@v4
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -724,21 +724,21 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
       - name: Download WASM artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: wasm
           path: client/src/wasm
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -855,16 +855,16 @@ jobs:
         run: cp client/dist/index.html client/dist/404.html
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: client/dist
 
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
 
   # ── Server binary compile (parallel with card-data) ─────────────────────────
   # phase-server is compiled NATIVELY as a static musl binary, then uploaded as
@@ -896,11 +896,11 @@ jobs:
             triple: aarch64-unknown-linux-musl
             cargo_cmd: zigbuild
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache-shared-key: rust-server-${{ matrix.arch }}
 
@@ -938,7 +938,7 @@ jobs:
           cp target/${{ matrix.triple }}/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: server-binary-${{ matrix.arch }}
           path: phase-server
@@ -966,12 +966,12 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
       - name: Download server binary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: server-binary-*
           path: prebuilt
@@ -990,7 +990,7 @@ jobs:
         run: echo "short_sha=${DEPLOY_SHA::12}" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -998,16 +998,16 @@ jobs:
 
       # QEMU only runs the runtime stage's apt-get for the arm64 leg; the
       # binaries are prebuilt, so nothing heavy is emulated.
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
         with:
           platforms: arm64
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build and push preview image
         # BINARY_STAGE=prebuilt makes Docker copy the prebuilt musl binaries
         # instead of compiling in-container — the build is just apt + COPY.
         # One manifest list covers both platforms under the same tag/digest.
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64

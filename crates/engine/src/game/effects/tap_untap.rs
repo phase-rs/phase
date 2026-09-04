@@ -366,6 +366,7 @@ fn prompt_resolution_tap_untap_choice(
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
         // Tap/untap selection performs no zone move, so no bounded-move
@@ -1549,6 +1550,110 @@ mod tests {
         );
     }
 
+    /// CR 611.2b presence sibling: Somnophore's untap lock states the
+    /// PRESENCE wording — "doesn't untap during its controller's untap step
+    /// for as long as Somnophore remains on the battlefield" — which lowers to
+    /// a `GenericEffect` transient carrying `WhileHostOnBattlefield` since the
+    /// second wording split. This is the PARITY pin for that split's shared
+    /// exit leg: the new variant must keep ending on the host's actual
+    /// battlefield exit exactly as the conflated variant did, or the split
+    /// strands every presence-bound untap lock forever.
+    ///
+    /// Revert-probe: dropping `WhileHostOnBattlefield` from
+    /// `Duration::ends_when_host_leaves_play`'s true arm leaves the transient
+    /// un-pruned at the exit — the final "untaps once Somnophore is gone"
+    /// assertion FAILS. The tapped assertions before it guard against the
+    /// vacuous opposite (no lock installed at all). The phase-out leg of the
+    /// same class is pinned by
+    /// `a_phased_out_host_ends_the_presence_effect_and_spares_the_event_deadline`.
+    #[test]
+    fn somnophore_untap_lock_keeps_its_gate_under_the_presence_wording() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::turns::execute_untap;
+
+        let mut state = GameState::new_two_player(42);
+        let somnophore = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Somnophore".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&somnophore)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let foe_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opposing Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&foe_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Flying\nWhenever Somnophore deals damage to a player, tap target \
+             creature that player controls. That creature doesn't untap during \
+             its controller's untap step for as long as Somnophore remains on \
+             the battlefield.",
+            "Somnophore",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Illusion".to_string()],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .expect("Somnophore must parse a damage trigger")
+            .execute
+            .as_deref()
+            .expect("the trigger must carry an effect chain");
+
+        let resolved = build_resolved_from_def_with_targets(
+            execute,
+            somnophore,
+            PlayerId(0),
+            vec![TargetRef::Object(foe_creature)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "reach-guard: the trigger must tap the chosen creature"
+        );
+
+        // The lock holds through its controller's untap step while Somnophore
+        // is on the battlefield.
+        state.active_player = PlayerId(1);
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "the creature must stay tapped while Somnophore remains on the battlefield"
+        );
+
+        // CR 611.2b: once Somnophore leaves the battlefield, the stated
+        // lifetime is over and the next untap step unlocks the creature.
+        crate::game::zones::move_to_zone(&mut state, somnophore, Zone::Graveyard, &mut Vec::new());
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "the lock must lapse once Somnophore has left the battlefield"
+        );
+    }
+
     /// CR 611.2b control-swap sibling: the duration ends on a control CHANGE of
     /// Spider-Woman, not only when it leaves play (the Master Thief reading).
     /// Reverting the `ControllerControlsSource` controller comparison to read the
@@ -2126,6 +2231,238 @@ mod tests {
             values.replacement_definitions.contains(&printed_rider),
             "CR 707.2: a printed (non-gated) replacement IS a copiable value — the \
              filter must be selective, not a blanket drop"
+        );
+    }
+    /// CR 611.2a at the install seam, both halves of the refusal.
+    ///
+    /// **Which durations the seam represents.** Only
+    /// `Duration::WhileControllingHost` has an enforceable lifetime here: the
+    /// gate it promises is `ReplacementCondition::ControllerControlsSource`,
+    /// which ends on a control change. The presence reading
+    /// (`WhileHostOnBattlefield`) and the event deadline
+    /// (`UntilHostLeavesPlay`) both SURVIVE a control change while their source
+    /// stays on the battlefield, so wearing that gate would end them early —
+    /// a window shorter than printed, which CR 611.2a forbids exactly as much
+    /// as a longer one. Both therefore classify `Unsupported` and are refused,
+    /// on every replacement form including the bare untap rider.
+    ///
+    /// **How the refusal is delivered.** As a hard `EffectError`, not a
+    /// successful no-op. The previous revision returned `None` here and every
+    /// resolver arm turned that into `Ok(())` / `continue`, so a printed
+    /// replacement resolved into nothing while the card reported as supported.
+    /// The `unwrap_err` assertions below are the pin against that regressing:
+    /// an `unwrap()` here would pass again the moment the seam goes quiet.
+    ///
+    /// All three call sites of `replacement_with_ability_expiry` are driven
+    /// (floating `TargetFilter::None`, object target, player target), through
+    /// the production resolver `add_target_replacement::resolve`.
+    ///
+    /// REVERT-PROBES (measured, see the PR table): mapping the two non-control
+    /// durations back onto `GateControlled` reds the bare-untap-rider block;
+    /// restoring `Ok(())`/`continue` in the resolver arms reds every
+    /// `unwrap_err`; dropping the `host_gate_enforceable` check reds the
+    /// non-untap block. The positive control (control wording, bare untap
+    /// rider, installs WITH the gate) guards against a vacuous "refuses
+    /// everything".
+    #[test]
+    fn host_duration_on_non_untap_replacement_fails_closed() {
+        use crate::types::ability::{Duration, Effect, ReplacementCondition, ResolvedAbility};
+
+        let host_durations = [
+            Duration::WhileControllingHost,
+            Duration::UntilHostLeavesPlay,
+            Duration::WhileHostOnBattlefield,
+        ];
+
+        for duration in &host_durations {
+            let mut state = GameState::new_two_player(42);
+            let bear = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Test Bear".to_string(),
+                Zone::Battlefield,
+            );
+
+            // A `Moved` rider with NO parser-stamped expiry: exactly the shape
+            // that would install lifetime-less under the reverted arm.
+            let rider = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::Moved,
+            )
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Graveyard);
+            let mut install = ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(rider),
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Object(bear)],
+                ObjectId(0),
+                PlayerId(0),
+            );
+            install.duration = Some(duration.clone());
+            crate::game::effects::add_target_replacement::resolve(
+                &mut state,
+                &install,
+                &mut Vec::new(),
+            )
+            .expect_err(
+                "an unenforceable host-bound duration must FAIL the resolution, \
+                 not succeed with no effect",
+            );
+            assert_eq!(
+                state.objects[&bear]
+                    .replacement_definitions
+                    .iter_all()
+                    .count(),
+                0,
+                "{duration:?}: an unenforceable host-bound duration must refuse the install"
+            );
+            assert!(
+                state.objects[&bear].base_replacement_definitions.is_empty(),
+                "{duration:?}: nothing may reach the base store either"
+            );
+
+            // Floating (`TargetFilter::None`) path — same seam, other call site.
+            let floating = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::DamageDone,
+            );
+            let mut float_install = ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(floating),
+                    target: TargetFilter::None,
+                },
+                vec![],
+                ObjectId(0),
+                PlayerId(0),
+            );
+            float_install.duration = Some(duration.clone());
+            crate::game::effects::add_target_replacement::resolve(
+                &mut state,
+                &float_install,
+                &mut Vec::new(),
+            )
+            .expect_err("the floating call site must fail loudly too");
+            assert!(
+                state.pending_damage_replacements.is_empty(),
+                "{duration:?}: a floating rider with an unenforceable host-bound \
+                 duration must not reach pending_damage_replacements"
+            );
+
+            // Player-target path — the third call site of the same seam.
+            let player_rider = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::DamageDone,
+            );
+            let mut player_install = ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(player_rider),
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(0),
+                PlayerId(0),
+            );
+            player_install.duration = Some(duration.clone());
+            crate::game::effects::add_target_replacement::resolve(
+                &mut state,
+                &player_install,
+                &mut Vec::new(),
+            )
+            .expect_err("the player-target call site must fail loudly too");
+            assert!(
+                state.pending_damage_replacements.is_empty(),
+                "{duration:?}: a player-target rider with an unenforceable \
+                 host-bound duration must not reach pending_damage_replacements"
+            );
+        }
+
+        // CR 611.2a, the duration axis on its own: the bare untap rider — the
+        // ONE form the control gate can carry — is still refused under the two
+        // NON-control host wordings, because the gate would end them at a
+        // control change they are printed to survive.
+        for duration in [
+            Duration::UntilHostLeavesPlay,
+            Duration::WhileHostOnBattlefield,
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let bear = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Test Bear".to_string(),
+                Zone::Battlefield,
+            );
+            let untap_rider = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::Untap,
+            );
+            let mut install = ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(untap_rider),
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Object(bear)],
+                ObjectId(0),
+                PlayerId(0),
+            );
+            install.duration = Some(duration.clone());
+            crate::game::effects::add_target_replacement::resolve(
+                &mut state,
+                &install,
+                &mut Vec::new(),
+            )
+            .expect_err("a non-control host wording must not be admitted through the CONTROL gate");
+            assert_eq!(
+                state.objects[&bear]
+                    .replacement_definitions
+                    .iter_all()
+                    .count(),
+                0,
+                "{duration:?}: the bare untap rider must not install under a \
+                 non-control host wording"
+            );
+        }
+
+        // Positive control: the bare untap-prevention rider under the CONTROL
+        // wording installs, carrying the control gate (not refused).
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let untap_rider = crate::types::ability::ReplacementDefinition::new(
+            crate::types::replacements::ReplacementEvent::Untap,
+        );
+        let mut install = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(untap_rider),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(bear)],
+            ObjectId(0),
+            PlayerId(0),
+        );
+        install.duration = Some(Duration::WhileControllingHost);
+        crate::game::effects::add_target_replacement::resolve(
+            &mut state,
+            &install,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let defs: Vec<_> = state.objects[&bear]
+            .replacement_definitions
+            .iter_all()
+            .collect();
+        assert_eq!(defs.len(), 1, "the bare untap rider must still install");
+        assert!(
+            matches!(
+                defs[0].condition,
+                Some(ReplacementCondition::ControllerControlsSource { .. })
+            ),
+            "…and it must carry the control gate, proving the refusal above is \
+             the gate check, not a blanket drop"
         );
     }
 }

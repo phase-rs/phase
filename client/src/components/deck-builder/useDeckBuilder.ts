@@ -371,13 +371,18 @@ export function useDeckBuilder({
   );
   useEffect(() => {
     const names = copyLimitKey ? copyLimitKey.split("|") : [];
-    if (names.length === 0) {
+    // The engine resolves the ceiling from the whole `FormatConfig`, so an
+    // unresolved config (unknown format) leaves the map empty rather than
+    // guessing a default client-side.
+    if (names.length === 0 || !formatConfig) {
       setCopyLimits(new Map());
       return;
     }
     let cancelled = false;
     Promise.all(
-      names.map(async (name) => [name, await maxDeckCopies(name, format)] as const),
+      names.map(
+        async (name) => [name, await maxDeckCopies(name, formatConfig)] as const,
+      ),
     )
       .then((results) => {
         if (!cancelled) setCopyLimits(new Map(results));
@@ -390,7 +395,7 @@ export function useDeckBuilder({
     return () => {
       cancelled = true;
     };
-  }, [copyLimitKey, format]);
+  }, [copyLimitKey, formatConfig]);
 
   const canIncrement = useCallback(
     (name: string) => {

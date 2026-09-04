@@ -9,7 +9,7 @@ use nom::bytes::complete::take_until;
 use nom::character::complete::multispace1;
 use nom::combinator::{cut, eof, map, opt, peek, value, verify};
 use nom::multi::many0;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::bridge::nom_on_lower;
@@ -6839,19 +6839,79 @@ fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, 
     ))
 }
 
-/// CR 601.2h + CR 603.4: Intervening-if comparing mana spent on the triggering
-/// spell against this creature's power and/or toughness.
+/// CR 601.2h + CR 603.4: Intervening-if comparing the mana spent on a cast
+/// spell against the source's own power and/or toughness. Which spell that is
+/// comes from the subject's anaphora, not from a default.
 ///
-/// Recognizes "the amount of mana you spent is [comparator] this creature's
-/// power or toughness" (SOS Increment reminder text). The natural-language
+/// Two surface forms of the same sentence:
+///   * "the amount of mana you spent is …" — the SOS Increment reminder text,
+///     whose subject is always the triggering spell.
+///   * "the amount of mana spent to cast <anaphora> is …" — the printed
+///     wording that predates the keyword (Liberator, Urza's Battlethopter).
+///     Which spell that names is read through the shared
+///     `parse_mana_spent_self_subject` authority every mana-spent sibling in
+///     this module already consults, so "that spell" is not re-decided here.
+///     CR 400.7d is what
+///     licenses the self-anaphora arm of that authority: a permanent's ability
+///     may reference "what mana was spent to pay" the costs of the spell it
+///     was.
+///
+/// The object is "[comparator] <subject>'s power or toughness". The natural-language
 /// "or" means *either* threshold — `A > (P or T)` is satisfied when `A > P`
-/// **or** `A > T`. The "this creature's" subject, including the normalized
-/// "~'s" self-reference form, carries Increment's implicit source-is-creature
-/// intervening-if; "this permanent's" stays as a plain P/T comparison for
-/// non-Increment siblings.
+/// **or** `A > T`.
+///
+/// Whether a source-is-creature conjunct is added is decided by the SUBJECT,
+/// because the object phrase cannot decide it. `oracle_util::normalize_card_name_refs`
+/// rewrites BOTH a card's own printed name and "this creature" to `~` — the
+/// name via `replace_all_words`, the phrase via `SELF_REF_TYPE_PHRASES` — so
+/// `~'s` arrives from Increment's reminder and from Liberator, Urza's
+/// Battlethopter alike. The subject keeps them apart:
+///
+///   * "the amount of mana you spent" is the printed REMINDER of Increment. The
+///     reminder drops the clause CR 702.191a's rules text carries ("'Increment'
+///     means 'Whenever you cast a spell, IF THIS PERMANENT IS A CREATURE AND the
+///     amount of mana spent to cast that spell is greater than this creature's
+///     power …'"), so reinstating it here is that keyword clause. It gates.
+///   * "the amount of mana spent to cast &lt;anaphora&gt;" is a card spelling the
+///     sentence out itself. Liberator prints no creature clause and must not be
+///     given one. CR 208.3 ("A noncreature permanent has no power or
+///     toughness…") with CR 107.2 ("If anything needs to use a number that can't
+///     be determined … it uses 0 instead") says such a permanent compares
+///     against 0 — the ability still triggers. This engine reports a
+///     noncreature's power as its printed value instead, an engine-level CR
+///     208.3 gap tracked separately, not a parser one.
+///
+/// The explicit "this creature's" / "this permanent's" object arms are kept and
+/// stay pinned, but no production path was found that reaches this parser with
+/// either phrase intact — normalization rewrites both unconditionally.
+///
+/// One divergence, deliberate and unreachable today: the subject anaphora is
+/// read by `parse_mana_spent_self_subject`, which maps "this spell"/"it" to
+/// `SelfObject`, while `try_extract_mana_spent_comparison_condition`
+/// (`oracle_trigger.rs`) states the opposite for its own sentence in the same
+/// position. Neither ever ACCEPTS the other's input — that one requires a
+/// `" its mana value"` tail this one cannot produce, and it already sees and
+/// rejects Liberator's clause — and no corpus face writes this sentence with a
+/// self-anaphora. Consulting the shared authority is still the right call:
+/// re-deciding the mapping here is exactly the hand-typed list this parser
+/// avoids elsewhere.
 fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticCondition> {
-    // Subject: "the amount of mana you spent is "
-    let (rest, _) = tag("the amount of mana you spent is ").parse(input)?;
+    // Subject, and with it the spell whose payment is measured.
+    let (rest, (scope, is_increment_reminder)) = alt((
+        value(
+            (CastManaObjectScope::TriggeringSpell, true),
+            tag("the amount of mana you spent is "),
+        ),
+        map(
+            delimited(
+                tag("the amount of mana spent to cast "),
+                nom_quantity::parse_mana_spent_self_subject,
+                tag(" is "),
+            ),
+            |scope| (scope, false),
+        ),
+    ))
+    .parse(input)?;
     // Comparator: "greater than " / "less than " / "equal to "
     let (rest, comparator) = alt((
         value(Comparator::GT, tag("greater than ")),
@@ -6863,7 +6923,13 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
     let (rest, requires_creature_source) = alt((
         value(true, tag("this creature's ")),
         value(false, tag("this permanent's ")),
-        value(true, tag("~'s ")),
+        // `oracle_util::normalize_card_name_refs` collapses BOTH "this creature"
+        // and the card's own printed name to `~`, so this arm alone cannot tell
+        // Increment's reminder from a card that writes its own name. The subject
+        // can: the reminder's subject reaches a card only from the Increment
+        // keyword, a spelled-out subject is the card writing its own sentence,
+        // and only the keyword carries CR 702.191a's creature clause.
+        value(is_increment_reminder, tag("~'s ")),
     ))
     .parse(rest)?;
     let (rest, first) = alt((
@@ -6903,9 +6969,10 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
 
     let lhs = QuantityExpr::Ref {
         qty: QuantityRef::ManaSpentToCast {
-            // "the amount of mana you spent" is the triggering-spell intervening-if
-            // (SOS Increment); the trigger event is in scope at evaluation time.
-            scope: CastManaObjectScope::TriggeringSpell,
+            // The subject above already decided this: the reminder text's
+            // "you spent" is the triggering spell, the printed form's anaphora
+            // says so itself. The trigger event is in scope at evaluation time.
+            scope,
             metric: crate::types::ability::CastManaSpentMetric::Total,
         },
     };
@@ -9862,9 +9929,50 @@ pub fn parse_you_put_onto_battlefield_this_way_clause(
     Ok((rest, (filter, false)))
 }
 
-/// CR 603.12 + CR 701.9a: Parse "you discard [quantifier] [type] card[s] this
-/// way" — the active-voice reflexive gate created by a preceding "discard a
-/// card" instruction in the same ability (Talion's Messenger: "draw a card,
+/// CR 608.2c + CR 701.25a: Parse "you put [quantifier] [type] into your
+/// graveyard this way" — the active-voice reflexive gate created by a
+/// preceding "surveil N" instruction (Chandra, Chill of Compliance prints
+/// "Surveil 1." followed by "If you put a noncreature, nonland card into
+/// your graveyard this way, put that card into your hand."; Enlightened
+/// Confidant shares the shape).
+///
+/// CR 701.25a: to surveil, each looked-at card is EITHER put into the
+/// graveyard OR left on top of the library — a genuine choice, unlike
+/// discard/sacrifice/exile, whose destination is inherent to the verb. So
+/// (like the `parse_you_put_onto_battlefield_this_way_clause` sibling right
+/// above) this clause is DESTINATION-BOUND: a redirect that sends the card
+/// elsewhere as it moves (Rest in Peace / Leyline of the Void: "would be put
+/// into a graveyard from anywhere → exile instead") defeats it — the caller
+/// must pair the returned filter with `destination: Some(Zone::Graveyard)`,
+/// not `None`. The surveil choice's library → graveyard move publishes the
+/// moved card into `state.last_zone_changed_ids`, mirroring the
+/// `parse_you_discard_this_way_clause` / `parse_you_sacrifice_this_way_clause`
+/// siblings below; only the verb and destination differ.
+pub fn parse_you_put_into_graveyard_this_way_clause(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("you put ").parse(input)?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        parse_article,
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let after_filter = after_filter.trim_start();
+    let (rest, _) = tag("into your graveyard this way").parse(after_filter)?;
+    Ok((rest, (filter, false)))
+}
+
+/// CR 701.9a: Parse "you discard [quantifier] [type] card[s] this way" — the
+/// active-voice condition following a preceding "discard a card" instruction
+/// in the same ability (Talion's Messenger: "draw a card,
 /// then discard a card. When you discard a card this way, put a +1/+1 counter
 /// on target Faerie you control"; The Ancient One: "Draw a card, then discard
 /// a card. When you discard a card this way, target player mills cards equal to
@@ -9902,9 +10010,9 @@ pub fn parse_you_discard_this_way_clause(input: &str) -> OracleResult<'_, (Targe
     Ok((rest, (filter, false)))
 }
 
-/// CR 603.12 + CR 701.21a: Parse "you sacrifice [quantifier] [type] this way" —
-/// the active-voice reflexive gate created by a preceding "sacrifice [quantifier]
-/// [type]" instruction in the same ability (Nyssa of Traken: "sacrifice any
+/// CR 701.21a: Parse "you sacrifice [quantifier] [type] this way" — the
+/// active-voice condition following a preceding "sacrifice [quantifier] [type]"
+/// instruction in the same ability (Nyssa of Traken: "sacrifice any
 /// number of artifacts. When you sacrifice one or more artifacts this way, tap
 /// up to that many target creatures and draw that many cards").
 ///
@@ -10434,7 +10542,7 @@ mod tests {
         assert_eq!(cond, StaticCondition::SourceIsSaddled);
     }
 
-    /// CR 603.12 + CR 701.21a: the active-voice reflexive sacrifice gate
+    /// CR 701.21a: the active-voice sacrifice condition
     /// ("you sacrifice [quantifier] [type] this way") parses to its filter for
     /// every quantifier form, mirroring the discard/put combinators.
     #[test]
@@ -18293,6 +18401,70 @@ mod tests {
         }
     }
 
+    /// CR 601.2h + CR 603.4: the PRINTED wording of the same sentence, which
+    /// predates the Increment keyword (Liberator, Urza's Battlethopter:
+    /// "Whenever you cast a spell, if the amount of mana spent to cast that
+    /// spell is greater than Liberator's power, ..."). Before the subject was
+    /// widened this fell through and the whole intervening-if was dropped, so
+    /// every spell cast added a counter regardless of what was paid.
+    #[test]
+    fn test_parse_condition_printed_mana_spent_vs_self_power() {
+        let (rest, c) = parse_condition(
+            "if the amount of mana spent to cast that spell is greater than ~'s power",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        // A bare comparison: single property, so no `Or`; and no
+        // source-is-creature conjunct, because the SUBJECT is not Increment's
+        // reminder wording. Its twin
+        // `test_parse_condition_mana_spent_vs_normalized_self_pt_has_creature_gate`
+        // feeds the SAME object phrase, `~'s power`, and does get the conjunct —
+        // which is the proof that the object cannot be what decides it. The
+        // scope likewise comes from "that spell", not from a default.
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                        metric: crate::types::ability::CastManaSpentMetric::Total,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+            }
+        );
+    }
+
+    /// CR 400.7d: the printed form reads its scope from the anaphora — "this
+    /// spell" resolves to `CastManaObjectScope::SelfObject`, the ability's own
+    /// source object, not to the triggering spell. Pins that the shared subject
+    /// authority is consulted rather than re-decided here.
+    #[test]
+    fn test_printed_mana_spent_subject_selects_scope() {
+        let (rest, c) = parse_condition(
+            "if the amount of mana spent to cast this spell is greater than ~'s toughness",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison { lhs, .. } = &c else {
+            panic!("expected a bare comparison, got {c:?}");
+        };
+        assert_eq!(
+            *lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                    metric: crate::types::ability::CastManaSpentMetric::Total,
+                },
+            }
+        );
+    }
+
     /// Single-property form ("greater than this creature's power") parses as
     /// a single `QuantityComparison`, not an `Or`.
     #[test]
@@ -18851,6 +19023,14 @@ mod tests {
         ));
     }
 
+    /// CR 702.191a: the reminder-text subject identifies the Increment keyword,
+    /// whose rules text prints "if this permanent is a creature and".
+    /// Normalization has already turned "this creature's" into "~'s" by the time
+    /// the parser sees it, so the gate has to survive that rewrite.
+    /// `test_parse_condition_printed_mana_spent_vs_self_power` is its twin: the
+    /// spelled-out subject gets no gate. CR 702.191a's own rules text words the
+    /// subject exactly that way — what separates the two is that no oracle face
+    /// gives that keyword any subject but its reminder's.
     #[test]
     fn test_parse_condition_mana_spent_vs_normalized_self_pt_has_creature_gate() {
         let (rest, c) =

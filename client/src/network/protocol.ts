@@ -14,6 +14,7 @@ import type { InteractionSubmission, ViewerInteraction } from "../adapter/genera
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 import type { P2PAuthorityStamp, P2PSessionKey } from "../services/p2pSession";
 import type { P2PTerminalResult } from "../services/p2pTerminalResult";
+import { decodeJsonEnvelope, encodeJsonEnvelope } from "./wireEnvelope";
 
 /**
  * The stable session identity is carried on reconnect so a resumed host can
@@ -95,6 +96,55 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  40 — DerivedViews.room_half_identities publishes both halves of every
+ *       battlefield Room in printed order, resolved through the COPIED halves
+ *       for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+ *       special action's offer names the half it would unlock and shows that
+ *       half's cost (CR 709.5e) from this map: an enter-as-copy recipient
+ *       carries neither on its own printed card (its `back_face` is empty and
+ *       its printed name is its own), and printed order is engine work
+ *       besides — `room::live_face_door` reads `modal_back_face`, the
+ *       CR 709.5d mapping. Face-down permanents are absent (CR 708.2a). The
+ *       field is additive behind a serde default, but this client renders the
+ *       map directly rather than deriving halves from raw state; a v39 host
+ *       would silently label every offered door "Tap for Mana" again, which is
+ *       the defect this bump exists to fix. Since game_setup and reconnect_ack
+ *       carry GameState, first contact rejects the version skew rather than
+ *       allowing that capability loss.
+ *  39 — DerivedViews.storm_count publishes the engine-owned number of copies a
+ *       current Storm trigger will create, or a newly cast Storm spell would
+ *       create. The field is additive, but this client renders the scalar
+ *       directly; a v38 host would silently omit the Storm HUD status. Since
+ *       game_setup and reconnect_ack carry GameState, first contact rejects
+ *       the version skew rather than allowing that capability loss.
+ *  38 — Casting permissions gained a typed lifetime. Two parts, with different
+ *       compatibility consequences:
+ *       (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration`
+ *           and `source_id`; `::ExileWithAltCost` gained `source_id` beside the
+ *           `duration` it already carried. `source_id` is the granting
+ *           permanent whose presence bounds the stated lifetime. Additive
+ *           behind serde defaults, like entry 34's `prepared_copy_source`.
+ *       (b) `Duration` gained the `WhileControllingHost` ("for as long as
+ *           you control ~") and `WhileHostOnBattlefield` ("for as long as ~
+ *           remains on the battlefield") variants (CR 611.2b). Each new tag
+ *           is a PARSE BREAK in the v38 -> v37 direction, in the same shape
+ *           as the full-game bump at entry 46 (new tag emitted, old peer
+ *           cannot parse it; the break runs ONE way, unlike entry 32's
+ *           two-way break): a v37 peer deserializing a snapshot that contains
+ *           either new tag fails on an unknown variant. There is no serde
+ *           default that can rescue it, which is why the handshake must
+ *           refuse the pairing rather than degrade.
+ *  37 — FormatConfig gained default_deck_copy_limit, the resolved per-format
+ *       deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
+ *       and the deck-compatibility admission path now both read. The field
+ *       is optional and still parses on an older peer, but silently falls
+ *       back to the fail-closed UpTo(1) singleton cap instead of the
+ *       format's real declared limit — a silent capability loss like 24, not
+ *       a parse break. game_setup and reconnect_ack both carry the full
+ *       GameState, so this P2P track is broken by the same change as the
+ *       full-game PROTOCOL_VERSION track (see
+ *       crates/lobby-broker/src/protocol.rs entry 48) and must bump in
+ *       lockstep with it.
  *  36 — Resolution-time optional fixed sacrifice payments add a typed
  *       replacement-resumable continuation to GameState.
  *  35 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
@@ -205,7 +255,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 36 as const;
+export const WIRE_PROTOCOL_VERSION = 41 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
@@ -363,39 +413,11 @@ export function validateMessage(raw: unknown): P2PMessage {
 // ~20-byte header would inflate sub-100-byte payloads. Ping/pong and small
 // control messages take the raw path; state broadcasts take the gzip path.
 
-const FORMAT_RAW = 0x00;
-const FORMAT_GZIP = 0x01;
-const COMPRESSION_THRESHOLD = 256;
-
 export async function encodeWireMessage(msg: P2PMessage): Promise<Uint8Array> {
-  const json = JSON.stringify(msg);
-  const jsonBytes = new TextEncoder().encode(json);
-  if (jsonBytes.length < COMPRESSION_THRESHOLD) {
-    const out = new Uint8Array(1 + jsonBytes.length);
-    out[0] = FORMAT_RAW;
-    out.set(jsonBytes, 1);
-    return out;
-  }
-  const stream = new Blob([jsonBytes]).stream().pipeThrough(new CompressionStream("gzip"));
-  const gzipped = new Uint8Array(await new Response(stream).arrayBuffer());
-  const out = new Uint8Array(1 + gzipped.length);
-  out[0] = FORMAT_GZIP;
-  out.set(gzipped, 1);
-  return out;
+  return encodeJsonEnvelope(JSON.stringify(msg));
 }
 
 export async function decodeWireMessage(bytes: Uint8Array): Promise<P2PMessage> {
-  if (bytes.length < 1) throw new Error("empty wire message");
-  const version = bytes[0];
-  const payload = bytes.subarray(1);
-  let json: string;
-  if (version === FORMAT_RAW) {
-    json = new TextDecoder().decode(payload);
-  } else if (version === FORMAT_GZIP) {
-    const stream = new Blob([payload]).stream().pipeThrough(new DecompressionStream("gzip"));
-    json = await new Response(stream).text();
-  } else {
-    throw new Error(`unknown wire format version: 0x${version.toString(16)}`);
-  }
+  const json = await decodeJsonEnvelope(bytes);
   return validateMessage(JSON.parse(json));
 }

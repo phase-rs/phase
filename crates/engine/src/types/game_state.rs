@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::ability::{
     default_target_filter_permanent, legacy_trigger_entry_list,
@@ -22,6 +22,7 @@ use super::ability::{
     TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
     TriggerDefinitionRef, TriggerEntry,
 };
+use super::actions::ResolveAllScope;
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
@@ -238,35 +239,6 @@ mod tuple_key_map {
 
 #[cfg(test)]
 mod legacy_trigger_definition_ref_map {
-    use super::*;
-
-    pub fn serialize<S, H>(
-        map: &HashMap<TriggerDefinitionRef, u32, H>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut entries: Vec<_> = map.iter().collect();
-        entries.sort_unstable_by_key(|(key, _)| *key);
-        entries.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<HashMap<TriggerDefinitionRef, u32>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Vec::<(TriggerDefinitionRef, u32)>::deserialize(deserializer)
-            .map(|entries| entries.into_iter().collect())
-    }
-}
-
-/// Serde adapter for trigger occurrence ledgers. JSON object keys must be
-/// strings, while a `TriggerDefinitionRef` is structured identity; encode the
-/// map as an explicit entry list rather than flattening or guessing a key.
-mod trigger_definition_ref_map {
     use super::*;
 
     pub fn serialize<S, H>(
@@ -2092,6 +2064,15 @@ pub struct ResolveAllConsentRun {
     #[serde(default)]
     pub max_resolutions: StackResolutionBudget,
     pub priority_snapshot: ResolveAllPrioritySnapshot,
+    /// Which seats this run binds. `Own` runs cover only the requester, so the
+    /// live-authority check accepts them as a SUBSET of the current priority
+    /// participants; a `Shared` run is a table-wide proposal and must still
+    /// match the live set exactly, or a seat that became a participant after
+    /// the snapshot would be bound by a consent it never gave (CR 117.3d).
+    /// Defaults to `Own` so a save written before this field existed cannot
+    /// silently acquire table-wide authority.
+    #[serde(default)]
+    pub scope: ResolveAllScope,
     pub participants: Vec<ResolveAllConsentParticipant>,
     /// The complete sparse auto-pass map captured before a fresh Resolve All
     /// run installs its temporary shared-resolution overlay. `None` identifies
@@ -2474,6 +2455,20 @@ pub struct PendingContinuation {
     /// placeholder `chain` is never resolved when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) player_scope_queue_end: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// CR 608.2c + CR 616.1: Exact progress for an `ExileFromTopUntil` loop whose
+/// current library-to-exile event paused for a replacement choice.
+pub struct PendingExileFromTopUntil {
+    /// Card whose replacement-resolved destination must be classified on resume.
+    pub pending_card: ObjectId,
+    /// Original library snapshot after `pending_card`, in iteration order.
+    pub remaining: Vec<ObjectId>,
+    /// Current-resolution exile incarnations completed before the pause.
+    pub linked_batch: Vec<ObjectIncarnationRef>,
+    /// Cumulative property total completed before the pause.
+    pub cumulative: i32,
 }
 
 impl PendingContinuation {
@@ -4218,14 +4213,62 @@ pub struct PendingPerPlayerZoneChoice {
 /// surfaced immediately as `WaitingFor::EffectZoneChoice`; remaining owner
 /// batches drain after each batch completes.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MassLibraryOrderMember {
+    /// The exact object incarnation that was selected for this ordered move.
+    pub identity: ObjectIncarnationRef,
+    /// The zone this member occupied when the mass move created the prompt.
+    pub origin: Zone,
+}
+
+/// One owner's exact members of a mass library-order instruction.
+/// The identity and origin are frozen at prompt creation so a later object with
+/// the same id cannot satisfy an in-flight ordering choice.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MassLibraryOrderBatch {
+    pub owner: PlayerId,
+    pub members: Vec<MassLibraryOrderMember>,
+}
+
+/// Remaining batches of an in-flight mass library order.
+///
+/// The untagged wire preserves the historical tuple-array representation,
+/// while the enum makes its provenance state mutually exclusive at runtime.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PendingMassLibraryOrderBatches {
+    /// Current saves carry exact member identity and origin for every batch.
+    Typed(Vec<MassLibraryOrderBatch>),
+    /// Pre-identity archives carried only `(owner, object_ids)` tuples. These
+    /// may authorize only the narrow migration path before their successor is
+    /// promoted to a typed prompt.
+    Legacy(Vec<(PlayerId, Vec<ObjectId>)>),
+}
+
+impl Default for PendingMassLibraryOrderBatches {
+    fn default() -> Self {
+        Self::Typed(Vec::new())
+    }
+}
+
+impl PendingMassLibraryOrderBatches {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Typed(batches) => batches.is_empty(),
+            Self::Legacy(batches) => batches.is_empty(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMassLibraryOrderChoice {
     pub source_id: ObjectId,
     pub library_position: crate::types::ability::LibraryPosition,
     pub track_exiled_by_source: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
-    /// Remaining (owner, cards) batches in APNAP order after the current prompt.
-    pub remaining_batches: Vec<(PlayerId, Vec<ObjectId>)>,
+    /// Remaining owner batches in APNAP order after the current prompt.
+    #[serde(default)]
+    pub remaining_batches: PendingMassLibraryOrderBatches,
 }
 
 /// CR 101.4: If players make choices for one instruction, they choose in
@@ -5208,25 +5251,100 @@ pub struct PendingCounterMoveQueue {
 /// drained one `(counter_type, count)` at a time by
 /// `effects::counters::drain_pending_counter_removals`, which re-parks the queue
 /// when a per-removal replacement surfaces a `ReplacementChoice` mid-batch. When
-/// the queue empties, `total` is stamped into `last_effect_count` so a downstream
+/// the queue empties, `applied_total` is stamped into `last_effect_count` so a downstream
 /// "create that many" / "add that much" rider (Tetravus, storage lands) reading
 /// `QuantityRef::EventContextAmount` picks up the count removed.
 ///
 /// Serialized in the `CounterRemovals` frame so a mid-batch re-park survives the
 /// server→client→server state round-trip a `ReplacementChoice` requires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCounterRemoval {
+    pub object_id: ObjectId,
+    pub counter_type: CounterType,
+    pub count: u32,
+}
+
+/// A removal awaiting its replacement-pipeline result. The pre-removal count
+/// lets the queue record the actual clamped or replacement-modified removal
+/// when a `ReplacementChoice` resumes the parked queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCounterRemovalInFlight {
+    pub removal: PendingCounterRemoval,
+    pub counter_count_before: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingCounterRemovalQueue {
-    /// Remaining per-type removals to apply to `source_id`.
-    pub remaining: Vec<(CounterType, u32)>,
-    /// The object counters are removed from (the effect's single source).
-    pub source_id: ObjectId,
+    /// Remaining per-object counter removals.
+    pub remaining: Vec<PendingCounterRemoval>,
     /// Effect kind for the terminating `EffectResolved` event.
     pub effect_kind: EffectKind,
     /// Ability source object for the terminating `EffectResolved` event.
     pub source_ability_id: ObjectId,
-    /// Total counters requested across all entries; stamped into
-    /// `last_effect_count` when the queue empties.
+    /// Total counters requested across all entries. Retained for diagnostics and
+    /// legacy wire compatibility; use `applied_total` for effect result context.
     pub total: u32,
+    /// Counters actually removed so far, after clamping and replacements.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub applied_total: u32,
+    /// A removal whose replacement pipeline has not settled yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight: Option<PendingCounterRemovalInFlight>,
+}
+
+#[derive(Deserialize)]
+struct PendingCounterRemovalQueueWire {
+    remaining: Vec<PendingCounterRemovalWire>,
+    #[serde(default)]
+    source_id: Option<ObjectId>,
+    effect_kind: EffectKind,
+    source_ability_id: ObjectId,
+    total: u32,
+    #[serde(default)]
+    applied_total: u32,
+    #[serde(default)]
+    in_flight: Option<PendingCounterRemovalInFlight>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PendingCounterRemovalWire {
+    Current(PendingCounterRemoval),
+    Legacy((CounterType, u32)),
+}
+
+/// CR 122.1 + CR 614.1: Accept the legacy single-source queue on the wire
+/// while persisting new multi-object removals with their object per entry.
+impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PendingCounterRemovalQueueWire::deserialize(deserializer)?;
+        let remaining = wire
+            .remaining
+            .into_iter()
+            .map(|entry| match entry {
+                PendingCounterRemovalWire::Current(entry) => Ok(entry),
+                PendingCounterRemovalWire::Legacy((counter_type, count)) => wire
+                    .source_id
+                    .map(|object_id| PendingCounterRemoval {
+                        object_id,
+                        counter_type,
+                        count,
+                    })
+                    .ok_or_else(|| serde::de::Error::missing_field("source_id")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            remaining,
+            effect_kind: wire.effect_kind,
+            source_ability_id: wire.source_ability_id,
+            total: wire.total,
+            applied_total: wire.applied_total,
+            in_flight: wire.in_flight,
+        })
+    }
 }
 
 /// CR 603.10a + CR 616.1: The not-yet-delivered tail of a simultaneous
@@ -5758,6 +5876,18 @@ pub enum BatchCompletion {
     SurveilKeepOnTop {
         player: PlayerId,
         top_cards: Vec<ObjectId>,
+        /// CR 608.2c + CR 701.25a: the looked-at cards the surveil choice put
+        /// into the graveyard (everything NOT in `top_cards`) — published to
+        /// `state.last_zone_changed_ids` before the paused ability chain
+        /// resumes, so a "this way" rider on the surveil (Chandra, Chill of
+        /// Compliance: "If you put a noncreature, nonland card into your
+        /// graveyard this way, put that card into your hand") can check
+        /// whether one of them actually arrived there. Defaults to empty on
+        /// deserialize of an older save so a stale record degrades to "the
+        /// gate never fires" rather than a panic — never worse than the
+        /// pre-fix behavior.
+        #[serde(default)]
+        graveyard_bound: Vec<ObjectId>,
     },
     /// Manifest dread: after the non-manifested cards reach the graveyard, clear
     /// the reveal markers on every looked-at card.
@@ -12556,6 +12686,11 @@ pub enum WaitingFor {
         /// preserves bottom/nth placement across the choice round-trip.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_position: Option<LibraryPosition>,
+        /// Exact origin/identity snapshot for a fresh
+        /// mass `ChangeZoneAll` library-order prompt. Generic zone choices leave
+        /// this absent and therefore retain their ordinary strict zone check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mass_library_order: Option<MassLibraryOrderBatch>,
         /// CR 118.3: When true, this choice is for a cost payment (e.g., exile cost)
         /// rather than effect resolution. Cost-payment choices require special
         /// handling for exile-link tracking (push_exiled_with_source_this_turn).
@@ -15333,21 +15468,36 @@ pub enum AutoPassMode {
     },
 }
 
-/// How the engine recommends passing ordinary priority windows for one player.
+/// THE single per-player authority for auto-passing ordinary priority windows,
+/// as a graduated scale from "never" to "skip the low-use ones".
 ///
-/// This is an opt-in interface preference, not a change to priority itself:
-/// every recommended pass is still submitted as `GameAction::PassPriority` and
-/// resolved by the normal CR 117.3d / CR 117.4 engine path. `Standard` preserves
-/// the existing meaningful-action-aware recommendation ladder.
-/// `SkipLowUseWindows` adds a
+/// Two consumers read it, and they differ in force:
+///
+/// - `ai_support::auto_pass_recommended` — a *recommendation* to the frontend.
+///   Every recommended pass is still submitted as `GameAction::PassPriority`
+///   and resolved by the normal CR 117.3d / CR 117.4 path.
+/// - `game::engine`'s `run_auto_pass_loop` — *authoritative*. Passes taken here
+///   never reach a client, which is why `FullControl` has to live in engine
+///   state rather than in a frontend toggle: an auto-pass session installed by
+///   another player (Resolve All, CR 117.3d) drives this loop, and a
+///   client-only preference is invisible to it.
+///
+/// `Standard` is the meaningful-action-aware ladder. `SkipLowUseWindows` adds a
 /// narrow fast path for the active player's empty-stack Upkeep, Draw, and End
-/// priority windows; explicit phase stops, priority yields, and Full Control
-/// remain higher-authority user choices.
+/// windows. `FullControl` never auto-passes at all.
+///
+/// `FullControl` is deliberately NOT expressible as a `phase_stops` entry on
+/// every phase: `GameState::phase_stop_hit` is consulted only for empty-stack
+/// initial windows (`ai_support/mod.rs`), whereas Full Control must also hold a
+/// window while objects are on the stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum PriorityPassingMode {
     #[default]
     Standard,
     SkipLowUseWindows,
+    /// CR 117.1: hold every priority window this player receives. Outranks any
+    /// auto-pass session, including one another player installed.
+    FullControl,
 }
 
 /// CR 732.2a: user-controllable gate for the live combo (infinite-loop) detector.
@@ -17837,7 +17987,7 @@ declare_game_state! {
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
-        with = "trigger_definition_ref_map"
+        with = "crate::types::deterministic_serde::hash_map_entries"
     )]
     pub trigger_fire_counts_this_turn: HashMap<TriggerDefinitionRef, u32>,
     /// CR 603.2: Tracks per-opponent-per-turn firing for
@@ -18376,6 +18526,9 @@ declare_game_state! {
     /// box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_discard_batch: Option<Box<PendingDiscardBatch>>,
+    /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
     /// CR 401.4: Remaining per-owner library-order batches for a mass
     /// `ChangeZoneAll` instruction paused on `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -19274,6 +19427,18 @@ pub struct EndEffectPermission {
     pub cost: ManaCost,
 }
 
+/// Exact object bindings captured when a transient continuous effect begins.
+///
+/// CR 400.7 + CR 611.2b: both fields name the particular objects the resolved
+/// effect may affect or whose state may sustain its duration.  They travel in
+/// the same journaled install command as the rest of the effect, rather than
+/// being attached after installation, so replay cannot observe a partial TCE.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransientContinuousEffectBindings {
+    pub affected_recipient: Option<ObjectIncarnationRef>,
+    pub duration_subject: Option<ObjectIncarnationRef>,
+}
+
 /// A runtime-generated continuous effect stored at state level.
 ///
 /// Unlike `StaticDefinition` (which represents intrinsic/printed card text),
@@ -19302,12 +19467,13 @@ pub struct TransientContinuousEffect {
     /// subject diverge — Zygon Infiltrator: the copy modification applies to
     /// the source, but the duration tracks the copy *target*'s tap state.
     /// `None` for the common case where the duration tracks `affected` or the
-    /// source. Set only via [`GameState::set_transient_duration_subject`] on the
-    /// TCE that `add_transient_continuous_effect` just created, so all TCE
-    /// construction stays in one authority. Backward-compatible across the
-    /// WASM/multiplayer serialization boundary.
+    /// source. Captured in the journaled installation command together with
+    /// `affected_recipient`, so replay cannot reconstruct a partial effect.
+    /// Backward-compatible across the WASM/multiplayer serialization boundary:
+    /// the `ObjectIncarnationRef` serde migration converts legacy raw ids to a
+    /// non-current sentinel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_subject: Option<ObjectId>,
+    pub duration_subject: Option<ObjectIncarnationRef>,
     /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
     /// printed termination permission. Set inside the single construction
     /// authority (`add_transient_continuous_effect_with_end_permission`), so it
@@ -23226,6 +23392,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
+            pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
@@ -23723,12 +23890,38 @@ impl GameState {
             modifications,
             condition,
             None,
+            TransientContinuousEffectBindings::default(),
+        )
+    }
+
+    /// Register a transient continuous effect with exact object identities
+    /// captured as part of the same journaled installation command.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_transient_continuous_effect_with_bindings(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+        bindings: TransientContinuousEffectBindings,
+    ) -> u64 {
+        self.add_transient_continuous_effect_inner(
+            source_id,
+            controller,
+            duration,
+            affected,
+            modifications,
+            condition,
+            None,
+            bindings,
         )
     }
 
     /// CR 116.2c: install a continuous effect that carries a pay-to-end
     /// permission. The permission is threaded into the construction authority
-    /// (rather than post-stamped like `duration_subject`) so it rides INSIDE
+    /// together with the exact object bindings, so it rides INSIDE
     /// the journaled `ResolvedContinuousEffectCommand` and survives replay.
     ///
     /// One argument wider than the plain constructor by construction — it is the
@@ -23754,6 +23947,7 @@ impl GameState {
             modifications,
             condition,
             Some(end_permission),
+            TransientContinuousEffectBindings::default(),
         )
     }
 
@@ -23767,6 +23961,7 @@ impl GameState {
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
+        bindings: TransientContinuousEffectBindings,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -23794,10 +23989,10 @@ impl GameState {
                 timestamp,
                 duration,
                 affected,
-                affected_recipient: None,
+                affected_recipient: bindings.affected_recipient,
                 modifications,
                 condition,
-                duration_subject: None,
+                duration_subject: bindings.duration_subject,
                 end_permission,
                 source_name,
             },
@@ -23885,39 +24080,6 @@ impl GameState {
         self.next_timestamp = self.next_timestamp.max(command.resulting_next_timestamp);
         self.layers_dirty.mark_full();
         Ok(())
-    }
-
-    /// Bind a transient effect to the exact recipient resolved by a one-shot
-    /// instruction. Dynamic effects intentionally leave this unset.
-    pub fn set_transient_affected_recipient(&mut self, id: u64, recipient: ObjectIncarnationRef) {
-        if let Some(tce) = self
-            .transient_continuous_effects
-            .iter_mut()
-            .find(|tce| tce.id == id)
-        {
-            tce.affected_recipient = Some(recipient);
-            self.layers_dirty.mark_full();
-        }
-    }
-
-    /// CR 611.2b + CR 110.5d: bind a target-relative `ForAsLongAs` duration to a
-    /// concrete object resolved at effect-resolution time, on the TCE that
-    /// [`Self::add_transient_continuous_effect`] just created (addressed by its
-    /// returned `id`). Used when the duration's tracked subject diverges from the
-    /// effect's `affected` recipient — Zygon Infiltrator: the copy modification
-    /// applies to the source, but the duration tracks the copy *target*'s tap
-    /// state. Keeps construction in one authority (no second constructor); the
-    /// only divergent caller is `effects/become_copy.rs`. Marks layers dirty so
-    /// the duration re-evaluation picks up the binding.
-    pub fn set_transient_duration_subject(&mut self, id: u64, subject: ObjectId) {
-        if let Some(tce) = self
-            .transient_continuous_effects
-            .iter_mut()
-            .find(|tce| tce.id == id)
-        {
-            tce.duration_subject = Some(subject);
-            self.layers_dirty.mark_full();
-        }
     }
 
     /// Migrate the pre-2026-05-09 audit M4 split-slot
@@ -25372,6 +25534,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
+        pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
         pending_library_search_delivery: _,
@@ -25591,6 +25754,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
+            && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice
                 == other.pending_mass_library_order_choice
@@ -26790,6 +26954,7 @@ mod tests {
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
+        LEGACY_INCARNATION,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
@@ -26836,6 +27001,74 @@ mod tests {
             persisted["unrelated"],
             serde_json::json!({ "type": "Untap" }),
             "only serialized Effect payloads are migrated"
+        );
+    }
+
+    #[test]
+    fn pending_counter_removal_queue_migrates_legacy_single_source_entries() {
+        let source_id = ObjectId(17);
+        let mut legacy_wire = serde_json::to_value(PendingCounterRemovalQueue {
+            remaining: Vec::new(),
+            effect_kind: EffectKind::RemoveCounter,
+            source_ability_id: ObjectId(18),
+            total: 2,
+            applied_total: 0,
+            in_flight: None,
+        })
+        .expect("current counter-removal queue serializes");
+        legacy_wire["source_id"] = serde_json::to_value(source_id).expect("source ID serializes");
+        legacy_wire["remaining"] = serde_json::json!([[
+            serde_json::to_value(CounterType::Plus1Plus1).expect("counter type serializes"),
+            2
+        ]]);
+
+        let restored: PendingCounterRemovalQueue = serde_json::from_value(legacy_wire)
+            .expect("legacy single-source counter-removal queue migrates");
+
+        assert_eq!(
+            restored.remaining,
+            vec![PendingCounterRemoval {
+                object_id: source_id,
+                counter_type: CounterType::Plus1Plus1,
+                count: 2,
+            }],
+            "legacy entries inherit their queue's single source ID"
+        );
+        assert_eq!(
+            restored.applied_total, 0,
+            "queues persisted before applied-count tracking start at zero"
+        );
+        assert!(
+            restored.in_flight.is_none(),
+            "legacy queues never carry a replacement-pipeline in-flight removal"
+        );
+    }
+
+    #[test]
+    fn legacy_duration_subject_id_deserializes_as_a_non_current_incarnation() {
+        let effect = TransientContinuousEffect {
+            id: 1,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            timestamp: 1,
+            duration: Duration::Permanent,
+            affected: TargetFilter::SelfRef,
+            affected_recipient: None,
+            modifications: Vec::new(),
+            condition: None,
+            duration_subject: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
+            end_permission: None,
+            source_name: String::new(),
+        };
+        let mut legacy = serde_json::to_value(effect).expect("effect serializes");
+        legacy["duration_subject"] = serde_json::json!(9);
+
+        let migrated: TransientContinuousEffect =
+            serde_json::from_value(legacy).expect("legacy raw duration id migrates");
+        assert_eq!(
+            migrated.duration_subject,
+            Some(ObjectIncarnationRef::of(ObjectId(9), LEGACY_INCARNATION)),
+            "a saved raw id cannot prove its old incarnation and must never bind a live object"
         );
     }
 
@@ -26960,6 +27193,12 @@ mod tests {
 
     #[derive(Serialize)]
     struct TriggerRefFixture<'a> {
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_entries::serialize")]
+        values: &'a HashMap<TriggerDefinitionRef, u32, ReverseBuildHasher>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyTriggerRefFixture<'a> {
         #[serde(serialize_with = "legacy_trigger_definition_ref_map::serialize")]
         values: &'a HashMap<TriggerDefinitionRef, u32, ReverseBuildHasher>,
     }
@@ -27159,12 +27398,21 @@ mod tests {
             vec![2, 1, 0],
             "hostile trigger map must expose descending native iteration"
         );
+        let trigger_bytes = serde_json::to_string(&TriggerRefFixture {
+            values: &trigger_values,
+        })
+        .expect("trigger-ref fixture should serialize");
         assert_eq!(
-            serde_json::to_string(&TriggerRefFixture {
+            trigger_bytes,
+            r#"{"values":[[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":0}}},10],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":1}}},11],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":2}}},12]]}"#
+        );
+        assert_eq!(
+            trigger_bytes,
+            serde_json::to_string(&LegacyTriggerRefFixture {
                 values: &trigger_values,
             })
-            .expect("trigger-ref fixture should serialize"),
-            r#"{"values":[[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":0}}},10],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":1}}},11],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":2}}},12]]}"#
+            .expect("legacy trigger-ref oracle should serialize"),
+            "the shared adapter must preserve the established canonical bytes"
         );
         let trigger_round_trip = legacy_trigger_definition_ref_map::deserialize(
             &mut serde_json::Deserializer::from_str(
@@ -33558,6 +33806,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
@@ -33951,6 +34200,13 @@ mod tests {
 
     #[test]
     fn effect_zone_choice_roundtrips() {
+        let mass_library_order = MassLibraryOrderBatch {
+            owner: PlayerId(0),
+            members: vec![MassLibraryOrderMember {
+                identity: ObjectIncarnationRef::of(ObjectId(1), 7),
+                origin: Zone::Battlefield,
+            }],
+        };
         let wf = WaitingFor::EffectZoneChoice {
             player: PlayerId(0),
             cards: vec![ObjectId(1), ObjectId(2)],
@@ -33972,6 +34228,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            mass_library_order: Some(mass_library_order.clone()),
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
@@ -33980,6 +34237,48 @@ mod tests {
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
         assert_eq!(wf, deserialized);
         assert!(json.contains("\"EffectZoneChoice\""));
+        assert!(json.contains("\"mass_library_order\""));
+
+        let mut legacy_wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        legacy_wire["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mass_library_order");
+        assert!(matches!(
+            serde_json::from_value::<WaitingFor>(legacy_wire).unwrap(),
+            WaitingFor::EffectZoneChoice {
+                mass_library_order: None,
+                ..
+            }
+        ));
+        assert_eq!(mass_library_order.members.len(), 1);
+    }
+
+    #[test]
+    fn pending_mass_library_order_choice_decodes_legacy_tuple_batches() {
+        let pending = PendingMassLibraryOrderChoice {
+            source_id: ObjectId(10),
+            library_position: LibraryPosition::Bottom,
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(Vec::new()),
+        };
+        let mut wire = serde_json::to_value(pending).unwrap();
+        wire["remaining_batches"] = serde_json::json!([[1, [2, 3]]]);
+
+        let decoded: PendingMassLibraryOrderChoice = serde_json::from_value(wire).unwrap();
+        assert!(matches!(
+            decoded.remaining_batches,
+            PendingMassLibraryOrderBatches::Legacy(ref batches)
+                if batches == &vec![(PlayerId(1), vec![ObjectId(2), ObjectId(3)])]
+        ));
+
+        let reserialized = serde_json::to_value(decoded).unwrap();
+        assert_eq!(
+            reserialized["remaining_batches"],
+            serde_json::json!([[1, [2, 3]]]),
+            "a legacy mass-order queue must retain its migration authority across a save"
+        );
     }
 
     /// CR 502.3: the bounded untap-subset prompt must survive serde round-trip
@@ -34524,6 +34823,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
@@ -36400,6 +36700,7 @@ mod tests {
         let run = ResolveAllConsentRun {
             epoch: 1,
             max_resolutions: StackResolutionBudget::Unlimited,
+            scope: ResolveAllScope::Own,
             priority_snapshot: ResolveAllPrioritySnapshot {
                 waiting_player: PlayerId(0),
                 priority_player: PlayerId(0),

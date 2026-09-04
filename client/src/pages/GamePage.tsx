@@ -274,6 +274,11 @@ export function GamePage() {
   const roomNameParam = searchParams.get("roomName");
   const sourceParam = searchParams.get("source") ?? undefined;
   const draftIdParam = searchParams.get("draftId") ?? undefined;
+  // The lobby authority this join/spectate was launched from. Produced by
+  // our own navigation from a canonical `LobbySource.url`; a hand-edited
+  // value surfaces through the adapter's existing handshake error path, the
+  // same way a hand-edited `code` does.
+  const serverParam = searchParams.get("server") ?? undefined;
   const playerCount = playersParam ? Number(playersParam) : undefined;
   const activeGameMeta = useMemo(
     () => (gameId ? loadActiveGame() : null),
@@ -552,11 +557,14 @@ export function GamePage() {
             deckRejected: true,
             reason: event.reason,
             joinCode,
+            // Carry the origin back: the retry must re-join the same server,
+            // not whichever one this client hosts on.
+            server: serverParam,
           },
         });
         break;
     }
-  }, [gameId, navigate, joinCode, isOnlineMode, t]);
+  }, [gameId, navigate, joinCode, serverParam, isOnlineMode, t]);
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
@@ -762,6 +770,7 @@ export function GamePage() {
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
       draftId={draftIdParam}
+      serverUrl={serverParam}
       onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
@@ -1004,6 +1013,7 @@ function GamePageContent({
   );
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
+  const logPanelOpen = useUiStore((s) => s.logPanelOpen);
   const toggleDebugClickModeButtonVisible = useUiStore(
     (s) => s.toggleDebugClickModeButtonVisible,
   );
@@ -1524,6 +1534,13 @@ function GamePageContent({
         className={`relative ${boardChoiceLayerActive && !isReconnecting ? GAME_Z_LAYER.boardChoiceGrid : GAME_Z_LAYER.board} grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
         style={{
           paddingTop: "var(--game-top-overlay-offset, 0px)",
+          // The game log docks as a rail, not an overlay: it publishes its width
+          // as `--game-{left,right}-rail-offset` and the board's content box
+          // shrinks by that much, so nothing is ever hidden underneath it.
+          // Padding (not width/margin) keeps row 3's `100dvh`-derived height
+          // math untouched — only the horizontal content box moves.
+          paddingLeft: "var(--game-left-rail-offset, 0px)",
+          paddingRight: "var(--game-right-rail-offset, 0px)",
           gridTemplateRows,
           gridTemplateColumns: "1fr",
         }}
@@ -1618,8 +1635,13 @@ function GamePageContent({
             flexZone="playerPiles"
             scaleKey="playerPiles"
             className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
-            // Anchor box-scale to the bottom-left dock corner.
-            style={{ ...playerZoneRailStyle, transformOrigin: "bottom left" }}
+            // Anchor box-scale to the bottom-left dock corner. No left-rail
+            // offset here: this pile is absolutely positioned inside the board
+            // grid, whose padding already accounts for a left-docked log panel.
+            style={{
+              ...playerZoneRailStyle,
+              transformOrigin: "bottom left",
+            }}
           >
             <div className="flex items-end gap-2">
               <ExilePile
@@ -1726,6 +1748,8 @@ function GamePageContent({
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
+        logPanelOpen={logPanelOpen}
+        onToggleGameLog={() => useUiStore.getState().toggleLogPanel()}
         multiplayerBoardLayout={
           seatCount > 2 && !untapForcedSplit ? resolvedMultiplayerBoardLayout : undefined
         }
@@ -3263,6 +3287,11 @@ function AbilityChoiceModal() {
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
   );
+  // CR 709.5b: engine-published Room halves, already resolved through the
+  // COPIED halves for a permanent that copies a Room.
+  const roomHalfIdentities = useGameStore(
+    (s) => s.gameState?.derived?.room_half_identities,
+  );
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
 
   if (!pending || !obj) return null;
@@ -3309,6 +3338,7 @@ function AbilityChoiceModal() {
           obj,
           objects,
           webSlingingCosts,
+          roomHalfIdentities,
         );
         if (action.type === "TapLandForMana") {
           const surfaces = action.interactionActionId

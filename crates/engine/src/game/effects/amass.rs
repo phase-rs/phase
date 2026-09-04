@@ -27,12 +27,22 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (subtype, count_expr) = match &ability.effect {
-        Effect::Amass { subtype, count } => (subtype.clone(), count.clone()),
+    let (subtype, count_expr, player_filter) = match &ability.effect {
+        Effect::Amass {
+            subtype,
+            count,
+            player,
+        } => (subtype.clone(), count.clone(), player.clone()),
         _ => return Ok(()),
     };
 
-    let controller = ability.controller;
+    // CR 109.4 + CR 701.47a: the amass instruction is performed by `player`,
+    // not necessarily the ability's own controller — Azog, Moria's Ruin's
+    // "Its controller amasses Goblins X" binds this to the destroyed
+    // creature's controller (`TargetFilter::ParentTargetController`), which
+    // can differ from `ability.controller` (Azog's controller). Mirrors
+    // `Manifest.target` / `Discover.player`'s resolution path.
+    let controller = super::resolve_player_for_context_ref(state, ability, &player_filter);
     let n = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as u32;
 
     // CR 701.47a: Find an existing Army creature on the controller's battlefield.
@@ -261,6 +271,7 @@ mod tests {
             Effect::Amass {
                 subtype: subtype.to_string(),
                 count,
+                player: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),

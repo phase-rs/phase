@@ -32,6 +32,7 @@ import {
   commitFullTerminalDelivery,
   type FullTerminalDelivery,
 } from "../services/fullTerminalResult";
+import type { WireFormat } from "../network/wireEnvelope";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
@@ -202,11 +203,67 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 57 — `GameAction::BeginResolveAll` gained `scope: ResolveAllScope` (`Own`
+ *      binds only the requester and resolves immediately; `Shared` opens the
+ *      table-wide consent protocol), and `PriorityPassingMode` gained
+ *      `FullControl`, which is now engine-authoritative rather than a
+ *      frontend-only toggle.
+ * 56 — Host-only authoritative-state export request/response variants. Native
+ *      P2P sends each player a redacted view, so the host must ask its local
+ *      server for the trusted engine envelope rather than export that view.
+ * 55 — DerivedViews.room_half_identities publishes both halves of every
+ *      battlefield Room in printed order, resolved through the COPIED halves
+ *      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+ *      offer names the half and shows its unlock cost (CR 709.5e) from this
+ *      map; an enter-as-copy recipient carries neither on its own printed
+ *      card. Serde-additive, but the client renders the map directly, so an
+ *      older server would silently label every door "Tap for Mana" again. The
+ *      full handshake refuses stale peers. Lobby messages are unchanged.
+ * 54 — CreateDraftWithSettings now carries a tagged DraftSourceIntent. A
+ *      Chaos client sends candidate set codes only; the Full server resolves
+ *      and persists the private seat-by-round assignment matrix. The full
+ *      handshake refuses stale peers. Lobby messages are unchanged.
+ * 53 — DraftPlayerView.launch_capability publishes the engine-authorized
+ *      post-draft multiplayer launch. The client renders this procedure-owned
+ *      capability instead of inferring it from DraftKind; an older server
+ *      would omit it and silently hide a completed Commander pod's launch.
+ *      The full-game handshake refuses that capability mismatch. Lobby
+ *      messages are unchanged.
+ * 52 — DerivedViews.storm_count publishes the engine-owned number of copies a
+ *      current Storm trigger will create, or a newly cast Storm spell would
+ *      create. The field is serde-additive, but this client renders that
+ *      scalar directly rather than deriving Storm from raw state; a v51 host
+ *      would silently omit the HUD status. The full-game handshake refuses
+ *      that capability mismatch. Lobby messages are unchanged.
+ * 51 — Casting permissions gained a typed lifetime: ExileWithAltAbilityCost
+ *      gained duration and source_id, ExileWithAltCost gained source_id beside
+ *      the duration it already had (additive, serde
+ *      defaults), and Duration gained the WhileControllingHost and
+ *      WhileHostOnBattlefield variants (CR 611.2b). Each new Duration tag is a
+ *      one-way parse break — a v50 peer cannot deserialize a snapshot
+ *      containing it — so the handshake refuses the pairing instead of
+ *      degrading.
+ * 50 — FormatConfig gained default_deck_copy_limit, the resolved per-format
+ *      deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
+ *      and the deck-compatibility admission path now both read, replacing
+ *      per-function hardcoded literals and bare-GameFormat-derived defaults
+ *      so the two authorities can't disagree. A CAPABILITY bump like 24: the
+ *      field is serde-optional (fail-closed UpTo(1), the tightest possible
+ *      cap), so a peer missing it still deserializes GameState cleanly — but
+ *      silently loses the format's real declared limit and falls back to the
+ *      singleton cap, wrongly rejecting a legal 4-of deck rather than
+ *      admitting one it shouldn't. Symmetric in both directions. See
+ *      PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs for the full
+ *      entry; lobby carriers move too, see LOBBY_PROTOCOL_VERSION 3 below.
+ * 49 — Full-server DraftPlayerView payloads require public-seat
+ *      active_pack_count. An older v48 server can complete the handshake yet
+ *      omit that additive field while this client accepts the JSON, leaving it
+ *      unable to render a seat's active-pack presence. The Full handshake
+ *      refuses that capability mismatch. Lobby messages are unchanged.
  * 48 — Full-server DraftPlayerView payloads require the engine-owned
  *      pick_selection_mode. An older server can omit it while this client
- *      accepts the JSON and then silently treats an ordered Commander Draft
- *      pick as direct selection, so the Full handshake refuses that pairing.
- *      Lobby messages are unchanged.
+ *      accepts the JSON, then silently treats an ordered Commander Draft pick
+ *      as direct selection. Lobby messages are unchanged.
  * 47 — Resolution-time optional fixed sacrifice payments add a typed
  *      replacement-resumable continuation to GameState.
  * 46 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
@@ -339,12 +396,12 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 48;
+export const PROTOCOL_VERSION = 57;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
- * Planechase changed the wire message surface in a non-backward-compatible way,
- * so this release only accepts the current protocol.
+ * Engine-owned presentation fields may parse when absent but still need an
+ * exact full-game match when the client no longer derives a raw-state fallback.
  */
 export const MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION;
 
@@ -369,6 +426,20 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
+ * 4 — The tournament-organizer message set: seven LobbyClientMessage variants
+ *     and five LobbyServerMessage variants. Purely ADDITIVE, so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — no
+ *     existing variant changed shape, so nothing this client already parses
+ *     can break against a version-2 broker.
+ * 3 — FormatConfig gained default_deck_copy_limit (see PROTOCOL_VERSION 50
+ *     above for the full entry). Same three carriers as 2:
+ *     CreateGameWithSettings, JoinTargetInfo, PeerInfo. Unlike 2, this is a
+ *     CAPABILITY bump, not a parse bump — the field is serde-optional and
+ *     still deserializes cleanly on either side — so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below does NOT move: a v2 broker
+ *     can still create/join a game, it just can't declare or observe a
+ *     non-default deck-copy-limit override, silently getting the fail-closed
+ *     UpTo(1) fallback instead of the format's real default.
  * 2 — FormatConfig.deck_size retyped from a bare integer to the adjacently
  *     tagged DeckSizeRule, carried by CreateGameWithSettings, JoinTargetInfo
  *     and PeerInfo. See LOBBY_PROTOCOL_VERSION in
@@ -376,7 +447,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 2;
+export const LOBBY_PROTOCOL_VERSION = 4;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -403,6 +474,8 @@ export interface ServerInfo {
   /** Public base URL the server advertises for `<code>@<host>` join strings
    * (a tunnel/proxy URL), or undefined when the server has none to share. */
   publicUrl?: string;
+  /** Optional binary JSON envelopes understood by this server. */
+  wireFormats?: WireFormat[];
 }
 
 /**
@@ -551,6 +624,10 @@ export class WebSocketAdapter implements EngineAdapter {
     number,
     { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
   >();
+  private pendingAuthoritativeStateExport: {
+    resolve: (state: string) => void;
+    reject: (error: Error) => void;
+  } | null = null;
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
   /** Starting-player contest event captured from the initial GameStarted
@@ -909,6 +986,9 @@ export class WebSocketAdapter implements EngineAdapter {
       this.rejectPendingManaPaymentPreviews(
         new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
       );
+      this.rejectAuthoritativeStateExport(
+        new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
+      );
       this.rejectPregameMutation(
         new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
       );
@@ -1005,6 +1085,39 @@ export class WebSocketAdapter implements EngineAdapter {
       if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
         this.pendingManaPaymentPreviews.delete(requestId);
         reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
+      }
+    });
+  }
+
+  /**
+   * Requests the server-owned trusted engine envelope. The server authorizes
+   * this separately from ordinary redacted state broadcasts.
+   */
+  async exportPersistenceState(): Promise<string> {
+    // An unredacted engine envelope must not cross a cleartext WebSocket. The
+    // native sidecar is a local trusted transport rather than a network socket.
+    if (
+      !this.serverUrl.startsWith("wss://")
+      && !this.serverUrl.startsWith("native-engine://")
+    ) {
+      throw new AdapterError(
+        "WS_ERROR",
+        "Authoritative-state export requires a secure connection",
+        false,
+      );
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+    if (this.pendingAuthoritativeStateExport) {
+      throw new AdapterError("WS_ERROR", "Authoritative-state export already in progress", false);
+    }
+
+    return new Promise<string>((resolve, reject) => {
+      this.pendingAuthoritativeStateExport = { resolve, reject };
+      if (!this.send({ type: "ExportAuthoritativeState" })) {
+        this.pendingAuthoritativeStateExport = null;
+        reject(new AdapterError("WS_CLOSED", "Failed to request authoritative state", true));
       }
     });
   }
@@ -1133,6 +1246,9 @@ export class WebSocketAdapter implements EngineAdapter {
     this.pendingReject = null;
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
+    );
+    this.rejectAuthoritativeStateExport(
+      new AdapterError("WS_CLOSED", "Adapter disposed during authoritative-state export", true),
     );
     this.rejectPregameMutation(
       new AdapterError("WS_CLOSED", "Adapter disposed during seat mutation", true),
@@ -1366,6 +1482,11 @@ export class WebSocketAdapter implements EngineAdapter {
       reject(error);
     }
     this.pendingManaPaymentPreviews.clear();
+  }
+
+  private rejectAuthoritativeStateExport(error: Error): void {
+    this.pendingAuthoritativeStateExport?.reject(error);
+    this.pendingAuthoritativeStateExport = null;
   }
 
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
@@ -1740,6 +1861,36 @@ export class WebSocketAdapter implements EngineAdapter {
           this.pendingManaPaymentPreviews.delete(data.request_id);
           pending.reject(new AdapterError("WS_ERROR", data.message, false));
         }
+        break;
+      }
+
+      case "AuthoritativeStateExport": {
+        const data = msg.data as { state?: unknown };
+        const pending = this.pendingAuthoritativeStateExport;
+        this.pendingAuthoritativeStateExport = null;
+        if (pending) {
+          if (typeof data.state === "string") {
+            pending.resolve(data.state);
+          } else {
+            pending.reject(new AdapterError(
+              "WS_ERROR",
+              "Server sent an invalid authoritative-state export.",
+              false,
+            ));
+          }
+        }
+        break;
+      }
+
+      case "AuthoritativeStateExportFailed": {
+        const data = msg.data as { message?: unknown };
+        const pending = this.pendingAuthoritativeStateExport;
+        this.pendingAuthoritativeStateExport = null;
+        pending?.reject(new AdapterError(
+          "WS_ERROR",
+          typeof data.message === "string" ? data.message : "Authoritative-state export failed.",
+          false,
+        ));
         break;
       }
 

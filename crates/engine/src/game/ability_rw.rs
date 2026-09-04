@@ -2118,6 +2118,8 @@ fn legacy_duration(x: &Duration) -> bool {
         Duration::UntilEndOfTurn
         | Duration::UntilEndOfCombat
         | Duration::UntilHostLeavesPlay
+        | Duration::WhileControllingHost
+        | Duration::WhileHostOnBattlefield
         | Duration::UntilSourceExilesAnotherCard
         | Duration::UntilOpponentBecomesMonarch
         | Duration::Permanent
@@ -3126,13 +3128,18 @@ fn legacy_effect(x: &Effect) -> bool {
 
         // ---- `count`-only (QuantityExpr) ----
         Effect::Monstrosity { count }
-        | Effect::Incubate { count }
-        | Effect::Amass { count, .. }
         | Effect::Renown { count }
         | Effect::Bolster { count }
         | Effect::Adapt { count }
         | Effect::AssembleContraptions { count }
         | Effect::AddPendingETBCounters { count, .. } => legacy_quantity_expr(count),
+        // CR 701.53a: Incubate's count carries no player-scope axis.
+        Effect::Incubate { count } => legacy_quantity_expr(count),
+        // CR 701.47a: Amass also carries a `player` `TargetFilter` (Azog,
+        // Moria's Ruin's "its controller amasses" — mirrors `Manifest.target`).
+        Effect::Amass { count, player, .. } => {
+            legacy_target_filter(player) || legacy_quantity_expr(count)
+        }
         // Deferred continuous-modification carrier — no `count`; descend the mods
         // for a nested frozen tag (AddType/AddSubtype return `false`).
         Effect::AddPendingEntersModifications { modifications } => {
@@ -4337,6 +4344,13 @@ fn rw_duration(x: &Duration) -> RwProfile {
         Duration::UntilEndOfTurn
         | Duration::UntilEndOfCombat
         | Duration::UntilHostLeavesPlay
+        // CR 611.2b: the control question is asked against the carrier's own
+        // controller field, not against a `PlayerScope` payload on the
+        // duration — the same reason `StaticCondition::SourceControllerEquals`
+        // is `RwProfile::empty()` in `rw_static_condition`.
+        | Duration::WhileControllingHost
+        // CR 611.2b + CR 702.26f: presence-bound sibling, likewise payload-free.
+        | Duration::WhileHostOnBattlefield
         | Duration::UntilSourceExilesAnotherCard
         | Duration::UntilOpponentBecomesMonarch
         | Duration::Permanent => RwProfile::empty(),
@@ -4809,7 +4823,11 @@ fn rw_effect(
             p.writes_external_counter_census.merge(Census::Any);
             (p, Some(WriteScope::External))
         }
-        Effect::Amass { count, subtype: _ } => {
+        Effect::Amass {
+            count,
+            subtype: _,
+            player: _,
+        } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_external.set(StateKind::ObjectCounters);
             p.writes_external_counter_census.merge(Census::Any);
@@ -5797,12 +5815,7 @@ fn rw_effect(
             player: _,
             count: _,
         }
-        | Effect::ChooseObjectsIntoTrackedSet {
-            chooser: _,
-            filter: _,
-            min: _,
-            max: _,
-        }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::RingTemptsYou
         | Effect::TimeTravel
         | Effect::Planeswalk

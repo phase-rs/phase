@@ -20,7 +20,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { MotionGlobalConfig } from "framer-motion";
 
 import { GamePage } from "../GamePage";
@@ -44,6 +44,8 @@ let capturedOnNoDeck: ((reason?: string, bracketViolation?: boolean) => void) | 
 let capturedFormatConfig: FormatConfig | undefined;
 let capturedOnWsEvent: ((event: WsAdapterEvent) => void) | undefined;
 let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
+// The join/spectate origin the route carried, handed down as a provider prop.
+let capturedServerUrl: string | undefined;
 
 const { mockClearPromptOverlayState, mockIsMobile, mockSetGameState, storeOverrides } = vi.hoisted(() => ({
   mockClearPromptOverlayState: vi.fn(),
@@ -105,17 +107,20 @@ vi.mock("../../providers/GameProvider", () => ({
     onWsEvent,
     onP2PEvent,
     formatConfig,
+    serverUrl,
   }: {
     children: React.ReactNode;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
     onWsEvent?: (event: WsAdapterEvent) => void;
     onP2PEvent?: (event: P2PAdapterEvent) => void;
     formatConfig?: FormatConfig;
+    serverUrl?: string;
   }) => {
     capturedOnNoDeck = onNoDeck;
     capturedOnWsEvent = onWsEvent;
     capturedOnP2PEvent = onP2PEvent;
     capturedFormatConfig = formatConfig;
+    capturedServerUrl = serverUrl;
     return <>{children}</>;
   },
 }));
@@ -176,6 +181,9 @@ vi.mock("../../stores/gameStore", async () => ({
   hasRemoteHumans: (
     await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
   ).hasRemoteHumans,
+  canExportAuthoritativeState: (
+    await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+  ).canExportAuthoritativeState,
   loadActiveGame: vi.fn(() => null),
   saveActiveGame: vi.fn(),
   clearActiveGame: vi.fn(),
@@ -255,6 +263,18 @@ vi.mock("../../components/modal/CardDataMissingModal", () => ({
   CardDataMissingModal: () => null,
 }));
 
+// This is the leaf of the production ability-choice path. Keeping the mock at
+// the rendering boundary lets the test exercise GamePage's module-private
+// AbilityChoiceModal and observe the actual labels it supplies without pulling
+// card-art loading into a label-wiring test.
+vi.mock("../../components/modal/ChoiceModal", () => ({
+  ChoiceModal: ({ options }: { options: Array<{ id: string; label: string }> }) => (
+    <div data-testid="ability-choice-options">
+      {options.map((option) => <button key={option.id} type="button">{option.label}</button>)}
+    </div>
+  ),
+}));
+
 vi.mock("../../stores/draftStore", () => ({
   useDraftStore: vi.fn(() => ({
     phase: "idle",
@@ -306,6 +326,13 @@ vi.mock("../../hooks/useCardDataMeta", () => ({
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** Renders whatever router state the deck-rejected re-entry navigated with,
+ * so a dropped field is visible rather than inferred. */
+function MultiplayerStub() {
+  const { state } = useLocation();
+  return <div data-testid="multiplayer-stub">{JSON.stringify(state)}</div>;
+}
+
 function gamePageTree(
   initialEntry: string | { pathname: string; search: string; state: unknown } =
     "/game/test-game-123?mode=ai",
@@ -315,6 +342,7 @@ function gamePageTree(
       <Routes>
         <Route path="/game/:id" element={<GamePage />} />
         <Route path="/setup" element={<div data-testid="setup-page">Setup</div>} />
+        <Route path="/multiplayer" element={<MultiplayerStub />} />
         <Route path="/" element={<div>Home</div>} />
       </Routes>
     </MemoryRouter>
@@ -361,11 +389,13 @@ beforeEach(() => {
   capturedFormatConfig = undefined;
   capturedOnWsEvent = undefined;
   capturedOnP2PEvent = undefined;
+  capturedServerUrl = undefined;
   capturedGameMenuProps = undefined;
   storeOverrides.adapter = null;
   storeOverrides.gameState = null;
   storeOverrides.gameMode = null;
   storeOverrides.waitingFor = null;
+  useUiStore.setState({ pendingAbilityChoice: null });
   mockIsMobile.mockReturnValue(false);
   usePreferencesStore.setState({
     multiplayerBoardLayout: "focused",
@@ -555,6 +585,47 @@ describe("GamePage — P2P pause resume control", () => {
     act(() => { capturedOnP2PEvent?.({ type: "gamePaused", reason: "Paused by host" }); });
 
     expect(screen.queryByRole("button", { name: "Resume game" })).toBeNull();
+  });
+});
+
+describe("GamePage — Room unlock labels", () => {
+  it("passes copied Room half identities into its private ability-choice consumer", () => {
+    const roomCopy = gameObjectFactory
+      .enchantment()
+      .onBattlefield()
+      .withId(8294)
+      .named("")
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers(0, 1)
+      .withObjects(roomCopy)
+      .priority(0)
+      .build({
+        derived: {
+          room_half_identities: {
+            [String(roomCopy.id)]: {
+              left: { name: "Greenhouse", mana_cost: { type: "Cost", generic: 2, shards: ["Green"] } },
+              right: { name: "Rickety Gazebo", mana_cost: { type: "Cost", generic: 3, shards: ["Green"] } },
+            },
+          },
+        },
+      });
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+    useUiStore.setState({
+      pendingAbilityChoice: {
+        objectId: roomCopy.id,
+        actions: [
+          { type: "UnlockRoomDoor", data: { object_id: roomCopy.id, door: "Left" } },
+          { type: "UnlockRoomDoor", data: { object_id: roomCopy.id, door: "Right" } },
+        ],
+      },
+    });
+
+    renderGamePage();
+
+    expect(screen.getByRole("button", { name: "Unlock Greenhouse ({2}{G})" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unlock Rickety Gazebo ({3}{G})" })).toBeInTheDocument();
   });
 });
 
@@ -1255,5 +1326,47 @@ describe("GamePage — rematch preserves the format the game was played with", (
     // `FORMAT_DEFAULTS` is a Proxy in this suite, so a lost hand-over surfaces
     // as `undefined` here rather than as the real 40.
     expect(capturedFormatConfig?.starting_life).toBe(25);
+  });
+});
+
+describe("GamePage — join origin", () => {
+  const ORIGIN = "wss://play.example.com/ws";
+
+  it("passes the route's server to GameProvider and carries it through deck rejection", async () => {
+    renderGamePage(
+      `/game/g1?mode=join&code=ABC123&server=${encodeURIComponent(ORIGIN)}`,
+    );
+
+    expect(capturedServerUrl).toBe(ORIGIN);
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "deckRejected", reason: "bad deck" });
+    });
+
+    const stub = await screen.findByTestId("multiplayer-stub");
+    expect(JSON.parse(stub.textContent ?? "null")).toEqual({
+      deckRejected: true,
+      reason: "bad deck",
+      joinCode: "ABC123",
+      server: ORIGIN,
+    });
+  });
+
+  it("carries no server when the route had none", async () => {
+    renderGamePage("/game/g1?mode=join&code=ABC123");
+
+    expect(capturedServerUrl).toBeUndefined();
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "deckRejected", reason: "bad deck" });
+    });
+
+    const stub = await screen.findByTestId("multiplayer-stub");
+    // Paired with the case above: the field is absent, not stale.
+    expect(JSON.parse(stub.textContent ?? "null")).toEqual({
+      deckRejected: true,
+      reason: "bad deck",
+      joinCode: "ABC123",
+    });
   });
 });

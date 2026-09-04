@@ -6,6 +6,7 @@ type BridgeEvent =
   | { type: "error"; detail: string };
 
 type CloseListener = (event: CloseEvent) => void;
+type MessageListener = (event: MessageEvent<string>) => void;
 
 /**
  * WebSocket-shaped client for the shell-owned native-engine bridge.
@@ -30,6 +31,7 @@ export class NativeEngineSocket {
   onclose: ((event: CloseEvent) => void) | null = null;
 
   private readonly closeListeners = new Map<CloseListener, boolean>();
+  private readonly messageListeners = new Map<MessageListener, boolean>();
   private readonly pendingEvents: BridgeEvent[] = [];
   private bridgeId: number | null = null;
   private _readyState = NativeEngineSocket.CONNECTING;
@@ -49,15 +51,27 @@ export class NativeEngineSocket {
     type: "close",
     listener: CloseListener,
     options?: AddEventListenerOptions | boolean,
+  ): void;
+  addEventListener(
+    type: "message",
+    listener: MessageListener,
+    options?: AddEventListenerOptions | boolean,
+  ): void;
+  addEventListener(
+    type: "close" | "message",
+    listener: CloseListener | MessageListener,
+    options?: AddEventListenerOptions | boolean,
   ): void {
-    if (type !== "close") return;
     const once = typeof options === "object" && options.once === true;
-    this.closeListeners.set(listener, once);
+    if (type === "close") this.closeListeners.set(listener as CloseListener, once);
+    else this.messageListeners.set(listener as MessageListener, once);
   }
 
-  removeEventListener(type: "close", listener: CloseListener): void {
-    if (type !== "close") return;
-    this.closeListeners.delete(listener);
+  removeEventListener(type: "close", listener: CloseListener): void;
+  removeEventListener(type: "message", listener: MessageListener): void;
+  removeEventListener(type: "close" | "message", listener: CloseListener | MessageListener): void {
+    if (type === "close") this.closeListeners.delete(listener as CloseListener);
+    else this.messageListeners.delete(listener as MessageListener);
   }
 
   send(text: string): void {
@@ -144,7 +158,12 @@ export class NativeEngineSocket {
     switch (event.type) {
       case "message":
         if (this.readyState === NativeEngineSocket.OPEN) {
-          this.onmessage?.(new MessageEvent("message", { data: event.text }));
+          const message = new MessageEvent<string>("message", { data: event.text });
+          this.onmessage?.(message);
+          for (const [listener, once] of this.messageListeners) {
+            listener(message);
+            if (once) this.messageListeners.delete(listener);
+          }
         }
         break;
       case "error":

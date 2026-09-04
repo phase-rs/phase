@@ -7,6 +7,7 @@ import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
 import { ScrollableCardStrip } from "../modal/ChoiceOverlay.tsx";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
+import { timeCounterOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -26,6 +27,7 @@ import {
 } from "../../viewmodel/cardActionChoice.ts";
 import { DebugCardContextMenu } from "../chrome/DebugCardContextMenu.tsx";
 import { debugContextMenuPoint } from "../chrome/debugContextMenuPosition.ts";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 
 interface ZoneViewerProps {
   zone: "graveyard" | "exile" | "library";
@@ -195,6 +197,7 @@ export function ZoneViewer({
                     name: isHiddenFromViewer ? t("card.faceDownName") : obj.name,
                   })}
                   hiddenFromViewer={isHiddenFromViewer}
+                  showTimeCounter={zone === "exile" && !isHiddenFromViewer}
                   debugInteractionMode={debugInteractionMode}
                   onOpenDebugMenu={(launcher, x, y) => {
                     debugMenuAnchorRef.current = launcher;
@@ -237,6 +240,7 @@ function ZoneCard({
   canDelve,
   castTitle,
   hiddenFromViewer,
+  showTimeCounter,
   debugInteractionMode,
   onOpenDebugMenu,
   onTarget,
@@ -249,6 +253,7 @@ function ZoneCard({
   canDelve: boolean;
   castTitle: string;
   hiddenFromViewer: boolean;
+  showTimeCounter: boolean;
   debugInteractionMode: boolean;
   onOpenDebugMenu: (
     launcher: HTMLButtonElement,
@@ -263,6 +268,7 @@ function ZoneCard({
   // click that follows it in the capture phase, so this component needs neither
   // its own useLongPress nor a firedRef guard here.
   const hoverProps = useInspectHoverProps();
+  const timeCounter = timeCounterOf(useCounterDisplay(obj.id));
   const interactive = debugInteractionMode || isValidTarget || canDelve || canCast;
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
@@ -301,6 +307,16 @@ function ZoneCard({
           legitimate Hideaway/Foretell controller who the engine intends to
           let see the real card. */}
       <CardImage {...objectImageProps(obj)} size="normal" faceDown={hiddenFromViewer} />
+      {showTimeCounter && timeCounter && (
+        <CounterTooltip type={timeCounter.counter} count={timeCounter.count}>
+          <span
+            aria-label={String(timeCounter.count)}
+            className="absolute -right-1 -top-1 z-20 rounded-full border border-sky-100/70 bg-sky-700 px-1.5 py-0.5 text-xs font-bold leading-none text-white shadow"
+          >
+            {timeCounter.count}
+          </span>
+        </CounterTooltip>
+      )}
       {canCast && !isValidTarget && (
         <>
           {/* Arena-style purple "playable" affordance — same treatment as the

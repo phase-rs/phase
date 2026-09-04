@@ -23,7 +23,7 @@ use engine::game::{
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType, Supertype};
-use engine::types::format::GameFormat;
+use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::keywords::{Keyword, PartnerType};
 use engine::types::mana::ManaColor;
 
@@ -375,7 +375,7 @@ fn constructed_commander_keeps_its_own_axes() {
 ///
 /// Parameter order mirrors the signature: db, main_deck, sideboard, commander,
 /// companion, planar_deck, scheme_deck, signature_spell, draft_set_codes,
-/// selected_format, selected_match_type, player_count.
+/// format_config, selected_match_type, player_count.
 fn launch_verdict(
     db: &CardDatabase,
     main_deck: &[String],
@@ -393,7 +393,7 @@ fn launch_verdict(
         &[],
         &[],
         &draft_set_codes,
-        GameFormat::CommanderDraft,
+        &FormatConfig::commander_draft(),
         None,
         4,
     )

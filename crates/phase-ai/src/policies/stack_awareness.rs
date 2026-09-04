@@ -83,6 +83,58 @@ fn score_target_redundancy(ctx: &PolicyContext<'_>, target_id: ObjectId) -> f64 
     }
 }
 
+/// Impact at which a stack entry is worth the AI's best counter, on the
+/// [`assess_spell_impact`] scale. Two consumers share it: the last-counter
+/// reservation in [`score_counter_target_value`] (below this, spending the AI's
+/// only counter is penalized) and the cast-time impact scaling in
+/// `effect_timing::counterspell_score` (at or above this, the counter cast keeps
+/// its full stack-pressure bracket).
+pub(crate) const COUNTER_IMPACT_THRESHOLD: f64 = 3.0;
+
+/// Impact below which countering is card disadvantage: a counter trades exactly
+/// one card, so a target worth less than one card is not worth casting it.
+/// Used by `effect_timing::counterspell_score` as the floor of the impact ramp.
+///
+/// This is a *pricing* boundary, not a card-quality judgement: a 1/1 mana dork
+/// prices at 1.05 (0.3 mana value + 0.75 body) and clears it, while Birds of
+/// Paradise at 0.6 (0.3 + 0.3 for a 0/1 body) holds. Repricing belongs in
+/// [`assess_spell_impact`], not in this constant.
+pub(crate) const COUNTER_BREAK_EVEN_IMPACT: f64 = 1.0;
+
+/// CR 701.6a: countering removes a spell from the stack. If `entry` is itself a
+/// counter, report what countering *it* is worth to `ai_player`: the impact of
+/// the most valuable AI-controlled stack object it targets, or `0.0` when it
+/// targets nothing the AI controls (a rival counter aimed at a third player's
+/// spell is someone else's fight — countering it buys the AI nothing).
+///
+/// Returns `None` when `entry` is not a counter at all, so callers can fall back
+/// to [`assess_spell_impact`]. Single authority for the "which spell does this
+/// foreign counter threaten" walk, shared with `effect_timing`.
+pub(crate) fn foreign_counter_target_of_ai(
+    state: &GameState,
+    entry: &StackEntry,
+    ai_player: PlayerId,
+) -> Option<f64> {
+    let ability = entry.ability()?;
+    let effects = collect_ability_effects(ability);
+    if !effects.iter().any(|e| matches!(e, Effect::Counter { .. })) {
+        return None;
+    }
+
+    let mut worth = 0.0_f64;
+    for target in &ability.targets {
+        let TargetRef::Object(target_id) = target else {
+            continue;
+        };
+        if let Some(threatened) = state.stack.iter().find(|e| e.id == *target_id) {
+            if threatened.controller == ai_player {
+                worth = worth.max(assess_spell_impact(state, threatened));
+            }
+        }
+    }
+    Some(worth)
+}
+
 /// When the AI is casting a counter spell, score the target stack entry by its
 /// impact. Higher-value spells (by mana value, creature stats, effects) should be
 /// preferred counter targets. Returns 0.0 if the pending spell is not a counter.
@@ -101,8 +153,15 @@ fn score_counter_target_value(ctx: &PolicyContext<'_>, target_id: ObjectId) -> f
         return 0.0;
     };
 
-    // Only counter opponent spells — countering your own spell is almost always wrong
-    if entry.controller == ctx.ai_player {
+    // Not a legitimate counter target: countering your own spell is almost always
+    // wrong, and so is countering a rival's counter that is aimed at a third
+    // player's spell — that resolves someone else's fight at the AI's expense.
+    if entry.controller == ctx.ai_player
+        || matches!(
+            foreign_counter_target_of_ai(ctx.state, entry, ctx.ai_player),
+            Some(worth) if worth <= 0.0
+        )
+    {
         return -10.0;
     }
 
@@ -110,8 +169,7 @@ fn score_counter_target_value(ctx: &PolicyContext<'_>, target_id: ObjectId) -> f
 
     // Last-counter reservation: if this is the AI's only counterspell, penalize
     // spending it on low-impact targets. Save it for something that matters.
-    let impact_threshold = 3.0;
-    if score < impact_threshold {
+    if score < COUNTER_IMPACT_THRESHOLD {
         let counters_in_hand =
             super::strategy_helpers::count_counterspells_in_hand(ctx.state, ctx.ai_player);
         if counters_in_hand == 1 {
@@ -368,6 +426,49 @@ mod tests {
             },
         });
         state.next_object_id += 1;
+    }
+
+    fn counter_effect() -> Effect {
+        Effect::Counter {
+            target: TargetFilter::Any,
+            source_rider: None,
+            countered_spell_zone: None,
+        }
+    }
+
+    /// Sibling of [`push_stack_entry`] for multiplayer counter fixtures: the entry
+    /// carries an explicit `controller` and is backed by a real object, so
+    /// [`assess_spell_impact`] can read its mana value. Returns the entry id.
+    fn push_spell(
+        state: &mut GameState,
+        controller: PlayerId,
+        mana_value: u32,
+        effect: Effect,
+        targets: Vec<TargetRef>,
+    ) -> ObjectId {
+        let source_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&source_id).unwrap().mana_cost = ManaCost::generic(mana_value);
+        let ability = ResolvedAbility::new(effect, targets, source_id, controller);
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id,
+            source_id,
+            controller,
+            kind: StackEntryKind::Spell {
+                ability: Some(Box::new(ability)),
+                card_id: CardId(id.0),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+        id
     }
 
     fn make_target_ctx(
@@ -628,6 +729,48 @@ mod tests {
         assert!(
             score < 0.0 && score > -5.0,
             "Should get partial penalty for indestructible, got {score}"
+        );
+    }
+
+    /// Three players: B (P0) counters `victim_controller`'s spell. When the victim
+    /// is C (P2), countering B's counter only resolves C's spell — the AI (P1)
+    /// would be fighting someone else's fight for a card. Returns B's entry id.
+    fn three_player_counter_war(victim_controller: PlayerId) -> (GameState, ObjectId) {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        let victim = push_spell(&mut state, victim_controller, 4, Effect::NoOp, Vec::new());
+        let rival_counter = push_spell(
+            &mut state,
+            PlayerId(0),
+            2,
+            counter_effect(),
+            vec![TargetRef::Object(victim)],
+        );
+        (state, rival_counter)
+    }
+
+    #[test]
+    fn counter_target_rival_counter_on_third_party_spell_is_penalised() {
+        let (state, rival_counter) = three_player_counter_war(PlayerId(2));
+        let (decision, candidate) = make_target_ctx(&state, rival_counter, counter_effect());
+        let score = score_policy(&state, &decision, &candidate);
+        assert!(
+            score <= -10.0,
+            "A rival counter aimed at a third player's spell must not be a counter \
+             target, got {score}"
+        );
+    }
+
+    #[test]
+    fn counter_target_rival_counter_on_own_spell_is_valued() {
+        // PlayerId(1) is the AI seat that `score_policy` scores from.
+        let (state, rival_counter) = three_player_counter_war(PlayerId(1));
+        let (decision, candidate) = make_target_ctx(&state, rival_counter, counter_effect());
+        let score = score_policy(&state, &decision, &candidate);
+        assert!(
+            score > 0.0,
+            "A rival counter aimed at the AI's own spell is a legitimate counter \
+             target, got {score}"
         );
     }
 }

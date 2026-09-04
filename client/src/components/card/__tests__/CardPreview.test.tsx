@@ -744,3 +744,69 @@ describe("CardPreview activate labels", () => {
     expect(container.textContent).not.toContain("~");
   });
 });
+
+describe("CardPreview nameless permanent", () => {
+  // CR 709.5: a permanent with a shared type line doesn't have the name of a
+  // half it hasn't unlocked, and CR 709.5d gives a copy of a Room neither
+  // unlocked designation — so it has no name at all. The hover must still
+  // answer with the card. An empty name is a real permanent; only `null`
+  // means "there is nothing to preview".
+  function namelessRoomCopy(overrides: Partial<GameObject> = {}): GameObject {
+    return battlefieldObject({
+      name: "",
+      printed_ref: { oracle_id: "greenhouse-oracle-id", face_name: "Greenhouse" },
+      ...overrides,
+    });
+  }
+
+  it("previews a battlefield permanent whose name is empty", () => {
+    const object = namelessRoomCopy();
+    useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
+
+    const { container } = render(
+      <CardPreview cardName="" objectId={object.id} position={{ x: 20, y: 20 }} />,
+    );
+
+    expect(container.querySelector("[data-card-preview]")).not.toBeNull();
+    // The identity the art is resolved FROM is the object's `printed_ref`,
+    // never the name — the empty name reaches the hook untouched beside it.
+    expect(useCardImage).toHaveBeenCalledWith(
+      "",
+      expect.objectContaining({
+        oracleId: "greenhouse-oracle-id",
+        faceName: "Greenhouse",
+      }),
+    );
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "greenhouse-oracle-id.png",
+    );
+  });
+
+  it("measures a hand origin for a nameless card the same way", () => {
+    // The hand-origin gate asks the same question as the render gate. Left
+    // asking for truthiness it withholds `measuredHandOrigin`, and the preview
+    // never mounts — the same defect on the other branch.
+    const object = namelessRoomCopy({ zone: "Hand" });
+    useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
+    const source = document.createElement("div");
+    source.dataset.handCard = "";
+    source.dataset.handRotation = "-4";
+    source.dataset.objectId = String(object.id);
+    Object.defineProperty(source, "offsetWidth", { configurable: true, value: 120 });
+    source.matches = vi.fn((selector) => selector === ":hover");
+    source.getBoundingClientRect = () => ({
+      bottom: 748, height: 168, left: 220, right: 340, top: 580, width: 120,
+      x: 220, y: 580, toJSON: () => ({}),
+    });
+    document.body.appendChild(source);
+
+    const { container } = render(
+      <CardPreview cardName="" objectId={object.id} handSourceObjectId={object.id} />,
+    );
+
+    const preview = container.querySelector<HTMLElement>("[data-card-preview]");
+    expect(preview).not.toBeNull();
+    expect(preview?.style.bottom).toBe("0px");
+    source.remove();
+  });
+});

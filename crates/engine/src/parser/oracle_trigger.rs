@@ -3361,12 +3361,12 @@ fn extract_unless_pay_modifier(
         return (cleaned, Some(UnlessPayModifier { cost, payer }));
     }
 
-    // CR 118.12a: "[trigger] ... unless they/that player/that opponent
-    // {sacrifice|discard|pay life} [or ...]" — same disjunctive non-mana
+    // CR 118.12a: "[trigger] ... unless they/that player/that opponent/defending
+    // player {sacrifice|discard|pay life} [or ...]" — same disjunctive non-mana
     // unless-cost shape the resolution-time path handles. Delegate to the
     // single authority (`parse_unless_they_alt_cost_chain`) so trigger-side
     // and resolution-side parse identically. The chain requires an explicit
-    // pronoun ("they"/"that player"/"that opponent"), so "you"/mana forms
+    // subject (`parse_unless_payer_subject`), so "you"/mana forms
     // fall through to the existing blocks unchanged.
     //
     // GUARD: the chain's per-branch `unless_branch_boundary` stops at the
@@ -3377,11 +3377,22 @@ fn extract_unless_pay_modifier(
     // terminal unless-cost; defer to the gap path (mirrors the `unless`
     // dispatch guard below at the `Unsupported unless clause` site).
     if !has_later_sentence_if(&lower) {
-        if let Some(cost) = parse_unless_they_alt_cost_chain(after_unless) {
-            let payer = infer_pronoun_unless_payer(&lower[..unless_pos], condition_lower)
-                .unwrap_or(TargetFilter::TriggeringPlayer);
+        if let Some(alt_cost) = parse_unless_they_alt_cost_chain(after_unless) {
+            // CR 508.5: a subject that NAMES its payer ("defending player")
+            // outranks the anaphoric inference below, which exists only to
+            // find the referent of a pronoun.
+            let payer = alt_cost.payer.unwrap_or_else(|| {
+                infer_pronoun_unless_payer(&lower[..unless_pos], condition_lower)
+                    .unwrap_or(TargetFilter::TriggeringPlayer)
+            });
             let cleaned = text[..unless_pos].trim().to_string();
-            return (cleaned, Some(UnlessPayModifier { cost, payer }));
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost: alt_cost.cost,
+                    payer,
+                }),
+            );
         }
     }
 
@@ -4231,12 +4242,12 @@ fn parse_unless_counted_target_filter(rest: &str) -> Option<(u32, TargetFilter)>
     Some((count, filter))
 }
 
-/// CR 118.12 + CR 118.12a: Parse a chain of "they"-pronoun alternative
-/// payment verbs joined by " or " into either a single `AbilityCost` (one
-/// branch) or `AbilityCost::OneOf { costs }` (two or more branches). Used by
-/// the resolution-time "[Effect] unless they X or Y" pattern (Tergrid's
-/// Lantern: "Target player loses 3 life unless they sacrifice a nonland
-/// permanent of their choice or discard a card.").
+/// CR 118.12 + CR 118.12a: Parse an unless-clause subject followed by a chain
+/// of alternative payment verbs joined by " or ", into either a single
+/// `AbilityCost` (one branch) or `AbilityCost::OneOf { costs }` (two or more).
+/// Used by the resolution-time "[Effect] unless <subject> X or Y" pattern
+/// (Tergrid's Lantern: "Target player loses 3 life unless they sacrifice a
+/// nonland permanent of their choice or discard a card.").
 ///
 /// The "of their choice" qualifier on `parse_unless_they_sacrifice_filter`
 /// is structurally redundant — the runtime sacrifice-cost prompt
@@ -4245,20 +4256,30 @@ fn parse_unless_counted_target_filter(rest: &str) -> Option<(u32, TargetFilter)>
 /// must be absorbed to avoid leaving unparsed tail text on the cost.
 ///
 /// `after_unless` is the lowercase tail immediately after the literal
-/// `"unless "` prefix has been consumed; the sole caller
-/// (`extract_resolution_unless_pay_modifier`) strips the entire unless
-/// clause from the surrounding effect text using its own pre-computed
-/// `before_unless` offset, so this combinator only needs to return the
-/// parsed cost. Returns `None` if no "they X" branch is recognized.
-pub(crate) fn parse_unless_they_alt_cost_chain(after_unless: &str) -> Option<AbilityCost> {
-    let (first_cost, after_first) = parse_unless_they_single_alt_cost(after_unless)?;
+/// `"unless "` prefix has been consumed. Every caller strips the entire
+/// unless clause from the surrounding effect text using its own pre-computed
+/// offset, so this combinator returns only what the clause itself carries:
+/// the cost, plus the payer its SUBJECT names (see `parse_unless_payer_subject`
+/// — `Some` for a named role like CR 508.5's "defending player", `None` for
+/// the anaphoric pronouns, whose referent only the caller's surrounding
+/// context can supply). Returns `None` if no subject+verb branch is
+/// recognized.
+///
+/// Three production callers consume this: the trigger-side
+/// `extract_unless_pay_modifier`, the resolution-side
+/// `extract_resolution_unless_pay_modifier`, and the counter path's
+/// `parse_unless_payment` (which discards the payer — it pins the payer to the
+/// targeted spell's controller at its own call site).
+pub(crate) fn parse_unless_they_alt_cost_chain(after_unless: &str) -> Option<UnlessAltCost> {
+    let (first, after_first) = parse_unless_they_single_alt_cost(after_unless)?;
+    let payer = first.payer;
 
     // CR 118.12a: Greedily consume " or {alt_cost}" continuations to build
     // a disjunctive `OneOf`. English elides the second-clause subject
     // pronoun ("unless they sacrifice X or discard Y" — the "they" before
     // "discard" is implicit). `parse_unless_they_continuation` accepts
     // either form, dispatching by verb.
-    let mut costs = vec![first_cost];
+    let mut costs = vec![first.cost];
     let mut remainder = after_first;
     while let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(remainder) {
         let Some((next_cost, after_next)) = parse_unless_they_continuation(after_or) else {
@@ -4268,33 +4289,85 @@ pub(crate) fn parse_unless_they_alt_cost_chain(after_unless: &str) -> Option<Abi
         remainder = after_next;
     }
 
-    if costs.len() == 1 {
-        costs.pop()
+    let cost = if costs.len() == 1 {
+        costs.pop()?
     } else {
-        Some(AbilityCost::OneOf { costs })
-    }
+        AbilityCost::OneOf { costs }
+    };
+    Some(UnlessAltCost { cost, payer })
 }
 
-/// CR 118.12: Parse a single "they {verb} ..." alternative payment branch.
-/// Mirrors the verb set of `parse_unless_alt_cost` but with the "they"
-/// pronoun (the target player) instead of "you" (the resolving ability's
-/// controller). Returns the cost and the unconsumed tail.
-fn parse_unless_they_single_alt_cost(input: &str) -> Option<(AbilityCost, &str)> {
-    // CR 118.12a: The first branch requires an explicit payer pronoun — it
-    // anchors the unless-clause to the paying player. The pronoun axis is
-    // parameterized: "they " (Tergrid's Lantern — a player target) and "that
-    // player " / "that opponent " (Nicol Bolas, Torment of Hailfire — the
-    // per-opponent scoped player). All forms resolve to the same payer, so
-    // only the verb dispatch downstream needs the remainder. Continuation
-    // branches omit the pronoun (English elision).
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("they "),
-        tag("that player "),
-        tag("that opponent "),
+/// CR 118.12a: An "unless [subject] [verb] …" alternative cost together with
+/// the payer its *subject* names outright.
+///
+/// The subject axis has two kinds of member (see
+/// [`parse_unless_payer_subject`]): anaphoric pronouns, which name no player of
+/// their own and leave `payer` as `None` for the caller to resolve from the
+/// surrounding effect text, and named combat/game roles, which resolve to a
+/// concrete [`TargetFilter`] here. Carrying the two in one value keeps the
+/// subject grammar in a single authority instead of forcing every caller to
+/// re-scan the clause to learn who the subject was.
+#[derive(Debug)]
+pub(crate) struct UnlessAltCost {
+    pub(crate) cost: AbilityCost,
+    /// `Some` when the clause's subject names its payer directly; `None` for
+    /// the anaphoric pronouns, whose referent only the caller's surrounding
+    /// context can supply.
+    pub(crate) payer: Option<TargetFilter>,
+}
+
+/// CR 118.12a: The subject of an "unless [subject] [verb] …" clause, as the
+/// payer it names (or `None` when it names none).
+///
+/// Two kinds of subject share this position in the grammar:
+///
+/// - **Anaphoric pronouns** — "they " (Tergrid's Lantern — a player target),
+///   "that player " / "that opponent " (Nicol Bolas, Torment of Hailfire — the
+///   per-opponent scoped player). These point back at a player the surrounding
+///   effect text established, so they carry no payer of their own; the caller
+///   infers it (`infer_pronoun_unless_payer` trigger-side, the
+///   `before_unless` scan resolution-side).
+/// - **Named roles** — CR 508.5: "defending player" is the player the
+///   attacking creature is attacking, determined per attacker and resolved
+///   from combat state, so the clause names its payer outright and no
+///   surrounding context is needed (Ogre Marauder). CR 508.5a makes this one
+///   specific player in multiplayer, which is exactly what
+///   `TargetFilter::DefendingPlayer` resolves to.
+fn parse_unless_payer_subject(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    alt((
+        // CR 508.5: named role — the subject IS the payer.
+        value(
+            Some(TargetFilter::DefendingPlayer),
+            alt((
+                tag("the defending player "),
+                tag::<_, _, OracleError<'_>>("defending player "),
+            )),
+        ),
+        // CR 118.12a: anaphoric pronouns — payer resolved by the caller.
+        value(
+            None,
+            alt((
+                tag::<_, _, OracleError<'_>>("they "),
+                tag("that player "),
+                tag("that opponent "),
+            )),
+        ),
     ))
     .parse(input)
-    .ok()?;
-    parse_unless_they_branch_by_verb(rest)
+}
+
+/// CR 118.12: Parse a single "[subject] {verb} ..." alternative payment
+/// branch. Mirrors the verb set of `parse_unless_alt_cost` but with a payer
+/// subject (the paying player) instead of "you" (the resolving ability's
+/// controller). Returns the cost, the payer its subject names (if any), and
+/// the unconsumed tail.
+fn parse_unless_they_single_alt_cost(input: &str) -> Option<(UnlessAltCost, &str)> {
+    // CR 118.12a: The first branch requires an explicit payer subject — it
+    // anchors the unless-clause to the paying player. Continuation branches
+    // omit it (English elision).
+    let (rest, payer) = parse_unless_payer_subject(input).ok()?;
+    let (cost, after) = parse_unless_they_branch_by_verb(rest)?;
+    Some((UnlessAltCost { cost, payer }, after))
 }
 
 /// CR 118.12a: Parse the second-or-later branch of a "unless they X or Y"
@@ -5989,8 +6062,12 @@ fn extract_if_condition_with_card_name(
     }
 
     // CR 603.4 + CR 601.2h: "if the amount of mana spent to cast it/that spell
-    // was less than/greater than its mana value" — intervening-if for mana-spent
-    // comparison triggers (Tokka & Rahzar, Liberator, Urza's Battlethopter).
+    // was less than/greater than ITS MANA VALUE" — intervening-if for mana-spent
+    // comparison triggers (Ancient Cellarspawn, Tokka & Rahzar). The tail is
+    // required, so a comparison against a characteristic of the SOURCE
+    // (Liberator, Urza's Battlethopter: "greater than ~'s power") is NOT this
+    // clause; it belongs to `parse_mana_spent_vs_source_pt` in
+    // `oracle_nom/condition.rs`.
     if let Some(result) = try_extract_mana_spent_comparison_condition(&lower, text) {
         return result;
     }
@@ -7474,8 +7551,15 @@ fn parse_no_mana_spent_clause(i: &str) -> OracleResult<'_, &str> {
 }
 
 /// CR 603.4 + CR 601.2h: Extract "if the amount of mana spent to cast it/that spell
-/// was less than/greater than its mana value" — intervening-if for mana-spent
-/// comparison triggers (Tokka & Rahzar, Liberator, Urza's Battlethopter).
+/// was less than/greater than ITS MANA VALUE" — intervening-if for mana-spent
+/// comparison triggers (Ancient Cellarspawn, Tokka & Rahzar).
+///
+/// The `" its mana value"` tail is required. A comparison against a
+/// characteristic of the SOURCE (Liberator, Urza's Battlethopter: "greater than
+/// ~'s power") is a different sentence and is read by
+/// `parse_mana_spent_vs_source_pt` in `oracle_nom/condition.rs`. Naming
+/// Liberator here was wrong, and it is why the missing subject went unnoticed:
+/// a grep for the card landed on a parser that can never accept it.
 fn try_extract_mana_spent_comparison_condition(
     lower: &str,
     text: &str,
@@ -7483,6 +7567,13 @@ fn try_extract_mana_spent_comparison_condition(
     let (before, comparator, rest) = scan_preceded(lower, |i| {
         preceded(tag("if "), parse_mana_spent_comparison_clause).parse(i)
     })?;
+
+    // CR 603.4: only an "if" immediately after the trigger event is an
+    // intervening-if. A later clause qualifies the resolving effect and must
+    // remain available to effect-chain parsing.
+    if !before.trim().is_empty() {
+        return None;
+    }
 
     let rest_trimmed = rest.trim_start();
     if !(rest_trimmed.is_empty() || rest_trimmed.starts_with(',') || rest_trimmed.starts_with('.'))
@@ -19007,8 +19098,11 @@ fn try_parse_one_or_more_put_into_library(lower: &str) -> Option<(TriggerMode, T
 
 /// Parse discard trigger patterns with prefix-based matching.
 /// Handles: "whenever you discard a card", "whenever an opponent discards a card",
-/// "whenever a player discards a card", batched "one or more" variants,
-/// and optional type filters ("a creature card", "a nonland card").
+/// "whenever a player discards a card", "whenever each player discards a card",
+/// "whenever one or more players discard a card", batched "one or more <cards>"
+/// quantity variants composed onto every one of those actors (CR 603.2c — see
+/// the quantity strip below), and optional type filters ("a creature card", "a
+/// nonland card").
 fn try_parse_discard_trigger(
     lower: &str,
     make_base: &dyn Fn() -> TriggerDefinition,
@@ -19081,33 +19175,6 @@ fn try_parse_discard_trigger(
             .is_ok()
     }
 
-    // CR 603.2c: Batched discard triggers — "one or more" fire once per batch.
-    if let Ok((after_verb, _)) =
-        tag::<_, _, OracleError<'_>>("you discard one or more ").parse(event)
-    {
-        let mut def = make_base();
-        def.mode = TriggerMode::DiscardedAll;
-        def.valid_target = Some(TargetFilter::Controller);
-        let card_filter = discard_card_filter(after_verb)?;
-        if !is_plain_card_filter(&card_filter) {
-            def.valid_card = Some(card_filter);
-        }
-        def.batched = true;
-        return Some((TriggerMode::DiscardedAll, def));
-    }
-    if let Ok((after_verb, _)) =
-        tag::<_, _, OracleError<'_>>("one or more players discard one or more ").parse(event)
-    {
-        let mut def = make_base();
-        def.mode = TriggerMode::DiscardedAll;
-        let card_filter = discard_card_filter(after_verb)?;
-        if !is_plain_card_filter(&card_filter) {
-            def.valid_card = Some(card_filter);
-        }
-        def.batched = true;
-        return Some((TriggerMode::DiscardedAll, def));
-    }
-
     // CR 109.5 + CR 603.2: "a spell or ability an opponent controls causes you to
     // discard this card" — the self-discard caused by an opponent's spell/ability
     // (Guerrilla Tactics, Sand Golem, Quagnoth, Mangara's Blessing). The
@@ -19138,30 +19205,66 @@ fn try_parse_discard_trigger(
         return Some((TriggerMode::Discarded, def));
     }
 
-    // Determine subject and find "discards"/"discard" verb using nom alt()
+    // Determine subject and find "discards"/"discard" verb using nom alt().
+    // "one or more players discard " is the plural-subject spelling of the
+    // same any-player actor as "a player discards "/"each player discards "
+    // (all three carry no controller restriction — `discard_actor_filter`
+    // maps every one of them to `None`), so it lives on this axis rather
+    // than a separate branch.
     fn parse_discard_subject(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
         alt((
             value(Some(ControllerRef::You), tag("you discard ")),
             value(Some(ControllerRef::Opponent), tag("an opponent discards ")),
             value(None, tag("a player discards ")),
             value(None, tag("each player discards ")),
+            value(None, tag("one or more players discard ")),
         ))
         .parse(input)
     }
     let (after_verb, controller_ref) = parse_discard_subject.parse(event).ok()?;
 
     let mut def = make_base();
-    def.mode = TriggerMode::Discarded;
-
     def.valid_target = discard_actor_filter(controller_ref);
+
     if is_discarded_self_reference(after_verb) {
+        def.mode = TriggerMode::Discarded;
         def.valid_card = Some(TargetFilter::SelfRef);
         def.trigger_zones = vec![Zone::Graveyard, Zone::Exile];
-    } else {
-        def.valid_card = Some(discard_card_filter(after_verb)?);
+        return Some((TriggerMode::Discarded, def));
     }
 
-    Some((TriggerMode::Discarded, def))
+    // CR 603.2c: a batched event-wording ("one or more <cards>") fires the
+    // triggered ability once per qualifying discard EVENT — not once per
+    // card discarded — regardless of which actor phrasing introduced it
+    // above (Tinybones, Pocket Nuisance: "a player discards one or more
+    // cards"; Magmakin Artillerist: "you discard one or more cards"; Waste
+    // Not: "one or more players discard one or more cards"). Composing the
+    // quantity check here, after the actor is resolved, is what lets every
+    // actor above pick up batching for free instead of a per-actor literal
+    // "<actor> discard(s) one or more " duplicate.
+    let (after_verb, batched) = match tag::<_, _, OracleError<'_>>("one or more ").parse(after_verb)
+    {
+        Ok((rest, _)) => (rest, true),
+        Err(_) => (after_verb, false),
+    };
+
+    let card_filter = discard_card_filter(after_verb)?;
+    if batched {
+        def.mode = TriggerMode::DiscardedAll;
+        // Mirrors the non-batched arm below: an unqualified "cards" filter
+        // matches every discarded card, so leaving `valid_card` unset (not
+        // an always-true Typed(Card) filter) keeps the parsed shape minimal.
+        if !is_plain_card_filter(&card_filter) {
+            def.valid_card = Some(card_filter);
+        }
+        def.batched = true;
+    } else {
+        def.mode = TriggerMode::Discarded;
+        def.valid_card = Some(card_filter);
+    }
+
+    let mode = def.mode.clone();
+    Some((mode, def))
 }
 
 /// CR 603 + CR 701.21: Parse player-actor sacrifice trigger patterns.

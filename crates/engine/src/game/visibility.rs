@@ -838,6 +838,15 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // itself. Viewer projections are display-only clones; the authoritative
     // state the drain resumes from is never filtered.
     filtered.pending_discard_batch = None;
+    // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
+    // identities and origins for later private choices. The public current
+    // `EffectZoneChoice` is projected below; its execution-only successor
+    // carrier must never be shipped to any viewer, including a future owner.
+    filtered.pending_mass_library_order_choice = None;
+    // CR 400.2 + CR 616.1: the replacement-suspended exile iterator retains
+    // the exact remaining library order and current-resolution incarnation
+    // pins. The ReplacementChoice prompt is its complete public surface.
+    filtered.pending_exile_from_top_until = None;
     // CR 510.2 + CR 616.1: the parked combat-damage batch is server authority.
     // Its `batch_events` can carry rider-created `ZoneChanged` records and other
     // effect events that `filter_events_for_viewer` would redact in the live
@@ -1835,15 +1844,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         ref enter_with_counters,
         ref conditional_enter_with_counters,
         count_param,
-        library_position: None,
+        ref library_position,
+        mass_library_order: _,
         is_cost_payment: _,
         enters_modified_if: _,
         ref duration,
     } = state.waiting_for
     {
-        // `open_private_zone_cast_selection` is the sole Library producer and
-        // always writes `library_position: None`, so this pattern redacts every
-        // private library cast-choice payload for non-prompt viewers.
+        // A private-zone choice reveals exactly which cards can be selected,
+        // including a mass library-order prompt whose members still occupy the
+        // battlefield. The placement parameters are public, but the offered
+        // ids and their identity/origin provenance are not.
         if !can_view_private_for_player(player) && matches!(zone, Zone::Hand | Zone::Library) {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
@@ -1867,7 +1878,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 enter_with_counters: enter_with_counters.clone(),
                 conditional_enter_with_counters: conditional_enter_with_counters.clone(),
                 count_param,
-                library_position: None,
+                library_position: library_position.clone(),
+                mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
                 // The bounded-move duration is a public effect parameter, not
@@ -6822,6 +6834,49 @@ mod tests {
         );
     }
 
+    /// CR 400.2 + CR 616.1: an exile-until replacement continuation carries
+    /// hidden library order and is server-only for every viewer.
+    #[test]
+    fn parked_exile_from_top_until_is_absent_from_every_viewer_projection() {
+        let mut state = GameState::new_two_player(42);
+        let pending = create_object(
+            &mut state,
+            CardId(70_008),
+            PlayerId(0),
+            "Pending Secret".to_string(),
+            Zone::Library,
+        );
+        let remaining = create_object(
+            &mut state,
+            CardId(70_009),
+            PlayerId(0),
+            "Remaining Secret".to_string(),
+            Zone::Library,
+        );
+        state.pending_exile_from_top_until = Some(Box::new(
+            crate::types::game_state::PendingExileFromTopUntil {
+                pending_card: pending,
+                remaining: vec![remaining],
+                linked_batch: Vec::new(),
+                cumulative: 0,
+            },
+        ));
+        let authoritative = serde_json::to_string(&state.pending_exile_from_top_until)
+            .expect("authoritative continuation serializes");
+        assert!(authoritative.contains(&remaining.0.to_string()));
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let view = filter_state_for_viewer(&state, viewer);
+            assert!(view.pending_exile_from_top_until.is_none());
+            let wire = serde_json::to_string(&view).expect("filtered state serializes");
+            assert!(
+                !wire.contains("pendingExileFromTopUntil")
+                    && !wire.contains("pending_exile_from_top_until")
+            );
+        }
+        assert!(state.pending_exile_from_top_until.is_some());
+    }
+
     /// CR 510.2 + CR 616.1: `pending_combat_lifelink` is the parked
     /// combat-damage batch. Its `batch_events` can carry effect events that
     /// `filter_events_for_viewer` redacts in the live stream — a hidden-zone
@@ -7813,6 +7868,8 @@ mod tests {
             },
             constraint: None,
             granted_to,
+            duration: None,
+            source_id: None,
         }];
         (state, card)
     }
@@ -7934,6 +7991,7 @@ mod tests {
                 Zone::Battlefield,
             )));
             obj.casting_permissions = vec![CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost: crate::types::mana::ManaCost::zero(),
                 cost_provenance: ExileGrantCostProvenance::Alternative,
                 cast_transformed: false,

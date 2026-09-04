@@ -1579,10 +1579,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             ForEachCategoryAction::ExileFromPool { .. } => Axes::NONE,
         },
         Effect::ChooseObjectsIntoTrackedSet {
-            chooser,
-            filter,
-            min: _,
-            max: _,
+            chooser, filter, ..
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(chooser, target_ctx, mode));
@@ -1843,9 +1840,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
-        Effect::Amass { count, subtype: _ } => {
+        Effect::Amass {
+            count,
+            subtype: _,
+            player,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
+            acc = acc.or(scan_target_filter(player, target_ctx, mode));
             acc
         }
         Effect::Monstrosity { count } => {
@@ -4033,6 +4035,11 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes {
             acc
         }
         Duration::UntilHostLeavesPlay => Axes::NONE,
+        // CR 611.2b: payload-free, exactly like `UntilHostLeavesPlay` — the
+        // controller it is measured against lives on the carrier.
+        Duration::WhileControllingHost => Axes::NONE,
+        // CR 611.2b + CR 702.26f: presence-bound sibling, likewise payload-free.
+        Duration::WhileHostOnBattlefield => Axes::NONE,
         Duration::UntilSourceExilesAnotherCard => Axes::NONE,
         Duration::UntilOpponentBecomesMonarch => Axes::NONE,
         Duration::UntilNextStepOf { player, .. } => {

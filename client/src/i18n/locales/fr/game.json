@@ -605,6 +605,8 @@
     "chooseXInputAria": "Saisir la valeur de X",
     "decreaseX": "Diminuer la valeur de X",
     "increaseX": "Augmenter la valeur de X",
+    "maximum": "Max.",
+    "setXToMaximum": "Définir X au maximum",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
     "amountOutOfRange": "Entrez un nombre entier entre {{min}} et {{max}}",
@@ -660,7 +662,9 @@
   },
   "storm": {
     "copies_one": "Déluge : {{count}} copie",
-    "copies_other": "Déluge : {{count}} copies"
+    "copies_other": "Déluge : {{count}} copies",
+    "count_one": "Compteur de déluge : {{count}} copie",
+    "count_other": "Compteur de déluge : {{count}} copies"
   },
   "opponentHud": {
     "ally": "Allié",
@@ -822,6 +826,8 @@
   },
   "log": {
     "title": "Journal de partie",
+    "dockLeft": "Ancrer le journal à gauche",
+    "dockRight": "Ancrer le journal à droite",
     "noEvents": "Aucun événement pour l'instant",
     "closeLog": "Fermer le journal de partie",
     "verbosityFull": "complet",
@@ -1104,7 +1110,10 @@
       "subtitlePreparedCopy": "Lancer le sort préparé ?",
       "subtitleActivate": "Activer cette capacité ?",
       "subtitlePlay": "Choisissez comment jouer cette carte",
-      "subtitleChoose": "Choisissez une capacité à activer"
+      "subtitleChoose": "Choisissez une capacité à activer",
+      "unlockThisDoor": "Déverrouiller cette porte",
+      "unlockHalf": "Déverrouiller {{name}}",
+      "unlockHalfWithCost": "Déverrouiller {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Engager pour du mana",
@@ -1616,6 +1625,9 @@
       "selectAll": "Tout sélectionner",
       "invert": "Inverser",
       "clear": "Effacer",
+      "searchLabel": "Filtrer",
+      "searchPlaceholder": "Nom de la carte",
+      "searchCardsAria": "Filtrer les cartes par nom",
       "sortLabel": "Trier",
       "groupLabel": "Grouper",
       "optNone": "Aucun",
@@ -2041,6 +2053,7 @@
     "diagnostic": "diagnostic : {{reason}}",
     "showDetails": "Afficher les détails",
     "exportGameState": "Exporter l'état de la partie",
+    "exportClientSnapshot": "Exporter l’instantané du client",
     "exported": "Exporté",
     "exportFailed": "Échec de l'exportation",
     "copyDiagnostic": "Copier le diagnostic",

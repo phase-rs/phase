@@ -26,7 +26,7 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Skip low-use priority windows (Experimental)",
     "skipLowUsePriorityWindowsDescription": "Automatically pass your own empty-stack upkeep, draw, and end-step priority windows. Phase stops and Full Control still pause.",
-    "logDefault": "Log Default",
+    "logDockSide": "Game Log Position",
     "spellPayment": "Spell Payment",
     "manualManaPayment": "Manual mana payment for spells",
     "spellPaymentOptions": {
@@ -60,9 +60,9 @@
       "medium": "Medium",
       "large": "Large"
     },
-    "logDefaultOptions": {
-      "open": "Open",
-      "closed": "Closed"
+    "logDockSideOptions": {
+      "left": "Left",
+      "right": "Right"
     }
   },
   "visual": {
@@ -176,6 +176,7 @@
     "signedInAs": "Signed in as {{name}}",
     "syncNow": "Sync now",
     "statusSyncing": "Syncing…",
+    "statusPaused": "Cloud sync is paused while you're offline.",
     "statusError": "Sync failed",
     "lastSynced": "Last synced {{time}}",
     "never": "never",
@@ -215,6 +216,7 @@
   "visualPacks": {
     "title": "Offline card images",
     "description": "Choose images to keep on this device. The card catalog is cached from Scryfall; every image is then downloaded directly from Scryfall.",
+    "offlineUnavailable": "Network downloads are unavailable while offline. Reconnect to update the catalog or install, sync, repair, or resume images.",
     "availability": {
       "loading": "Checking offline visual catalog support…",
       "browser": "This browser does not provide the local storage features required for offline image downloads.",
@@ -402,6 +404,42 @@
       "effects": "Spell casts, zone changes, deaths, life changes, counters, tap/untap.",
       "combat": "Combat damage timing — how long blockers and attackers linger before damage resolves.",
       "banners": "Turn-start banner display."
+    }
+  },
+  "offlinePreparation": {
+    "title": "Offline preparation",
+    "description": "Prepare this desktop for cold-launch local play before enabling Work Offline.",
+    "prepare": "Prepare for Offline",
+    "preparing": "Preparing…",
+    "workOffline": "Work Offline",
+    "checklistLabel": "Offline readiness checklist",
+    "visualWarning": "Installed visual packs need attention. Open Visual Packs to repair them; local play remains available.",
+    "incompleteTitle": "Offline preparation is incomplete",
+    "incompleteMessage": "Missing: {{capabilities}}. Enable Work Offline anyway?",
+    "confirmOffline": "Enable Work Offline",
+    "states": {
+      "needs-preparation": "Prepare this device before working offline.",
+      "preparing": "Preparing local play capabilities…",
+      "ready": "This device is ready for offline local play.",
+      "failed": "Some required local-play capabilities are not ready.",
+      "reconnect-required": "Reconnect before preparing offline local play.",
+      "reload-or-relaunch-required": "Reload the app or relaunch the desktop shell, then prepare again."
+    },
+    "capabilities": {
+      "appShell": "App shell",
+      "browserEngine": "Browser engine and card database",
+      "scryfallSearch": "Card search data",
+      "preconCatalog": "Generated preconstructed decks",
+      "bundledAiCatalog": "Bundled AI deck catalog",
+      "deckLibrary": "Installed Deck Library",
+      "nativeEngine": "Native engine"
+    },
+    "capabilityStates": {
+      "ready": "Ready",
+      "not-ready": "Not ready",
+      "reload-required": "Reload required",
+      "not-applicable": "Not applicable",
+      "not-installed": "Not installed"
     }
   },
   "artChain": {

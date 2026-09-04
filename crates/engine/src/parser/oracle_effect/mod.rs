@@ -145,7 +145,7 @@ pub(crate) use self::conditions::{
 };
 use self::imperative::{
     lower_imperative_family_ast, lower_shuffle_ast, lower_targeted_action_ast,
-    lower_zone_counter_ast, parse_imperative_family_ast, parse_shuffle_ast,
+    lower_zone_counter_ast, parse_imperative_family_ast, parse_shuffle_ast, try_parse_amass,
 };
 use self::search::parse_search_filter;
 use self::search::{
@@ -516,7 +516,22 @@ pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
         return target;
     }
     match &ctx.subject {
-        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+        // CR 608.2c + CR 701.21a: `CostPaidObject` is the gated "If you do,"
+        // Sacrifice-antecedent anchor (`if_you_do_object_anchor`'s
+        // `Effect::Sacrifice` arm) — a resolution-time referent, not a
+        // trigger-subject CATEGORY to refine via `TriggeringSource`. Excluded
+        // here alongside `SelfRef`/`Any` so bare "it" keeps binding to the
+        // ability's source when no other typed trigger subject exists:
+        // Bloodcrazed Socialite's "you may sacrifice a Blood token. If you
+        // do, IT gets +2/+2" needs the ATTACKING CREATURE, not the sacrificed
+        // (now nonexistent, CR 111.7) token. Mirrors the identical exclusion
+        // in `oracle_target::resolve_pronoun_target`.
+        Some(subject)
+            if !matches!(
+                subject,
+                TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+            ) =>
+        {
             TargetFilter::TriggeringSource
         }
         _ => TargetFilter::SelfRef,
@@ -650,6 +665,78 @@ fn condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool {
     }
 }
 
+/// CR 608.2c: the object anchor a gated "If you do,"/"If you don't," clause
+/// binds its bare/demonstrative anaphor to — the antecedent clause's own
+/// target when it has one (`Effect::GenericEffect`'s `target`/`affected`).
+///
+/// CR 701.21a + CR 608.2d: An `Effect::Sacrifice` whose OWN target is a typed
+/// pool (`TargetFilter::Typed`, e.g. "a creature"/"another artifact") is a
+/// resolution-time CHOICE the controller announces while applying the effect
+/// (contrast CR 601.2c target announcement at cast/activation time) — "You
+/// may sacrifice a creature" never produces an `Effect::TargetOnly`/declared
+/// target slot for `ParentTarget` to inherit.
+/// The runtime already resolves exactly this referent through the
+/// cost-paid-object ladder (`ResolvedAbility::cost_paid_object` falling back
+/// to `effect_context_object`, stamped by `perform_player_scope_sacrifices`/
+/// `perform_collected_player_scope_sacrifices_with_completion` whenever
+/// `propagate_parent_context` is set — see `game/effects/mod.rs`), so the
+/// anchor for a gated typed-pool Sacrifice antecedent is
+/// `TargetFilter::CostPaidObject`, not the default source-object
+/// `ParentTarget` fallback. Without this arm, "You may sacrifice a creature.
+/// If you do, return that card to the battlefield ..." (Heart-Shaped Herb,
+/// issue #8077) returned the ability's OWN source instead of the sacrificed
+/// creature, because `ParentTarget` has nothing to inherit and silently
+/// defaults to the source object.
+///
+/// Deliberately a POSITIVE allowlist on `TargetFilter::Typed` rather than a
+/// negative `SelfRef` denylist: `TargetFilter::Typed` is the one shape
+/// `crate::game::effects::effect_object_targets` cannot resolve from the
+/// ability's own pre-chosen targets (a typed pool carries no CR 601.2c
+/// target slot at all), so it is the only shape guaranteed to route through
+/// the resolution-time choice/auto-select machinery that stamps
+/// `cost_paid_object`/`effect_context_object`. Every OTHER Sacrifice-target
+/// shape names an ALREADY-established referent instead of introducing a
+/// fresh one: `SelfRef` ("sacrifice this enchantment") names the ability's
+/// own source; `ParentTarget`/`TriggeringSource` ("its controller may
+/// sacrifice it") name an EARLIER chosen CR 601.2c target or trigger-event
+/// object. A later demonstrative/pronoun after one of those needs to bind to
+/// THAT antecedent (typically via the pre-existing `chunk_subject`/
+/// trigger-subject machinery this function does not touch), never to a
+/// resolution-time choice that was never made. Angelic Renewal ("Whenever a
+/// creature is put into your graveyard ..., you may sacrifice this
+/// enchantment. If you do, return that card to the battlefield") and Grave
+/// Peril ("When a nonblack creature enters, sacrifice this enchantment. If
+/// you do, destroy that creature") both have the `SelfRef` shape with a
+/// DIFFERENT card as the true antecedent (the creature named by the trigger
+/// condition) — an unrelated anaphor-binding gap with its own pre-existing
+/// (and unaffected-by-this-fix) behavior, out of scope here. A `SelfRef`-only
+/// denylist previously let this arm ALSO fire for a `ParentTarget`-targeted
+/// Sacrifice (e.g. Star Athlete's "its controller may sacrifice it", where
+/// "it" is an earlier CR 601.2c target, not a fresh choice) — the
+/// `Typed`-only allowlist rules that out categorically rather than by
+/// enumerating every non-`Typed` shape.
+///
+/// `publishes_aggregate_set_from_resolution`'s doc comment (which contrasts
+/// it with `publishes_tracked_set_from_resolution`) documents this same gap
+/// on the SET axis ("Sacrifice is deliberately NOT added ... re-pointing a
+/// post-sacrifice clause's ParentTarget at the sacrificed set is a different
+/// question with a far wider blast radius") — `CostPaidObject` is the
+/// narrower, already-proven single-object axis that answers it without
+/// touching the wider `TrackedSet` rewrite.
+///
+/// SCOPE NOTE: this anchor is consumed ONLY by the object-position
+/// demonstrative noun phrase ("that card"/"that creature"/"that permanent"/
+/// "that token") in `oracle_target::parse_target_with_syntax`'s "that "
+/// branch — never by the SUBJECT-position demonstrative grammar
+/// (`subject::parse_subject_application`/`build_continuous_clause`, e.g. "If
+/// you do, THAT CREATURE gets +1/+1"/"gains flying"), which resolves its own
+/// subject independently and does not consult this function or `ctx.subject`
+/// at all. A hypothetical future card with "You may sacrifice a creature. If
+/// you do, that creature gets +1/+1" (subject position, not object position)
+/// would reproduce issue #8077's class on that separate grammar — no card in
+/// the current corpus has this exact shape, so it is an out-of-scope sibling
+/// gap here, not a live regression, but a fix for it belongs in
+/// `parse_subject_application`, not in this anchor.
 fn if_you_do_object_anchor(
     clauses: &[ClauseIr],
     condition: &Option<AbilityCondition>,
@@ -675,6 +762,10 @@ fn if_you_do_object_anchor(
                     .iter()
                     .find_map(|definition| definition.affected.clone())
             }),
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(_),
+                ..
+            } => Some(TargetFilter::CostPaidObject),
             _ => None,
         })
 }
@@ -2919,10 +3010,16 @@ pub(crate) fn parse_optional_period_and_end(input: &str) -> Option<()> {
 ///
 /// The CR 611.2b "for as long as you control ~" duration is NOT encoded here:
 /// the clause shell peels that trailing duration onto the sub-ability frame
-/// (`Duration::UntilHostLeavesPlay`), and the `AddTargetReplacement` install
+/// (`Duration::WhileControllingHost`), and the `AddTargetReplacement` install
 /// chokepoint translates it into a `ControllerControlsSource` gate stamped with
 /// the real originating source/controller. A bare "can't become untapped" with
 /// no duration installs the permanent prohibition (no gate).
+///
+/// The two NON-control host wordings peel here just as readily
+/// (`WhileHostOnBattlefield`, `UntilHostLeavesPlay`), and that chokepoint
+/// REFUSES both: they survive a control change the gate would end them on, so
+/// the line is demoted to `Effect::Unimplemented` at
+/// `parser::oracle::demote_unenforceable_replacement_lifetimes`.
 fn try_parse_cant_become_untapped_target_rider(lower: &str) -> Option<Effect> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("that creature"),
@@ -5483,6 +5580,8 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         granted_to: None,
                         resolution_cleanup: None,
                         duration: None,
+                        // CR 611.2a: no duration, so no host to bind to.
+                        source_id: None,
                         graveyard_replacement: None,
                         enters_with_counter: None,
                         enters_with_modifications: Vec::new(),
@@ -8089,6 +8188,8 @@ fn try_parse_choose_and_pay_per_object(
         filter,
         min,
         max,
+        cardinality: None,
+        eligibility: None,
     });
     clause.sub_ability = Some(Box::new(pay_ability));
     // CR 603.4: The "that player may" modal makes the whole clause optional —
@@ -13346,6 +13447,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -13487,6 +13589,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             single_use_group: None,
             single_use,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -13596,6 +13699,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -13843,6 +13947,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation,
         },
@@ -13923,6 +14028,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -14099,6 +14205,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             },
@@ -14882,6 +14989,8 @@ fn parse_choose_survivors_destroy_rest_ir(
                 filter,
                 min: 0,
                 max: Some(max),
+                cardinality: None,
+                eligibility: None,
             }),
             Some(match connector {
                 DestroyRestConnector::Then => ClauseBoundary::Then,
@@ -16915,8 +17024,22 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // (`parse_each_of_target_distribution`), so it is the primary authority for
     // the DealDamage fixup below.
     let pending_damage_multi_target = ctx.pending_damage_multi_target.take();
+    // CR 611.2a: route the stripped trailing duration through the shared
+    // `with_clause_duration` building block instead of assigning `clause.duration`
+    // alone. The effects `with_clause_duration` patches (`CastFromZone`,
+    // `GenericEffect`, `GrantCastingPermission`, `BecomeCopy`) carry the
+    // permission's lifetime INSIDE the effect — `record_lingering_permissions`
+    // and the
+    // `is_lingering_cast_from_zone` optionality gate both read
+    // `Effect::CastFromZone.duration`, never the outer `AbilityDefinition`. A bare
+    // outer assignment left the effect's own slot empty, so a lasting play
+    // permission ("you may play that card for as long as you control ~") was
+    // classified as a one-shot resolution offer and its "may" became an
+    // `OptionalEffectChoice` whose decline destroyed the grant.
     if clause.duration.is_none() {
-        clause.duration = duration;
+        if let Some(duration) = duration {
+            clause = with_clause_duration(clause, duration);
+        }
     }
     // CR 611.2a: A during-resolution cast happens AS the ability resolves and
     // cannot carry a lingering play-window duration. When the anaphor branch set
@@ -21444,6 +21567,39 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
 /// succeeds at the originating typed clause. It stops at the first clause that is
 /// conditional or is neither typed nor a `ParentTarget` carrier, so it never
 /// reaches across an unrelated referent.
+///
+/// CR 603.12 + CR 608.2c carve-out: a `WhenYouDo` clause does NOT bail the walk,
+/// even though it carries a `condition` — it is still inspected as a possible
+/// typed introducer before the walk gives up. Grishnákh, Brash Instigator:
+/// "When ~ enters, amass Orcs 2. **When you do**, until end of turn, gain
+/// control of target nonlegendary creature an opponent controls with power
+/// less than or equal to the amassed Army's power. Untap that creature. It
+/// gains haste until end of turn." The `WhenYouDo`-conditioned `GainControl`
+/// clause IS the typed introducer for the trailing "It gains haste" anaphor two
+/// clauses later; the old unconditional bail never got far enough back to see
+/// it, leaving "It" to fall back to `SelfRef` (the source, Grishnákh itself)
+/// instead of the stolen creature (issue #8145).
+///
+/// This carve-out is intentionally narrower than the identical-looking one on
+/// the sibling walk `chain_prior_referent_is_created_token` below, which also
+/// admits `EffectOutcome::OptionalEffectPerformed` ("if you do" tied to a
+/// separately-declinable optional action) behind an additional
+/// `gated_publisher_reaches` prediction — that extra machinery exists there
+/// because a declined inline "if you do" gate can leave `resolve_ability_chain`
+/// still descending into an independent `SequentialSibling` instruction with no
+/// referent ever having been produced (a stale-bind hazard for the
+/// game-lifetime `last_created_token_ids` ledger the sibling reads).
+/// `WhenYouDo` has no such hazard: `game::effects::consume_reflexive_creation_gate`
+/// treats `WhenYouDo` as a whole-body membership marker for a CR 603.12
+/// reflexive triggered ability and materializes it as a genuinely separate
+/// stack object (`build_reflexive_pending_trigger`) only when the antecedent
+/// action actually occurred; that object chooses its own targets at the time
+/// it is put on the stack (CR 603.3d, which applies CR 601.2c's target-choice
+/// process to triggered abilities), so if this walk ever reaches a
+/// `WhenYouDo` clause, that reflexive ability necessarily fired with real
+/// targets recorded — there is no "gate false, chain still descends" case to
+/// guard against. Extending this carve-out to `OptionalEffectPerformed` needs
+/// its own hostile-fixture proof and is deliberately left out of this fix.
 fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: bool) -> bool {
     // CR 608.2c: An `Otherwise` else-branch anaphor ("... and it's a 3/3 Robot ...")
     // binds to the referent that was in scope BEFORE the paired conditional it is the
@@ -21455,12 +21611,22 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
     // reaches the originating `Choose target artifact card`. A SECOND conditional
     // still bails (never walk across an unrelated conditional). Default `false`
     // preserves the byte-for-byte behavior of the non-else callers.
+    //
+    // The `WhenYouDo` carve-out above shares this same one-shot allowance
+    // bookkeeping rather than bypassing it: the FIRST conditional encountered —
+    // `WhenYouDo` or not — always consumes `skipped_conditional`, so a `WhenYouDo`
+    // clause standing in the `Otherwise` pairing slot doesn't leave the allowance
+    // unspent for some unrelated SECOND conditional further back to steal (which
+    // would let an `Otherwise` anaphor bind across a conditional it was never
+    // paired with). Only once the allowance is already spent does a `WhenYouDo`
+    // clause additionally never bail on its own account, matching every other
+    // caller's unconditional carve-out.
     let mut skipped_conditional = false;
     for prev in clauses.iter().rev() {
-        if prev.condition.is_some() {
+        if let Some(cond) = prev.condition.as_ref() {
             if skip_first_conditional && !skipped_conditional {
                 skipped_conditional = true;
-            } else {
+            } else if *cond != AbilityCondition::WhenYouDo {
                 return false;
             }
         }
@@ -21914,6 +22080,37 @@ fn lower_subject_predicate_ast(
                     profile: None,
                     enters_under: None,
                 });
+            }
+            // CR 701.47a + CR 109.4 + CR 608.2c: "<player> amasses [subtype] N"
+            // — third-person form. Azog, Moria's Ruin's "Its controller amasses
+            // Goblins X, where X is that creature's power" binds the acting
+            // player to the anaphoric subject (`affected` = `ParentTargetController`
+            // — the destroyed creature's controller, per `parse_subject_application`'s
+            // bare "its controller" arm) instead of the imperative form's default
+            // `Controller`. Delegates to the same `try_parse_amass` keyword-body
+            // parser the plain "Amass Zombies 2" imperative uses, so subtype
+            // canonicalization and "where X is …" binding stay a single authority.
+            if let Some(effect) = try_parse_amass(&text, &pred_lower, affected.clone()) {
+                let mut clause = parsed_clause(effect);
+                // CR 601.2c + CR 608.2c (ruling: "If no target is chosen for
+                // Azog's ability, 'its controller' is undefined and no player
+                // amasses Goblins"): when the acting player anaphors the
+                // parent's chosen OBJECT target (`ParentTargetController` /
+                // `ParentTargetOwner`), a declined "up to one" antecedent
+                // leaves that anaphor undefined. Gate on `HasObjectTarget` so
+                // no player amasses — mirroring
+                // `gate_reflexive_rider_on_declined_optional_target`, which
+                // only wraps a rider's OWN pre-existing condition and so
+                // cannot reach this condition-less Amass clause itself. A
+                // plain "you"/"they" subject (`affected == Controller`, no
+                // target dependency) is left ungated.
+                if matches!(
+                    affected,
+                    TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
+                ) {
+                    clause.condition = Some(AbilityCondition::HasObjectTarget);
+                }
+                return clause;
             }
             // CR 701.40a + CR 101.4 + CR 608.2c: "<target players> [each]
             // manifest[s] <N> card[s] from their hand[s]" (Kozilek, the Broken
@@ -28215,6 +28412,28 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
         )
 }
 
+/// CR 608.2c + CR 400.7j: a singular battlefield recall after a self-move
+/// antecedent — the nearest prior publishing clause is a ChangeZone whose
+/// target is the source itself ("Exile ~ / Exile this Saga / Exile <name>"),
+/// so "it" names the source object, not the chain tracked set. Nearest-first
+/// scan mirrors the `draw_object_count_filter` precedent; using the same
+/// publisher set as the tracked-set rewrite keeps both branches consistent
+/// about what "affected objects" means.
+fn nearest_publisher_is_self_move(defs: &[AbilityDefinition]) -> bool {
+    defs.iter()
+        .rev()
+        .find(|d| publishes_tracked_set_from_resolution(&d.effect))
+        .is_some_and(|d| {
+            matches!(
+                &*d.effect,
+                Effect::ChangeZone {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        })
+}
+
 /// CR 603.7 + CR 400.7: A return/put onto the battlefield publishes the moved
 /// objects as the chain tracked set (Storm Herald "those Auras", Returned cause).
 fn is_battlefield_return_effect(effect: &Effect) -> bool {
@@ -28701,6 +28920,18 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
         || free_cast_that_card_grant
 }
 
+/// CR 608.2c: the SINGULAR battlefield-recall anaphor — "return it " at a
+/// clause start with a battlefield mention. Splitting the plural axis out of
+/// [`contains_implicit_tracked_set_pronoun`] lets the assembly gate bind the
+/// singular pronoun to its named antecedent (CR 400.7j) while plural riders
+/// keep the chain-set binding.
+pub(crate) fn singular_battlefield_recall(lower: &str) -> bool {
+    tag::<_, _, OracleError<'_>>("return it ")
+        .parse(lower)
+        .is_ok()
+        && scan_contains_phrase(lower, "battlefield")
+}
+
 fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
     if let Effect::CreateDelayedTrigger {
         uses_tracked_set, ..
@@ -29018,6 +29249,26 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect, cast_anaphor_is_ex
             *target = tracked_set_filter();
         }
         _ => {}
+    }
+}
+
+/// CR 608.2c + CR 400.7j: singular battlefield recall after a self-move —
+/// "Exile ~, then return it to the battlefield" binds "it" to the source
+/// object itself (the thing the prior clause moved), not to the chain tracked
+/// set, whose membership may include unrelated riders (Cold Snap's tap leg).
+/// Non-recursive over CreateDelayedTrigger, mirroring
+/// [`rewrite_parent_targets_to_tracked_set`]: a delayed payload keeps its own
+/// CR 603.7c referent machinery (Aetherling, Otherworldly Journey).
+fn rewrite_singular_battlefield_recall_to_self(effect: &mut Effect) {
+    if let Effect::ChangeZone {
+        target,
+        destination: Zone::Battlefield,
+        ..
+    } = effect
+    {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::SelfRef;
+        }
     }
 }
 
@@ -30833,6 +31084,8 @@ fn maybe_convert_choose_head_into_tracked_set(def: &mut AbilityDefinition) {
         filter,
         min,
         max,
+        cardinality: None,
+        eligibility: None,
     };
     def.multi_target = None;
 }
@@ -31445,6 +31698,8 @@ fn parse_exile_pile_shuffle_cloak_ir(
                 filter,
                 min: 0,
                 max: None,
+                cardinality: None,
+                eligibility: None,
             }),
             Some(ClauseBoundary::Comma),
             ClauseDisposition::Emit {
@@ -32116,8 +32371,9 @@ pub(crate) fn parse_effect_chain_ir(
     let (text, chain_rounding) = strip_trailing_rounding_annotation(&text);
     let text = text.as_str();
     // CR 611.2b + CR 611.2a: A leading "For as long as <condition>," prefix that
-    // resolves to UntilHostLeavesPlay (either "you control ~" or "~ remains on the
-    // battlefield") scopes the ENTIRE following comma body, not just its first
+    // resolves to a host lifetime — `WhileControllingHost` from "you control ~",
+    // `WhileHostOnBattlefield` from "~ remains on the battlefield", both answered by
+    // `Duration::ends_when_host_leaves_play` — scopes the ENTIRE following comma body, not just its first
     // clause. When that body is HETEROGENEOUS — its first clause is a distinct effect
     // (e.g. "gain control of that permanent") the single-clause arm cannot merge with
     // the trailing static/restriction riders — starts_prefix_clause ("for as long as")
@@ -32127,13 +32383,13 @@ pub(crate) fn parse_effect_chain_ir(
     // duration is restamped onto every clause after the chunk loop.
     //
     // Gate is deliberately narrow (only Opportunistic Dragon fires across the full
-    // dataset): RESTRICTED to UntilHostLeavesPlay (excludes "until end of turn"
+    // dataset): RESTRICTED to the host lifetimes (excludes "until end of turn"
     // animations, which the single-clause arm MERGES into one GenericEffect) AND to
     // bodies whose first chunk is neither GenericEffect (homogeneous continuous-mod /
     // animate merge — Kitesail) nor GrantCastingPermission (play/mana permission merge
     // — Kotose), the two classes the single-clause arm merges across commas.
     let leading_host_lifetime_split = strip_leading_duration(text).and_then(|(dur, body)| {
-        if !matches!(dur, Duration::UntilHostLeavesPlay) {
+        if !dur.ends_when_host_leaves_play() {
             return None;
         }
         let body_chunks = split_clause_sequence(body);
@@ -36651,7 +36907,11 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     // spell's controller by `counter_unless_pay_modifier` at the call site, so
     // rewriting the recognized subject does not affect resolution.
     let normalized = normalize_counter_unless_subject(after_unless)?;
+    // The payer the subject names is discarded here on purpose: the counter
+    // path pins the payer to the targeted spell's controller at the call site
+    // (`counter_unless_pay_modifier`), per the normalization note above.
     crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(&normalized)
+        .map(|alt_cost| alt_cost.cost)
 }
 
 /// CR 117.3 + CR 107.14: Parse the mana / energy / dynamic-{X} forms of an
@@ -36981,7 +37241,7 @@ fn extract_resolution_unless_pay_modifier(
                 }),
             );
         }
-        if let Some(cost) =
+        if let Some(alt_cost) =
             crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(after_unless_lower)
         {
             // Strip the entire " unless ..." tail from the cleaned effect
@@ -36995,21 +37255,32 @@ fn extract_resolution_unless_pay_modifier(
             // preceding word. The mask preserves byte length, so `.len()` indexes
             // the original text exactly.
             let cleaned = text[..before_unless.len()].trim().to_string();
-            // CR 118.12a + CR 608.2f: select the payer for "they X". A
-            // permanent's controller in the pre-"unless" text (Fade Away)
-            // takes precedence. Otherwise, when this chunk carries a
-            // `player_scope` ("each opponent/each player ... unless they X"),
-            // the payer is the per-iteration scoped player (`ScopedPlayer`,
-            // bound by the fan-out) rather than a chosen player target.
-            // Non-scoped punishers (Tergrid's Lantern) keep `Player`.
-            let payer = if nom_primitives::scan_contains(before_unless, "controller") {
-                TargetFilter::ParentTargetController
-            } else if player_scope.is_some() {
-                TargetFilter::ScopedPlayer
-            } else {
-                TargetFilter::Player
-            };
-            return (cleaned, Some(UnlessPayModifier { cost, payer }));
+            // CR 508.5 + CR 118.12a + CR 608.2f: select the payer. A subject
+            // that NAMES its payer ("defending player" — Ogre Marauder) is
+            // authoritative; the fallbacks below only exist to find the
+            // referent of an anaphoric pronoun. A permanent's controller in
+            // the pre-"unless" text (Fade Away) takes precedence there.
+            // Otherwise, when this chunk carries a `player_scope` ("each
+            // opponent/each player ... unless they X"), the payer is the
+            // per-iteration scoped player (`ScopedPlayer`, bound by the
+            // fan-out) rather than a chosen player target. Non-scoped
+            // punishers (Tergrid's Lantern) keep `Player`.
+            let payer = alt_cost.payer.unwrap_or_else(|| {
+                if nom_primitives::scan_contains(before_unless, "controller") {
+                    TargetFilter::ParentTargetController
+                } else if player_scope.is_some() {
+                    TargetFilter::ScopedPlayer
+                } else {
+                    TargetFilter::Player
+                }
+            });
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost: alt_cost.cost,
+                    payer,
+                }),
+            );
         }
     }
 

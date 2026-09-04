@@ -939,7 +939,7 @@ describe("card pool board primitives", () => {
     ).columns).toHaveLength(20);
   });
 
-  it("adds_the_twentieth_column_and_then_disables_the_add_control", () => {
+  it("keeps_the_desktop_control_at_twenty_columns", () => {
     const pool = [card("first")];
     const poolGroups = groups(["first"]);
     const workspace = placedState(["first"]);
@@ -1184,11 +1184,14 @@ describe("card pool board primitives", () => {
       .toHaveAttribute("data-board-row", "0");
     expect(screen.getByRole("button", { name: "Inspect spell" }).closest("[data-board-row]"))
       .toHaveAttribute("data-board-row", "1");
+    const cardArea = container.querySelector<HTMLElement>("[data-card-area]")!;
+    expect(cardArea).toHaveClass("row-start-2", "row-span-2", "grid-rows-subgrid");
     for (const row of container.querySelectorAll("[data-board-row]")) {
-      expect(row).toHaveClass("border", "border-hairline", "bg-black/28");
+      expect(row).toHaveClass("border", "border-hairline");
       expect(row).toHaveClass(row.getAttribute("data-board-row") === "1"
         ? "rounded-[7px]"
-        : "rounded-b-[7px]");
+        : "relative");
+      expect(row).toHaveStyle({ gridRow: String(Number(row.getAttribute("data-board-row")) + 1) });
     }
     expect(workspaceChanges).toHaveBeenLastCalledWith(expect.objectContaining({
       placements: expect.objectContaining({
@@ -1532,6 +1535,7 @@ describe("card pool board primitives", () => {
     );
     expect(columns).toHaveClass("min-w-0", "flex-1");
     expect(columns).not.toHaveClass("min-w-max");
+    expect(columns?.parentElement).toHaveClass("p-6");
     expect(columns?.parentElement?.parentElement).toHaveClass("overflow-x-hidden");
   });
 
@@ -1569,6 +1573,7 @@ describe("card pool board primitives", () => {
     expect([...container.querySelectorAll<HTMLElement>("[data-board-column]")]
       .map((column) => column.dataset.boardColumn)).toEqual(["0", "1", "2", "3", "4", "5", "6"]);
     expect(container.querySelectorAll("header[aria-label^='Column ']")).toHaveLength(7);
+    expect(container.querySelector("[data-board-columns]")).toHaveClass("p-6");
 
     rerender(
       <CardPoolBoard
@@ -1590,7 +1595,7 @@ describe("card pool board primitives", () => {
       .toEqual([6, 1]);
   });
 
-  it("highlights_only_the_active_drop_column_in_white", () => {
+  it("glows_the_entire_active_one_row_card_area_without_its_header", () => {
     const pool = [card("first")];
     const { container } = render(
       <CardPoolBoard
@@ -1610,21 +1615,23 @@ describe("card pool board primitives", () => {
     const columns = container.querySelectorAll<HTMLElement>("section[data-drop-state]");
     const board = container.querySelector<HTMLElement>("[data-board-columns]")?.parentElement;
     const panel = container.firstElementChild;
-    const highlight = columns[1].querySelector<HTMLElement>('[data-drop-highlight="active"]');
+    const cardArea = columns[1].querySelector<HTMLElement>("[data-card-area]")!;
+    const header = columns[1].querySelector("header")!;
     expect(columns[1]).toHaveAttribute("data-drop-state", "active");
     expect(columns[1]).toHaveClass("border-hairline");
     expect(columns[1]).not.toHaveClass("border-white", "bg-white/10");
-    expect(highlight).toHaveClass("absolute", "inset-0", "border-2", "border-white");
-    expect(highlight?.closest("header")).toBeNull();
+    expect(cardArea).toHaveClass("draft-card-area-drop-active");
+    expect(header.contains(cardArea)).toBe(false);
+    expect(columns[1].querySelector('[data-drop-highlight="active"]')).not.toBeInTheDocument();
     expect(columns[0]).toHaveAttribute("data-drop-state", "idle");
-    expect(columns[0].querySelector('[data-drop-highlight="active"]')).not.toBeInTheDocument();
+    expect(columns[0].querySelector("[data-card-area]")).not.toHaveClass("draft-card-area-drop-active");
     expect(panel).toHaveClass("border-hairline");
     expect(board).not.toHaveClass("border-dashed", "border-amber-300");
   });
 
-  it("highlights_only_the_active_drop_row_when_two_rows_are_visible", () => {
+  it("glows_the_entire_active_two_row_card_area_while_preserving_row_targeting", () => {
     const pool = [card("first")];
-    const { container } = render(
+    const { container, rerender } = render(
       <CardPoolBoard
         zone="deck"
         pool={pool}
@@ -1641,14 +1648,32 @@ describe("card pool board primitives", () => {
 
     const activeColumn = container.querySelectorAll<HTMLElement>("section[data-drop-state]")[1];
     const rows = activeColumn.querySelectorAll<HTMLElement>("[data-board-row]");
-    const highlights = activeColumn.querySelectorAll<HTMLElement>('[data-drop-highlight="active"]');
+    const cardArea = activeColumn.querySelector<HTMLElement>("[data-card-area]")!;
     expect(activeColumn).toHaveAttribute("data-drop-state", "active");
     expect(rows[0]).toHaveAttribute("data-drop-state", "idle");
     expect(rows[1]).toHaveAttribute("data-drop-state", "active");
-    expect(highlights).toHaveLength(1);
-    expect(highlights[0].closest("[data-board-row]")).toBe(rows[1]);
-    expect(activeColumn.querySelector("[data-card-area] > [data-drop-highlight='active']"))
-      .not.toBeInTheDocument();
+    expect(cardArea).toHaveClass("draft-card-area-drop-active", "row-start-2", "row-span-2");
+    expect(activeColumn.querySelector("header")?.contains(cardArea)).toBe(false);
+    expect(activeColumn.querySelector("header")).toHaveClass("z-10");
+    expect(activeColumn.querySelector('[data-drop-highlight="active"]')).not.toBeInTheDocument();
+    expect(rows[0]).toHaveStyle({ gridRow: "1" });
+    expect(rows[1]).toHaveStyle({ gridRow: "2" });
+
+    rerender(
+      <CardPoolBoard
+        zone="deck"
+        pool={pool}
+        poolGroups={groups(["first"])}
+        workspace={placedState(["first"])}
+        preferences={{ ...preferences, showHeaders: false }}
+        cardPreviewMode="none"
+        cardPreviewHoverDelayMs={0}
+        dropState={{ zoneActive: true, column: 1, row: 1 }}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+    expect(container.querySelector<HTMLElement>("[data-card-area]")).toHaveClass("rounded-[8px]");
   });
 
   it("reveals_sixteen_percent_of_the_card_width_between_stacked_cards", () => {
@@ -1670,7 +1695,7 @@ describe("card pool board primitives", () => {
     expect(screen.getByRole("button", { name: "Inspect first" }).parentElement?.style.marginTop).toBe("");
     const second = screen.getByRole("button", { name: "Inspect second" });
     const secondWrapper = second.parentElement;
-    expect(second.closest("section")?.querySelector("[data-card-area]")).toHaveClass("contents");
+    expect(second.closest("section")?.querySelector("[data-card-area]")).toHaveClass("grid-rows-subgrid", "row-span-2");
     expect(second.closest("section")?.querySelector("[data-card-area]")).not.toHaveClass("p-2");
     expect(secondWrapper?.style.marginTop).toBe("-123.3442622951%");
     second.getBoundingClientRect = () => ({

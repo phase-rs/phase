@@ -91,6 +91,7 @@ fn split_spell_on_stack_reports_chosen_half_mana_value() {
 /// arm of `cast_permission_constraint_allows_cast`.
 fn exile_cast_permission_mv_le(ceiling: i32) -> CastingPermission {
     CastingPermission::ExileWithAltCost {
+        source_id: None,
         cost_provenance: engine::types::ability::ExileGrantCostProvenance::Alternative,
         cost: ManaCost::zero(),
         cast_transformed: false,

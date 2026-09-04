@@ -16,7 +16,7 @@
 
 import { create } from "zustand";
 
-import { DraftAdapter, distinctJoined, setPackSequence, type CubeDraftSettings, type DraftProcedure, type PoolInput, type SetPackSequence, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
+import { DraftAdapter, distinctJoined, setPackSequence, type CubeDraftSettings, type DraftProcedure, type PackDistribution, type PoolInput, type SetPackSequence, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
 import type { DraftPackChoice } from "./draftStore";
 import type { DraftPodHostConfig } from "../adapter/draftPodHostAdapter";
 import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
@@ -26,15 +26,29 @@ import {
   loadDraftHostSession,
   persistedDraftHostSessionState,
 } from "../services/draftPersistence";
-import { useMultiplayerDraftStore } from "./multiplayerDraftStore";
+import { parseWebSocketUrl } from "../services/serverDetection";
+import { DRAFT_OFFLINE_ERROR, useMultiplayerDraftStore } from "./multiplayerDraftStore";
+import { useMultiplayerStore } from "./multiplayerStore";
+import { getEffectiveOffline } from "./connectivityStore";
 import type { DraftKind } from "../components/draft/draftKind";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type PoolMode = "set" | "cube";
+/** How a set-backed pod maps its selected sets onto boosters. */
+export type SetDraftMode = "uniform" | "chaos";
 
 /** Result of one host-recovery probe. Page entry owns the route policy. */
-export type HostedPodResumeOutcome = "resumed" | "absent" | "terminal" | "invalid" | "superseded";
+export type HostedPodResumeOutcome = "resumed" | "absent" | "terminal" | "invalid" | "offline" | "superseded";
+
+/** The backup API is served beside the selected phase-server's WebSocket API. */
+function configuredBackupEndpoint(): string | undefined {
+  const hosting = useMultiplayerStore.getState().hostingServer;
+  const server = hosting === null ? null : parseWebSocketUrl(hosting);
+  if (!server) return undefined;
+  server.protocol = server.protocol === "wss:" ? "https:" : "http:";
+  return server.origin;
+}
 
 export interface CubeForm {
   cubeName: string;
@@ -62,6 +76,8 @@ export interface PodConfig {
   podPolicy: PodPolicy;
 }
 
+type ProcedureCacheKey = Pick<PodConfig, "kind" | "tournamentFormat">;
+
 interface DraftPodState {
   /** Pod configuration selected by host before creating the pod. */
   config: PodConfig;
@@ -75,6 +91,8 @@ interface DraftPodState {
   guestDisplayName: string;
   /** Which pool source the host is configuring: a Set pool or a custom Cube list. */
   poolMode: PoolMode;
+  /** Set pods either follow the host's pack order or draw every seat's packs from candidates. */
+  setDraftMode: SetDraftMode;
   /** Cube form state (cube name + list text + settings); null when poolMode === "set". */
   cubeForm: CubeForm | null;
   /** Set pool JSON loaded from draft-pools.json. Set-mode cache only — unused in cube mode. */
@@ -83,21 +101,17 @@ interface DraftPodState {
   loadingPool: boolean;
   /** Error from pool loading or pod creation. */
   configError: string | null;
-  /**
-   * CR 903.13a + CR 800.1: the kind's engine-published seat floor
-   * (`DraftProcedure.min_pod_size`), cached for the lobby's Start gate.
-   *
-   * A CACHE of an engine value, never a client derivation, and deliberately
-   * outside `PodConfig` — that is host INTENT, is persisted, and is rewritten
-   * by `normalizePodConfig`, none of which is true of a published floor.
-   * `null` until loaded and after `reset()`, and `null` is fail-CLOSED: the
-   * reducer is the authority, so a stale or absent client value can never
-   * admit an illegal pod, only refuse a legal one until the engine answers.
-   */
-  minPodSize: number | null;
+  /** Exact engine-allowed seat counts for the selected tournament format. */
+  allowedPodSizes: number[] | null;
+  /** Configuration for which the procedure cache was published. */
+  procedureCacheKey: ProcedureCacheKey | null;
+  /** A deep-link entry may adopt the engine procedure's default seat count once. */
+  pendingProcedureDefault: ProcedureCacheKey | null;
+  /** Engine-published pack delivery behavior. `null` until the kind procedure loads. */
+  packDistribution: PackDistribution | null;
   /**
    * The kind's engine-published booster count (`DraftProcedure.packs_per_player`),
-   * cached alongside `minPodSize` and on the same terms: a copy of an engine
+   * cached alongside `allowedPodSizes` and on the same terms: a copy of an engine
    * value, never a client derivation. It fixes how many sets the host arranges,
    * so a Sealed pod asks for six and a draft pod for three without the page
    * knowing either number.
@@ -116,6 +130,8 @@ interface DraftPodActions {
    *  pod size (`DraftProcedure.pod_size`) rather than re-deriving one in the client.
    *  The host may still override it with the pod-size selector before creating. */
   enterKind: (kind: DraftKind) => Promise<void>;
+  /** Enter from a URL intent, preserving the engine default across a competing setup refresh. */
+  enterKindForEntry: (kind: DraftKind) => Promise<void>;
   /** Toggle bot-fill on/off. */
   toggleBotFill: () => void;
   /** Set host display name. */
@@ -136,6 +152,8 @@ interface DraftPodActions {
   refreshProcedure: () => Promise<void>;
   /** Switch between Set-pool and Cube-list pool modes. */
   setPoolMode: (mode: PoolMode) => void;
+  /** Choose the host's ordered lineup or host-local Chaos candidate pool. */
+  setSetDraftMode: (mode: SetDraftMode) => void;
   /** Set the cube form (name + list text + settings) for cube-mode host setup. */
   setCubeForm: (form: CubeForm | null) => void;
   /** Load the set pool data and create a new pod as host. */
@@ -167,11 +185,15 @@ const initialState: DraftPodState = {
   guestDisplayName: "",
   joinCode: "",
   poolMode: "set",
+  setDraftMode: "uniform",
   cubeForm: null,
   setPoolJson: null,
   loadingPool: false,
   configError: null,
-  minPodSize: null,
+  allowedPodSizes: null,
+  procedureCacheKey: null,
+  pendingProcedureDefault: null,
+  packDistribution: null,
   packsPerPlayer: null,
 };
 
@@ -185,17 +207,13 @@ const initialState: DraftPodState = {
  * Names are not persisted, so each entry is labelled by its own code.
  */
 function persistedPodPacks(poolInput: PoolInput): DraftPackChoice[] {
+  if (poolInput.type === "Chaos") {
+    return poolInput.data.candidate_codes.map((code) => ({ code, name: code }));
+  }
   if (poolInput.type !== "Set") return [];
   const sequence = (poolInput.data as Partial<SetPackSequence>).sequence;
   if (!Array.isArray(sequence)) return [];
   return sequence.map((code) => ({ code, name: code }));
-}
-
-function normalizePodConfig(config: PodConfig): PodConfig {
-  if (config.tournamentFormat === "SingleElimination") {
-    return { ...config, podSize: 8 };
-  }
-  return config;
 }
 
 interface HostedPodResumeAttempt {
@@ -206,24 +224,58 @@ interface HostedPodResumeAttempt {
 
 let resumeHostedPodAttempt: HostedPodResumeAttempt | null = null;
 
+// Every procedure read competes to publish the same cache. A kind comparison
+// alone rejects cross-kind replies, but cannot distinguish two reads for the
+// same kind (for example, setup entry followed by a refresh). Keep one
+// monotonically increasing identity so only the newest read may publish.
+let podOrchestrationGeneration = 0;
+
+function beginPodOrchestration(set: (partial: Partial<DraftPodState>) => void): number {
+  podOrchestrationGeneration += 1;
+  // A newer public operation retires any pool spinner owned by the older
+  // generation before that older continuation can settle.
+  set({ loadingPool: false });
+  return podOrchestrationGeneration;
+}
+
+function isCurrentPodOrchestration(generation: number): boolean {
+  return generation === podOrchestrationGeneration;
+}
+
 /**
- * Fetch `kind`'s engine-published procedure and cache the axes the lobby needs.
+ * Fetch `kind`'s engine-published procedure for the caller to publish.
  *
- * CR 903.13a + CR 800.1: `min_pod_size` is the ENGINE's per-kind seat floor.
- * The client holds a copy so `DraftPodLobby` can gate its Start button without
- * a second wasm call; it never re-derives the value, and the reducer refuses a
- * below-floor pod regardless of what this cache says.
+ * Callers cache the engine-owned allowed-size set only after their request
+ * remains current. The client renders that set directly and the reducer still
+ * validates every submitted pod size.
  */
 async function loadProcedure(
   kind: DraftKind,
-  set: (partial: Partial<DraftPodState>) => void,
+  tournamentFormat: TournamentFormat,
 ): Promise<DraftProcedure> {
-  const procedure = await new DraftAdapter().draftProcedure(kind);
-  set({
-    minPodSize: procedure.min_pod_size,
+  return new DraftAdapter().draftProcedure(kind, tournamentFormat);
+}
+
+function procedureTargetMatchesConfig(
+  target: ProcedureCacheKey,
+  config: PodConfig,
+): boolean {
+  return target.kind === config.kind && target.tournamentFormat === config.tournamentFormat;
+}
+
+function procedureCache(
+  procedure: DraftProcedure,
+  procedureCacheKey: ProcedureCacheKey,
+): Pick<
+  DraftPodState,
+  "allowedPodSizes" | "procedureCacheKey" | "packDistribution" | "packsPerPlayer"
+> {
+  return {
+    allowedPodSizes: procedure.allowed_pod_sizes,
+    procedureCacheKey,
+    packDistribution: procedure.distribution,
     packsPerPlayer: procedure.packs_per_player,
-  });
-  return procedure;
+  };
 }
 
 // ── Store ──────────────────────────────────────────────────────────────
@@ -233,39 +285,126 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     ...initialState,
 
     setConfig: (partial) => {
-      set((prev) => ({
-        config: normalizePodConfig({ ...prev.config, ...partial }),
-        poolMode: (partial.kind ?? prev.config.kind) === "Sealed" ? "set" : prev.poolMode,
-        configError: null,
-      }));
+      set((prev) => {
+        const kindChanged = partial.kind !== undefined && partial.kind !== prev.config.kind;
+        const tournamentFormatChanged =
+          partial.tournamentFormat !== undefined
+          && partial.tournamentFormat !== prev.config.tournamentFormat;
+        const procedureChanged = kindChanged || tournamentFormatChanged;
+        const packDistribution = kindChanged ? null : prev.packDistribution;
+
+        return {
+          config: { ...prev.config, ...partial },
+          poolMode: packDistribution === "AllAtOnce" ? "set" : prev.poolMode,
+          // The allowed seat set belongs to both the draft kind and tournament
+          // format. Clear it until the engine publishes the newly selected
+          // procedure so the selector cannot offer values from the prior shape.
+          allowedPodSizes: procedureChanged ? null : prev.allowedPodSizes,
+          procedureCacheKey: procedureChanged ? null : prev.procedureCacheKey,
+          pendingProcedureDefault: procedureChanged ? null : prev.pendingProcedureDefault,
+          packDistribution,
+          packsPerPlayer: kindChanged ? null : prev.packsPerPlayer,
+          loadingPool: false,
+          configError: null,
+        };
+      });
     },
 
     enterKind: async (kind) => {
+      if (getEffectiveOffline()) {
+        set({ configError: DRAFT_OFFLINE_ERROR });
+        return;
+      }
+      const procedureRequest = beginPodOrchestration(set);
       // Apply the kind first: it is the entry point's whole purpose and must not
       // depend on the wasm load succeeding. `setConfig` is the single authority for
-      // normalization (`normalizePodConfig`) and the Sealed pool-mode rule.
+      // the Sealed pool-mode rule.
       get().setConfig({ kind });
+      const target: ProcedureCacheKey = {
+        kind,
+        tournamentFormat: get().config.tournamentFormat,
+      };
       try {
-        const procedure = await loadProcedure(kind, set);
+        const procedure = await loadProcedure(target.kind, target.tournamentFormat);
+        // A newer entry or refresh can target the same kind, so kind equality
+        // alone is insufficient to protect the cache and adopted default.
+        if (
+          !isCurrentPodOrchestration(procedureRequest)
+          || !procedureTargetMatchesConfig(target, get().config)
+        ) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
+        set({ ...procedureCache(procedure, target), pendingProcedureDefault: null });
         get().setConfig({ podSize: procedure.pod_size });
       } catch (err) {
+        if (
+          !isCurrentPodOrchestration(procedureRequest)
+          || !procedureTargetMatchesConfig(target, get().config)
+        ) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
         set({ configError: err instanceof Error ? err.message : String(err) });
       }
     },
 
+    enterKindForEntry: async (kind) => {
+      if (getEffectiveOffline()) {
+        set({ configError: DRAFT_OFFLINE_ERROR });
+        return;
+      }
+      const entering = get().enterKind(kind);
+      const target: ProcedureCacheKey = {
+        kind,
+        tournamentFormat: get().config.tournamentFormat,
+      };
+      set({ pendingProcedureDefault: target });
+      await entering;
+    },
+
     refreshProcedure: async () => {
-      const kind = get().config.kind;
+      if (getEffectiveOffline()) {
+        set({ configError: DRAFT_OFFLINE_ERROR });
+        return;
+      }
+      const { kind, tournamentFormat } = get().config;
+      const target: ProcedureCacheKey = { kind, tournamentFormat };
+      const procedureRequest = beginPodOrchestration(set);
       try {
-        const procedure = await new DraftAdapter().draftProcedure(kind);
-        // The host may have switched kinds while this was in flight; a late
-        // answer for the previous kind would publish the wrong booster count
-        // and seat floor, so drop it rather than write it.
-        if (get().config.kind !== kind) return;
+        const procedure = await loadProcedure(target.kind, target.tournamentFormat);
+        // The host may have switched kinds or superseded this read with another
+        // entry/refresh while it was in flight; drop that stale publication.
+        if (
+          !isCurrentPodOrchestration(procedureRequest)
+          || !procedureTargetMatchesConfig(target, get().config)
+        ) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
+        const adoptsProcedureDefault = get().pendingProcedureDefault?.kind === target.kind
+          && get().pendingProcedureDefault?.tournamentFormat === target.tournamentFormat;
         set({
-          minPodSize: procedure.min_pod_size,
-          packsPerPlayer: procedure.packs_per_player,
+          ...procedureCache(procedure, target),
+          pendingProcedureDefault: adoptsProcedureDefault ? null : get().pendingProcedureDefault,
         });
+        if (adoptsProcedureDefault) {
+          get().setConfig({ podSize: procedure.pod_size });
+        } else if (!procedure.allowed_pod_sizes.includes(get().config.podSize)) {
+          get().setConfig({ podSize: procedure.allowed_pod_sizes[0] });
+        }
       } catch (err) {
+        if (
+          !isCurrentPodOrchestration(procedureRequest)
+          || !procedureTargetMatchesConfig(target, get().config)
+        ) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
         set({ configError: err instanceof Error ? err.message : String(err) });
       }
     },
@@ -288,9 +427,13 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     setPoolMode: (mode) => {
       set((prev) => ({
-        poolMode: prev.config.kind === "Sealed" ? "set" : mode,
+        poolMode: prev.packDistribution === "AllAtOnce" ? "set" : mode,
         configError: null,
       }));
+    },
+
+    setSetDraftMode: (setDraftMode) => {
+      set({ setDraftMode, configError: null });
     },
 
     setCubeForm: (form) => {
@@ -298,24 +441,59 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     },
 
     createPod: async () => {
-      const { config, hostDisplayName, poolMode, cubeForm } = get();
-
-      if (config.kind === "Sealed" && poolMode !== "set") {
-        set({ configError: "Sealed pods require a set pool" });
+      if (getEffectiveOffline()) {
+        set({ configError: DRAFT_OFFLINE_ERROR });
         return;
       }
+      let { config, poolMode, setDraftMode } = get();
+      const { hostDisplayName, cubeForm } = get();
 
       if (!hostDisplayName.trim()) {
         set({ configError: "Enter a display name" });
         return;
       }
 
-      // CR 903.13a + CR 800.1: cache the kind's seat floor for the lobby's
-      // Start gate. Once, before the poolMode branch, because the set branch
-      // returns before reaching the cube branch and both lead to the lobby.
+      // Cache every engine-published procedure axis before either host branch;
+      // both lead to the same lobby. The newest request wins if setup changes
+      // while this asynchronous read is in flight.
+      const procedureRequest = beginPodOrchestration(set);
+      const target: ProcedureCacheKey = {
+        kind: config.kind,
+        tournamentFormat: config.tournamentFormat,
+      };
       try {
-        await loadProcedure(config.kind, set);
+        const procedure = await loadProcedure(target.kind, target.tournamentFormat);
+        if (
+          !isCurrentPodOrchestration(procedureRequest)
+          || !procedureTargetMatchesConfig(target, get().config)
+          || get().config !== config
+        ) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
+        if (procedure.distribution === "AllAtOnce" && poolMode !== "set") {
+          set({ configError: "This procedure requires a set pool" });
+          return;
+        }
+        set(procedureCache(procedure, target));
+        if (!procedure.allowed_pod_sizes.includes(config.podSize)) {
+          get().setConfig({ podSize: procedure.allowed_pod_sizes[0] });
+        }
+        get().setConfig({});
+        config = get().config;
+        poolMode = get().poolMode;
+        setDraftMode = get().setDraftMode;
       } catch (err) {
+        if (
+          !isCurrentPodOrchestration(procedureRequest)
+          || !procedureTargetMatchesConfig(target, get().config)
+          || get().config !== config
+        ) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
         set({ configError: err instanceof Error ? err.message : String(err) });
       }
 
@@ -331,27 +509,64 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
         try {
           const resp = await fetch(__DRAFT_POOLS_URL__);
+          if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
+          if (getEffectiveOffline()) {
+            set({ configError: DRAFT_OFFLINE_ERROR, loadingPool: false });
+            return;
+          }
           if (!resp.ok) {
             throw new Error(`Failed to load draft pools: ${resp.status}`);
           }
           const allPools: Record<string, unknown> = await resp.json();
           const selection = setPackSequence(config.packs, allPools);
 
+          if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
+          if (getEffectiveOffline()) {
+            set({ configError: DRAFT_OFFLINE_ERROR, loadingPool: false });
+            return;
+          }
+
           set({ setPoolJson: JSON.stringify(selection), loadingPool: false });
 
           const persistenceId = crypto.randomUUID();
+          const poolInput: PoolInput = setDraftMode === "chaos"
+            ? {
+                type: "Chaos",
+                data: {
+                  pools: selection.pools,
+                  candidate_codes: selection.sequence,
+                },
+              }
+            : { type: "Set", data: selection };
           const hostConfig: DraftPodHostConfig = {
-            poolInput: { type: "Set", data: selection },
+            poolInput,
             kind: config.kind,
             podSize: config.podSize,
             hostDisplayName: hostDisplayName.trim(),
             tournamentFormat: config.tournamentFormat,
             podPolicy: config.podPolicy,
             persistenceId,
+            backupEndpoint: configuredBackupEndpoint(),
           };
 
-          await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+          if (getEffectiveOffline()) {
+            set({ configError: DRAFT_OFFLINE_ERROR });
+            return;
+          }
+          const hosted = await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+          if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
+          if (hosted) return;
+          if (getEffectiveOffline()) {
+            set({ configError: DRAFT_OFFLINE_ERROR });
+            return;
+          }
+          set({ configError: useMultiplayerDraftStore.getState().error ?? "Unable to host draft pod" });
         } catch (err) {
+          if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
+          if (getEffectiveOffline()) {
+            set({ configError: DRAFT_OFFLINE_ERROR, loadingPool: false });
+            return;
+          }
           const message = err instanceof Error ? err.message : String(err);
           set({ configError: message, loadingPool: false });
         }
@@ -370,6 +585,11 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       }
 
       try {
+        if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
         const persistenceId = crypto.randomUUID();
         const hostConfig: DraftPodHostConfig = {
           poolInput: {
@@ -386,16 +606,33 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           tournamentFormat: config.tournamentFormat,
           podPolicy: config.podPolicy,
           persistenceId,
+          backupEndpoint: configuredBackupEndpoint(),
         };
 
-        await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+        const hosted = await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+        if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
+        if (hosted) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
+        set({ configError: useMultiplayerDraftStore.getState().error ?? "Unable to host draft pod" });
       } catch (err) {
+        if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         set({ configError: message });
       }
     },
 
     resumeHostedPod: async (options = {}) => {
+      if (getEffectiveOffline()) {
+        set({ configError: DRAFT_OFFLINE_ERROR });
+        return "offline";
+      }
       const routeToken = options.routeToken ?? 0;
       if (
         resumeHostedPodAttempt &&
@@ -436,8 +673,27 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           return "resumed";
         }
 
-        const persisted = await loadDraftHostSession(meta.id);
-        if (!isCurrentAttempt()) return "superseded";
+        // Fence the persisted read itself. A new entry, refresh, creation, or
+        // reset that starts while storage is pending must win before this
+        // resume can publish its recovered configuration.
+        const procedureRequest = beginPodOrchestration(set);
+        let persisted: Awaited<ReturnType<typeof loadDraftHostSession>>;
+        try {
+          persisted = await loadDraftHostSession(meta.id);
+        } catch (err) {
+          if (!isCurrentAttempt() || !isCurrentPodOrchestration(procedureRequest)) return "superseded";
+          if (getEffectiveOffline()) {
+            set({ configError: DRAFT_OFFLINE_ERROR });
+            return "offline";
+          }
+          set({ configError: err instanceof Error ? err.message : String(err) });
+          return "invalid";
+        }
+        if (!isCurrentAttempt() || !isCurrentPodOrchestration(procedureRequest)) return "superseded";
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return "offline";
+        }
         if (!persisted) {
           clearActiveDraftPodIfCurrent(capture);
           if (!options.silent) set({ configError: "Saved draft pod was not found" });
@@ -476,6 +732,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             },
             hostDisplayName: persisted.hostDisplayName,
             poolMode: "cube",
+            setDraftMode: "uniform",
             cubeForm: {
               cubeName: cubeData.cube_name,
               cubeListText: cubeData.cube_list_text,
@@ -484,6 +741,10 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             setPoolJson: null,
             loadingPool: false,
             configError: null,
+            allowedPodSizes: null,
+            procedureCacheKey: null,
+            packDistribution: null,
+            packsPerPlayer: null,
           });
         } else {
           // Restore the pack sequence the pod was configured with, so a host
@@ -503,37 +764,82 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             },
             hostDisplayName: persisted.hostDisplayName,
             poolMode: "set",
+            setDraftMode: persisted.poolInput.type === "Chaos" ? "chaos" : "uniform",
             cubeForm: null,
             setPoolJson: JSON.stringify(persisted.poolInput.data),
             loadingPool: false,
             configError: null,
+            allowedPodSizes: null,
+            procedureCacheKey: null,
+            packDistribution: null,
+            packsPerPlayer: null,
           });
         }
 
-        // CR 903.13a + CR 800.1: the resumed lobby needs the floor too.
+        // Rehydrate the complete engine procedure cache for the resumed lobby.
+        // A later entry/refresh is allowed to supersede this publication.
+        const target: ProcedureCacheKey = {
+          kind: persisted.kind,
+          tournamentFormat: persisted.tournamentFormat,
+        };
         try {
-          await loadProcedure(persisted.kind, set);
+          const procedure = await loadProcedure(target.kind, target.tournamentFormat);
+          if (
+            !isCurrentAttempt()
+            || !isCurrentPodOrchestration(procedureRequest)
+            || !procedureTargetMatchesConfig(target, get().config)
+          ) return "superseded";
+          if (getEffectiveOffline()) {
+            set({ configError: DRAFT_OFFLINE_ERROR });
+            return "offline";
+          }
+          set(procedureCache(procedure, target));
+          if (!procedure.allowed_pod_sizes.includes(get().config.podSize)) {
+            get().setConfig({ podSize: procedure.allowed_pod_sizes[0] });
+          }
         } catch (err) {
+          if (
+            !isCurrentAttempt()
+            || !isCurrentPodOrchestration(procedureRequest)
+            || !procedureTargetMatchesConfig(target, get().config)
+          ) return "superseded";
+          if (getEffectiveOffline()) {
+            set({ configError: DRAFT_OFFLINE_ERROR });
+            return "offline";
+          }
           set({ configError: err instanceof Error ? err.message : String(err) });
         }
 
         const hostConfig: DraftPodHostConfig = {
           poolInput: persisted.poolInput,
           kind: persisted.kind,
-          podSize: persisted.podSize,
+          podSize: get().config.podSize,
           hostDisplayName: persisted.hostDisplayName,
           tournamentFormat: persisted.tournamentFormat,
           podPolicy: persisted.podPolicy,
           persistenceId: persisted.persistenceId,
           preferredRoomCode: persisted.roomCode || undefined,
+          backupEndpoint: configuredBackupEndpoint(),
         };
 
-        if (!isCurrentAttempt()) return "superseded";
+        if (!isCurrentAttempt() || !isCurrentPodOrchestration(procedureRequest)) {
+          return "superseded";
+        }
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return "offline";
+        }
         const hosted = await useMultiplayerDraftStore.getState().hostDraft({
           ...hostConfig,
           signal: options.signal,
         });
-        if (!isCurrentAttempt()) return "superseded";
+        if (!isCurrentAttempt() || !isCurrentPodOrchestration(procedureRequest)) {
+          return "superseded";
+        }
+        if (!hosted && getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return "offline";
+        }
         return hosted ? "resumed" : "invalid";
       })();
       resumeHostedPodAttempt = attempt;
@@ -546,6 +852,10 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     },
 
     joinPod: async () => {
+      if (getEffectiveOffline()) {
+        set({ configError: DRAFT_OFFLINE_ERROR });
+        return;
+      }
       const { joinCode, guestDisplayName } = get();
 
       if (!joinCode.trim()) {
@@ -565,19 +875,39 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         displayName: guestDisplayName.trim(),
       };
 
+      const request = beginPodOrchestration(set);
       try {
-        await useMultiplayerDraftStore.getState().joinDraft(guestConfig);
+        if (!isCurrentPodOrchestration(request)) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
+        const joined = await useMultiplayerDraftStore.getState().joinDraft(guestConfig);
+        if (!isCurrentPodOrchestration(request)) return;
+        if (!joined && getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+        }
       } catch (err) {
+        if (!isCurrentPodOrchestration(request)) return;
+        if (getEffectiveOffline()) {
+          set({ configError: DRAFT_OFFLINE_ERROR });
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         set({ configError: message });
       }
     },
 
     startDraft: async () => {
+      if (getEffectiveOffline()) {
+        set({ configError: DRAFT_OFFLINE_ERROR });
+        return;
+      }
       await useMultiplayerDraftStore.getState().startDraft(get().botFillEnabled);
     },
 
     reset: () => {
+      beginPodOrchestration(set);
       set(initialState);
     },
   }),

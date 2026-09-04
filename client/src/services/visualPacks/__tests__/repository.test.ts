@@ -7,6 +7,7 @@ import {
   decodeCandidateKey,
   encodeCandidateKey,
   manaSymbolCandidate,
+  semanticCardCandidateGroups,
   setIconCandidate,
   tokenCandidateGroups,
 } from "../candidateKeys.ts";
@@ -181,6 +182,7 @@ describe("VisualPackRepository", () => {
         { requested: [english], normal: [englishNormal] },
       ],
       rung: "normal",
+      allowRemote: true,
       remote: { src: "remote", rungs: { small: "remote-small", normal: "remote-normal" } },
     });
     expect(result.sources.map((source) => source.src)).toEqual(["installed-a", "installed-z", "remote", null]);
@@ -194,7 +196,7 @@ describe("VisualPackRepository", () => {
     for (const key of fixed) {
       const matches = new Map([[key, [{ asset: "QQ", url: `installed-${key.split(":")[2]}` }]]]);
       const backend = fakeBackend(async (keys) => resolved(keys, matches));
-      const result = await new VisualPackRepository(async () => backend).resolve({ groups: [{ requested: [key] }], rung: "art_crop" });
+      const result = await new VisualPackRepository(async () => backend).resolve({ groups: [{ requested: [key] }], rung: "art_crop", allowRemote: false });
       expect(result.sources[0]).toMatchObject({ kind: "installed", rungs: undefined });
     }
   });
@@ -210,7 +212,7 @@ describe("VisualPackRepository", () => {
       revision: installedRevision("2"),
     });
     const repository = new VisualPackRepository(async () => backend);
-    const result = await repository.resolve({ groups: [{ requested: [key] }], rung: "normal", remote: { src: "remote" } });
+    const result = await repository.resolve({ groups: [{ requested: [key] }], rung: "normal", allowRemote: true, remote: { src: "remote" } });
     expect(resolve).toHaveBeenCalledTimes(2);
     expect(result.revision).toBe("2");
     expect(result.sources.map((source) => source.src)).toEqual(["remote", null]);
@@ -247,7 +249,7 @@ describe("VisualPackRepository", () => {
     const listener = vi.fn();
     repository.subscribe(listener);
 
-    const result = await repository.resolve({ groups: [{ requested: [key] }], rung: "normal" });
+    const result = await repository.resolve({ groups: [{ requested: [key] }], rung: "normal", allowRemote: false });
 
     expect(result.revision).toBe("3");
     expect(repository.currentRevision()).toBe("3");
@@ -266,6 +268,7 @@ describe("VisualPackRepository", () => {
     const result = await new VisualPackRepository(async () => backend).resolve({
       groups: [{ requested: [alias], small: [small], normal: [normal] }],
       rung: "normal",
+      allowRemote: false,
     });
 
     expect(result.sources.slice(0, 2)).toEqual([
@@ -278,8 +281,204 @@ describe("VisualPackRepository", () => {
     const result = await new VisualPackRepository(async () => null).resolve({
       groups: [{ requested: [candidateKey(CORPUS_KEYS.oracle)] }],
       rung: "normal",
+      allowRemote: true,
       remote: { src: "remote" },
     });
     expect(result.sources).toEqual([{ kind: "remote", src: "remote", rungs: undefined }, { kind: "fallback", src: null }]);
+  });
+
+  it.each([true, false])("applies remote policy on every local-miss return path (%s)", async (allowRemote) => {
+    const key = candidateKey(CORPUS_KEYS.oracle);
+    const expected = allowRemote
+      ? [{ kind: "remote", src: "remote", rungs: undefined }, { kind: "fallback", src: null }]
+      : [{ kind: "fallback", src: null }];
+    const request = { groups: [{ requested: [key] }], rung: "normal" as const, allowRemote, remote: { src: "remote" } };
+    const backend = fakeBackend(async (keys) => resolved(keys, new Map()));
+    const errored = fakeBackend(async () => { throw new Error("unavailable"); });
+    const staleResolve = vi.fn(async (keys: ResolutionKey[]) => resolved(keys, new Map([
+      [key, [{ asset: "QQ", url: "stale-installed" }]],
+    ]), "1"));
+    const stale = fakeBackend(staleResolve, {
+      cause: "remove",
+      operationId: null,
+      catalogRoot: null,
+      revision: installedRevision("2"),
+    });
+
+    await expect(new VisualPackRepository(async () => null).resolve(request)).resolves.toEqual(
+      expect.objectContaining({ sources: expected }),
+    );
+    await expect(new VisualPackRepository(async () => backend).resolve({ ...request, groups: [] })).resolves.toEqual(
+      expect.objectContaining({ sources: expected }),
+    );
+    await expect(new VisualPackRepository(async () => errored).resolve(request)).resolves.toEqual(
+      expect.objectContaining({ sources: expected }),
+    );
+    await expect(new VisualPackRepository(async () => backend).resolve(request)).resolves.toEqual(
+      expect.objectContaining({ sources: expected }),
+    );
+    const staleResult = await new VisualPackRepository(async () => stale).resolve(request);
+    expect(staleResolve).toHaveBeenCalledTimes(2);
+    expect(staleResult.sources).toEqual(expected);
+  });
+
+  it("applies pack and unambiguous constraints before rung matching", async () => {
+    const [requested] = semanticCardCandidateGroups({
+      oracleId: ORACLE,
+      cardName: "Card",
+      faceName: "Card",
+      variant: "full_card",
+      rung: "normal",
+    });
+    const [small] = semanticCardCandidateGroups({
+      oracleId: ORACLE,
+      cardName: "Card",
+      faceName: "Card",
+      variant: "full_card",
+      rung: "small",
+    });
+    const [normal] = semanticCardCandidateGroups({
+      oracleId: ORACLE,
+      cardName: "Card",
+      faceName: "Card",
+      variant: "full_card",
+      rung: "normal",
+    });
+    const backend = fakeBackend(async (keys) => resolved(keys, new Map([
+      [requested.keys[0], [
+        { asset: "QQ", pack: "core", url: "core-requested" },
+        { asset: "Qg", pack: "deck_library", url: "deck-requested" },
+      ]],
+      [small.keys[0], [
+        { asset: "Qw", pack: "core", url: "core-small" },
+        { asset: "RA", pack: "deck_library", url: "deck-small" },
+      ]],
+    ])));
+    const constrained = await new VisualPackRepository(async () => backend).resolve({
+      groups: [{ requested: requested.keys, small: small.keys, normal: normal.keys, packId: packId("deck_library") }],
+      rung: "normal",
+      allowRemote: false,
+    });
+    expect(constrained.sources).toEqual([
+      expect.objectContaining({ kind: "installed", src: "deck-requested", rungs: { small: "deck-small", normal: "deck-requested" } }),
+      { kind: "fallback", src: null },
+    ]);
+
+    const unique = encodeCandidateKey("oracle", [ORACLE, 0, "full_card", "normal"]);
+    const unambiguousBackend = fakeBackend(async (keys) => resolved(keys, new Map([
+      [unique, [
+        { asset: "QQ", pack: "core", url: "core-copy" },
+        { asset: "QQ", pack: "printing:abc", url: "printing-copy" },
+      ]],
+    ])));
+    const oneAsset = await new VisualPackRepository(async () => unambiguousBackend).resolve({
+      groups: [{ requested: [unique], requireUnambiguousAsset: true }],
+      rung: "normal",
+      allowRemote: false,
+    });
+    expect(oneAsset.sources).toEqual([
+      expect.objectContaining({ kind: "installed", src: "core-copy" }),
+      { kind: "fallback", src: null },
+    ]);
+
+    const ambiguousBackend = fakeBackend(async (keys) => resolved(keys, new Map([
+      [unique, [
+        { asset: "QQ", pack: "core", url: "first" },
+        { asset: "Qg", pack: "printing:abc", url: "second" },
+      ]],
+    ])));
+    const multipleAssets = await new VisualPackRepository(async () => ambiguousBackend).resolve({
+      groups: [{ requested: [unique], requireUnambiguousAsset: true }],
+      rung: "normal",
+      allowRemote: false,
+    });
+    expect(multipleAssets.sources).toEqual([{ kind: "fallback", src: null }]);
+  });
+
+  it("treats disallowed requests and ambiguous companions as constrained misses", async () => {
+    const requested = encodeCandidateKey("oracle", [ORACLE, 0, "full_card", "normal"]);
+    const small = encodeCandidateKey("oracle_alias", ["small", 0, "full_card", "small"]);
+    const normal = encodeCandidateKey("oracle_alias", ["normal", 0, "full_card", "normal"]);
+    const backend = fakeBackend(async (keys) => resolved(keys, new Map([
+      [requested, [{ asset: "QQ", pack: "core", url: "core-only" }]],
+      [small, [
+        { asset: "Qg", pack: "deck_library", url: "small-a" },
+        { asset: "Qw", pack: "deck_library", url: "small-b" },
+      ]],
+      [normal, [
+        { asset: "RA", pack: "deck_library", url: "normal-a" },
+        { asset: "RQ", pack: "deck_library", url: "normal-b" },
+      ]],
+    ])));
+    const repository = new VisualPackRepository(async () => backend);
+
+    await expect(repository.resolve({
+      groups: [{ requested: [requested], packId: packId("deck_library") }],
+      rung: "normal",
+      allowRemote: false,
+    })).resolves.toEqual(expect.objectContaining({
+      sources: [{ kind: "fallback", src: null }],
+    }));
+
+    const requestedDeck = encodeCandidateKey("oracle_alias", ["requested", 0, "full_card", "normal"]);
+    const companionBackend = fakeBackend(async (keys) => resolved(keys, new Map([
+      [requestedDeck, [{ asset: "QQ", pack: "deck_library", url: "requested" }]],
+      [small, [
+        { asset: "Qg", pack: "deck_library", url: "small-a" },
+        { asset: "Qw", pack: "deck_library", url: "small-b" },
+      ]],
+      [normal, [
+        { asset: "RA", pack: "deck_library", url: "normal-a" },
+        { asset: "RQ", pack: "deck_library", url: "normal-b" },
+      ]],
+    ])));
+    const companions = await new VisualPackRepository(async () => companionBackend).resolve({
+      groups: [{
+        requested: [requestedDeck],
+        small: [small],
+        normal: [normal],
+        requireUnambiguousAsset: true,
+      }],
+      rung: "normal",
+      allowRemote: false,
+    });
+    expect(companions.sources).toEqual([
+      expect.objectContaining({ kind: "installed", src: "requested", rungs: undefined }),
+      { kind: "fallback", src: null },
+    ]);
+  });
+
+  it("leaves exact and token-reference identity unrestricted across packs", async () => {
+    const [exact] = cardCandidateGroups({
+      englishPrintingId: PRINTING,
+      faceIndex: 0,
+      variant: "full_card",
+      rung: "normal",
+    });
+    const [token] = tokenCandidateGroups({
+      scryfallId: TOKEN,
+      faceName: "Token",
+      faceIndex: 0,
+      rung: "normal",
+    });
+    const backend = fakeBackend(async (keys) => resolved(keys, new Map([
+      [exact.keys[0], [
+        { asset: "QQ", pack: "core", url: "exact-core" },
+        { asset: "Qg", pack: "printing:abc", url: "exact-printing" },
+      ]],
+      [token.keys[0], [
+        { asset: "Qw", pack: "core", url: "token-core" },
+        { asset: "RA", pack: "printing:abc", url: "token-printing" },
+      ]],
+    ])));
+    const repository = new VisualPackRepository(async () => backend);
+    for (const group of [exact, token]) {
+      const result = await repository.resolve({ groups: [{ requested: group.keys }], rung: "normal", allowRemote: false });
+      expect(result.sources.map((source) => source.src)).toEqual(
+        group === exact
+          ? ["exact-core", "exact-printing", null]
+          : ["token-core", "token-printing", null],
+      );
+    }
   });
 });

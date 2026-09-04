@@ -116,8 +116,8 @@ impl DraftSession {
         {
             return Err("persisted draft player tokens must be unique".to_string());
         }
-        core.validate_sealed_snapshot()
-            .map_err(|error| format!("invalid persisted sealed snapshot: {error}"))?;
+        core.validate_persisted_snapshot()
+            .map_err(|error| format!("invalid persisted draft snapshot: {error}"))?;
         Ok(Self::from_persisted(ps))
     }
 
@@ -1376,6 +1376,35 @@ mod tests {
         let mut restored = DraftSessionManager::new();
         assert!(restored.restore_persisted_session(persisted).is_err());
         assert!(restored.sessions.is_empty());
+    }
+
+    #[test]
+    fn restore_persisted_session_accepts_chaos_through_redacted_player_views() {
+        let mut source = DraftSessionManager::new();
+        let (code, token, _) = source.create_draft(test_config(), "Alice".to_string());
+        let mut persisted = source.sessions[&code].to_persisted();
+        let chaos_source = DraftSource::Set {
+            layout: draft_core::types::SetLayout::Chaos {
+                candidate_codes: vec!["TST".to_string()],
+                assignments: vec![vec!["TST".to_string(); 3]; 8],
+            },
+        };
+        persisted.config.source = chaos_source.clone();
+        persisted.session.config.source = chaos_source;
+
+        let mut restored = DraftSessionManager::new();
+        restored
+            .restore_persisted_session(persisted)
+            .expect("redacted core views make persisted Chaos sessions safe to restore");
+
+        let view = restored.sessions[&code].view_for_seat(0);
+        let serialized = serde_json::to_string(&view).expect("serialize player view");
+        assert!(
+            !serialized.contains("assignments"),
+            "a server player view must not serialize Chaos assignments: {serialized}"
+        );
+        assert!(restored.sessions.contains_key(&code));
+        assert_eq!(restored.draft_for_token(&token), Some(code.as_str()));
     }
 
     fn fill_and_start(mgr: &mut DraftSessionManager, code: &str) {

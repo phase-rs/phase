@@ -68,7 +68,13 @@ vi.mock("../../components/chrome/ScreenChrome", () => ({ ScreenChrome: () => nul
 vi.mock("../../components/menu/MenuShell", () => ({
   MenuShell: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
-vi.mock("../../components/draft/HostControls", () => ({ HostControls: () => null }));
+vi.mock("../../components/draft/HostControls", () => {
+  const emptyTopActions: readonly [] = [];
+  return {
+    HostControls: () => null,
+    useHostDraftTopActions: (_options: { enabled: boolean }) => emptyTopActions,
+  };
+});
 
 // ── Fixtures ───────────────────────────────────────────────────────────
 
@@ -80,6 +86,7 @@ function seat(index: number, isBot: boolean): SeatPublicView {
     connected: true,
     has_submitted_deck: true,
     pick_status: "NotDrafting",
+    active_pack_count: 0,
     face_up_draft_cards: [],
   };
 }
@@ -88,6 +95,7 @@ function commanderView(seatCount: number): DraftPlayerView {
   return {
     status: "Complete",
     kind: "CommanderDraft",
+    launch_capability: "CommanderMultiplayer",
     current_pack_number: 3,
     pick_number: 1,
     pass_direction: "Left",
@@ -296,14 +304,15 @@ describe("DraftPodPage Commander launch", () => {
     expect(podCommanderDeckPayload).toHaveBeenCalledWith(expect.anything(), 2);
   });
 
-  // Hostile fixture — the four CR 905.1a kinds are untouched at the UI too.
+  // Hostile fixture — the engine capability, rather than the kind label,
+  // authorizes a completed pod game.
   // The reach guard and the negative live in this one case because the guard
   // ("Draft Complete") is a POSITIVE assertion about a different element, so it
   // cannot mask the negative below it.
-  it("renders no launch button for a Premier pod", async () => {
+  it("renders no launch button when the engine withdraws launch capability", async () => {
     await installCompletedPod(4);
     useMultiplayerDraftStore.setState({
-      view: { ...commanderView(4), kind: "Premier" } as DraftPlayerView,
+      view: { ...commanderView(4), launch_capability: "None" } as DraftPlayerView,
     });
     renderPage();
 
@@ -311,6 +320,18 @@ describe("DraftPodPage Commander launch", () => {
     expect(
       screen.queryByRole("button", { name: "Start Commander Game" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("refuses a direct launch request when the engine withdraws launch capability", async () => {
+    await installCompletedPod(4);
+    useMultiplayerDraftStore.setState({
+      view: { ...commanderView(4), launch_capability: "None" } as DraftPlayerView,
+    });
+
+    await useMultiplayerDraftStore.getState().launchCommanderGame(navigateSpy);
+
+    expect(podCommanderDeckPayload).not.toHaveBeenCalled();
+    expect(navigateSpy).not.toHaveBeenCalled();
   });
 
   // Hostile fixture — role authority. A guest has no `activeHostAdapter` and

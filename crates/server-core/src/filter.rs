@@ -27,11 +27,15 @@ mod tests {
     use engine::game::deck_loading::DeckEntry;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, Effect, EffectKind, LibraryPosition, QuantityExpr,
+        TargetFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
-    use engine::types::game_state::{ActiveLibrarySearch, WaitingFor};
+    use engine::types::game_state::{
+        ActiveLibrarySearch, MassLibraryOrderBatch, MassLibraryOrderMember,
+        PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice, WaitingFor,
+    };
     use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use engine::types::mana::ManaCost;
     use engine::types::resolution::PendingProliferateActions;
@@ -379,6 +383,7 @@ mod tests {
             count_param: 0,
             is_cost_payment: false,
             library_position: None,
+            mass_library_order: None,
             enters_modified_if: None,
             duration: None,
         };
@@ -394,6 +399,113 @@ mod tests {
 
         assert_eq!(filtered.objects[&card_a].name, "Hidden Card");
         assert_eq!(filtered.objects[&card_b].name, "Hidden Card");
+    }
+
+    #[test]
+    fn mass_library_order_choice_redacts_cards_and_provenance_for_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let card_a = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(23),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Library,
+        );
+        let queued_card_a = create_object(
+            &mut state,
+            CardId(24),
+            PlayerId(1),
+            "Queued Swamp".to_string(),
+            Zone::Library,
+        );
+        let queued_card_b = create_object(
+            &mut state,
+            CardId(25),
+            PlayerId(1),
+            "Queued Mountain".to_string(),
+            Zone::Library,
+        );
+        let members = [card_a, card_b]
+            .into_iter()
+            .map(|id| MassLibraryOrderMember {
+                identity: ObjectIncarnationRef::from_object(&state.objects[&id]),
+                origin: Zone::Library,
+            })
+            .collect();
+
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![card_a, card_b],
+            count: 2,
+            min_count: 2,
+            up_to: false,
+            source_id: ObjectId(100),
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            zone: Zone::Library,
+            destination: None,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: Some(LibraryPosition::Bottom),
+            mass_library_order: Some(MassLibraryOrderBatch {
+                owner: PlayerId(0),
+                members,
+            }),
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
+        };
+        state.pending_mass_library_order_choice = Some(PendingMassLibraryOrderChoice {
+            source_id: ObjectId(100),
+            library_position: LibraryPosition::Bottom,
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(vec![MassLibraryOrderBatch {
+                owner: PlayerId(1),
+                members: [queued_card_a, queued_card_b]
+                    .into_iter()
+                    .map(|id| MassLibraryOrderMember {
+                        identity: ObjectIncarnationRef::from_object(&state.objects[&id]),
+                        origin: Zone::Library,
+                    })
+                    .collect(),
+            }]),
+        });
+
+        let filtered = filter_state_for_player(&state, PlayerId(1));
+        match filtered.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                cards,
+                library_position,
+                mass_library_order,
+                ..
+            } => {
+                assert_eq!(cards, vec![ObjectId(0), ObjectId(0)]);
+                assert_eq!(library_position, Some(LibraryPosition::Bottom));
+                assert!(mass_library_order.is_none());
+            }
+            other => panic!("Expected EffectZoneChoice, got {other:?}"),
+        }
+        assert_eq!(filtered.objects[&card_a].name, "Hidden Card");
+        assert_eq!(filtered.objects[&card_b].name, "Hidden Card");
+        assert!(
+            filtered.pending_mass_library_order_choice.is_none(),
+            "a future owner must not receive queued mass-order provenance"
+        );
     }
 
     /// CR 603.3b: `WaitingFor::OrderTriggers` carries only public information

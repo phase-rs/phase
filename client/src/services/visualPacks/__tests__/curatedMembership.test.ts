@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PrintingEntry } from "../../scryfall.ts";
 import type { ArtChainEntry, CardArtOverride } from "../../../stores/preferencesStore.ts";
-import { cardCandidateGroups, decodeCandidateKey } from "../candidateKeys.ts";
+import { cardCandidateGroups, decodeCandidateKey, semanticCardCandidateGroups } from "../candidateKeys.ts";
 import { planCuratedMembership } from "../curatedMembership.ts";
 import type { CuratedCardEntry, CuratedMembershipInput } from "../curatedMembership.ts";
 import { packId } from "../types.ts";
@@ -158,6 +158,14 @@ function aliasesOf(descriptor: ScryfallAssetDescriptor | undefined): unknown[] {
     .map(([, tuple]) => tuple[0]);
 }
 
+function candidateKinds(descriptor: ScryfallAssetDescriptor): string[] {
+  return descriptor.candidateKeys.map((key) => decodeCandidateKey(key)[0]);
+}
+
+function descriptorMembership(descriptors: readonly ScryfallAssetDescriptor[]): readonly [string, string][] {
+  return descriptors.map(({ assetKey, sourceUrl }) => [assetKey, sourceUrl]);
+}
+
 describe("planCuratedMembership", () => {
   it("emits one printing per card across all three rungs", async () => {
     const { descriptors } = await planCuratedMembership(input());
@@ -283,23 +291,30 @@ describe("planCuratedMembership", () => {
       expect(keysOf(descriptors).sort()).toContain(`asset:v1:canonical_card:${BOLT}-0-full_card-normal`);
     });
 
-    it("carries only the oracle candidate group — the keys a render with no printing asks for", async () => {
+    it("preserves the oracle candidate group and appends semantic face identities", async () => {
       const { descriptors } = await planCuratedMembership(input());
       const solo = descriptors.find((value) =>
         value.assetKey === `asset:v1:canonical_card:${SOLO}-1-full_card-normal`);
 
       // `useCardImage` passes an empty englishPrintingId when no stored
-      // preference resolves to a printing, so `cardCandidateGroups` emits the
-      // oracle group alone. The descriptor must carry exactly those keys.
+      // preference resolves to a printing, so the legacy oracle group remains
+      // first. The appended face identities are a separate caller-owned
+      // projection and preserve their canonical order.
       expect(solo?.candidateKeys).toEqual(cardCandidateGroups({
         oracleId: SOLO,
         oracleAliases: ["Solo Print", "solo back"],
         faceIndex: 1,
         variant: "full_card",
         rung: "normal",
-      }).flatMap((group) => group.keys));
+      }).flatMap((group) => group.keys).concat(semanticCardCandidateGroups({
+        oracleId: SOLO,
+        cardName: "Solo Print",
+        faceName: "solo back",
+        variant: "full_card",
+        rung: "normal",
+      }).flatMap((group) => group.keys)));
       expect(solo?.candidateKeys.map((key) => decodeCandidateKey(key)[0]))
-        .toEqual(["oracle", "oracle_alias", "oracle_alias"]);
+        .toEqual(["oracle", "oracle_alias", "oracle_alias", "oracle_face", "name_face"]);
     });
 
     it("never emits both asset forms for one card", async () => {
@@ -517,6 +532,159 @@ describe("planCuratedMembership", () => {
       }));
 
       expect(exactPrintingIds(descriptors)).toEqual(new Set([BOLT_OLD.id]));
+    });
+
+    it("keeps broad semantics on the stored no-source winner and source semantics on every selected printing", async () => {
+      const chain: ArtChainEntry[] = [{ type: "source_printing" }, { type: "newest" }];
+      const first = await planCuratedMembership(input({
+        artChain: chain,
+        deckPrintings: [
+          { oracleId: BOLT, source: { setCode: "M20", collectorNumber: "1" } },
+          { oracleId: BOLT, source: LEA_161 },
+          { oracleId: BOLT, source: { setCode: "lea", collectorNumber: "161" } },
+        ],
+      }));
+      const second = await planCuratedMembership(input({
+        artChain: chain,
+        deckPrintings: [
+          { oracleId: BOLT, source: { setCode: "lea", collectorNumber: "161" } },
+          { oracleId: BOLT, source: { setCode: "m20", collectorNumber: "1" } },
+          { oracleId: BOLT, source: LEA_161 },
+        ],
+      }));
+      const newRows = first.descriptors.filter((value) => value.assetKey.includes(BOLT_NEW.id));
+      const oldRows = first.descriptors.filter((value) => value.assetKey.includes(BOLT_OLD.id));
+
+      expect(descriptorMembership(second.descriptors)).toEqual(descriptorMembership(first.descriptors));
+      expect(second.membershipDigest).toBe(first.membershipDigest);
+      expect(newRows).toHaveLength(3);
+      expect(oldRows).toHaveLength(3);
+      for (const descriptor of newRows) {
+        expect(candidateKinds(descriptor)).toEqual(expect.arrayContaining([
+          "source_printing", "oracle_face", "name_face",
+        ]));
+      }
+      for (const descriptor of oldRows) {
+        expect(candidateKinds(descriptor)).toContain("source_printing");
+        expect(candidateKinds(descriptor)).not.toContain("oracle_face");
+        expect(candidateKinds(descriptor)).not.toContain("name_face");
+      }
+    });
+
+    it("uses the first sorted source printing as primary when no stored selection exists", async () => {
+      const { descriptors } = await planCuratedMembership(input({
+        artChain: EMPTY_CHAIN,
+        deckPrintings: [
+          { oracleId: BOLT, source: { setCode: "M20", collectorNumber: "1" } },
+          { oracleId: BOLT, source: LEA_161 },
+        ],
+      }));
+      const oldRows = descriptors.filter((value) => value.assetKey.includes(BOLT_OLD.id));
+      const newRows = descriptors.filter((value) => value.assetKey.includes(BOLT_NEW.id));
+
+      expect(exactPrintingIds(descriptors)).toEqual(new Set([BOLT_NEW.id, BOLT_OLD.id]));
+      for (const descriptor of oldRows) {
+        expect(candidateKinds(descriptor)).toEqual(expect.arrayContaining(["oracle_face", "name_face"]));
+      }
+      for (const descriptor of newRows) {
+        expect(candidateKinds(descriptor)).not.toContain("oracle_face");
+        expect(candidateKinds(descriptor)).not.toContain("name_face");
+      }
+    });
+
+    it("keeps mixed-case collector contexts through selection while permutations retain one primary", async () => {
+      const upperCollector = printing({
+        id: "abababab-abab-4aba-8aba-abababababab",
+        set: "abc",
+        collector_number: "A63",
+      });
+      const upperSource = { setCode: "AbC", collectorNumber: "A63" };
+      const lowerSource = { setCode: "abc", collectorNumber: "a63" };
+      const first = await planCuratedMembership(input({
+        printings: { ...PRINTINGS, [BOLT]: [upperCollector, BOLT_OLD] },
+        artChain: EMPTY_CHAIN,
+        deckPrintings: [
+          { oracleId: BOLT, source: LEA_161 },
+          { oracleId: BOLT, source: lowerSource },
+          { oracleId: BOLT, source: upperSource },
+          { oracleId: BOLT, source: upperSource },
+        ],
+      }));
+      const second = await planCuratedMembership(input({
+        printings: { ...PRINTINGS, [BOLT]: [upperCollector, BOLT_OLD] },
+        artChain: EMPTY_CHAIN,
+        deckPrintings: [
+          { oracleId: BOLT, source: upperSource },
+          { oracleId: BOLT, source: LEA_161 },
+          { oracleId: BOLT, source: lowerSource },
+        ],
+      }));
+      const upperRows = first.descriptors.filter((value) => value.assetKey.includes(upperCollector.id));
+      const oldRows = first.descriptors.filter((value) => value.assetKey.includes(BOLT_OLD.id));
+
+      expect(exactPrintingIds(first.descriptors)).toEqual(new Set([upperCollector.id, BOLT_OLD.id]));
+      expect(descriptorMembership(second.descriptors)).toEqual(descriptorMembership(first.descriptors));
+      expect(second.membershipDigest).toBe(first.membershipDigest);
+      for (const descriptor of upperRows) {
+        expect(candidateKinds(descriptor)).toEqual(expect.arrayContaining(["oracle_face", "name_face"]));
+      }
+      for (const descriptor of oldRows) {
+        expect(candidateKinds(descriptor)).not.toContain("oracle_face");
+        expect(candidateKinds(descriptor)).not.toContain("name_face");
+      }
+    });
+
+    it("skips an image-less nominal winner and uses the first printing that emits descriptors", async () => {
+      const chain: ArtChainEntry[] = [{ type: "source_printing" }, { type: "newest" }];
+      const { descriptors } = await planCuratedMembership(input({
+        cards: { ...CARDS, [BLANK]: BLANK_ENTRY },
+        printings: { ...PRINTINGS, [BLANK]: [BLANK_UNIMAGED, BLANK_IMAGED] },
+        artChain: chain,
+        deckPrintings: [{ oracleId: BLANK, source: { setCode: "M19", collectorNumber: "1" } }],
+      }));
+      const imaged = descriptors.filter((value) => value.assetKey.includes(BLANK_IMAGED.id));
+
+      expect(keysOf(descriptors).some((key) => key.includes(BLANK_UNIMAGED.id))).toBe(false);
+      expect(imaged).toHaveLength(6);
+      for (const descriptor of imaged) {
+        expect(candidateKinds(descriptor)).toEqual(expect.arrayContaining(["source_printing", "oracle_face", "name_face"]));
+      }
+    });
+
+    it("keeps a partially imaged primary's broad face/rung identities off later source printings", async () => {
+      const partial = printing({
+        id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        set: "m20",
+        collector_number: "9",
+        faces: [NO_IMAGE_FACE, imageFace("partial-back")],
+      });
+      const later = printing({
+        id: "99999999-9999-4999-8999-999999999999",
+        set: "m19",
+        collector_number: "8",
+        faces: [imageFace("later-front"), imageFace("later-back")],
+      });
+      const chain: ArtChainEntry[] = [{ type: "source_printing" }, { type: "newest" }];
+      const { descriptors } = await planCuratedMembership(input({
+        printings: { ...PRINTINGS, [GIANT]: [partial, later] },
+        artChain: chain,
+        deckPrintings: [{ oracleId: GIANT, source: { setCode: "M19", collectorNumber: "8" } }],
+      }));
+      const partialRows = descriptors.filter((value) => value.assetKey.includes(partial.id));
+      const laterRows = descriptors.filter((value) => value.assetKey.includes(later.id));
+
+      expect(partialRows).toHaveLength(3);
+      expect(laterRows).toHaveLength(6);
+      for (const descriptor of partialRows) {
+        expect(candidateKinds(descriptor)).toEqual(expect.arrayContaining([
+          "source_printing", "oracle_face", "name_face",
+        ]));
+      }
+      for (const descriptor of laterRows) {
+        expect(candidateKinds(descriptor)).toContain("source_printing");
+        expect(candidateKinds(descriptor)).not.toContain("oracle_face");
+        expect(candidateKinds(descriptor)).not.toContain("name_face");
+      }
     });
   });
 

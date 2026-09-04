@@ -21,8 +21,9 @@ import { useTranslation } from "react-i18next";
 
 import type { SeatPublicView } from "../../adapter/draft-adapter";
 import { menuButtonClass } from "../menu/buttonStyles";
-import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
+import { DRAFT_OFFLINE_ERROR, useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { useDraftPodStore } from "../../stores/draftPodStore";
+import { useEffectiveOffline } from "../../stores/connectivityStore";
 import { draftKindLabels } from "./draftKind";
 import { BotIndicator } from "./BotIndicator";
 import { copyText } from "../../services/copyText";
@@ -132,6 +133,7 @@ interface DraftPodLobbyProps {
 
 export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
   const { t } = useTranslation("draft");
+  const effectiveOffline = useEffectiveOffline();
   const role = useMultiplayerDraftStore((s) => s.role);
   const seats = useMultiplayerDraftStore((s) => s.seats);
   const joined = useMultiplayerDraftStore((s) => s.joined);
@@ -148,7 +150,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
   const config = useDraftPodStore((s) => s.config);
   const poolMode = useDraftPodStore((s) => s.poolMode);
   const cubeForm = useDraftPodStore((s) => s.cubeForm);
-  const minPodSize = useDraftPodStore((s) => s.minPodSize);
+  const allowedPodSizes = useDraftPodStore((s) => s.allowedPodSizes);
 
   // `lobby.draftKind` interpolates the kind into a sentence, so a raw enum reads
   // "CommanderDraft Draft" once Commander is selectable. `draftKindLabels` is the
@@ -164,15 +166,15 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
 
   const isHost = role === "host";
   const filledSeats = seats.filter((s) => s.display_name).length;
-  // CR 903.13a + CR 800.1: the seat floor is the KIND's, published by the
-  // engine's procedure table and cached in the store. No `?? 2` fallback — a
-  // fallback would reinstate the kind-blind literal this deletes. `null`
-  // disables the button, which is the honest state before the engine answers,
-  // and the reducer refuses a below-floor pod regardless. `botFillEnabled`
-  // keeps its short-circuit: bot-fill pads the pod to `procedure.pod_size`,
-  // which is above every kind's floor.
+  // The engine publishes the exact legal seat counts for this procedure and
+  // tournament format. No client-side floor or fallback: `null` disables the
+  // button until the engine answers, while bot fill remains an explicit path
+  // that pads the pod before draft creation.
   const canStart =
-    isHost && (botFillEnabled || (minPodSize !== null && filledSeats >= minPodSize));
+    !effectiveOffline
+    && isHost
+    && (botFillEnabled || (allowedPodSizes?.includes(filledSeats) ?? false));
+  const errorMessage = error === DRAFT_OFFLINE_ERROR ? t("offline.startUnavailable") : error;
 
   // Build a full 8-seat grid (pad with empty seats if the adapter
   // hasn't sent all seats yet)
@@ -260,9 +262,15 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
       </div>
 
       {/* Error display */}
-      {error && (
+      {effectiveOffline && (
+        <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-4 py-3 text-sm text-amber-100">
+          {t("offline.unavailableDescription")}
+        </div>
+      )}
+
+      {errorMessage && (
         <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
-          {error}
+          {errorMessage}
         </div>
       )}
 

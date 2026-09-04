@@ -163,6 +163,7 @@ type BuilderView = NonNullable<NonNullable<Parameters<typeof LimitedDeckBuilder>
 const TEST_VIEW: BuilderView = {
   status: "Deckbuilding",
   kind: "Quick",
+  launch_capability: "None",
   current_pack_number: 1,
   pick_number: 1,
   pass_direction: "Left",
@@ -359,6 +360,59 @@ describe("LimitedDeckBuilder", () => {
       expect(onAutoSuggestLands).toHaveBeenCalledOnce();
     },
   );
+
+  it.each([
+    ["phone-portrait", 2, 2, 56],
+    ["phone-landscape", 1, 1, 32],
+    ["tablet-portrait", 3, 3, 72],
+    ["tablet-landscape", 1, 1, 40],
+  ] as const)("uses the shared %s compact-sideboard stack in the builder", (
+    responsiveLayout,
+    columnCount,
+    secondRowCardIndex,
+    exposedStepPx,
+  ) => {
+    const sideboardCards = Array.from({ length: 4 }, (_, index) => ({
+      ...TEST_VIEW.pool[0],
+      instance_id: `side-${index}`,
+      name: `Side ${index}`,
+    }));
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...TEST_VIEW, pool: sideboardCards },
+          workspace: {
+            schemaVersion: 1,
+            placements: Object.fromEntries(sideboardCards.map((card, index) => [
+              card.instance_id,
+              { zone: "sideboard" as const, row: 0 as const, column: 0, order: index },
+            ])),
+            virtualBasics: [],
+          },
+          preferences: {
+            ...createDefaultDraftWorkspacePreferences(),
+            explicitView: "board",
+            sideboardCollapsed: false,
+            builderPhoneSideboardCollapsed: false,
+          },
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout={responsiveLayout}
+      />,
+    );
+
+    const sideboard = screen.getByRole("region", { name: "Compact sideboard" });
+    const stack = sideboard.querySelector<HTMLElement>("[data-card-stack]")!;
+    expect(stack).toHaveAttribute("data-sideboard-column-count", String(columnCount));
+    expect(stack).toHaveClass("relative");
+    expect(stack.querySelector<HTMLElement>(`[data-sideboard-row='1'][data-sideboard-column='0'] [data-instance-id='side-${secondRowCardIndex}']`)!.style.top)
+      .toBe(`${exposedStepPx}px`);
+  });
 
   it("keeps the tablet portrait generic summary and actions docked while leaving statistics tables on desktop", async () => {
       const suggestDeck = vi.fn();

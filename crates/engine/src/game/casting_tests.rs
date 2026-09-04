@@ -410,6 +410,7 @@ fn priority_land_play_omits_an_exile_land_blocked_by_a_play_restriction() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -1915,6 +1916,7 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -1977,6 +1979,7 @@ fn add_play_from_exile_test_spell(
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
     spell
@@ -2268,6 +2271,7 @@ fn cast_permanent_from_granted_permission_enters_under_caster_control() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -2320,6 +2324,7 @@ fn play_land_from_granted_permission_enters_under_player_control() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -3079,6 +3084,7 @@ fn foretell_cast_does_not_inherit_sibling_alt_cost_or_spend_rider() {
         *cost = foretell_cost.clone();
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: false,
@@ -3751,6 +3757,7 @@ fn exile_with_alt_cost_zero_uses_no_cost_path() {
         .unwrap()
         .casting_permissions
         .push(CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
@@ -11693,6 +11700,7 @@ fn play_from_exile_raise(granted_to: PlayerId, raise: Option<ManaCost>) -> Casti
         single_use_group: None,
         single_use: false,
         cast_cost_raise: raise,
+        alt_ability_cost: None,
         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
     }
 }
@@ -19060,6 +19068,7 @@ fn cast_with_keyword_convoke_honors_from_exile_filter() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -19163,6 +19172,7 @@ fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -19337,6 +19347,7 @@ fn play_from_exile_grant_binds_to_grantee_and_carries_any_mana_permission() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -19707,6 +19718,7 @@ fn graveyard_timed_alt_cost_grant_omits_an_artifact_land_but_keeps_its_land_play
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 mode: crate::types::ability::CardPlayMode::Play,
@@ -19831,6 +19843,7 @@ fn graveyard_in_place_alt_cost_grant_is_consumed_after_one_cast() {
         // never expires).
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: false,
@@ -20344,6 +20357,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
             // P1: the permission the caster (PlayerId(0)) actually consumes.
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -20361,6 +20375,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
             // finality rider that must NOT leak onto this cast.
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -20441,6 +20456,7 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
         {
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -20526,6 +20542,7 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
         {
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
                     cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
@@ -20598,6 +20615,7 @@ fn hand_alt_cost_permission_overrides_printed_mana_cost() {
         obj.mana_cost = ManaCost::generic(5);
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: false,
@@ -20645,6 +20663,7 @@ fn add_borrowed_exile_sorcery_with_mana_value(
 
 fn beseech_style_permission() -> CastingPermission {
     CastingPermission::ExileWithAltCost {
+        source_id: None,
         cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
         cost: ManaCost::zero(),
         cast_transformed: false,
@@ -20689,6 +20708,7 @@ fn failing_mana_value_permission_does_not_override_unconstrained_permission() {
         obj.casting_permissions.push(beseech_style_permission());
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: false,
@@ -20770,6 +20790,7 @@ fn once_per_turn_collection_counter_play_permission_requires_live_source_static(
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -20845,6 +20866,7 @@ fn collection_counter_play_permission_is_once_per_turn() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -27754,6 +27776,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
     obj.base_keywords = obj.keywords.clone();
     obj.casting_permissions = vec![
         CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
@@ -27780,6 +27803,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         },
     ];
@@ -29394,6 +29418,7 @@ fn cast_only_from_zones_blocks_affected_opponent_from_exile() {
         .unwrap()
         .casting_permissions
         .push(crate::types::ability::CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::generic(2),
             cast_transformed: false,
@@ -32578,6 +32603,7 @@ fn cast_with_keyword_convoke_uses_caster_not_stored_controller() {
         };
         obj.casting_permissions
             .push(crate::types::ability::CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: obj.mana_cost.clone(),
                 cast_transformed: false,
@@ -45348,6 +45374,7 @@ fn a_free_static_ordered_first_does_not_hide_a_normal_cost_static() {
 /// (`NormalCost` provenance — a normal cast route).
 fn normal_cost_grant(player: PlayerId, cost: ManaCost) -> crate::types::ability::CastingPermission {
     crate::types::ability::CastingPermission::ExileWithAltCost {
+        source_id: None,
         cost,
         cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
         cast_transformed: false,
@@ -45671,6 +45698,7 @@ fn a_normal_cost_play_grant_with_companion_lets_disguise_cast_face_down() {
 /// Free-cast grant permission as `cast_from_zone` installs it (Dauthi-class).
 fn free_cast_grant(player: PlayerId) -> crate::types::ability::CastingPermission {
     crate::types::ability::CastingPermission::ExileWithAltCost {
+        source_id: None,
         cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
         cost: ManaCost::zero(),
         cast_transformed: false,
@@ -45703,6 +45731,7 @@ fn play_from_exile_grant(
         single_use_group: None,
         single_use: false,
         cast_cost_raise: None,
+        alt_ability_cost: None,
         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         provenance: if companion {
             crate::types::ability::PlayFromExileProvenance::LandLookCompanion
@@ -45959,6 +45988,7 @@ fn resolution_offer_grant(
     source_id: ObjectId,
 ) -> crate::types::ability::CastingPermission {
     crate::types::ability::CastingPermission::ExileWithAltCost {
+        source_id: None,
         cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
         cost: ManaCost::zero(),
         cast_transformed: false,
@@ -46608,6 +46638,7 @@ fn add_impulse_exiled_card(
             single_use_group: Some(single_use_group),
             single_use: true,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
     exiled
@@ -46890,6 +46921,7 @@ fn grant_object_exile_land_play_permission(
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
 }
@@ -47143,6 +47175,7 @@ fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
 
@@ -53121,6 +53154,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
         .unwrap()
         .casting_permissions
         .push(CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
@@ -53515,6 +53549,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
         });
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: true,
@@ -53589,6 +53624,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -53650,6 +53686,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
         ));
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::SelfManaCost,
                 cast_transformed: false,
@@ -53670,6 +53707,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
             });
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::SelfManaCost,
                 cast_transformed: false,

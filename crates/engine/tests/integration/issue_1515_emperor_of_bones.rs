@@ -865,6 +865,7 @@ fn amassed_army_generic_effect_binds_the_stamped_army_under_outer_self_ref() {
                 Effect::Amass {
                     subtype: "Zombie".to_string(),
                     count: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
                 },
             )
             .sub_ability(self_ref_generic_grant(TargetFilter::AmassedArmy)),

@@ -74,6 +74,7 @@ use engine::game::perf_counters::{self, PerfCounterSnapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::config::AiDifficulty;
+use crate::duel_suite::refusal_markdown;
 
 use super::find_matchup;
 use super::run::{drive_game, resolve_matchup};
@@ -377,12 +378,13 @@ pub struct PerfReport {
 /// game on the *same thread*, and snapshot the counters. The reset/snapshot pair
 /// is only meaningful because the counted paths never leave the calling thread.
 pub fn run_perf_scenario(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     action_cap: usize,
 ) -> PerfCounterSnapshot {
     perf_counters::reset();
-    let _ = drive_game(payload, seed, AiDifficulty::Medium, action_cap);
+    let _ = drive_game(Some(db), payload, seed, AiDifficulty::Medium, action_cap);
     perf_counters::snapshot()
 }
 
@@ -415,7 +417,7 @@ pub fn run_perf_suite(
             n = n + 1,
             total = scenarios.len(),
         );
-        let snapshot = run_perf_scenario(&payload, seed, action_cap);
+        let snapshot = run_perf_scenario(db, &payload, seed, action_cap);
         let scenario_counters = PerfCounters::from_snapshot(&snapshot);
         // One JSON line per scenario: a killed child still leaves a machine-readable
         // partial payload for every scenario that did finish.
@@ -450,9 +452,9 @@ pub fn run_perf_suite(
 /// real trajectory — this gate compares aggregate COST LEVELS, not a replayed game.
 ///
 /// Panics (internal invariant, not a runtime input path) if `samples` is empty or
-/// the samples disagree on schema_version / base_seed / action_cap — every sample
-/// is produced by the same binary at the same const workload, so disagreement is a
-/// bug. Provenance (git_sha, card_data_hash) is left None for the caller to stamp.
+/// the samples disagree on any workload field — every sample is produced by the
+/// same binary at the same const workload, so disagreement is a bug. Provenance
+/// (git_sha, card_data_hash) is left None for the caller to stamp.
 pub fn median_report(samples: &[PerfReport]) -> PerfReport {
     assert!(
         !samples.is_empty(),
@@ -466,6 +468,9 @@ pub fn median_report(samples: &[PerfReport]) -> PerfReport {
         );
         assert_eq!(s.base_seed, first.base_seed, "sample seed mismatch");
         assert_eq!(s.action_cap, first.action_cap, "sample action_cap mismatch");
+        // Order-sensitive: samples come from the same const `default_scenarios()`, so this is
+        // an internal invariant rather than a runtime input path.
+        assert_eq!(s.scenarios, first.scenarios, "sample scenario mismatch");
     }
     // All samples share an identical key set (from_snapshot is a total destructure).
     let mut counters = BTreeMap::new();
@@ -553,8 +558,8 @@ impl PerfCompareReport {
 }
 
 /// Comparison error. Parallels the win-rate gate's `compare::CompareError` but
-/// is defined locally (that type lives in the out-of-bounds `compare.rs` and
-/// lacks the workload-mismatch variant this gate needs).
+/// is defined locally: the two gates carry different payloads and render their
+/// refusals separately.
 #[derive(Debug)]
 pub enum PerfCompareError {
     Io(std::io::Error),
@@ -564,8 +569,8 @@ pub enum PerfCompareError {
         baseline: u32,
         current: u32,
     },
-    /// The workload (seed or action_cap) differs — the counter payloads describe
-    /// different runs, so any comparison would be a false PASS/FAIL (exit 2).
+    /// A workload field differs — the counter payloads describe different runs, so
+    /// any comparison would be a false PASS/FAIL (exit 2).
     WorkloadMismatch {
         field: &'static str,
         baseline: String,
@@ -616,6 +621,13 @@ pub fn load_report(path: &Path) -> Result<PerfReport, PerfCompareError> {
     Ok(report)
 }
 
+/// The scenario list as a sorted multiset, for comparison.
+fn sorted_scenarios(scenarios: &[String]) -> Vec<&str> {
+    let mut sorted: Vec<&str> = scenarios.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted
+}
+
 /// FAIL threshold for a counter: `baseline * ratio + floor`, rounded via f64
 /// (the counters are far below f64's 2^53 exact-integer ceiling).
 fn fail_threshold(baseline: u64) -> u64 {
@@ -628,8 +640,8 @@ fn counter_fails(baseline: u64, current: u64) -> bool {
     (current as f64) > (baseline as f64) * PERF_TOLERANCE_RATIO + PERF_ABSOLUTE_FLOOR as f64
 }
 
-/// Compare a current report against a baseline. Guards run in order: (1) schema
-/// version, (2) workload (seed/action_cap). Only then are counters classified
+/// Compare a current report against a baseline. Guards run in order: schema
+/// version first, then every workload field. Only then are counters classified
 /// per key across the union of baseline and current keys.
 pub fn compare(
     baseline: &PerfReport,
@@ -662,6 +674,20 @@ pub fn compare(
             field: "sample_count",
             baseline: baseline.sample_count.to_string(),
             current: current.sample_count.to_string(),
+        });
+    }
+
+    // Counters are summed field-wise across scenarios, so the aggregate does not say which
+    // scenarios produced it. The sum is order-invariant, which makes a reorder the same
+    // workload — but a repeat is not, because that scenario's cost is counted twice. Hence a
+    // sorted multiset, and the message renders the same sorted form that was compared.
+    let baseline_scenarios = sorted_scenarios(&baseline.scenarios);
+    let current_scenarios = sorted_scenarios(&current.scenarios);
+    if baseline_scenarios != current_scenarios {
+        return Err(PerfCompareError::WorkloadMismatch {
+            field: "scenarios",
+            baseline: baseline_scenarios.join(", "),
+            current: current_scenarios.join(", "),
         });
     }
 
@@ -709,6 +735,40 @@ fn verdict_str(v: CounterVerdict) -> &'static str {
         CounterVerdict::New => "NEW",
         CounterVerdict::Removed => "REMOVED",
     }
+}
+
+/// The report body for a perf comparison that could not be made at all.
+///
+/// This gate has the failure the duel-suite gate only looked like it had. Nothing in
+/// `bin/ai_perf_gate.rs` writes to stdout before `compare` — every diagnostic on the way
+/// there is `eprintln!` — so a refusal that reached only stderr left
+/// `target/ai-perf-gate-report.md` at zero bytes, and `.github/workflows/ai-gate.yml`
+/// answers an empty report by aborting with "Decision-cost perf gate failed without a
+/// drift report" and posting no issue at all. The refusal was produced and then thrown
+/// away. Sharing `refusal_markdown` with the duel-suite gate so the two cannot drift.
+pub fn render_error_markdown(err: &PerfCompareError) -> String {
+    let remedy = match err {
+        PerfCompareError::WorkloadMismatch {
+            field,
+            baseline,
+            current,
+        } => format!(
+            "The samples were taken under different `{field}` (`{baseline}` vs `{current}`), so \
+             their counters describe different runs and any comparison would be a false verdict. \
+             Either re-record the baseline under the current workload \
+             (`cargo ai-perf-gate --refresh-baseline`) — checking first that every other \
+             invocation reading this baseline uses that workload too — or run the gate under the \
+             baseline's workload. Nothing was measured, so this is not a perf regression."
+        ),
+        PerfCompareError::SchemaMismatch { .. } => "The baseline predates the current report \
+             format. Bump `schema_version` and re-record it with \
+             `cargo ai-perf-gate --refresh-baseline`."
+            .to_string(),
+        PerfCompareError::Io(_) | PerfCompareError::Parse(_) => "The baseline could not be read. \
+             Check the path, and that the file is the JSON a previous `--refresh-baseline` wrote."
+            .to_string(),
+    };
+    refusal_markdown(err, &remedy)
 }
 
 /// Render the comparison as a markdown table to stdout; diagnostics (hash-delta
@@ -1044,6 +1104,59 @@ mod tests {
         ));
     }
 
+    /// Every refusal this gate can produce must carry a non-empty report body naming what
+    /// happened, because the workflow posts stdout and aborts on an empty file — so a refusal
+    /// that reaches only stderr posts nothing at all. Asserted over EVERY variant by
+    /// construction rather than over the one that is easiest to build: a variant added later
+    /// with no remedy would otherwise ship silently.
+    ///
+    /// The `assert_ne!` against the bare `Display` is the discriminating half. Without it a
+    /// `render_error_markdown` that just forwarded the error string would pass every other
+    /// assertion here, and that implementation is precisely the one that loses the remedy.
+    #[test]
+    fn every_refusal_renders_a_body_that_says_more_than_the_error_line() {
+        let io = PerfCompareError::Io(std::io::Error::other("disk"));
+        let parse = PerfCompareError::Parse(serde_json::from_str::<PerfReport>("{").unwrap_err());
+        let schema = PerfCompareError::SchemaMismatch {
+            baseline: 1,
+            current: 2,
+        };
+        let workload = PerfCompareError::WorkloadMismatch {
+            field: "action_cap",
+            baseline: "10".to_string(),
+            current: "20".to_string(),
+        };
+
+        for err in [&io, &parse, &schema, &workload] {
+            let body = render_error_markdown(err);
+            assert!(!body.trim().is_empty(), "empty body for {err:?}");
+            assert!(
+                body.contains("## Gate: comparison refused"),
+                "missing heading for {err:?}: {body}"
+            );
+            assert!(
+                body.contains(&err.to_string()),
+                "body must carry the error itself for {err:?}: {body}"
+            );
+            assert_ne!(
+                body.trim(),
+                err.to_string().trim(),
+                "body must add a remedy, not echo the error, for {err:?}"
+            );
+        }
+
+        // The workload arm is the reachable one in CI, so its two values and both directions
+        // of remedy are pinned rather than left to the loop's generic assertions.
+        let body = render_error_markdown(&workload);
+        assert!(body.contains("action_cap"), "{body}");
+        assert!(body.contains("`10`") && body.contains("`20`"), "{body}");
+        assert!(body.contains("--refresh-baseline"), "{body}");
+        assert!(
+            body.contains("run the gate under the baseline's workload"),
+            "{body}"
+        );
+    }
+
     // Matrix 7: adapter totality — a distinct non-zero value per field yields one
     // map entry per field, values round-trip, WITHOUT hardcoding the field count.
     // Assigning 1..=N in the struct literal is self-flagging: adding/removing a
@@ -1179,6 +1292,7 @@ mod tests {
         // and the counter snapshot for each run.
         perf_counters::reset();
         let wt_1 = drive_game(
+            Some(&db),
             &payload,
             PERF_BASE_SEED,
             AiDifficulty::Medium,
@@ -1188,6 +1302,7 @@ mod tests {
 
         perf_counters::reset();
         let wt_2 = drive_game(
+            Some(&db),
             &payload,
             PERF_BASE_SEED,
             AiDifficulty::Medium,
@@ -1316,6 +1431,71 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // Matrix 15: the counter aggregate does not say which scenarios produced it, so a
+    // differing scenario list is a differing workload. Three arms, three wrong
+    // implementations: `Vec` equality fails the reorder arm, `HashSet` fails the repeat arm,
+    // no guard at all fails the length arm.
+    #[test]
+    fn a_different_scenario_list_is_refused_rather_than_compared() {
+        let mut baseline = mk_report(&[("c", 1)]);
+        baseline.scenarios = vec!["a".to_string(), "b".to_string()];
+        let mut current = mk_report(&[("c", 1)]);
+        current.scenarios = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let err = compare(&baseline, &current).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerfCompareError::WorkloadMismatch {
+                    field: "scenarios",
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_reordered_scenario_list_still_compares() {
+        let mut baseline = mk_report(&[("c", 1)]);
+        baseline.scenarios = vec!["a".to_string(), "b".to_string()];
+        let mut current = mk_report(&[("c", 1)]);
+        current.scenarios = vec!["b".to_string(), "a".to_string()];
+
+        compare(&baseline, &current).expect("a field-wise sum is order-invariant");
+    }
+
+    #[test]
+    fn a_repeated_scenario_is_refused() {
+        let mut baseline = mk_report(&[("c", 1)]);
+        baseline.scenarios = vec!["a".to_string(), "a".to_string(), "b".to_string()];
+        let mut current = mk_report(&[("c", 1)]);
+        current.scenarios = vec!["a".to_string(), "b".to_string()];
+
+        let err = compare(&baseline, &current).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PerfCompareError::WorkloadMismatch {
+                    field: "scenarios",
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    // Matrix 13 (hostile): `scenarios` is the member the sample-agreement loop omitted, so a
+    // median over mixed scenario lists was stamped with the first sample's and read as clean.
+    #[test]
+    #[should_panic(expected = "sample scenario mismatch")]
+    fn median_report_rejects_samples_that_disagree_on_scenarios() {
+        let mut odd = mk_report(&[("c", 1)]);
+        odd.scenarios = vec!["a-scenario-the-other-sample-did-not-run".to_string()];
+        let samples = [mk_report(&[("c", 1)]), odd];
+        let _ = median_report(&samples);
     }
 
     // Matrix M-even: median totality for even K — deterministic upper-middle at

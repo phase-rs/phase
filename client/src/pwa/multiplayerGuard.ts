@@ -1,15 +1,5 @@
 import { isAuthorityRemote, useGameStore } from "../stores/gameStore";
-import { useMultiplayerDraftStore, type MultiplayerDraftPhase } from "../stores/multiplayerDraftStore";
-
-const LIVE_DRAFT_PHASES: ReadonlySet<MultiplayerDraftPhase> = new Set([
-  "connecting",
-  "lobby",
-  "drafting",
-  "deckbuilding",
-  "pairing",
-  "matchInProgress",
-  "roundComplete",
-]);
+import { isMultiplayerDraftPodLive, useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
 
 function isRemoteGameLive(): boolean {
   const { gameMode, gameState, adapter } = useGameStore.getState();
@@ -17,8 +7,7 @@ function isRemoteGameLive(): boolean {
 }
 
 function isDraftPodLive(): boolean {
-  const { role, phase } = useMultiplayerDraftStore.getState();
-  return role !== null && LIVE_DRAFT_PHASES.has(phase);
+  return isMultiplayerDraftPodLive(useMultiplayerDraftStore.getState());
 }
 
 /**

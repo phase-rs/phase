@@ -24,7 +24,7 @@
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::casting::spell_objects_available_to_cast;
 use engine::game::effects::resolve_ability_chain;
-use engine::game::layers::prune_until_next_turn_casting_permissions;
+use engine::game::layers::prune_untap_step_casting_permissions;
 use engine::game::scenario::GameScenario;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
@@ -65,6 +65,7 @@ fn play_from_exile_grant() -> CastingPermission {
         single_use_group: None,
         single_use: false,
         cast_cost_raise: None,
+        alt_ability_cost: None,
         land_enter_tapped: EtbTapState::Unspecified,
     }
 }
@@ -209,7 +210,7 @@ fn grant_expires_at_activator_next_turn_not_grantee_turn() {
 
     // P1's own next untap step: Memory Vessel's grant must SURVIVE (it lasts
     // until the ACTIVATOR P0's next turn, not P1's).
-    prune_until_next_turn_casting_permissions(state, P1);
+    prune_untap_step_casting_permissions(state, P1);
     assert!(
         state
             .objects
@@ -228,7 +229,7 @@ fn grant_expires_at_activator_next_turn_not_grantee_turn() {
     );
 
     // The activator P0's next untap step: every player's grant now expires.
-    prune_until_next_turn_casting_permissions(state, P0);
+    prune_untap_step_casting_permissions(state, P0);
     assert!(
         state
             .objects

@@ -66,6 +66,59 @@ new_sqlite_classes = ["LobbyDO"]
 binding = "TELEMETRY"
 dataset = "phase_telemetry"
 
+# ── Server directory ───────────────────────────────────────────────────────
+# Admission list for `GET /servers`: one key per canonical server URL, managed
+# with `scripts/lobby-servers.sh`. The Worker reads MEMBERSHIP only — the value
+# is an operator-facing timestamp it never parses — so the allowlist stays a
+# set rather than a second unvalidated schema. The binding is optional in the
+# Worker (`SERVER_ALLOWLIST?`), and its absence fails CLOSED: the directory
+# lists nobody rather than publishing everyone who announced.
+#
+# The id below is a SENTINEL and is not deployable. A KV namespace is a created
+# resource, so before this branch merges an operator must run, with their own
+# Cloudflare login:
+#
+#   cd lobby-worker
+#   npx wrangler kv namespace create SERVER_ALLOWLIST                 # production
+#   npx wrangler kv namespace create SERVER_ALLOWLIST --env preview   # preview
+#
+# and paste the two returned ids over the sentinels here and under
+# [[env.preview.kv_namespaces]]. `wrangler deploy --dry-run` does NOT catch a
+# bad id — measured: it accepts a stanza with no `id` at all and prints the
+# binding table as if it were fine — so the first thing a placeholder breaks is
+# the deploy-lobby-preview job, after a ~7 minute wasm build. The sentinel is
+# deliberately not hex-shaped so it cannot be mistaken for a real id.
+#
+# Shipping dark is a supported fallback: comment both stanzas out and the
+# Worker deploys with `GET /servers` returning an empty list.
+[[kv_namespaces]]
+binding = "SERVER_ALLOWLIST"
+id = "20a08b21f9d64418b1f1ec8e09b3fcc1"
+
+# Per-IP rate limits for the two directory write endpoints. Three constraints,
+# all measured against the pinned wrangler (4.113.0) rather than assumed:
+#   - `namespace_id` MUST be a quoted string; an integer is rejected outright.
+#   - `simple.period` is a hard enum of 10 or 60; 30 is rejected.
+#   - the id is developer-chosen and is NOT a created Cloudflare resource
+#     (unlike a KV namespace), so nothing here waits on an operator.
+# Two bindings rather than one because `simple.limit` is per-binding and the
+# two purposes want different limits.
+#
+# A well-behaved server announces once per 60 s; 10 leaves room for restarts
+# and for several servers behind one NAT without letting one IP flood the
+# directory.
+[[ratelimits]]
+name = "ANNOUNCE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+# A client batches its probe reports, so 60/min is generous for a real client
+# and still bounds a forger.
+[[ratelimits]]
+name = "METRICS_LIMIT"
+namespace_id = "1002"
+simple = { limit = 60, period = 60 }
+
 # Workers Logs — persistent logs in the dashboard Observability tab. We keep this
 # ON for our structured console.* output: relay-mint failures surface via
 # `console.error({event:"turn_mint_failed"})` in turn.ts (the always-on Workers
@@ -166,6 +219,29 @@ invocation_logs = false
 [[env.preview.analytics_engine_datasets]]
 binding = "TELEMETRY"
 dataset = "phase_telemetry_preview"
+
+# Both directory stanzas RESTATED, because `kv_namespaces` and `ratelimits`
+# are not inherited into a named environment. The failure mode is nearly
+# silent and was measured: declaring them only at top level and deploying with
+# `--env preview` produces two "is not inherited by environments" warnings and
+# then `No bindings found.` — a Worker that serves, with a directory that
+# lists nothing and a rate limiter that never fires.
+[[env.preview.kv_namespaces]]
+binding = "SERVER_ALLOWLIST"
+id = "febe7ebca1a14c30b7347e5b4e7c26f0"
+
+# Distinct namespace ids from production: a rate-limit counter space is
+# per-id, and sharing them would let preview traffic exhaust production's
+# budget.
+[[env.preview.ratelimits]]
+name = "ANNOUNCE_LIMIT"
+namespace_id = "1003"
+simple = { limit = 10, period = 60 }
+
+[[env.preview.ratelimits]]
+name = "METRICS_LIMIT"
+namespace_id = "1004"
+simple = { limit = 60, period = 60 }
 
 [env.preview.vars]
 TURN_KEY_ID = "97c7984d6c155084f9d0fdf8090e02f8"

@@ -156,6 +156,9 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
       const viewFor = (seat: number) => ({
         status: statusNow(),
         kind: stubConfig.postDraftPlay === "CompleteImmediately" ? "CommanderDraft" : "Premier",
+        launch_capability: stubConfig.postDraftPlay === "CompleteImmediately"
+          ? "CommanderMultiplayer"
+          : "None",
         seat_index: seat,
         current_round: 1,
         pairings: [],
@@ -184,6 +187,7 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
           display_name: s.isBot ? `Bot ${s.seat}` : `Player ${s.seat}`,
           has_submitted_deck: submitted.has(s.seat),
           pick_status: "NotDrafting",
+          active_pack_count: 0,
           face_up_draft_cards: [],
         })),
         match_config: { match_type: "Bo1" },
@@ -193,6 +197,9 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
         loadCardDatabase: vi.fn(async () => 0),
         draftProcedure: vi.fn(async () => ({
           post_draft_play: stubConfig.postDraftPlay,
+          launch_capability: stubConfig.postDraftPlay === "CompleteImmediately"
+            ? "CommanderMultiplayer"
+            : "None",
         })),
         // Seam 1 again: `submitHostDeck` refuses a submission before the draft
         // has started, so the chain now runs `startDraft` first and this is the
@@ -270,7 +277,13 @@ vi.mock("../../components/menu/MenuShell", () => ({
   // PASSTHROUGH, never `() => null` — see the header.
   MenuShell: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
-vi.mock("../../components/draft/HostControls", () => ({ HostControls: () => null }));
+vi.mock("../../components/draft/HostControls", () => {
+  const emptyTopActions: readonly [] = [];
+  return {
+    HostControls: () => null,
+    useHostDraftTopActions: (_options: { enabled: boolean }) => emptyTopActions,
+  };
+});
 
 // ── Harness ────────────────────────────────────────────────────────────
 

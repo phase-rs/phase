@@ -24,6 +24,8 @@ function renderGameMenu(
         isOnlineMode={false}
         showAiHand={false}
         onToggleAiHand={vi.fn()}
+        logPanelOpen={false}
+        onToggleGameLog={vi.fn()}
         onSettingsClick={vi.fn()}
         onHelpClick={vi.fn()}
         multiplayerBoardLayout="split"
@@ -131,6 +133,8 @@ describe("GameMenu", () => {
             isOnlineMode={false}
             showAiHand={false}
             onToggleAiHand={vi.fn()}
+            logPanelOpen={false}
+            onToggleGameLog={vi.fn()}
             onSettingsClick={() => setSettingsOpen(true)}
             onHelpClick={vi.fn()}
           />
@@ -196,6 +200,8 @@ describe("GameMenu", () => {
             isOnlineMode
             showAiHand={false}
             onToggleAiHand={vi.fn()}
+            logPanelOpen={false}
+            onToggleGameLog={vi.fn()}
             onSettingsClick={vi.fn()}
             onHelpClick={vi.fn()}
             onConcede={() => setOpen(true)}
@@ -331,4 +337,25 @@ describe("GameMenu", () => {
     expect(screen.queryByRole("button", { name: "Request Takeback" })).toBeNull();
   });
 
+  it("replaces the no-op Resume entry with a game log toggle", () => {
+    const onToggleGameLog = vi.fn();
+    renderGameMenu({ onToggleGameLog });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open Game Log" }));
+
+    expect(onToggleGameLog).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Open Game Log" })).not.toBeInTheDocument();
+  });
+
+  it("offers to close the game log while it is open", () => {
+    renderGameMenu({ logPanelOpen: true });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Close Game Log" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Game Log" })).toBeNull();
+  });
 });

@@ -1004,13 +1004,14 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
 
     assert_eq!(
         (production.len(), test_scoped.len()),
-        (3, 11),
+        (3, 12),
         "the no-origin-zone battlefield-entry construction surface moved. Expected 3 production \
          constructions — the authority plus two adjudicated survivors:{ADJUDICATED_SURVIVORS}\
          A NEW production hit means a SEVENTH clone of the record/emit split was written: route it \
          through `zones::record_and_emit_entry_from_no_zone` instead. A REMOVED hit means the \
-         authority or a survivor moved. The 11 test-scoped hits include the `stack.rs` observer \
-         probe, 7 other constructions spelled `from: None`, and 3 written in field-init shorthand \
+         authority or a survivor moved. The 12 test-scoped hits include the `stack.rs` observer \
+         probe, the Saga entry-boundary regression, 7 other constructions spelled `from: None`, \
+         and 3 written in field-init shorthand \
          (`analysis/sim.rs`, `trigger_matchers.rs`, `targeting.rs`), which the shorthand branch of \
          `classify` is what sees. \
          Production hits = {production:#?}"

@@ -1,13 +1,13 @@
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::types::ability::{
-    ContinuousModification, Effect, EffectScope, PtValue, QuantityExpr, TapStateChange,
-    TargetFilter, TriggerDefinition, TypeFilter,
+    ContinuousModification, ControllerRef, Effect, EffectScope, PtValue, QuantityExpr,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
 };
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
@@ -39,30 +39,96 @@ fn invert(polarity: EffectPolarity) -> EffectPolarity {
     }
 }
 
-/// CR 122.1: Counters sign — `+1/+1` is beneficial to the bearer, `-1/-1`
-/// harmful. Non-P/T counter types (poison, loyalty, charge, etc.) are classified
-/// as Contextual because their value to the bearer depends on card semantics.
+/// CR 122.1: A counter's polarity for the permanent that bears it.
+///
+/// Exhaustive over `CounterType` — deliberately no wildcard — so a new counter
+/// kind is a compile error here rather than a silent `Contextual`. `Contextual`
+/// reads as impact 0.0 at the call sites, which inverts the AI's target
+/// preference (it happily shielded and buffed opponents' creatures).
 fn counter_sign_polarity(counter_type: &CounterType) -> EffectPolarity {
     match counter_type {
+        // CR 122.1a: `+X/+Y` adds to power and toughness, `-X/-Y` subtracts.
         CounterType::Plus1Plus1 => EffectPolarity::Beneficial,
         CounterType::Minus1Minus1 => EffectPolarity::Harmful,
+        // CR 122.1a: the parameterized asymmetric counter carries both deltas,
+        // so the sign is derived rather than assumed. A mixed counter (+1/-1)
+        // is a genuine trade-off and an all-zero one a no-op, so both stay
+        // Contextual.
+        CounterType::PowerToughness { power, toughness } => match (*power, *toughness) {
+            (0, 0) => EffectPolarity::Contextual,
+            (p, t) if p >= 0 && t >= 0 => EffectPolarity::Beneficial,
+            (p, t) if p <= 0 && t <= 0 => EffectPolarity::Harmful,
+            _ => EffectPolarity::Contextual,
+        },
+        // CR 122.1c: shield counters only ever protect their bearer — they
+        // replace a destruction and prevent damage — so they are strictly
+        // beneficial to it.
+        CounterType::Shield => EffectPolarity::Beneficial,
+        // CR 122.1d: a stun counter stops the permanent from untapping, a
+        // strict penalty on its controller.
+        CounterType::Stun => EffectPolarity::Harmful,
+        // CR 702.147a: decayed is the one keyword a counter can grant that is a
+        // drawback ("can't block", and sacrifice at end of combat when it
+        // attacks), so it inverts the keyword-counter default below.
+        CounterType::Keyword(KeywordKind::Decayed) => EffectPolarity::Harmful,
+        // CR 122.1b: every other keyword a counter can grant (flying, first
+        // strike, hexproof, lifelink, …) upgrades the bearer.
+        CounterType::Keyword(_) => EffectPolarity::Beneficial,
+        // Resource and clock counters carry no intrinsic polarity for the
+        // bearer: CR 122.1e loyalty is a planeswalker's own currency;
+        // CR 122.1g defense is a battle's, and a battle is attacked by its
+        // protector's opponents; CR 714.3 lore advances a Saga toward both its
+        // payoff chapters and its sacrifice; CR 702.62a/CR 702.63a time counts
+        // down to a free cast (suspend) or a sacrifice (vanishing);
+        // CR 702.32a fade and CR 702.24a age each bring the sacrifice or the
+        // escalating upkeep closer on a permanent that was printed to carry
+        // them; CR 122.1h finality swaps the graveyard for exile, which denies
+        // the bearer's controller recursion but also denies an opponent's.
+        CounterType::Loyalty
+        | CounterType::Defense
+        | CounterType::Lore
+        | CounterType::Time
+        | CounterType::Fade
+        | CounterType::Age
+        | CounterType::Finality => EffectPolarity::Contextual,
+        // The legacy string counter keeps its `+`/`-` spelling rule; every
+        // other name (charge, quest, verse, …) is card-specific.
         CounterType::Generic(s) if s.starts_with('+') => EffectPolarity::Beneficial,
         CounterType::Generic(s) if s.starts_with('-') => EffectPolarity::Harmful,
-        _ => EffectPolarity::Contextual,
+        CounterType::Generic(_) => EffectPolarity::Contextual,
+    }
+}
+
+/// Whether a `Pump` power/toughness modifier is non-negative.
+///
+/// The parser carries a pump's sign *inside* the value, in two encodings the AI
+/// must read alike:
+/// - `PtValue::Variable` names the signed variable directly — "target creature
+///   gets -X/-X" parses to `Variable("-X")` (Slice from the Shadows), while
+///   "gets +X/+X" parses to `Variable("X")`.
+/// - `PtValue::Quantity` negates by multiplying — "gets -X/-X, where X is the
+///   number of …" parses to `Multiply { factor: -1, inner }`.
+///
+/// Every other `Quantity` shape counts up from a non-negative game quantity, and
+/// a `Fixed` modifier carries its own sign.
+fn pt_value_is_non_negative(value: &PtValue) -> bool {
+    match value {
+        PtValue::Fixed(v) => *v >= 0,
+        PtValue::Variable(name) => !name.starts_with('-'),
+        PtValue::Quantity(QuantityExpr::Multiply { factor, .. }) => *factor >= 0,
+        PtValue::Quantity(_) => true,
     }
 }
 
 pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
     match effect {
-        // Pump: beneficial only if both values are non-negative
+        // Pump: beneficial only if both modifiers are non-negative. The sign
+        // lives in the value (see `pt_value_is_non_negative`), so a `-X/-X`
+        // shrink must not be read as a buff just because it is variable.
         Effect::Pump {
             power, toughness, ..
         } => {
-            let p_ok = matches!(power, PtValue::Fixed(v) if *v >= 0)
-                || matches!(power, PtValue::Variable(_) | PtValue::Quantity(_));
-            let t_ok = matches!(toughness, PtValue::Fixed(v) if *v >= 0)
-                || matches!(toughness, PtValue::Variable(_) | PtValue::Quantity(_));
-            if p_ok && t_ok {
+            if pt_value_is_non_negative(power) && pt_value_is_non_negative(toughness) {
                 EffectPolarity::Beneficial
             } else {
                 EffectPolarity::Harmful
@@ -695,19 +761,43 @@ pub(crate) fn targeted_player_impact_in(
         let Some(filter) = extract_target_filter(effect) else {
             continue;
         };
-        if engine::game::filter::player_matches_target_filter_in_state(
-            state,
-            filter,
-            player,
-            source_controller,
-            source_id,
-        ) {
+        if filter_names_the_chosen_players_permanents(filter)
+            || engine::game::filter::player_matches_target_filter_in_state(
+                state,
+                filter,
+                player,
+                source_controller,
+                source_id,
+            )
+        {
             found_targeted_effect = true;
             impact += player_impact(effect);
         }
     }
 
     found_targeted_effect.then_some(impact)
+}
+
+/// "each creature target player controls" (Requisition
+/// Raid) or "each creature target opponent controls" has exactly one instance
+/// of the word "target", and it names a PLAYER. The objects the effect touches
+/// are described *by reference to* that chosen player, so the slot being
+/// filled is the player slot and the effect's impact lands on whichever player
+/// is chosen. `player_matches_target_filter_in_state` deliberately fails closed
+/// on both `ControllerRef::TargetPlayer` and `ControllerRef::TargetOpponent`
+/// (it has no ability context to resolve the reference against); here the
+/// candidate player *is* that target, so the effect must be counted for them
+/// rather than dropped — dropping it left the whole spell reading as "no
+/// per-player signal".
+fn filter_names_the_chosen_players_permanents(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(typed)
+            if matches!(
+                typed.controller,
+                Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent)
+            )
+    )
 }
 
 pub(crate) fn targeted_object_impact(ctx: &PolicyContext<'_>, object_id: ObjectId) -> Option<f64> {
@@ -1295,6 +1385,230 @@ mod grant_trigger_polarity_tests {
                 )),
             }),
             EffectPolarity::Beneficial
+        );
+    }
+}
+
+#[cfg(test)]
+mod pump_polarity_tests {
+    use super::*;
+    use engine::parser::oracle::parse_oracle_text;
+    use engine::types::ability::AbilityKind;
+
+    fn pump(power: PtValue, toughness: PtValue) -> Effect {
+        Effect::Pump {
+            power,
+            toughness,
+            target: TargetFilter::Any,
+        }
+    }
+
+    /// "gets -X/-X" — the parser puts the sign in the VARIABLE NAME, so the
+    /// pre-fix `matches!(PtValue::Variable(_))` non-negative assumption read it
+    /// as a buff and `anti_self_harm` aimed it at the AI's own creature.
+    #[test]
+    fn negative_variable_pump_is_harmful() {
+        assert_eq!(
+            effect_polarity(&pump(
+                PtValue::Variable("-X".to_string()),
+                PtValue::Variable("-X".to_string()),
+            )),
+            EffectPolarity::Harmful
+        );
+    }
+
+    /// The discriminator: the same variable carrier WITHOUT the sign is still a
+    /// buff, so the fix reads the name rather than blanket-condemning variables.
+    #[test]
+    fn positive_variable_pump_is_beneficial() {
+        assert_eq!(
+            effect_polarity(&pump(
+                PtValue::Variable("X".to_string()),
+                PtValue::Variable("X".to_string()),
+            )),
+            EffectPolarity::Beneficial
+        );
+    }
+
+    /// A single negative slot is enough: "+2/-2" harms the creature it lands on.
+    #[test]
+    fn one_negative_slot_makes_the_pump_harmful() {
+        assert_eq!(
+            effect_polarity(&pump(
+                PtValue::Fixed(2),
+                PtValue::Variable("-X".to_string()),
+            )),
+            EffectPolarity::Harmful
+        );
+    }
+
+    /// The parser's SECOND negative encoding: "gets -X/-X, where X is the number
+    /// of …" lands as `Quantity(Multiply { factor: -1, .. })`, not as a signed
+    /// variable name. 103 Pump/PumpAll slots in card-data carry a `Multiply`.
+    #[test]
+    fn where_x_negative_quantity_pump_is_harmful() {
+        let negated = PtValue::Quantity(QuantityExpr::Multiply {
+            factor: -1,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: engine::types::ability::QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+        });
+        assert_eq!(
+            effect_polarity(&pump(negated.clone(), negated)),
+            EffectPolarity::Harmful
+        );
+    }
+
+    /// Sibling reach-guard: a POSITIVE multiplier ("twice the number of …") is
+    /// still a buff, so the arm keys on the factor's sign, not on `Multiply`.
+    #[test]
+    fn positive_multiply_quantity_pump_is_beneficial() {
+        let doubled = PtValue::Quantity(QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: engine::types::ability::QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+        });
+        assert_eq!(
+            effect_polarity(&pump(doubled.clone(), doubled)),
+            EffectPolarity::Beneficial
+        );
+    }
+
+    /// Production-parser reach guard: Slice from the Shadows' real Oracle text
+    /// parses to `Pump { power: Variable("-X"), toughness: Variable("-X") }`
+    /// (confirmed against `data/card-data.json`), and that shape must read
+    /// Harmful through the classifier the AI's target scorer uses.
+    #[test]
+    fn slice_from_the_shadows_real_parse_is_harmful() {
+        let parsed = parse_oracle_text(
+            "Target creature gets -X/-X until end of turn.",
+            "Slice from the Shadows",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let spell = parsed
+            .abilities
+            .iter()
+            .find(|a| a.kind == AbilityKind::Spell)
+            .expect("Slice from the Shadows parses to a spell ability");
+        assert!(
+            matches!(
+                &*spell.effect,
+                Effect::Pump { power: PtValue::Variable(p), toughness: PtValue::Variable(t), .. }
+                    if p == "-X" && t == "-X"
+            ),
+            "the sign lives in the variable name: {:?}",
+            spell.effect
+        );
+        assert_eq!(effect_polarity(&spell.effect), EffectPolarity::Harmful);
+    }
+}
+
+#[cfg(test)]
+mod counter_polarity_tests {
+    use super::*;
+    use engine::types::keywords::KeywordKind;
+
+    fn put(counter_type: CounterType) -> Effect {
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+        }
+    }
+
+    /// CR 122.1c: shield counters only ever protect their bearer. Pre-fix these
+    /// fell through the wildcard to `Contextual` (impact 0.0), so the AI put
+    /// them on opponents' creatures.
+    #[test]
+    fn shield_counter_is_beneficial() {
+        assert_eq!(
+            effect_polarity(&put(CounterType::Shield)),
+            EffectPolarity::Beneficial
+        );
+    }
+
+    /// CR 122.1d: a stun counter stops the permanent from untapping.
+    #[test]
+    fn stun_counter_is_harmful() {
+        assert_eq!(
+            effect_polarity(&put(CounterType::Stun)),
+            EffectPolarity::Harmful
+        );
+    }
+
+    /// CR 122.1b: a granted keyword upgrades the bearer …
+    #[test]
+    fn keyword_counter_is_beneficial() {
+        assert_eq!(
+            effect_polarity(&put(CounterType::Keyword(KeywordKind::Flying))),
+            EffectPolarity::Beneficial
+        );
+    }
+
+    /// … except CR 702.147a decayed, the one drawback keyword a counter grants.
+    #[test]
+    fn decayed_keyword_counter_is_harmful() {
+        assert_eq!(
+            effect_polarity(&put(CounterType::Keyword(KeywordKind::Decayed))),
+            EffectPolarity::Harmful
+        );
+    }
+
+    /// CR 122.1a: the asymmetric counter's sign comes from its own payload.
+    #[test]
+    fn power_toughness_counter_sign_derived() {
+        assert_eq!(
+            effect_polarity(&put(CounterType::PowerToughness {
+                power: 1,
+                toughness: 0,
+            })),
+            EffectPolarity::Beneficial
+        );
+        assert_eq!(
+            effect_polarity(&put(CounterType::PowerToughness {
+                power: 0,
+                toughness: -1,
+            })),
+            EffectPolarity::Harmful
+        );
+        // Mixed signs are a trade-off, not a direction.
+        assert_eq!(
+            effect_polarity(&put(CounterType::PowerToughness {
+                power: 1,
+                toughness: -1,
+            })),
+            EffectPolarity::Contextual
+        );
+    }
+
+    /// Removing a counter inverts its polarity, and the inversion now reaches
+    /// the newly-signed kinds too (Vampire Hexmage on a shield counter).
+    #[test]
+    fn removing_a_shield_counter_is_harmful() {
+        assert_eq!(
+            effect_polarity(&Effect::RemoveCounter {
+                counter_type: Some(CounterType::Shield),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            }),
+            EffectPolarity::Harmful
+        );
+    }
+
+    /// Unchanged behaviour guard: loyalty stays Contextual, so the exhaustive
+    /// match did not turn the whole enum into a direction.
+    #[test]
+    fn loyalty_counter_stays_contextual() {
+        assert_eq!(
+            effect_polarity(&put(CounterType::Loyalty)),
+            EffectPolarity::Contextual
         );
     }
 }

@@ -68,7 +68,18 @@ const BOLT_NEW = printing("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "m20", "2019-0
 const BOLT_OLD = printing("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "lea", "1993-08-05");
 
 function cardEntry(oracleId: string, name: string, faceName: string) {
-  return { oracle_id: oracleId, name, face_names: [faceName], faces: [imageFace(oracleId)] };
+  return {
+    oracle_id: oracleId,
+    name,
+    face_names: [faceName],
+    faces: [imageFace(oracleId)],
+    mana_cost: "",
+    cmc: 0,
+    type_line: "",
+    colors: [],
+    color_identity: [],
+    keywords: [],
+  };
 }
 
 const BOLT_ENTRY = cardEntry(BOLT, "Lightning Bolt", "lightning bolt");
@@ -159,7 +170,7 @@ const DATABASE = "phase-visual-packs-scryfall-v1";
  * `settle()` reaching `completed`.
  */
 async function interrupt(operation: OperationId): Promise<void> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   const record = await database.get("operations", operation);
   await database.put("operations", { ...record, state: "downloading", completedRevision: null });
   database.close();
@@ -188,7 +199,7 @@ async function failures(backend: ScryfallBrowserVisualPackBackend): Promise<Prog
 
 /** Every persisted operation record, read the way a fresh launch reads them. */
 async function operationRecords(): Promise<unknown[]> {
-  const database = await openDB(DATABASE, 1);
+  const database = await openDB(DATABASE);
   const records = await database.getAll("operations");
   database.close();
   return records;
@@ -435,7 +446,7 @@ describe("curated install selector", () => {
       const source = String(input);
       if (!promoted && source.startsWith("https://cards.scryfall.io/")) {
         promoted = true;
-        const database = await openDB(DATABASE, 1);
+        const database = await openDB(DATABASE);
         await database.put("packs", {
           id: packId("curated"),
           packId: packId("curated"),

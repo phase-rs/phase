@@ -113,16 +113,23 @@
     "draftBadge": "Draft {{setCode}}",
     "p2pBadgeTitle": "Gra peer-to-peer (gospodarz uruchamia silnik)",
     "sandboxBadgeTitle": "Ta gra pozwala na akcje debugowania. Używaj do testów — to nie jest mecz wyczynowy.",
+    "hintSlow": "POWOLNY",
+    "hintSlowTitle": "Ten serwer odpowiadał ostatnio graczom powoli.",
+    "hintUnreliable": "NIESTABILNY",
+    "hintUnreliableTitle": "Gracze często nie mogli się ostatnio połączyć z tym serwerem.",
     "rankedBadgeTitle": "Pokój rankingowy",
     "rankedBadge": "RANKING",
     "anonymous": "Anonimowy",
     "by": "autor: {{name}}",
     "passwordProtected": "Chronione hasłem",
-    "join": "Dołącz"
+    "join": "Dołącz",
+    "originTitle": "Wystawione przez {{name}} {{kind}}",
+    "kindFull": "(serwer gry)",
+    "kindLobbyOnly": "(broker poczekalni)"
   },
   "serverPicker": {
     "title": "Serwer",
-    "subtitle": "Wybierz region lub połącz się z własną instancją.",
+    "subtitle": "Wybierz, gdzie hostujesz i które poczekalnie przeglądasz.",
     "noneLabel": "Brak (tylko P2P)",
     "directCodes": "bezpośrednie kody",
     "official": "Oficjalny",
@@ -133,7 +140,23 @@
     "urlError": "URL musi zaczynać się od ws:// lub wss://",
     "connected": "Połączono",
     "connectionFailed": "Połączenie nie powiodło się",
-    "testing": "Testowanie…"
+    "testing": "Testowanie…",
+    "hostingServer": "Serwer hostujący",
+    "hostingServerHelp": "Tam są tworzone i rejestrowane hostowane przez ciebie gry.",
+    "sources": "Źródła poczekalni",
+    "sourcesHelp": "Otwarte stoły ze wszystkich poniższych źródeł są łączone w jedną listę.",
+    "addSource": "Dodaj źródło",
+    "remove": "Usuń",
+    "useForHosting": "Użyj do hostowania",
+    "sourceStatusConnecting": "Łączenie…",
+    "sourceStatusDegraded": "Niedostępny",
+    "sourceDuplicate": "Ten serwer jest już źródłem poczekalni.",
+    "sourceCapReached": "Można dodać maksymalnie {{max}} źródeł.",
+    "directoryOrigin": "Katalog",
+    "sourceScore": "Wynik {{score}}",
+    "enable": "Włącz",
+    "disable": "Wyłącz",
+    "incompatibleVersion": "Niezgodny — wersja serwera {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Brak dostępnych pokoi draftu",
@@ -183,7 +206,9 @@
     "hostP2PGame": "Hostuj grę P2P",
     "passwordRequired": "Wymagane hasło",
     "passwordPlaceholder": "Wpisz hasło",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Część źródeł poczekalni jest niedostępna",
+    "invalidJoinServer": "Adres serwera w tym kodzie jest nieprawidłowy."
   },
   "hostSetup": {
     "hostDirectMatch": "Hostuj mecz bezpośredni",
@@ -213,6 +238,10 @@
     "startWhenFull": "Rozpocznij po zapełnieniu",
     "ranked": "Rankingowa",
     "listInLobby": "Wyświetl w poczekalni",
+    "hostServer": "Hostuj na",
+    "hostServerHelp": "Który serwer prowadzi tę partię. Twoje ustawienia przeglądania i kodu bezpośredniego nie zmieniają się.",
+    "hostServerScore": "{{name}} — kondycja {{score}}",
+    "hostServerUnscored": "{{name}} — jeszcze nieoceniony",
     "sandboxMode": "Tryb piaskownicy — zezwól na akcje debugowania",
     "sandboxModeHelp": "Gospodarz może bezpośrednio manipulować stanem gry (przenosić karty, zmieniać życie, modyfikować znaczniki) i przyznawać uprawnienia debugowania innym graczom. Używaj do testów lub gry w piaskownicy — nie do meczów wyczynowych. Tego ustawienia nie można zmienić po rozpoczęciu gry.",
     "setPassword": "Ustaw hasło",
@@ -220,7 +249,17 @@
     "back": "Wstecz",
     "opening": "Otwieranie…",
     "hostP2PGame": "Hostuj grę P2P",
-    "hostGame": "Hostuj grę"
+    "hostGame": "Hostuj grę",
+    "savedFormats": "Zapisane formaty niestandardowe",
+    "saveAsCustomFormat": "Zapisz format",
+    "customFormatNamePlaceholder": "Nazwij ten format",
+    "useCustomFormat": "Użyj",
+    "customFormatInUse": "W użyciu",
+    "deleteCustomFormat": "Usuń",
+    "loadingCustomFormat": "Wczytywanie formatu…",
+    "noSavedCustomFormats": "Brak zapisanych formatów niestandardowych.",
+    "customFormatResolveFailed": "Nie udało się wczytać zapisanego formatu.",
+    "customFormatHostingUnavailable": "Hostowanie z formatem niestandardowym nie jest jeszcze obsługiwane — legalność talii nie może zostać dla niego sprawdzona. Na razie zapisz i tylko podglądaj."
   },
   "page": {
     "deckRejected": "Talia została odrzucona przez gospodarza.",
@@ -243,6 +282,8 @@
     "descriptionDraftLobby": "Oczekiwanie na graczy dołączających do grupy draftu.",
     "descriptionDeckSelectFormat": "Wybierz talię dla formatu {{format}}.",
     "descriptionDeckSelect": "Wybierz talię, którą chcesz wystawić online.",
+    "offlineUnavailableTitle": "Tryb wieloosobowy jest niedostępny offline.",
+    "offlineUnavailableDescription": "Połącz się ponownie lub wyłącz Tryb Offline, aby hostować lub dołączyć do gry wieloosobowej.",
     "eyebrow": "Rozgrywka sieciowa",
     "activeDeck": "Aktywna talia",
     "edit": "Edytuj",
@@ -250,7 +291,8 @@
     "noDeckWarning": "Nie wybrano talii — musisz wybrać jedną przed hostowaniem.",
     "pickDeck": "Wybierz talię",
     "anonymous": "Anonimowy",
-    "joining": "Dołączanie"
+    "joining": "Dołączanie",
+    "joinNeedsServer": "Wybierz serwer, zanim dołączysz do gry."
   },
   "draftLobbyPanel": {
     "draftPod": "Grupa draftu",

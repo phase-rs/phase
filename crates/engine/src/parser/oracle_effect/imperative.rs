@@ -8,12 +8,15 @@ use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::counter::{
-    parse_counter_anaphor, try_parse_double_effect, try_parse_move_counters_from,
-    try_parse_multiply_pt_effect, try_parse_put_counter, try_parse_remove_counter,
+    parse_counter_anaphor, remove_counter_exact_selection_count,
+    remove_counter_exact_target_multi_target, try_parse_double_effect,
+    try_parse_move_counters_from, try_parse_multiply_pt_effect, try_parse_put_counter,
+    try_parse_remove_counter,
 };
 use super::lower::{
     parse_for_each_multiplier_prefix, parse_multi_target_count_expr,
-    parse_where_x_quantity_expression, strip_leading_quantifier, strip_trailing_where_x,
+    parse_where_x_quantity_expression, rebind_cost_paid_object_pt_to_target,
+    strip_leading_quantifier, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -39,8 +42,9 @@ use crate::types::ability::{
     CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, ContinuousModification,
     ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp,
     Duration, Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef,
-    GrantedAbilityScope, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PerPlayerScope,
-    PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    GrantedAbilityScope, LibraryPosition, MultiTargetSpec, ObjectSelectionCardinality,
+    ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerScope,
+    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
     ReassembleControlMode, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
     TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
     ZoneOwner,
@@ -2549,6 +2553,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 granted_to: None,
                 resolution_cleanup: None,
                 duration: None,
+                // CR 611.2a: no duration, so no host to bind to.
+                source_id: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
@@ -3268,7 +3274,7 @@ pub(super) fn parse_search_and_creation_ast(
                     colors,
                     keywords,
                     tapped,
-                    count,
+                    count: count.clone(),
                     attach_to,
                     static_abilities,
                     enters_attacking,
@@ -11135,7 +11141,9 @@ pub(super) fn parse_imperative_family_ast(
         // CR 701.53a: "incubate N"
         "incubate" => try_parse_incubate(lower).map(ImperativeFamilyAst::GainKeyword),
         // CR 701.47a: "amass [Type] N"
-        "amass" => try_parse_amass(text, lower).map(ImperativeFamilyAst::GainKeyword),
+        // allow-noncombinator: pre-existing grandfathered first-word match arm; only reformatted to two lines because the new `player` param (Azog, Moria's Ruin) pushed it past the line-length limit.
+        "amass" => try_parse_amass(text, lower, TargetFilter::Controller)
+            .map(ImperativeFamilyAst::GainKeyword),
         // CR 701.37a: "monstrosity N"
         "monstrosity" => try_parse_monstrosity(lower).map(ImperativeFamilyAst::GainKeyword),
         // CR 701.46a: "adapt N"
@@ -11724,7 +11732,17 @@ fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, Targe
             .parse(span)
             .ok()?;
     let target_a = parse_exchange_slot(left.trim())?;
-    let target_b = parse_exchange_slot(right.trim())?;
+    let mut target_b = parse_exchange_slot(right.trim())?;
+    // The relative clause attaches RIGHTWARD, to slot B, and its antecedent is
+    // slot A's declared object target. Guarded on slot A actually
+    // surfacing one: `collect_target_slots`' ExchangeControl loop skips a
+    // `TargetFilter::SelfRef` slot (`ability_utils.rs:2667`), so for "exchange
+    // control of this artifact and target X with equal or lesser mana value"
+    // there is no prior object target and `ObjectScope::Target` would resolve
+    // to slot B ITSELF. Keep this guard in sync with that skip.
+    if !matches!(target_a, TargetFilter::SelfRef) {
+        crate::parser::oracle_target::rebind_compound_slot_referent_to_prior_target(&mut target_b);
+    }
     Some((target_a, target_b))
 }
 
@@ -12555,6 +12573,40 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             }
             clause
         }
+        // CR 115.1d + CR 122.1: "remove a +1/+1 counter from each of two
+        // creatures you control" is an untargeted exact selection followed by
+        // removal from the selected set. It must not become a blank typed target
+        // filter, which the targeting layer correctly interprets as a player.
+        ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::RemoveCounter {
+            counter_type,
+            count,
+            target,
+            exact_selection: Some(selection_count),
+            multi_target: None,
+        }) => {
+            let removal = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RemoveCounter {
+                    counter_type: counter_type.clone(),
+                    count: count.clone(),
+                    target: TargetFilter::TrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                    },
+                },
+            );
+            let mut clause = parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter: target,
+                min: selection_count,
+                max: Some(selection_count),
+                cardinality: Some(ObjectSelectionCardinality::Exactly {
+                    count: selection_count,
+                }),
+                eligibility: Some(ObjectSelectionEligibility::RemovableCounter { counter_type }),
+            });
+            clause.sub_ability = Some(Box::new(removal));
+            clause
+        }
         // CR 608.2c: A tracked-set partition with a rest complement ("Put all
         // <filter> revealed this way into your hand and the rest into your
         // graveyard" — Winding Way). The primary mass move sends the chosen
@@ -12696,6 +12748,26 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             target,
             multi_target,
         }) => lower_put_counter_list(entries, target, multi_target),
+        // CR 601.2c + CR 122.1: The targeted fixed-count counterpart of the
+        // untargeted exact-selection grammar retains its announced target
+        // cardinality through lowering.
+        ImperativeFamilyAst::ZoneCounter(
+            ast @ ZoneCounterImperativeAst::RemoveCounter {
+                exact_selection: None,
+                multi_target: Some(_),
+                ..
+            },
+        ) => {
+            let multi_target = match &ast {
+                ZoneCounterImperativeAst::RemoveCounter { multi_target, .. } => {
+                    multi_target.clone()
+                }
+                _ => None,
+            };
+            let mut clause = parsed_clause(lower_zone_counter_ast(ast));
+            clause.multi_target = multi_target;
+            clause
+        }
         // CR 115.1c + CR 601.2c: "Choose target X and target Y" — two
         // independent target slots. Lowered to a primary `Effect::TargetOnly`
         // (slot A) with a chained `TargetOnly` sub_ability (slot B). At
@@ -13840,6 +13912,8 @@ pub(super) fn parse_zone_counter_ast(
                     counter_type,
                     count,
                     target,
+                    exact_selection: remove_counter_exact_selection_count(lower),
+                    multi_target: remove_counter_exact_target_multi_target(lower),
                 }),
                 _ => None,
             };
@@ -14029,6 +14103,8 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             counter_type,
             count,
             target,
+            exact_selection: _,
+            multi_target: _,
         } => Effect::RemoveCounter {
             counter_type,
             count,
@@ -14088,12 +14164,23 @@ fn try_parse_incubate(lower: &str) -> Option<Effect> {
     Some(Effect::Incubate { count })
 }
 
-/// CR 701.47a: Parse "amass {Type} {N}" from Oracle text.
+/// CR 701.47a: Parse "amass {Type} {N}" (imperative) or "amasses {Type} {N}"
+/// (third-person, subject-shifted) from Oracle text.
 ///
 /// Handles all subtypes generically. The subtype is canonicalized from plural
 /// to singular form (e.g., "Zombies" -> "Zombie") via `parse_subtype`.
-fn try_parse_amass(text: &str, lower: &str) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("amass ").parse(lower).ok()?;
+///
+/// `player` is the `TargetFilter` naming which player performs the amass
+/// instruction — `TargetFilter::Controller` for the imperative "Amass Zombies
+/// 2" form (the ability's own controller amasses), or an anaphoric subject
+/// such as `TargetFilter::ParentTargetController` for Azog, Moria's Ruin's
+/// "Its controller amasses Goblins X" (the destroyed creature's controller,
+/// not Azog's). Resolved at runtime via `resolve_player_for_context_ref`
+/// (mirrors `Manifest.target` / `Discover.player`).
+pub(super) fn try_parse_amass(text: &str, lower: &str, player: TargetFilter) -> Option<Effect> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("amass "), tag("amasses ")))
+        .parse(lower)
+        .ok()?;
     let rest = rest.trim();
     if rest.is_empty() {
         return None;
@@ -14106,9 +14193,42 @@ fn try_parse_amass(text: &str, lower: &str) -> Option<Effect> {
 
     // CR 701.47a: Amass requires an explicit count after the subtype. If it
     // doesn't parse, surface as Unimplemented rather than amassing 1.
-    let count = parse_count_expr(remainder).map(|(q, _)| q)?;
+    let mut count = parse_count_expr(remainder).map(|(q, _)| q)?;
 
-    Some(Effect::Amass { subtype, count })
+    // CR 608.2c + CR 109.4 + CR 608.2h: when the amass PERFORMER anaphors a
+    // parent target ("its controller amasses ..." — Azog, Moria's Ruin), a
+    // same-clause "that creature's power/toughness" in the count is the SAME
+    // anaphor: the creature named by the parent effect's own object target
+    // (e.g. "destroy up to one other target creature"), not a cost/trigger
+    // referent. The shared where-X/CDA quantity grammar lowers the
+    // context-free phrase to `ObjectScope::CostPaidObject` (its
+    // sacrifice-cost / dies-trigger sense), which reads only
+    // `cost_paid_object` / `effect_context_object` snapshots populated when
+    // the parent effect actually moved the object to a public zone — so an
+    // indestructible/regenerated/prevented creature (never destroyed, no
+    // such snapshot) silently amasses 0 even though it is still sitting
+    // right there on the battlefield. Rebind to `ObjectScope::Target`, which
+    // reads the SAME inherited `ability.targets` slot `ParentTargetController`
+    // already resolves against (see `parent_target_controller`) and reads the
+    // object live while present, falling back to its LKI once it has left
+    // (CR 608.2h) — mirroring the identical rebind
+    // `rebind_cost_paid_object_pt_to_target` already performs for a targeted
+    // continuous grant's "that creature's power" (Xenagos, God of Revels).
+    // Gated on the parent-target player anaphor so a plain "you"/"they"
+    // amass (`player == Controller`, no parent-target dependency) is
+    // untouched.
+    if matches!(
+        player,
+        TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
+    ) {
+        rebind_cost_paid_object_pt_to_target(&mut count);
+    }
+
+    Some(Effect::Amass {
+        subtype,
+        count,
+        player,
+    })
 }
 
 /// CR 701.37a: Parse "monstrosity {N}" from Oracle text.
@@ -16036,6 +16156,7 @@ mod tests {
                 counter_type: None,
                 count: QuantityExpr::Fixed { value: -1 },
                 target,
+                ..
             }) = result
             else {
                 panic!("{input}: expected anaphoric RemoveCounter (count -1), got {result:?}");
@@ -17699,12 +17820,21 @@ mod tests {
 
     #[test]
     fn parse_amass_zombies_2() {
-        let result = try_parse_amass("amass Zombies 2", "amass zombies 2");
+        let result = try_parse_amass(
+            "amass Zombies 2",
+            "amass zombies 2",
+            TargetFilter::Controller,
+        );
         assert!(result.is_some(), "Should parse 'amass Zombies 2'");
         match result.unwrap() {
-            Effect::Amass { subtype, count } => {
+            Effect::Amass {
+                subtype,
+                count,
+                player,
+            } => {
                 assert_eq!(subtype, "Zombie");
                 assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+                assert_eq!(player, TargetFilter::Controller);
             }
             other => panic!("Expected Amass, got {other:?}"),
         }
@@ -17712,10 +17842,10 @@ mod tests {
 
     #[test]
     fn parse_amass_orcs_3() {
-        let result = try_parse_amass("amass Orcs 3", "amass orcs 3");
+        let result = try_parse_amass("amass Orcs 3", "amass orcs 3", TargetFilter::Controller);
         assert!(result.is_some(), "Should parse 'amass Orcs 3'");
         match result.unwrap() {
-            Effect::Amass { subtype, count } => {
+            Effect::Amass { subtype, count, .. } => {
                 assert_eq!(subtype, "Orc");
                 assert!(matches!(count, QuantityExpr::Fixed { value: 3 }));
             }
@@ -17725,10 +17855,14 @@ mod tests {
 
     #[test]
     fn parse_amass_zombies_x() {
-        let result = try_parse_amass("amass Zombies X", "amass zombies x");
+        let result = try_parse_amass(
+            "amass Zombies X",
+            "amass zombies x",
+            TargetFilter::Controller,
+        );
         assert!(result.is_some(), "Should parse 'amass Zombies X'");
         match result.unwrap() {
-            Effect::Amass { subtype, count } => {
+            Effect::Amass { subtype, count, .. } => {
                 assert_eq!(subtype, "Zombie");
                 assert!(matches!(
                     count,
@@ -17750,13 +17884,14 @@ mod tests {
         let result = try_parse_amass(
             "amass Orcs X, where X is that spell's mana value",
             "amass orcs x, where x is that spell's mana value",
+            TargetFilter::Controller,
         );
         assert!(
             result.is_some(),
             "Should parse 'amass Orcs X, where X is ...'"
         );
         match result.unwrap() {
-            Effect::Amass { subtype, count } => {
+            Effect::Amass { subtype, count, .. } => {
                 assert_eq!(subtype, "Orc");
                 assert_eq!(
                     count,
@@ -17766,6 +17901,97 @@ mod tests {
                         }
                     }
                 );
+            }
+            other => panic!("Expected Amass, got {other:?}"),
+        }
+    }
+
+    /// Azog, Moria's Ruin: "Its controller amasses Goblins X, where X is that
+    /// creature's power" — the third-person "amasses" verb form binds `player`
+    /// to whatever `TargetFilter` the subject layer resolved (here
+    /// `ParentTargetController`, standing in for "its controller"), instead of
+    /// the imperative form's default `Controller`.
+    ///
+    /// CR 608.2c + CR 608.2h (maintainer review, PR #8011): when `player`
+    /// anaphors a parent target, "that creature's power" anaphors the SAME
+    /// parent target (the object the parent effect — e.g. "destroy up to one
+    /// other target creature" — established), not a cost/trigger-condition
+    /// snapshot. The shared where-X/CDA grammar lowers the context-free
+    /// phrase to `ObjectScope::CostPaidObject`; `try_parse_amass` rebinds it
+    /// to `ObjectScope::Target` (`rebind_cost_paid_object_pt_to_target`) so
+    /// the quantity reads the referenced creature LIVE while it remains on
+    /// the battlefield (indestructible, regenerated, or otherwise-prevented
+    /// destruction) and falls back to its LKI only once it has actually
+    /// left — mirroring the identical rebind already applied to Xenagos, God
+    /// of Revels's targeted "+X/+X where X is that creature's power" grant.
+    #[test]
+    fn parse_amasses_goblins_x_where_x_is_that_creatures_power_with_performer() {
+        let result = try_parse_amass(
+            "amasses Goblins X, where X is that creature's power",
+            "amasses goblins x, where x is that creature's power",
+            TargetFilter::ParentTargetController,
+        );
+        assert!(
+            result.is_some(),
+            "Should parse 'amasses Goblins X, where X is that creature's power'"
+        );
+        match result.unwrap() {
+            Effect::Amass {
+                subtype,
+                count,
+                player,
+            } => {
+                assert_eq!(subtype, "Goblin");
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Target,
+                        }
+                    },
+                    "X must bind to the parent target's power, read live while \
+                     present and via LKI once it has left — not a cost/trigger \
+                     snapshot that a non-destroyed target never populates"
+                );
+                assert_eq!(player, TargetFilter::ParentTargetController);
+            }
+            other => panic!("Expected Amass, got {other:?}"),
+        }
+    }
+
+    /// CR 701.47a: The plain imperative "amass [subtype] N" form (`player ==
+    /// Controller`, no parent-target dependency) must NOT be touched by the
+    /// `ParentTargetController`/`ParentTargetOwner`-gated rebind above — a
+    /// hypothetical "amass Goblins X, where X is that creature's power" with
+    /// `player: Controller` has no parent target to bind `Target` against, so
+    /// leaving it on the generic `CostPaidObject` (cost/trigger-condition)
+    /// referent is correct here.
+    #[test]
+    fn parse_amass_goblins_x_where_x_is_that_creatures_power_plain_controller_unrebound() {
+        let result = try_parse_amass(
+            "amass Goblins X, where X is that creature's power",
+            "amass goblins x, where x is that creature's power",
+            TargetFilter::Controller,
+        );
+        match result.expect("Should parse 'amass Goblins X, where X is that creature's power'") {
+            Effect::Amass {
+                subtype,
+                count,
+                player,
+            } => {
+                assert_eq!(subtype, "Goblin");
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::CostPaidObject,
+                        }
+                    },
+                    "a plain Controller-performed amass has no parent target to \
+                     rebind against, so the generic CostPaidObject referent \
+                     must survive unrebound"
+                );
+                assert_eq!(player, TargetFilter::Controller);
             }
             other => panic!("Expected Amass, got {other:?}"),
         }
@@ -23298,5 +23524,58 @@ mod tests {
             ),
             "reach-guard: the printed assimilate phrase must produce the Assimilate node"
         );
+    }
+
+    /// SHAPE — CR 115.1d + CR 122.1: A fixed "each of two creatures" counter
+    /// removal is a resolution-time object selection, never two target slots
+    /// (and therefore never a player-target prompt).
+    #[test]
+    fn fixed_each_counter_removal_lowers_to_exact_tracked_set_selection() {
+        let text = "remove a +1/+1 counter from each of two creatures you control";
+        let ast = parse_imperative_family_ast(text, text, &mut ParseContext::default())
+            .expect("fixed untargeted counter-removal phrase must parse");
+        let clause = lower_imperative_family_ast(ast);
+        let Effect::ChooseObjectsIntoTrackedSet {
+            chooser,
+            filter,
+            min,
+            max,
+            cardinality,
+            eligibility,
+            ..
+        } = &clause.effect
+        else {
+            panic!(
+                "fixed each removal must lower to object selection: {:?}",
+                clause.effect
+            );
+        };
+        assert_eq!(*chooser, TargetFilter::Controller);
+        assert!(
+            matches!(filter, TargetFilter::Typed(_)),
+            "the selected objects must retain the creature filter, got {filter:?}"
+        );
+        assert_eq!(*min, 2);
+        assert_eq!(*max, Some(2));
+        assert_eq!(
+            *cardinality,
+            Some(ObjectSelectionCardinality::Exactly { count: 2 })
+        );
+        assert_eq!(
+            eligibility,
+            &Some(ObjectSelectionEligibility::RemovableCounter {
+                counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
+            })
+        );
+        let removal = clause
+            .sub_ability
+            .expect("selection must continue into the counter removal");
+        assert!(matches!(
+            *removal.effect,
+            Effect::RemoveCounter {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ));
     }
 }

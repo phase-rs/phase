@@ -1,525 +1,712 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import {
-  applyBackup,
-  buildBackup,
-  mergeDeckCollections,
-  type PhaseBackup,
-} from "../services/backup";
+import { applyBackup, buildBackup, mergeDeckCollections, type PhaseBackup } from "../services/backup";
 import {
   getCloudSyncProvider,
+  isCloudSyncConfigured,
+  pauseCloudSyncProvider,
   SyncConflictError,
+  type CloudSyncProvider,
+  type RemoteMeta,
   type RemoteSnapshot,
   type SyncAuthProvider,
   type SyncIdentity,
 } from "../services/cloudSync";
-import {
-  watchUserStorage,
-  withStorageWatchSuppressed,
-} from "../services/cloudSync/storageWatcher";
-import {
-  computeBackupDigest,
-  summarizeBackupDiff,
-  type ConflictDiffSummary,
-} from "../services/cloudSync/backupDiff";
+import { computeBackupDigest, summarizeBackupDiff, type ConflictDiffSummary } from "../services/cloudSync/backupDiff";
+import { watchUserStorage, withStorageWatchSuppressed } from "../services/cloudSync/storageWatcher";
+import { getEffectiveOffline } from "./connectivityStore";
 import { usePreferencesStore } from "./preferencesStore";
 
-/** Debounce window for auto-sync after a user-owned storage change. */
 const AUTO_SYNC_DEBOUNCE_MS = 3000;
-
-/**
- * Broadcast when the local profile has been replaced wholesale by a remote
- * snapshot. Components reading non-Zustand localStorage data directly (deck
- * lists, feed subscriptions, metadata) subscribe to this event and re-read.
- * Zustand-persisted stores rehydrate via their own `persist.rehydrate()` API.
- */
 export const PROFILE_REPLACED_EVENT = "phase:profile-replaced";
-
 export type SyncStatus = "idle" | "syncing" | "synced" | "conflict" | "error";
 export type ConflictChoice = "cloud" | "local" | "merge";
 
 interface CloudSyncState {
-  /** True when a provider is configured for this deployment. */
   available: boolean;
+  paused: boolean;
   identity: SyncIdentity | null;
-  /**
-   * False until `restoreSession()` has resolved on boot. Distinguishes
-   * "we haven't checked yet" (transient) from "no session" (confirmed
-   * signed-out). UI must NOT render the sign-in CTA while this is false —
-   * otherwise the icon flashes "Sign in" between mount and session restore
-   * even though the user is signed in, because `identity` starts null and
-   * doesn't populate until the async restore completes.
-   */
   sessionResolved: boolean;
   status: SyncStatus;
   error: string | null;
-  /** Local profile has changes not yet pushed. Persisted so a tab close
-   *  mid-debounce doesn't strand the changes — next boot still pushes them. */
   dirty: boolean;
-  /** Revision this device last reconciled with. null = never synced here. */
   lastSyncedRevision: number | null;
-  /**
-   * Local clock at the moment this device last reconciled with cloud — in
-   * either direction (push, pull, or fast-forward on digest equality). Not the
-   * cloud's `updatedAt`, which would be stale after a pull from data written
-   * by another device. Answers "when did this device last sync?" honestly.
-   */
   lastSyncedAt: string | null;
-  /** Pending remote snapshot awaiting a user reconciliation decision. */
   conflict: RemoteSnapshot | null;
-  /** Per-envelope-section diff summary for the current conflict, or null. */
   conflictDiff: ConflictDiffSummary | null;
-
-  /** Installs the storage watcher + session restore; returns an uninstaller. */
   init: () => () => void;
+  pause: () => void;
   signIn: (provider: SyncAuthProvider) => Promise<void>;
   signOut: () => Promise<void>;
   syncNow: () => Promise<void>;
   resolveConflict: (choice: ConflictChoice) => Promise<void>;
 }
 
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-/**
- * Serializes syncNow calls. The auto-sync debounce, visibility-flush, post-OAuth
- * boot, and manual button can all fire close enough together to race the
- * pull→push window — without this mutex two in-flight syncs can interleave their
- * snapshot of `lastSyncedRevision`, leaving the second one to misread a freshly
- * pushed revision as "remote ahead" and surface a false conflict.
- */
-let syncInFlight: Promise<void> | null = null;
-/**
- * Latest trailing-edge sync requested by a caller that arrived while another
- * sync was in flight. Each coalesced caller gets back a promise that resolves
- * after its follow-up sync, not merely after the older snapshot drains.
- */
-let nextSyncInFlight: Promise<void> | null = null;
-let nextSyncBase: Promise<void> | null = null;
-/**
- * Active realtime CDC channel for the current session. Held at module scope
- * so signIn/signOut can re-arm or tear down without going through `init()`.
- */
-let unsubscribeRealtime: (() => void) | null = null;
+interface Generation {
+  version: number;
+  provider: CloudSyncProvider;
+  cancelled: boolean;
+  ready: boolean;
+  authVersion: number;
+  authTransition: Promise<void> | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  visibility: (() => void) | null;
+  unsubscribe: (() => Promise<void>) | null;
+  inFlight: Promise<void> | null;
+  trailing: Promise<void> | null;
+  trailingQueued: boolean;
+  preserveError: boolean;
+}
 
-function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+export interface CloudSyncHmrState {
+  lifecycleVersion: number;
+  channelCleanupCompletion: Promise<void>;
+  retainedUnsubscribe: (() => Promise<void>) | null;
+}
+
+function createCloudSyncHmrState(): CloudSyncHmrState {
+  return {
+    lifecycleVersion: 0,
+    channelCleanupCompletion: Promise.resolve(),
+    retainedUnsubscribe: null,
+  };
+}
+
+/** Adopts Vite's predecessor registry before this module creates any lifecycle state. */
+export function adoptCloudSyncHmrState(data: { cloudSyncLifecycle?: unknown }): CloudSyncHmrState {
+  const predecessor = data.cloudSyncLifecycle;
+  return predecessor && typeof predecessor === "object"
+    ? predecessor as CloudSyncHmrState
+    : createCloudSyncHmrState();
+}
+
+const cloudSyncHmrState = adoptCloudSyncHmrState(import.meta.hot?.data ?? {});
+
+let lifecycleVersion = cloudSyncHmrState.lifecycleVersion;
+let active: Generation | null = null;
+let unwatchStorage: (() => void) | null = null;
+let localWriteVersion = 0;
+let conflictWriteVersion: number | null = null;
+/** Completion-aware teardown survives React cleanup, HMR, and replacement init. */
+
+function retainUnsubscribe(disposer: (() => Promise<void>) | null): void {
+  cloudSyncHmrState.retainedUnsubscribe = disposer;
+}
+
+function retainCleanupCompletion(completion: Promise<void>): Promise<void> {
+  cloudSyncHmrState.channelCleanupCompletion = completion;
+  return completion;
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function hasUserData(backup: PhaseBackup): boolean {
+  return Object.keys(backup.decks).length > 0 || backup.preferences !== null ||
+    backup.deckMetadata !== null || backup.activeDeck !== null ||
+    backup.feedSubscriptions !== null || backup.feedDeckOrigins !== null;
+}
+
+function current(generation: Generation, authVersion = generation.authVersion): boolean {
+  return active === generation && lifecycleVersion === generation.version && !generation.cancelled &&
+    generation.ready && generation.authVersion === authVersion && !getEffectiveOffline() &&
+    !useCloudSyncStore.getState().paused;
+}
+
+function actionGeneration(): Generation | null {
+  const generation = active;
+  return generation && current(generation) && !generation.authTransition ? generation : null;
+}
+
+function ensureWatcher(): void {
+  if (unwatchStorage) return;
+  unwatchStorage = watchUserStorage(() => {
+    // Advance before scheduling Zustand work: same-task conflict selections
+    // cannot publish an old local snapshot after a storage write.
+    localWriteVersion += 1;
+    queueMicrotask(() => {
+      useCloudSyncStore.setState({ dirty: true });
+      const generation = actionGeneration();
+      if (!generation || !useCloudSyncStore.getState().identity) return;
+      if (generation.timer) clearTimeout(generation.timer);
+      generation.timer = setTimeout(() => {
+        generation.timer = null;
+        if (current(generation) && !generation.authTransition) void useCloudSyncStore.getState().syncNow();
+      }, AUTO_SYNC_DEBOUNCE_MS);
+    });
+  });
+}
+
+function stopSyncResources(generation: Generation): void {
+  generation.cancelled = true;
+  if (generation.timer) clearTimeout(generation.timer);
+  generation.timer = null;
+  if (generation.visibility) document.removeEventListener("visibilitychange", generation.visibility);
+  generation.visibility = null;
+}
+
+async function disposeChannel(generation: Generation): Promise<void> {
+  const disposer = generation.unsubscribe ?? cloudSyncHmrState.retainedUnsubscribe;
+  generation.unsubscribe = null;
+  if (!disposer) return;
+  try {
+    await disposer();
+    if (cloudSyncHmrState.retainedUnsubscribe === disposer) retainUnsubscribe(null);
+  } catch (error) {
+    retainUnsubscribe(disposer);
+    throw error;
+  }
+}
+
+function invalidate(generation: Generation | null): Promise<void> {
+  if (!generation) return Promise.resolve();
+  stopSyncResources(generation);
+  return disposeChannel(generation);
 }
 
 /**
- * Does this device hold profile data the cloud might not? Checked over the WHOLE
- * backup envelope — decks AND preferences AND feed state — not just decks, so a
- * device whose only local data is settings/feeds is never silently overwritten
- * by a remote pull on first sign-in.
+ * Observe every asynchronous disposer immediately, while retaining one module
+ * completion boundary that successors await before subscribing.
  */
-function backupHasUserData(b: PhaseBackup): boolean {
-  return (
-    Object.keys(b.decks).length > 0 ||
-    b.preferences !== null ||
-    b.deckMetadata !== null ||
-    b.activeDeck !== null ||
-    b.feedSubscriptions !== null ||
-    b.feedDeckOrigins !== null
-  );
+function observeCleanup(cleanup: Promise<void>): Promise<void> {
+  const settled = cleanup.catch(() => undefined);
+  retainCleanupCompletion(cloudSyncHmrState.channelCleanupCompletion.then(() => settled));
+  return cleanup;
 }
 
-export const useCloudSyncStore = create<CloudSyncState>()(
-  persist(
-    (set, get) => ({
-      available: false,
-      identity: null,
-      sessionResolved: false,
-      status: "idle",
-      error: null,
-      dirty: false,
-      lastSyncedRevision: null,
-      lastSyncedAt: null,
-      conflict: null,
-      conflictDiff: null,
+function trackCleanup(generation: Generation | null): Promise<void> {
+  return observeCleanup(invalidate(generation));
+}
 
-      init: () => {
-        // Each call to init() runs to completion. Idempotency is provided
-        // by the inner lifecycles it talks to (watchUserStorage's
-        // registration-owned cleanup, armRealtime's
-        // `unsubscribeRealtime?.()` teardown-before-resub)
-        // — NOT by a module-level "already initialized" gate, which used to
-        // strand the UI across HMR: the OLD bundle's init flipped the flag
-        // true, the NEW bundle's init early-returned, and the OLD init's
-        // restoreSession promise was orphaned with no .then ever firing.
-        // Captured by every async callback below; if cleanup has run before
-        // those callbacks resolve (React StrictMode double-invokes the
-        // mounting effect, and HMR does the same), they no-op instead of
-        // arming a realtime channel that nobody owns. Without this guard the
-        // first init's restoreSession resolves, subscribes channel A, then
-        // the second init's restoreSession resolves and tears down channel A
-        // mid-handshake to subscribe channel B — surfacing as
-        // CHANNEL_ERROR: socket closed: 1000 → CLOSED in the console.
-        let cancelled = false;
-        const provider = getCloudSyncProvider();
-        set({ available: provider !== null });
-        if (!provider) {
-          // No provider configured (self-hoster build). Session is trivially
-          // resolved — there's nothing to wait for — so the UI escapes the
-          // "unknown" state immediately instead of stranding on the loading
-          // affordance forever.
-          set({ sessionResolved: true });
-          return () => {};
-        }
+function trackChannelCleanup(generation: Generation): Promise<void> {
+  return observeCleanup(disposeChannel(generation));
+}
 
-        // Mark dirty + debounce a push whenever user-owned storage changes.
-        // Deferred to a microtask so writes that happen inside a React render
-        // commit (legacy code paths) don't trigger the "Cannot update a
-        // component while rendering" warning. The microtask drains at the
-        // end of the current task, before the next paint or user input.
-        const uninstallWatcher = watchUserStorage(() => {
-          queueMicrotask(() => {
-            set({ dirty: true });
-            if (!get().identity) return;
-            if (debounceTimer) clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(() => {
-              void get().syncNow();
-            }, AUTO_SYNC_DEBOUNCE_MS);
-          });
-        });
+function queueChannelCleanup(operation: () => Promise<void>): Promise<void> {
+  const queued = cloudSyncHmrState.channelCleanupCompletion.then(operation);
+  retainCleanupCompletion(queued.catch(() => undefined));
+  return queued;
+}
 
-        // Tab visibility ↔ sync:
-        //   hidden  → flush pending local changes so they don't wait out the
-        //             debounce window if the user closes/backgrounds the tab.
-        //   visible → pull to learn about peer changes that landed while this
-        //             tab was backgrounded. This is the universal fallback for
-        //             when realtime CDC is unavailable or temporarily broken;
-        //             with realtime working, the pull is usually a no-op.
-        const onVisibility = () => {
-          if (!get().identity) return;
-          if (document.visibilityState === "hidden" && get().dirty) {
-            void get().syncNow();
-          } else if (document.visibilityState === "visible") {
-            void get().syncNow();
-          }
-        };
-        document.addEventListener("visibilitychange", onVisibility);
+function retryRetainedChannelCleanup(): Promise<void> {
+  return queueChannelCleanup(async () => {
+    if (!cloudSyncHmrState.retainedUnsubscribe) return;
+    const disposer = cloudSyncHmrState.retainedUnsubscribe;
+    try {
+      await disposer();
+      if (cloudSyncHmrState.retainedUnsubscribe === disposer) retainUnsubscribe(null);
+    } catch (error) {
+      retainUnsubscribe(disposer);
+      throw error;
+    }
+  });
+}
 
-        // Realtime subscription to peer-device pushes. While signed in we hold
-        // one CDC channel; on every remote revision tick that's newer than
-        // ours, fire a syncNow so this tab catches up. Required to make
-        // "green = currently in sync" honest in multi-device/multi-tab setups
-        // — without this the icon lies until the next local write or boot.
-        const armRealtime = () => {
-          unsubscribeRealtime?.();
-          unsubscribeRealtime = provider.subscribe((newRevision) => {
-            if (newRevision !== get().lastSyncedRevision) {
-              void get().syncNow();
-            }
-          });
-        };
+async function finishSignOutChannelCleanup(generation: Generation, auth: number): Promise<void> {
+  // A predecessor/HMR disposal clears its generation unsubscribe before its
+  // promise settles. Join that authoritative completion before considering a
+  // retry or this generation's own channel, so sign-out never double-disposes
+  // the same channel and still surfaces late retained-disposer failures.
+  await cloudSyncHmrState.channelCleanupCompletion;
+  if (!current(generation, auth)) return;
+  await retryRetainedChannelCleanup();
+  if (!current(generation, auth)) return;
+  if (generation.unsubscribe) {
+    await trackChannelCleanup(generation);
+    if (!current(generation, auth)) return;
+  }
+}
 
-        // Adopt any existing session (including one just returned from an OAuth
-        // redirect), then reconcile and arm realtime. The `cancelled` guard
-        // makes the callback a no-op if the mounting effect's cleanup has
-        // already run — otherwise a stale init would arm a realtime channel
-        // after the current init already armed its own, racing two subscribes.
-        void provider
-          .restoreSession()
-          .then((identity) => {
-            if (cancelled) return;
-            set({ identity, sessionResolved: true });
-            if (identity) {
-              void get().syncNow();
-              armRealtime();
-            }
-          })
-          .catch((e) => {
-            if (cancelled) return;
-            // Mark resolved even on failure — the UI must transition out of
-            // "unknown" so the signed-out CTA renders. The error surfaces
-            // through `status: "error"` for visibility.
-            set({
-              identity: null,
-              sessionResolved: true,
-              status: "error",
-              error: errorMessage(e),
-            });
-          });
+function requestTrailing(generation: Generation): void {
+  // This trailing reconciliation already carries the newest acknowledged
+  // revision. A pending debounce from the write it subsumes would otherwise
+  // wake later and redundantly reread metadata during the trailing operation.
+  if (generation.timer) clearTimeout(generation.timer);
+  generation.timer = null;
+  if (generation.trailingQueued) return;
+  generation.trailingQueued = true;
+  queueMicrotask(() => {
+    generation.trailingQueued = false;
+    if (current(generation) && !generation.authTransition && !useCloudSyncStore.getState().conflict) {
+      void useCloudSyncStore.getState().syncNow();
+    }
+  });
+}
 
-        return () => {
-          cancelled = true;
-          uninstallWatcher();
-          document.removeEventListener("visibilitychange", onVisibility);
-          if (debounceTimer) clearTimeout(debounceTimer);
-          unsubscribeRealtime?.();
-          unsubscribeRealtime = null;
-        };
-      },
+function publishConflict(generation: Generation, auth: number, write: number, local: PhaseBackup, remote: RemoteSnapshot): boolean {
+  if (!current(generation, auth) || localWriteVersion !== write) return false;
+  conflictWriteVersion = write;
+  useCloudSyncStore.setState({ status: "conflict", error: null, conflict: remote, conflictDiff: summarizeBackupDiff(local, remote.backup) });
+  return true;
+}
 
-      signIn: async (authProvider) => {
-        const provider = getCloudSyncProvider();
-        if (!provider) return;
+function applyRemote(generation: Generation, auth: number, write: number, remote: RemoteSnapshot): boolean {
+  if (!current(generation, auth) || localWriteVersion !== write) return false;
+  withStorageWatchSuppressed(() => applyBackup(remote.backup, "overwrite"));
+  conflictWriteVersion = null;
+  useCloudSyncStore.setState({ status: "synced", error: null, dirty: false, conflict: null, conflictDiff: null, lastSyncedRevision: remote.meta.revision, lastSyncedAt: new Date().toISOString() });
+  void usePreferencesStore.persist.rehydrate();
+  window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT));
+  return true;
+}
+
+function applyMerged(backup: PhaseBackup): void {
+  withStorageWatchSuppressed(() => applyBackup(backup, "overwrite"));
+  void usePreferencesStore.persist.rehydrate();
+  window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT));
+}
+
+function acknowledgePush(generation: Generation, auth: number, write: number, meta: RemoteMeta, mergeSnapshot: RemoteSnapshot | null = null): void {
+  if (!current(generation, auth)) return;
+  const state: Partial<CloudSyncState> = { lastSyncedRevision: meta.revision, lastSyncedAt: new Date().toISOString() };
+  if (mergeSnapshot) {
+    const local = buildBackup();
+    conflictWriteVersion = localWriteVersion;
+    Object.assign(state, { status: "conflict", dirty: true, conflict: mergeSnapshot, conflictDiff: summarizeBackupDiff(local, mergeSnapshot.backup) });
+  } else if (localWriteVersion !== write) {
+    conflictWriteVersion = null;
+    Object.assign(state, { status: "synced", dirty: true, conflict: null, conflictDiff: null });
+    requestTrailing(generation);
+  } else {
+    conflictWriteVersion = null;
+    Object.assign(state, { status: "synced", error: null, dirty: false, conflict: null, conflictDiff: null });
+  }
+  useCloudSyncStore.setState(state);
+}
+
+function restorePreservedAuthError(generation: Generation, auth: number, write: number, preserveError: boolean, error: string | null): void {
+  if (preserveError && error && current(generation, auth) && localWriteVersion === write && !useCloudSyncStore.getState().conflict) {
+    useCloudSyncStore.setState({ status: "error", error });
+  }
+}
+
+type PullConflictResult = "published" | "vanished" | "stale";
+
+async function pullConflict(generation: Generation, auth: number): Promise<PullConflictResult> {
+  const remote = await generation.provider.pull();
+  if (!current(generation, auth)) return "stale";
+  if (!remote) return "vanished";
+  // Re-capture after the await. A newer local write requires a new truthful
+  // conflict/diff, not the pre-CAS snapshot and never a false reseed.
+  const currentWrite = localWriteVersion;
+  return publishConflict(generation, auth, currentWrite, buildBackup(), remote) ? "published" : "stale";
+}
+
+async function reconcile(generation: Generation, preserveError = false): Promise<void> {
+  const auth = generation.authVersion;
+  if (!current(generation, auth) || generation.authTransition) return;
+  const identity = generation.provider.identity();
+  if (!identity) return;
+  const write = localWriteVersion;
+  const local = buildBackup();
+  const oldError = useCloudSyncStore.getState().error;
+  useCloudSyncStore.setState({ status: "syncing", identity, ...(preserveError ? {} : { error: null }) });
+  try {
+    const meta = await generation.provider.pullMeta();
+    if (!current(generation, auth)) return;
+    const { lastSyncedRevision, dirty } = useCloudSyncStore.getState();
+    if (!meta) {
+      const pushed = await generation.provider.push(local, null);
+      acknowledgePush(generation, auth, write, pushed);
+      restorePreservedAuthError(generation, auth, write, preserveError, oldError);
+      return;
+    }
+    const remoteAhead = meta.revision !== lastSyncedRevision;
+    const localChanged = dirty || (lastSyncedRevision === null && hasUserData(local));
+    if (remoteAhead && localChanged) {
+      const remote = await generation.provider.pull();
+      if (!current(generation, auth)) return;
+      if (!remote) {
+        const pushed = await generation.provider.push(local, null);
+        acknowledgePush(generation, auth, write, pushed);
+        restorePreservedAuthError(generation, auth, write, preserveError, oldError);
+        return;
+      }
+      const [localDigest, remoteDigest] = await Promise.all([computeBackupDigest(local), computeBackupDigest(remote.backup)]);
+      if (!current(generation, auth) || localWriteVersion !== write) return;
+      if (localDigest === remoteDigest) {
+        conflictWriteVersion = null;
+        useCloudSyncStore.setState({ status: preserveError && oldError ? "error" : "synced", error: preserveError ? oldError : null, dirty: false, conflict: null, conflictDiff: null, lastSyncedRevision: remote.meta.revision, lastSyncedAt: new Date().toISOString() });
+      } else {
+        publishConflict(generation, auth, write, local, remote);
+      }
+      return;
+    }
+    if (remoteAhead) {
+      const remote = await generation.provider.pull();
+      if (!current(generation, auth)) return;
+      if (remote) {
+        applyRemote(generation, auth, write, remote);
+        restorePreservedAuthError(generation, auth, write, preserveError, oldError);
+      }
+      else {
+        const pushed = await generation.provider.push(local, null);
+        acknowledgePush(generation, auth, write, pushed);
+        restorePreservedAuthError(generation, auth, write, preserveError, oldError);
+      }
+      return;
+    }
+    if (localChanged) {
+      const pushed = await generation.provider.push(local, meta.revision);
+      acknowledgePush(generation, auth, write, pushed);
+      restorePreservedAuthError(generation, auth, write, preserveError, oldError);
+      return;
+    }
+    if (current(generation, auth) && localWriteVersion === write) {
+      useCloudSyncStore.setState({ status: preserveError && oldError ? "error" : "synced", error: preserveError ? oldError : null, lastSyncedAt: new Date().toISOString() });
+    }
+  } catch (error) {
+    if (!current(generation, auth)) return;
+    if (error instanceof SyncConflictError) {
+      try {
+        const result = await pullConflict(generation, auth);
+        if (result !== "vanished") return;
+        if (!current(generation, auth)) return;
+        const pushed = await generation.provider.push(local, null);
+        acknowledgePush(generation, auth, write, pushed);
+        restorePreservedAuthError(generation, auth, write, preserveError, oldError);
+      } catch (reseedError) {
+        if (current(generation, auth)) useCloudSyncStore.setState({ status: "error", error: message(reseedError) });
+      }
+    } else {
+      useCloudSyncStore.setState({ status: "error", error: message(error) });
+    }
+  }
+}
+
+function startReconcile(generation: Generation, preserveError = false): Promise<void> {
+  if (generation.inFlight) {
+    generation.preserveError ||= preserveError;
+    if (!generation.trailing) {
+      const base = generation.inFlight;
+      const trailing = base.then(() => {
+        // The completion continuation may run before the generic finally that
+        // clears this field. Clear this generation-owned slot first so the
+        // trailing request is a real reconciliation, not a self-reference.
+        if (generation.inFlight === base) generation.inFlight = null;
+        if (generation.trailing === trailing) generation.trailing = null;
+        if (!current(generation) || generation.authTransition || useCloudSyncStore.getState().conflict) return;
+        return startReconcile(generation, generation.preserveError);
+      });
+      generation.trailing = trailing;
+      void trailing.finally(() => {
+        if (generation.trailing === trailing) generation.trailing = null;
+      });
+    }
+    return generation.trailing;
+  }
+  // Conflicts are authoritative until a new explicit choice. Every ordinary
+  // caller (startup, manual, watcher, realtime, or trailing) shares this gate.
+  if (useCloudSyncStore.getState().conflict) return Promise.resolve();
+  generation.preserveError = preserveError;
+  const task = reconcile(generation, generation.preserveError);
+  generation.inFlight = task;
+  void task.finally(() => {
+    if (generation.inFlight === task) generation.inFlight = null;
+    if (!generation.inFlight && !generation.trailing) generation.preserveError = false;
+  });
+  return task;
+}
+
+async function armRealtime(
+  generation: Generation,
+  predecessorCleanup: Promise<void>,
+  auth = generation.authVersion,
+): Promise<void> {
+  try { await predecessorCleanup; } catch { /* retry the retained disposer below */ }
+  if (!current(generation, auth) || generation.authTransition || !useCloudSyncStore.getState().identity || generation.unsubscribe) return;
+  try { await retryRetainedChannelCleanup(); } catch (error) {
+    if (current(generation, auth)) useCloudSyncStore.setState({ status: "error", error: message(error) });
+    return;
+  }
+  if (!current(generation, auth) || generation.authTransition || !useCloudSyncStore.getState().identity || generation.unsubscribe) return;
+  generation.unsubscribe = generation.provider.subscribe((revision) => {
+    if (current(generation, auth) && !generation.authTransition && revision !== useCloudSyncStore.getState().lastSyncedRevision) {
+      void useCloudSyncStore.getState().syncNow();
+    }
+  });
+}
+
+async function replaceStaleChannelAndReconcile(
+  generation: Generation,
+  auth: number,
+  preserveError: boolean,
+): Promise<void> {
+  // An auth transition advances authVersion before the provider call, so any
+  // existing callback is intentionally stale. It must not remain installed:
+  // armRealtime correctly refuses to stack a second subscription.
+  if (generation.unsubscribe) {
+    try { await trackChannelCleanup(generation); } catch { /* armRealtime retries retained cleanup */ }
+  }
+  if (!current(generation, auth)) return;
+  await startReconcile(generation, preserveError);
+  if (current(generation, auth)) {
+    await armRealtime(generation, cloudSyncHmrState.channelCleanupCompletion, auth);
+  }
+}
+
+export const useCloudSyncStore = create<CloudSyncState>()(persist((set, get) => ({
+  available: false,
+  paused: false,
+  identity: null,
+  sessionResolved: false,
+  status: "idle",
+  error: null,
+  dirty: false,
+  lastSyncedRevision: null,
+  lastSyncedAt: null,
+  conflict: null,
+  conflictDiff: null,
+
+  pause: () => {
+    const version = ++lifecycleVersion;
+    const predecessor = active;
+    active = null;
+    trackCleanup(predecessor);
+    // This is intentionally read after tracking the local generation. It is
+    // the module/HMR-owned completion boundary, so an already-detached older
+    // disposer still settles before the provider receives its global pause.
+    const cleanup = cloudSyncHmrState.channelCleanupCompletion;
+    set({ paused: true, available: isCloudSyncConfigured(), sessionResolved: true });
+    ensureWatcher();
+    void cleanup.finally(async () => {
+      if (lifecycleVersion !== version || !getEffectiveOffline()) return;
+      try {
+        await pauseCloudSyncProvider();
+        if (lifecycleVersion === version && getEffectiveOffline()) retainUnsubscribe(null);
+      } catch { /* preserve existing state; online init retries the channel disposer */ }
+    });
+  },
+
+  init: () => {
+    if (getEffectiveOffline()) { get().pause(); return () => {}; }
+    const version = ++lifecycleVersion;
+    const predecessor = active;
+    active = null;
+    trackCleanup(predecessor);
+    const predecessorCleanup = cloudSyncHmrState.channelCleanupCompletion;
+    set({ paused: false, available: isCloudSyncConfigured(), sessionResolved: false });
+    ensureWatcher();
+    if (!isCloudSyncConfigured()) { set({ sessionResolved: true }); return () => {}; }
+    const provider = getCloudSyncProvider();
+    if (!provider) { set({ available: false, sessionResolved: true }); return () => {}; }
+    const generation: Generation = { version, provider, cancelled: false, ready: false, authVersion: 0, authTransition: null, timer: null, visibility: null, unsubscribe: null, inFlight: null, trailing: null, trailingQueued: false, preserveError: false };
+    active = generation;
+    generation.visibility = () => {
+      if (!current(generation) || generation.authTransition || !get().identity) return;
+      if (document.visibilityState !== "hidden" || get().dirty) void get().syncNow();
+    };
+    document.addEventListener("visibilitychange", generation.visibility);
+    void (async () => {
+      try {
+        await provider.resume();
+        if (active !== generation || lifecycleVersion !== version || getEffectiveOffline()) return;
+        const identity = await provider.restoreSession();
+        if (active !== generation || lifecycleVersion !== version || getEffectiveOffline()) return;
+        generation.ready = true;
+        set({ identity, sessionResolved: true });
+        if (!identity) return;
+        await startReconcile(generation);
+        if (current(generation)) await armRealtime(generation, predecessorCleanup);
+      } catch (error) {
+        if (active !== generation || lifecycleVersion !== version || getEffectiveOffline()) return;
+        generation.ready = true;
+        set({ identity: null, sessionResolved: true, status: "error", error: message(error) });
+      }
+    })();
+    return () => {
+      if (active !== generation || lifecycleVersion !== version) return;
+      lifecycleVersion += 1;
+      active = null;
+      void trackCleanup(generation);
+    };
+  },
+
+  signIn: async (authProvider) => {
+    const generation = actionGeneration();
+    if (!generation) return;
+    if (generation.authTransition) return generation.authTransition;
+    const auth = ++generation.authVersion;
+    generation.preserveError = false;
+    const operation = (async () => {
+      let signInError: unknown = null;
+      try {
         set({ error: null });
-        // Redirects away; the session is adopted by init() on return.
-        await provider.signIn(authProvider);
-      },
+        await generation.provider.signIn(authProvider);
+      } catch (error) {
+        signInError = error;
+      }
+      if (!current(generation, auth)) return;
+      const identity = generation.provider.identity();
+      const error = signInError ? message(signInError) : null;
+      set({ identity, status: error ? "error" : "idle", error });
+      // Release the shared auth gate before follow-up work; reconciliation
+      // itself correctly rejects a transition that supersedes this one.
+      generation.authTransition = null;
+      if (!identity) return;
+      await replaceStaleChannelAndReconcile(generation, auth, signInError !== null);
+      if (error && current(generation, auth)) set({ status: "error", error });
+    })().finally(() => { if (current(generation, auth)) generation.authTransition = null; });
+    generation.authTransition = operation;
+    return operation;
+  },
 
-      signOut: async () => {
-        const provider = getCloudSyncProvider();
-        if (!provider) return;
-        // Tear down realtime first so we stop receiving notifications for a
-        // user we are no longer authenticated as.
-        unsubscribeRealtime?.();
-        unsubscribeRealtime = null;
-        await provider.signOut();
-        set({ identity: null, status: "idle", error: null });
-      },
-
-      syncNow: async () => {
-        // Coalesce concurrent callers onto the in-flight promise so the
-        // pull→push window can't be straddled by a stale snapshot. A caller that
-        // arrives mid-flight may have observed a newer remote revision than the
-        // running sync snapshotted, so chain a trailing sync and return that
-        // promise to the caller.
-        if (syncInFlight) {
-          if (nextSyncInFlight && nextSyncBase === syncInFlight) {
-            return nextSyncInFlight;
-          }
-          const base = syncInFlight;
-          const followUp = base
-            .then(() => get().syncNow())
-            .finally(() => {
-              if (nextSyncInFlight === followUp) {
-                nextSyncInFlight = null;
-                nextSyncBase = null;
-              }
-            });
-          nextSyncBase = base;
-          nextSyncInFlight = followUp;
-          return followUp;
+  signOut: async () => {
+    const generation = actionGeneration();
+    if (!generation) return;
+    if (generation.authTransition) return generation.authTransition;
+    const auth = ++generation.authVersion;
+    generation.preserveError = false;
+    const operation = (async () => {
+      let authError: unknown = null;
+      try { await generation.provider.signOut(); } catch (error) { authError = error; }
+      if (!current(generation, auth)) return;
+      const identity = generation.provider.identity();
+      if (!identity) {
+        // Signed-out identity and the released auth gate are authoritative as
+        // soon as the provider says so. Channel teardown is still awaited for
+        // this call, but it must not hold subsequent lifecycle transitions.
+        const signedOutError = authError ? message(authError) : null;
+        set({ identity: null, status: signedOutError ? "error" : "idle", error: signedOutError });
+        generation.authTransition = null;
+        let cleanupError: unknown = null;
+        try { await finishSignOutChannelCleanup(generation, auth); } catch (error) { cleanupError = error; }
+        if (!current(generation, auth)) return;
+        if (cleanupError && !signedOutError) {
+          set({ status: "error", error: message(cleanupError) });
         }
-        const provider = getCloudSyncProvider();
-        const identity = provider?.identity() ?? null;
-        if (!provider || !identity) return;
-        set({ status: "syncing", error: null, identity });
-        syncInFlight = (async () => {
-          try {
-            // Cheap metadata-only read first. The full payload is fetched only
-            // in the two branches below that actually reconcile remote data, so
-            // the common "nothing changed" tab-focus/realtime sync transfers a
-            // few bytes instead of the entire backup envelope.
-            const meta = await provider.pullMeta();
-            const local = buildBackup();
-            const { lastSyncedRevision, dirty } = get();
+        return;
+      }
+      // A rejected sign-out may still have changed SDK auth state. Preserve the
+      // observable error and recover exactly once from the provider's identity.
+      const recoveryError = authError ? message(authError) : "Sign out did not clear the session";
+      set({ identity, status: "error", error: recoveryError });
+      generation.authTransition = null;
+      await replaceStaleChannelAndReconcile(generation, auth, true);
+      if (current(generation, auth)) set({ status: "error", error: recoveryError });
+    })().finally(() => { if (current(generation, auth)) generation.authTransition = null; });
+    generation.authTransition = operation;
+    return operation;
+  },
 
-            if (!meta) {
-              // Account is empty — seed it with this device's data.
-              const seeded = await provider.push(local, null);
-              set({
-                status: "synced",
-                dirty: false,
-                lastSyncedRevision: seeded.revision,
-                lastSyncedAt: new Date().toISOString(),
-              });
-              return;
-            }
+  syncNow: async () => {
+    const generation = actionGeneration();
+    if (!generation) return;
+    // A conflict choice owns the same reconciliation mutex. Queue its one
+    // trailing pass before the authoritative-conflict gate so a successful
+    // choice can continue syncing, while a rebuilt/failed choice keeps that
+    // pass blocked when it actually executes.
+    if (generation.inFlight) return startReconcile(generation);
+    if (get().conflict) return;
+    return startReconcile(generation);
+  },
 
-            const remoteAhead = meta.revision !== lastSyncedRevision;
-            // On first sign-in (no revision history here) treat any existing
-            // local profile data — decks, prefs, or feeds — as unsynced changes
-            // so we never silently discard them to a remote pull.
-            const localChanged =
-              dirty ||
-              (lastSyncedRevision === null && backupHasUserData(local));
-
-            if (remoteAhead && localChanged) {
-              // Diverged: need the remote body for the digest + conflict diff.
-              const remote = await provider.pull();
-              if (!remote) {
-                // Row deleted between pullMeta and pull — reseed as empty.
-                const seeded = await provider.push(local, null);
-                set({
-                  status: "synced",
-                  dirty: false,
-                  lastSyncedRevision: seeded.revision,
-                  lastSyncedAt: new Date().toISOString(),
-                });
-                return;
-              }
-              // Suppress false conflicts: if local and remote payloads are
-              // byte-identical (after excluding the volatile exportedAt
-              // timestamp), there's nothing to reconcile — just adopt the
-              // remote revision and continue silently.
-              const [localDigest, remoteDigest] = await Promise.all([
-                computeBackupDigest(local),
-                computeBackupDigest(remote.backup),
-              ]);
-              if (localDigest === remoteDigest) {
-                set({
-                  status: "synced",
-                  dirty: false,
-                  lastSyncedRevision: remote.meta.revision,
-                  lastSyncedAt: new Date().toISOString(),
-                });
-                return;
-              }
-              set({
-                status: "conflict",
-                conflict: remote,
-                conflictDiff: summarizeBackupDiff(local, remote.backup),
-              });
-              return;
-            }
-            if (remoteAhead && !localChanged) {
-              // Remote moved, nothing local to preserve: fetch the body and
-              // adopt it wholesale.
-              const remote = await provider.pull();
-              if (!remote) {
-                const seeded = await provider.push(local, null);
-                set({
-                  status: "synced",
-                  dirty: false,
-                  lastSyncedRevision: seeded.revision,
-                  lastSyncedAt: new Date().toISOString(),
-                });
-                return;
-              }
-              applyRemote(set, remote);
-              return;
-            }
-            if (!remoteAhead && localChanged) {
-              // Local-only changes: push with the meta revision as the CAS
-              // guard — no remote body needed.
-              const pushed = await provider.push(local, meta.revision);
-              set({
-                status: "synced",
-                dirty: false,
-                lastSyncedRevision: pushed.revision,
-                lastSyncedAt: new Date().toISOString(),
-              });
-              return;
-            }
-            // Already in sync: nothing moved over the wire, but the meta read
-            // confirmed both sides agree on the current revision. That IS a
-            // successful reconciliation — stamp lastSyncedAt so the user
-            // pressing "Sync now" gets visible confirmation.
-            set({ status: "synced", lastSyncedAt: new Date().toISOString() });
-          } catch (e) {
-            if (e instanceof SyncConflictError) {
-              // Lost the write race — re-pull and ask the user.
-              const remote = await provider.pull();
-              if (remote) {
-                const local = buildBackup();
-                set({
-                  status: "conflict",
-                  conflict: remote,
-                  conflictDiff: summarizeBackupDiff(local, remote.backup),
-                });
-                return;
-              }
-              // The row is gone (deleted, or a delete+reinsert race that turned
-              // our null-revision reseed into P0001). Reseed this device's data
-              // as the new account state rather than dead-ending at an error.
-              try {
-                const seeded = await provider.push(buildBackup(), null);
-                set({
-                  status: "synced",
-                  dirty: false,
-                  lastSyncedRevision: seeded.revision,
-                  lastSyncedAt: new Date().toISOString(),
-                });
-              } catch (reseedErr) {
-                set({ status: "error", error: errorMessage(reseedErr) });
-              }
-              return;
-            }
-            set({ status: "error", error: errorMessage(e) });
-          }
-        })();
-        try {
-          await syncInFlight;
-        } finally {
-          syncInFlight = null;
-        }
-      },
-
-      resolveConflict: async (choice) => {
-        const { conflict } = get();
-        const provider = getCloudSyncProvider();
-        if (!conflict || !provider) return;
-
-        if (choice === "cloud") {
-          applyRemote(set, conflict);
+  resolveConflict: async (choice) => {
+    const generation = actionGeneration();
+    const conflict = get().conflict;
+    if (!generation || !conflict) return;
+    if (generation.inFlight) return generation.inFlight;
+    const auth = generation.authVersion;
+    const local = buildBackup();
+    const write = localWriteVersion;
+    // A conflict normally originates from publishConflict, which records the
+    // write version. Treat a freshly restored/injected conflict equivalently
+    // on its first choice instead of silently dropping the selection.
+    if (conflictWriteVersion === null) conflictWriteVersion = write;
+    if (conflictWriteVersion !== write) { publishConflict(generation, auth, write, local, conflict); return; }
+    const task = (async () => {
+      try {
+        const meta = await generation.provider.pullMeta();
+        if (!current(generation, auth)) return;
+        if (!meta) {
+          conflictWriteVersion = null;
+          set({ conflict: null, conflictDiff: null, status: "idle" });
+          requestTrailing(generation);
           return;
         }
-
-        const local = buildBackup();
-        const next = choice === "merge"
-          ? mergeDeckCollections(local, conflict.backup)
-          : local;
-
-        // Publish first so the local profile cannot appear reconciled before
-        // the remote CAS write accepts the selected result.
-        set({ status: "syncing", conflict: null, conflictDiff: null });
-        try {
-          const meta = await provider.push(next, conflict.meta.revision);
-          if (choice === "merge") {
-            applyMergedDeckCollection(next);
+        if (meta.revision !== conflict.meta.revision) {
+          const remote = await generation.provider.pull();
+          if (!current(generation, auth)) return;
+          if (remote) publishConflict(generation, auth, localWriteVersion, buildBackup(), remote);
+          else {
+            conflictWriteVersion = null;
+            set({ conflict: null, conflictDiff: null, status: "idle" });
+            requestTrailing(generation);
           }
-          set({
-            status: "synced",
-            dirty: false,
-            lastSyncedRevision: meta.revision,
-            lastSyncedAt: meta.updatedAt,
-          });
-        } catch (e) {
-          set({ status: "error", error: errorMessage(e) });
+          return;
         }
-      },
-    }),
-    {
-      name: "phase-cloud-sync",
-      // Identity + transient status are re-derived at runtime; only the sync
-      // bookkeeping needs to survive reloads.
-      partialize: (s) => ({
-        dirty: s.dirty,
-        lastSyncedRevision: s.lastSyncedRevision,
-        lastSyncedAt: s.lastSyncedAt,
-      }),
-    },
-  ),
-);
+        if (choice === "cloud") {
+          // The row can disappear after metadata revalidation. Pull the body
+          // before replacing local storage; null releases into a fresh seed.
+          const remote = await generation.provider.pull();
+          if (!current(generation, auth)) return;
+          if (!remote) {
+            conflictWriteVersion = null;
+            set({ conflict: null, conflictDiff: null, status: "idle" });
+            requestTrailing(generation);
+            return;
+          }
+          if (localWriteVersion !== write) {
+            publishConflict(generation, auth, localWriteVersion, buildBackup(), remote);
+            return;
+          }
+          if (remote.meta.revision !== conflict.meta.revision) {
+            publishConflict(generation, auth, write, local, remote);
+            return;
+          }
+          applyRemote(generation, auth, write, remote);
+          return;
+        }
+        const next = choice === "merge" ? mergeDeckCollections(local, conflict.backup) : local;
+        set({ status: "syncing" }); // retain conflict/diff while publication is pending
+        const pushed = await generation.provider.push(next, conflict.meta.revision);
+        if (!current(generation, auth)) return;
+        const staleMerge = choice === "merge" && localWriteVersion !== write ? { backup: next, meta: pushed } : null;
+        if (choice === "merge" && !staleMerge && localWriteVersion === write) applyMerged(next);
+        acknowledgePush(generation, auth, write, pushed, staleMerge);
+      } catch (error) {
+        if (!current(generation, auth)) return;
+        if (error instanceof SyncConflictError) {
+          try {
+            const result = await pullConflict(generation, auth);
+            if (result !== "vanished") return;
+            if (current(generation, auth)) { set({ conflict: null, conflictDiff: null, status: "idle" }); requestTrailing(generation); }
+          } catch (refreshError) {
+            if (current(generation, auth)) set({ status: "error", error: message(refreshError) });
+          }
+        } else {
+          set({ status: "error", error: message(error) });
+        }
+      }
+    })();
+    generation.inFlight = task;
+    try { await task; } finally { if (generation.inFlight === task) generation.inFlight = null; }
+  },
+}), {
+  name: "phase-cloud-sync",
+  partialize: (state) => ({ dirty: state.dirty, lastSyncedRevision: state.lastSyncedRevision, lastSyncedAt: state.lastSyncedAt }),
+}));
 
-/**
- * Overwrite the local profile with a remote snapshot and rehydrate in place.
- *
- * No page reload: a reload destroys in-progress UI state (modals, navigation,
- * multiplayer DataChannels) and used to drive a two-tab ping-pong loop with
- * CDC. Instead we (a) write the snapshot to localStorage with the watcher
- * suppressed, (b) rehydrate every Zustand store whose persisted slice lives
- * in the backup envelope, and (c) broadcast `PROFILE_REPLACED_EVENT` so the
- * remaining direct-localStorage readers (deck list, feed metadata) re-fetch.
- */
-function applyRemote(
-  set: (partial: Partial<CloudSyncState>) => void,
-  remote: RemoteSnapshot,
-): void {
-  withStorageWatchSuppressed(() => {
-    applyBackup(remote.backup, "overwrite");
-  });
-  set({
-    status: "synced",
-    dirty: false,
-    conflict: null,
-    conflictDiff: null,
-    lastSyncedRevision: remote.meta.revision,
-    lastSyncedAt: new Date().toISOString(),
-  });
-  // Preferences is the only Zustand-persisted slice carried in the backup
-  // envelope; multiplayerStore is session-scoped and not synced. If the
-  // envelope ever grows to include another persisted store, rehydrate it here.
-  void usePreferencesStore.persist.rehydrate();
-  window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT));
+function disposeCloudSyncModule(data: { cloudSyncLifecycle?: CloudSyncHmrState }): void {
+  lifecycleVersion += 1;
+  cloudSyncHmrState.lifecycleVersion = lifecycleVersion;
+  unwatchStorage?.();
+  unwatchStorage = null;
+  const generation = active;
+  active = null;
+  // Store the mutable registry object, not a snapshot: an async disposer can
+  // still fail after this callback and must hand its retained retry state to
+  // the replacement module.
+  data.cloudSyncLifecycle = cloudSyncHmrState;
+  void trackCleanup(generation);
 }
 
-/** Apply the already-published local/cloud deck reconciliation without a reload. */
-function applyMergedDeckCollection(backup: PhaseBackup): void {
-  withStorageWatchSuppressed(() => {
-    applyBackup(backup, "overwrite");
-  });
-  void usePreferencesStore.persist.rehydrate();
-  window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT));
+/** Test seam for the exact HMR disposal authority used by Vite. */
+export function disposeCloudSyncModuleForTest(data: { cloudSyncLifecycle?: unknown }): void {
+  disposeCloudSyncModule(data as { cloudSyncLifecycle?: CloudSyncHmrState });
+}
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(disposeCloudSyncModule);
 }

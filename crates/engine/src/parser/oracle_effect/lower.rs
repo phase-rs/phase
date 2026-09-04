@@ -1245,6 +1245,36 @@ pub(super) fn attach_cast_cost_raise_to_previous_play_from_exile(
     true
 }
 
+/// CR 118.9 + CR 119.4: Fold a "[If you cast a spell this way,] pay
+/// <ability-cost> rather than pay its mana cost" rider onto the preceding
+/// `PlayFromExile` grant's `alt_ability_cost`. Mirrors
+/// `attach_cast_cost_raise_to_previous_play_from_exile` exactly: the rider
+/// scopes to spells cast via the just-granted exile-play permission
+/// ("this way"), not a standalone cast clause. Unlike Nashi / Xander's Pact
+/// (whose whole grant is spell-only, so the rider folds onto a `CastFromZone`
+/// via `attach_alt_cost_to_prior_cast_from_zone`), this class's preceding
+/// clause is a plain "you may play those cards" grant that ALSO authorizes
+/// land plays (Inside Information). Folding onto `alt_ability_cost` instead
+/// of converting the grant to `CastFromZone` keeps that land-play authority
+/// intact — the field is only ever consulted by the spell-casting cost
+/// pipeline, never by the land-play path, so lands played under the same
+/// grant are correctly unaffected. Called as a FALLBACK from the `AltCost`
+/// modifier handler only when the `CastFromZone` attach fails to find its
+/// target, so the two attach helpers together cover the full class.
+pub(super) fn attach_alt_ability_cost_to_previous_play_from_exile(
+    defs: &mut [AbilityDefinition],
+    cost: AbilityCost,
+) -> bool {
+    let Some(CastingPermission::PlayFromExile {
+        alt_ability_cost, ..
+    }) = find_prev_play_from_exile_permission_mut(defs)
+    else {
+        return false;
+    };
+    *alt_ability_cost = Some(cost);
+    true
+}
+
 /// CR 614.1c: Fold an "each land played this way enters tapped" rider into the
 /// preceding `PlayFromExile` grant's `land_enter_tapped`.
 pub(super) fn attach_land_enters_tapped_to_previous_play_from_exile(
@@ -2076,6 +2106,406 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
     def.sub_ability = Some(sub);
     if let Some(sub) = def.sub_ability.as_mut() {
         fold_enters_this_way_counter_rider(sub);
+    }
+}
+
+/// CR 608.2c + CR 701.9a + CR 701.21a + CR 701.25a: Rebind the parser's generic
+/// bare-pronoun default (`TargetFilter::ParentTarget` — no chosen target and no
+/// clearer antecedent reached the clause parser, per `resolve_pronoun_target`'s
+/// fallthrough arm) to the moved object (`TargetFilter::LastZoneChanged`) in a
+/// sub-ability gated by a discard/sacrifice/surveil-this-way reflexive
+/// condition (`AbilityCondition::ZoneChangedThisWay { .. }`) whose PARENT
+/// effect is the `Discard`/`Sacrifice`/`Surveil` that created the reflexive
+/// gate. See `reflexive_gate_destination_matches_parent` for the per-parent
+/// `destination` shape each of the three verbs requires.
+///
+/// Neither `Effect::Discard.target` (the ACTING PLAYER), `Effect::Sacrifice
+/// .target` (the ELIGIBILITY filter for what may be sacrificed), nor
+/// `Effect::Surveil.target` (WHO surveils) names the specific card/permanent
+/// that actually moved — that object is known only once the move resolves
+/// (`state.last_zone_changed_ids`). This is why the sibling battlefield-entry
+/// "this way" class (`fold_enters_this_way_counter_rider`,
+/// `destination: Some(Zone::Battlefield)`) stays on `TargetFilter::ParentTarget`
+/// for its own gated riders: "you put an artifact onto the battlefield this
+/// way" IS itself the parent effect's declared target (Oviya, Automech
+/// Artisan's "put an artifact card from your hand onto the battlefield"
+/// already names that artifact), so a bare pronoun in ITS gated body correctly
+/// resolves to `ParentTarget` — there is no equivalent declared target for a
+/// discard/sacrifice parent, so the SAME parser default is wrong here and must
+/// be corrected.
+///
+/// MUST run before `oracle_trigger::lower_trigger_ir`'s later
+/// `lift_parent_target_to_triggering_source_in_ability` pass, which — for
+/// event-source-bearing trigger modes including `TriggerMode::ChangesZone`
+/// (self-ETB triggers) — blindly rewrites any remaining top-level
+/// `ParentTarget` on a `ChangeZone`/`Sacrifice`/`CopyTokenOf` effect to
+/// `TriggeringSource` (correct for a *direct* "whenever you discard a card,
+/// exile it" trigger, where `ParentTarget` names the discarded card, but wrong
+/// here: it would rebind to the ETB SOURCE — Silvan Reveler itself, already on
+/// the battlefield — not the discarded card several sub-abilities deep). This
+/// pass runs during `assemble_effect_chain` (`oracle_effect::lower_effect_chain_ir`
+/// → `oracle_effect::assembly::assemble_effect_chain`), which
+/// `lower_trigger_effect_chain` calls to build `execute` BEFORE
+/// `lower_trigger_ir` applies that later lift — so once this pass has already
+/// rebound the target to `LastZoneChanged`, the later pass's own
+/// `matches!(target, TargetFilter::ParentTarget)` guard no longer matches and
+/// leaves it alone.
+///
+/// Runs as a POST-HOC rewrite over the fully assembled ability tree —
+/// mirroring the sibling `rebind_triggering_source_to_parent_target`
+/// (`oracle_effect/mod.rs`, gated on a self-referential disjunctive delayed
+/// trigger) — rather than as parse-time `ParseContext::object_pronoun_ref`
+/// threading, since the clause dispatcher's many candidate-recognizer paths
+/// do not reliably carry a per-chunk context pin this deep (each candidate
+/// may re-derive its own target parse via the context-free `parse_target`
+/// wrapper). Walking parent/child adjacency on the assembled tree is exact
+/// regardless of which internal recognizer produced the child's effect.
+///
+/// Silvan Reveler (issue #8122): "When this creature enters, draw a card,
+/// then discard a card. If you discard a land card this way, put it from
+/// your graveyard onto the battlefield tapped." Without this rewrite, "it"
+/// resolves to `TriggeringSource` (Silvan Reveler itself, already on the
+/// battlefield), so the land never leaves the graveyard.
+///
+/// Chandra, Chill of Compliance: "Surveil 1. If you put a noncreature,
+/// nonland card into your graveyard this way, put that card into your hand."
+/// (Enlightened Confidant shares the shape.) Without this rewrite, "that
+/// card" resolves to bare `ParentTarget`, which names nothing — `Surveil`
+/// declares no card-shaped target of its own (`Effect::Surveil.target` is WHO
+/// surveils, a player) — so the card silently stays in the graveyard.
+///
+/// SCOPE — narrowed to `Effect::ChangeZone`'s own `target` field only (#8250
+/// review): `TargetFilter::ParentTarget` is not exclusive to "no antecedent
+/// reached the parser" — it is also the standing representation for "this
+/// ability's own separately-declared target" wherever that target is chosen
+/// once for the whole ability chain per CR 601.2c/603.3d (a fresh "target
+/// player or planeswalker"/"target creature or planeswalker" nested inside a
+/// discard/sacrifice-this-way rider carries `ParentTarget` on ITS OWN
+/// `DealDamage.target` field for exactly that reason). Cragganwick Cremator
+/// ("...this creature deals damage equal to that card's power to target
+/// player or planeswalker") and Narset of the Ancient Way's -2 ("...Narset
+/// deals damage equal to that card's mana value to target creature or
+/// planeswalker") both parse to `DealDamage { target: ParentTarget, .. }`
+/// under the very same `ZoneChangedThisWay { destination: None, .. }` gate as
+/// Silvan Reveler's `ChangeZone` — confirmed against `parse_effect_chain`'s
+/// output before this pass runs. A blanket `each_target_filter_mut` walk over
+/// `sub.effect` cannot distinguish "the bare moved-object pronoun" from "this
+/// effect's own freshly-chosen target that merely happens to reuse the
+/// `ParentTarget` sentinel", and previously rewrote both, redirecting
+/// Cragganwick's and Narset's damage to the discarded/exiled card instead of
+/// the chosen recipient. Only `Effect::ChangeZone` — the effect class that
+/// literally moves the referenced object, matching "put it"/"return it"/
+/// "exile it" phrasing (CR 400.7 moved-object identity) — is targeted here;
+/// a `DealDamage` (or any other effect) sibling in the same gated rider is
+/// left untouched, preserving its own independently-resolved target.
+pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut AbilityDefinition) {
+    // Computed up front (before borrowing `def.sub_ability` below) purely to
+    // keep the two borrows disjoint and obviously so — see
+    // `ReflexiveGateParent`'s doc comment for what each variant requires of
+    // the paired `ZoneChangedThisWay.destination`.
+    let parent_kind = ReflexiveGateParent::from_effect(&def.effect);
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        let gate_destination = match &sub.condition {
+            Some(AbilityCondition::ZoneChangedThisWay { destination, .. }) => Some(*destination),
+            _ => None,
+        };
+        if let Some(destination) = gate_destination {
+            if parent_kind.destination_matches(destination) {
+                // Narrow to `ChangeZone`'s own target field — see the SCOPE
+                // note above. Do NOT widen to `each_target_filter_mut`: that
+                // walker also visits `DealDamage`/`Discard`/`Mill`/etc.
+                // targets that may independently and correctly carry
+                // `ParentTarget` for their own declared target.
+                if let Effect::ChangeZone { target, .. } = sub.effect.as_mut() {
+                    if *target == TargetFilter::ParentTarget {
+                        *target = TargetFilter::LastZoneChanged;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rebind_zone_changed_this_way_pronoun_to_moved_object(sub);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        rebind_zone_changed_this_way_pronoun_to_moved_object(els);
+    }
+}
+
+/// Which reflexive-gate-producing verb (if any) `def.effect` is, for
+/// `rebind_zone_changed_this_way_pronoun_to_moved_object`'s parent/gate
+/// pairing check. Discard and Sacrifice are cause-bound — CR 701.9a makes the
+/// graveyard inherent to "discard", CR 701.21a inherent to "sacrifice" — so
+/// their gates parse with `destination: None`
+/// (`parse_you_discard_this_way_clause` / `parse_you_sacrifice_this_way_clause`).
+/// Surveil's gate is destination-bound — CR 701.25a: the surveilled card's
+/// fate is a genuine graveyard-or-library choice, not implied by the verb —
+/// so it parses with `destination: Some(Zone::Graveyard)`
+/// (`parse_you_put_into_graveyard_this_way_clause`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReflexiveGateParent {
+    DiscardOrSacrifice,
+    Surveil,
+    Other,
+}
+
+impl ReflexiveGateParent {
+    /// Exhaustive over `Effect` on purpose (#8319 review): a bare `_ =>
+    /// Self::Other` would silently swallow a future reflexive-gate-producing
+    /// verb (the next "discard/sacrifice/surveil-shaped" addition) into
+    /// `Other`, skipping the rebind above with no compile-time signal.
+    /// Enumerating every non-reflexive-gate variant here means adding a new
+    /// `Effect` variant is a non-event UNLESS it belongs on the
+    /// `DiscardOrSacrifice`/`Surveil` side, in which case the match stops
+    /// compiling until it is placed correctly.
+    fn from_effect(effect: &Effect) -> Self {
+        match effect {
+            Effect::Discard { .. } | Effect::Sacrifice { .. } => Self::DiscardOrSacrifice,
+            Effect::Surveil { .. } => Self::Surveil,
+            Effect::StartYourEngines { .. }
+            | Effect::ChangeSpeed { .. }
+            | Effect::DealDamage { .. }
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+            | Effect::Draw { .. }
+            | Effect::Pump { .. }
+            | Effect::PairWith { .. }
+            | Effect::Destroy { .. }
+            | Effect::Regenerate { .. }
+            | Effect::RemoveAllDamage { .. }
+            | Effect::Counter { .. }
+            | Effect::CounterAll { .. }
+            | Effect::Token { .. }
+            | Effect::GainLife { .. }
+            | Effect::LoseLife { .. }
+            | Effect::SetTapState { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::Mill { .. }
+            | Effect::Scry { .. }
+            | Effect::PumpAll { .. }
+            | Effect::DamageAll { .. }
+            | Effect::DamageEachPlayer { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Dig { .. }
+            | Effect::GainControl { .. }
+            | Effect::GainControlAll { .. }
+            | Effect::ControlNextTurn { .. }
+            | Effect::Attach { .. }
+            | Effect::UnattachAll { .. }
+            | Effect::Fight { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::Explore
+            | Effect::ExploreAll { .. }
+            | Effect::Investigate
+            | Effect::Tribute { .. }
+            | Effect::TimeTravel
+            | Effect::BecomeMonarch { .. }
+            | Effect::NoOp
+            | Effect::Proliferate
+            | Effect::ProliferateTarget { .. }
+            | Effect::Populate
+            | Effect::Clash
+            | Effect::Behold { .. }
+            | Effect::EndTheTurn
+            | Effect::EndCombatPhase
+            | Effect::Vote { .. }
+            | Effect::SeparateIntoPiles { .. }
+            | Effect::SwitchPT { .. }
+            | Effect::CopySpell { .. }
+            | Effect::EpicCopy { .. }
+            | Effect::CastCopyOfCard { .. }
+            | Effect::CopyTokenOf { .. }
+            | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::Myriad
+            | Effect::Encore
+            | Effect::CombineHost { .. }
+            | Effect::ChooseAugmentAndCombineWithHost { .. }
+            | Effect::Meld { .. }
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::ChoosePermanent { .. }
+            | Effect::GainActivatedAbilitiesOfTarget { .. }
+            | Effect::ChooseCard { .. }
+            | Effect::PutCounter { .. }
+            | Effect::ChooseCounterKind { .. }
+            | Effect::PutChosenCounter { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::ChooseCounterAdjustment { .. }
+            | Effect::DoublePT { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::ReproduceEventCounters { .. }
+            | Effect::Animate { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::RegisterBending { .. }
+            | Effect::GenericEffect { .. }
+            | Effect::Cleanup { .. }
+            | Effect::Mana { .. }
+            | Effect::Shuffle { .. }
+            | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
+            | Effect::SearchLibrary { .. }
+            | Effect::SearchOutsideGame { .. }
+            | Effect::RevealHand { .. }
+            | Effect::RevealFromHand { .. }
+            | Effect::Reveal { .. }
+            | Effect::RevealChosenNumbers { .. }
+            | Effect::RevealTop { .. }
+            | Effect::ExileTop { .. }
+            | Effect::ExileFaceDownPile { .. }
+            | Effect::TargetOnly { .. }
+            | Effect::Choose { .. }
+            | Effect::OpponentGuess { .. }
+            | Effect::SwapChosenLabels { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::Suspect { .. }
+            | Effect::Unsuspect { .. }
+            | Effect::Connive { .. }
+            | Effect::PhaseOut { .. }
+            | Effect::PhaseIn { .. }
+            | Effect::ForceBlock { .. }
+            | Effect::ForceAttack { .. }
+            | Effect::SolveCase
+            | Effect::BecomePrepared { .. }
+            | Effect::BecomeUnprepared { .. }
+            | Effect::BecomeSaddled { .. }
+            | Effect::SetClassLevel { .. }
+            | Effect::CreateDelayedTrigger { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::AddPendingETBCounters { .. }
+            | Effect::AddPendingEntersModifications { .. }
+            | Effect::CreateEmblem { .. }
+            | Effect::PayCost { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::FreeCastFromZones { .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+            | Effect::PreventDamage { .. }
+            | Effect::CreateDamageReplacement { .. }
+            | Effect::CreateDrawReplacement { .. }
+            | Effect::CreatePlaneswalkReplacement { .. }
+            | Effect::LoseTheGame { .. }
+            | Effect::WinTheGame { .. }
+            | Effect::RollDie { .. }
+            | Effect::FlipCoin { .. }
+            | Effect::FlipCoins { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::RingTemptsYou
+            | Effect::VentureIntoDungeon
+            | Effect::VentureInto { .. }
+            | Effect::TakeTheInitiative
+            | Effect::ArrangePlanarDeckTop { .. }
+            | Effect::Planeswalk
+            | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
+            | Effect::RedistributeLifeTotals
+            | Effect::OpenAttractions { .. }
+            | Effect::RollToVisitAttractions
+            | Effect::AssembleContraptions { .. }
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::CrankContraptions { .. }
+            | Effect::ReassembleContraption { .. }
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::ReassembleContraptionOnSprocket { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ApplySticker { .. }
+            | Effect::ProcessRadCounters
+            | Effect::GrantCastingPermission { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::RememberCard { .. }
+            | Effect::NoteManaSpent
+            | Effect::ForEachCategory { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
+            | Effect::Exploit { .. }
+            | Effect::GainEnergy { .. }
+            | Effect::GivePlayerCounter { .. }
+            | Effect::LoseAllPlayerCounters { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::Discover { .. }
+            | Effect::Heist { .. }
+            | Effect::HeistExile
+            | Effect::Cascade
+            | Effect::Ripple { .. }
+            | Effect::MiracleCast { .. }
+            | Effect::MadnessCast { .. }
+            | Effect::PutAtLibraryPosition { .. }
+            | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::GiftDelivery { .. }
+            | Effect::Goad { .. }
+            | Effect::GoadAll { .. }
+            | Effect::Detain { .. }
+            | Effect::SetRoomDoorLock { .. }
+            | Effect::ExchangeControl { .. }
+            | Effect::ChangeTargets { .. }
+            | Effect::Manifest { .. }
+            | Effect::ManifestDread
+            | Effect::Cloak { .. }
+            | Effect::TurnFaceUp { .. }
+            | Effect::TurnFaceDown { .. }
+            | Effect::ExtraTurn { .. }
+            | Effect::GrantExtraLoyaltyActivations { .. }
+            | Effect::SkipNextTurn { .. }
+            | Effect::SkipNextStep { .. }
+            | Effect::AdditionalPhase { .. }
+            | Effect::Double { .. }
+            | Effect::RuntimeHandled { .. }
+            | Effect::Incubate { .. }
+            | Effect::Amass { .. }
+            | Effect::Monstrosity { .. }
+            | Effect::Specialize
+            | Effect::Renown { .. }
+            | Effect::Bolster { .. }
+            | Effect::Adapt { .. }
+            | Effect::Learn
+            | Effect::Forage
+            | Effect::CompletePlayerAction { .. }
+            | Effect::Harness
+            | Effect::CollectEvidence { .. }
+            | Effect::Endure { .. }
+            | Effect::BlightEffect { .. }
+            | Effect::Seek { .. }
+            | Effect::SetLifeTotal { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::GiveControl { .. }
+            | Effect::RemoveFromCombat { .. }
+            | Effect::BecomeBlocked { .. }
+            | Effect::Conjure { .. }
+            | Effect::ApplyPerpetual { .. }
+            | Effect::Intensify { .. }
+            | Effect::DraftFromSpellbook { .. }
+            | Effect::ChooseOneOf { .. }
+            | Effect::Unimplemented { .. } => Self::Other,
+        }
+    }
+
+    /// Whether a `ZoneChangedThisWay.destination` value is the shape THIS
+    /// parent's own grammar produces — a mismatch (e.g. `DiscardOrSacrifice`
+    /// paired with `Some(Zone::Battlefield)`) cannot occur from this parser's
+    /// own output but guards against a future reflexive-gate producer being
+    /// added without updating this match; the pronoun is then left alone for
+    /// another pass (or `swallow_check`) to handle.
+    fn destination_matches(self, destination: Option<crate::types::zones::Zone>) -> bool {
+        match self {
+            Self::DiscardOrSacrifice => destination.is_none(),
+            Self::Surveil => destination == Some(crate::types::zones::Zone::Graveyard),
+            Self::Other => false,
+        }
     }
 }
 
@@ -10495,7 +10925,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
 /// arm. Only the per-object power/toughness refs are rewritten; every other
 /// reference (object counts, mana value, non-`CostPaidObject` scopes) is left
 /// as-is so unrelated where-X bindings are never disturbed.
-fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
+pub(super) fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref {
             qty: QuantityRef::Power { scope } | QuantityRef::Toughness { scope },

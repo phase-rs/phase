@@ -37,6 +37,8 @@ import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore"
 import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
+import { resyncFromAdapterSafely } from "../game/staleStateWatchdog";
+import { debugLog } from "../game/debugLog";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
 import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync";
 import { hostRoom, joinRoom } from "../network/connection";
@@ -175,6 +177,29 @@ function setupDraftMatchAvatars(seed: string) {
     playerNames: names,
     playerAvatars,
   });
+}
+
+/**
+ * Drop this client's wire-assigned seat when a game session tears down.
+ *
+ * `activePlayerId` is written only from a wire (`playerIdentity`, P2P
+ * `game_setup`, `setupDraftMatchAvatars`) and had no clear, so it outlived the
+ * game that assigned it. Two consecutive wire-assigned games therefore shared
+ * one value: until the second game's assignment arrived, `resolveLocalSeat`
+ * handed out the FIRST game's seat. `SeatSource` does not cover this — it is
+ * keyed on mode (`"seat-zero"` makes a solo game ignore the field), not on
+ * session, so online → online reads the stale seat.
+ *
+ * Safe against a remount (React StrictMode double-mounts in dev) because every
+ * wire-assigned mode re-establishes the seat when its effect re-runs:
+ * draft-match re-runs `setupDraftMatchAvatars`, and a fresh WS/P2P-guest
+ * adapter re-emits `playerIdentity` from `GameStarted` / `reconnect_ack`. The
+ * P2P HOST is the one path with no re-emit (it emits only from its game-start
+ * flow) — it is unaffected because the host is always seat 0, which is exactly
+ * what `resolveLocalSeat` falls back to.
+ */
+function clearWireAssignedSeat(): void {
+  useMultiplayerStore.getState().setActivePlayerId(null);
 }
 
 function playerNamesRecordToMap(playerNames: Record<number, string>): Map<number, string> {
@@ -522,6 +547,12 @@ export interface GameProviderProps {
   roomName?: string;
   source?: string;
   draftId?: string;
+  /**
+   * The lobby authority this join or spectate was launched from, carried by
+   * the route (`/game?...&server=`). Absent for flows with no explicit
+   * origin, which fall back to the hosting server via `detectServerUrl()`.
+   */
+  serverUrl?: string;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
@@ -549,6 +580,7 @@ export function GameProvider({
   roomName,
   source,
   draftId,
+  serverUrl: originUrl,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -711,6 +743,7 @@ export function GameProvider({
       return () => {
         audioManager.setContext("menu");
         clearPromptOverlayState();
+        clearWireAssignedSeat();
       };
     }
 
@@ -745,7 +778,10 @@ export function GameProvider({
             }
           }
           if (event.type === "stateChanged") {
-            processRemoteUpdate(event.snapshot, event.events, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries).catch((err) => {
+              debugLog(`p2p remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              resyncFromAdapterSafely("delivery rejected");
+            });
           }
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
@@ -1043,6 +1079,7 @@ export function GameProvider({
         if (p2pAdapter) p2pAdapter.dispose();
         audioManager.setContext("menu");
         clearPromptOverlayState();
+        clearWireAssignedSeat();
         reset();
       };
     }
@@ -1176,7 +1213,15 @@ export function GameProvider({
             return;
           }
         }
-        const serverUrl = import.meta.env.VITE_WS_URL ?? await detectServerUrl();
+        // Origin precedence: an explicit build override wins; then the
+        // server a resumable session was recorded on (that server holds the
+        // session); then the origin the route carried; and only with none of
+        // those, this client's hosting server.
+        const serverUrl =
+          import.meta.env.VITE_WS_URL
+          ?? reconnectSession?.serverUrl
+          ?? originUrl
+          ?? await detectServerUrl();
         if (cancelled) return;
 
         wsAdapter = new WebSocketAdapter(
@@ -1221,7 +1266,10 @@ export function GameProvider({
             if (needAdapter) {
               useGameStore.setState({ adapter: wsAdapter });
             }
-            processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets).catch((err) => {
+              debugLog(`remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              resyncFromAdapterSafely("delivery rejected");
+            });
             useMultiplayerStore.getState().setConnectionStatus("connected");
             const wsState = event.snapshot.state;
             if (
@@ -1333,6 +1381,7 @@ export function GameProvider({
         useMultiplayerStore.getState().setSpectators([]);
         audioManager.setContext("menu");
         clearPromptOverlayState();
+        clearWireAssignedSeat();
         reset();
       };
     }
@@ -1662,7 +1711,10 @@ export function GameProvider({
               if (!useGameStore.getState().adapter && adapter) {
                 useGameStore.setState({ adapter });
               }
-              processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets);
+              processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets).catch((err) => {
+                debugLog(`remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+                resyncFromAdapterSafely("delivery rejected");
+              });
             }
             if (event.type === "gameOver") {
               useGameStore.setState({
@@ -1858,7 +1910,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

@@ -17,10 +17,12 @@ import { del as idbDel, entries as idbEntries, set as idbSet } from "idb-keyval"
 import {
   _resetFeedCacheForTests,
   getCachedFeed,
+  getFeedCacheState,
   hydrateFeedCache,
   refreshFeedCache,
   removeCachedFeed,
   setCachedFeed,
+  subscribeFeedCache,
 } from "../feedPersistence.ts";
 import type { Feed } from "../../types/feed.ts";
 
@@ -126,5 +128,59 @@ describe("refreshFeedCache", () => {
 
     expect(getCachedFeed("stale")).toBeNull();
     expect(getCachedFeed("durable")).toBe(durable);
+  });
+});
+
+describe("imperative feed-cache observation", () => {
+  it("exposes the existing cache state and subscribes without a React render", async () => {
+    const observed = vi.fn();
+    const unsubscribe = subscribeFeedCache(observed);
+    const current = feed("current", 3);
+
+    await setCachedFeed("current", current);
+
+    expect(getFeedCacheState()).toMatchObject({ cache: { current }, hydrated: false });
+    expect(observed).toHaveBeenCalledWith(
+      expect.objectContaining({ cache: { current }, hydrated: false }),
+      expect.objectContaining({ cache: {}, hydrated: false }),
+    );
+    unsubscribe();
+    removeCachedFeed("current");
+    expect(observed).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("hydrateFeedCache", () => {
+  it("shares one durable read and preserves a cache write made before hydration settles", async () => {
+    const reading = deferred<Array<[IDBValidKey, Feed]>>();
+    vi.mocked(idbEntries).mockReturnValueOnce(reading.promise);
+
+    const first = hydrateFeedCache();
+    const successor = hydrateFeedCache();
+    const current = feed("current", 3);
+    const currentWrite = setCachedFeed("current", current);
+    const durable = feed("durable", 2);
+    reading.resolve([["current", feed("current", 1)], ["durable", durable]]);
+
+    await Promise.all([first, successor, currentWrite]);
+
+    expect(vi.mocked(idbEntries)).toHaveBeenCalledTimes(1);
+    expect(getCachedFeed("current")).toBe(current);
+    expect(getCachedFeed("durable")).toBe(durable);
+  });
+
+  it("does not let a mode-style successor overwrite a newer cache publication", async () => {
+    const reading = deferred<Array<[IDBValidKey, Feed]>>();
+    vi.mocked(idbEntries).mockReturnValueOnce(reading.promise);
+
+    const older = hydrateFeedCache();
+    const successor = hydrateFeedCache();
+    const refreshed = feed("starter", 4);
+    const write = setCachedFeed("starter", refreshed);
+    reading.resolve([["starter", feed("starter", 1)]]);
+
+    await Promise.all([older, successor, write]);
+
+    expect(getCachedFeed("starter")).toBe(refreshed);
   });
 });

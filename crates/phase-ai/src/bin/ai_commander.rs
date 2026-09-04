@@ -45,7 +45,7 @@ use std::time::Instant;
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{
-    load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
+    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -1028,18 +1028,18 @@ fn classify_run_outcome(aborted: bool, waiting_for: &WaitingFor) -> RunOutcome {
 /// `main()` and the setup regression test below both call this, so the two
 /// can never drift apart.
 ///
-/// Populates `state.all_card_names` (a `#[serde(skip)]` field, so it is never
-/// restored by deserialization) right after deck loading, mirroring every
-/// other game-construction site (`engine-wasm/src/lib.rs`, `replay.rs`,
-/// `server-core/src/session.rs`). Without it, `NamedChoice { choice_type:
-/// CardName, .. }` candidate generation (`ai_support::candidate_actions` ->
+/// Loads through the canonical `load_and_hydrate_decks` init path shared with
+/// `engine-wasm/src/lib.rs`, `replay.rs` and `server-core/src/session.rs`, so
+/// dual-faced cards get their back faces and `state.all_card_names` (a
+/// `#[serde(skip)]` field, so it is never restored by deserialization) is
+/// populated. Without the pool, `NamedChoice { choice_type: CardName, .. }`
+/// candidate generation (`ai_support::candidate_actions` ->
 /// `card_name_choice_candidates`) sees an empty `all_card_names` and returns
 /// zero legal actions — a permanent AI stall the first time an opponent's
 /// card triggers a "name a card" choice.
 fn build_game_state(db: &CardDatabase, payload: &DeckPayload, seed: u64) -> GameState {
     let mut state = GameState::new(FormatConfig::commander(), 4, seed);
-    load_deck_into_state(&mut state, payload);
-    state.all_card_names = db.card_names().into();
+    load_and_hydrate_decks(&mut state, payload, Some(db));
     state
 }
 
@@ -1180,9 +1180,9 @@ mod tests {
         };
         let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
 
-        // Calls the same setup function `main()` uses — if the
-        // `all_card_names` assignment is ever removed from `build_game_state`,
-        // this test fails instead of silently passing against a duplicated copy.
+        // Calls the same setup function `main()` uses — if `build_game_state`
+        // ever drops back to a loader that skips the card-name pool, this test
+        // fails instead of silently passing against a duplicated copy.
         let mut state = build_game_state(&db, &payload, 42);
 
         assert!(

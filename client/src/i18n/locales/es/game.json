@@ -605,6 +605,8 @@
     "chooseXInputAria": "Introducir el valor de X",
     "decreaseX": "Disminuir el valor de X",
     "increaseX": "Aumentar el valor de X",
+    "maximum": "Máx.",
+    "setXToMaximum": "Establecer X al máximo",
     "minMax": "mín. {{min}} / máx. {{max}}",
     "maxOnly": "máx. {{max}}",
     "amountOutOfRange": "Introduce un número entero entre {{min}} y {{max}}",
@@ -660,7 +662,9 @@
   },
   "storm": {
     "copies_one": "Tormenta: {{count}} copia",
-    "copies_other": "Tormenta: {{count}} copias"
+    "copies_other": "Tormenta: {{count}} copias",
+    "count_one": "Contador de tormenta: {{count}} copia",
+    "count_other": "Contador de tormenta: {{count}} copias"
   },
   "opponentHud": {
     "ally": "Aliado",
@@ -822,6 +826,8 @@
   },
   "log": {
     "title": "Registro de la partida",
+    "dockLeft": "Acoplar el registro a la izquierda",
+    "dockRight": "Acoplar el registro a la derecha",
     "noEvents": "Aún no hay eventos",
     "closeLog": "Cerrar el registro de la partida",
     "verbosityFull": "completo",
@@ -1104,7 +1110,10 @@
       "subtitlePreparedCopy": "¿Lanzar el hechizo preparado?",
       "subtitleActivate": "¿Activar esta habilidad?",
       "subtitlePlay": "Elige cómo jugar esta carta",
-      "subtitleChoose": "Elige una habilidad para activar"
+      "subtitleChoose": "Elige una habilidad para activar",
+      "unlockThisDoor": "Desbloquear esta puerta",
+      "unlockHalf": "Desbloquear {{name}}",
+      "unlockHalfWithCost": "Desbloquear {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Girar para obtener maná",
@@ -1616,6 +1625,9 @@
       "selectAll": "Seleccionar todo",
       "invert": "Invertir",
       "clear": "Limpiar",
+      "searchLabel": "Filtrar",
+      "searchPlaceholder": "Nombre de carta",
+      "searchCardsAria": "Filtrar cartas por nombre",
       "sortLabel": "Ordenar",
       "groupLabel": "Agrupar",
       "optNone": "Ninguno",
@@ -2041,6 +2053,7 @@
     "diagnostic": "diagnóstico: {{reason}}",
     "showDetails": "Mostrar detalles",
     "exportGameState": "Exportar estado de la partida",
+    "exportClientSnapshot": "Exportar instantánea del cliente",
     "exported": "Exportado",
     "exportFailed": "Error al exportar",
     "copyDiagnostic": "Copiar diagnóstico",

@@ -38,9 +38,15 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+/// The engine owns copy-source enumeration: which zone the filter names
+/// (`FilterProp::InZone`, battlefield by default), the `ExiledCardByIndex`
+/// resolution, the source exclusion, and the mana-value ceiling. Surfaced here
+/// beside the other copy accessors so AI policies ask that single authority
+/// instead of re-deriving a battlefield scan.
+pub use crate::game::engine_replacement::find_copy_targets;
 pub(crate) use candidates::power_threshold_witness;
 pub use candidates::{
-    candidate_actions, candidate_actions_broad, candidate_actions_exact,
+    balanced_pile_partition, candidate_actions, candidate_actions_broad, candidate_actions_exact,
     candidate_actions_with_probe, retarget_actions, ActionMetadata, CandidateAction, TacticalClass,
 };
 pub use combat_withdrawal::{
@@ -1917,6 +1923,17 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // controlled seat here would both honor the wrong user's preference and
     // reveal it through the viewer-scoped recommendation bit.
     if state.stack.is_empty() && state.phase_stop_hit(mode_owner) {
+        return false;
+    }
+
+    // CR 117.1: Full Control is a standing refusal to give up ANY window, so no
+    // recommendation is ever issued. Deliberately ABOVE the CR 117.3d yield rung
+    // below — that rung is the one other place this function can answer `true`
+    // over a hold, and the engine-side gates in `game::engine` (which cover
+    // passes that never reach a frontend) do not consult yields. Ordering Full
+    // Control first is what keeps the recommendation and the authoritative loop
+    // from disagreeing about the same window.
+    if state.priority_passing_mode(mode_owner) == PriorityPassingMode::FullControl {
         return false;
     }
 

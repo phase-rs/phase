@@ -113,16 +113,23 @@
     "draftBadge": "Draft {{setCode}}",
     "p2pBadgeTitle": "Partida punto a punto (el anfitrión ejecuta el motor)",
     "sandboxBadgeTitle": "Esta partida permite acciones de depuración. Úsala para pruebas — no es una partida competitiva.",
+    "hintSlow": "LENTO",
+    "hintSlowTitle": "Este servidor ha respondido con lentitud a los jugadores últimamente.",
+    "hintUnreliable": "POCO FIABLE",
+    "hintUnreliableTitle": "Últimamente los jugadores han fallado a menudo al conectarse a este servidor.",
     "rankedBadgeTitle": "Sala clasificatoria",
     "rankedBadge": "CLASIF.",
     "anonymous": "Anónimo",
     "by": "de {{name}}",
     "passwordProtected": "Protegida con contraseña",
-    "join": "Unirse"
+    "join": "Unirse",
+    "originTitle": "Listada por {{name}} {{kind}}",
+    "kindFull": "(servidor de juego)",
+    "kindLobbyOnly": "(intermediario de sala)"
   },
   "serverPicker": {
     "title": "Servidor",
-    "subtitle": "Elige una región o conéctate a una instancia autoalojada.",
+    "subtitle": "Elige dónde alojas tus partidas y qué salas exploras.",
     "noneLabel": "Ninguno (solo P2P)",
     "directCodes": "códigos directos",
     "official": "Oficial",
@@ -133,7 +140,23 @@
     "urlError": "La URL debe empezar por ws:// o wss://",
     "connected": "Conectado",
     "connectionFailed": "La conexión falló",
-    "testing": "Probando…"
+    "testing": "Probando…",
+    "hostingServer": "Servidor anfitrión",
+    "hostingServerHelp": "Donde se crean y registran las partidas que alojas.",
+    "sources": "Fuentes de sala",
+    "sourcesHelp": "Las mesas abiertas de todas las fuentes se combinan en una sola lista.",
+    "addSource": "Añadir una fuente",
+    "remove": "Quitar",
+    "useForHosting": "Usar para alojar",
+    "sourceStatusConnecting": "Conectando…",
+    "sourceStatusDegraded": "Inaccesible",
+    "sourceDuplicate": "Ese servidor ya es una fuente de sala.",
+    "sourceCapReached": "Se pueden añadir hasta {{max}} fuentes.",
+    "directoryOrigin": "Directorio",
+    "sourceScore": "Puntuación {{score}}",
+    "enable": "Activar",
+    "disable": "Desactivar",
+    "incompatibleVersion": "Incompatible — versión del servidor {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "No hay salas de draft disponibles",
@@ -183,7 +206,9 @@
     "hostP2PGame": "Hospedar partida P2P",
     "passwordRequired": "Contraseña requerida",
     "passwordPlaceholder": "Introduce la contraseña",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Algunas fuentes de sala están inaccesibles",
+    "invalidJoinServer": "La dirección del servidor de ese código no es válida."
   },
   "hostSetup": {
     "hostDirectMatch": "Hospedar partida directa",
@@ -213,6 +238,10 @@
     "startWhenFull": "Empezar cuando esté llena",
     "ranked": "Clasificatoria",
     "listInLobby": "Listar en la sala de espera",
+    "hostServer": "Alojar en",
+    "hostServerHelp": "Qué servidor ejecuta esta partida. Tus ajustes de navegación y de código directo no cambian.",
+    "hostServerScore": "{{name}} — estado {{score}}",
+    "hostServerUnscored": "{{name}} — aún sin valorar",
     "sandboxMode": "Modo Sandbox — permitir acciones de depuración",
     "sandboxModeHelp": "El anfitrión puede manipular directamente el estado de la partida (mover cartas, cambiar vidas, modificar contadores) y otorgar permiso de depuración a otros jugadores. Úsalo para pruebas o juego de sandbox — no para partidas competitivas. Este ajuste no se puede cambiar una vez iniciada la partida.",
     "setPassword": "Establecer contraseña",
@@ -220,7 +249,17 @@
     "back": "Atrás",
     "opening": "Abriendo…",
     "hostP2PGame": "Hospedar partida P2P",
-    "hostGame": "Hospedar partida"
+    "hostGame": "Hospedar partida",
+    "savedFormats": "Formatos personalizados guardados",
+    "saveAsCustomFormat": "Guardar formato",
+    "customFormatNamePlaceholder": "Nombra este formato",
+    "useCustomFormat": "Usar",
+    "customFormatInUse": "En uso",
+    "deleteCustomFormat": "Eliminar",
+    "loadingCustomFormat": "Cargando formato…",
+    "noSavedCustomFormats": "Todavía no hay formatos personalizados guardados.",
+    "customFormatResolveFailed": "No se pudo cargar ese formato guardado.",
+    "customFormatHostingUnavailable": "Hospedar con un formato personalizado aún no es compatible — no se puede comprobar la legalidad del mazo para él. Por ahora, guárdalo y solo previsualízalo."
   },
   "page": {
     "deckRejected": "El anfitrión rechazó el mazo.",
@@ -243,6 +282,8 @@
     "descriptionDraftLobby": "Esperando a que los jugadores se unan al pod de draft.",
     "descriptionDeckSelectFormat": "Elige un mazo para {{format}}.",
     "descriptionDeckSelect": "Elige el mazo que quieres llevar en línea.",
+    "offlineUnavailableTitle": "El multijugador no está disponible sin conexión.",
+    "offlineUnavailableDescription": "Vuelve a conectarte o desactiva el modo sin conexión para crear o unirte a una partida multijugador.",
     "eyebrow": "Multijugador",
     "activeDeck": "Mazo activo",
     "edit": "Editar",
@@ -250,7 +291,8 @@
     "noDeckWarning": "Ningún mazo seleccionado — tendrás que elegir uno antes de hospedar.",
     "pickDeck": "Elegir mazo",
     "anonymous": "Anónimo",
-    "joining": "Uniéndose"
+    "joining": "Uniéndose",
+    "joinNeedsServer": "Elige un servidor antes de unirte a una partida."
   },
   "draftLobbyPanel": {
     "draftPod": "Pod de draft",

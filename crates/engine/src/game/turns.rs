@@ -1116,7 +1116,15 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
             && state.resolution_stack.is_empty()
             && state.resolving_stack_entry.is_none()
             && matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "start_next_turn requires an empty stack, no pending resolution carrier, and a settled Priority window"
+        "start_next_turn requires an empty stack, no pending resolution carrier, and a settled \
+         Priority window (turn {}, phase {:?}, stack {}, waiting_for {:?}, carrier {:?}, \
+         resolution_stack {:?})",
+        state.turn_number,
+        state.phase,
+        state.stack.len(),
+        state.waiting_for,
+        state.resolving_stack_entry,
+        state.resolution_stack,
     );
     // CR 805.4b: defensively drop any stale draw-step queue entries. The
     // queue is normally drained to empty before a turn ends, but a turn
@@ -1587,10 +1595,11 @@ pub fn execute_untap_with_choices(
             );
         }
     }
-    // CR 514.2 + CR 611.2a/b: Expire `PlayFromExile` permissions granted to
-    // the active player with `UntilYourNextTurn` duration (impulse draws that
-    // last "until your next turn").
-    super::layers::prune_until_next_turn_casting_permissions(state, active);
+    // CR 500.4 + CR 514.2: the untap-step seam for casting permissions — arms
+    // "until the end of your next turn" grants and expires both untap-step
+    // shapes ("until your next turn" and "until [its controller's] next untap
+    // step"). See `layers::prune_untap_step_casting_permissions`.
+    super::layers::prune_untap_step_casting_permissions(state, active);
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions.retain(|r| {
             !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active)
@@ -3482,7 +3491,10 @@ mod tests {
                 .downcast_ref::<&str>()
                 .copied()
                 .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
-            assert_eq!(message, Some(MESSAGE));
+            assert!(
+                message.is_some_and(|message| message.starts_with(MESSAGE)),
+                "unexpected panic payload: {message:?}"
+            );
             assert_eq!(
                 serde_json::to_vec(&state).expect("serialize rejected state"),
                 before

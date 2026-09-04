@@ -69,6 +69,7 @@ afterEach(() => {
     mobileHandGesture: null,
     shiftHeld: false,
     altHeld: false,
+    previewSticky: false,
   });
   // GameCardPreview adds a third store; reset it so "shift" mode doesn't leak.
   usePreferencesStore.setState({ cardPreviewMode: "follow" });
@@ -92,6 +93,16 @@ describe("GameCardPreview", () => {
     expect(container.querySelector<HTMLElement>("[data-card-preview]")).toHaveStyle({
       right: "calc(env(safe-area-inset-right) + 1rem + var(--game-right-rail-offset, 0px))",
     });
+  });
+
+  it("keeps an explicit sticky preview visible in Hold Shift mode", () => {
+    inspect(battlefieldObject());
+    usePreferencesStore.setState({ cardPreviewMode: "shift" });
+    useUiStore.setState({ previewSticky: true });
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
   });
 
   it("anchors the preview to the hand card hovered through PlayerHand", async () => {

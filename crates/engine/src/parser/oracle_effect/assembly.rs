@@ -36,7 +36,8 @@ use crate::types::zones::Zone;
 use super::conditions::ability_condition_to_static_condition;
 use super::lower::{
     append_remember_card_to_standalone_exiled_choice, apply_where_x_ability_expression,
-    apply_where_x_to_latest_def, attach_any_color_mana_rider_to_previous_play_from_exile,
+    apply_where_x_to_latest_def, attach_alt_ability_cost_to_previous_play_from_exile,
+    attach_any_color_mana_rider_to_previous_play_from_exile,
     attach_cast_cost_raise_to_previous_play_from_exile,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_free_cast_from_zones,
@@ -57,13 +58,14 @@ use super::lower::{
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
     patch_choose_from_zone_counter_continuation_target, patch_population_head_tap_anaphor,
-    patch_self_ref_head_tap_anaphor, relink_gated_token_referent_consumers,
-    resolve_populated_token_anaphors, resolve_populated_unsuspect_anaphors,
-    resolve_those_tokens_anaphors, rewire_result_anchored_subchain,
-    rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
-    rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
-    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
-    target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
+    patch_self_ref_head_tap_anaphor, rebind_zone_changed_this_way_pronoun_to_moved_object,
+    relink_gated_token_referent_consumers, resolve_populated_token_anaphors,
+    resolve_populated_unsuspect_anaphors, resolve_those_tokens_anaphors,
+    rewire_result_anchored_subchain, rewrite_counter_instead_target_from_antecedent,
+    rewrite_else_event_context_to_stable, rewrite_else_parent_target_to_self_ref,
+    rewrite_player_anaphor_targets_in_definition, rewrite_those_tokens_from_antecedent,
+    rewrite_two_target_counter_chain, target_choice_timing_for_clause,
+    thread_chosen_damage_source_into_oneshot_effects,
 };
 use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
@@ -76,13 +78,14 @@ use super::{
     def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
-    parse_spell_graveyard_replacement_rider,
+    nearest_publisher_is_self_move, parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
     resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
     rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
-    rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
+    rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
+    singular_battlefield_recall, stamp_delayed_returns, try_fold_token_repeat_into_count,
     wire_optional_cast_decline_fallback,
 };
 
@@ -1756,7 +1759,21 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // def; emit no sibling. `modifier` selects which field/aspect.
                 match modifier {
                     PriorModifier::AltCost(cost) => {
-                        attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
+                        // CR 118.9 + CR 119.4: Xander's Pact / Nashi fold the
+                        // rider onto a preceding `CastFromZone` (their whole
+                        // grant is spell-only). Inside Information's preceding
+                        // grant is a plain "you may play those cards" —
+                        // `GrantCastingPermission { PlayFromExile }` — which
+                        // also authorizes land plays, so when no `CastFromZone`
+                        // is in scope, fall back to folding the cost onto that
+                        // grant's `alt_ability_cost` instead (land plays stay
+                        // unaffected — the field is spell-cast-only).
+                        if !attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone()) {
+                            attach_alt_ability_cost_to_previous_play_from_exile(
+                                &mut defs,
+                                cost.clone(),
+                            );
+                        }
                     }
                     PriorModifier::ManaRetention(expiry) => {
                         attach_mana_retention_to_prior_mana(&mut defs, *expiry);
@@ -2797,12 +2814,33 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     let cast_anaphor_is_exiled = defs
                         .iter()
                         .any(|d| publishes_exiled_cause_at_resolution(&d.effect));
+                    // CR 608.2c + CR 400.7j: singular self-recall after a
+                    // self-move antecedent binds to the source object; plural
+                    // and mass-publisher recalls keep the chain tracked set.
+                    let singular_self_recall = singular_battlefield_recall(&source_text_lower)
+                        && nearest_publisher_is_self_move(&defs);
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
-                        rewrite_parent_targets_to_tracked_set(
-                            &mut current.effect,
-                            cast_anaphor_is_exiled,
-                        );
+                        // Per-def branch: only a battlefield-recall-shaped leg
+                        // enters the carve-out; sibling defs of the same clause
+                        // keep today's tracked-set rewrite.
+                        if singular_self_recall
+                            && matches!(
+                                &*current.effect,
+                                Effect::ChangeZone {
+                                    target: TargetFilter::ParentTarget,
+                                    destination: Zone::Battlefield,
+                                    ..
+                                }
+                            )
+                        {
+                            rewrite_singular_battlefield_recall_to_self(&mut current.effect);
+                        } else {
+                            rewrite_parent_targets_to_tracked_set(
+                                &mut current.effect,
+                                cast_anaphor_is_exiled,
+                            );
+                        }
                     }
                 }
             } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {
@@ -3264,6 +3302,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // attaching object.
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
+    // CR 608.2c + CR 701.9a + CR 701.21a: a discard/sacrifice-this-way gated
+    // sub-ability's bare "it" pronoun parses to the generic `ParentTarget`
+    // fallback, but there is no declared parent target to fall back on
+    // (unlike the battlefield-entry/into-hand "this way" siblings
+    // `fold_enters_this_way_counter_rider` folds above) — rebind it to the
+    // moved object instead, and do so before `oracle_trigger::lower_trigger_ir`
+    // can otherwise blindly lift that same `ParentTarget` to `TriggeringSource`.
+    rebind_zone_changed_this_way_pronoun_to_moved_object(&mut result);
     // CR 603.7a + CR 608.2c + CR 702.170c: fold the exile-instead "If you do,
     // ..." continuation (Feather's return-to-hand, Lilah's become-plotted) onto
     // the exile-resolving carrier's typed `on_exile` rider so the consequence is
@@ -3449,18 +3495,23 @@ fn normalize_linked_exile_cast_pair(
     }
     // CR 608.2c + CR 701.13a: Jodah, the Unifier — the head-aware companion
     // gate. `prev` is `ExileFromTopUntil { NextMatches }`; `chain` is its
-    // optional `CastFromZone { ParentTarget }` with the bottom cleanup already
-    // nested beneath it. Rewrite that cleanup to the linked exile set and make
-    // it the decline branch, preserving the hit in exile when the cast is
-    // declined.
-    if chain.optional {
-        if let Some(cleanup) = chain.sub_ability.as_deref().cloned() {
-            if is_exile_until_cast_bottom_cleanup(&prev.effect, &chain.effect, &cleanup.effect) {
-                if let Some(cleanup_mut) = chain.sub_ability.as_deref_mut() {
-                    normalize_exile_until_cast_bottom_cleanup(&mut cleanup_mut.effect);
+    // `CastFromZone { ParentTarget }` with the bottom cleanup already nested
+    // beneath it. Rewrite that cleanup to the linked exile set, preserving the
+    // hit in exile.
+    if let Some(cleanup) = chain.sub_ability.as_deref().cloned() {
+        if is_exile_until_cast_bottom_cleanup(&prev.effect, &chain.effect, &cleanup.effect) {
+            if let Some(cleanup_mut) = chain.sub_ability.as_deref_mut() {
+                // The "the rest of those exiled cards" rewrite is a property of
+                // the WORDING, so it runs for a standing permission too.
+                normalize_exile_until_cast_bottom_cleanup(&mut cleanup_mut.effect);
+                // CR 608.2d: only a resolution-time offer has a decline branch. A
+                // lingering permission (The Day of the Doctor) is never declined as
+                // the ability resolves, so an else branch there would publish a
+                // second, unreachable copy of the cleanup to the chain scanners.
+                if chain.optional {
                     chain.else_ability = Some(Box::new(cleanup_mut.clone()));
-                    return true;
                 }
+                return true;
             }
         }
     }

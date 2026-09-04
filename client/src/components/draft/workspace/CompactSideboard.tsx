@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import type { CSSProperties } from "react";
+import type { CSSProperties, RefCallback } from "react";
 
 import type { DraftCardInstance, DraftPoolGroups } from "../../../adapter/draft-adapter";
 import type { CardHoverInfo } from "../../card/CardPreview";
@@ -25,6 +25,7 @@ interface CompactSideboardProps {
   preferences: Readonly<Record<DraftZone, DraftBoardPreferences>>;
   interactionLocked?: boolean;
   dropActive?: boolean;
+  registerCardArea?: RefCallback<HTMLElement>;
   dragController?: DraftWorkspaceDragController;
   touchDragEnabled?: boolean;
   collapsed?: boolean;
@@ -35,6 +36,21 @@ interface CompactSideboardProps {
   responsiveContext?: "draft" | "builder";
 }
 
+interface ResponsiveStackLayout {
+  columnCount: number;
+  columnGapPx: number;
+  exposedStepPx: number;
+}
+
+// Sideboards deliberately reveal more of each card than the denser deck stacks.
+// Both draft and builder use this same compact geometry on every non-desktop layout.
+const RESPONSIVE_STACK_LAYOUTS: Readonly<Record<Exclude<ResponsiveDraftLayout, "desktop">, ResponsiveStackLayout>> = {
+  "phone-portrait": { columnCount: 2, columnGapPx: 8, exposedStepPx: 56 },
+  "phone-landscape": { columnCount: 1, columnGapPx: 0, exposedStepPx: 32 },
+  "tablet-portrait": { columnCount: 3, columnGapPx: 8, exposedStepPx: 72 },
+  "tablet-landscape": { columnCount: 1, columnGapPx: 0, exposedStepPx: 40 },
+};
+
 export function CompactSideboard({
   pool,
   poolGroups,
@@ -42,6 +58,7 @@ export function CompactSideboard({
   preferences,
   interactionLocked = false,
   dropActive = false,
+  registerCardArea,
   dragController,
   touchDragEnabled = false,
   collapsed = true,
@@ -62,29 +79,6 @@ export function CompactSideboard({
   const cards = sideboard.columns.flatMap((column) => (
     column.rows.flatMap((row) => row.cards)
   ));
-  const responsiveStackStyle = (stackIndex: number): CSSProperties | undefined => {
-    switch (responsiveLayout) {
-      case "phone-portrait":
-        return responsiveContext === "builder"
-          ? { position: "absolute", top: 5, left: 5 + stackIndex * 54, width: 70 }
-          : { position: "absolute", top: 6, left: 6 + stackIndex * 52, width: 68 };
-      case "phone-landscape":
-        return { position: "absolute", top: stackIndex * 24, left: 4, width: "calc(100% - 8px)" };
-      case "tablet-portrait":
-        return { position: "absolute", top: 7, left: 7 + stackIndex * 66, width: 88 };
-      case "tablet-landscape":
-        return { position: "absolute", top: 8, left: 8 + stackIndex * 76, width: 100 };
-      case "desktop":
-        return undefined;
-    }
-  };
-  const responsiveSlotHeight = responsiveLayout === "phone-portrait"
-    ? responsiveContext === "builder" ? 108 : 106
-    : responsiveLayout === "tablet-portrait"
-      ? 132
-      : responsiveLayout === "tablet-landscape"
-        ? 150
-        : undefined;
   const builderPhoneLayout = responsiveContext === "builder"
     && (responsiveLayout === "phone-portrait" || responsiveLayout === "phone-landscape");
   const draftPhoneLayout = responsiveContext === "draft"
@@ -101,8 +95,18 @@ export function CompactSideboard({
   const draftPhonePortraitExpanded = responsiveContext === "draft"
     && responsiveLayout === "phone-portrait"
     && !collapsed;
-  const naturalCardLayout = draftPhoneLayout || tabletLayout;
-  const scrollableCardLayout = naturalCardLayout || isLandscapeBuilderPhone;
+  const responsiveStack = responsiveLayout !== "desktop";
+  const responsiveStackLayout = responsiveStack
+    ? RESPONSIVE_STACK_LAYOUTS[responsiveLayout]
+    : undefined;
+  const maximumResponsiveStackRow = responsiveStackLayout === undefined || cards.length === 0
+    ? 0
+    : Math.floor((cards.length - 1) / responsiveStackLayout.columnCount);
+  const responsiveCardWidth = responsiveStackLayout === undefined
+    ? undefined
+    : `calc((100% - ${(responsiveStackLayout.columnCount - 1) * responsiveStackLayout.columnGapPx}px) / ${responsiveStackLayout.columnCount})`;
+  const naturalCardLayout = responsiveStack;
+  const scrollableCardLayout = responsiveStack;
   const collapsibleCompactSideboard = builderPhoneLayout || draftPhoneLayout || tabletLayout;
   const sideRailCollapsed = (
     isLandscapeBuilderPhone
@@ -204,15 +208,15 @@ export function CompactSideboard({
       data-zone="sideboard"
       data-responsive-sideboard-layout={responsiveLayout}
       data-sideboard-collapsed={collapsed ? "true" : "false"}
-      className={`min-w-0 overflow-hidden rounded-card border border-hairline text-fg shadow-[0_10px_26px_rgba(0,0,0,0.2)] ${tabletPortraitLayout && !collapsed ? "bg-slate-950" : "bg-black/18"} ${isLandscapeBuilderPhone || draftPhoneLayout || tabletLayout ? "flex h-full min-h-0 flex-col" : builderPhoneLayout ? "flex shrink-0 flex-col" : ""}`}
+      className={`min-w-0 ${dropActive ? "overflow-visible" : "overflow-hidden"} rounded-card border border-hairline text-fg shadow-[0_10px_26px_rgba(0,0,0,0.2)] ${tabletPortraitLayout && !collapsed ? "bg-slate-950" : "bg-black/18"} ${isLandscapeBuilderPhone || draftPhoneLayout || tabletLayout ? "flex h-full min-h-0 flex-col" : builderPhoneLayout ? "flex shrink-0 flex-col" : ""}`}
     >
-      <header className={sideRailCollapsed
-        ? "relative flex h-full min-h-0 flex-col items-center justify-start gap-1 bg-white/[0.035] px-1 py-2"
+      <header className={`relative z-10 ${sideRailCollapsed
+        ? "relative flex min-h-11 shrink-0 flex-col items-center justify-start gap-1 bg-white/[0.035] px-1 py-2"
         : draftPhoneLandscapeExpanded
           ? "flex shrink-0 flex-col items-start gap-1 border-b border-hairline bg-white/[0.035] px-2 py-1.5"
         : tabletPortraitCollapsed
-          ? "relative flex h-full min-h-0 items-center justify-center border-b border-hairline bg-slate-950 px-12 py-1"
-        : "flex min-h-11 shrink-0 items-center gap-2 border-b border-hairline bg-white/[0.035] px-2 py-1.5"}
+          ? "relative flex min-h-11 shrink-0 items-center justify-center border-b border-hairline bg-slate-950 px-12 py-1"
+        : "flex min-h-11 shrink-0 items-center gap-2 border-b border-hairline bg-white/[0.035] px-2 py-1.5"}`}
       >
         {sideRailCollapsed && (draftPhoneLandscapeSideRail
           ? <span className="relative z-10 mt-10">{sideboardToggle}</span>
@@ -251,22 +255,18 @@ export function CompactSideboard({
         {!sideRailCollapsed && !tabletPortraitCollapsed && !draftPhoneLandscapeExpanded && sideboardToggle}
       </header>
       {(!collapsibleCompactSideboard || !collapsed) && <div
+        ref={registerCardArea}
+        data-sideboard-card-area
+        data-drop-target="collapsed-sideboard"
+        data-drop-state={dropActive ? "active" : "idle"}
         data-sideboard-slot={builderPhoneLayout || scrollableCardLayout ? undefined : ""}
         data-sideboard-body={builderPhoneLayout || scrollableCardLayout ? "" : undefined}
-        className={scrollableCardLayout
+        className={`${scrollableCardLayout
           ? "relative min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain bg-black/12 p-2 thin-scrollbar"
           : builderPhoneLayout
             ? "relative shrink-0 overflow-visible bg-black/12 p-2"
-          : `relative grid min-w-0 bg-black/12 ${responsiveLayout === "desktop" || responsiveLayout === "phone-landscape" ? "aspect-[488/680]" : ""}`}
-        style={builderPhoneLayout || naturalCardLayout || responsiveSlotHeight === undefined ? undefined : { height: responsiveSlotHeight }}
+            : `relative grid min-w-0 bg-black/12 ${responsiveLayout === "desktop" || responsiveLayout === "phone-landscape" ? "aspect-[488/680]" : ""}`} ${dropActive ? "draft-card-area-drop-active" : ""}`}
       >
-        {dropActive && (
-          <span
-            aria-hidden="true"
-            data-drop-highlight="active"
-            className="pointer-events-none absolute inset-0 z-20 border-2 border-white"
-          />
-        )}
         <span
           aria-hidden="true"
           data-card-height-baseline
@@ -279,19 +279,40 @@ export function CompactSideboard({
         ) : (
           <div
             data-card-stack
-            className={naturalCardLayout
-              ? responsiveLayout === "tablet-portrait"
-                ? "grid min-w-0 grid-cols-3 items-start gap-2"
-                : responsiveLayout === "phone-portrait"
-                  ? "grid min-w-0 grid-cols-2 items-start gap-2"
-                  : "grid min-w-0 grid-cols-1 items-start gap-2"
+            data-sideboard-column-count={responsiveStackLayout?.columnCount}
+            className={responsiveStack
+              ? "relative min-h-full min-w-0"
               : builderPhoneLayout
               ? isLandscapeBuilderPhone
                 ? "flex min-w-0 flex-col"
                 : "grid min-w-0 grid-cols-2 gap-2"
               : "relative h-full min-w-0 [grid-area:1/1]"}
           >
-            {cards.map((card, stackIndex) => (
+            {responsiveStackLayout !== undefined && responsiveCardWidth !== undefined && (
+              <span
+                aria-hidden="true"
+                data-sideboard-stack-spacer
+                className="block aspect-[488/680]"
+                style={{
+                  width: responsiveCardWidth,
+                  marginBottom: maximumResponsiveStackRow * responsiveStackLayout.exposedStepPx,
+                }}
+              />
+            )}
+            {cards.map((card, stackIndex) => {
+              const column = responsiveStackLayout === undefined ? 0 : stackIndex % responsiveStackLayout.columnCount;
+              const row = responsiveStackLayout === undefined ? stackIndex : Math.floor(stackIndex / responsiveStackLayout.columnCount);
+              const responsiveStackStyle: CSSProperties | undefined = responsiveStackLayout === undefined || responsiveCardWidth === undefined
+                ? undefined
+                : {
+                  position: "absolute",
+                  top: row * responsiveStackLayout.exposedStepPx,
+                  left: column === 0
+                    ? 0
+                    : `calc(${column * 100 / responsiveStackLayout.columnCount}% + ${column * responsiveStackLayout.columnGapPx / responsiveStackLayout.columnCount}px)`,
+                  width: responsiveCardWidth,
+                };
+              const workspaceCard = (
               <WorkspaceCard
                 key={card.key}
                 card={card}
@@ -300,13 +321,9 @@ export function CompactSideboard({
                 onHover={(hoveredCard) => onCardHover?.(hoveredCard?.preview ?? null)}
                 onBlur={() => onCardHover?.(null)}
                 onActivate={(activatedCard) => activate(activatedCard.instanceId)}
-                stackStyle={naturalCardLayout
-                  ? { width: "100%" }
-                  : isLandscapeBuilderPhone
-                  ? { width: "100%", marginTop: stackIndex === 0 ? undefined : "-72%" }
-                  : builderPhoneLayout
-                    ? { width: "100%" }
-                    : responsiveStackStyle(stackIndex)}
+                stackStyle={responsiveStack
+                  ? responsiveStackStyle
+                  : undefined}
                 {...(dragController === undefined
                   ? {}
                   : {
@@ -318,7 +335,18 @@ export function CompactSideboard({
                     },
                   })}
               />
-            ))}
+              );
+              return responsiveStackLayout === undefined ? workspaceCard : (
+                <div
+                  key={card.key}
+                  className="contents"
+                  data-sideboard-column={column}
+                  data-sideboard-row={row}
+                >
+                  {workspaceCard}
+                </div>
+              );
+            })}
           </div>
         )}
         {cards.length > 0 && cards.map((card) => (
@@ -339,6 +367,15 @@ export function CompactSideboard({
           </button>
         ))}
       </div>}
+      {collapsibleCompactSideboard && collapsed && (
+        <div
+          ref={registerCardArea}
+          data-sideboard-card-area
+          data-drop-target="collapsed-sideboard"
+          data-drop-state={dropActive ? "active" : "idle"}
+          className={`min-h-11 flex-1 ${dropActive ? "draft-card-area-drop-active" : ""}`}
+        />
+      )}
     </section>
   );
 }

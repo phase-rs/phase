@@ -287,6 +287,7 @@ fn rebound_declined_at_upkeep_leaves_card_in_exile_with_no_permission() {
         .unwrap()
         .casting_permissions
         .push(CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost_provenance: engine::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,

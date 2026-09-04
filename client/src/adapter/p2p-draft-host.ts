@@ -61,6 +61,58 @@ import {
 } from "../services/intergameCommandLedger";
 import { assignAvatarForSeat } from "../services/playerAvatars";
 
+/**
+ * Prepare a host snapshot for the publicly retrievable P2P backup endpoint.
+ *
+ * IndexedDB keeps the full host snapshot and is the only durable location from
+ * which a Chaos draft can resume. The HTTP backup is reachable by a derivable
+ * host peer id, so it may retain the candidate intent but must never upload the
+ * per-seat Chaos assignment matrix. The server repeats this redaction at its
+ * trust boundary.
+ */
+function redactChaosAssignmentsFromPublicBackup(
+  snapshot: PersistedDraftHostSession,
+): PersistedDraftHostSession {
+  if (snapshot.draftSessionJson === null) return snapshot;
+
+  try {
+    const session: unknown = JSON.parse(snapshot.draftSessionJson);
+    if (!isJsonRecord(session) || !isJsonRecord(session.config)) return snapshot;
+    if (!redactChaosAssignmentsFromSource(session.config.source)) return snapshot;
+
+    return { ...snapshot, draftSessionJson: JSON.stringify(session) };
+  } catch {
+    // The server also redacts at the trust boundary. Keeping an unexpected
+    // opaque payload intact preserves the existing best-effort backup behavior.
+    return snapshot;
+  }
+}
+
+function redactChaosAssignmentsFromSource(source: unknown): boolean {
+  if (!isJsonRecord(source)) return false;
+
+  let redacted = false;
+  const redactSetLayout = (layout: unknown): void => {
+    if (!isJsonRecord(layout) || !("candidate_codes" in layout) || !("assignments" in layout)) {
+      return;
+    }
+    delete layout.assignments;
+    redacted = true;
+  };
+
+  // `DraftSource`'s canonical serde output is adjacent-tagged. The older
+  // externally tagged form is accepted too so a legacy transport shape cannot
+  // bypass this client defense before the server applies its matching redaction.
+  redactSetLayout(source.Set);
+  if (source.type === "Set") redactSetLayout(source.data);
+  redactSetLayout(source);
+  return redacted;
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 // ── Types ──────────────────────────────────────────────────────────────
 
 /** Tracks Bo3 match state between games for a single pairing. */
@@ -141,6 +193,13 @@ const PICK_TIMER_DURATIONS_MS: readonly number[] = [
 
 function pickTimerDurationMs(pickNumber: number): number {
   return PICK_TIMER_DURATIONS_MS[Math.min(pickNumber, PICK_TIMER_DURATIONS_MS.length - 1)];
+}
+
+/** A host seed controls both card collation and private Chaos assignments. */
+function hostDraftSeed(): number {
+  const values = new Uint32Array(1);
+  crypto.getRandomValues(values);
+  return values[0]!;
 }
 
 /**
@@ -466,7 +525,7 @@ export class P2PDraftHost {
     // The third caller, the public `getHostView()`, is NOT covered by this
     // ordering — it is covered by `buildLobbyView`'s throw-on-null, which is
     // why that rule is load-bearing rather than defensive.
-    this.procedure = await this.adapter.draftProcedure(this.kind);
+    this.procedure = await this.adapter.draftProcedure(this.kind, this.tournamentFormat);
 
     this.hostConnectionUnsub = this.onGuestConnected((conn) => {
       this.handleNewConnection(conn);
@@ -895,7 +954,7 @@ export class P2PDraftHost {
       throw new Error("Cannot start draft while a player is reconnecting");
     }
 
-    const seed = Math.floor(Math.random() * 0xffffffff);
+    const seed = hostDraftSeed();
     this.draftSeed = seed;
     const draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
     const seats: MultiplayerSeatDescriptor[] = [];
@@ -1462,11 +1521,17 @@ export class P2PDraftHost {
     } finally {
       stopWatchingSession();
     }
-    await session.send({
-      type: "draft_leave_ack",
-      draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
-      draftToken,
-    });
+    try {
+      await session.send({
+        type: "draft_leave_ack",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+        draftToken,
+      });
+    } catch (error) {
+      // The leave is already durable. A failed notification cannot skip
+      // terminal cleanup or hide the departure from the remaining seats.
+      console.warn("[P2PDraftHost] leave acknowledgement failed:", error);
+    }
     session.close("Participant left draft");
 
     if (this.draftStarted) {
@@ -1886,7 +1951,13 @@ export class P2PDraftHost {
       revision: receipt.revision,
     };
     if (seat === 0) return;
-    await this.guestSessions.get(seat)?.send(message);
+    try {
+      await this.guestSessions.get(seat)?.send(message);
+    } catch (error) {
+      // The receipt is already durable; an exact retry can acknowledge it
+      // without applying the result to the reducer again.
+      console.warn("[P2PDraftHost] settlement acknowledgement failed:", error);
+    }
   }
 
   /**
@@ -2735,13 +2806,14 @@ export class P2PDraftHost {
   private async uploadBackupSnapshot(snapshot: PersistedDraftHostSession): Promise<void> {
     if (!this.backupEndpoint || !this.draftCode) return;
     try {
+      const publicSnapshot = redactChaosAssignmentsFromPublicBackup(snapshot);
       await fetch(`${this.backupEndpoint}/p2p-draft-backup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           draft_code: this.draftCode,
           host_peer_id: this.hostPeer.id,
-          snapshot_json: JSON.stringify(snapshot),
+          snapshot_json: JSON.stringify(publicSnapshot),
         }),
       });
     } catch (err) {
@@ -3008,7 +3080,13 @@ export class P2PDraftHost {
     // Fence queued non-terminal saves before awaiting guest notifications.
     this.persistenceClosed = true;
     for (const session of this.guestSessions.values()) {
-      await session.send({ type: "draft_host_left", reason: "Host left the draft" });
+      try {
+        await session.send({ type: "draft_host_left", reason: "Host left the draft" });
+      } catch (error) {
+        // A disconnected guest cannot prevent notification of the remaining
+        // guests or the terminal cleanup of the host's durable session.
+        console.warn("[P2PDraftHost] termination notification failed:", error);
+      }
     }
     await this.persistQueue;
     if (this.persistenceId) {
@@ -3045,6 +3123,7 @@ export class P2PDraftHost {
         connected: i === 0 || this.guestSessions.has(i),
         has_submitted_deck: false,
         pick_status: "NotDrafting",
+        active_pack_count: 0,
         face_up_draft_cards: [],
       });
     }
@@ -3063,6 +3142,7 @@ export class P2PDraftHost {
     return {
       status: "Lobby",
       kind: this.kind,
+      launch_capability: this.procedure.launch_capability,
       current_pack_number: 0,
       pick_number: 0,
       pass_direction: "Left",

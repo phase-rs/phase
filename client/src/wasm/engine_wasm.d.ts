@@ -77,6 +77,24 @@ export function companionCandidates(request: any): any;
 export function create_initial_state(): any;
 
 /**
+ * Axis A: capture a lobby's live, fully-resolved `FormatConfig` as a saved
+ * custom-format DEFINITION (`CustomFormatDef`), which the client persists
+ * locally. Never produces an active config — `formatConfigForCustomRules`
+ * below is the reverse direction, applied when a player later selects a saved
+ * definition.
+ *
+ * Fallible, and the engine's own rejection message is surfaced verbatim: a
+ * format whose `deck_loading.rs` behavior grants an auxiliary deck or
+ * component keyed on the literal format (Planechase's shared planar deck,
+ * Archenemy's scheme deck, Momir's game-start emblem) has no representation in
+ * `StructuralRules` and would be silently lost, as would an already-`Custom`
+ * source's own legality rules. An empty name is rejected too. The frontend
+ * must not re-derive any of these conditions — it displays what the engine
+ * says.
+ */
+export function customFormatFromLobbyConfig(name: string, format_config: any): any;
+
+/**
  * CR 100.2a / CR 903.5b: The named card's per-card deck-construction copy-limit
  * override, or `null` when the default four-of / singleton limit applies.
  * Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
@@ -91,6 +109,23 @@ export function deckCopyLimit(name: string): any;
  * deck has no commander or the card database is not loaded.
  */
 export function estimate_bracket_for_deck(deck_js: any): any;
+
+/**
+ * Always-definite deck/format gate for callers that ENFORCE rather than hint.
+ *
+ * Returns `{ compatible: boolean, reasons: string[] }` — never a tri-state.
+ * Backed by `evaluate_deck_format_gate`, a thin wrapper over the same
+ * authoritative `validate_deck_for_format` the real game-creation boundary
+ * runs, so a host's admission decision cannot disagree with the engine's own.
+ *
+ * Its one intended caller is the P2P host's per-guest deck check
+ * (`validateGuestDeck` in `client/src/adapter/p2p-adapter.ts`), which kicks a
+ * guest whose deck is illegal for the room's format. UI-hint callers must keep
+ * using `evaluate_deck_compatibility_js`: that one deliberately answers "no
+ * opinion" (`selected_format_compatible: null`) for a Custom format, which is
+ * the honest answer for a legality chip and an unacceptable one for a kick.
+ */
+export function evaluateDeckFormatGate(request: any): any;
 
 /**
  * Evaluate deck compatibility and format legality using the loaded card database.
@@ -110,6 +145,19 @@ export function export_game_state_json(): string;
  * initialized in this worker (or the recording was invalidated by undo).
  */
 export function export_replay_log(): string;
+
+/**
+ * The single authoritative `CustomFormatRules -> FormatConfig` resolver,
+ * exposed for the lobby's "select a saved custom format" action. Total and
+ * infallible: a `CustomFormatRules` carries every structural field the config
+ * needs, so there is no unresolvable input.
+ *
+ * The frontend must call this rather than assembling a `FormatConfig` from the
+ * saved rules itself. `FormatConfig`'s own `Deserialize` re-derives the config
+ * with this exact function and demands equality, so any hand-built config
+ * would be rejected at the next boundary it crossed.
+ */
+export function formatConfigForCustomRules(custom_rules: any): any;
 
 /**
  * Return the authoritative list of user-selectable formats as a typed array.
@@ -350,18 +398,24 @@ export function load_card_database(json_str: string): number;
 export function load_replay_for_playback(json_str: string): number;
 
 /**
- * CR 100.2a / CR 903.5b: How many copies of the named card a `format` deck may
- * legally contain across main deck, sideboard, and command zone combined
- * (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved* ceiling — it
- * already applies the basic-land exemption, the card's printed override, and
- * the format default, so the caller compares a count against it directly.
+ * CR 100.2a / CR 903.5b: How many copies of the named card a deck built under
+ * `format_config` may legally contain across main deck, sideboard, and command
+ * zone combined (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved*
+ * ceiling — it already applies the basic-land exemption, the card's printed
+ * override, and the format default, so the caller compares a count against it
+ * directly.
+ *
+ * `format_config` is a full `FormatConfig` JSON object (as published by
+ * `getFormatRegistry`'s `default_config`), not a bare `GameFormat` string: only
+ * the config carries the resolved `default_deck_copy_limit` a custom format
+ * declares.
  *
  * Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
  * `{"type":"UpTo","data":N}`); switch on `.type`. Returns `{"type":"Unlimited"}`
  * when the card database isn't loaded, so a not-yet-hydrated frontend never
  * blocks a legal add.
  */
-export function maxDeckCopies(name: string, format: any): any;
+export function maxDeckCopies(name: string, format_config: any): any;
 
 /**
  * Verify WASM integration works.
@@ -434,17 +488,6 @@ export function replay_seek_js(target: number): any;
 export function restore_game_state(json_str: string): void;
 
 /**
- * Explicitly resume a persisted stack-automation session after
- * `restore_game_state` has installed the snapshot.
- *
- * Generic restore is intentionally decode-only, so it never manufactures a
- * priority pass. This returns the engine-authored bounded presentation for the
- * resumed session (or an explicit no-op/repair); read the post-transition game
- * state through `get_game_state` or a filtered state export.
- */
-export function resume_restored_game_state(): any;
-
-/**
  * Resume a multiplayer host session from a persisted `GameState`.
  *
  * Called when a P2P host returns after a crash/reload and needs to restore
@@ -475,11 +518,21 @@ export function resume_restored_game_state(): any;
  *    session.
  *
  * Refuses when the engine is already in use — this is a fresh-instance
- * entry point. Callers must clear any existing state first. Returns the same
- * bounded engine-authored restored-automation presentation as
- * `resume_restored_game_state` before the host exposes its first snapshot.
+ * entry point. Callers must clear any existing state first.
  */
 export function resume_multiplayer_host_state(json_str: string): any;
+
+/**
+ * Explicitly drive any persisted stack automation after a successful restore.
+ *
+ * [`restore_game_state`] deliberately remains an undo/decode boundary: it
+ * installs a playable snapshot but never manufactures a priority pass. This
+ * separately-invoked transition is the only WASM owner allowed to ask the
+ * engine to resume a saved `StackResolutionSession` or legacy Ready latch.
+ * Its bounded engine-authored presentation describes the automated burst;
+ * callers read the final game snapshot through the normal state exports.
+ */
+export function resume_restored_game_state(): any;
 
 /**
  * Search the loaded card database. The engine is the single authority for the
@@ -503,9 +556,13 @@ export function search_cards_js(query: any): any;
 export function set_multiplayer_mode(enabled: boolean): void;
 
 /**
- * CR 100.4a: Returns the sideboard policy for a given game format as a
+ * CR 100.4a: Returns the sideboard policy stored on a `FormatConfig` as a
  * tagged union: `{"type": "Forbidden"}`, `{"type": "Limited", "data": 15}`,
  * or `{"type": "Unlimited"}`.
+ *
+ * `format_config` is a full `FormatConfig` JSON object (as published by
+ * `getFormatRegistry`'s `default_config`), not a bare `GameFormat` string: only
+ * the config carries the resolved policy a custom format declares.
  *
  * The frontend must exhaustive-switch on `.type` — unit variants (`Forbidden`,
  * `Unlimited`) emit no `data` field under `#[serde(tag, content)]`.
@@ -513,7 +570,7 @@ export function set_multiplayer_mode(enabled: boolean): void;
  * The engine is the single authority for format sideboard rules; the frontend
  * never hardcodes 15 or any other cap.
  */
-export function sideboardPolicyForFormat(format: any): any;
+export function sideboardPolicyForFormat(format_config: any): any;
 
 /**
  * Returns the engine-authored Oathbreaker signature-spell selection policy.
@@ -569,11 +626,14 @@ export interface InitOutput {
     readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
     readonly companionCandidates: (a: any) => [number, number, number];
+    readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
+    readonly evaluateDeckFormatGate: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
+    readonly formatConfigForCustomRules: (a: any) => [number, number, number];
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -604,8 +664,8 @@ export interface InitOutput {
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
     readonly replay_seek_js: (a: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
-    readonly resume_restored_game_state: () => [number, number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
+    readonly resume_restored_game_state: () => [number, number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];

@@ -22,12 +22,13 @@ use crate::types::ability::{
     CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
     Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
-    ObjectScope, ParsedCondition, PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope,
-    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
-    SpeedDelta, SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement,
-    StackAbilityKind, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
+    ObjectScope, ObjectSelectionCardinality, ObjectSelectionEligibility, ParsedCondition,
+    PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
+    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
+    TypedFilter, VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -1226,6 +1227,8 @@ fn fmt_duration(d: &Duration) -> String {
             format!("until end of next turn ({})", fmt_player_scope(player))
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
+        Duration::WhileHostOnBattlefield => "while it remains on the battlefield".to_string(),
+        Duration::WhileControllingHost => "while its controller controls the source".to_string(),
         Duration::UntilSourceExilesAnotherCard => "until source exiles another card".to_string(),
         Duration::UntilOpponentBecomesMonarch => {
             "until an opponent becomes the monarch".to_string()
@@ -3575,6 +3578,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             filter,
             min,
             max,
+            cardinality,
+            eligibility,
         } => {
             d.push(("chooser".into(), fmt_target(chooser)));
             d.push(("filter".into(), fmt_target(filter)));
@@ -3583,6 +3588,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 "max".into(),
                 max.map_or_else(|| "any".to_string(), |m| m.to_string()),
             ));
+            if let Some(ObjectSelectionCardinality::Exactly { count }) = cardinality {
+                d.push(("cardinality".into(), format!("exactly {count}")));
+            }
+            if let Some(ObjectSelectionEligibility::RemovableCounter { counter_type }) = eligibility
+            {
+                d.push((
+                    "eligibility".into(),
+                    counter_type.as_ref().map_or_else(
+                        || "removable counter".to_string(),
+                        |counter_type| format!("removable {} counter", counter_type.as_str()),
+                    ),
+                ));
+            }
         }
         Effect::ChooseCounterKind { target } => {
             d.push(("target".into(), fmt_target(target)));
@@ -3729,9 +3747,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
             d.push(("chooser".into(), fmt_target(chooser)));
         }
-        Effect::Amass { subtype, count } => {
+        Effect::Amass {
+            subtype,
+            count,
+            player,
+        } => {
             d.push(("subtype".into(), subtype.clone()));
             d.push(("count".into(), fmt_quantity(count)));
+            d.push(("player".into(), fmt_target(player)));
         }
         Effect::Monstrosity { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
@@ -12181,6 +12204,60 @@ mod tests {
             labels.len(),
             8,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
+        );
+    }
+
+    /// Exact cardinality and counter-removal eligibility are semantic parser
+    /// axes. Defaults deliberately render nothing, preserving existing
+    /// signatures, while non-default selections remain distinguishable.
+    #[test]
+    fn object_selection_cardinality_and_eligibility_reach_parse_details() {
+        let selection = |cardinality, eligibility| Effect::ChooseObjectsIntoTrackedSet {
+            chooser: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            min: 0,
+            max: None,
+            cardinality,
+            eligibility,
+        };
+        let default = effect_details(&selection(None, None));
+        assert!(
+            !default
+                .iter()
+                .any(|(key, _)| key == "cardinality" || key == "eligibility"),
+            "the legacy selection shape must not gain signature keys"
+        );
+
+        let exact = effect_details(&selection(
+            Some(ObjectSelectionCardinality::Exactly { count: 2 }),
+            None,
+        ));
+        assert!(
+            exact
+                .iter()
+                .any(|(key, value)| key == "cardinality" && value == "exactly 2"),
+            "an exact selection cardinality must be visible to parse coverage: {exact:?}"
+        );
+        assert_ne!(
+            default, exact,
+            "exact and legacy selections must not collapse"
+        );
+
+        let removable = effect_details(&selection(
+            Some(ObjectSelectionCardinality::Exactly { count: 2 }),
+            Some(ObjectSelectionEligibility::RemovableCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+            }),
+        ));
+        assert!(
+            removable
+                .iter()
+                .any(|(key, value)| { key == "eligibility" && value == "removable P1P1 counter" }),
+            "counter-removal eligibility must be visible to parse coverage: {removable:?}"
+        );
+        assert_ne!(
+            exact, removable,
+            "counter-eligible and unconstrained exact selections must not collapse"
         );
     }
 

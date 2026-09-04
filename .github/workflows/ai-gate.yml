@@ -47,17 +47,22 @@ jobs:
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       - name: Run quick AI gate
-        run: cargo ai-gate --games 10
+        run: cargo ai-gate --games 10 --seed 10573729 --difficulty medium
 
   ai-gate-nightly:
     name: Nightly AI gate drift monitor
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    # `--full-suite --games 100` consistently exceeded the prior 90m ceiling
-    # (never completed since at least 2026-06-13). Raised to 300m — generous
-    # headroom under GitHub's 360m hosted-runner cap — to get a first completion
-    # and a real-duration baseline to right-size from. The ceiling only bills the
-    # failure case; a job that finishes in 2h stops at 2h.
+    # The gate's workload flags MUST equal the corresponding fields in
+    # crates/phase-ai/baselines/suite-baseline.json. The comparator refuses a pair
+    # whose workloads disagree, so a divergent value here makes this job incapable
+    # of any verdict; crates/phase-ai/tests/gate_cli.rs reds if an invocation
+    # written down in this directory drifts from the baseline.
+    #
+    # What the leg buys at that workload: liveness across the whole matchup
+    # registry, plus mirror classification at a low-power band — not a drift gate
+    # at the band a larger per-matchup sample would give. The ceiling only bills
+    # the failure case; a job that finishes early stops early.
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -84,7 +89,7 @@ jobs:
           # skipped, and nothing else has invoked cargo yet — the redirect then
           # dies with "No such file or directory" and the gate never executes.
           mkdir -p target
-          cargo ai-gate --full-suite --games 100 > target/ai-gate-report.md
+          cargo ai-gate --full-suite --games 10 --seed 10573729 --difficulty medium > target/ai-gate-report.md
 
       - name: Open or update drift issue
         if: steps.gate.outcome == 'failure'
