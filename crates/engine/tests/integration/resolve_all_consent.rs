@@ -892,7 +892,7 @@ fn persisted_pending_consent_decline_restores_the_captured_baseline() {
     assert!(restored.auto_pass.is_empty());
 }
 
-/// CR 117.4: a save written before `ResolveAllScope` existed carries no `scope`
+/// CR 117.3d: a save written before `ResolveAllScope` existed carries no `scope`
 /// key at all, and `#[serde(default)]` must resolve that to `Own` -- the scope
 /// that binds only the requester. Defaulting a legacy run to `Shared` would
 /// silently hand it table-wide authority over seats that never consented, which

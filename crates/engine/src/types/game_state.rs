@@ -2068,7 +2068,7 @@ pub struct ResolveAllConsentRun {
     /// live-authority check accepts them as a SUBSET of the current priority
     /// participants; a `Shared` run is a table-wide proposal and must still
     /// match the live set exactly, or a seat that became a participant after
-    /// the snapshot would be bound by a consent it never gave (CR 117.4).
+    /// the snapshot would be bound by a consent it never gave (CR 117.3d).
     /// Defaults to `Own` so a save written before this field existed cannot
     /// silently acquire table-wide authority.
     #[serde(default)]

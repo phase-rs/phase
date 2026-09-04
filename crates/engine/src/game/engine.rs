@@ -8918,7 +8918,7 @@ fn begin_resolve_all_consent(
     super::priority::pass_priority_legality(state, priority_player)?;
     let current_representative =
         super::topology::priority_pass_representative(state, priority_player);
-    // CR 117.3d / CR 117.4: `Own` binds the requester alone (no consent to ask,
+    // CR 117.3d: `Own` binds the requester alone (no consent to ask,
     // so nobody can block it); `Shared` opens the table-wide compression
     // proposal, rotated so the requester is first and self-granted. See
     // `ResolveAllScope`.

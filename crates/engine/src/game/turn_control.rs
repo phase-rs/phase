@@ -412,7 +412,7 @@ pub(crate) fn resolve_all_consent_authority_matches_live(
         .into_iter()
         .collect();
 
-    // CR 117.4: a `Shared` run is a table-wide proposal, so a seat that became
+    // CR 117.3d: a `Shared` run is a table-wide proposal, so a seat that became
     // a priority participant after the snapshot would otherwise be bound by a
     // consent it never gave — the live set must match exactly. An `Own` run
     // binds only the requester and asks nobody, so it stays coherent as long as
