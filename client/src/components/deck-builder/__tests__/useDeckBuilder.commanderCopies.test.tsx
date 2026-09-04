@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 
 import type { GameFormat } from "../../../adapter/types";
+import {
+  evaluateDeckCompatibility,
+  type DeckCompatibilityResult,
+} from "../../../services/deckCompatibility";
 
 const eligible = new Set<string>();
 const partnerCandidates = vi.fn(async () => [] as string[]);
@@ -182,22 +186,26 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     expect(result.current.commanders).toEqual([]);
   });
 
-  it("projects one color identity entry per cached physical copy", async () => {
+  it("uses the engine distribution even when cached card data is absent or stale", async () => {
     cardDataCache.set("Azorius Pair", {
       name: "Azorius Pair",
       cmc: 2,
-      color_identity: ["W", "U"],
+      color_identity: ["G"],
     });
-    cardDataCache.set("Red Card", {
-      name: "Red Card",
-      cmc: 1,
-      color_identity: ["R"],
-    });
-    cardDataCache.set("Wastes", {
-      name: "Wastes",
-      cmc: 0,
-      color_identity: [],
-    });
+    const distribution = [
+      { color: "White" as const, count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Blue" as const, count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Red" as const, count: 1, percentage: 20, display_percentage: 20 },
+    ];
+    vi.mocked(evaluateDeckCompatibility).mockResolvedValue({
+      standard: { compatible: true, reasons: [] },
+      commander: { compatible: true, reasons: [] },
+      bo3_ready: false,
+      unknown_cards: [],
+      selected_format_reasons: [],
+      color_identity: ["W", "U", "R"],
+      color_distribution: distribution,
+    } satisfies DeckCompatibilityResult);
     const { result } = setup();
 
     act(() => {
@@ -213,7 +221,7 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     });
 
     await waitFor(() => {
-      expect([...result.current.colorValues].sort()).toEqual(["", "R", "WU", "WU"]);
+      expect(result.current.colorDistribution).toEqual(distribution);
     });
   });
 });

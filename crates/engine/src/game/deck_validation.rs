@@ -172,6 +172,14 @@ pub struct CompatibilityCheck {
     pub reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeckColorDistributionEntry {
+    pub color: ManaColor,
+    pub count: usize,
+    pub percentage: f64,
+    pub display_percentage: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeckCompatibilityResult {
     pub standard: CompatibilityCheck,
@@ -187,6 +195,9 @@ pub struct DeckCompatibilityResult {
     /// Each entry is a single-letter color code: "W", "U", "B", "R", or "G".
     #[serde(default)]
     pub color_identity: Vec<String>,
+    /// Per-color distribution of known main-deck cards, in WUBRG order.
+    #[serde(default)]
+    pub color_distribution: Vec<DeckColorDistributionEntry>,
     /// Engine coverage summary for the deck's unique cards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<DeckCoverage>,
@@ -243,6 +254,7 @@ pub fn evaluate_deck_compatibility(
     // time, so they are never BO3-ready regardless of slot occupancy.
     let bo3_ready = !request.sideboard.is_empty() && request.commander.is_empty();
     let color_identity = collect_color_identity(db, request);
+    let color_distribution = collect_main_deck_color_distribution(db, request);
 
     let (mut selected_format_compatible, mut selected_format_reasons) = evaluate_selected_format(
         db,
@@ -288,6 +300,7 @@ pub fn evaluate_deck_compatibility(
         selected_format_compatible,
         selected_format_reasons,
         color_identity,
+        color_distribution,
         coverage: Some(coverage),
         format_legality,
     }
@@ -331,6 +344,7 @@ fn evaluate_deck_compatibility_summary(
         selected_format_compatible,
         selected_format_reasons,
         color_identity: collect_color_identity(db, request),
+        color_distribution: collect_main_deck_color_distribution(db, request),
         coverage: None,
         format_legality: BTreeMap::new(),
     }
@@ -2954,6 +2968,42 @@ fn collect_color_identity(db: &CardDatabase, request: &DeckCompatibilityRequest)
         .collect()
 }
 
+/// Returns the engine-authored WUBRG color distribution for known main-deck cards.
+fn collect_main_deck_color_distribution(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+) -> Vec<DeckColorDistributionEntry> {
+    let mut counts = HashMap::new();
+
+    for name in &request.main_deck {
+        let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) else {
+            continue;
+        };
+        for color in card_color_identity(face) {
+            *counts.entry(color).or_insert(0usize) += 1;
+        }
+    }
+
+    let total: usize = counts.values().sum();
+    if total == 0 {
+        return Vec::new();
+    }
+
+    ManaColor::ALL
+        .iter()
+        .filter_map(|color| {
+            let count = *counts.get(color)?;
+            let percentage = count as f64 / total as f64 * 100.0;
+            Some(DeckColorDistributionEntry {
+                color: *color,
+                count,
+                percentage,
+                display_percentage: percentage.round() as u8,
+            })
+        })
+        .collect()
+}
+
 fn mana_color_letter(color: &ManaColor) -> String {
     match color {
         ManaColor::White => "W",
@@ -4814,6 +4864,69 @@ mod tests {
 
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
+    }
+
+    #[test]
+    fn color_distribution_is_main_deck_only_and_matches_summary() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: vec![
+                "Grub Commander".to_string(),
+                "Grub Commander".to_string(),
+                "Red Card".to_string(),
+                "Legal Standard".to_string(),
+                "Unknown Card".to_string(),
+            ],
+            sideboard: vec!["Grub Commander".to_string()],
+            commander: vec!["Grub Commander".to_string()],
+            companion: vec!["Grub Commander".to_string()],
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: vec!["Grub Commander".to_string()],
+            selected_format: Some(GameFormat::Standard),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+            default_deck_copy_limit: None,
+        };
+
+        let full = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(
+            full.color_distribution,
+            vec![
+                DeckColorDistributionEntry {
+                    color: ManaColor::Black,
+                    count: 2,
+                    percentage: 40.0,
+                    display_percentage: 40,
+                },
+                DeckColorDistributionEntry {
+                    color: ManaColor::Red,
+                    count: 3,
+                    percentage: 60.0,
+                    display_percentage: 60,
+                },
+            ]
+        );
+        assert_eq!(full.unknown_cards, vec!["Unknown Card"]);
+
+        let summary = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                summary_only: true,
+                ..request
+            },
+        );
+        assert_eq!(summary.color_distribution, full.color_distribution);
+
+        let mut old_payload = serde_json::to_value(full).unwrap();
+        old_payload
+            .as_object_mut()
+            .unwrap()
+            .remove("color_distribution");
+        let decoded: DeckCompatibilityResult = serde_json::from_value(old_payload).unwrap();
+        assert!(decoded.color_distribution.is_empty());
     }
 
     #[test]

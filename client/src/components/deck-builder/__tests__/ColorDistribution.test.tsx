@@ -1,15 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, within } from "@testing-library/react";
 
 import { ColorDistribution } from "../ColorDistribution";
 
+const DISTRIBUTION = [
+  { color: "White", count: 2, percentage: 33.25, display_percentage: 33 },
+  { color: "Blue", count: 4, percentage: 66.75, display_percentage: 67 },
+] as const;
+
 describe("ColorDistribution", () => {
   it.each(["default", "compact"] as const)(
-    "renders WUBRG percentages in %s presentation",
+    "renders engine-authored percentages in %s presentation",
     (presentation) => {
       const { container } = render(
         <ColorDistribution
-          colorValues={["WU", "WU", "R", ""]}
+          distribution={DISTRIBUTION}
           presentation={presentation}
         />,
       );
@@ -20,24 +25,15 @@ describe("ColorDistribution", () => {
         presentation,
       );
       expect(within(distribution as HTMLElement).getByText("Colors")).toBeInTheDocument();
-      expect(distribution).toHaveTextContent("W 40%");
-      expect(distribution).toHaveTextContent("U 40%");
-      expect(distribution).toHaveTextContent("R 20%");
+      expect(distribution).toHaveTextContent("W 33%");
+      expect(distribution).toHaveTextContent("U 67%");
+      expect(within(distribution as HTMLElement).getByTitle("W: 33%")).toHaveStyle({ width: "33.25%" });
+      expect(within(distribution as HTMLElement).getByTitle("U: 67%")).toHaveStyle({ width: "66.75%" });
     },
   );
 
-  it("renders nothing for empty, colorless, and unknown-only inputs", () => {
-    const { container, rerender } = render(<ColorDistribution colorValues={[]} />);
+  it("renders nothing for an empty engine distribution", () => {
+    const { container } = render(<ColorDistribution distribution={[]} />);
     expect(container.querySelector("[data-color-distribution]")).toBeNull();
-
-    rerender(<ColorDistribution colorValues={["", "X"]} />);
-    expect(container.querySelector("[data-color-distribution]")).toBeNull();
-  });
-
-  it("ignores unknown symbols without changing known-color percentages", () => {
-    render(<ColorDistribution colorValues={["WX", "U"]} />);
-    expect(screen.getByText("W 50%")).toBeInTheDocument();
-    expect(screen.getByText("U 50%")).toBeInTheDocument();
-    expect(screen.queryByText(/X \d+%/)).toBeNull();
   });
 });

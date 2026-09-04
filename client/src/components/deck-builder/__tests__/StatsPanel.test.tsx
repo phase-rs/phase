@@ -9,7 +9,10 @@ describe("StatsPanel", () => {
       <StatsPanel
         compatibility={null}
         cmcValues={[1, 2]}
-        colorValues={["W", "U"]}
+        colorDistribution={[
+          { color: "White", count: 1, percentage: 50, display_percentage: 50 },
+          { color: "Blue", count: 1, percentage: 50, display_percentage: 50 },
+        ]}
         isCommander={false}
         estimate={null}
         manualBracket={null}

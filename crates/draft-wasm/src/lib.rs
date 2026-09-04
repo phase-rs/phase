@@ -1178,10 +1178,9 @@ fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
             );
 
             // CR 903.13f(1): "A player's deck must contain at least 60 cards".
-            // New Commander Cube sessions clamp configured `min_deck_size` to
-            // the engine-published Cube floor, so this guard enforces at least
-            // 60 for them. Restored sessions retain their persisted floor; this
-            // guard enforces that stored value without rewriting snapshot history.
+            // New and restored Commander Cube sessions clamp configured
+            // `min_deck_size` to the engine-published Cube floor, so this guard
+            // enforces at least 60 for every session.
             //
             // `min_deck_size` is also the same value `apply_submit_deck` hands
             // `validate_limited_deck` for the human on this pod

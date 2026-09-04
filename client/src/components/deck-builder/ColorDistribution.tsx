@@ -1,35 +1,26 @@
 import { useTranslation } from "react-i18next";
 
+import type { DeckColor, DeckColorDistributionEntry } from "../../services/deckCompatibility";
+
 interface ColorDistributionProps {
-  colorValues: string[];
+  distribution: readonly DeckColorDistributionEntry[];
   presentation?: "default" | "compact";
 }
 
-const COLORS = [
-  { symbol: "W", bg: "bg-amber-200" },
-  { symbol: "U", bg: "bg-blue-500" },
-  { symbol: "B", bg: "bg-gray-700" },
-  { symbol: "R", bg: "bg-red-600" },
-  { symbol: "G", bg: "bg-green-600" },
-] as const;
+const COLORS: Record<DeckColor, { symbol: string; bg: string }> = {
+  White: { symbol: "W", bg: "bg-amber-200" },
+  Blue: { symbol: "U", bg: "bg-blue-500" },
+  Black: { symbol: "B", bg: "bg-gray-700" },
+  Red: { symbol: "R", bg: "bg-red-600" },
+  Green: { symbol: "G", bg: "bg-green-600" },
+};
 
 export function ColorDistribution({
-  colorValues,
+  distribution,
   presentation = "default",
 }: ColorDistributionProps) {
   const { t } = useTranslation("deck-builder");
-  const counts = new Map<string, number>();
-  let total = 0;
-
-  for (const identity of colorValues) {
-    for (const symbol of identity) {
-      if (!COLORS.some((color) => color.symbol === symbol)) continue;
-      counts.set(symbol, (counts.get(symbol) ?? 0) + 1);
-      total += 1;
-    }
-  }
-
-  if (total === 0) return null;
+  if (distribution.length === 0) return null;
 
   const compact = presentation === "compact";
   return (
@@ -45,29 +36,25 @@ export function ColorDistribution({
         {t("manaCurve.colors")}
       </h4>
       <div className={compact ? "flex h-2 overflow-hidden rounded" : "flex h-3 overflow-hidden rounded"}>
-        {COLORS.map(({ symbol, bg }) => {
-          const count = counts.get(symbol) ?? 0;
-          if (count === 0) return null;
-          const percentage = (count / total) * 100;
+        {distribution.map(({ color, percentage, display_percentage }) => {
+          const { symbol, bg } = COLORS[color];
           return (
             <div
-              key={symbol}
+              key={color}
               className={`${bg} transition-all`}
               style={{ width: `${percentage}%` }}
-              title={`${symbol}: ${Math.round(percentage)}%`}
+              title={`${symbol}: ${display_percentage}%`}
             />
           );
         })}
       </div>
       <div className="flex gap-2">
-        {COLORS.map(({ symbol, bg }) => {
-          const count = counts.get(symbol) ?? 0;
-          if (count === 0) return null;
-          const percentage = Math.round((count / total) * 100);
+        {distribution.map(({ color, display_percentage }) => {
+          const { symbol, bg } = COLORS[color];
           return (
-            <span key={symbol} className="flex items-center gap-1 text-[10px] text-gray-400">
+            <span key={color} className="flex items-center gap-1 text-[10px] text-gray-400">
               <span className={`inline-block h-2 w-2 rounded-full ${bg}`} />
-              {symbol} {percentage}%
+              {symbol} {display_percentage}%
             </span>
           );
         })}

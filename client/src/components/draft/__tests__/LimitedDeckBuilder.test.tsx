@@ -2,6 +2,7 @@ import { StrictMode, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
+import type { DeckColorDistributionEntry } from "../../../services/deckCompatibility";
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
 import type { DraftWorkspaceState } from "../workspace/types";
 import { createDefaultDraftWorkspacePreferences } from "../workspace/workspacePreferences";
@@ -11,7 +12,7 @@ afterEach(cleanup);
 const compatibilityHarness = vi.hoisted(() => ({
   evaluate: vi.fn(),
   cardDataCache: new Map<string, { name: string; cmc: number; color_identity: string[] }>(),
-  colorCaptures: [] as string[][],
+  colorCaptures: [] as DeckColorDistributionEntry[][],
 }));
 
 const compatibleResult = () => ({
@@ -33,8 +34,11 @@ vi.mock("../../../services/deckCompatibility", () => ({
 vi.mock("../../deck-builder/ColorDistribution", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../deck-builder/ColorDistribution")>();
   return {
-    ColorDistribution: (props: { colorValues: string[]; presentation?: "default" | "compact" }) => {
-      compatibilityHarness.colorCaptures.push([...props.colorValues]);
+    ColorDistribution: (props: {
+      distribution: readonly DeckColorDistributionEntry[];
+      presentation?: "default" | "compact";
+    }) => {
+      compatibilityHarness.colorCaptures.push([...props.distribution]);
       return <actual.ColorDistribution {...props} />;
     },
   };
@@ -1670,9 +1674,11 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       />,
     );
 
-    expect(compatibilityHarness.colorCaptures.some(
-      (capture) => JSON.stringify([...capture].sort()) === JSON.stringify(["", "R", "WU", "WU"]),
-    )).toBe(true);
+    expect(compatibilityHarness.colorCaptures).toContainEqual([
+      { color: "White", count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Blue", count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Red", count: 1, percentage: 20, display_percentage: 20 },
+    ]);
     expect(screen.getByText("W 40%")).toBeInTheDocument();
     expect(screen.getByText("U 40%")).toBeInTheDocument();
     expect(screen.getByText("R 20%")).toBeInTheDocument();
@@ -1717,9 +1723,11 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       />,
     );
 
-    expect(compatibilityHarness.colorCaptures.some(
-      (capture) => JSON.stringify([...capture].sort()) === JSON.stringify(["", "R", "WU", "WU"]),
-    )).toBe(true);
+    expect(compatibilityHarness.colorCaptures).toContainEqual([
+      { color: "White", count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Blue", count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Red", count: 1, percentage: 20, display_percentage: 20 },
+    ]);
     const layout = container.querySelector<HTMLElement>("[data-responsive-builder-layout]")!;
     const phone = responsiveLayout.startsWith("phone");
     const tablet = responsiveLayout === "tablet-landscape";

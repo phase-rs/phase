@@ -73,7 +73,7 @@ export function DeckBuilder({
     estimate,
     auditEmptyReason,
     cmcValues,
-    colorValues,
+    colorDistribution,
     cardCounts,
     warnings,
     handleListContextMenu,
@@ -516,7 +516,7 @@ export function DeckBuilder({
             <StatsPanel
               compatibility={compatibility}
               cmcValues={cmcValues}
-              colorValues={colorValues}
+              colorDistribution={colorDistribution}
               isCommander={isCommander}
               estimate={estimate}
               manualBracket={bracket}

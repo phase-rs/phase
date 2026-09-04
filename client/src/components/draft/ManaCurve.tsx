@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { DraftCardInstance } from "../../adapter/draft-adapter";
+import type { DeckColorDistributionEntry } from "../../services/deckCompatibility";
 import { ColorDistribution } from "../deck-builder/ColorDistribution";
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -58,6 +59,33 @@ export function ManaCurve({ pool, cards, colorValues, presentation = "default" }
   }, [cards, pool]);
 
   const maxCount = Math.max(1, ...counts.map((b) => b.count));
+  const colorDistribution = useMemo(() => {
+    const countsByColor = new Map<string, number>();
+    let total = 0;
+
+    for (const identity of colorValues) {
+      for (const symbol of identity) {
+        const color = { W: "White", U: "Blue", B: "Black", R: "Red", G: "Green" }[symbol];
+        if (!color) continue;
+        countsByColor.set(color, (countsByColor.get(color) ?? 0) + 1);
+        total += 1;
+      }
+    }
+
+    if (total === 0) return [];
+
+    return ["White", "Blue", "Black", "Red", "Green"].flatMap((color) => {
+      const count = countsByColor.get(color) ?? 0;
+      if (count === 0) return [];
+      const percentage = (count / total) * 100;
+      return [{
+        color: color as DeckColorDistributionEntry["color"],
+        count,
+        percentage,
+        display_percentage: Math.round(percentage),
+      }];
+    });
+  }, [colorValues]);
 
   return (
     <div
@@ -118,7 +146,7 @@ export function ManaCurve({ pool, cards, colorValues, presentation = "default" }
           </div>
         ))}
       </div>
-      <ColorDistribution colorValues={colorValues} presentation={presentation} />
+      <ColorDistribution distribution={colorDistribution} presentation={presentation} />
     </div>
   );
 }
