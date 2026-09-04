@@ -3624,7 +3624,16 @@ mod tests {
         );
         let (id, message) = rejection_of(&correlated);
         assert_eq!(id, REQUEST_ID);
-        assert!(!message.is_empty(), "a refusal must say why");
+        // Discriminating, not just non-empty: `handle_start_tournament_round`'s
+        // own refusals (bad token, tournament not found) route through this
+        // same `settle_rejection` call and would otherwise satisfy a bare
+        // non-empty check just as well — which would let this test silently
+        // drift onto the handler path if the bounds check ever moved, taking
+        // D6's only coverage with it without turning the suite red.
+        assert!(
+            message.contains("organizer_token") && message.contains("at most"),
+            "expected the bounds-guard message, got: {message}"
+        );
 
         // Reach-guard: the SAME oversized frame, uncorrelated, still produces
         // today's bare `Error` — proving the assertions above are about the

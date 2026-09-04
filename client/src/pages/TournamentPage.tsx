@@ -263,10 +263,14 @@ export function TournamentPage() {
    * `TournamentActionAck` / `TournamentActionRejected` for **this exact
    * request** (`services/tournamentClient.ts`, module header parts 3-4), so
    * `{ok:false, reason:"rejected"}` is a reliable "the server refused *me*"
-   * signal, not another actor's frame arriving in its place. The one residual
-   * "not confirmed" case is `{reason:"unsupported"}`: against a peer too old
-   * to mint an ack, the frame is still sent and very likely performed, and
-   * this client simply cannot confirm it. `view` still comes only from the
+   * signal, not another actor's frame arriving in its place. The residual
+   * "not confirmed" cases are `{reason:"unsupported"}` — a peer too old to
+   * mint an ack, where the frame is still sent and very likely performed —
+   * and, less commonly, `{reason:"timeout"}`: a correlated request also
+   * ignores a bare `Error` (`services/tournamentClient.ts`, module header
+   * part 5), so a fast-fail at the parse boundary or a lost/late ack settles
+   * this way too, and neither means the action definitely did not happen.
+   * `view` still comes only from the
    * ambient subscription, as a layering choice — the fan-out owns state, this
    * function owns the call — not as compensation for a signal that could not
    * be trusted.
