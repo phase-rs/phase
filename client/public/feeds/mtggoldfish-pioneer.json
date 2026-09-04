@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-03T00:00:00Z",
+  "updated": "2026-09-04T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -1042,8 +1042,8 @@
       "name": "Dimir Self-Bounce",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "U"
+        "U",
+        "B"
       ],
       "tags": [
         "metagame"
@@ -1051,11 +1051,7 @@
       "main": [
         {
           "count": 4,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 4,
-          "name": "Clearwater Pathway"
+          "name": "Fear of Isolation"
         },
         {
           "count": 4,
@@ -1063,15 +1059,19 @@
         },
         {
           "count": 4,
-          "name": "Darkslick Shores"
+          "name": "This Town Ain't Big Enough"
         },
         {
           "count": 4,
-          "name": "Thoughtseize"
+          "name": "Watery Grave"
         },
         {
           "count": 4,
-          "name": "Fear of Isolation"
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 2,
+          "name": "Urborg, Tomb of Yawgmoth"
         },
         {
           "count": 2,
@@ -1082,12 +1082,16 @@
           "name": "Hopeless Nightmare"
         },
         {
-          "count": 2,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Momentum Breaker"
         },
         {
           "count": 4,
-          "name": "Momentum Breaker"
+          "name": "Nowhere to Run"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
         },
         {
           "count": 4,
@@ -1095,7 +1099,15 @@
         },
         {
           "count": 4,
-          "name": "Nowhere to Run"
+          "name": "Clearwater Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Darkslick Shores"
+        },
+        {
+          "count": 2,
+          "name": "Island"
         },
         {
           "count": 1,
@@ -1114,12 +1126,8 @@
           "name": "Underground River"
         },
         {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
           "count": 2,
-          "name": "Island"
+          "name": "Swamp"
         },
         {
           "count": 1,
@@ -1127,19 +1135,11 @@
         },
         {
           "count": 4,
-          "name": "This Town Ain't Big Enough"
+          "name": "Thoughtseize"
         },
         {
           "count": 4,
           "name": "Fatal Push"
-        },
-        {
-          "count": 2,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
         },
         {
           "count": 4,

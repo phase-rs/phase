@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-09-03T00:00:00Z",
+  "updated": "2026-09-04T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -269,8 +269,8 @@
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Spell Pierce"
+          "count": 1,
+          "name": "Sleight of Hand"
         },
         {
           "count": 4,
@@ -294,15 +294,15 @@
         },
         {
           "count": 4,
-          "name": "Sleight of Hand"
+          "name": "Riverpyre Verge"
         },
         {
           "count": 4,
           "name": "Prismari Charm"
         },
         {
-          "count": 4,
-          "name": "Riverpyre Verge"
+          "count": 3,
+          "name": "Burst Lightning"
         },
         {
           "count": 4,
@@ -322,10 +322,6 @@
         },
         {
           "count": 3,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 3,
           "name": "Traumatic Critique"
         },
         {
@@ -337,16 +333,20 @@
           "name": "Spirebluff Canal"
         },
         {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 3,
+          "count": 4,
           "name": "Steam Vents"
         },
         {
           "count": 4,
           "name": "Sunderflock"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 3,
+          "name": "Sleight of Hand"
         }
       ],
       "sideboard": [
@@ -383,16 +383,16 @@
           "name": "Ill-Timed Explosion"
         },
         {
-          "count": 2,
-          "name": "Annul"
-        },
-        {
           "count": 3,
           "name": "Colorstorm Stallion"
         },
         {
           "count": 2,
           "name": "Hydro-Man, Fluid Felon"
+        },
+        {
+          "count": 2,
+          "name": "Annul"
         }
       ]
     },
@@ -883,36 +883,36 @@
       "name": "Mardu Discard",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
         "B",
-        "R"
+        "R",
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
           "count": 4,
-          "name": "Bloodghast"
+          "name": "Sacred Foundry"
         },
         {
-          "count": 2,
-          "name": "Carnage, Crimson Chaos"
+          "count": 1,
+          "name": "Mountain"
         },
         {
-          "count": 3,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 3,
-          "name": "Godless Shrine"
+          "count": 4,
+          "name": "Moonshadow"
         },
         {
           "count": 4,
           "name": "Cool but Rude"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Erode"
         },
         {
@@ -924,8 +924,8 @@
           "name": "Hardened Academic"
         },
         {
-          "count": 4,
-          "name": "Moonshadow"
+          "count": 3,
+          "name": "Godless Shrine"
         },
         {
           "count": 2,
@@ -940,78 +940,66 @@
           "name": "Marauding Mako"
         },
         {
-          "count": 4,
-          "name": "Sacred Foundry"
+          "count": 3,
+          "name": "Concealed Courtyard"
         },
         {
-          "count": 1,
-          "name": "Mountain"
+          "count": 3,
+          "name": "Carnage, Crimson Chaos"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Practiced Offense"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Requiting Hex"
+        },
+        {
+          "count": 4,
+          "name": "Bloodghast"
         },
         {
           "count": 4,
           "name": "Starting Town"
         },
         {
-          "count": 1,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Blood Crypt"
         },
         {
           "count": 2,
           "name": "Tersa Lightshatter"
-        },
-        {
-          "count": 4,
-          "name": "Blood Crypt"
         }
       ],
       "sideboard": [
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
         {
           "count": 2,
           "name": "Avatar's Wrath"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Duress"
         },
         {
-          "count": 2,
+          "count": 1,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 3,
           "name": "Monument to Endurance"
         },
         {
           "count": 1,
-          "name": "Pyroclasm"
+          "name": "Sheltered by Ghosts"
         },
         {
-          "count": 1,
-          "name": "Shoot the Sheriff"
-        },
-        {
-          "count": 3,
+          "count": 4,
           "name": "Strategic Betrayal"
         },
         {
           "count": 2,
           "name": "Voice of Victory"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Sheltered by Ghosts"
         }
       ]
     },
@@ -1126,92 +1114,36 @@
       "name": "Azorius Tempo",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "W"
+        "W",
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Flitterwing Nuisance"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Spell Snare"
         },
         {
-          "count": 4,
-          "name": "Voice of Victory"
-        },
-        {
-          "count": 1,
-          "name": "Malcolm, Alluring Scoundrel"
-        },
-        {
-          "count": 1,
-          "name": "The Wondrous Wasp"
-        },
-        {
-          "count": 1,
-          "name": "Floodpits Drowner"
-        },
-        {
           "count": 2,
-          "name": "Get Lost"
-        },
-        {
-          "count": 3,
-          "name": "No More Lies"
+          "name": "Jennifer Walters"
         },
         {
           "count": 4,
-          "name": "High Noon"
-        },
-        {
-          "count": 3,
-          "name": "Aang, Swift Savior"
-        },
-        {
-          "count": 4,
-          "name": "Aven Interrupter"
-        },
-        {
-          "count": 2,
           "name": "Skycoach Conductor"
         },
         {
-          "count": 3,
-          "name": "Avatar's Wrath"
+          "count": 2,
+          "name": "The Wondrous Wasp"
         },
         {
           "count": 2,
           "name": "Enduring Curiosity"
         },
         {
-          "count": 2,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 4,
-          "name": "Island"
-        },
-        {
           "count": 3,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Floodfarm Verge"
-        },
-        {
-          "count": 2,
-          "name": "Restless Anchorage"
-        },
-        {
-          "count": 3,
-          "name": "Hallowed Fountain"
+          "name": "Erode"
         },
         {
           "count": 2,
@@ -1219,45 +1151,89 @@
         },
         {
           "count": 4,
+          "name": "Floodfarm Verge"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 2,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Restless Anchorage"
+        },
+        {
+          "count": 4,
           "name": "Starting Town"
+        },
+        {
+          "count": 4,
+          "name": "Aang, Swift Savior"
+        },
+        {
+          "count": 3,
+          "name": "Avatar's Wrath"
+        },
+        {
+          "count": 4,
+          "name": "Aven Interrupter"
+        },
+        {
+          "count": 2,
+          "name": "Floodpits Drowner"
+        },
+        {
+          "count": 1,
+          "name": "Settle the Wreckage"
+        },
+        {
+          "count": 4,
+          "name": "High Noon"
+        },
+        {
+          "count": 4,
+          "name": "Voice of Victory"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Ajani, Outland Chaperone"
-        },
-        {
-          "count": 2,
-          "name": "Spider-Sense"
-        },
-        {
-          "count": 2,
-          "name": "Wan Shi Tong, Librarian"
+          "name": "Clarion Conqueror"
         },
         {
           "count": 1,
-          "name": "Tishana's Tidebinder"
+          "name": "Day of Judgment"
         },
         {
           "count": 2,
-          "name": "Requisition Raid"
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 1,
+          "name": "King T'Challa"
         },
         {
           "count": 2,
           "name": "Rest in Peace"
         },
         {
-          "count": 2,
+          "count": 4,
           "name": "Seam Rip"
         },
         {
           "count": 2,
-          "name": "Erode"
+          "name": "Spell Pierce"
         },
         {
           "count": 1,
-          "name": "Negate"
+          "name": "Spider-Sense"
         }
       ]
     },
