@@ -769,10 +769,16 @@ fn fog_bank_both_directions_correct_after_unifying_self_ref() {
     }
 }
 
-/// CR 614.1a + CR 302.6c: Gaseous Form, cast and attached through the REAL
-/// production pipeline (`GameRunner::cast(..).target_object(..).resolve()`,
-/// not a manually-set `attached_to`), then driven through real
+/// CR 614.1a: Gaseous Form, cast and attached through the REAL production
+/// pipeline (`GameRunner::cast(..).target_object(..).resolve()`, not a
+/// manually-set `attached_to`), then driven through real
 /// `DeclareAttackers`/`DeclareBlockers`/combat-damage resolution.
+///
+/// Only CR 614.1a is cited here, deliberately. What this test adds over its
+/// siblings is a fixture-construction route, and the CR has no opinion on how
+/// a test reaches a board state. The rules content it does touch is cited at
+/// the point of use below (CR 303.4a for the Aura target slot, CR 704.5m for
+/// the orphan-Aura sweep). Do not attach a second rule number here.
 ///
 /// The other tests in this file that exercise `AttachedTo`-scoped cards use
 /// `attach_aura` (manual field-setting) + a direct `replace_event` probe

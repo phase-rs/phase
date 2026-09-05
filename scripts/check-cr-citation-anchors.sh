@@ -59,6 +59,15 @@
 
 set -euo pipefail
 
+# A hook runs this with git's environment exported, and GIT_INDEX_FILE is an
+# absolute path in a linked worktree and under `git commit -a` / `-p`. The
+# self-check below builds a throwaway repo and stages into it; with that
+# variable inherited, its `git add` writes to the OUTER commit's index instead,
+# leaving the caller's staged work destroyed rather than merely unstaged. The
+# walk wants this repository read plainly, so drop git's ambient environment
+# before anything runs a git command.
+unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_PREFIX
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 

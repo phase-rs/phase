@@ -3,18 +3,20 @@
 //! Covers:
 //! - Defense-counter ETB (CR 310.4b)
 //! - Zero-defense SBA (CR 704.5v + CR 310.7)
-//! - Protector choice/getter (CR 310.11a + CR 310.8a)
-//! - Attack target routing — defending player = protector (CR 508.5 + CR 310.8d)
-//! - Protector cannot attack own battle (CR 310.8b)
+//! - Protector choice/getter (CR 310.9a + CR 310.12a)
+//! - Attack target routing — defending player = protector (CR 508.5 + CR 310.9d)
+//! - Protector cannot attack own battle (CR 310.9b)
 
 #![allow(unused_imports)]
 use super::*;
 
 use engine::game::sba;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::ChosenAttribute;
+use engine::game::stack;
+use engine::types::ability::{ChosenAttribute, Effect, ResolvedAbility};
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::game_state::{StackEntry, StackEntryKind};
 
 /// Convert an existing battlefield creature into a Siege with the given defense.
 fn make_into_siege(
@@ -63,7 +65,7 @@ fn battle_has_defense_equal_to_counters() {
     assert_eq!(obj.counters.get(&CounterType::Defense).copied(), Some(4));
 }
 
-/// CR 310.11b + CR 712.14a: Accepting a Siege victory cast during trigger
+/// CR 310.12b + CR 712.14a: Accepting a Siege victory cast during trigger
 /// resolution must preserve `cast_transformed`, so the permanent resolves onto
 /// the battlefield back face up.
 #[test]
@@ -168,7 +170,87 @@ fn zero_defense_battle_goes_to_graveyard_via_sba() {
     );
 }
 
-/// CR 310.8 + CR 310.8a: The `protector()` getter returns the chosen opponent.
+/// Put a triggered ability whose source is `source` onto the stack, so the
+/// zero-defense SBA sees the battle as "the source of an ability that has
+/// triggered but not yet left the stack" (CR 704.5v).
+fn push_own_trigger(runner: &mut GameRunner, source: ObjectId, controller: PlayerId) {
+    let entry = {
+        let state = runner.state_mut();
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        StackEntry {
+            id,
+            source_id: source,
+            controller,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::unimplemented("battle trigger", "this battle's own trigger"),
+                    vec![],
+                    source,
+                    controller,
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        }
+    };
+    stack::push_to_stack(runner.state_mut(), entry, &mut Vec::new());
+}
+
+/// CR 704.5v + CR 310.7: a Siege at defense 0 is NOT put into its owner's
+/// graveyard while it is the source of an ability that has triggered but not
+/// yet left the stack — CR 310.12b's victory trigger has to find the Siege on
+/// the battlefield when it resolves.
+#[test]
+fn zero_defense_siege_survives_its_own_trigger_on_stack() {
+    let (mut runner, battle) = prime_siege(P0, P1, "Deferred Siege", 0);
+    push_own_trigger(&mut runner, battle, P0);
+
+    let mut events = Vec::new();
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+    assert_eq!(
+        runner.state().objects[&battle].zone,
+        Zone::Battlefield,
+        "CR 704.5v: a 0-defense Siege must survive while its own triggered ability is on the stack"
+    );
+}
+
+/// CR 704.5w + CR 310.8: a non-Siege battle at defense 0 is put into its owner's
+/// graveyard even while it is the source of an ability that has triggered but
+/// not yet left the stack. CR 704.5w states the rule with no deferral clause at
+/// all — the clause in CR 704.5v is Siege-only.
+#[test]
+fn zero_defense_non_siege_battle_dies_with_its_own_trigger_on_stack() {
+    // CR 310.9a: a battle with no battle type may only have its controller as
+    // its protector, so P0 is both here. The non-Siege battles that ship in the
+    // card data (Occupation of Kulrath / Occupation of Llanowar, "Battle —
+    // Control Point") reach CR 704.5w by the same door: not being a Siege.
+    let (mut runner, battle) = prime_siege(P0, P0, "Occupied Battle", 0);
+    {
+        let obj = runner.state_mut().objects.get_mut(&battle).unwrap();
+        obj.card_types.subtypes.clear();
+        obj.base_card_types.subtypes.clear();
+    }
+    push_own_trigger(&mut runner, battle, P0);
+
+    let mut events = Vec::new();
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+    assert_eq!(
+        runner.state().objects[&battle].zone,
+        Zone::Graveyard,
+        "CR 704.5w: a 0-defense non-Siege battle has no trigger-on-stack deferral"
+    );
+}
+
+/// CR 310.9 + CR 310.9a: The `protector()` getter returns the chosen opponent.
 #[test]
 fn protector_getter_returns_chosen_player() {
     let (runner, battle) = prime_siege(P0, P1, "Protected Siege", 3);
@@ -185,10 +267,10 @@ fn non_battle_has_no_protector() {
     assert_eq!(runner.state().objects[&creature].protector(), None);
 }
 
-/// CR 508.1b + CR 508.5 + CR 310.8d: When a creature attacks a battle, the
+/// CR 508.1b + CR 508.5 + CR 310.9d: When a creature attacks a battle, the
 /// defending player for combat purposes is the battle's protector, not the
 /// battle's controller. Controller (P0) can attack their own Siege when the
-/// protector (P1) is different — CR 310.8b.
+/// protector (P1) is different — CR 310.9b.
 #[test]
 fn battle_attack_defending_player_is_protector() {
     let mut scenario = GameScenario::new();
@@ -234,7 +316,7 @@ fn battle_attack_defending_player_is_protector() {
 }
 
 // ---------------------------------------------------------------------------
-// CR 310.10 + CR 704.5w + CR 704.5x: SBA protector reassignment.
+// CR 310.11 + CR 704.5x: SBA protector reassignment.
 // Multi-candidate (3+ player) branch must pause with
 // `WaitingFor::BattleProtectorChoice`; singleton (2-player) must auto-apply.
 // ---------------------------------------------------------------------------
@@ -244,7 +326,7 @@ fn battle_attack_defending_player_is_protector() {
 #[test]
 fn battle_protector_auto_applies_with_single_candidate_2p() {
     let (mut runner, battle) = prime_siege(P0, P0, "Self-Protected Siege", 3);
-    // Baseline: protector == controller (illegal per CR 310.11a).
+    // Baseline: protector == controller (illegal per CR 310.12a).
     assert_eq!(runner.state().objects[&battle].protector(), Some(P0));
 
     let mut events = Vec::new();
@@ -262,7 +344,7 @@ fn battle_protector_auto_applies_with_single_candidate_2p() {
     assert!(runner.state().battlefield.contains(&battle));
 }
 
-/// CR 310.10 + CR 704.5w + CR 704.5x: In a 3-player game the controller has two
+/// CR 310.11 + CR 704.5x: In a 3-player game the controller has two
 /// legal opponents, so the SBA must pause with `BattleProtectorChoice`. Submitting
 /// `ChooseBattleProtector` assigns the chosen player via `ChosenAttribute::Player`
 /// and resumes the game.
@@ -312,7 +394,7 @@ fn battle_protector_pauses_for_choice_with_multiple_candidates_3p() {
     ));
 }
 
-/// CR 310.10: Submitting a protector that isn't in the candidate list is rejected.
+/// CR 310.11: Submitting a protector that isn't in the candidate list is rejected.
 #[test]
 fn battle_protector_choice_rejects_invalid_candidate() {
     const P2: PlayerId = PlayerId(2);
@@ -330,7 +412,7 @@ fn battle_protector_choice_rejects_invalid_candidate() {
         WaitingFor::BattleProtectorChoice { .. }
     ));
 
-    // P0 is the controller — not a legal Siege protector (CR 310.11a).
+    // P0 is the controller — not a legal Siege protector (CR 310.12a).
     let err = runner
         .act(GameAction::ChooseBattleProtector { protector: P0 })
         .expect_err("choosing a non-candidate player must be rejected");
@@ -347,12 +429,12 @@ fn battle_protector_choice_rejects_invalid_candidate() {
     assert_eq!(runner.state().objects[&battle].protector(), Some(P2));
 }
 
-/// CR 310.10 / CR 704.5w: When no legal candidate exists, the battle is put
+/// CR 310.11 / CR 704.5x: When no legal candidate exists, the battle is put
 /// into its owner's graveyard. This preserves the existing 0-candidate fallback.
 #[test]
 fn battle_with_no_legal_protector_goes_to_graveyard() {
     // 2-player Siege whose only opponent (P1) has been eliminated — no legal
-    // protector exists, so CR 310.10 sends the battle to the graveyard.
+    // protector exists, so CR 310.11 sends the battle to the graveyard.
     let (mut runner, battle) = prime_siege(P0, P0, "Abandoned Siege", 3);
     runner.state_mut().eliminated_players.push(P1);
 
@@ -367,8 +449,8 @@ fn battle_with_no_legal_protector_goes_to_graveyard() {
     ));
 }
 
-/// R4l — CR 310.11a (*"must choose its protector from among their opponents"*) +
-/// CR 704.5w (*"no player **in the game** designated as its protector"*): the protector
+/// R4l — CR 310.12a (*"must choose its protector from among their opponents"*) +
+/// CR 704.5x (*"no player **in the game** designated as its protector"*): the protector
 /// pick is a CHOICE (CR 115.10a), so a phased-out seat is not among the choosable
 /// opponents (the CR 702.26b MIRROR), and a departed one is not either (CR 800.4 +
 /// CR 102.1).
@@ -415,7 +497,7 @@ fn battle_protector_choice_excludes_a_phased_out_opponent_and_still_offers_the_r
 /// boundary, and at `1` the engine writes the protector ITSELF and publishes nothing: no
 /// `WaitingFor`, no events. That is invisible to every `candidates` assertion the R4-family
 /// shape prescribes, so it needs its own arm. The auto-applied seat is not wrong — it is
-/// the sole surviving legal opponent, which CR 310.10 + CR 310.11a make the only
+/// the sole surviving legal opponent, which CR 310.11 + CR 310.12a make the only
 /// appropriate player. What this arm guards is the SILENT DISAPPEARANCE of the prompt.
 ///
 /// BOTH halves are required: (a) alone would pass on a board where the SBA never ran at
@@ -447,13 +529,13 @@ fn battle_protector_narrowing_to_one_auto_applies_silently() {
     assert_eq!(
         runner.state().objects[&battle].protector(),
         Some(PlayerId(3)),
-        "the auto-applied seat is the ONLY surviving legal opponent (CR 310.11a)"
+        "the auto-applied seat is the ONLY surviving legal opponent (CR 310.12a)"
     );
     assert!(runner.state().battlefield.contains(&battle));
 }
 
 /// R4l arm 3 — the `→ 0` crossing: with every opponent phased out there is no appropriate
-/// player, and CR 310.10 / CR 704.5w put the battle into its owner's graveyard.
+/// player, and CR 310.11 / CR 704.5x put the battle into its owner's graveyard.
 ///
 /// Reached by PHASING rather than by elimination on purpose: eliminating every opponent
 /// also ends the game (`waiting_for = GameOver`), which would confound the assertions with
@@ -475,7 +557,7 @@ fn battle_protector_narrowing_to_zero_sends_the_battle_to_the_graveyard() {
     assert!(
         !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
         "the table must still be LIVE — reaching 0 by phasing rather than by elimination \
-         is what keeps this arm about CR 310.10 instead of about the game ending"
+         is what keeps this arm about CR 310.11 instead of about the game ending"
     );
 }
 
@@ -511,7 +593,7 @@ fn phased_protector_board(phase_out: &[PlayerId]) -> (GameRunner, ObjectId) {
     (runner, battle)
 }
 
-/// CR 310.10 + CR 704.5w: AI routing — when the 3-player SBA pauses with a
+/// CR 310.11 + CR 704.5x: AI routing — when the 3-player SBA pauses with a
 /// protector choice, `legal_actions` emits one `ChooseBattleProtector` candidate
 /// per legal opponent, so the AI has a deterministic decision surface.
 #[test]
@@ -544,7 +626,7 @@ fn battle_protector_choice_emits_ai_candidates_per_opponent() {
     assert_eq!(picks.len(), 2);
 }
 
-/// CR 310.8b: A battle's protector cannot attack it — the declaration is illegal.
+/// CR 310.9b: A battle's protector cannot attack it — the declaration is illegal.
 #[test]
 fn battle_protector_cannot_attack_own_battle() {
     let mut scenario = GameScenario::new();

@@ -377,6 +377,8 @@ export const retargetChoiceWaitingForFactory =
       stack_entry_index: 0,
       scope: { type: "Single" },
       current_targets: [],
+      slots: [],
+      slot_pools: [],
       legal_new_targets: [],
     },
   }));

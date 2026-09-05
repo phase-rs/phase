@@ -35291,15 +35291,17 @@ fn animation_conjunct_emits_both_halves_for_every_grant_verb() {
 #[test]
 fn animation_conjunct_boundary_ignores_non_grant_verbs() {
     let def =
-        parse_static_line("it's a 0/0 creature in addition to its other types and loses defender");
-    if let Some(def) = def {
-        assert!(
-            !def.modifications.is_empty(),
-            "a non-grant conjunct must not be turned into an empty-modification static; \
-             mods = {:?}",
-            def.modifications
-        );
-    }
+        parse_static_line("it's a 0/0 creature in addition to its other types and loses defender")
+            .expect(
+                "a non-grant conjunct must retain its existing parse path; the previous `if let \
+         Some(def)` let an unintended decline satisfy this test without asserting anything",
+            );
+    assert!(
+        !def.modifications.is_empty(),
+        "a non-grant conjunct must not be turned into an empty-modification static; \
+         mods = {:?}",
+        def.modifications
+    );
 }
 
 /// V7: an unrecognized conjunct is honest, not swallowed.
@@ -35406,11 +35408,11 @@ fn self_ref_keyword_as_long_as_keeps_typed_condition_in_both_orders() {
 fn self_ref_keyword_as_long_as_never_returns_empty_modifications() {
     let unmappable = parse_static_line("~ has florblewick as long as you control a Forest.");
     assert!(
-        !unmappable
-            .as_ref()
-            .is_some_and(|def| def.modifications.is_empty()),
-        "an unmappable keyword must decline, never return a Continuous static with an empty \
-         modification set; got {unmappable:?}"
+        unmappable.is_none(),
+        "an unmappable keyword must DECLINE. The weaker `!is_some_and(|d| \
+         d.modifications.is_empty())` this replaces was also satisfied by a `Some` carrying \
+         NON-empty modifications — a static that claims the line while granting something \
+         other than the keyword it failed to map; got {unmappable:?}"
     );
 
     let mappable = parse_static_line("~ has flying as long as you control a Forest.")

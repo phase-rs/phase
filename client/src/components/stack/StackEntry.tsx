@@ -180,10 +180,19 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const stormCopyCount = details?.provenance?.type === "Storm"
     ? details.provenance.data.copy_count
     : undefined;
-  const controllerLabel = entry.controller === playerId ? t("stack.controllerYou") : t("stack.controllerOpp");
-  const seatColor = useSeatColor(entry.controller);
+  // The engine computes the live controller (CR 112.2 + CR 613.1b); `??` is this
+  // file's own established structural fallback for a prop the sole production
+  // caller always supplies (`details?.source_name`, `details?.kind_label`,
+  // `details?.targets` all use it above), not a semantic choice between two
+  // engine fields.
+  const liveController = details?.controller ?? entry.controller;
+  const controllerLabel =
+    liveController === playerId ? t("stack.controllerYou") : t("stack.controllerOpp");
+  const seatColor = useSeatColor(liveController);
   const controllerInitial =
-    entry.controller === playerId ? t("stack.controllerInitialYou") : t("stack.controllerInitialOpp", { seat: entry.controller });
+    liveController === playerId
+      ? t("stack.controllerInitialYou")
+      : t("stack.controllerInitialOpp", { seat: liveController });
 
   // Targeting: whether the engine is currently asking THIS seat to choose an
   // object and this stack entry is one of the choices. `getWaitingForObjectChoiceIds`

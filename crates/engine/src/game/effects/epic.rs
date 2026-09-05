@@ -78,6 +78,10 @@ pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
             phase: Phase::Upkeep,
             player: effect.controller,
             gate: crate::types::ability::TurnGate::None,
+            // Already-concrete `player` (synthesized fresh each upkeep, never
+            // passed through the placeholder-resolving `resolve()` path), so
+            // `binding` is unread here; `Controller` is the accurate label.
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         },
         ability: Box::new(ResolvedAbility::new(
             Effect::EpicCopy {

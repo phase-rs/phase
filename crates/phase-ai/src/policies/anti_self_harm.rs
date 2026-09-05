@@ -13,6 +13,8 @@ use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 #[cfg(test)]
 use engine::types::ability::AbilityCondition;
+#[cfg(test)]
+use engine::types::ability::DelayedTriggerPlayerBinding;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, EffectScope,
     QuantityExpr, ReplacementMode, TapStateChange, TargetFilter, TargetRef,
@@ -5764,6 +5766,7 @@ mod tests {
                 phase: Phase::End,
                 player: PlayerId(0),
                 gate: engine::types::ability::TurnGate::None,
+                binding: DelayedTriggerPlayerBinding::Controller,
             }),
         )
     }
@@ -5842,6 +5845,7 @@ mod tests {
                     phase: Phase::Upkeep,
                     player: PlayerId(0),
                     gate: engine::types::ability::TurnGate::None,
+                    binding: DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(payment),
                 uses_tracked_set: false,
@@ -5974,6 +5978,7 @@ mod tests {
                 phase: Phase::Upkeep,
                 player: PlayerId(0),
                 gate: engine::types::ability::TurnGate::None,
+                binding: DelayedTriggerPlayerBinding::Controller,
             }),
         );
 

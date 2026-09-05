@@ -228,6 +228,8 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
+        | WaitingFor::RippleRevealChoice { .. }
+        | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
@@ -501,6 +503,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
+        | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
@@ -551,6 +554,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::CastOffer { .. }
+        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::MutateMergeChoice { .. }
@@ -1356,11 +1360,27 @@ fn target_sequence_projection(
         WaitingFor::RetargetChoice {
             scope,
             current_targets,
+            slot_pools,
             legal_new_targets,
             ..
         } => {
             let (candidates, count) = match scope {
-                crate::types::game_state::RetargetScope::Single => (legal_new_targets.clone(), 1),
+                // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review
+                // finding MED-2): admission for a `Single` submission is
+                // `slot_pools[0]` (`engine::apply_retarget`'s `pool_for(0)`),
+                // not the flat union — offering the union here can project a
+                // candidate this projection's own reducer rejects, the same
+                // defect fixed for `RetargetChoiceModal.tsx`. `slot_pools`
+                // empty is the deliberate outer-empty compat fallback
+                // (INVARIANT SC), where the union already equals the sole
+                // position's real pool.
+                crate::types::game_state::RetargetScope::Single => (
+                    slot_pools
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| legal_new_targets.clone()),
+                    1,
+                ),
                 crate::types::game_state::RetargetScope::All => {
                     (legal_new_targets.clone(), current_targets.len())
                 }
@@ -3938,6 +3958,7 @@ fn selection_projection(
             selectable_cards, ..
         } => selectable_cards.len(),
         WaitingFor::SeparatePilesPartition { eligible, .. } => eligible.len(),
+        WaitingFor::RippleBottomOrder { cards, .. } => cards.len(),
         _ => 0,
     };
     if candidate_count > MAX_INTERACTION_LIST_LEN {
@@ -4249,6 +4270,18 @@ fn selection_projection(
                 source_id: None,
             })
         }
+        // CR 702.60a + CR 608.2d: the controller submits a full permutation of
+        // the uncast revealed pile as its bottom-placement order.
+        WaitingFor::RippleBottomOrder {
+            cards, source_id, ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(cards.len(), cards.len()),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: Some(*source_id),
+        }),
         WaitingFor::ArrangePlanarDeckTopChoice {
             cards, keep_on_top, ..
         } => Some(SelectionProjection {
@@ -4505,6 +4538,7 @@ fn selection_projection(
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::CastOffer { .. }
+        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::MutateMergeChoice { .. }
@@ -11107,6 +11141,66 @@ mod tests {
             .expect("choose-objects is a target sequence");
         assert_eq!((projection.min, projection.max), (1, 3));
         assert!(projection.unique);
+    }
+
+    /// MED-2 (phase-rs/phase#8355 round-8 review, second pass): CR 115.7a +
+    /// INVARIANT SC — admission for a `Single` retarget submission is
+    /// `slot_pools[0]` (`engine::apply_retarget`'s `pool_for(0)`), not the flat
+    /// union. This projection fed the union to every consumer regardless,
+    /// which could offer a candidate the reducer then rejects — measured on a
+    /// prompt whose union has 3 entries but `slot_pools[0]` has 1.
+    #[test]
+    fn retarget_choice_single_scope_projection_uses_the_slot_pool_not_the_union() {
+        let object_a = TargetRef::Object(ObjectId(1));
+        let object_b = TargetRef::Object(ObjectId(2));
+        let object_c = TargetRef::Object(ObjectId(3));
+        let waiting = WaitingFor::RetargetChoice {
+            player: PlayerId(0),
+            stack_entry_index: 0,
+            scope: crate::types::game_state::RetargetScope::Single,
+            current_targets: vec![object_a.clone()],
+            slots: vec![crate::types::game_state::RetargetSlotAddress {
+                path: vec![],
+                slot: 0,
+            }],
+            slot_pools: vec![vec![object_b.clone()]],
+            legal_new_targets: vec![object_a, object_b.clone(), object_c],
+        };
+        let projection = target_sequence_projection(&waiting)
+            .expect("projection must succeed")
+            .expect("RetargetChoice is a target sequence");
+        assert_eq!(
+            projection.candidates,
+            vec![object_b],
+            "CR 115.7a: a Single-scope projection must offer the addressed \
+             position's own pool, not the 3-entry flat union"
+        );
+    }
+
+    /// Paired positive control: an outer-empty `slot_pools` (a compat payload
+    /// predating the field, INVARIANT SC) falls back to the union — the fix
+    /// above must not turn this row's absence into a silent "offer nothing."
+    #[test]
+    fn retarget_choice_single_scope_projection_falls_back_to_the_union_when_slot_pools_is_empty() {
+        let object_a = TargetRef::Object(ObjectId(1));
+        let object_b = TargetRef::Object(ObjectId(2));
+        let waiting = WaitingFor::RetargetChoice {
+            player: PlayerId(0),
+            stack_entry_index: 0,
+            scope: crate::types::game_state::RetargetScope::Single,
+            current_targets: vec![object_a.clone()],
+            slots: vec![],
+            slot_pools: vec![],
+            legal_new_targets: vec![object_a, object_b],
+        };
+        let projection = target_sequence_projection(&waiting)
+            .expect("projection must succeed")
+            .expect("RetargetChoice is a target sequence");
+        assert_eq!(
+            projection.candidates.len(),
+            2,
+            "an outer-empty slot_pools must fall back to the union"
+        );
     }
 
     /// F4 — the preview is budgeted like every other outbound list on the shortcut spec, at

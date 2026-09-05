@@ -1773,6 +1773,18 @@ pub fn fallback_action(
         } => Some(GameAction::RippleChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 702.60a: Ripple's "you may reveal" — reveal as the default
+        // (burying non-matches is information-neutral for the AI); the candidate
+        // generator still explores declining.
+        WaitingFor::RippleRevealChoice { .. } => Some(GameAction::RippleChoice {
+            choice: engine::types::actions::CastChoice::Cast,
+        }),
+        // CR 702.60a + CR 608.2d: Ripple bottom-order — submit the pile in its
+        // revealed order (any permutation is legal; order at the bottom of the
+        // library carries no tactical weight).
+        WaitingFor::RippleBottomOrder { cards, .. } => Some(GameAction::SelectCards {
+            cards: cards.clone(),
+        }),
         // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — finish the
         // window (cast nothing) as the conservative default; the candidate
         // generator still explores casting each eligible spell.
@@ -2159,12 +2171,16 @@ pub fn fallback_action(
             stack_entry_index,
             scope,
             current_targets,
+            slots,
+            slot_pools,
             legal_new_targets,
             ..
         } => retarget_actions(
             state,
             *stack_entry_index,
             scope,
+            slots,
+            slot_pools,
             current_targets,
             legal_new_targets,
         )

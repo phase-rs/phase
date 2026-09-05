@@ -25,7 +25,7 @@ use crate::types::zones::Zone;
 use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, resolve_it_pronoun,
 };
-use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::context::{ChosenColorQualifierScope, ParseContext};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
@@ -3415,6 +3415,43 @@ pub fn parse_type_phrase_with_ctx<'a>(
         };
         properties.push(chosen_prop);
         pos += remaining_offset + of_chosen_len;
+    }
+
+    // CR 105.4 + CR 608.2c + CR 109.2: a trailing "of the color of your choice"
+    // qualifier restricts the described permanents to one colour. Sibling of the
+    // chosen-TYPE arm directly above: same position (after both controller
+    // passes, before the trailing CR 115.2 zone pass), same accumulator idiom,
+    // same whitespace handling, same ctx-provenance question.
+    //
+    // CONSUMPTION IS GATED. `FilterProp::IsChosenColor` is a fail-closed read of
+    // the source's `ChosenAttribute::Color` (both `game/filter.rs` arms are
+    // `is_some_and`), so stamping it where no chooser will exist turns an
+    // over-broad filter into one that matches NOTHING — silently, with no
+    // `Effect::Unimplemented` and therefore no coverage signal. `ChainBound` is
+    // WRITTEN only by the effect-chain chunk context, which is also the context
+    // that reads `pending_printed_color_choice` back and injects the
+    // `Effect::Choose(Color)`; so "consumed" and "supplied" are one decision.
+    // NOTE: `ParseContext` is `Clone`, so `ChainBound` is INHERITED by derived
+    // contexts. A derived context that is not merged back with `*ctx = ..` must
+    // reset this field to `Unbound` — see `ChosenColorQualifierScope`'s doc and
+    // the same discipline documented for `pending_damage_multi_target`.
+    // When the gate is closed the qualifier is LEFT IN THE REMAINDER — exactly
+    // today's behaviour — so the existing `target-fallback:` diagnostic stays
+    // honest.
+    let remaining = lower[pos..].trim_start();
+    let remaining_offset = lower[pos..].len() - remaining.len();
+    if let Ok((rest, prop)) = nom_filter::parse_printed_color_choice_qualifier(remaining) {
+        if matches!(
+            ctx.chosen_color_qualifier,
+            ChosenColorQualifierScope::ChainBound
+        ) {
+            properties.push(prop);
+            pos += remaining_offset + (remaining.len() - rest.len());
+            // CR 608.2c: the choice must resolve before the filter is evaluated.
+            // Declared per-clause provenance for the assembly-time injector —
+            // never a shape scan of the lowered tree.
+            ctx.pending_printed_color_choice = Some(ChoiceType::color());
+        }
     }
 
     // CR 115.2: A spell or ability may target an object in a zone other than
@@ -7719,7 +7756,9 @@ fn parse_shared_quality_reference<'a>(
     }
 
     if let Ok((rest, ())) = parse_word_bounded(input, "it") {
-        let mut ctx_mut = ctx.clone();
+        // Throwaway (`ChosenColorQualifierScope` rule 1) — only the resolved
+        // filter is kept.
+        let mut ctx_mut = ctx.clone_throwaway();
         return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
     }
 
@@ -7734,7 +7773,9 @@ fn parse_shared_quality_reference<'a>(
     // ("a creature you control") still parses as its own filter below.
     for demonstrative in ["that creature", "that permanent", "that card", "that token"] {
         if let Ok((rest, ())) = parse_word_bounded(input, demonstrative) {
-            let mut ctx_mut = ctx.clone();
+            // Throwaway (`ChosenColorQualifierScope` rule 1) — only the resolved
+            // filter is kept.
+            let mut ctx_mut = ctx.clone_throwaway();
             return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
         }
     }
@@ -20534,6 +20575,116 @@ mod tests {
                 && pop.type_filters.contains(&TypeFilter::Permanent),
             "the population must carry the SAME type set as the candidates, got {:?}",
             pop.type_filters
+        );
+    }
+
+    /// V-CONTAIN (SHAPE) — CR 105.4. The printed chosen-colour qualifier arm is
+    /// gated on `ChosenColorQualifierScope::ChainBound`, and the gate must hold
+    /// in BOTH directions.
+    ///
+    /// Reverting the gate in either direction fails this test: dropping the
+    /// `ChainBound` check makes the negative half stamp `IsChosenColor` on a
+    /// throwaway `ParseContext::default()`; dropping the arm entirely makes the
+    /// positive half stop stamping it.
+    #[test]
+    fn printed_color_choice_qualifier_is_gated_on_chain_bound_scope() {
+        const PHRASE: &str = "permanents of the color of your choice";
+
+        // NEGATIVE — the exact throwaway call every `parse_type_phrase` call
+        // site makes (the wrapper builds a fresh `ParseContext::default()`).
+        let (unbound_filter, unbound_rest) = parse_type_phrase(PHRASE);
+        let unbound = typed_leg(&unbound_filter).expect("typed");
+        assert!(
+            !unbound
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "an Unbound context must NOT stamp IsChosenColor, got {:?}",
+            unbound.properties
+        );
+        assert_eq!(
+            unbound_rest.trim_start(),
+            "of the color of your choice",
+            "when the gate is closed the qualifier stays in the remainder so the \
+             existing target-fallback diagnostic stays honest"
+        );
+
+        // POSITIVE REACH-GUARD, same test — the arm does fire under ChainBound,
+        // so the negative above cannot pass because the arm is unreachable.
+        let mut bound_ctx = ParseContext {
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        let (bound_filter, bound_rest) = parse_type_phrase_with_ctx(PHRASE, &mut bound_ctx);
+        let bound = typed_leg(&bound_filter).expect("typed");
+        assert!(
+            bound
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "a ChainBound context MUST stamp IsChosenColor, got {:?}",
+            bound.properties
+        );
+        assert_eq!(bound_rest, "", "the qualifier must be fully consumed");
+        assert!(
+            matches!(
+                bound_ctx.pending_printed_color_choice,
+                Some(ChoiceType::Color { .. })
+            ),
+            "the arm must declare per-clause provenance for the assembly injector, got {:?}",
+            bound_ctx.pending_printed_color_choice
+        );
+
+        // WHITESPACE CASE — an upstream suffix arm that already consumed the
+        // separating space must not defeat the space-free tag.
+        let mut ws_ctx = ParseContext {
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        let (ws_filter, _) =
+            parse_type_phrase_with_ctx("permanents  of the color of your choice", &mut ws_ctx);
+        let ws = typed_leg(&ws_filter).expect("typed");
+        assert!(
+            ws.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "extra separating whitespace must not defeat the arm, got {:?}",
+            ws.properties
+        );
+
+        // ANAPHOR NEGATIVE — `ChainBound` must not widen the arm to the anaphor
+        // forms; those stay with `parse_pre_controller_chosen_filter_suffix`.
+        let mut anaphor_ctx = ParseContext {
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        let (anaphor_filter, anaphor_rest) =
+            parse_type_phrase_with_ctx("permanents of the chosen color", &mut anaphor_ctx);
+        let anaphor = typed_leg(&anaphor_filter).expect("typed");
+        assert!(
+            !anaphor
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "the anaphor form must NOT be consumed by this arm, got {:?}",
+            anaphor.properties
+        );
+        assert_eq!(anaphor_rest.trim_start(), "of the chosen color");
+        assert!(anaphor_ctx.pending_printed_color_choice.is_none());
+
+        // CLONE CASE — `ParseContext` derives `Clone`, so `ChainBound` is
+        // INHERITED by derived contexts (documented honestly on the enum), while
+        // a `..Default::default()`-constructed context is not.
+        let cloned = bound_ctx.clone();
+        assert_eq!(
+            cloned.chosen_color_qualifier,
+            ChosenColorQualifierScope::ChainBound,
+            "a clone inherits ChainBound — this is the documented hazard, not a bug"
+        );
+        assert_eq!(
+            ParseContext::default().chosen_color_qualifier,
+            ChosenColorQualifierScope::Unbound,
+            "a freshly defaulted context leaves the gate closed"
         );
     }
 }

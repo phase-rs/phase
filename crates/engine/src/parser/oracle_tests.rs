@@ -6882,6 +6882,7 @@ fn devourer_of_destiny_opening_hand_reveal_creates_first_upkeep_dig() {
             phase: Phase::Upkeep,
             player: PlayerId(0),
             gate: crate::types::ability::TurnGate::None,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         }
     );
 
@@ -20675,7 +20676,7 @@ fn untargeted_become_monarch_keeps_the_controller_default_cr_109_5() {
 
 /// CR 508.5: the rebind is gated on the trigger clause naming an attacked
 /// PLAYER. `Planeswalker` / `Battle` attack scopes name no player antecedent
-/// (a battle's anaphor would be its protector, CR 310.8d — a different
+/// (a battle's anaphor would be its protector, CR 310.9d — a different
 /// reference), so a `ScopedPlayer` anchor must survive unchanged there.
 ///
 /// There are two distinct noun sources, and each is asserted in the shape the
@@ -28555,4 +28556,110 @@ fn cyclops_gladiator_if_you_do_damage_back_reads_targets_power_not_sources() {
          creature', the first sentence's chosen recipient) power, not the \
          attacking Cyclops's own power — got {back_amount:?}"
     );
+}
+
+/// CR 115.1 + CR 608.2c + CR 608.2k: card-exact census of every per-object
+/// power/toughness scope the parser emits for the "where X is that creature's
+/// power/toughness" class (issue #8460).
+///
+/// Each row is a real card's VERBATIM Oracle text run through the production
+/// parser, and the expectation is the full multiset of `Power`/`Toughness`
+/// scopes in its parse — so a scope that moves anywhere in the card, not just
+/// at the node under test, reds this table.
+///
+/// The two halves of the table are the two readings of the same English phrase:
+///
+/// * `Target` — the clause announces its own "target creature", so CR 115.1
+///   makes that announced target the antecedent (Thickest in the Thicket,
+///   Soul's Might, Nantuko Mentor).
+/// * `CostPaidObject` — the antecedent is the CR 608.2k referent named by the
+///   ability's cost or trigger condition, with no announced creature target for
+///   the demonstrative to bind to instead. **Minsc & Boo, Timeless Heroes is the
+///   named non-regression constraint for #8460**: its reflexive "~ deals X
+///   damage to any target, where X is that creature's power" announces
+///   `TargetFilter::Any`, and X must keep reading the creature sacrificed by the
+///   −2 ability. Hamletback Goliath (trigger referent) and Shadowheart, Dark
+///   Justiciar (sacrifice cost) hold the same reading from the other two
+///   directions.
+#[test]
+fn where_x_that_creature_stat_binds_target_only_when_the_clause_announces_one() {
+    /// Collect every `QuantityRef::Power`/`Toughness` scope in a parse, in
+    /// document order. Serializing the whole `ParsedAbilities` reaches nodes no
+    /// hand-written index chain would (sub-abilities, else-branches, granted
+    /// definitions), so a scope that moves anywhere is visible here.
+    fn power_scopes(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let (Some(serde_json::Value::String(kind)), Some(scope)) =
+                    (map.get("type"), map.get("scope"))
+                {
+                    if kind == "Power" || kind == "Toughness" {
+                        if let Some(serde_json::Value::String(name)) = scope.get("type") {
+                            out.push(format!("{kind}/{name}"));
+                        }
+                    }
+                }
+                for nested in map.values() {
+                    power_scopes(nested, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for nested in items {
+                    power_scopes(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let cases: &[(&str, &[&str], &str, &[&str])] = &[
+        (
+            "Thickest in the Thicket",
+            &["Enchantment"],
+            "When this enchantment enters, put X +1/+1 counters on target creature, where X is that creature's power.\nAt the beginning of your end step, draw two cards if you control the creature with the greatest power or tied for the greatest power.",
+            &["Power/Target"],
+        ),
+        (
+            "Soul's Might",
+            &["Sorcery"],
+            "Put X +1/+1 counters on target creature, where X is that creature's power.",
+            &["Power/Target"],
+        ),
+        (
+            "Nantuko Mentor",
+            &["Creature"],
+            "{2}{G}, {T}: Target creature gets +X/+X until end of turn, where X is that creature's power.",
+            &["Power/Target", "Power/Target"],
+        ),
+        (
+            "Minsc & Boo, Timeless Heroes",
+            &["Planeswalker"],
+            "When Minsc & Boo enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste.\n[+1]: Put three +1/+1 counters on up to one target creature with trample or haste.\n[\u{2212}2]: Sacrifice a creature. When you do, Minsc & Boo deals X damage to any target, where X is that creature's power. If the sacrificed creature was a Hamster, draw X cards.\nMinsc & Boo, Timeless Heroes can be your commander.",
+            &["Power/CostPaidObject", "Power/CostPaidObject"],
+        ),
+        (
+            "Hamletback Goliath",
+            &["Creature"],
+            "Whenever another creature enters, you may put X +1/+1 counters on this creature, where X is that creature's power.",
+            &["Power/CostPaidObject"],
+        ),
+        (
+            "Shadowheart, Dark Justiciar",
+            &["Creature"],
+            "{1}{B}, {T}, Sacrifice another creature: Draw X cards, where X is that creature's power.",
+            &["Power/CostPaidObject"],
+        ),
+    ];
+
+    for (name, types, oracle, expected) in cases {
+        let types: Vec<String> = types.iter().map(|t| (*t).to_string()).collect();
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        let value = serde_json::to_value(&parsed).expect("ParsedAbilities must serialize");
+        let mut scopes = Vec::new();
+        power_scopes(&value, &mut scopes);
+        assert_eq!(
+            scopes, *expected,
+            "{name}: per-object power/toughness scopes changed"
+        );
+    }
 }

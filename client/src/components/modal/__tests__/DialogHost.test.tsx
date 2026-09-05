@@ -274,6 +274,8 @@ describe("DialogHost", () => {
         stack_entry_index: 0,
         scope: { type: "All" },
         current_targets: [{ Object: 71 }],
+        slots: [],
+        slot_pools: [],
         legal_new_targets: [{ Object: 27 }, { Object: 43 }],
       },
     });

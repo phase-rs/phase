@@ -2496,6 +2496,32 @@ fn collect_matching_triggers_inner(
             if !admitted {
                 continue;
             }
+            // CR 603.10d + CR 603.3a: "when you lose control of ~" is
+            // controlled by the PRE-change controller — the player who just
+            // lost control — not by whoever controls the object now.
+            // `source_context.lki.controller` (captured into `controller`
+            // above) already reflects the POST-change live controller for a
+            // self-ref source: `collect_pending_triggers` flushes layers
+            // before this scan runs, so the changing object's own controller
+            // has already moved to `new_controller` by the time trigger
+            // sources are gathered. Mirror
+            // `trigger_matchers::match_changes_controller`'s own directional
+            // discriminant (`source_id == *object_id`) here rather than
+            // re-deriving it, since `admitted` above already confirms this
+            // trig_def's matcher accepted the event. The delayed /
+            // `SpecificObject` shape (Stolen Uniform, `source_id !=
+            // object_id`) is left UNCHANGED: its source is a different object
+            // whose own controller is already the right answer (CR 113.8).
+            let controller = match event {
+                GameEvent::ControllerChanged {
+                    object_id,
+                    old_controller,
+                    ..
+                } if trig_def.mode == TriggerMode::ChangesController && *object_id == obj_id => {
+                    *old_controller
+                }
+                _ => controller,
+            };
             if !check_trigger_constraint_with_ref(
                 state,
                 trig_def,
@@ -2531,6 +2557,16 @@ fn collect_matching_triggers_inner(
                 &source_context,
                 definition_ref.as_ref(),
             );
+            // CR 603.3a + CR 113.8: `build_triggered_ability_from_context` has
+            // no `event` parameter and so re-derives its own controller from
+            // `source_context.lki.controller` — the same value `controller`
+            // held before the CR 603.10d override above. Rebind the ability
+            // (and every sub/else branch, via the existing `player_scope`
+            // rebinding authority) to the possibly-overridden `controller` so
+            // the ability's controller and its `PendingTrigger.controller`
+            // agree by construction. A no-op for every trigger mode other
+            // than the self-ref `ChangesController` case above.
+            ability.set_controller_recursive(controller);
             // CR 603.4: Stamp the printed-trigger index so per-turn resolution
             // tracking (`AbilityCondition::NthResolutionThisTurn`) can identify
             // "this ability" at resolution time.
@@ -2883,7 +2919,7 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .iter()
             .filter_map(|entry| match &entry.kind {
                 StackEntryKind::Spell { .. } => Some(entry.id),
-                // CR 111.1b + CR 113.3b: Activated/triggered ability stack entries
+                // CR 113.3b + CR 113.3c: Activated/triggered ability stack entries
                 // (including KeywordAction) are abilities, not objects.
                 StackEntryKind::ActivatedAbility { .. }
                 | StackEntryKind::TriggeredAbility { .. }
@@ -5369,13 +5405,19 @@ fn collect_pending_triggers_with_collection(
                 })
                 .unwrap_or_default();
             for n in ripple_instances {
+                // CR 702.60a: Ripple fires "when you cast this spell". The
+                // WasCast intervening-if is intentionally omitted (mirroring the
+                // Storm and Casualty seams above/below): this synthesized
+                // trigger is only collected from SpellCast, which is only
+                // emitted for an actual cast, so cast-ness is already implied by
+                // the trigger event itself. A redundant WasCast condition here
+                // also FAILS its CR 603.4 resolution recheck for any Ripple card
+                // that carries a real spell ability (every printed one — Surging
+                // Dementia, Surging Flame, …), because `TriggerSourceRead`'s
+                // `cast_from_zone` reads the object field that only abilityless
+                // permanent spells populate.
                 let ripple_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                    .description("Ripple".to_string())
-                    .condition(TriggerCondition::WasCast {
-                        zone: None,
-                        controller: None,
-                        owner: None,
-                    });
+                    .description("Ripple".to_string());
                 let mut ripple_ability = ResolvedAbility::new(
                     Effect::Ripple { count: n },
                     Vec::new(),
@@ -12907,6 +12949,11 @@ fn delayed_trigger_event_with_index(
             phase,
             player,
             gate,
+            // `binding` is only consulted at delayed-trigger CREATION
+            // (`effects::delayed_trigger::resolve`), which has already
+            // stamped `player` to a concrete id by the time this matcher
+            // runs each phase change — nothing left here to read it for.
+            binding: _,
         } => {
             if state.active_player != *player {
                 return None;

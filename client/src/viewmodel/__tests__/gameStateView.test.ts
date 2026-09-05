@@ -1109,6 +1109,8 @@ const PARTITION_FIXTURES: Record<
   StationTarget: NO_TARGET_REF_LEGAL_SET,
   SaddleMount: NO_TARGET_REF_LEGAL_SET,
   ScryChoice: NO_TARGET_REF_LEGAL_SET,
+  RippleRevealChoice: NO_TARGET_REF_LEGAL_SET,
+  RippleBottomOrder: NO_TARGET_REF_LEGAL_SET,
   ArrangePlanarDeckTopChoice: NO_TARGET_REF_LEGAL_SET,
   RedistributeLifeTotals: NO_TARGET_REF_LEGAL_SET,
   CoinFlipKeepChoice: NO_TARGET_REF_LEGAL_SET,
