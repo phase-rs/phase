@@ -2726,10 +2726,16 @@ fn detect_dynamic_qty(
     {
         return;
     }
-    // CR 101.4 + CR 701.21a: Tragic Arrogance-style "For each player, you choose
-    // ..." is a turn-order choice procedure, not a numeric quantity. Its carrier
-    // is the dedicated ChooseAndSacrificeRest effect rather than a QuantityExpr.
-    if cleaned.contains("for each player, you choose ") // allow-noncombinator: swallow detector marker scan on classified text
+    // CR 101.4 + CR 608.2c + CR 701.21a: Tragic Arrogance-style "For each
+    // player, you choose ..." is a turn-order choice procedure, not a numeric
+    // quantity. Its carrier is the dedicated ChooseAndSacrificeRest effect
+    // rather than a QuantityExpr. The "you" is grammatically optional (CR
+    // 608.2c's imperative voice already addresses the ability's controller by
+    // default — see the parser dispatch site's comment), so the bare "for
+    // each player, choose " form (The Eternal Wanderer's −4) is the same
+    // idiom and carries the same evidence.
+    if (cleaned.contains("for each player, you choose ") // allow-noncombinator: swallow detector marker scan on classified text
+        || cleaned.contains("for each player, choose ")) // allow-noncombinator: swallow detector marker scan on classified text
         && evidence.any_effect(|e| matches!(e, Effect::ChooseAndSacrificeRest { .. }))
     {
         return;
@@ -7181,6 +7187,44 @@ mod tests {
             has_swallowed_detector(&parsed, "Optional_YouMay"),
             "a card that produced NO parsed output at all must report its text as \
              swallowed, not fall silent. Warnings: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// Issue #7153 follow-up: the bare "for each player, choose ..." entry
+    /// point (no "you") is the SAME Tragic-Arrogance-style choice procedure
+    /// (CR 608.2c: the imperative voice already addresses the ability's
+    /// controller by default), so it must not raise a false-positive
+    /// `DynamicQty` swallow warning for the "for each " marker. Positive
+    /// reach-guard: assert `ChooseAndSacrificeRest` is actually present (not
+    /// `Effect::Unimplemented`, which would vacuously suppress every
+    /// detector via `any_ability_has_unimplemented`) before asserting the
+    /// negative. Revert-to-red: dropping the bare-"choose" arm from the
+    /// suppression's `cleaned.contains(..)` alternation reintroduces the
+    /// warning while this positive guard keeps holding.
+    #[test]
+    fn eternal_wanderer_minus_four_bare_choose_does_not_flag_dynamic_qty() {
+        let parsed = parse_named(
+            "For each player, choose a creature that player controls. Each player \
+             sacrifices all creatures they control not chosen this way.",
+            "Test Sweep",
+            &["Sorcery"],
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(a.effect.as_ref(), Effect::ChooseAndSacrificeRest { .. })),
+            "premise: must actually parse to ChooseAndSacrificeRest, not \
+             Unimplemented (which would vacuously suppress every swallow \
+             detector). Abilities: {:?}",
+            parsed.abilities
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "the bare 'for each player, choose' idiom must not be reported as a \
+             swallowed dynamic quantity — its carrier is ChooseAndSacrificeRest, \
+             not a QuantityExpr. Warnings: {:?}",
             parsed.parse_warnings
         );
     }
