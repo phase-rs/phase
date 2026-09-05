@@ -1845,10 +1845,14 @@ async fn attach_current_draft_match(
         let mut manager = state.lock().await;
         let player_index = usize::from(game_player.0);
         let (player_token, full_key, was_disconnected) = {
-            let session = manager
-                .sessions
-                .get(&game_code)
-                .ok_or_else(|| format!("Draft match game not found: {game_code}"))?;
+            let Some(session) = manager.sessions.get(&game_code) else {
+                warn!(
+                    draft = %draft_code,
+                    game = %game_code,
+                    "draft pairing references a game that is no longer resident"
+                );
+                return Ok(None);
+            };
             let full_key = session
                 .full_runtime
                 .as_ref()
@@ -5116,11 +5120,10 @@ fn initialize_draft_match_runtime(
         .sessions
         .get_mut(&spawn.game_code)
         .ok_or_else(|| format!("Spawned draft match is missing: {}", spawn.game_code))?;
+    // These seats have not attached yet. Keep their presence accurate without
+    // starting reconnect expiry before an actual socket has disconnected.
+    session.connected.fill(false);
     initialize_full_runtime(game_db, session, full_key.clone())?;
-
-    for player in [&spawn.player_a, &spawn.player_b] {
-        game_manager.handle_disconnect(&spawn.game_code, player.game_player);
-    }
 
     Ok(full_key)
 }
@@ -12140,6 +12143,9 @@ mod draft_socket_authority_tests {
                 };
                 let (draft_code, draft_token, _) = drafts.create_draft(config, "Alice".to_string());
                 let mut games = app_state.sessions.lock().await;
+                // Any synthetic disconnect created by initialization would
+                // expire before this fixture's first socket attachment.
+                games.reconnect.grace_period = Duration::ZERO;
                 let (game_code, _host_token) = games
                     .create_game_n_players(
                         engine::game::deck_loading::PlayerDeckPayload::default(),
@@ -12204,6 +12210,18 @@ mod draft_socket_authority_tests {
                 .expect("build initial draft match announcement");
                 (draft_code, draft_token, key, initial_match_start)
             };
+
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            {
+                let mut games = app_state.sessions.lock().await;
+                let session = &games.sessions[&expected_key.game_code];
+                assert!(session.game_started);
+                assert_eq!(session.connected, vec![false, false]);
+                assert!(
+                    games.reconnect.check_expired().is_empty(),
+                    "awaiting the first attachment must not expire the match"
+                );
+            }
 
             let announced_token = match initial_match_start {
                 ServerMessage::DraftMatchStart {
@@ -12292,7 +12310,10 @@ mod draft_socket_authority_tests {
 
             loop {
                 match recv_server_message(&mut socket).await {
-                    ServerMessage::ActionRejected { rejection } => break rejection.code,
+                    ServerMessage::ActionRejected { rejection } => {
+                        assert_eq!(rejection.code, ActionRejectionCode::ActionNotAllowed);
+                        break;
+                    }
                     ServerMessage::ActionFailed { message }
                     | ServerMessage::Error { message, .. } => {
                         panic!("draft match action missed Full authority: {message}")
@@ -12300,14 +12321,102 @@ mod draft_socket_authority_tests {
                     _ => {}
                 }
             }
+
+            socket
+                .close(None)
+                .await
+                .expect("close attached game socket");
+            loop {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                let mut games = app_state.sessions.lock().await;
+                if games
+                    .reconnect
+                    .is_disconnected(&expected_key.game_code, PlayerId(0))
+                {
+                    assert_eq!(
+                        games.reconnect.check_expired(),
+                        vec![expected_key.game_code.clone()],
+                        "an actual socket disconnect must still expire normally"
+                    );
+                    break;
+                }
+            }
         })
         .await;
         server.abort();
 
-        assert_eq!(
-            outcome.expect("draft reconnect or action response timed out"),
-            ActionRejectionCode::ActionNotAllowed
-        );
+        outcome.expect("draft attachment, action, or disconnect response timed out");
+    }
+
+    #[tokio::test]
+    async fn draft_reconnect_sends_the_view_when_its_active_game_is_missing() {
+        use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let (drafts, _, draft_code, draft_token) = test_draft();
+        {
+            let mut drafts = drafts.lock().await;
+            let draft = drafts.sessions.get_mut(&draft_code).expect("draft exists");
+            draft.session.status = DraftStatus::MatchInProgress;
+            draft.session.current_round = 1;
+            draft.session.pairings.push(DraftPairing {
+                round: 1,
+                table: 0,
+                players: [PlayerId(0), PlayerId(1)],
+                match_id: "r1-t0".to_string(),
+                status: PairingStatus::Pending,
+                winner: None,
+            });
+            draft
+                .active_matches
+                .insert("r1-t0".to_string(), "GONE01".to_string());
+            assert!(draft.active_match_for_seat(0).is_some());
+            *app_state.draft_sessions.lock().await = std::mem::take(&mut *drafts);
+        }
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            for message in [
+                ClientMessage::ClientHello {
+                    client_version: env!("CARGO_PKG_VERSION").to_string(),
+                    build_commit: build_commit().to_string(),
+                    protocol_version: PROTOCOL_VERSION,
+                    lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                    wire_formats: Vec::new(),
+                },
+                ClientMessage::ReconnectDraft {
+                    draft_code: draft_code.clone(),
+                    player_token: draft_token,
+                },
+            ] {
+                socket
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&message)
+                            .expect("client message json")
+                            .into(),
+                    ))
+                    .await
+                    .expect("send client message");
+            }
+
+            match recv_server_message(&mut socket).await {
+                ServerMessage::DraftStateUpdate { view } => {
+                    assert_eq!(view.status, DraftStatus::MatchInProgress);
+                    assert_eq!(view.seats[0].seat_index, 0);
+                }
+                other => panic!("missing Full game must not block the draft view: {other:?}"),
+            }
+            assert!(app_state.connections.lock().await[&draft_code].contains_key(&PlayerId(0)));
+        })
+        .await;
+        server.abort();
+        outcome.expect("draft view response timed out");
     }
 
     #[tokio::test]
