@@ -246,8 +246,46 @@ pub fn resolve(
             // resolves as a zero-count draw.
             if max > 0 {
                 let drawing_player = super::resolve_player_for_context_ref(state, ability, target);
-                prompt_up_to_draw_count(state, ability, target, drawing_player, max);
-                return Ok(());
+                // CR 121.3: "if an effect says that a player can't draw cards
+                // and another effect offers that player the choice to draw a
+                // card, that player can't choose to do so." CR 121.3a extends
+                // that to a chooser who is not the drawer and keys the test on
+                // the DRAWER — which is why `drawing_player`, not
+                // `ability.controller`, is the subject here (Arcane Denial's
+                // exact shape).
+                //
+                // GATE, DO NOT CLAMP. The test is `== 0`, not
+                // `0..=allowed_draw_count(..)`. CR 121.3 withholds the choice
+                // only when an effect says the player can't draw cards *at all*;
+                // a `PerTurnDrawLimit` with draws still remaining says no such
+                // thing, so "up to two" under a one-per-turn limit must still
+                // offer 2 and then deliver 1. CR 101.2's "can't" precedence is
+                // applied per individual draw downstream by
+                // `apply_draw_after_replacement`, which calls
+                // `allowed_draw_count` itself; clamping the ANNOUNCEMENT here
+                // would apply the same restriction twice, at the wrong layer.
+                //
+                // With `max > 0`, `min(max, remaining) == 0` holds exactly when
+                // `remaining == 0`, so the `max` argument is not load-bearing to
+                // the gate — this asks "may this player draw at all right now".
+                //
+                // NOT `can_draw_at_least_one`, which looks like the helper for
+                // this and is not: it also answers false for an empty library
+                // and for a replacement-removed draw, and CR 121.3's FIRST
+                // sentence requires the choice to stay open in both of those
+                // cases. Using it here would silently reintroduce the
+                // library-size clamp this menu must never have.
+                if allowed_draw_count(state, drawing_player, max) > 0 {
+                    prompt_up_to_draw_count(state, ability, target, drawing_player, max);
+                    return Ok(());
+                }
+                // Falls through to the mandatory path, exactly as a printed
+                // `Draw { Fixed(max) }` under the same prohibition does: the
+                // draw sequence runs, `apply_draw_after_replacement` clamps
+                // every unit to zero, and `EffectResolved { kind: Draw }` still
+                // fires. No CR 704.5b exposure — `attempted_empty_library` is
+                // gated on `allowed_count > 0`, so a forbidden draw records no
+                // empty-library attempt.
             }
         }
     }
@@ -311,6 +349,10 @@ pub fn resolve(
 /// pure magnitude with nothing to select. (The object-selecting `up_to`
 /// resolvers, `sacrifice` and `search_library`, derive their count from the
 /// chosen objects instead and so need a different prompt.)
+///
+/// Callers must have already cleared the CR 121.3 gate (`allowed_draw_count > 0`
+/// for `drawing_player`): this builds the menu unconditionally and does not
+/// re-check whether the choice may be offered at all.
 ///
 /// Three properties CR 608.2d requires of the offer:
 ///

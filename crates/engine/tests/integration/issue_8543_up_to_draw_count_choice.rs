@@ -22,11 +22,13 @@
 //! AST was already right.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, QuantityExpr, TargetFilter};
+use engine::types::ability::{Effect, EffectKind, QuantityExpr, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::statics::{ProhibitionScope, StaticMode};
 
 /// Deep enough that the count choice, not the library, bounds every draw in the
 /// matrix below. The boundary tests set their own shallower libraries.
@@ -293,4 +295,178 @@ fn the_count_menu_is_not_clamped_to_library_size() {
     );
     // The hand is not asserted here: a player who has left the game no longer
     // has one, so hand size cannot witness the delivered card at this point.
+}
+
+// ---------------------------------------------------------------------------
+// CR 121.3: an effect that says a player can't draw cards withholds the CHOICE,
+// not merely the cards. These pin the gate that sits in front of the menu.
+// ---------------------------------------------------------------------------
+
+/// Attach a battlefield permanent carrying `mode` so `allowed_draw_count` sees
+/// it (`battlefield_active_statics` reads the battlefield only).
+fn add_draw_prohibition(scenario: &mut GameScenario, mode: StaticMode) {
+    scenario
+        .add_creature(P0, "Draw Prohibition Witness", 1, 1)
+        .with_static(mode);
+}
+
+fn resolved_a_draw(outcome: &engine::game::scenario::CastOutcome) -> bool {
+    outcome.events().iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Draw,
+                ..
+            }
+        )
+    })
+}
+
+/// CR 121.3: "if an effect says that a player can't draw cards and another
+/// effect offers that player the choice to draw a card, that player can't
+/// choose to do so." CR 121.3a keys the test on the player who would DRAW.
+///
+/// Offering "Draw 1 card" under a `CantDraw` static and then delivering nothing
+/// is a choice-fidelity defect, not an illegal-draw one — `allowed_draw_count`
+/// is the single enforcement authority downstream and always clamped the
+/// outcome to zero. What was wrong was the menu, so that is what is asserted.
+#[test]
+fn a_cant_draw_prohibition_withholds_the_count_choice_entirely() {
+    let mut scenario = scenario_with_library(DEEP_LIBRARY);
+    add_draw_prohibition(
+        &mut scenario,
+        StaticMode::CantDraw {
+            who: ProhibitionScope::AllPlayers,
+        },
+    );
+    let spell = up_to_draw_spell(&mut scenario, 2);
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).resolve();
+
+    assert!(
+        !matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ChooseOneOfBranch { .. }
+        ),
+        "CR 121.3: a player who can't draw cards must not be offered the count choice"
+    );
+    assert_eq!(
+        outcome.hand_drawn(P0),
+        0,
+        "no cards may be drawn under a CantDraw static"
+    );
+    // The distinguishability property the resolver's doc comment makes
+    // load-bearing: resolving at zero is NOT the same as never resolving.
+    assert!(
+        resolved_a_draw(&outcome),
+        "the ability must still RESOLVE at zero, distinguishably from not resolving at all"
+    );
+}
+
+/// POSITIVE CONTROL for the test above. The identical fixture minus the
+/// prohibition MUST open the menu — otherwise "no prompt appeared" would be
+/// satisfied by a broken fixture rather than by the CR 121.3 gate.
+#[test]
+fn the_same_fixture_without_a_prohibition_does_offer_the_count_choice() {
+    let mut scenario = scenario_with_library(DEEP_LIBRARY);
+    let spell = up_to_draw_spell(&mut scenario, 2);
+    let mut runner = scenario.build();
+
+    runner.cast(spell).commit();
+    advance_to_choice(&mut runner);
+
+    // Asserts the menu is exactly 0..=2 and locates the "Draw 2 cards" branch.
+    let index = count_branch_index(&runner, 2, 2);
+    runner
+        .act(GameAction::ChooseBranch { index })
+        .expect("the unprohibited count choice must be selectable");
+    assert_eq!(
+        hand_size(&runner, P0),
+        2,
+        "the unprohibited fixture must actually draw the announced two cards"
+    );
+}
+
+/// THE JUDGEMENT CALL, pinned. CR 121.3 withholds the choice only when an
+/// effect says the player can't draw cards *at all*. A `PerTurnDrawLimit` with
+/// draws still remaining (Spirit of the Labyrinth, nothing drawn yet) says no
+/// such thing, so "up to two" must still OFFER two — and then deliver one,
+/// because CR 101.2's "can't" precedence is applied per individual draw
+/// (CR 121.2) downstream, not to the announcement.
+///
+/// Clamping the menu to the remaining allowance would make this test offer only
+/// 0..=1, which is the behaviour this asserts against.
+#[test]
+fn a_partial_per_turn_draw_limit_still_offers_the_full_announcement_range() {
+    let mut scenario = scenario_with_library(DEEP_LIBRARY);
+    add_draw_prohibition(
+        &mut scenario,
+        StaticMode::PerTurnDrawLimit {
+            who: ProhibitionScope::AllPlayers,
+            max: 1,
+        },
+    );
+    let spell = up_to_draw_spell(&mut scenario, 2);
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().players[0].cards_drawn_this_turn,
+        0,
+        "precondition: the one permitted draw is still available"
+    );
+
+    runner.cast(spell).commit();
+    advance_to_choice(&mut runner);
+
+    // The decisive assertion: three options (0,1,2) despite only one draw
+    // being deliverable this turn.
+    let index = count_branch_index(&runner, 2, 2);
+    let before = hand_size(&runner, P0);
+    runner
+        .act(GameAction::ChooseBranch { index })
+        .expect("announcing two under a one-per-turn limit is a legal CR 608.2d choice");
+
+    assert_eq!(
+        hand_size(&runner, P0) - before,
+        1,
+        "CR 121.2 + CR 101.2: the limit applies per individual draw, so exactly one lands"
+    );
+}
+
+/// The other side of the same limit: once it is exhausted the effect DOES say
+/// the player can't draw cards, so CR 121.3 withholds the choice. This is why
+/// the gate tests `allowed_draw_count == 0` rather than keying on `CantDraw`
+/// alone.
+#[test]
+fn an_exhausted_per_turn_draw_limit_withholds_the_count_choice() {
+    let mut scenario = scenario_with_library(DEEP_LIBRARY);
+    add_draw_prohibition(
+        &mut scenario,
+        StaticMode::PerTurnDrawLimit {
+            who: ProhibitionScope::AllPlayers,
+            max: 1,
+        },
+    );
+    let spell = up_to_draw_spell(&mut scenario, 2);
+    let mut runner = scenario.build();
+    runner.state_mut().players[0].cards_drawn_this_turn = 1;
+
+    let outcome = runner.cast(spell).resolve();
+
+    assert!(
+        !matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ChooseOneOfBranch { .. }
+        ),
+        "an exhausted per-turn limit is \"can't draw cards\" right now (CR 121.3)"
+    );
+    assert_eq!(
+        outcome.hand_drawn(P0),
+        0,
+        "no further draw is permitted this turn"
+    );
+    assert!(
+        resolved_a_draw(&outcome),
+        "the ability must still resolve at zero"
+    );
 }
