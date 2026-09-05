@@ -4308,6 +4308,149 @@ fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
     );
 }
 
+/// CR 120.1 + CR 510.2 + CR 701.20e (issue #8467): "Whenever ~ deals combat
+/// damage to a player, look at the top three cards of that player's library"
+/// reads the DAMAGED player's library.
+///
+/// This is the surviving-`Dig` half of the class. The look-then-exile half
+/// (Gonti, Canny Acquisitor, above) rewrites its `Dig` into an `ExileTop` and
+/// re-resolved the owner anaphor on the way; the hideaway half ("exile one of
+/// them face down") keeps the `Dig`, so it kept whatever
+/// `parse_dig_library_owner` produced — a fixed `TargetFilter::ParentTarget`,
+/// which has NO referent on a combat-damage event. `resolve_player_for_context_ref`
+/// then fell through to `ability.controller` and Thief of Sanity dug its own
+/// controller's library.
+#[test]
+fn combat_damage_dig_binds_that_players_library_to_the_damaged_player() {
+    let def = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, look at the top three cards of \
+         that player's library, exile one of them face down, then put the rest into their \
+         graveyard. You may cast that card for as long as it remains exiled, and mana of any \
+         type can be spent to cast that spell.",
+        "Thief of Sanity",
+    );
+    // Reach-guard: the combat-damage trigger scope that supplies the "that
+    // player" antecedent really was established for this body.
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+    let Effect::Dig {
+        player,
+        count,
+        keep_count,
+        destination,
+        rest_destination,
+        ..
+    } = &*execute.effect
+    else {
+        panic!(
+            "the look step must stay an Effect::Dig for the hideaway idiom, got: {:?}",
+            execute.effect
+        );
+    };
+    // Reach-guard: the "exile one of them face down" fusion patched this exact
+    // Dig, so the assertion below is read off the arm production resolves — not
+    // off a bare keep-nothing peek that never reaches the library owner.
+    assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+    assert_eq!(*keep_count, Some(1));
+    assert_eq!(*destination, Some(crate::types::zones::Zone::Exile));
+    assert_eq!(
+        *rest_destination,
+        Some(crate::types::zones::Zone::Graveyard)
+    );
+    assert_eq!(
+        *player,
+        TargetFilter::TriggeringPlayer,
+        "the dug library must belong to the damaged player, not the ability controller"
+    );
+}
+
+/// CR 120.1 + CR 510.2 + CR 102.2 (issue #8467): the `"that opponent's"`
+/// spelling of the same library-owner anaphor. Gonti, Night Minister's damage
+/// trigger names its ACTING player separately ("its controller looks at ...")
+/// from the library it reads ("that opponent's library"), so a binding that
+/// collapses to the ability controller is observably wrong here even when the
+/// two coincide on `"that player's"` cards.
+#[test]
+fn combat_damage_look_binds_that_opponents_library_to_the_damaged_opponent() {
+    let def = parse_trigger_line(
+        "Whenever a creature deals combat damage to one of your opponents, its controller looks \
+         at the top card of that opponent's library and exiles it face down. They may play that \
+         card for as long as it remains exiled. Mana of any type can be spent to cast a spell \
+         this way.",
+        "Gonti, Night Minister",
+    );
+    // Reach-guard: the opponent-recipient damage trigger was recognized, which
+    // is what establishes the "that opponent" antecedent.
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+    let Effect::ExileTop { player, .. } = &*execute.effect else {
+        panic!(
+            "\"looks at ... and exiles it face down\" must fuse into ExileTop, got: {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        *player,
+        TargetFilter::TriggeringPlayer,
+        "the exiled top card must come from the damaged opponent's library"
+    );
+}
+
+/// CR 115.1 (issue #8467) — priority control for the arm above. A clause that
+/// prints BOTH possessives ("Look at the top card of target player's library.
+/// You may put that card on the bottom of that player's library.") must keep
+/// binding the *declared target*, not the anaphor: `"target player's library"`
+/// still outranks the `"that <owner>'s library"` scan.
+#[test]
+fn target_players_library_still_outranks_the_that_player_anaphor() {
+    let parsed = parse_oracle_text(
+        "[+2]: Look at the top card of target player's library. You may put that card on the \
+         bottom of that player's library.\n[0]: Draw three cards, then put two cards from your \
+         hand on top of your library in any order.\n[\u{2212}1]: Return target creature to its \
+         owner's hand.\n[\u{2212}12]: Exile all cards from target player's library, then that \
+         player shuffles their hand into their library.",
+        "Jace, the Mind Sculptor",
+        &[],
+        &["Legendary".to_string(), "Planeswalker".to_string()],
+        &["Jace".to_string()],
+    );
+    let dig_player = parsed
+        .abilities
+        .iter()
+        .find_map(|ability| match &*ability.effect {
+            Effect::Dig { player, .. } => Some(player.clone()),
+            _ => None,
+        })
+        .expect("the +2 look-at ability must lower to an Effect::Dig");
+    assert_eq!(
+        dig_player,
+        TargetFilter::Player,
+        "a declared player target must not be rebound by the \"that player's library\" anaphor"
+    );
+}
+
+/// CR 701.20e (issue #8467) — default control. A first-person library ("your
+/// library") carries no relative-player anaphor at all, so the owner stays
+/// `Controller`; the anaphor arm must not widen to every dig.
+#[test]
+fn your_library_dig_still_binds_the_controller() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, look at the top card of your library.",
+        "Delver of Secrets",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+    let Effect::Dig { player, .. } = &*execute.effect else {
+        panic!("expected an Effect::Dig, got: {:?}", execute.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
+}
+
 /// CR 406.3, CR 406.3a-b, CR 601.2a, and CR 611.2a: Rev's exact Oracle text
 /// grants its controller permission to look at and cast the face-down card for
 /// as long as it remains exiled. The intervening Treasure creation must not
