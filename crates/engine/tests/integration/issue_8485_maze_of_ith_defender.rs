@@ -111,6 +111,53 @@ fn run_mazed_combat_with_maze_removal(
                     );
                 }
             }
+            // CR 510.1c + CR 702.19b: an attacker blocked by MORE THAN ONE creature,
+            // or one with trample, must have its combat damage divided by its
+            // controller before the combat damage step can proceed. Without this arm
+            // the loop fell through to `_ => break` and left combat unfinished — which
+            // is exactly what the terminal reach-guard below now catches, and what
+            // silently hollowed out `..._prevents_trample_spillover` and
+            // `..._prevents_every_event_when_multiple_blockers`.
+            //
+            // The division mirrors the shared driver in `rules.rs`
+            // (`run_combat_with_blocker_divisions`): assign each blocker its lethal
+            // minimum in order, then give the remainder to the defending player as
+            // trample damage (CR 702.19b) or, with no trample, dump it on the last
+            // blocker so the assignment totals the attacker's power (CR 510.1c).
+            WaitingFor::AssignCombatDamage {
+                blockers,
+                total_damage,
+                trample,
+                ..
+            } => {
+                // NOTE: this loop matches on a CLONED `waiting_for`, so these
+                // bindings are owned values, not the references `rules.rs` gets.
+                let mut remaining = total_damage;
+                let mut assignments: Vec<(ObjectId, u32)> = Vec::new();
+                for slot in &blockers {
+                    let assign = remaining.min(slot.lethal_minimum);
+                    assignments.push((slot.blocker_id, assign));
+                    remaining = remaining.saturating_sub(assign);
+                }
+                if trample.is_none() && remaining > 0 {
+                    if let Some(last) = assignments.last_mut() {
+                        last.1 += remaining;
+                        remaining = 0;
+                    }
+                }
+                let trample_damage = if trample.is_some() { remaining } else { 0 };
+                if runner
+                    .act(GameAction::AssignCombatDamage {
+                        mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
+                        assignments,
+                        trample_damage,
+                        controller_damage: 0,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
             WaitingFor::Priority { .. } => {
                 if runner.act(GameAction::PassPriority).is_err() {
                     break;
@@ -120,6 +167,28 @@ fn run_mazed_combat_with_maze_removal(
         }
     }
     assert!(mazed, "Maze of Ith must have been activated");
+    // TERMINAL REACH-GUARD. Most assertions in this file are ABSENCES — "the Mazed
+    // creature dealt no damage", "the planeswalker lost no loyalty", "the blocker
+    // took no damage" — and an absence is satisfied for free if combat never
+    // reached the combat damage step at all. This loop has six ways to stop early
+    // that are not "combat finished": the `_ => break` arm on an unrecognized
+    // `WaitingFor`, the four `.is_err()` breaks, and exhausting 400 iterations.
+    // Without this guard a future `WaitingFor` variant, a new trigger shape, or a
+    // CR 616.1 `WaitingFor::ReplacementChoice` park (which issue #8485 makes newly
+    // reachable — see `prevent_damage::tests::
+    // two_shields_on_one_damage_event_prevent_it_exactly_once`) would silently turn
+    // eight of these tests green-for-the-wrong-reason. Only the tests that carry an
+    // un-Mazed control creature are immune on their own.
+    assert!(
+        matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        ),
+        "combat must have run to completion — an absence-only assertion below would \
+         otherwise pass vacuously (stopped in {:?} waiting for {:?})",
+        runner.state().phase,
+        runner.state().waiting_for
+    );
 }
 
 fn damage_marked(runner: &engine::game::scenario::GameRunner, obj: ObjectId) -> u32 {
@@ -389,7 +458,13 @@ fn issue_8485_maze_prevents_every_event_when_multiple_blockers() {
     let maze = scenario
         .add_land_from_oracle(P0, "Maze of Ith", MAZE_OF_ITH)
         .id();
-    let mazed = scenario.add_creature(P1, "Mazed Attacker", 4, 6).id();
+    // CR 510.1c: the attacker's power must be at least the SUM of both blockers'
+    // lethal minimums, or the division cannot legally put damage on the second
+    // blocker at all. At the original 4 power against two 4-toughness blockers the
+    // only legal assignment was 4/0, so the "SECOND blocker" assertion below was
+    // vacuous no matter what the shield did. 8 power forces a genuine 4/4 split, so
+    // both "by" events are really produced and really have to be prevented.
+    let mazed = scenario.add_creature(P1, "Mazed Attacker", 8, 6).id();
     let blocker_a = scenario.add_creature(P0, "Blocker A", 2, 4).id();
     let blocker_b = scenario.add_creature(P0, "Blocker B", 2, 4).id();
 
