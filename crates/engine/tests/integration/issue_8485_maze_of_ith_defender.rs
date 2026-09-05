@@ -56,10 +56,19 @@ fn run_mazed_combat_with_maze_removal(
 ) {
     let mut mazed = false;
     let mut blocked = false;
+    // Reach latches for the terminal guard below. The phase check alone only proves
+    // combat ENDED, which any change that pulls the attacker out of combat or skips
+    // the damage step also satisfies — leaving every absence-only assertion in this
+    // file green for the wrong reason, i.e. the exact class the guard exists to
+    // close. These latch that the combat damage step was actually entered, and that
+    // the CR 510.1c/702.19b division actually ran for the fixtures that need one.
+    let mut saw_damage_step = false;
+    let mut divided_damage = false;
     runner
         .declare_attackers(attacks)
         .expect("P1 must be able to declare its attack");
     for _ in 0..400 {
+        saw_damage_step |= runner.state().phase == Phase::CombatDamage;
         if matches!(
             runner.state().phase,
             Phase::EndCombat | Phase::PostCombatMain
@@ -157,6 +166,7 @@ fn run_mazed_combat_with_maze_removal(
                 {
                     break;
                 }
+                divided_damage = true;
             }
             WaitingFor::Priority { .. } => {
                 if runner.act(GameAction::PassPriority).is_err() {
@@ -188,6 +198,35 @@ fn run_mazed_combat_with_maze_removal(
          otherwise pass vacuously (stopped in {:?} waiting for {:?})",
         runner.state().phase,
         runner.state().waiting_for
+    );
+    // CR 510.2: reaching EndCombat is necessary but NOT sufficient. A change that
+    // removed the attacker from combat, or skipped the damage step, would satisfy
+    // the phase check while producing no damage event at all — and every
+    // absence-only assertion below would still pass. Require that the combat damage
+    // step was actually entered.
+    assert!(
+        saw_damage_step,
+        "combat reached its end without ever entering the combat damage step — \
+         no damage event was produced, so the absence assertions below prove nothing"
+    );
+    // CR 510.1c + CR 702.19b: for the fixtures that need a division (an attacker
+    // blocked by more than one creature, or a trampler), the division must actually
+    // have been performed. Without this, a future change that stopped raising
+    // `AssignCombatDamage` would silently return those fixtures to the vacuous state
+    // this guard was added to fix.
+    // Looked up defensively: a panic on a missing object here would mask the
+    // assertion rather than report it.
+    let needs_division = blockers.len() > 1
+        || runner
+            .state()
+            .objects
+            .get(&attacker)
+            .is_some_and(|o| o.has_keyword(&engine::types::keywords::Keyword::Trample));
+    assert!(
+        !needs_division || divided_damage,
+        "this fixture blocks with {} creature(s) and/or has trample, so a CR 510.1c \
+         damage division was required — but `AssignCombatDamage` never fired",
+        blockers.len()
     );
 }
 

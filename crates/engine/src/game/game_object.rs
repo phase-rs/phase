@@ -1688,10 +1688,6 @@ impl GameObject {
     /// it is also what makes the carry-over idempotent under mid-pass re-entry
     /// (see `reseed_replacements_carrying_resolution_effects`).
     pub(crate) fn install_resolution_replacement(&mut self, mut def: ReplacementDefinition) {
-        debug_assert!(
-            !self.base_replacement_definitions.contains(&def),
-            "a resolution-installed replacement must not also live in base"
-        );
         // CR 611.2a: a `Resolution`-origin def is carried across every CR 613.1
         // reset, so its ONLY removal paths are an expiry prune (`turns.rs`, all
         // three of which key on `expiry` alone) and a zone change. A def with no
@@ -1707,6 +1703,15 @@ impl GameObject {
             self.replacement_definitions.push(def);
             return;
         }
+        // Asserted AFTER the fail-closed return, not before it: the invariant is
+        // about defs that actually get STAMPED `Resolution`, and an unbounded def
+        // never is. Checking it earlier would abort debug and test builds for a
+        // legitimate unstated-duration rider that merely happens to equal a printed
+        // base def — a def that, being live-only and unstamped, cannot double-apply.
+        debug_assert!(
+            !self.base_replacement_definitions.contains(&def),
+            "a resolution-installed replacement must not also live in base"
+        );
         def.origin = crate::types::ability::ReplacementOrigin::Resolution;
         self.replacement_definitions.push(def);
     }

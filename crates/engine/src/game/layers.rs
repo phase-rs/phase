@@ -9873,6 +9873,99 @@ mod tests {
         );
     }
 
+    /// CR 305.7 + CR 611.2c (issue #8485): Blood Moon-class `SetBasicLandType`
+    /// removes the land's rules-text abilities; it does not end a continuous effect
+    /// that already resolved onto it.
+    ///
+    /// The CR 305.7 sibling of `humility_does_not_end_a_resolution_created_shield`.
+    /// `set_land_subtype_replacing` got the same
+    /// `.retain(|d| d.is_resolution_installed())` as the CR 613.1f
+    /// `RemoveAllAbilities` arm, but only the latter had a fixture — and this is the
+    /// path that hosts `add_target_replacement` riders on LANDS, so a regression
+    /// here would be silent. CR 305.7: "It loses all abilities generated from its
+    /// rules text... Note that this doesn't remove any abilities that were granted
+    /// to the land by other effects." A resolution-created replacement is neither:
+    /// CR 611.2c says it is not a characteristic of the object at all.
+    #[test]
+    fn blood_moon_does_not_end_a_resolution_created_shield() {
+        let mut state = setup();
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nonbasic Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Desert".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
+            obj.replacement_definitions = vec![printed_base_shield()].into();
+            obj.base_characteristics_initialized = true;
+            obj.install_resolution_replacement(spent_resolution_shield());
+        }
+        // Reach-guard: the printed def is present before the pass, so its removal
+        // below is an observed change rather than a vacuous absence.
+        assert!(state.objects[&land]
+            .replacement_definitions
+            .iter_all()
+            .any(|d| !d.is_resolution_installed()));
+
+        let blood_moon = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Blood Moon".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&blood_moon).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: land })
+                    .modifications(vec![ContinuousModification::SetBasicLandType {
+                        land_type: crate::types::ability::BasicLandType::Mountain,
+                    }]),
+            );
+            obj.base_static_definitions = obj.static_definitions.as_slice().to_vec().into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // Positive reach-guard: the subtype set really applied this pass.
+        assert!(
+            state.objects[&land]
+                .card_types
+                .subtypes
+                .contains(&"Mountain".to_string()),
+            "reach-guard: CR 305.7 subtype replacement must have run"
+        );
+        assert!(
+            !state.objects[&land]
+                .card_types
+                .subtypes
+                .contains(&"Desert".to_string()),
+            "CR 205.3i: the old land subtype is replaced"
+        );
+
+        let live = &state.objects[&land].replacement_definitions;
+        assert_eq!(
+            live.len(),
+            1,
+            "the printed rules-text def is removed, the resolution shield stays"
+        );
+        assert!(live[0].is_resolution_installed());
+        assert!(
+            live[0].is_consumed,
+            "CR 615.3: the carried shield keeps its runtime state through Blood Moon"
+        );
+    }
+
     /// CR 613.1f + CR 611.2c (issue #8485): Humility-class `RemoveAllAbilities`
     /// removes the object's ABILITIES; it does not end a continuous effect that
     /// already resolved onto it. Paired positive reach-guard: the printed def
