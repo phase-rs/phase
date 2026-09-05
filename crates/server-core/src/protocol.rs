@@ -3122,8 +3122,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_64_for_draft_full_identity() {
-        assert_eq!(PROTOCOL_VERSION, 64);
+    fn protocol_version_is_65_for_draft_full_identity() {
+        assert_eq!(PROTOCOL_VERSION, 65);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3134,7 +3134,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_64_for_draft_full_identity` stays
+    /// `protocol_version_is_65_for_draft_full_identity` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

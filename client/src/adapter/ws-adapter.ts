@@ -208,7 +208,7 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 64 — DraftMatchStart now announces the exact Full-session identity for the
+ * 65 — DraftMatchStart now announces the exact Full-session identity for the
  *      spawned match. Draft reconnect attaches the authenticated draft seat
  *      to that Full-session lifetime, and Full follow-up frames carry the key
  *      needed to reject stale-generation traffic. Lobby messages are unchanged.
@@ -441,7 +441,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 64;
+export const PROTOCOL_VERSION = 65;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
