@@ -132,8 +132,9 @@ fn ordering_the_shockland_tap_last_still_enters_tapped() {
 /// `enter_tapped` write (see `chained_enter_tapped_commute_class`).
 ///
 /// Goes RED if the decline walk is reduced to a root-only `decline.effect` check.
-#[test]
-fn chained_decline_tap_still_collides_with_an_untap_source() {
+/// Drives the chained-decline scenario, declining the payment. `untap_last`
+/// picks the ordering; returns `(entered_tapped, prompt_rounds)`.
+fn play_chained_tapland_declining(untap_last: bool) -> (bool, usize) {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Effect, EffectScope, QuantityExpr,
         ReplacementDefinition, ReplacementMode, TapStateChange, TargetFilter,
@@ -195,11 +196,20 @@ fn chained_decline_tap_still_collides_with_an_untap_source() {
         let pick = if let Some(i) = labels.iter().position(|d| d == "Decline") {
             i
         } else {
-            // Order the chained tap FIRST so Spelunking's untap applies last.
-            candidates
+            // CR 616.1f: the effect applied LAST wins, so selecting the TAP
+            // first makes the untap win, and vice versa.
+            let tap = candidates
                 .iter()
-                .position(|c| c.source_name == "Chained Tapland")
-                .unwrap_or(0)
+                .position(|c| c.source_name == "Chained Tapland");
+            let untap = candidates
+                .iter()
+                .position(|c| c.source_name == "Spelunking");
+            let (first, other) = if untap_last {
+                (tap, untap)
+            } else {
+                (untap, tap)
+            };
+            first.or(other).unwrap_or(0)
         };
         runner
             .act(GameAction::ChooseReplacement { index: pick })
@@ -208,13 +218,46 @@ fn chained_decline_tap_still_collides_with_an_untap_source() {
         assert!(rounds <= 6, "replacement prompt failed to terminate");
     }
 
+    let obj = &runner.state().objects[&land_id];
+    assert_eq!(obj.zone, Zone::Battlefield, "the land entered play");
+    (obj.tapped, rounds)
+}
+
+/// CR 616.1e: the chained decline tap must surface the ordering prompt.
+///
+/// Goes RED if the decline walk is reduced to a root-only `decline.effect` check.
+#[test]
+fn chained_decline_tap_still_collides_with_an_untap_source() {
+    let (tapped, rounds) = play_chained_tapland_declining(true);
     assert!(
         rounds >= 2,
         "CR 616.1e: a chained decline tap must still surface the ordering prompt, got {rounds} round(s)"
     );
     assert!(
-        !runner.state().objects[&land_id].tapped,
+        !tapped,
         "CR 616.1f: with the untap applied last the land must enter untapped"
+    );
+}
+
+/// The MIRROR of the case above, and the half that makes it discriminating.
+///
+/// `!tapped` alone is equally consistent with "the chained tap was applied and
+/// then correctly overwritten" and with "the chained tap was never applied at
+/// all" — it passes in both the working and the broken world. This test pins
+/// the opposite ordering: applying the chained tap LAST must leave the land
+/// TAPPED, which is only true if the classifier and the applier agree that the
+/// chained tap really writes `enter_tapped`. A degenerate ordering (or a
+/// classifier/applier disagreement) fails one of the pair.
+#[test]
+fn ordering_the_chained_decline_tap_last_still_enters_tapped() {
+    let (tapped, rounds) = play_chained_tapland_declining(false);
+    assert!(
+        rounds >= 2,
+        "CR 616.1e: the ordering prompt must still be offered, got {rounds} round(s)"
+    );
+    assert!(
+        tapped,
+        "CR 616.1f: with the chained tap applied last the land must enter tapped —          if this fails while its mirror passes, the chained tap is never applied          and the classifier disagrees with the applier"
     );
 }
 
@@ -395,5 +438,73 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         ReplacementChoiceKind::SearchFoundDestination,
         "CR 616.1: a legacy save's search-found prompt must restore as \
          SearchFoundDestination, not as the serde default `Order`"
+    );
+}
+
+/// CR 616.1f: the ordering prompt's `last_applied_decides` flag must be TRUE for
+/// a whole-field overwrite collision (the enters-tapped class), so the client may
+/// name a concrete winning result.
+///
+/// The companion negative case lives in the engine unit tests: a compositional
+/// collision (damage doubler vs adder) and the first-applied-wins EmptyManaPool
+/// sentinel must both report FALSE, because naming a "winner" there would state
+/// an outcome that does not exist (or the exact inverse).
+///
+/// Goes RED if the flag is hardcoded true or dropped from the payload.
+#[test]
+fn enter_tapped_ordering_prompt_reports_last_applied_decides() {
+    use engine::types::game_state::ReplacementChoiceKind;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Spelunking", "Lands you control enter untapped.");
+    let mut builder = scenario.add_land_to_hand(P0, "Stomping Ground");
+    builder.from_oracle_text(SHOCK_LAND);
+    let land_id = builder.id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&land_id].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land_id,
+            card_id,
+        })
+        .expect("play land should succeed");
+
+    // With an untap source out, the tap-vs-untap ordering prompt is raised
+    // alongside the shock land's own optional payment. Capture the flag from the
+    // FIRST prompt whose kind is `Order` — that is the one the client renders as
+    // a sortable list.
+    let mut seen_order = None;
+    let mut guard = 0;
+    while let WaitingFor::ReplacementChoice {
+        kind,
+        last_applied_decides,
+        ref candidates,
+        ..
+    } = runner.state().waiting_for
+    {
+        if kind == ReplacementChoiceKind::Order && seen_order.is_none() {
+            seen_order = Some(last_applied_decides);
+        }
+        // Advance: decline a payment branch when offered, else take the first
+        // ordering candidate.
+        let pick = candidates
+            .iter()
+            .position(|c| c.description == "Decline")
+            .unwrap_or(0);
+        runner
+            .act(GameAction::ChooseReplacement { index: pick })
+            .expect("replacement choice should succeed");
+        guard += 1;
+        assert!(guard <= 6, "replacement prompt failed to terminate");
+    }
+
+    let last_applied_decides = seen_order
+        .expect("reach guard: an Order prompt must occur, or the flag assertion is vacuous");
+    assert!(
+        last_applied_decides,
+        "CR 616.1f: two single-target SetTapState writers each stamp the whole \
+         `enter_tapped` field, so the last one applied decides the outcome"
     );
 }

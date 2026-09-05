@@ -48,6 +48,12 @@ export function ReplacementModal() {
       ? (waitingFor.data.kind?.type ?? "Order")
       : "Order";
   const isOrdering = kindType === "Order" && candidateCount > 1;
+  // CR 616.1f: engine-computed — does the last-applied candidate alone decide
+  // the outcome? Absent (legacy/unknown) means "don't claim a winner".
+  const lastAppliedDecides =
+    waitingFor?.type === "ReplacementChoice"
+      ? (waitingFor.data.last_applied_decides ?? false)
+      : false;
 
   // Local UI state: the chosen permutation (indices into `candidates`).
   // Identity to start; reset on every new prompt because successive CR 616.1f
@@ -55,9 +61,21 @@ export function ReplacementModal() {
   const [order, setOrder] = useState<number[]>(() =>
     Array.from({ length: candidateCount }, (_, i) => i),
   );
+  // Reset on a genuinely NEW prompt, keyed on stable CONTENT rather than array
+  // identity. `candidates` is a fresh array on every engine snapshot commit, so
+  // depending on it would blow away an in-progress reorder whenever any
+  // unrelated state pushed — the user would watch their arrangement snap back
+  // mid-drag. Successive CR 616.1f rounds change the candidate set, so the
+  // identity key changes and the reset still fires when it should.
+  const promptKey = isReplacementChoice
+    ? `${candidateCount}|${candidates.map((c) => `${c.source_id}:${c.description}`).join("|")}`
+    : "";
   useEffect(() => {
     setOrder(Array.from({ length: candidateCount }, (_, i) => i));
-  }, [candidateCount, candidates, isReplacementChoice]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- promptKey encodes
+    // candidateCount + candidate content; adding `candidates` would reintroduce
+    // the identity-churn reset this key exists to avoid.
+  }, [promptKey]);
 
   const move = useCallback((from: number, to: number) => {
     setOrder((prev) => {
@@ -130,14 +148,25 @@ export function ReplacementModal() {
     );
   }
 
-  // The winning effect is the one applied last — the bottom of the list.
-  const winningLabel = labelFor(order[order.length - 1] ?? 0);
+  // CR 616.1f: name a concrete winning result ONLY when the engine says the
+  // last-applied effect decides the outcome. That holds for whole-field
+  // overwrites (the enters-tapped class) but NOT for compositional collisions
+  // — a damage doubler ordered against a damage adder has both effects apply,
+  // so there is no winner to name and the order changes the arithmetic instead.
+  // The engine owns this distinction; never infer it from the candidate labels.
+  const winningLabel = lastAppliedDecides
+    ? labelFor(order[order.length - 1] ?? 0)
+    : null;
 
   return (
     <DialogShell
       eyebrow={t("replacement.eyebrow")}
       title={t("replacement.title")}
-      subtitle={t("replacement.orderSubtitle")}
+      subtitle={
+        lastAppliedDecides
+          ? t("replacement.orderSubtitle")
+          : t("replacement.orderSubtitleComposing")
+      }
       size="md"
       scrollable
       footer={
@@ -152,7 +181,9 @@ export function ReplacementModal() {
     >
       <div className="px-3 py-3 lg:px-5 lg:py-5">
         <div className="mb-2 text-xs uppercase tracking-wide text-white/50">
-          {t("replacement.appliedFirst")}
+          {lastAppliedDecides
+            ? t("replacement.appliedFirst")
+            : t("replacement.appliedEarlier")}
         </div>
         <Reorder.Group
           as="ol"
@@ -188,6 +219,14 @@ export function ReplacementModal() {
                 {...(candidate ? hoverProps(candidate.source_id) : {})}
               >
                 <div className="flex-1 text-left">
+                  {/* Position is visually obvious from the list order but
+                      invisible to a screen reader, which reads rows in isolation. */}
+                  <span className="sr-only">
+                    {t("replacement.positionAnnounce", {
+                      position: position + 1,
+                      total: order.length,
+                    })}
+                  </span>
                   <div className="font-semibold text-white">
                     <RichLabel text={labelFor(candidateIndex)} size="sm" />
                   </div>
@@ -202,7 +241,9 @@ export function ReplacementModal() {
                 <div className="flex flex-col gap-1">
                   <button
                     type="button"
-                    aria-label={t("replacement.moveUp")}
+                    aria-label={t("replacement.moveUpNamed", {
+                      name: labelFor(candidateIndex),
+                    })}
                     disabled={position === 0}
                     onClick={() => move(position, position - 1)}
                     className="min-h-8 rounded border border-white/10 px-2 text-white/80 transition hover:bg-white/10 disabled:opacity-30"
@@ -211,7 +252,9 @@ export function ReplacementModal() {
                   </button>
                   <button
                     type="button"
-                    aria-label={t("replacement.moveDown")}
+                    aria-label={t("replacement.moveDownNamed", {
+                      name: labelFor(candidateIndex),
+                    })}
                     disabled={position === order.length - 1}
                     onClick={() => move(position, position + 1)}
                     className="min-h-8 rounded border border-white/10 px-2 text-white/80 transition hover:bg-white/10 disabled:opacity-30"
@@ -224,16 +267,24 @@ export function ReplacementModal() {
           })}
         </Reorder.Group>
         <div className="mt-2 text-xs uppercase tracking-wide text-cyan-300/80">
-          {t("replacement.appliedLast")}
+          {lastAppliedDecides
+            ? t("replacement.appliedLast")
+            : t("replacement.appliedLater")}
         </div>
         {/* State the concrete outcome so the player never has to infer it from
-            the ordering semantics. */}
-        <div className="mt-3 rounded-[12px] border border-cyan-400/20 bg-cyan-400/5 px-3 py-2 text-sm font-semibold text-cyan-200">
-          <RichLabel
-            text={t("replacement.resultLabel", { outcome: winningLabel })}
-            size="sm"
-          />
-        </div>
+            the ordering semantics — but only when one effect actually wins. */}
+        {winningLabel !== null ? (
+          <div className="mt-3 rounded-[12px] border border-cyan-400/20 bg-cyan-400/5 px-3 py-2 text-sm font-semibold text-cyan-200">
+            <RichLabel
+              text={t("replacement.resultLabel", { outcome: winningLabel })}
+              size="sm"
+            />
+          </div>
+        ) : (
+          <div className="mt-3 rounded-[12px] border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">
+            {t("replacement.composesNote")}
+          </div>
+        )}
         <p className="mt-2 text-center text-xs text-white/40">
           {t("replacement.dragHint")}
         </p>

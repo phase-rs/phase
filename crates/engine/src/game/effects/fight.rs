@@ -779,6 +779,7 @@ mod tests {
                 description: "Shield".to_string(),
             }],
             kind: Default::default(),
+            last_applied_decides: false,
         };
 
         // Accept the replacement for bear → wolf (first direction).

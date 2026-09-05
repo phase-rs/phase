@@ -12337,6 +12337,14 @@ pub enum WaitingFor {
         /// and the many test constructions keep deserializing unchanged.
         #[serde(default)]
         kind: ReplacementChoiceKind,
+        /// CR 616.1f: whether the LAST-applied candidate alone decides the
+        /// outcome (every colliding write overwrites the whole field), so the
+        /// UI may name a concrete winning result. False for compositional
+        /// collisions — damage doublers vs adders, count and mana modifiers —
+        /// where both effects apply and there is no single winner. The display
+        /// layer must not assume last-write-wins; this is the engine's answer.
+        #[serde(default)]
+        last_applied_decides: bool,
     },
     /// CR 614.12a: choose the opponent that a permanent enters under before
     /// the zone change is delivered. `candidates` is captured at replacement
@@ -28325,6 +28333,7 @@ mod tests {
             candidate_count: 2,
             candidates: Vec::new(),
             kind: Default::default(),
+            last_applied_decides: false,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -28493,6 +28502,7 @@ mod tests {
             candidate_count: 2,
             candidates: Vec::new(),
             kind: Default::default(),
+            last_applied_decides: false,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -33648,6 +33658,7 @@ mod tests {
             candidate_count: 2,
             candidates: vec![],
             kind: Default::default(),
+            last_applied_decides: false,
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),

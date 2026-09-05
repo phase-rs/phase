@@ -1010,11 +1010,27 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
         };
     }
 
+    // CR 616.1f: only the engine can say whether a winner exists; the client
+    // must not infer it from the candidate labels.
+    let last_applied_decides = state.pending_replacement.as_ref().is_some_and(|p| {
+        // CR 703.4q: the `EmptyManaPool` sentinel path hardcodes `Order` and is
+        // FIRST-applied-wins — `apply_empty_mana_pool_replacement` skips any unit
+        // whose disposition the earlier handler already claimed. Naming the last
+        // entry as the winner there would state the exact inverse, so it is
+        // excluded before the field check.
+        if matches!(p.proposed, ProposedEvent::EmptyManaPool { .. }) {
+            return false;
+        }
+        kind == ReplacementChoiceKind::Order
+            && replacement_last_applied_decides(state, &p.candidates, &p.proposed)
+    });
+
     WaitingFor::ReplacementChoice {
         player,
         candidate_count,
         candidates,
         kind,
+        last_applied_decides,
     }
 }
 
@@ -9131,6 +9147,42 @@ fn apply_single_replacement_and_dirty(
 /// shapes default to MATERIAL — never auto-resolve a possibly order-sensitive
 /// set; this conservative default also covers self-replacement effects
 /// (CR 616.1a / CR 614.15).
+/// CR 616.1f: whether the LAST-applied candidate alone determines this event's
+/// outcome — i.e. every colliding write is a whole-field overwrite rather than a
+/// composition.
+///
+/// True only for the `EnterTapped` class: two single-target `SetTapState`
+/// writers each stamp the whole field, so the final write wins and "the last one
+/// applied is the one that takes effect" is literally true. It is FALSE for
+/// arithmetic/compositional collisions — `Damage` (Furnace of Rath `Double` +
+/// Torbran `Plus{2}`), `Count`, and `ManaType` — where both effects apply and
+/// the order changes the arithmetic without producing a "winner"; and for
+/// `Unconditional` candidates, whose interaction is unproven by construction.
+///
+/// The display layer must not assume last-write-wins: presenting a "Result: X"
+/// banner for a composing collision states an outcome that does not exist.
+pub(crate) fn replacement_last_applied_decides(
+    state: &GameState,
+    candidates: &[ReplacementId],
+    proposed: &ProposedEvent,
+) -> bool {
+    let mut saw_overwrite = false;
+    for rid in candidates {
+        match candidate_materiality(state, *rid, proposed) {
+            // Unproven interaction — never claim a winner.
+            CandidateMateriality::Unconditional => return false,
+            CandidateMateriality::Writes { field, .. } => {
+                if field != EventField::EnterTapped {
+                    return false;
+                }
+                saw_overwrite = true;
+            }
+            CandidateMateriality::Disjoint => {}
+        }
+    }
+    saw_overwrite
+}
+
 pub(crate) fn replacement_ordering_is_material(
     state: &GameState,
     candidates: &[ReplacementId],
@@ -9293,7 +9345,7 @@ fn enter_tapped_commute_class(effect: &Effect) -> Option<CommuteClass> {
 /// `sub_ability` links so a self tap on a chained link is not missed by a
 /// root-only check.
 ///
-/// Mirrors [`EventModifiers::event_modifiers_for_ability`] EXACTLY, including
+/// Mirrors [`event_modifiers_for_ability`] EXACTLY, including
 /// its stopping rule: that walk consumes only a contiguous prefix of
 /// event-modifier effects and breaks at the first non-modifier link, and it
 /// keeps the FIRST tap/untap it sees rather than the last. A tap sitting after
@@ -12203,6 +12255,111 @@ mod tests {
             panic!("expected NeedsChoice for enter_tapped field collision, got {result:?}");
         };
         assert_eq!(player, PlayerId(0));
+    }
+
+    /// CR 616.1f: `replacement_last_applied_decides` must distinguish a
+    /// whole-field OVERWRITE collision from a COMPOSITIONAL one.
+    ///
+    /// Two single-target `SetTapState` writers each stamp the whole
+    /// `enter_tapped` field, so the last applied decides — the client may name a
+    /// winning result. Two damage modifiers (Furnace of Rath `Double` + Torbran
+    /// `Plus`) BOTH apply: the order changes the arithmetic ((x*2)+2 vs (x+2)*2)
+    /// but neither is overwritten, so there is no winner to name. A UI that
+    /// claimed one would state an outcome that does not exist.
+    ///
+    /// Goes RED if the `EventField::EnterTapped` guard is dropped.
+    #[test]
+    fn last_applied_decides_only_for_whole_field_overwrites() {
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield);
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield);
+        let mut state =
+            test_state_with_object(ObjectId(1), Zone::Battlefield, vec![tap_repl, untap_repl]);
+        let entering = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(0),
+            "Tapland".to_string(),
+            Zone::Hand,
+        );
+        state.objects.insert(ObjectId(20), entering);
+        let zone_event =
+            ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None);
+        let tap_candidates = vec![
+            ReplacementId {
+                source: ObjectId(1),
+                index: 0,
+            },
+            ReplacementId {
+                source: ObjectId(1),
+                index: 1,
+            },
+        ];
+        assert!(
+            replacement_last_applied_decides(&state, &tap_candidates, &zone_event),
+            "CR 616.1f: opposite enter_tapped writes overwrite the whole field,              so the last applied decides"
+        );
+
+        // A damage collision composes — both modifiers apply, no winner.
+        let double = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .damage_modification(DamageModification::Double)
+            .valid_card(TargetFilter::Any);
+        let plus = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .damage_modification(DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 2 },
+            })
+            .valid_card(TargetFilter::Any);
+        let mut dmg_state =
+            test_state_with_object(ObjectId(1), Zone::Battlefield, vec![double, plus]);
+        let victim = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(0),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        dmg_state.objects.insert(ObjectId(30), victim);
+        dmg_state.battlefield.push_back(ObjectId(30));
+        let dmg_event = ProposedEvent::Damage {
+            source_id: ObjectId(1),
+            target: crate::types::ability::TargetRef::Object(ObjectId(30)),
+            amount: 2,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let dmg_candidates = vec![
+            ReplacementId {
+                source: ObjectId(1),
+                index: 0,
+            },
+            ReplacementId {
+                source: ObjectId(1),
+                index: 1,
+            },
+        ];
+        assert!(
+            !replacement_last_applied_decides(&dmg_state, &dmg_candidates, &dmg_event),
+            "CR 616.1f: a damage doubler and adder both apply — the order changes              the arithmetic but neither overwrites the other, so there is no winner"
+        );
     }
 
     #[test]

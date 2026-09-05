@@ -1038,6 +1038,7 @@ mod tests {
             candidate_count,
             candidates,
             kind,
+            ..
         } = &state.waiting_for
         else {
             panic!(

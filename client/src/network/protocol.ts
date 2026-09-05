@@ -106,6 +106,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  47 — WaitingFor.ReplacementChoice gained an engine-owned
+ *       ReplacementChoiceKind discriminator and a last_applied_decides flag.
+ *       Both are optional on the wire, so a skewed host/guest pair decodes
+ *       successfully and then misrenders the prompt instead of failing at
+ *       first contact.
  *  45 — Effect.ChooseCounterKind gained domain and chooser, carried inside
  *       GameObject.abilities and trigger definitions on every GameState frame
  *       (CR 608.2d). Additive behind serde defaults; a v44 peer has no field to
@@ -327,7 +332,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 46 as const;
+export const WIRE_PROTOCOL_VERSION = 47 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

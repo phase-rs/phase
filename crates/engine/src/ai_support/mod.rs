@@ -4112,6 +4112,7 @@ mod tests {
             candidate_count: 2,
             candidates: Vec::new(),
             kind: Default::default(),
+            last_applied_decides: false,
         };
 
         assert!(cheap_reject_candidate(
