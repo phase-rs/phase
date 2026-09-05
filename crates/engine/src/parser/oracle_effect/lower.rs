@@ -6094,11 +6094,11 @@ fn chosen_number_extremum_of(amount: &QuantityExpr) -> Option<AggregateFunction>
     }
 }
 
-/// CR 120.2b + CR 120.3 + CR 102.2: leading "each opponent/player/foe/other
-/// opponent/other player" damage scope, returning the matched filter AND the
-/// unconsumed remainder. Unlike `parse_damage_each_player_scope` it is NOT
-/// all-consuming — used only by the multi-target damage CHAIN primary, which
-/// hands the trailing " and M damage to ..." segment back to the loop.
+/// CR 102.2 + CR 102.3: leading "each opponent/player/foe/other opponent/other
+/// player" damage scope, returning the matched filter AND the unconsumed
+/// remainder. Unlike `parse_damage_each_player_scope` it is NOT all-consuming —
+/// used only by the multi-target damage CHAIN primary, which hands the trailing
+/// " and M damage to ..." segment back to the loop.
 fn parse_damage_each_player_scope_with_remainder(text: &str) -> Option<(PlayerFilter, &str)> {
     let (rest, filter) = preceded(
         tag("each "),
@@ -6111,7 +6111,26 @@ fn parse_damage_each_player_scope_with_remainder(text: &str) -> Option<(PlayerFi
                 )),
             ),
             value(PlayerFilter::Opponent, tag("other player")),
-            parse_damage_player_scope,
+            // CR 109.5: "your" on an object refers to the object's controller, so
+            // "each of your opponents" is the PARTITIVE spelling of the same
+            // player scope as "each opponent" — a surface variant, not a new
+            // scope.
+            //
+            // Only the FIRST-PERSON partitive is accepted. "of their opponents"
+            // would bind an anaphor to some antecedent player rather than to the
+            // controller, so mapping it onto the static `PlayerFilter::Opponent`
+            // would install a wrong-referent rule; no live card carries it, so
+            // the arm is omitted rather than guessed.
+            //
+            // `parse_damage_player_scope` matches the SINGULAR stem ("opponent"
+            // is a prefix of "opponents") and the enclosing
+            // `parse_damage_each_player_scope` is all-consuming over
+            // whitespace/punctuation, so the trailing plural "s" must be consumed
+            // here or the scope would decline on its own remainder.
+            terminated(
+                preceded(opt(tag("of your ")), parse_damage_player_scope),
+                opt(tag("s")),
+            ),
         )),
     )
     .parse(text)
@@ -8392,7 +8411,10 @@ pub(super) fn try_parse_damage(lower: &str, text: &str, ctx: &mut ParseContext) 
 }
 
 /// CR 608.2c: Bind a bare "those cards" aggregate only to its typed chain antecedent.
-fn parse_contextual_bare_card_aggregate(text: &str, ctx: &ParseContext) -> Option<QuantityExpr> {
+pub(super) fn parse_contextual_bare_card_aggregate(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<QuantityExpr> {
     let source = ctx.bare_card_aggregate_source?;
     let (rest, qty) = nom_quantity::parse_contextual_bare_card_aggregate_ref(text, source).ok()?;
     rest.trim().is_empty().then_some(QuantityExpr::Ref { qty })
