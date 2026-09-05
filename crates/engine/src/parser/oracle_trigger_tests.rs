@@ -32002,7 +32002,7 @@ fn possessive_their_hand_binds_to_the_clause_subject_not_the_trigger() {
         "fusing the choose clause with \"and\" must not change whose hand is revealed"
     );
 
-    // CR 608.2c: the same pronoun under a "that player" subject still resolves
+    // The same pronoun under a "that player" subject still resolves
     // to the triggering player — the fix defers to the subject, it does not
     // rewrite every reveal to an opponent (Biting-Palm Ninja).
     assert_eq!(
@@ -32074,7 +32074,7 @@ fn brain_maggot_reveals_the_target_opponents_hand_at_runtime() {
     };
     assert_eq!(
         *player, P0,
-        "CR 701.20a: the controller makes the choice from the revealed hand"
+        "CR 109.5: \"you choose\" is the ability's controller, not the revealing player"
     );
 
     let revealed: std::collections::HashSet<_> = cards.iter().copied().collect();
