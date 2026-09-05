@@ -5972,11 +5972,39 @@ pub enum FilterProp {
     /// scanning `state.damage_dealt_this_turn` for a record whose `source_id`
     /// is this object.
     ///
-    /// Parameterization note: these two form a damage-role pair. If a third
-    /// damage-role filter appears (e.g. "dealt combat damage this turn"), fold
-    /// the pair into `DamageThisTurn { role: {Dealt, Received}, combat_only }`
-    /// per the /add-engine-variant sibling-cluster threshold.
-    DealtDamageThisTurn,
+    /// CR 608.2i: a look-back predicate — the record ledger is authoritative, so
+    /// a source that has since left the battlefield or changed characteristics
+    /// still matches. CR 514.2 clears the ledger, scoping it to the turn.
+    ///
+    /// Parameterized along the two axes the printed clause varies on, rather
+    /// than grown as siblings (`DealtCombatDamageThisTurn`,
+    /// `DealtDamageToYouThisTurn`, …):
+    ///
+    /// - `kind` (CR 120.2a / CR 120.2b) restricts to combat or noncombat damage.
+    /// - `recipient` (CR 120.1 "Objects can deal damage to … players") restricts
+    ///   WHO the damage was dealt to. `None` leaves the recipient unconstrained
+    ///   (Red Guardian's bare "dealt damage this turn").
+    ///
+    /// Covers "that dealt damage to you this turn" (Reciprocate, Retaliate,
+    /// Spear of Heliod, Giltspire Avenger, Otherworldly Escort) and
+    /// "that dealt combat damage to you this turn" (Witch-king of Angmar).
+    ///
+    /// The object-recipient forms ("that dealt damage to it this turn", Brine
+    /// Hag / Giant Albatross) are a THIRD axis and deliberately not modeled
+    /// here: they resolve against the trigger's event context, not a player
+    /// scope. Widen `recipient` to an object-or-player reference when that class
+    /// is built, rather than adding a sibling variant.
+    DealtDamageThisTurn {
+        /// CR 120.2a / CR 120.2b: which damage class counts. `Any` (the default,
+        /// and what a bare unit-variant record deserializes to) accepts both.
+        #[serde(default)]
+        kind: DamageKindFilter,
+        /// CR 120.1: the required damage recipient, as a player scope resolved
+        /// against the ability's controller ("to you" → `PlayerFilter::Controller`).
+        /// `None` = any recipient, preserving the unparameterized semantics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient: Option<PlayerFilter>,
+    },
     /// CR 400.7: Object entered the battlefield during this turn.
     /// Checks `entered_battlefield_turn == Some(current_turn)`.
     EnteredThisTurn,
@@ -8960,10 +8988,133 @@ pub enum UntilCondition {
 /// CR 117.1 + CR 400.7j + CR 608.2k: Public characteristics of an object paid
 /// as a cost for the resolving spell or ability. Effects can later refer to
 /// that object even after the cost moved it to a public zone.
+///
+/// CR 400.7 + CR 608.2k: `incarnation` is the referent's
+/// `GameObject::incarnation` at binding time. CR 608.2k keeps the reference
+/// alive across *characteristic* changes, but an object that changes zones
+/// becomes a new object (CR 400.7) that the reference must no longer name.
+/// Because the engine reuses `ObjectId` as stable storage identity, the id
+/// alone cannot distinguish "still the bound object" from "a new object at the
+/// same id"; the incarnation epoch is what separates them. Consumers that act
+/// on the *live* object (identity reads) must gate on
+/// [`CostPaidObjectSnapshot::is_current`]. Consumers that read the frozen
+/// `lki` are unaffected — LKI is the departed object's recorded state and is
+/// incarnation-safe by construction (CR 608.2h).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostPaidObjectSnapshot {
     pub object_id: ObjectId,
     pub lki: LKISnapshot,
+    /// CR 400.7: incarnation epoch captured at binding time. Legacy saves that
+    /// predate this field deserialize to [`LEGACY_INCARNATION`], which can
+    /// never equal a live object's incarnation, so such records are treated as
+    /// stale (fail-closed) rather than silently naming a new object.
+    #[serde(default = "legacy_incarnation")]
+    pub incarnation: u64,
+}
+
+/// Serde default for [`CostPaidObjectSnapshot::incarnation`] on pre-migration
+/// saves. Mirrors `ObjectIncarnationRefCompat`'s legacy arm
+/// (`types/identifiers.rs`): a record written before the incarnation was
+/// captured cannot prove which incarnation it bound, so it is pinned to a
+/// sentinel that never matches a live object.
+fn legacy_incarnation() -> u64 {
+    crate::types::identifiers::LEGACY_INCARNATION
+}
+
+impl CostPaidObjectSnapshot {
+    /// CR 400.7j + CR 608.2k: Capture the cost-paid referent from a
+    /// live object, pinning its current incarnation. The single construction
+    /// seam for production binding sites, so no seam can forget the epoch.
+    pub fn capture(object: &crate::game::game_object::GameObject, lki: LKISnapshot) -> Self {
+        Self {
+            object_id: object.id,
+            lki,
+            incarnation: object.incarnation,
+        }
+    }
+
+    /// CR 608.2c + CR 608.2h + CR 400.7: Bind a referent whose object has
+    /// already left the zone the parent instruction moved it from, so its
+    /// characteristics come from last known information rather than a live
+    /// read. The object row survives the move with its incarnation already
+    /// bumped (`game/zones.rs`), so `state_incarnation` is that post-move
+    /// epoch: the reference names the object as the parent instruction left
+    /// it, and goes stale if it moves again.
+    ///
+    /// Returns a snapshot pinned to [`LEGACY_INCARNATION`] when the row is
+    /// gone entirely (ceased to exist), which no live object can match.
+    pub fn capture_departed(
+        state: &crate::types::game_state::GameState,
+        object_id: ObjectId,
+        lki: LKISnapshot,
+    ) -> Self {
+        let incarnation = state
+            .objects
+            .get(&object_id)
+            .map_or(crate::types::identifiers::LEGACY_INCARNATION, |object| {
+                object.incarnation
+            });
+        Self {
+            object_id,
+            lki,
+            incarnation,
+        }
+    }
+
+    /// CR 400.7: True when this snapshot still names the live object it was
+    /// bound to. False when the referent left and returned (a new object at the
+    /// same storage id), when it is gone entirely, or when the record is a
+    /// pre-migration save with no captured incarnation.
+    ///
+    /// This is a strict full-pair compare and is deliberately NOT
+    /// `ResolvedAbility::target_pin_is_current`, which fails *open* when no pin
+    /// is recorded — a `CostPaidObject` referent never has an ordinary target
+    /// pin, so that check would pass for free.
+    pub fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        crate::types::identifiers::ObjectIncarnationRef::of(self.object_id, self.incarnation)
+            .is_current(state)
+    }
+
+    /// CR 400.7 + CR 608.2k: Re-pin this snapshot to the referent's CURRENT
+    /// incarnation, keeping the characteristics captured at binding time.
+    ///
+    /// Cost-payment seams necessarily capture the referent BEFORE the cost moves
+    /// it (the `lki` must record its pre-move characteristics — CR 608.2h), but
+    /// that move is the cost's own and must NOT invalidate the reference: CR
+    /// 608.2k exists so an effect can still refer to the object its cost moved.
+    /// Re-pinning once the cost's moves are complete makes the pin mean "this
+    /// object, as the cost left it", so only a LATER zone change reads as stale.
+    ///
+    /// Deliberately re-reads the live incarnation rather than assuming a fixed
+    /// increment: a cost move may be redirected by a replacement effect or pass
+    /// through more than one zone, so the delta is not reliably one.
+    ///
+    /// Leaves the pin untouched when the object no longer exists — the recorded
+    /// epoch then still cannot match any live object, which is the correct
+    /// fail-closed reading.
+    pub fn repin_to_current_incarnation(&mut self, state: &crate::types::game_state::GameState) {
+        if let Some(object) = state.objects.get(&self.object_id) {
+            self.incarnation = object.incarnation;
+        }
+    }
+
+    /// CR 400.7 + CR 608.2k: The single authority for resolving this snapshot to
+    /// a LIVE object id. Yields the id only while the snapshot still names the
+    /// object it was bound to; a referent that left (with or without returning
+    /// under the same storage id) yields `None`, and there is deliberately NO
+    /// fallback to a same-id object.
+    ///
+    /// Every live-object consumer of a `CostPaidObject` / `AmassedArmy`
+    /// referent must resolve through here rather than reading `object_id`
+    /// directly, so the identity rule has one implementation instead of one per
+    /// call site.
+    ///
+    /// This is NOT for readers of the frozen `lki`: CR 608.2h requires those to
+    /// keep reporting the departed object's recorded characteristics, so they
+    /// read `self.lki` and never call this.
+    pub fn live_object_id(&self, state: &crate::types::game_state::GameState) -> Option<ObjectId> {
+        self.is_current(state).then_some(self.object_id)
+    }
 }
 
 /// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): The mana type(s) spent to
@@ -18661,6 +18812,77 @@ impl TargetFilter {
         )
     }
 
+    /// CR 115.10a + CR 608.2d: True when this filter DESCRIBES a population that
+    /// a resolver may enumerate against the live board — the non-targeted
+    /// counterpart of a chosen target (CR 115.10a: being affected by a spell or
+    /// ability does not make an object a target unless it is identified by the
+    /// word "target"; CR 608.2d: an untargeted choice is made while the effect is
+    /// applied).
+    ///
+    /// POSITIVE and FAIL-CLOSED by design. A mass resolver that keys off "the
+    /// filter is not one of these bad shapes" is one unhandled shape away from a
+    /// battlefield-wide sweep: `TargetFilter::Any` matches every object
+    /// (the `TargetFilter::Any => true` arm of `game::filter::filter_inner_for_
+    /// object`), and so does a CONTENTLESS `Typed` — with empty `type_filters`
+    /// and `properties` and no `controller`, the type loop iterates nothing, the
+    /// controller check is skipped on `None`, and `properties.iter().all(..)` is
+    /// vacuously true. Those two shapes are what the parser emits for a recipient
+    /// phrase it could not classify AT ALL, so both must be refused here, and any
+    /// variant added later must be refused until someone opts it in.
+    ///
+    /// SCOPE — what this does NOT do. It refuses a recipient that parses to a
+    /// CONTENTLESS `Typed` or to `Any`. It does NOT refuse a PARTIALLY classified
+    /// recipient, and it is not a correctness check on the filter's CONTENT.
+    /// Measured examples that answer TRUE here and still resolve against a wrong
+    /// population: "each permanent that isn't a creature you control" parses to
+    /// `Typed{[Permanent], controller: None}` and "each creature and each
+    /// planeswalker you control" to `Typed{[Creature], controller: None}` — both
+    /// enumerate BOTH players' permanents; "each Spider you control and each
+    /// legendary creature you control" parses to `Typed{[Spider], You}`, silently
+    /// dropping its second conjunct. Those are pre-existing recipient misparses
+    /// (see `docs/parser-misparse-backlog.md` root cause 6 and the repeated-`each`
+    /// class), not defects of this predicate. The contract is "this filter names
+    /// SOME population", never "this filter names the RIGHT population".
+    ///
+    /// `Or`/`And` require EVERY leg to qualify — one contentless leg inside an
+    /// `Or` matches everything, so `any` (which the parse-time shape check
+    /// `oracle_target::target_filter_has_meaningful_content` uses for a
+    /// different question) would be unsound for a sweep gate.
+    ///
+    /// `Not` admits a COMPLEMENT population ("every non-creature"). That is the
+    /// one arm where "every leg enumerable" is not the same as "bounded
+    /// description"; it is kept for uniformity with `Or`/`And` rather than
+    /// silently defaulted to `false`. No counter-multiplication parse path
+    /// produces a top-level `Not` (the recipient comes from `parse_target`), so
+    /// a future consumer must re-argue this arm rather than inherit it.
+    ///
+    /// ZONE CAVEAT: this answers "is it a describable population", not "which
+    /// zone". A zone-qualified filter such as "each creature in your graveyard"
+    /// (`Typed{[Creature], You, InZone(Graveyard)}`) answers TRUE here, but a
+    /// caller that enumerates only `battlefield_phased_in_ids()` will resolve it
+    /// to nothing — which is exactly today's `MultiplyCounter` tier behaviour, so
+    /// it is no regression. Callers that must honour the zone should follow
+    /// `game::effects::resolved_battlefield_object_ids`, which reads
+    /// [`TargetFilter::extract_in_zone`].
+    ///
+    /// Deterministic anaphors (`SelfRef`, `TriggeringSource`, `ParentTarget`,
+    /// `TrackedSet`, ...) are NOT populations; they answer `false` here and are
+    /// resolved by their own tiers. Callers that accept both ask
+    /// `is_context_ref() || names_enumerable_population()`.
+    pub fn names_enumerable_population(&self) -> bool {
+        match self {
+            TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                !filters.is_empty()
+                    && filters
+                        .iter()
+                        .all(TargetFilter::names_enumerable_population)
+            }
+            TargetFilter::Not { filter } => filter.names_enumerable_population(),
+            _ => false,
+        }
+    }
+
     /// CR 115.1a + CR 109.5: Returns true when this filter's TARGET SLOT holds a
     /// player rather than an object — "target player", "target opponent", a
     /// snapshotted specific player.
@@ -18928,6 +19150,29 @@ impl Effect {
             }
             _ => {}
         }
+    }
+
+    /// CR 701.10e: true for the two effects that express "double the number of
+    /// counters on ..." — the typed form (`MultiplyCounter`, "+1/+1 counters")
+    /// and the untyped form (`Double { DoubleTarget::Counters }`, "each kind of
+    /// counter"). Both carry the multiplier intrinsically in the resolver
+    /// ("give as many of those counters as already present"), never as a
+    /// `QuantityExpr`, and both share `counters::nontargeted_counter_population_ids`
+    /// for the non-targeted population tier. Their targeted/anaphoric recipients
+    /// are resolved on separate paths: `MultiplyCounter` through
+    /// `counters::resolve_defined_or_targets`, `Double { Counters }` through
+    /// `effects::double::resolve_object_targets` → `targeting::resolved_targets`.
+    /// Single authority for that pair so the swallow detector and the
+    /// multi-target fixup cannot drift apart.
+    pub(crate) fn is_counter_multiplication(&self) -> bool {
+        matches!(
+            self,
+            Effect::MultiplyCounter { .. }
+                | Effect::Double {
+                    target_kind: DoubleTarget::Counters { .. },
+                    ..
+                }
+        )
     }
 
     pub fn target_filter(&self) -> Option<&TargetFilter> {
@@ -29931,6 +30176,27 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_cost_paid_object_recursive(snapshot);
+        }
+    }
+
+    /// CR 400.7 + CR 608.2k: Re-pin this ability's (and every sub/else branch's)
+    /// cost-paid referent to its current incarnation, once the cost's own object
+    /// moves are complete. Mirrors `set_cost_paid_object_recursive`'s traversal.
+    ///
+    /// See `CostPaidObjectSnapshot::repin_to_current_incarnation`: the cost's own
+    /// move must not make the reference stale, only a later one.
+    pub fn repin_cost_paid_object_recursive(
+        &mut self,
+        state: &crate::types::game_state::GameState,
+    ) {
+        if let Some(snapshot) = self.cost_paid_object.as_mut() {
+            snapshot.repin_to_current_incarnation(state);
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.repin_cost_paid_object_recursive(state);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.repin_cost_paid_object_recursive(state);
         }
     }
 

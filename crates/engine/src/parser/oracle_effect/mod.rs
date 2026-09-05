@@ -112,7 +112,7 @@ use crate::types::ability::{
     CombatDamageScope, Comparator, ConjureCard, ConjureSource, ContinuousModification,
     ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DieResultBranch, DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    DieResultBranch, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     GameRestriction, GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint,
     LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole, MultiTargetSpec,
     NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
@@ -127,8 +127,11 @@ use crate::types::ability::{
     TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
     WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
 };
+// `DoubleTarget` has no production use in this module since the counter-doubling
+// discriminator moved to `Effect::is_counter_multiplication()`; the child
+// `tests` module still names it through `use super::*`.
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject};
+use crate::types::ability::{AttackScope, AttackSubject, DoubleTarget};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -514,8 +517,14 @@ pub(crate) fn replace_first_object_pronoun(body: &str, replacement: &str) -> Opt
 /// In trigger effects where the subject is a non-self filter (e.g. "a creature
 /// you control"), "it" refers to the triggering object (TriggeringSource).
 /// For self-triggers ("~ enters"), "it" stays SelfRef.
-/// For AttachedTo subjects ("equipped creature"), TriggeringSource is also correct
-/// because the triggering event's source IS the attached-to creature.
+/// For AttachedTo subjects ("equipped creature"), TriggeringSource is correct
+/// only when the trigger condition is ACTIVE-voice ("whenever equipped creature
+/// deals combat damage"), where the event's source IS the attached-to creature.
+/// On a PASSIVE-voice condition ("whenever equipped creature is dealt damage")
+/// the event's source is the damage DEALER, so the antecedent is the recipient;
+/// `trigger_object_pronoun_ref_for_condition` (oracle_trigger.rs) pins
+/// `ctx.object_pronoun_ref` to `EventTarget` for that class and the match below
+/// is never consulted.
 pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     if let Some(target) = ctx.object_pronoun_ref.clone() {
         return target;
@@ -17291,15 +17300,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // `MultiTargetSpec` from the shared extractor; without the MultiplyCounter
     // arm, "on any number of other target creatures" drops its bound and the
     // effect binds a single required target (p0 "Unused selected target slots").
-    if (matches!(
-        clause.effect,
-        Effect::Double {
-            target_kind: DoubleTarget::Counters { .. },
-            ..
-        }
-    ) || matches!(clause.effect, Effect::MultiplyCounter { .. }))
-        && clause.multi_target.is_none()
-    {
+    if clause.effect.is_counter_multiplication() && clause.multi_target.is_none() {
         clause.multi_target = extract_double_counter_multi_target(text);
     }
     clause
@@ -17888,11 +17889,11 @@ fn try_parse_verb_and_target<'a>(
         };
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
-                // CR 110.2a + CR 608.2c:
-                // bind the raw control clause BEFORE either struct literal —
-                // the `target,` field shorthand MOVES `target`, so a `&target`
-                // borrow inside the literal would not compile. `d.control` is
-                // `Copy`, so reading it here does not disturb `d`.
+                // CR 110.2a + CR 608.2c: bind the raw control clause BEFORE
+                // either struct literal — the `target,` field shorthand MOVES
+                // `target`, so a `&target` borrow inside the literal would not
+                // compile. `d.control` is `Copy`, so reading it here does not
+                // disturb `d`.
                 let enters_under = bind_control_clause(
                     d.control,
                     name_entry_control_antecedent(Some(&target), ctx),
@@ -17958,8 +17959,8 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Hand,
-                            // CR 110.2: controller
-                            // semantics apply only while an object is a permanent.
+                            // CR 110.2: controller semantics apply only while an
+                            // object is a permanent.
                             enters_under: EntersUnderSpec::Default,
                             enter_tapped: false,
                             enter_with_counters: vec![],
@@ -17995,8 +17996,8 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: d.zone,
-                            // CR 110.2: controller
-                            // semantics apply only while an object is a permanent.
+                            // CR 110.2: controller semantics apply only while an
+                            // object is a permanent.
                             enters_under: EntersUnderSpec::Default,
                             enter_tapped: false,
                             enter_with_counters: vec![],
@@ -23212,12 +23213,32 @@ fn apply_their_library_reveal_anchor(effect: &mut Effect, anchor: &TargetFilter,
     let Effect::RevealTop { player, .. } = effect else {
         return;
     };
-    if matches!(
-        *player,
-        TargetFilter::Controller | TargetFilter::Player | TargetFilter::ParentTargetController
-    ) {
+    if is_repairable_library_owner(player) {
         *player = anchor.clone();
     }
+}
+
+/// CR 608.2c: The library-owner bindings a "their library" reveal can carry
+/// BEFORE an anchor repair — the ability-controller default plus the
+/// relative-player anaphors `that_player_library_filter` produces. The anchor is
+/// the more specific authority in every case, and an explicit "your library"
+/// reveal never reaches here (both callers guard on the possessive first).
+///
+/// The anaphor arms exist because #8498 made the dig recognizer bind the named
+/// owner instead of falling through to `TargetFilter::Controller`: a "their
+/// library" reveal now arrives as `ParentTarget`/`TriggeringPlayer`/
+/// `ScopedPlayer`, where before the fail-open default made it `Controller`. Both
+/// anchors would silently stop firing without these arms.
+fn is_repairable_library_owner(player: &TargetFilter) -> bool {
+    matches!(
+        player,
+        TargetFilter::Controller
+            | TargetFilter::Player
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::ScopedPlayer
+    )
 }
 
 /// CR 109.4: Map a player-reference `TargetFilter` to the `ControllerRef`
@@ -24012,6 +24033,34 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // the `owner` channel wins over the `target == Any` injection.
         Effect::CopyTokenOf { ref mut owner, .. } if *owner == TargetFilter::Controller => {
             *owner = subject_filter;
+        }
+        // CR 701.20a + CR 115.1 (issue #8428): "target opponent reveals THEIR
+        // hand". `parse_hand_possessive_target` resolves the bare possessive
+        // pronoun "their hand" to `TriggeringPlayer`, which is the right answer
+        // only when the clause has no subject of its own to bind to ("Look at
+        // their hand." — the antecedent then comes from the triggering event).
+        // When the clause DOES name a declared target as its subject, that
+        // subject is the antecedent, and it outranks the pronoun default: a
+        // "target opponent" is chosen as the ability goes on the stack (CR
+        // 601.2c, reached via CR 603.3d for a triggered ability), so the reveal
+        // must show THAT player's hand.
+        //
+        // The pronoun default is not `Any`, so the injection group below could
+        // not correct it, and the fabricated antecedent erased the declared
+        // target — Brain Maggot's ETB built no player target slot at all and
+        // `reveal_hand` fell back to the triggering event's player, revealing
+        // its own controller's hand.
+        //
+        // `subject.target` (not `subject.affected`) is the discriminator, the
+        // same one the `Sacrifice` arm below uses: it is `Some` only for a
+        // DECLARED target ("target opponent" / "target player"), so an
+        // anaphoric subject ("that player reveals their hand" — Biting-Palm
+        // Ninja) keeps the triggering-player binding it already resolves to.
+        Effect::RevealHand { target, .. }
+            if *target == TargetFilter::TriggeringPlayer
+                && subject.target.as_ref().is_some_and(TargetFilter::is_player_scope) =>
+        {
+            *target = subject_filter;
         }
         // CR 701.14a: "enchanted creature fights target creature" — the subject
         // of the fight is the enchanted/equipped creature, not the Aura/Equipment.
@@ -32695,10 +32744,10 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
     }
 
     // CR 108.3 + CR 400.3 + CR 608.2c: after an owner's-library shuffle,
-    // a following "their library" reveal refers to that same owner. The
-    // generic reveal parser defaults subjectless reveals to the controller, so
-    // repair only the owner-shuffle chain and leave explicit "your library"
-    // reveals untouched.
+    // a following "their library" reveal refers to that same owner. The generic
+    // reveal parser binds "their library" to the relative-player anaphor (or, for
+    // a subjectless reveal, to the controller), so repair only the owner-shuffle
+    // chain and leave explicit "your library" reveals untouched.
     let mut saw_owner_shuffle = false;
     let mut current = Some(def);
     while let Some(node) = current {
@@ -32707,13 +32756,7 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
                 saw_owner_shuffle = true;
             }
             Effect::RevealTop { player, .. }
-                if saw_owner_shuffle
-                    && matches!(
-                        *player,
-                        TargetFilter::Controller
-                            | TargetFilter::Player
-                            | TargetFilter::ParentTargetController
-                    ) =>
+                if saw_owner_shuffle && is_repairable_library_owner(player) =>
             {
                 *player = TargetFilter::ParentTargetOwner;
             }
@@ -35584,7 +35627,44 @@ pub(crate) fn parse_effect_chain_ir(
             .find_map(|clause| nearest_dig_rest_zone_in_clause(&clause.parsed));
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
-            object_pronoun_ref: prior_typed_referent.then_some(TargetFilter::ParentTarget),
+            // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
+            // first. A referent established by an EARLIER CLAUSE OF THIS CHAIN wins
+            // ("exile target creature. If you do, ... it") — that is the
+            // `ParentTarget` rung. Only when the chain has introduced no typed
+            // referent of its own does the anaphor reach back to the antecedent the
+            // TRIGGER CONDITION introduced (`ParseContext::object_pronoun_ref`, set
+            // by `oracle_trigger::trigger_object_pronoun_ref_for_condition`).
+            //
+            // The `.or_else` is load-bearing: this struct literal REPLACES the
+            // parent context rather than updating it, so a bare `then_some` silently
+            // dropped the trigger-level antecedent on every single-clause trigger
+            // body. That drop was invisible while the only producer was the
+            // spell-cast axis AND the chunk subject was a non-self filter, because
+            // `resolve_it_pronoun`'s non-self-subject fallback then independently
+            // returns the same `TriggeringSource`. The two paths agree ONLY in that
+            // case: with `chunk_subject = Some(SelfRef)` the fallback returns
+            // `SelfRef` and disagrees, which is why the gate below is required. The
+            // passive-voice damage axis is the first producer whose answer
+            // (`EventTarget`) DISAGREES with that fallback, which is what made the
+            // drop visible (issue #8379).
+            //
+            // The trigger-level antecedent is the OUTERMOST rung, so it must not
+            // outrank one THIS CHUNK established. `binds_source_counter_pronoun`
+            // sets `chunk_subject = SelfRef` above, but `resolve_it_pronoun` reads
+            // `object_pronoun_ref` BEFORE it reaches `subject` — so propagating
+            // unconditionally short-circuits the nearer binding. That is what
+            // regressed the CR 122.1 + CR 608.2k counter-gate class in #8549:
+            // `TriggeringSource` on a spell-cast trigger is the CAST SPELL
+            // (CR 109.2b), not the ability's source (CR 113.7) — so Decree of
+            // Silence and Charitable Levy stopped sacrificing themselves, and
+            // Thing in the Ice and The Emperor of Palamecia stopped transforming.
+            object_pronoun_ref: prior_typed_referent
+                .then_some(TargetFilter::ParentTarget)
+                .or_else(|| {
+                    (!binds_source_counter_pronoun)
+                        .then(|| ctx.object_pronoun_ref.clone())
+                        .flatten()
+                }),
             card_name: ctx.card_name.clone(),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
@@ -37447,13 +37527,12 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
         .map(|(effect, _, _)| effect)
 }
 
-/// The third tuple element is the CR 110.2a
-/// battlefield-entry control spec. It is returned ALONGSIDE the `Effect` rather
-/// than folded into `Effect::ChangeZone.enters_under` because the `Effect` field
-/// is a collapsed `Option<ControllerRef>` with no room for the fail-closed
-/// `UnboundAnaphor` state; `parse_put_ast` stores the full spec on the IR and
-/// the lowering site decides between a bound controller and an honest
-/// `Effect::unimplemented`.
+/// The third tuple element is the CR 110.2a battlefield-entry control spec. It
+/// is returned ALONGSIDE the `Effect` rather than folded into
+/// `Effect::ChangeZone.enters_under` because the `Effect` field is a collapsed
+/// `Option<ControllerRef>` with no room for the fail-closed `UnboundAnaphor`
+/// state; `parse_put_ast` stores the full spec on the IR and the lowering site
+/// decides between a bound controller and an honest `Effect::unimplemented`.
 fn try_parse_put_zone_change_parts(
     lower: &str,
     text: &str,
@@ -37662,14 +37741,14 @@ fn try_parse_put_zone_change_parts(
                 let origin_text = format!("{}{}", before.lower, after.lower);
                 infer_origin_zone(&origin_text)
             };
-            // CR 110.2a: the SAME span as the
-            // single-literal `scan_contains_phrase(after_put_tp.lower, "under
-            // your control")` boolean this replaces — no reach change. The
-            // fold's `You`-wins priority makes it byte-for-byte non-regressive
-            // (both walk word boundaries over the identical span and both
-            // return `You` when that clause is present anywhere in it); the only
-            // delta is that a third-person anaphor is now bound (CR 608.2c)
-            // or failed closed instead of silently dropped.
+            // CR 110.2a: the SAME span as the single-literal
+            // `scan_contains_phrase(after_put_tp.lower, "under your control")`
+            // boolean this replaces — no reach change. The fold's `You`-wins
+            // priority makes it byte-for-byte non-regressive (both walk word
+            // boundaries over the identical span and both return `You` when that
+            // clause is present anywhere in it); the only delta is that a
+            // third-person anaphor is now bound (CR 608.2c) or failed closed
+            // instead of silently dropped.
             let enters_under_spec = bind_control_clause(
                 fold_control_clauses(after_put_tp.lower),
                 name_entry_control_antecedent(Some(&target), ctx),

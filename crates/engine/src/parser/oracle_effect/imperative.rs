@@ -169,9 +169,128 @@ pub(super) fn filter_has_controller_scope(filter: &TargetFilter) -> bool {
     }
 }
 
-/// CR 701.20e + CR 401.1: Map the possessive owner of the library that a
-/// "look at / reveal the top N cards" instruction reads to its library-owner
-/// `TargetFilter`.
+/// CR 401.1 + CR 108.3: The possessive library-owner phrase `<owner> library` —
+/// the single authority mapping an Oracle possessive to the `TargetFilter` that
+/// names WHOSE library an effect reads. `parse_library_player_suffix` (the
+/// "card[s] of <owner> library" surface), `parse_from_top_of_library_owner` (the
+/// "from the top of <owner> library" surface) and `parse_dig_library_owner` (the
+/// dig recognizer) all delegate here, so a row added once is recognized by every
+/// grammar that names a library owner.
+///
+/// Anchored at the owner boundary and matched as the whole "<owner> library"
+/// phrase, so no shorter alternative can prefix-shadow a longer one. Returns the
+/// post-`library` tail plus the owner filter. FAIL-CLOSED: an owner this table
+/// does not name returns `None` so the caller declines instead of guessing (see
+/// the `parse_dig_library_owner` header, #8498).
+///
+/// "each opponent's library" is deliberately NOT a row here: it lowers to the
+/// parse-only `TargetFilter::Opponent` SCOPE sentinel, which is sound only on the
+/// surfaces that run `lift_distributive_exile_top_scope`. Those surfaces opt in
+/// through `parse_library_owner_or_opponent_scope`.
+fn parse_library_owner_phrase<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, TargetFilter)> {
+    let that_player = that_player_library_filter(ctx);
+    for (pattern, player) in [
+        // CR 109.5: "your" on an object refers to that object's controller.
+        ("your library", TargetFilter::Controller),
+        // CR 608.2c: the player named earlier in the same instruction, resolved
+        // by the context-aware authority (#8467) rather than a fixed anaphor.
+        ("that player's library", that_player.clone()),
+        ("their library", that_player),
+        // CR 115.1: an announced target names whose library this is.
+        (
+            "target opponent's library",
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        ),
+        ("target player's library", TargetFilter::Player),
+        // CR 401.1: each player's deck becomes their library, so "each player's
+        // library" names ONE library per player — the per-player scope sentinel.
+        ("each player's library", TargetFilter::ScopedPlayer),
+    ] {
+        if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(input) {
+            return Some((tail, player));
+        }
+    }
+    None
+}
+
+/// CR 401.1 + CR 102.2 + CR 102.3: `parse_library_owner_phrase` plus the "each
+/// opponent's library" row. `TargetFilter::Opponent` in a library-owner slot is
+/// the parse-only PER-OPPONENT SCOPE sentinel (never a single targeted opponent)
+/// that `lift_distributive_exile_top_scope` erases to `Controller` while stamping
+/// `player_scope: Opponent`, so the fan-out rebinds the acting controller to each
+/// opponent in APNAP order (Lobelia, Defender of Bag End).
+/// `debug_assert_exile_top_opponent_sentinel_lifted` is the net that catches an
+/// unlifted one — which is why only the surfaces that run the lift take this row.
+fn parse_library_owner_or_opponent_scope<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, TargetFilter)> {
+    if let Some(found) = parse_library_owner_phrase(input, ctx) {
+        return Some(found);
+    }
+    tag::<_, _, OracleError<'_>>("each opponent's library")
+        .parse(input)
+        .ok()
+        .map(|(tail, _)| (tail, TargetFilter::Opponent))
+}
+
+/// CR 701.20a + CR 701.20e: Step over the head noun of a dig instruction — the
+/// "<count> card[s] of " connective between the verb phrase and the library owner
+/// ("look at the top TWO CARDS OF their library") — and return the text at the
+/// owner boundary. `None` means the instruction names no library source at all.
+///
+/// The connective search is bounded to the instruction's FIRST sentence, so a
+/// later sentence's "… cards of your library" can never supply the owner of this
+/// dig (Temporal Aperture: "reveal the top card." followed by a sentence that
+/// mentions the controller's library).
+fn parse_dig_head_noun(input: &str) -> Option<&str> {
+    let (_, first_sentence) = take_till::<_, _, OracleError<'_>>(|c| c == '.')
+        .parse(input)
+        .ok()?;
+    let (after_noun, _) = alt((
+        preceded(
+            take_until::<_, _, OracleError<'_>>("cards of "),
+            tag::<_, _, OracleError<'_>>("cards of "),
+        ),
+        preceded(
+            take_until::<_, _, OracleError<'_>>("card of "),
+            tag::<_, _, OracleError<'_>>("card of "),
+        ),
+    ))
+    .parse(first_sentence)
+    .ok()?;
+    Some(after_noun)
+}
+
+/// CR 401.1: which text shape a call site hands [`parse_dig_library_owner`]. The
+/// two dig surfaces reach the recognizer at different points in the same phrase,
+/// and the source-less elision is sound for exactly one of them — so the shape
+/// is passed explicitly rather than re-derived from the text, which cannot
+/// distinguish "no library named" from "owner boundary already reached".
+#[derive(Clone, Copy)]
+enum DigOwnerPhrase {
+    /// The head noun phrase with its connective unconsumed ("four cards of their
+    /// library"). No connective at all means the instruction names no library of
+    /// its own, so the CR 608.2c carry-over elision applies.
+    WithHeadNoun,
+    /// The owner boundary itself ("their library"), the caller having already
+    /// stepped over the connective. Nothing remains to step over and no elision
+    /// is available, so an owner the table cannot bind must decline.
+    AtOwnerBoundary,
+}
+
+/// CR 401.1 + CR 701.20a + CR 701.20e: Resolve WHOSE library a "look at / reveal
+/// the top N cards of <owner>'s library" instruction reads.
+///
+/// Two call-site boundaries feed this recognizer: the "the top …" form hands in
+/// the head noun phrase ("two cards of their library"), the count-leading form
+/// hands in the owner boundary directly ("their library"). One `alt()` per axis —
+/// the head-noun connective (`parse_dig_head_noun`), then the owner
+/// (`parse_library_owner_or_opponent_scope`, the same authority the "card[s] of"
+/// and "from the top of" tables use).
 ///
 /// The `"that player's"` / `"that opponent's"` anaphor is deliberately NOT
 /// resolved here. It is delegated to [`that_player_library_filter`], the
@@ -187,7 +306,40 @@ pub(super) fn filter_has_controller_scope(filter: &TargetFilter) -> bool {
 /// `TriggeringPlayer` for that scope — the damaged player — and still returns
 /// `ParentTarget` as its own default, so contexts that introduce no relative
 /// player scope keep their existing binding.
-fn parse_dig_library_owner(rest_lower: &str, ctx: &ParseContext) -> TargetFilter {
+///
+/// FAIL-CLOSED (#8498): an instruction that NAMES a library whose owner the table
+/// does not recognize returns `None`, so the caller declines and the clause stays
+/// honestly unparsed. This used to fall through to `TargetFilter::Controller`,
+/// which bound the ability's CONTROLLER as the library owner for every clause
+/// naming somebody else's library ("their library", "target opponent's library",
+/// "each player's library") — confidently wrong, and invisible to coverage
+/// tooling because nothing was `Unimplemented`. The anaphor arm below returns
+/// before any of that, so the fail-closed table can never make it decline.
+///
+/// The one surviving `Controller` reading is the SOURCE-LESS elision — "Shuffle
+/// your library, then reveal the top card." (Temporal Aperture, Unexpected
+/// Results) — where the instruction names no library of its own and, per CR
+/// 608.2c, the library named by the preceding clause (the controller's, CR 109.5)
+/// carries over. That arm is reachable only under `DigOwnerPhrase::WithHeadNoun`
+/// and only when there is no "card[s] of" source phrase at all, so it cannot
+/// absorb an unrecognized owner. Absence of the connective is not by itself
+/// evidence of a source-less instruction: under `AtOwnerBoundary` the caller has
+/// already consumed it, which is why the shape is a parameter rather than
+/// something this function infers from the text it is handed.
+fn parse_dig_library_owner(
+    rest_lower: &str,
+    ctx: &ParseContext,
+    shape: DigOwnerPhrase,
+) -> Option<TargetFilter> {
+    // The three arms below scan the WHOLE instruction rather than the owner
+    // boundary, because the phrase naming the library can sit in a later clause
+    // ("… then put the rest on the bottom of that library" — Gonti, Lord of
+    // Luxury). Their relative precedence is load-bearing and unchanged.
+
+    // CR 115.1: a DECLARED player target names the library's owner outright, and
+    // outranks the anaphor below — a clause printing both ("Look at the top card
+    // of target player's library. You may put that card on the bottom of that
+    // player's library." — Jace, the Mind Sculptor) binds the target.
     if preceded(
         take_until::<_, _, OracleError<'_>>("target player's library"),
         tag::<_, _, OracleError<'_>>("target player's library"),
@@ -195,13 +347,22 @@ fn parse_dig_library_owner(rest_lower: &str, ctx: &ParseContext) -> TargetFilter
     .parse(rest_lower)
     .is_ok()
     {
-        return TargetFilter::Player;
+        return Some(TargetFilter::Player);
     }
 
-    // One `alt()` over the owner-noun axis of a single `"that <owner>'s
-    // library"` anaphor, nested under its shared `"that "` prefix and tried at
-    // each word boundary (the possessive trails the card-count noun phrase, so
-    // it never sits at offset 0).
+    // CR 120.1 + CR 510.2 + CR 608.2c (#8467): one `alt()` over the owner-noun
+    // axis of a single `"that <owner>'s library"` anaphor, nested under its
+    // shared `"that "` prefix and tried at each word boundary (the possessive
+    // trails the card-count noun phrase, so it never sits at offset 0).
+    //
+    // This stays its own arm rather than becoming a row of
+    // `parse_library_owner_phrase`: the table maps a phrase to a FIXED filter
+    // matched at the owner boundary, while the anaphor delegates to a resolver
+    // and is matched by scanning. The table's own `"that player's library"` row
+    // (which the `card[s] of` and `from the top of` surfaces read) now returns
+    // this same `that_player_library_filter(ctx)` value, so the two paths agree
+    // wherever both could fire — the scan simply reaches the later-clause
+    // occurrences the anchored table cannot see.
     if nom_primitives::scan_at_word_boundaries(rest_lower, |input| {
         value(
             (),
@@ -215,12 +376,11 @@ fn parse_dig_library_owner(rest_lower: &str, ctx: &ParseContext) -> TargetFilter
     })
     .is_some()
     {
-        return that_player_library_filter(ctx);
+        return Some(that_player_library_filter(ctx));
     }
 
-    // CR 608.2c + CR 400.3: "that library" — anaphoric to a library
-    // identified earlier in the instruction (Chaos Warp: owner's library
-    // after shuffle).
+    // CR 108.3 + CR 608.2c: "that library" — the library named earlier in the
+    // instruction, read through its owner (Psychic Surgery, Chaos Warp).
     if preceded(
         take_until::<_, _, OracleError<'_>>("that library"),
         tag::<_, _, OracleError<'_>>("that library"),
@@ -228,39 +388,33 @@ fn parse_dig_library_owner(rest_lower: &str, ctx: &ParseContext) -> TargetFilter
     .parse(rest_lower)
     .is_ok()
     {
-        return TargetFilter::ParentTargetOwner;
+        return Some(TargetFilter::ParentTargetOwner);
     }
 
-    // CR 401.1 + CR 608.2c: "the top card of each player's library" — each player
-    // owns their own library, so this names one library per player. Mark the
-    // per-player scope with `ScopedPlayer` so the look-then-exile idiom's
-    // materialized `ExileTop` lifts to a `player_scope: All` fan-out (the same
-    // shape the direct "exile the top card of each player's library" path gets via
-    // `parse_library_player_suffix`, the single authority for this phrase→scope
-    // mapping). `rest_lower` begins at the card-count noun phrase, so match the
-    // owner at that boundary rather than scanning a later clause.
-    if tag::<_, _, OracleError<'_>>("card of each player's library")
-        .parse(rest_lower)
-        .is_ok()
-    {
-        return TargetFilter::ScopedPlayer;
+    // The count-leading call site ("… cards from the top of their library") hands
+    // in the owner boundary itself.
+    if let Some((_, player)) = parse_library_owner_or_opponent_scope(rest_lower, ctx) {
+        return Some(player);
     }
 
-    // CR 401.1 + CR 102.2 + CR 102.3: "look at the top card of each opponent's library …
-    // and exile those cards" — the opponent-scoped partner of the `each player's` arm
-    // above. Mark the per-opponent scope with `Opponent` so the look-then-exile idiom's
-    // materialized `ExileTop` lifts to a `player_scope: Opponent` fan-out (the same shape
-    // the direct path gets via `parse_library_player_suffix`). Without this arm the
-    // recognizer falls through to `Controller` below and Lobelia, Defender of Bag End
-    // SILENTLY exiles the CONTROLLER's own top card instead of each opponent's.
-    if tag::<_, _, OracleError<'_>>("card of each opponent's library")
-        .parse(rest_lower)
-        .is_ok()
-    {
-        return TargetFilter::Opponent;
+    // CR 401.1 (#8498): at the owner boundary the caller has already consumed
+    // the connective, so there is no head noun left to step over and no
+    // source-less instruction to elide from — an owner the table cannot bind
+    // declines here. Without this the elision below fires unconditionally for
+    // this shape (`parse_dig_head_noun` can never match text the caller already
+    // advanced past), which is the fail-open default this issue removes,
+    // surviving on one of the two call sites.
+    if matches!(shape, DigOwnerPhrase::AtOwnerBoundary) {
+        return None;
     }
 
-    TargetFilter::Controller
+    // The "the top …" call site hands in the head noun phrase; step over it to
+    // reach the owner. No connective means no library source is named — the
+    // elision described in the header.
+    let Some(after_noun) = parse_dig_head_noun(rest_lower) else {
+        return Some(TargetFilter::Controller);
+    };
+    parse_library_owner_or_opponent_scope(after_noun, ctx).map(|(_, player)| player)
 }
 
 fn try_parse_put_sticker_effect(
@@ -2109,12 +2263,12 @@ pub(super) fn parse_targeted_action_ast(
                 // counters are threaded through so "return each creature card
                 // from your graveyard to the battlefield. They enter with a
                 // finality counter" (Shilgengar) applies the finality counter
-                // (CR 122.1h) to every returned object, not just one.
-                // CR 110.2a + CR 608.2c:
-                // bind the raw control clause BEFORE either struct literal —
-                // the `target,` field shorthand MOVES `target`, so a `&target`
-                // borrow inside the literal would not compile. `d.control` is
-                // `Copy`, so reading it here does not disturb `d`.
+                // (CR 122.1h) to every returned object, not just one. CR 110.2a
+                // + CR 608.2c: bind the raw control clause BEFORE either struct
+                // literal — the `target,` field shorthand MOVES `target`, so a
+                // `&target` borrow inside the literal would not compile.
+                // `d.control` is `Copy`, so reading it here does not disturb
+                // `d`.
                 let enters_under = bind_control_clause(
                     d.control,
                     name_entry_control_antecedent(Some(&target), ctx),
@@ -2205,8 +2359,8 @@ pub(super) fn parse_targeted_action_ast(
                         )?,
                         origin,
                         destination: Zone::Hand,
-                        // CR 110.2: controller
-                        // semantics apply only while an object is a permanent.
+                        // CR 110.2: controller semantics apply only while an
+                        // object is a permanent.
                         enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
@@ -2246,8 +2400,8 @@ pub(super) fn parse_targeted_action_ast(
                         )?,
                         origin,
                         destination: d.zone,
-                        // CR 110.2: controller
-                        // semantics apply only while an object is a permanent.
+                        // CR 110.2: controller semantics apply only while an
+                        // object is a permanent.
                         enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
@@ -2495,11 +2649,10 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             face_down,
             attach_host: _,
         } => {
-            // CR 110.2a: fail closed. A printed
-            // control clause whose antecedent could not be named must NOT
-            // collapse into the existing no-override carrier — that loses the
-            // explicitly printed controller while the card reports as fully
-            // supported.
+            // CR 110.2a: fail closed. A printed control clause whose
+            // antecedent could not be named must NOT collapse into the
+            // existing no-override carrier — that loses the explicitly
+            // printed controller while the card reports as fully supported.
             if let Some(p) = enters_under.unbound_possessor() {
                 return Effect::unimplemented(
                     "change_zone_enters_under_anaphor",
@@ -2562,9 +2715,9 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enter_with_counters,
         } => {
-            // CR 110.2a: fail closed on an
-            // unbindable control clause rather than silently defaulting the
-            // controller for the whole moved population.
+            // CR 110.2a: fail closed on an unbindable control clause rather
+            // than silently defaulting the controller for the whole moved
+            // population.
             if let Some(p) = enters_under.unbound_possessor() {
                 return Effect::unimplemented(
                     "change_zone_enters_under_anaphor",
@@ -3214,29 +3367,34 @@ pub(super) fn parse_search_and_creation_ast(
         } else {
             QuantityExpr::Fixed { value: 1 }
         };
-        let player = parse_dig_library_owner(rest_lower, ctx);
-        // CR 701.20e + CR 701.13a + CR 406.3: "look at the top card ... and
-        // exiles it face down" (Gonti, Night Minister) — fuse into ExileTop so
-        // the card leaves the library and the trailing play grant can bind to
-        // the tracked set.
-        if preceded(
-            take_until::<_, _, OracleError<'_>>("and exiles it face down"),
-            tag::<_, _, OracleError<'_>>("and exiles it face down"),
-        )
-        .parse(rest_lower)
-        .is_ok()
+        // CR 401.1 (#8498): an instruction naming a library owner the recognizer
+        // cannot bind DECLINES the dig arm rather than defaulting the owner to the
+        // ability's controller, so the clause stays honestly unparsed.
+        if let Some(player) = parse_dig_library_owner(rest_lower, ctx, DigOwnerPhrase::WithHeadNoun)
         {
-            return Some(SearchCreationImperativeAst::ExileTopLookedAt {
-                player,
+            // CR 701.20e + CR 701.13a + CR 406.3: "look at the top card ... and
+            // exiles it face down" (Gonti, Night Minister) — fuse into ExileTop so
+            // the card leaves the library and the trailing play grant can bind to
+            // the tracked set.
+            if preceded(
+                take_until::<_, _, OracleError<'_>>("and exiles it face down"),
+                tag::<_, _, OracleError<'_>>("and exiles it face down"),
+            )
+            .parse(rest_lower)
+            .is_ok()
+            {
+                return Some(SearchCreationImperativeAst::ExileTopLookedAt {
+                    player,
+                    count,
+                    face_down: true,
+                });
+            }
+            return Some(SearchCreationImperativeAst::Dig {
                 count,
-                face_down: true,
+                reveal,
+                player,
             });
         }
-        return Some(SearchCreationImperativeAst::Dig {
-            count,
-            reveal,
-            player,
-        });
     }
     // CR 701.20a + CR 701.20e: "look at/reveal <count> cards from the top of
     // <owner>'s library" — the count-leading word order as opposed to the
@@ -3283,12 +3441,18 @@ pub(super) fn parse_search_and_creation_ast(
                 ))
                 .parse(after_count)
                 {
-                    let player = parse_dig_library_owner(owner_lower, ctx);
-                    return Some(SearchCreationImperativeAst::Dig {
-                        count,
-                        reveal,
-                        player,
-                    });
+                    // CR 401.1 (#8498): fail-closed owner — an unrecognized
+                    // library owner declines this arm instead of binding the
+                    // ability's controller.
+                    if let Some(player) =
+                        parse_dig_library_owner(owner_lower, ctx, DigOwnerPhrase::AtOwnerBoundary)
+                    {
+                        return Some(SearchCreationImperativeAst::Dig {
+                            count,
+                            reveal,
+                            player,
+                        });
+                    }
                 }
             }
         }
@@ -7083,14 +7247,14 @@ fn try_parse_gain_keyword(text: &str) -> Option<Effect> {
         return None;
     }
 
-    // CR 611.2a: do NOT inject a default window
-    // here. `None` must stay a true unset sentinel so a window this clause's own
-    // recognizer already hoisted onto the carrier can distribute into the embedded
-    // field (`oracle_ir::ast::duration_is_unset_sentinel`). An injected
-    // `UntilEndOfTurn` is byte-identical to a PRINTED one, so the distribution rule
-    // cannot tell them apart and declines, stranding the printed window. The single
-    // authority for the fallback is the resolver (`game/effects/effect.rs`), which
-    // already applies `.unwrap_or(Duration::UntilEndOfTurn)`.
+    // CR 611.2a: do NOT inject a default window here. `None` must stay a true unset
+    // sentinel so a window this clause's own recognizer already hoisted onto the
+    // carrier can distribute into the embedded field
+    // (`oracle_ir::ast::duration_is_unset_sentinel`). An injected `UntilEndOfTurn`
+    // is byte-identical to a PRINTED one, so the distribution rule cannot tell them
+    // apart and declines, stranding the printed window. The single authority for
+    // the fallback is the resolver (`game/effects/effect.rs`), which already
+    // applies `.unwrap_or(Duration::UntilEndOfTurn)`.
 
     Some(Effect::GenericEffect {
         static_abilities: vec![StaticDefinition::continuous()
@@ -7404,11 +7568,11 @@ pub(super) fn parse_put_ast(
     if let Some((effect, choice_count, enters_under)) =
         super::try_parse_put_zone_change_parts(lower, text, ctx)
     {
-        // CR 110.2a: the control clause is bound
-        // by the seam that owns the destination text and returned alongside the
-        // `Effect`, so the AST carries the full three-state spec (including the
-        // fail-closed `UnboundAnaphor`) rather than the `Effect`'s already
-        // collapsed `Option<ControllerRef>`.
+        // CR 110.2a: the control clause is bound by the seam that owns the
+        // destination text and returned alongside the `Effect`, so the AST
+        // carries the full three-state spec (including the fail-closed
+        // `UnboundAnaphor`) rather than the `Effect`'s already collapsed
+        // `Option<ControllerRef>`.
         return match effect {
             Effect::ChangeZoneAll {
                 origin,
@@ -7559,10 +7723,10 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             // bare (non-partition) lowering never carries it.
             rest_library_position: _,
         } => {
-            // CR 110.2a: fail closed. This
-            // lowering receives NO text, which is exactly why
-            // `EntersUnderSpec::UnboundAnaphor` carries the possessor — the
-            // printed clause is recoverable here without a text slice.
+            // CR 110.2a: fail closed. This lowering receives NO text, which
+            // is exactly why `EntersUnderSpec::UnboundAnaphor` carries the
+            // possessor — the printed clause is recoverable here without a
+            // text slice.
             if let Some(p) = enters_under.unbound_possessor() {
                 return Effect::unimplemented(
                     "change_zone_enters_under_anaphor",
@@ -7594,10 +7758,10 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             choice_count: _,
             enter_with_counters,
         } => {
-            // CR 110.2a: fail closed. This
-            // lowering receives NO text, which is exactly why
-            // `EntersUnderSpec::UnboundAnaphor` carries the possessor — the
-            // printed clause is recoverable here without a text slice.
+            // CR 110.2a: fail closed. This lowering receives NO text, which
+            // is exactly why `EntersUnderSpec::UnboundAnaphor` carries the
+            // possessor — the printed clause is recoverable here without a
+            // text slice.
             if let Some(p) = enters_under.unbound_possessor() {
                 return Effect::unimplemented(
                     "change_zone_enters_under_anaphor",
@@ -8779,16 +8943,12 @@ fn starts_with_target_possessive_zone(rest_lower: &str) -> bool {
 /// CR 400.12 + CR 115.1: Match a "[card|cards] of [a player]'s library" suffix
 /// and return the matched-suffix tail plus the resolved library-owner filter.
 ///
-/// This is the player-binding half of the twelve top-of-library suffix patterns
-/// shared by the exile and put-onto-battlefield (manifest) paths. It maps each
-/// possessive form to its canonical `TargetFilter`:
-/// - "your library" → `Controller`
-/// - "that player's" / "their" library → the relative player from `ctx`
-///   (`TriggeringPlayer` for DamageDone triggers via `that_player_library_filter`)
-/// - "target opponent's library" → `Typed{controller: Opponent}`
-/// - "target player's library" → `Player`
-/// - "each player's library" → `ScopedPlayer`
-/// - "each opponent's library" → `Opponent` (parse-only scope sentinel)
+/// This is the player-binding half of the top-of-library suffix patterns shared
+/// by the exile and put-onto-battlefield (manifest) paths. The owner rows live in
+/// `parse_library_owner_or_opponent_scope` (`parse_library_owner_phrase` plus the
+/// per-opponent scope sentinel), so "that player's"/"their" library resolves the
+/// relative player from `ctx` (`TriggeringPlayer` for DamageDone triggers via
+/// `that_player_library_filter`) exactly as it does on every other surface.
 ///
 /// The helper performs only the player-suffix match; callers own any trailing
 /// face-down / where-X / destination parsing (the exile and manifest epilogues
@@ -8797,46 +8957,17 @@ pub(super) fn parse_library_player_suffix<'a>(
     remainder: &'a str,
     ctx: &ParseContext,
 ) -> Option<(&'a str, TargetFilter)> {
-    let that_player = that_player_library_filter(ctx);
-    let target_opponent_filter =
-        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
-    for (pattern, player) in [
-        ("card of your library", TargetFilter::Controller),
-        ("cards of your library", TargetFilter::Controller),
-        ("card of that player's library", that_player.clone()),
-        ("cards of that player's library", that_player.clone()),
-        ("card of their library", that_player.clone()),
-        ("cards of their library", that_player.clone()),
-        (
-            "card of target opponent's library",
-            target_opponent_filter.clone(),
-        ),
-        (
-            "cards of target opponent's library",
-            target_opponent_filter.clone(),
-        ),
-        ("card of target player's library", TargetFilter::Player),
-        ("cards of target player's library", TargetFilter::Player),
-        ("card of each player's library", TargetFilter::ScopedPlayer),
-        ("cards of each player's library", TargetFilter::ScopedPlayer),
-        // CR 401.1 + CR 102.2 + CR 102.3 + CR 608.2c: "each opponent's library" names ONE
-        // library per opponent — the same one-library-per-player reading as the `each
-        // player's` rows above, restricted to the controller's opponents. `TargetFilter::
-        // Opponent` is the parse-only scope sentinel here (never a targeted single
-        // opponent); `lift_distributive_exile_top_scope` erases it to `Controller` and
-        // stamps `player_scope: Opponent`, so the fan-out rebinds the acting controller to
-        // each opponent in APNAP order and `Effect::ExileTop` reads that opponent's library.
-        // Without these rows the clause falls through to the generic
-        // ChangeZone(Library→Exile) path, which offers a library-wide EffectZoneChoice
-        // tutor prompt over every card in every opponent's library (issue #8392).
-        ("card of each opponent's library", TargetFilter::Opponent),
-        ("cards of each opponent's library", TargetFilter::Opponent),
-    ] {
-        if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
-            return Some((tail, player));
-        }
-    }
-    None
+    // Two axes, one `alt()` each: the head-noun connective, then the owner.
+    // The owner rows are `parse_library_owner_or_opponent_scope` — the shared
+    // authority this surface, the "from the top of" source suffix and the dig
+    // recognizer all read, so the three can no longer drift apart (#8498).
+    let (after_noun, _) = alt((
+        tag::<_, _, OracleError<'_>>("cards of "),
+        tag::<_, _, OracleError<'_>>("card of "),
+    ))
+    .parse(remainder)
+    .ok()?;
+    parse_library_owner_or_opponent_scope(after_noun, ctx)
 }
 
 /// CR 112.1: A spell is a card on the stack. `scope_target_spell_phrase` lowers
@@ -8911,16 +9042,12 @@ fn resolve_dynamic_exile_count(qty_text: &str) -> Option<QuantityExpr> {
 /// suffix of a dynamic-count top-of-library exile and map the possessive owner to
 /// its library-owner `TargetFilter`.
 ///
-/// R7 zero-touch: this is a self-contained 6-owner table deliberately kept
-/// separate from `parse_library_player_suffix` (whose surface is the different
-/// "card[s] of <owner>'s library" form). Each entry is matched as the full
-/// "<owner> library" phrase, so no shorter alternative can prefix-shadow a longer
-/// one. Returns the post-library tail plus the resolved owner filter:
-/// - "your library" → `Controller`
-/// - "that player's" / "their" library → the relative player from `ctx`
-/// - "target opponent's library" → `Typed{controller: Opponent}`
-/// - "target player's library" → `Player`
-/// - "each player's library" → `ScopedPlayer`
+/// The owner rows come from `parse_library_owner_phrase`, the shared authority
+/// this surface and `parse_library_player_suffix` (whose surface is the different
+/// "card[s] of <owner>'s library" form) both read; only the connective differs.
+/// Each row is matched as the full "<owner> library" phrase, so no shorter
+/// alternative can prefix-shadow a longer one. Returns the post-library tail plus
+/// the resolved owner filter.
 fn parse_from_top_of_library_owner<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -8934,30 +9061,19 @@ fn parse_from_top_of_library_owner<'a>(
     let (after_prefix, _) = tag::<_, _, OracleError<'_>>("from the top of ")
         .parse(input)
         .ok()?;
-    let that_player = that_player_library_filter(ctx);
-    for (pattern, player) in [
-        ("your library", TargetFilter::Controller),
-        ("that player's library", that_player.clone()),
-        ("their library", that_player.clone()),
-        (
-            "target opponent's library",
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-        ),
-        ("target player's library", TargetFilter::Player),
-        ("each player's library", TargetFilter::ScopedPlayer),
-    ] {
-        if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(after_prefix) {
-            return Some((tail, player));
-        }
-    }
+    // The owner rows come from the shared authority (#8498). The per-opponent
+    // scope sentinel is deliberately NOT available here: this surface has no
+    // `lift_distributive_exile_top_scope` pass, so an "each opponent's library"
+    // row would leave an unlifted `TargetFilter::Opponent` in `ExileTop.player`.
+    //
     // DEFERRED (honest gap): "its owner's library" (Dead Man's Chest — "exile cards
     // equal to its power from the top of its owner's library") needs an
     // anaphoric-object-owner → player `TargetFilter` that does not exist yet
-    // (add-engine-variant Stage-2/3). ROOT CAUSE: the closed owner table above has
-    // no "its owner" possessive, so this recognizer declines and Dead Man's Chest
+    // (add-engine-variant Stage-2/3). ROOT CAUSE: the shared owner table has no
+    // "its owner" possessive, so this recognizer declines and Dead Man's Chest
     // stays a count-less `ChangeZone`. Pinned by the `dead_mans_chest_*` tripwire;
     // adding the owner variant flips it to `ExileTop`.
-    None
+    parse_library_owner_phrase(after_prefix, ctx)
 }
 
 /// CR 701.13 + CR 401.1 + CR 608.2c: Recognize the dynamic-count top-of-library
@@ -12902,9 +13018,9 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             rest_destination: Some(rest_destination),
             rest_library_position,
         }) => {
-            // CR 110.2a: fail closed before the
-            // partition is materialized — a wrong controller on the primary
-            // pile would otherwise ship silently.
+            // CR 110.2a: fail closed before the partition is materialized — a
+            // wrong controller on the primary pile would otherwise ship
+            // silently.
             if let Some(p) = enters_under.unbound_possessor() {
                 return parsed_clause(Effect::unimplemented(
                     "change_zone_enters_under_anaphor",
@@ -13486,10 +13602,10 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 attach_host: Some(host),
             },
         )) => {
-            // CR 110.2a: fail closed before the
-            // attachment is installed. An unbound control clause lowers to an
-            // honest gap; leaving an executable Attach beneath it would attach
-            // a permanent that never entered the battlefield.
+            // CR 110.2a: fail closed before the attachment is installed. An
+            // unbound control clause lowers to an honest gap; leaving an
+            // executable Attach beneath it would attach a permanent that never
+            // entered the battlefield.
             if let Some(p) = enters_under.unbound_possessor() {
                 return parsed_clause(Effect::unimplemented(
                     "change_zone_enters_under_anaphor",
@@ -23859,5 +23975,280 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Helper: parse a dig instruction the way the verb dispatcher does and
+    /// return the bound library-owner filter, or `None` when the recognizer
+    /// declined the dig arm entirely.
+    fn dig_owner_of(text: &str) -> Option<TargetFilter> {
+        match parse_search_and_creation_ast(text, text, &mut ParseContext::default()) {
+            Some(SearchCreationImperativeAst::Dig { player, .. })
+            | Some(SearchCreationImperativeAst::ExileTopLookedAt { player, .. }) => Some(player),
+            _ => None,
+        }
+    }
+
+    /// CR 401.1 (#8498): the dig recognizer binds the library named by the
+    /// clause, across the whole owner class and BOTH call-site word orders —
+    /// "look at/reveal the top N cards of <owner>'s library" and the
+    /// count-leading "look at N cards from the top of <owner>'s library".
+    ///
+    /// Every non-"your" row here bound `TargetFilter::Controller` before the
+    /// fail-open default was removed, i.e. the ability's controller's own
+    /// library regardless of whose library the clause named.
+    #[test]
+    fn dig_binds_the_library_owner_the_clause_names() {
+        let ctx = ParseContext::default();
+        let that_player = that_player_library_filter(&ctx);
+        let target_opponent =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+        for (text, expected) in [
+            // "the top N …" word order.
+            (
+                "look at the top card of your library",
+                TargetFilter::Controller,
+            ),
+            (
+                "reveal the top two cards of your library",
+                TargetFilter::Controller,
+            ),
+            ("look at the top card of their library", that_player.clone()),
+            (
+                "reveal the top three cards of their library",
+                that_player.clone(),
+            ),
+            (
+                "look at the top four cards of target opponent's library",
+                target_opponent.clone(),
+            ),
+            (
+                "reveal the top card of target player's library",
+                TargetFilter::Player,
+            ),
+            // Singular AND plural head noun: only the singular form was
+            // recognized before, so "the top two cards of each player's library"
+            // silently read the controller's library.
+            (
+                "look at the top card of each player's library",
+                TargetFilter::ScopedPlayer,
+            ),
+            (
+                "look at the top two cards of each player's library",
+                TargetFilter::ScopedPlayer,
+            ),
+            (
+                "look at the top card of each opponent's library",
+                TargetFilter::Opponent,
+            ),
+            // Count-leading word order — the same owner table, entered at the
+            // owner boundary instead of behind the head noun.
+            (
+                "look at two cards from the top of your library",
+                TargetFilter::Controller,
+            ),
+            (
+                "look at three cards from the top of their library",
+                that_player,
+            ),
+            (
+                "look at two cards from the top of target opponent's library",
+                target_opponent,
+            ),
+        ] {
+            assert_eq!(
+                dig_owner_of(text),
+                Some(expected),
+                "dig must bind the library owner named by {text:?}"
+            );
+        }
+    }
+
+    /// CR 401.1 (#8498): a clause that NAMES a library whose owner the shared
+    /// table cannot bind declines the dig arm instead of guessing the ability's
+    /// controller. The `their library` row is the positive reach-guard: the same
+    /// sentence shape, same verb, same head noun — only the owner differs — so a
+    /// `None` on the unrecognized rows cannot be an upstream short-circuit.
+    #[test]
+    fn dig_fails_closed_on_a_library_owner_it_cannot_bind() {
+        assert!(
+            dig_owner_of("look at the top card of their library").is_some(),
+            "reach-guard: a recognized owner in this exact sentence shape must \
+             still reach the dig arm"
+        );
+        assert!(
+            dig_owner_of("look at the top two cards of their library").is_some(),
+            "reach-guard: the plural head noun must still reach the dig arm"
+        );
+        // The count-leading word order needs its OWN reach-guard: it enters the
+        // recognizer at the owner boundary, a different code path from the two
+        // guards above, so their green says nothing about it.
+        assert!(
+            dig_owner_of("look at two cards from the top of their library").is_some(),
+            "reach-guard: a recognized owner in the count-leading word order must \
+             still reach the dig arm"
+        );
+
+        for text in [
+            // Owners with no `TargetFilter` today (Neck Tangle, Inzerva, Coral
+            // Fighters). Honestly unparsed beats confidently controller-bound.
+            "look at the top card of the hydra's library",
+            "look at the top two cards of each other player's library",
+            "look at the top card of defending player's library",
+            // Not a library at all (Stairs to Infinity's planar deck).
+            "look at the top card of your planar deck",
+            // COUNT-LEADING word order, unrecognized owner. This shape reaches
+            // the recognizer past the "cards from the top of " connective, so
+            // `parse_dig_head_noun` can never match and the source-less elision
+            // used to fire unconditionally here — binding the ability's
+            // controller for a clause that plainly names somebody else. Every
+            // negative row above uses the top-N order and so could not see it.
+            "look at two cards from the top of an opponent's library",
+            "look at two cards from the top of the hydra's library",
+            "look at one card from the top of defending player's library",
+        ] {
+            assert_eq!(
+                dig_owner_of(text),
+                None,
+                "an unbindable library owner must decline, not default to the \
+                 ability's controller: {text:?}"
+            );
+        }
+    }
+
+    /// CR 608.2c + CR 109.5 (#8498): the one surviving `Controller` reading is
+    /// the SOURCE-LESS elision — "Shuffle your library, then reveal the top
+    /// card." (Temporal Aperture, Unexpected Results) — where the instruction
+    /// names no library of its own and the library named by the preceding clause
+    /// carries over. It must not widen back into a catch-all: the negative rows
+    /// in `dig_fails_closed_on_a_library_owner_it_cannot_bind` all name a source
+    /// and therefore never reach this arm.
+    #[test]
+    fn dig_without_a_named_library_source_keeps_the_elided_controller() {
+        for text in ["reveal the top card", "look at the top two cards"] {
+            assert_eq!(
+                dig_owner_of(text),
+                Some(TargetFilter::Controller),
+                "a source-less dig keeps the elided controller reading: {text:?}"
+            );
+        }
+        // A later sentence's library must not be harvested as this dig's source
+        // (Temporal Aperture's follow-on sentence names the controller's library
+        // twice; Unexpected Results' names none).
+        assert_eq!(
+            dig_owner_of(
+                "reveal the top card. until end of turn, for as long as that card \
+                 remains on top of your library, you may play that card"
+            ),
+            Some(TargetFilter::Controller),
+            "the head-noun search is bounded to the instruction's first sentence"
+        );
+    }
+
+    /// CR 401.1 (#8498): the three library-owner surfaces — the dig recognizer,
+    /// the "card[s] of <owner> library" suffix and the "from the top of <owner>
+    /// library" source — read ONE table, so they cannot drift apart again. Two
+    /// of them had already diverged (the dig recognizer was missing "their",
+    /// "target opponent's" and the plural "each player's" rows) and the divergence
+    /// is exactly where the misbindings came from.
+    #[test]
+    fn every_library_owner_surface_reads_the_same_table() {
+        let ctx = ParseContext::default();
+        for owner in [
+            "your library",
+            "their library",
+            "that player's library",
+            "target opponent's library",
+            "target player's library",
+            "each player's library",
+        ] {
+            let shared = parse_library_owner_phrase(owner, &ctx)
+                .unwrap_or_else(|| panic!("shared table must bind {owner:?}"))
+                .1;
+            let suffix = parse_library_player_suffix(&format!("cards of {owner}"), &ctx)
+                .unwrap_or_else(|| panic!("`card[s] of` suffix must bind {owner:?}"))
+                .1;
+            let from_top =
+                parse_from_top_of_library_owner(&format!("from the top of {owner}"), &ctx)
+                    .unwrap_or_else(|| panic!("`from the top of` source must bind {owner:?}"))
+                    .1;
+            assert_eq!(suffix, shared, "`card[s] of` surface diverged on {owner:?}");
+            assert_eq!(
+                from_top, shared,
+                "`from the top of` surface diverged on {owner:?}"
+            );
+            // The dig recognizer reaches the same value for every row — through
+            // its head noun for the context-free owners, and through its
+            // `"that <owner>'s library"` anaphor arm for "that player's library",
+            // which #8467 routed to this same `that_player_library_filter`. No
+            // row is exempt: that is the whole point of the two changes landing
+            // together.
+            assert_eq!(
+                parse_dig_library_owner(
+                    &format!("two cards of {owner}"),
+                    &ctx,
+                    DigOwnerPhrase::WithHeadNoun
+                ),
+                Some(shared),
+                "dig recognizer diverged on {owner:?}"
+            );
+        }
+
+        // #8467 x #8498: the anaphor arm runs BEFORE the fail-closed table and
+        // returns on its own, so making the table fail closed cannot turn the
+        // anaphor into an "unrecognized owner". `"that opponent's library"` is
+        // the sharp case — it is NOT a row of the shared table at all, so if the
+        // anaphor arm were ever folded into the table it would decline here.
+        for anaphor in ["that player's library", "that opponent's library"] {
+            assert_eq!(
+                parse_dig_library_owner(
+                    &format!("three cards of {anaphor}"),
+                    &ctx,
+                    DigOwnerPhrase::WithHeadNoun
+                ),
+                Some(that_player_library_filter(&ctx)),
+                "the {anaphor:?} anaphor must resolve through the context-aware \
+                 authority, never decline under the fail-closed table"
+            );
+        }
+
+        // Fail-closed on every surface, with the positive control above proving
+        // the same call shape binds a recognized owner.
+        assert_eq!(
+            parse_library_owner_phrase("the hydra's library", &ctx),
+            None
+        );
+        assert_eq!(
+            parse_library_player_suffix("cards of the hydra's library", &ctx),
+            None
+        );
+        assert_eq!(
+            parse_from_top_of_library_owner("from the top of the hydra's library", &ctx),
+            None
+        );
+        assert_eq!(
+            parse_dig_library_owner(
+                "two cards of the hydra's library",
+                &ctx,
+                DigOwnerPhrase::WithHeadNoun
+            ),
+            None
+        );
+        // The SAME unrecognized owner entered at the owner boundary — the shape
+        // the count-leading call site hands in. `parse_dig_head_noun` cannot
+        // match text the caller already advanced past, so before the
+        // `AtOwnerBoundary` arm this returned `Some(Controller)` and bound the
+        // ability's controller for a clause naming somebody else.
+        assert_eq!(
+            parse_dig_library_owner("the hydra's library", &ctx, DigOwnerPhrase::AtOwnerBoundary),
+            None
+        );
+        // Reach-guard for the row above: a RECOGNIZED owner in that same
+        // boundary shape must still bind, or the `None` proves only that the
+        // shape is broken.
+        assert_eq!(
+            parse_dig_library_owner("your library", &ctx, DigOwnerPhrase::AtOwnerBoundary),
+            Some(TargetFilter::Controller)
+        );
     }
 }

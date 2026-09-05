@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-09-04T00:00:00Z",
+  "updated": "2026-09-05T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -559,6 +559,157 @@
       ]
     },
     {
+      "name": "Affinity",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 4,
+          "name": "Fiery Islet"
+        },
+        {
+          "count": 2,
+          "name": "Salvage Titan"
+        },
+        {
+          "count": 3,
+          "name": "Starting Town"
+        },
+        {
+          "count": 1,
+          "name": "Preordain"
+        },
+        {
+          "count": 1,
+          "name": "Blood Moon"
+        },
+        {
+          "count": 1,
+          "name": "Pithing Needle"
+        },
+        {
+          "count": 2,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Engineered Explosives"
+        },
+        {
+          "count": 4,
+          "name": "Kappa Cannoneer"
+        },
+        {
+          "count": 1,
+          "name": "Skateboard"
+        },
+        {
+          "count": 4,
+          "name": "Mox Opal"
+        },
+        {
+          "count": 1,
+          "name": "Welding Jar"
+        },
+        {
+          "count": 4,
+          "name": "Mishra's Bauble"
+        },
+        {
+          "count": 4,
+          "name": "Pinnacle Emissary"
+        },
+        {
+          "count": 1,
+          "name": "Haywire Mite"
+        },
+        {
+          "count": 4,
+          "name": "Weapons Manufacturing"
+        },
+        {
+          "count": 4,
+          "name": "Tormod's Crypt"
+        },
+        {
+          "count": 2,
+          "name": "Emry, Lurker of the Loch"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 3,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 2,
+          "name": "Metallic Rebuke"
+        },
+        {
+          "count": 4,
+          "name": "Urza's Saga"
+        },
+        {
+          "count": 2,
+          "name": "Claws of Gix"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Damping Sphere"
+        },
+        {
+          "count": 1,
+          "name": "Vexing Bauble"
+        },
+        {
+          "count": 1,
+          "name": "Cursed Totem"
+        },
+        {
+          "count": 1,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 3,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 1,
+          "name": "Shadowspear"
+        },
+        {
+          "count": 1,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 2,
+          "name": "Whipflare"
+        },
+        {
+          "count": 2,
+          "name": "Galvanic Blast"
+        },
+        {
+          "count": 1,
+          "name": "Swan Song"
+        }
+      ]
+    },
+    {
       "name": "Boros Energy",
       "author": "MTGGoldfish",
       "colors": [
@@ -714,157 +865,6 @@
         {
           "count": 2,
           "name": "Wrath of the Skies"
-        }
-      ]
-    },
-    {
-      "name": "Affinity",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Islet"
-        },
-        {
-          "count": 2,
-          "name": "Salvage Titan"
-        },
-        {
-          "count": 3,
-          "name": "Starting Town"
-        },
-        {
-          "count": 1,
-          "name": "Preordain"
-        },
-        {
-          "count": 1,
-          "name": "Blood Moon"
-        },
-        {
-          "count": 1,
-          "name": "Pithing Needle"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Engineered Explosives"
-        },
-        {
-          "count": 4,
-          "name": "Kappa Cannoneer"
-        },
-        {
-          "count": 1,
-          "name": "Skateboard"
-        },
-        {
-          "count": 4,
-          "name": "Mox Opal"
-        },
-        {
-          "count": 1,
-          "name": "Welding Jar"
-        },
-        {
-          "count": 4,
-          "name": "Mishra's Bauble"
-        },
-        {
-          "count": 4,
-          "name": "Pinnacle Emissary"
-        },
-        {
-          "count": 1,
-          "name": "Haywire Mite"
-        },
-        {
-          "count": 4,
-          "name": "Weapons Manufacturing"
-        },
-        {
-          "count": 4,
-          "name": "Tormod's Crypt"
-        },
-        {
-          "count": 2,
-          "name": "Emry, Lurker of the Loch"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 3,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 2,
-          "name": "Metallic Rebuke"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Saga"
-        },
-        {
-          "count": 2,
-          "name": "Claws of Gix"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 1,
-          "name": "Vexing Bauble"
-        },
-        {
-          "count": 1,
-          "name": "Cursed Totem"
-        },
-        {
-          "count": 1,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 1,
-          "name": "Shadowspear"
-        },
-        {
-          "count": 1,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 2,
-          "name": "Whipflare"
-        },
-        {
-          "count": 2,
-          "name": "Galvanic Blast"
-        },
-        {
-          "count": 1,
-          "name": "Swan Song"
         }
       ]
     },

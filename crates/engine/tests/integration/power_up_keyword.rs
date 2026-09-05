@@ -7,12 +7,11 @@
 //! re-parses the Oracle text with the new parser; `GameRunner` drives `apply()`),
 //! and each carries a revert-failing assertion (not an AST-shape assertion).
 //!
-//! CR 602.5b: activate only once.
-//! CR 602.2b + CR 601.2f + CR 302.6: cost reduced by source MV if it entered
-//! this turn.
-//! CR 106.6: tag-scoped mana spend restriction (Quinjet).
-//! CR 500.7 + CR 514.2: Kang's extra-turn power-up prohibition.
-//! CR 603.2c: Marvel Boy's dual-condition trigger fires once for each event.
+//! CR 602.5b: activate only once. CR 602.2b + CR 601.2f + CR 302.6: cost
+//! reduced by source MV if it entered this turn. CR 106.6: tag-scoped mana
+//! spend restriction (Quinjet). CR 500.7 + CR 514.2: Kang's extra-turn
+//! power-up prohibition. CR 603.2c: Marvel Boy's dual-condition trigger
+//! fires once for each event.
 
 use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;

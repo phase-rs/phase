@@ -526,10 +526,10 @@ pub fn eliminate_players_simultaneously(
         // CR 800.4a: A live trigger-construction batch can carry a priority
         // recipient who is not the prompt's controller, so neither cursor-
         // clearing site above fires when that recipient alone leaves. Priority
-        // passes to the next player in turn order who is still in the game,
-        // so the carried recipient is
-        // re-pointed rather than stranded — the same authority and remedy the
-        // `waiting_for` re-point directly above uses for a dead acting player.
+        // passes to the next player in turn order who is still in the game, so
+        // the carried recipient is re-pointed rather than stranded — the same
+        // authority and remedy the `waiting_for` re-point directly above uses
+        // for a dead acting player.
         if let Some(recipient) = state.pending_trigger_construction_priority_recipient {
             if !players::is_alive(state, recipient) {
                 state.pending_trigger_construction_priority_recipient =

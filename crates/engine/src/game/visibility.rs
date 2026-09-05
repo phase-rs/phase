@@ -6687,6 +6687,7 @@ mod tests {
         pending.cost_paid_object = Some(CostPaidObjectSnapshot {
             object_id: hidden,
             lki: state.objects[&hidden].snapshot_for_mana_spent(),
+            incarnation: 0,
         });
         let mana_resume = PendingCostMoveResume::ManaAbilityPayment {
             pending: Box::new(pending),

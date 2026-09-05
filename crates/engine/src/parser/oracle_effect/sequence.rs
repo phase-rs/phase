@@ -3673,11 +3673,11 @@ fn recovered_conjunct_continues_prior_subject(text: &str) -> bool {
     !starts_clause_text(t) && starts_clause_text_or_conjugated(t)
 }
 
-/// CR 603.1 + CR 603.7: a boundary that severs a mid-sentence
-/// delayed-trigger head from its body does not divide two independent instructions —
-/// it divides one printed "[At] [event], [effect]" in half. Splitting there emits the
-/// trigger's body as a one-shot the card never authorizes (measured: Giant Oyster gains
-/// a top-level `PutCounter{ForAsLongAs SourceIsTapped}`).
+/// CR 603.1 + CR 603.7: a boundary that severs a mid-sentence delayed-trigger head from
+/// its body does not divide two independent instructions — it divides one printed "[At]
+/// [event], [effect]" in half. Splitting there emits the trigger's body as a one-shot
+/// the card never authorizes (measured: Giant Oyster gains a top-level
+/// `PutCounter{ForAsLongAs SourceIsTapped}`).
 fn head_ends_with_dangling_phase_trigger(head: &str) -> bool {
     let lower = head.to_ascii_lowercase();
     nom_primitives::scan_at_word_boundaries(
@@ -3865,8 +3865,8 @@ fn chunk_end_offset(body: &str, sub: &[ClauseChunk], k: usize) -> Option<usize> 
     Some(cursor)
 }
 
-/// CR 608.2c + CR 611.2a: a leading duration states the lifetime of
-/// the WHOLE instruction it prefixes, not only of its first conjunct.
+/// CR 608.2c + CR 611.2a: a leading duration states the lifetime of the WHOLE
+/// instruction it prefixes, not only of its first conjunct.
 ///
 /// `starts_prefix_clause` latches `"until "` / `"for as long as "` (as it also latches
 /// `"if "`), so the whole sentence arrives as one chunk. A leading CONDITIONAL is then
@@ -6084,18 +6084,17 @@ pub(super) fn parse_intrinsic_continuation_ast(
             Some(ContinuationAst::SearchDestination {
                 destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
-                // CR 110.2a: the SAME span
-                // (`full_lower`) as the single-literal `scan_contains` this
-                // replaces — no widening. `You`-wins makes the fold
-                // byte-for-byte non-regressive. This seam has no object filter
-                // of its own (the found card is not a parsed `TargetFilter`
-                // here), so the CR 108.3 moved-object-owner source can never
-                // fire: only a mapped, `ParseContext`-declared referent binds.
-                // The one dangerous scope value at this seam (`TargetPlayer`,
-                // which `filter.rs` resolves to the FIRST player target of an
-                // unrelated slot) is refused inside
-                // `map_relative_player_scope`, so the seam needs no
-                // special-casing of its own.
+                // CR 110.2a: the SAME span (`full_lower`) as the
+                // single-literal `scan_contains` this replaces — no widening.
+                // `You`-wins makes the fold byte-for-byte non-regressive. This
+                // seam has no object filter of its own (the found card is not
+                // a parsed `TargetFilter` here), so the CR 108.3
+                // moved-object-owner source can never fire: only a mapped,
+                // `ParseContext`-declared referent binds. The one dangerous
+                // scope value at this seam (`TargetPlayer`, which `filter.rs`
+                // resolves to the FIRST player target of an unrelated slot) is
+                // refused inside `map_relative_player_scope`, so the seam
+                // needs no special-casing of its own.
                 enters_under: bind_control_clause(
                     fold_control_clauses(&full_lower),
                     name_entry_control_antecedent(None, ctx),

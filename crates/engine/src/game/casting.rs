@@ -18398,10 +18398,10 @@ pub(crate) fn stamp_self_ref_discard_cost_paid_object(
         return;
     }
     if let Some(obj) = state.objects.get(&source_id) {
-        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-            object_id: source_id,
-            lki: obj.snapshot_for_mana_spent(),
-        });
+        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+            obj,
+            obj.snapshot_for_mana_spent(),
+        ));
     }
 }
 
@@ -19312,8 +19312,25 @@ pub(crate) fn can_pay_ability_cost_now(
     )
 }
 
-/// CR 602.2: Whether `player` may begin to activate an activated ability on
-/// a permanent controlled by `source_controller`.
+/// CR 602.2: Whether `player` may begin to activate an activated ability whose
+/// permission reference point is `source_controller`.
+///
+/// CR 602.2 reads "Only an object's controller (or its owner, if it doesn't have a
+/// controller) can activate its activated ability unless the object specifically
+/// says otherwise." The parenthetical is not decoration: CR 108.4 says a card in a
+/// hand, graveyard, library or exile is neither a permanent nor a spell and so has
+/// no controller at all, and CR 108.4a directs anything asking for that controller
+/// to use the owner instead. An object caller must therefore pass
+/// [`GameObject::controller_or_owner`], never a raw `.controller` — this gate runs
+/// before the `activation_zone` check, so it sees objects in every zone.
+///
+/// Routing through that helper rather than swapping in `.owner` is what keeps the
+/// command zone correct: CR 109.4c makes an emblem an object that DOES have a
+/// controller while in the command zone, and the helper carries that exception.
+///
+/// The activator-scoped static-ability caller is the one non-object caller: it
+/// passes a *static ability's* controller, which is a genuine controller with no
+/// owner fallback to make.
 fn player_may_begin_activating(
     state: &GameState,
     player: PlayerId,
@@ -19445,10 +19462,13 @@ pub(crate) fn activation_verdict(
     else {
         return ActivationVerdict::Illegal;
     };
+    // CR 602.2 + CR 108.4a: the permission reference point is the source's
+    // controller, or its owner when it has none — this gate runs ahead of the
+    // `activation_zone` check below, so it sees hand / graveyard / exile sources.
     if !player_may_begin_activating(
         state,
         player,
-        obj.controller,
+        obj.controller_or_owner(),
         ability_def.activator_filter.as_ref(),
     ) {
         return ActivationVerdict::Illegal;
@@ -19955,10 +19975,13 @@ pub fn handle_activate_ability(
             "Invalid ability index".to_string(),
         ));
     };
+    // CR 602.2 + CR 108.4a: the permission reference point is the source's
+    // controller, or its owner when it has none — this gate runs ahead of the
+    // `activation_zone` check below, so it sees hand / graveyard / exile sources.
     if !player_may_begin_activating(
         state,
         player,
-        obj.controller,
+        obj.controller_or_owner(),
         ability_def.activator_filter.as_ref(),
     ) {
         return Err(EngineError::NotYourPriority);

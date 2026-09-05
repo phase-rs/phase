@@ -287,6 +287,35 @@ kubectl -n phase annotate secret <release>-tls \
   cert-manager.io/certificate-name=<release> --overwrite
 ```
 
+### Upgrading a scale-out release from chart 0.3.0 or earlier
+
+Charts up to 0.3.0 stamped the full label set onto `volumeClaimTemplates`, and
+two of those labels move with the chart: `helm.sh/chart` and
+`app.kubernetes.io/version`. Kubernetes forbids **any** update to
+`volumeClaimTemplates` on an existing StatefulSet, so on such a release every
+chart or appVersion bump fails the upgrade outright:
+
+```
+cannot patch "phase-server" with kind StatefulSet: ... spec: Forbidden: updates
+to statefulset spec for fields other than 'replicas', 'ordinals', 'template',
+'updateStrategy', 'revisionHistoryLimit',
+'persistentVolumeClaimRetentionPolicy' and 'minReadySeconds' are forbidden
+```
+
+Chart 0.3.1 removes those labels — but doing so is itself a
+`volumeClaimTemplates` edit, so the first upgrade onto it needs the StatefulSet
+recreated once:
+
+```bash
+kubectl delete sts phase-server -n phase --cascade=orphan
+helm upgrade phase-server deploy/helm/phase-server -n phase -f <your values>
+```
+
+`--cascade=orphan` leaves the pods and the `data-<release>-N` claims in place and
+the new StatefulSet adopts both by name, so no volume is deleted and no game data
+is lost. The pods still roll for whatever else the upgrade changes, so do this
+between games as usual. Releases installed at 0.3.1 or later never need it.
+
 ## Autoscaling
 
 Turning autoscaling on without the prometheus-operator CRDs is a render-time

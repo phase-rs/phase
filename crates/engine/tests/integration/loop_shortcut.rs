@@ -1574,7 +1574,7 @@ fn setup_2p_vito_optional(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     (runner, kickoff)
 }
 
-/// 3p DRAIN_CLERIC/BLOOD_SIPPER loop where BOTH opponents drain equally (CR 704.5a "each
+/// 3p DRAIN_CLERIC/BLOOD_SIPPER loop where BOTH opponents drain equally (CR 119.3 "each
 /// opponent loses 1"). Configurable opponent life for the F2 ≥2-faller hardening tests: the
 /// per-cycle delta is EQUAL for both (so `live_mandatory_loop_winner`'s ≥2-faller floor
 /// passes), while the ABSOLUTE lives differ iff `p1_life != p2_life` (so the offer's own

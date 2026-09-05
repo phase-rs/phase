@@ -38,6 +38,27 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 64 — Retroactive bump for two new-tag changes that landed under 62/63
+///      WITHOUT their own bump. Both are one-way parse breaks by the rule
+///      entries 46, 51 and 62 state ("no serde default can rescue an unknown
+///      variant"), so the exact-match full-game handshake must refuse the
+///      pairing rather than admit it and fail mid-game:
+///      (a) #8501 added `Effect::OpenBoosterPack`, plus the `BoosterPack`
+///          variants of `OutsideGameChoiceSource` and `OutsideGameSelection`.
+///          Both enums are `#[serde(tag = "type", content = "data")]`, so the
+///          new arms emit TAG VALUES no older peer has a case for, and they
+///          ride `GameState.waiting_for` and `GameAction`.
+///      (b) #8332 added `slots` + `slot_pools` to `WaitingFor::RetargetChoice`
+///          and `controller` to `StackEntryDisplay`. These carry
+///          `#[serde(default)]`, so an old peer decodes and then MISRENDERS —
+///          `RetargetChoiceModal.tsx` indexes `slot_pools`, whose `??` guards
+///          an undefined element rather than an undefined array, so an old
+///          host paired with a new guest throws during render.
+///      No wire shape changes in THIS bump; it exists so the handshake stops
+///      admitting the skew those two PRs opened. `check-protocol-version.mjs`
+///      could not have caught either one: it enforces that the Rust and TS
+///      constants AGREE, not that they were INCREMENTED, and both PRs kept
+///      them agreeing at the wrong value. Lobby messages are unchanged.
 /// 63 — `WaitingFor::ReplacementChoice` gained an engine-owned
 ///      `ReplacementChoiceKind` discriminator and a `last_applied_decides`
 ///      flag. Both are `#[serde(default)]`, so a v62 peer decodes the payload
@@ -338,7 +359,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 63;
+pub const PROTOCOL_VERSION: u32 = 64;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1084,12 +1105,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 63);
+        assert_eq!(PROTOCOL_VERSION, 64);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 62);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 63);
     }
 
     #[test]

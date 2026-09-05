@@ -3083,7 +3083,7 @@ fn certified_bounded_cycle_offer<'a>(
         v.dedup();
         v
     };
-    // CR 704.5a: what ONE repetition charges to whichever seat a slot's pin names. The
+    // CR 119.3: what ONE repetition charges to whichever seat a slot's pin names. The
     // max-vs-sum reasoning, the gain clamp and the fail-closed direction live on the
     // function; `elimination_bounds` then sums the charged slots per declarable victim.
     // Extracted rather than inlined so the fork has a callable seam. ⚠ THE "`victim_slot` IS
@@ -3483,7 +3483,7 @@ pub(crate) struct EntryPinSlots {
 ///
 /// THE TWO QUESTIONS THIS TYPE KEEPS APART, because conflating them was a measured
 /// fail-OPEN. PUBLICATION answers CR 732.2a — *is this a game choice the player makes?* —
-/// and shapes the schema. CHARGING answers CR 704.5a — *which seat is charged, and how
+/// and shapes the schema. CHARGING answers CR 119.3 — *which seat is charged, and how
 /// much?* — and shapes the bound. A forced announcement is not a choice, so it is withheld
 /// from the schema; its victim still loses the life, so it is still charged. Deriving the
 /// bound from the PUBLISHED point set made the CR 732.2a withhold silently drop the forced
@@ -3547,7 +3547,7 @@ pub(crate) enum TargetAnnouncement {
     ///   routes to `AutoAssigned`), so no prompt is ever raised and a pin would be a
     ///   designation the RNG contradicts at drive time.
     ///
-    /// CHARGED ALL THE SAME: CR 704.5a asks which seat loses how much life, and nobody having
+    /// CHARGED ALL THE SAME: CR 119.3 asks which seat loses how much life, and nobody having
     /// made the choice changes neither who pays nor how much. Only the CR 732.2a publication
     /// reader acts on this value.
     NotProposerChoice,
@@ -3557,7 +3557,7 @@ pub(crate) enum TargetAnnouncement {
 /// BEFORE the CR 732.2a question of how much of it is a published game choice.
 ///
 /// THE SINGLE ACCEPTANCE AUTHORITY. Both [`entry_publishes_pin_slots`] (publication) and
-/// [`bounded_cycle_charged_targets_for_window`] (CR 704.5a charging) are thin readers of
+/// [`bounded_cycle_charged_targets_for_window`] (CR 119.3 charging) are thin readers of
 /// this one function, so the two can never disagree about WHICH entries are in the cycle —
 /// only about which of their announcements is a published choice. Two independent
 /// acceptance chains that could disagree is exactly the shape gate (3)'s single-authority
@@ -3573,7 +3573,7 @@ struct EntryAnnouncement {
 /// A THIN READER of [`entry_announces`], which owns every acceptance conjunct documented
 /// below; this function contributes exactly one thing on top of it — the CR 732.2a
 /// publication decision (a `Forced` announcement is not a game choice, so no point is
-/// published for it). The CR 704.5a charging reader
+/// published for it). The CR 119.3 charging reader
 /// ([`bounded_cycle_charged_targets_for_window`]) reads the SAME announcement, so the two
 /// cannot disagree about which entries are in the cycle.
 ///
@@ -3646,7 +3646,7 @@ pub(crate) fn entry_publishes_pin_slots(
 /// Every acceptance conjunct documented on [`entry_publishes_pin_slots`] lives here. What
 /// does NOT live here is the CR 732.2a publication decision: this function reports whether
 /// the announcement is `Chosen` or `Forced` and lets its two readers apply that fact to the
-/// question each is answering — the schema (publication) or the bound (CR 704.5a charging).
+/// question each is answering — the schema (publication) or the bound (CR 119.3 charging).
 fn entry_announces(
     state: &GameState,
     entry: &StackEntry,
@@ -3804,7 +3804,7 @@ fn entry_announces(
     // inherited from the `may` expression, which is `None` without it. A `may` the three
     // conjunct groups above suppressed leaves shape (B) with NO slot at all, so the whole
     // entry publishes `None` — the fail-closed direction, now applied by the publication
-    // reader rather than restated here. Shape (B) also charges NOTHING under CR 704.5a:
+    // reader rather than restated here. Shape (B) also charges NOTHING under CR 119.3:
     // there is no announced target, so there is no seat a declaration could aim at.
     if slots.is_empty() {
         if !ability.targets.is_empty() {
@@ -3897,7 +3897,7 @@ fn entry_announces(
     // a defect this commit introduced.
     //
     // ⚠ WITHHELD FROM THE SCHEMA IS NOT UNCHARGED, and the two used to be the same act.
-    // CR 704.5a asks which seat loses how much life, and a forced victim loses it exactly as
+    // CR 119.3 asks which seat loses how much life, and a forced victim loses it exactly as
     // a chosen one does — nobody having made the choice changes who pays, not how much.
     // Reporting the shape here rather than dropping the announcement is what lets
     // [`bounded_cycle_charged_targets_for_window`] charge it while
@@ -4071,17 +4071,18 @@ pub(crate) fn bounded_cycle_pin_slots_for_window(
     points
 }
 
-/// CR 704.5a: what ONE CERTIFIED PERIOD CHARGES — the announcement slot of every accepted
+/// CR 119.3: what ONE CERTIFIED PERIOD CHARGES — the announcement slot of every accepted
 /// entry, paired with the seats that announcement may name, whether or not CR 732.2a
 /// publishes it as a decision point.
 ///
 /// DELIBERATELY NOT A FILTER OVER [`bounded_cycle_pin_slots_for_window`]'s OUTPUT, and that
 /// is the entire reason this exists as its own reader. Publication answers CR 732.2a — "a
 /// sequence of game choices, for all players" — so a FORCED announcement publishes nothing.
-/// Charging answers CR 704.5a — "if a player has 0 or less life, that player loses the
-/// game" — and the victim loses that life whether or not anybody chose it. Deriving the
-/// bound from the published set therefore let the CR 732.2a withhold silently drop a forced
-/// victim into `ResourceVector::elimination_bounds`' cheaper `observed_life_loss` arm,
+/// Charging answers CR 119.3 — "if an effect causes a player to gain life or
+/// lose life, that player's life total is adjusted accordingly" — and the victim
+/// loses that life whether or not anybody chose it. Deriving the bound from the
+/// published set therefore let the CR 732.2a withhold silently drop a forced victim
+/// into `ResourceVector::elimination_bounds`' cheaper `observed_life_loss` arm,
 /// RAISING `max_iterations`: the offer would state more legal repetitions than CR 732.2a
 /// permits, on the very operator whose job is to prove the proposed sequence "may be legally
 /// taken based on the current game state".

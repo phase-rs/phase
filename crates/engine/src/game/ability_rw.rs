@@ -2529,7 +2529,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -2811,7 +2811,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
