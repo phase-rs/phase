@@ -205,7 +205,10 @@ function svgResponse(source: string): Response {
   return new Response(new TextEncoder().encode(source), { status: 200, headers: { "Content-Type": "image/svg+xml" } });
 }
 
-const fetchStub = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+// `_init` is unread here but deliberately part of the signature: it is what
+// makes `mock.calls` record each request's init, which is how the cache-mode
+// contract below is asserted.
+const fetchStub = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
   const source = String(input);
   requested.push(source);
   if (source === BULK_INDEX_URL) return jsonResponse({ data: [BULK_RECORD] });
@@ -1173,5 +1176,37 @@ describe("curated delta install", () => {
     await new Promise((resolve) => { setTimeout(resolve, 400); });
     const settledRecord = await backend.operationStatus(started.operation);
     expect(settledRecord.objectsPromoted).toBe(status.objectsPromoted);
+  });
+
+  /**
+   * Every image request must bypass the HTTP cache, or an install can be
+   * handed a response it is not allowed to read.
+   *
+   * Scryfall answers `access-control-allow-origin` only when the request
+   * carries an `Origin`, and the no-Origin response omits `vary: Origin`. So a
+   * plain no-cors `<img>` load stores the one cached variant for that URL
+   * WITHOUT the header, and this install's CORS fetch — CORS by necessity,
+   * since opaque bytes can be neither hashed nor verified — is then served
+   * that variant and fails the CORS check. The symptom is an install that
+   * dies only for users who looked at cards first.
+   *
+   * Asserted over `mock.calls` rather than through a stub that inspects the
+   * mode, because the stub ignores its init: the request the browser would
+   * make is exactly the argument recorded here.
+   */
+  it("re-requests every image from the network instead of the shared cache", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installCore(backend);
+
+    const imageCalls = fetchStub.mock.calls.filter(([input]) => {
+      const source = String(input);
+      return source === CARD_BACK_URL || source.startsWith("https://svgs.scryfall.io/card-symbols/");
+    });
+
+    // Guards the assertion below against passing on an empty set.
+    expect(imageCalls.length).toBeGreaterThanOrEqual(1 + MANA_SYMBOL_SHARDS.length);
+    for (const [input, init] of imageCalls) {
+      expect(init?.cache, String(input)).toBe("reload");
+    }
   });
 });
