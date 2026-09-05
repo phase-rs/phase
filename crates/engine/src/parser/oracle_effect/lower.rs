@@ -10344,6 +10344,30 @@ pub(super) fn apply_where_x_effect_expression(
     effect: &mut Effect,
     where_x_expression: Option<&str>,
 ) {
+    // CR 115.1 + CR 608.2c: this clause announces its own "target creature", so
+    // a bare demonstrative "that creature's power/toughness" in its where-clause
+    // names that announced target — there is no earlier instruction and no cost
+    // referent for it to bind to. The shared quantity grammar lowers the
+    // context-free phrase to `ObjectScope::CostPaidObject` (the CR 608.2k
+    // cost/trigger-referent sense it carries on Hamletback Goliath and
+    // Shadowheart, Dark Justiciar), so the announced-target reading has to be
+    // restored here at the lowering seam, where the clause's own target slot is
+    // in scope. Read before the `match` takes `effect` mutably.
+    //
+    // Same rule and same two helpers as the `Effect::GenericEffect` arm below,
+    // which already does this for a targeted continuous grant (Xenagos, God of
+    // Revels); this covers the magnitude carriers (Thickest in the Thicket,
+    // Soul's Might, Nantuko Mentor). Gating on a CREATURE-typed announced target
+    // is what keeps a genuine cost/trigger referent untouched — Minsc & Boo,
+    // Timeless Heroes' reflexive "~ deals X damage to any target, where X is
+    // that creature's power" announces `TargetFilter::Any`, which names no
+    // creature for the demonstrative to bind to, so it keeps `CostPaidObject`
+    // and still reads the sacrificed creature.
+    let rebind_magnitude_target_anaphor =
+        where_x_is_demonstrative_target_creature_stat(where_x_expression)
+            && effect
+                .target_filter()
+                .is_some_and(target_filter_names_creature);
     // CR 107.3c: set when the clause DEFINES X but the definition is not
     // representable. Recorded here and converted to a gap node after the match
     // (the arms hold a mutable borrow of `effect`'s fields).
@@ -10408,6 +10432,9 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::SkipNextTurn { count: amount, .. }
         | Effect::Surveil { count: amount, .. } => {
             bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
+            if rebind_magnitude_target_anaphor {
+                rebind_cost_paid_object_pt_to_target(amount);
+            }
         }
         // Multi-slot carriers: a where-X clause defines ONE X, and every slot that
         // references it must bind to the same expression (CR 107.3i: X has a single value
@@ -10606,6 +10633,10 @@ pub(super) fn apply_where_x_effect_expression(
                     *toughness = bound_toughness;
                 }
                 _ => unbound_where_x = where_x_expression.map(str::to_string),
+            }
+            if rebind_magnitude_target_anaphor {
+                rebind_cost_paid_object_pt_value_to_target(power);
+                rebind_cost_paid_object_pt_value_to_target(toughness);
             }
         }
         Effect::PreventDamage {
@@ -11043,6 +11074,39 @@ pub(super) fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
             rebind_cost_paid_object_pt_to_target(left);
             rebind_cost_paid_object_pt_to_target(right);
         }
+    }
+}
+
+/// CR 613.4c: `PtValue` counterpart of [`rebind_cost_paid_object_pt_to_target`].
+/// A layer-7 pump magnitude is a `PtValue`, whose only quantity-bearing form is
+/// `PtValue::Quantity`; a fixed or placeholder magnitude carries no object scope
+/// to rebind. Exhaustive so a new `PtValue` form has to be classified here.
+fn rebind_cost_paid_object_pt_value_to_target(value: &mut PtValue) {
+    match value {
+        PtValue::Quantity(expr) => rebind_cost_paid_object_pt_to_target(expr),
+        PtValue::Fixed(_) | PtValue::Variable(_) => {}
+    }
+}
+
+/// CR 115.1 + CR 208.1: does this announced target slot name a CREATURE — the
+/// "target creature" noun phrase that a bare demonstrative "that creature" can
+/// take as its antecedent?
+///
+/// A conjunction narrows the candidate set, so ONE creature-typed conjunct makes
+/// the whole slot a creature ("another target creature" = creature AND not the
+/// source). A disjunction widens it, so EVERY branch must be creature-typed
+/// before the slot is guaranteed to name a creature ("target creature or player"
+/// is not). A negation names what the target is *not*, so it never supplies an
+/// antecedent. Every remaining filter (`Any`, the player scopes, the stack and
+/// context refs) names no creature noun either.
+fn target_filter_names_creature(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.type_filters.contains(&TypeFilter::Creature),
+        TargetFilter::And { filters } => filters.iter().any(target_filter_names_creature),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(target_filter_names_creature)
+        }
+        _ => false,
     }
 }
 
@@ -13334,6 +13398,7 @@ mod where_x_tests {
         DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
         QuantityRef, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
+    use crate::types::counter::CounterType;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -13848,6 +13913,146 @@ mod where_x_tests {
         assert!(
             exprs.iter().all(has_event_context_amount),
             "rewritten expression should contain the where-X event amount in every branch: {exprs:?}"
+        );
+    }
+
+    /// CR 115.1 + CR 608.2c: a clause that announces its own "target creature"
+    /// supplies the antecedent for a bare demonstrative "that creature's power",
+    /// so the magnitude must read the ANNOUNCED TARGET, not the CR 608.2k
+    /// cost/trigger referent the context-free phrase lowers to.
+    ///
+    /// Drives the gate's target axis across the shapes that actually ship: a
+    /// creature-typed slot rebinds (Thickest in the Thicket, Soul's Might); a
+    /// bare `Any` slot (Minsc & Boo, Timeless Heroes' reflexive "deals X damage
+    /// to any target") and a player slot (its "draw X cards" sibling) name no
+    /// creature and must keep `CostPaidObject`, which is what makes them still
+    /// read the sacrificed creature.
+    #[test]
+    fn where_x_target_creature_anaphor_rebinds_only_for_a_creature_typed_target() {
+        fn put_counter(target: TargetFilter) -> Effect {
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target,
+            }
+        }
+        fn bound_count(effect: &Effect) -> &QuantityExpr {
+            let Effect::PutCounter { count, .. } = effect else {
+                panic!("expected PutCounter");
+            };
+            count
+        }
+        fn power(scope: ObjectScope) -> QuantityExpr {
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power { scope },
+            }
+        }
+
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        for (label, target, expected) in [
+            ("target creature", creature.clone(), ObjectScope::Target),
+            (
+                "another target creature",
+                TargetFilter::And {
+                    filters: vec![
+                        creature.clone(),
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::SelfRef),
+                        },
+                    ],
+                },
+                ObjectScope::Target,
+            ),
+            ("any target", TargetFilter::Any, ObjectScope::CostPaidObject),
+            (
+                "a player",
+                TargetFilter::Controller,
+                ObjectScope::CostPaidObject,
+            ),
+            (
+                "the source itself",
+                TargetFilter::SelfRef,
+                ObjectScope::CostPaidObject,
+            ),
+        ] {
+            let mut effect = put_counter(target);
+            super::apply_where_x_effect_expression(&mut effect, Some("that creature's power"));
+            assert_eq!(
+                bound_count(&effect),
+                &power(expected),
+                "{label}: demonstrative anaphor bound to the wrong object scope"
+            );
+        }
+    }
+
+    /// CR 613.4c: the same rule on the layer-7 pump magnitude, whose value is a
+    /// `PtValue` rather than a bare `QuantityExpr` (Nantuko Mentor: "Target
+    /// creature gets +X/+X until end of turn, where X is that creature's
+    /// power"). Both halves of the P/T pair must move together.
+    #[test]
+    fn where_x_target_creature_anaphor_rebinds_pump_magnitude() {
+        let mut effect = Effect::Pump {
+            power: PtValue::Variable("X".to_string()),
+            toughness: PtValue::Variable("X".to_string()),
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+        };
+
+        super::apply_where_x_effect_expression(&mut effect, Some("that creature's power"));
+
+        let expected = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+        });
+        let Effect::Pump {
+            power, toughness, ..
+        } = effect
+        else {
+            panic!("expected Pump");
+        };
+        assert_eq!(power, expected, "pump power must read the announced target");
+        assert_eq!(
+            toughness, expected,
+            "pump toughness must read the announced target"
+        );
+    }
+
+    /// CR 608.2k: the gate's OTHER axis. A participle cost referent ("the
+    /// sacrificed creature's power" — Shadowheart, Dark Justiciar) is not the
+    /// bare demonstrative, so a creature-typed target slot must NOT drag it onto
+    /// the announced target; it stays the cost/trigger referent.
+    #[test]
+    fn where_x_participle_cost_referent_is_not_rebound_by_a_creature_target() {
+        let mut effect = Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+        };
+
+        super::apply_where_x_effect_expression(
+            &mut effect,
+            Some("the sacrificed creature's power"),
+        );
+
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            },
+            "a participle cost referent must keep the CR 608.2k scope"
         );
     }
 
