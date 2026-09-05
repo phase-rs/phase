@@ -133,7 +133,7 @@ pub fn resolve(
             // or overwrite each other (CR 611.2c fixes each affected set
             // independently).
             //
-            // CR 112.6a: "you control" must resolve against the resolving
+            // CR 109.5 + CR 113.8: "you control" must resolve against the resolving
             // ability's controller, not whatever player currently controls the
             // live source object. `FilterContext::from_ability` binds
             // `source_controller` to `ability.controller` (captured when the
@@ -799,7 +799,7 @@ mod tests {
     }
 
     // ── Regression: group recipients must resolve against the resolving
-    // ability's controller (CR 112.6a), not the live source object's current
+    // ability's controller (CR 109.5 + CR 113.8), not the live source object's current
     // controller. Simulates the source (Grell) leaving the battlefield before
     // its triggered ability resolves — `state.objects` no longer holds it, so
     // `FilterContext::from_source` would read `source_controller: None` and

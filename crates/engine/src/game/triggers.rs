@@ -2883,7 +2883,7 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .iter()
             .filter_map(|entry| match &entry.kind {
                 StackEntryKind::Spell { .. } => Some(entry.id),
-                // CR 111.1b + CR 113.3b: Activated/triggered ability stack entries
+                // CR 113.3b + CR 113.3c: Activated/triggered ability stack entries
                 // (including KeywordAction) are abilities, not objects.
                 StackEntryKind::ActivatedAbility { .. }
                 | StackEntryKind::TriggeredAbility { .. }

@@ -8799,7 +8799,7 @@ pub enum AlternativeCastKeyword {
     /// Custom Warp keyword — exile-at-end-step rider; no CR section.
     Warp,
     /// CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent
-    /// was cast for its evoke cost (CR 702.74b).
+    /// was cast for its evoke cost.
     Evoke,
     /// CR 702.119a-c: Emerge alternative cost requires sacrificing the specified
     /// permanent quality while casting and reduces the emerge cost by that
@@ -13125,7 +13125,7 @@ pub enum WaitingFor {
     ///   may be recast from exile later (no CR section; rider lives on the
     ///   keyword).
     /// - `Evoke` (CR 702.74a) — creature ETBs and sacrifices itself when cast
-    ///   for the evoke cost (CR 702.74b).
+    ///   for the evoke cost.
     /// - `Overload` (CR 702.96a) — substitutes the overload cost and rewrites
     ///   every "target" in the spell's text to "each" (CR 702.96b-c).
     /// - `Bestow` (CR 702.103a) — substitutes the bestow cost and turns the

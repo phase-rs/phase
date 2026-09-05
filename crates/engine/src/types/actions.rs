@@ -94,7 +94,7 @@ pub enum AlternativeCastDecision {
     Normal,
     /// Pay the keyword-granted alternative cost. Resolution applies the
     /// keyword's post-payment effects (Overload's target→each text change per
-    /// CR 702.96b-c, Evoke's ETB-sacrifice trigger per CR 702.74b, Bestow's
+    /// CR 702.96b-c, Evoke's ETB-sacrifice trigger per CR 702.74a, Bestow's
     /// Aura transformation per CR 702.103b, Warp's exile-at-end-step rider).
     Alternative,
 }

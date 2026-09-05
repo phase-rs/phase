@@ -4335,7 +4335,7 @@ pub(super) fn matching_you_attack_events_by_attacked_player(
     let mut groups: Vec<(PlayerId, Vec<(ObjectId, crate::game::combat::AttackTarget)>)> =
         Vec::new();
     for (attacker, target) in matching_you_attack_pairs(event, trigger, source_context, state) {
-        // CR 508.5a + CR 310.8d: resolve the attacked object to the one player
+        // CR 508.5a + CR 310.9d: resolve the attacked object to the one player
         // it answers for (planeswalker → controller, battle → protector) so a
         // mixed declaration still groups by player identity.
         let attacked =
