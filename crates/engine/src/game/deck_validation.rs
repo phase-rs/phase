@@ -4921,12 +4921,11 @@ mod tests {
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: vec!["Grub Commander".to_string()],
-            selected_format: Some(GameFormat::Standard),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
             draft_set_codes: Vec::new(),
-            default_deck_copy_limit: None,
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
