@@ -93,6 +93,20 @@ jobs:
         # priority table mirrors the `// Priority` slots in oracle.rs.
         run: ./scripts/check-skill-doc.sh
 
+      - name: CR citation anchor gate
+        # A CR citation is anchored by its rule number. A line coordinate into
+        # docs/MagicCompRules.txt is not an anchor: that file is gitignored,
+        # every checkout fetches its own copy, and the offsets move with every
+        # fetch -- so a committed coordinate is stale on arrival and points at
+        # an unrelated rule, which is worse than no annotation (#8515).
+        #
+        # Whole-tree, not diff-based, so a coordinate cannot survive by living
+        # in a file the PR does not touch. The script self-checks its own
+        # detector against planted text on every run and reports what it
+        # declined, so a PASS states what it matched rather than claiming the
+        # tree is clean of every possible coordinate form.
+        run: ./scripts/check-cr-citation-anchors.sh
+
       - name: Engine authority gate
         # (A) Diff-based: new engine code must use single-authority helpers
         #     (keyword queries via game/keywords.rs) instead of raw state pokes.
