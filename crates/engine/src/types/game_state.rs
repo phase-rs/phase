@@ -7,6 +7,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::database::card_db::CardDbHandle;
+
 use super::ability::{
     default_target_filter_permanent, legacy_trigger_entry_list,
     materialize_legacy_printed_trigger_entries, AbilityCost, AbilityDefinition, AdditionalCost,
@@ -18913,21 +18915,24 @@ declare_game_state! {
     #[serde(skip)]
     pub meld_pair_registry: Arc<HashMap<String, MeldPairRecord>>,
 
-    /// Momir Basic selection index: mana value -> sorted creature face names.
-    /// CR 707.2 + CR 202.3: the random-token pool, keyed by mana value so the
-    /// emblem's `{X}` ability can pick a creature with mana value X. Built only
-    /// when `format == Momir` (see `rehydrate_card_db_metadata`); empty
-    /// otherwise. Skipped in serialization and rebuilt deterministically per peer
-    /// from the loaded card DB.
+    /// Handle to the loaded card database, for the rare resolver that must
+    /// query the WHOLE card corpus at resolution time instead of pre-staging a
+    /// copy of it into state.
+    ///
+    /// CR 707.2 + CR 202.3: the Momir Basic emblem's `{X}` ability creates a
+    /// token that's a copy of a creature card with mana value X "chosen at
+    /// random" — a draw over every printed creature. Materializing that corpus
+    /// into `GameState` (the previous `momir_pool` / `momir_pool_faces` pair)
+    /// meant holding ~19,500 `CardFace` clones of data the card database
+    /// already owns in the same engine instance. The resolver now draws one
+    /// face on demand through this handle.
+    ///
+    /// `Arc` inside [`CardDbHandle`] keeps `GameState::clone()` during AI
+    /// search O(1), matching `all_card_names` / `card_face_registry`. Skipped
+    /// in serialization and reinstalled by `install_card_db` on every path that
+    /// builds or restores a game.
     #[serde(skip)]
-    pub momir_pool: BTreeMap<i32, Vec<String>>,
-
-    /// Momir Basic hydration map: lowercase creature name -> `CardFace`. The
-    /// resolver reads this (NEVER `card_face_registry`, which is conjure-scoped
-    /// and misses most creatures) to build the copy token. Skipped in
-    /// serialization; rebuilt with `momir_pool`.
-    #[serde(skip)]
-    pub momir_pool_faces: Arc<HashMap<String, CardFace>>,
+    pub card_db: Option<CardDbHandle>,
 
     /// CR 400.11: the sealed booster products this game can open packs from.
     /// Populated only when some card in the game carries
@@ -23709,8 +23714,7 @@ impl GameState {
             all_card_names: Arc::from([]),
             card_face_registry: Arc::new(HashMap::new()),
             meld_pair_registry: Arc::new(HashMap::new()),
-            momir_pool: BTreeMap::new(),
-            momir_pool_faces: Arc::new(HashMap::new()),
+            card_db: None,
             booster_shelf: Arc::new(BoosterShelf::default()),
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
@@ -25730,8 +25734,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         all_card_names: _,
         card_face_registry: _,
         meld_pair_registry: _,
-        momir_pool: _,
-        momir_pool_faces: _,
+        card_db: _,
         booster_shelf: _,
         log_player_names: _,
         last_created_token_ids: _,

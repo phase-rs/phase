@@ -942,7 +942,7 @@ impl GameSession {
         }
     }
 
-    pub fn start_game(&mut self, db: &CardDatabase) -> Result<(), CedhBracketError> {
+    pub fn start_game(&mut self, db: &Arc<CardDatabase>) -> Result<(), CedhBracketError> {
         // A faulted game is never restarted in place: doing so would create a
         // new playable state behind the durable terminal fault record.
         if self.ai_driver_fault.is_some() {
@@ -991,8 +991,13 @@ impl GameSession {
                 // deserialize safely.
                 ai_difficulties: vec![],
             },
-            Some(db),
+            Some(&**db),
         );
+        // CR 707.2 + CR 202.3: resolvers that draw from the whole creature
+        // corpus (the Momir Basic emblem) read the database through this
+        // handle. Installed here, inside the canonical init, so no transport
+        // can build a game without it.
+        engine::game::install_card_db(&mut self.state, Arc::clone(db));
         self.state.log_player_names = self.display_names.clone();
         // Capture the d20 first-player contest events so the initial broadcast
         // can surface them; the broadcaster clears `start_events` afterward so
@@ -1198,7 +1203,7 @@ impl GameSession {
     /// The fresh seed also resets `rng_word_pos` — a `#[serde(default)]` field, not a skipped
     /// one. It is the saved high-water of the stream the old seed generated, and has no
     /// meaning against the new one.
-    pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Result<Self, String> {
+    pub fn from_persisted(ps: PersistedSession, db: &Arc<CardDatabase>) -> Result<Self, String> {
         let mut state = ps
             .state
             .prepare_for_restore(
@@ -1222,6 +1227,9 @@ impl GameSession {
                     db,
                     CardDbRehydrationFinalization::Defer,
                 );
+                // `card_db` is `#[serde(skip)]`, so a restored snapshot has no
+                // draw source until it is reinstalled.
+                engine::game::install_card_db(state, Arc::clone(db));
 
                 // Re-seed RNG with fresh randomness (stale rng_seed would produce
                 // deterministic sequences identical across all restored games)
@@ -1651,7 +1659,7 @@ impl SessionManager {
         ai_requests: Vec<(u8, AiDifficulty, PlayerDeckPayload)>,
         card_names: Vec<String>,
         format_config: Option<FormatConfig>,
-        db: &CardDatabase,
+        db: &Arc<CardDatabase>,
     ) -> Result<(String, String), String> {
         let total_players = 1 + ai_requests.len() as u8;
         let (game_code, player_token) = self.create_game_n_players(
@@ -2531,7 +2539,7 @@ mod tests {
             .interaction_session_id = Some(InteractionSessionId("some-other-game".to_string()));
         let persisted = mgr.sessions.get(&code).unwrap().to_persisted();
 
-        let db = CardDatabase::default();
+        let db = Arc::new(CardDatabase::default());
         let restored =
             GameSession::from_persisted(persisted, &db).expect("supported persisted format config");
 
@@ -2559,7 +2567,7 @@ mod tests {
             }));
         persisted.state = PersistedGameState::capture(state);
 
-        let error = GameSession::from_persisted(persisted, &CardDatabase::default())
+        let error = GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
             .err()
             .expect("limited range must remain disabled at the restore boundary");
 
@@ -2795,7 +2803,7 @@ mod tests {
         let mut mgr = SessionManager::new();
         let (code, token1) = mgr.create_game(make_deck());
         let (token2, _) = mgr.join_game(&code, make_deck()).unwrap();
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let resolver = UnusedResolver;
         let ctx = seat_reducer::types::ReducerCtx {
             platform: Platform::Native,
@@ -3066,7 +3074,7 @@ mod tests {
 
         let mut mgr = SessionManager::new();
         mgr.game_log = std::sync::Arc::new(GameFileCache::new(games_dir.clone()));
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let (code, _token) = mgr
             .create_game_with_ai(
                 make_deck(),
@@ -3107,7 +3115,7 @@ mod tests {
 
         let mut mgr = SessionManager::new();
         mgr.game_log = std::sync::Arc::new(GameFileCache::new(games_dir));
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let (code, _token) = mgr
             .create_game_with_ai(
                 make_deck(),
@@ -3436,11 +3444,13 @@ mod tests {
 
     fn precast_offer_runner() -> (GameRunner, u64) {
         const CHAIN_OF_SMOG: &str = "Target player discards two cards. That player may copy this spell and may choose a new target for that copy.";
-        let db = CardDatabase::from_mtgjson(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../data/mtgjson/test_fixture.json"),
-        )
-        .expect("parser fixture must contain Witherbloom Apprentice");
+        let db = Arc::new(
+            CardDatabase::from_mtgjson(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../data/mtgjson/test_fixture.json"),
+            )
+            .expect("parser fixture must contain Witherbloom Apprentice"),
+        );
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_real_card(P0, "Witherbloom Apprentice", Zone::Battlefield, &db);
@@ -3580,11 +3590,13 @@ mod tests {
             .expect("legacy raw persisted session remains decodable");
         assert!(matches!(&legacy.state, PersistedGameState::Raw(_)));
 
-        let db = CardDatabase::from_mtgjson(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../data/mtgjson/test_fixture.json"),
-        )
-        .expect("parser fixture must contain Witherbloom Apprentice");
+        let db = Arc::new(
+            CardDatabase::from_mtgjson(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../data/mtgjson/test_fixture.json"),
+            )
+            .expect("parser fixture must contain Witherbloom Apprentice"),
+        );
         let legacy_restored =
             GameSession::from_persisted(legacy, &db).expect("supported persisted format config");
         assert!(matches!(
@@ -3779,7 +3791,7 @@ mod tests {
     #[test]
     fn takeback_auto_approves_for_sole_human_seat() {
         let mut mgr = SessionManager::new();
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let (code, _token) = mgr
             .create_game_with_ai(
                 make_deck(),
@@ -4830,8 +4842,9 @@ mod tests {
     fn server_card_database_resolves_debug_card_batches() {
         let mut mgr = SessionManager::new();
         let (code, token) = create_sandbox_game(&mut mgr);
-        let db = CardDatabase::from_json_str(
-            r#"{
+        let db = Arc::new(
+            CardDatabase::from_json_str(
+                r#"{
                 "server debug creature": {
                     "name": "Server Debug Creature",
                     "mana_cost": { "type": "NoCost" },
@@ -4848,8 +4861,9 @@ mod tests {
                     "keywords": []
                 }
             }"#,
-        )
-        .expect("debug-card fixture database parses");
+            )
+            .expect("debug-card fixture database parses"),
+        );
 
         let result = mgr
             .handle_action_with_card_db(
@@ -4864,7 +4878,7 @@ mod tests {
                     run_etb: true,
                     nonlegendary: false,
                 }),
-                Some(&db),
+                Some(&*db),
             )
             .expect("server transport resolves a debug CreateCard batch through its card database");
 
@@ -5121,7 +5135,7 @@ mod tests {
     /// which is what makes the capability assertions load-bearing rather
     /// than a restatement of the sandbox flag.
     fn single_ai_opponent_game(mgr: &mut SessionManager) -> String {
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let (code, _token) = mgr
             .create_game_with_ai(
                 make_deck(),
@@ -5183,7 +5197,7 @@ mod tests {
         // Two authorities in one fixture, positive then negative, against the
         // SAME `session.state`.
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let (code, host_token) = mgr
             .create_game_with_ai(
                 make_deck(),
@@ -5262,7 +5276,7 @@ mod tests {
             }
         }
 
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
         let (code, _host) = mgr
             .create_game_n_players(
@@ -5328,7 +5342,7 @@ mod tests {
         //
         // It is also the production direction: the desktop sidecar restores
         // its own suspended game and must regain the capability.
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut origin = SessionManager::new();
         let code = single_ai_opponent_game(&mut origin);
         let persisted = origin.sessions.get(&code).unwrap().to_persisted();
@@ -5362,7 +5376,7 @@ mod tests {
     /// Serialize through JSON exactly as `persist.rs` writes to disk, so the
     /// "the capability rides in the blob" premise is measured rather than
     /// asserted from the `#[serde(default)]` attributes.
-    fn round_trip_through_disk(session: &GameSession, db: &CardDatabase) -> GameSession {
+    fn round_trip_through_disk(session: &GameSession, db: &Arc<CardDatabase>) -> GameSession {
         let json = serde_json::to_string(&session.to_persisted()).unwrap();
         let persisted: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
         GameSession::from_persisted(persisted, db).expect("supported persisted format config")
@@ -5375,7 +5389,7 @@ mod tests {
         // `to_persisted` captures the whole `GameState`, so they arrive
         // already set and `rebuild_pregame_state` never runs on the restore
         // path to re-examine them.
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut sidecar = SessionManager::single_user(Duration::from_secs(60));
         let code = single_ai_opponent_game(&mut sidecar);
 
@@ -5420,7 +5434,7 @@ mod tests {
         // Values are kept VERBATIM rather than re-seeded — an explicit
         // `RevokeDebugPermission` is game state, and re-deriving would
         // silently reinstate the revoked seat.
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut origin_mgr = SessionManager::new();
         let (code, _token) = create_sandbox_game(&mut origin_mgr);
         let origin = origin_mgr.sessions.get_mut(&code).unwrap();
@@ -5449,7 +5463,7 @@ mod tests {
         // suspended game. `HostingMode::SingleUser` is the second entitlement,
         // so nothing is dropped here. Fails against a restore that clears
         // whenever `allow_debug_actions` is false.
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut origin_mgr = SessionManager::single_user(Duration::from_secs(60));
         let code = single_ai_opponent_game(&mut origin_mgr);
         let restored = round_trip_through_disk(origin_mgr.sessions.get(&code).unwrap(), &db);
@@ -5480,7 +5494,7 @@ mod tests {
     /// `291 != 0` and panics the shuffle underneath it.
     #[test]
     fn restore_reseeds_the_rng_and_drops_the_saved_stream_position() {
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut mgr = SessionManager::new();
         let code = single_ai_opponent_game(&mut mgr);
 
@@ -5557,7 +5571,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "HighWaterRegression")]
     fn a_restored_session_that_kept_the_saved_stream_position_panics_on_its_next_shuffle() {
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
         let mut mgr = SessionManager::new();
         let code = single_ai_opponent_game(&mut mgr);
         let mut restored = round_trip_through_disk(mgr.sessions.get(&code).unwrap(), &db);
@@ -5866,7 +5880,7 @@ mod tests {
 
         // Build an empty CardDatabase (no real card data needed — the cEDH
         // bracket gate fires before any deck loading).
-        let db = engine::database::CardDatabase::default();
+        let db = Arc::new(engine::database::CardDatabase::default());
 
         // Construct a two-seat session manually: host (seat 0) + AI (seat 1).
         let pc = 2usize;
@@ -7331,8 +7345,9 @@ mod tests {
         let revision_before = session.state_revision;
         let persisted = session.to_persisted();
 
-        let mut restored = GameSession::from_persisted(persisted, &CardDatabase::default())
-            .expect("the snapshot restores");
+        let mut restored =
+            GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
+                .expect("the snapshot restores");
 
         assert!(
             restored.state.stack_resolution_session.is_some(),
@@ -7434,8 +7449,9 @@ mod tests {
         session.state.resolve_all_consent_run = None;
         let persisted = session.to_persisted();
 
-        let mut restored = GameSession::from_persisted(persisted, &CardDatabase::default())
-            .expect("the snapshot restores");
+        let mut restored =
+            GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
+                .expect("the snapshot restores");
 
         assert!(matches!(
             restored.state.waiting_for,
@@ -7467,8 +7483,9 @@ mod tests {
         let (mgr, game_code, _) = ai_table_awaiting_one_consent();
         let session = mgr.sessions.get(&game_code).expect("session exists");
         let persisted = session.to_persisted();
-        let mut restored = GameSession::from_persisted(persisted, &CardDatabase::default())
-            .expect("ordinary state restores");
+        let mut restored =
+            GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
+                .expect("ordinary state restores");
         let revision_before = restored.state_revision;
 
         let resumed = restored.resume_restored_stack_automation();
