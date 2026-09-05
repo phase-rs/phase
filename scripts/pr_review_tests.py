@@ -3353,10 +3353,12 @@ class PrReviewTests(unittest.TestCase):
         empty index reads no input, and printing the same green as a real scan
         reports a verdict the run never earned.
 
-        The index belongs to whoever runs the suite, so the staged state is read
-        rather than assumed, and the assertion branches on it. Asserting exit 3
-        unconditionally would make this test fail for a developer who happens to
-        have parser work staged — a false red about their index, not the gate.
+        The exit-3 path is reachable only with `GIT_INDEX_FILE` unset — setting
+        it selects the pre-commit branch — so this case necessarily reads the
+        real index, which belongs to whoever runs the suite. The assertions are
+        therefore split: the diagnostic contract is asserted on a clean index,
+        and the invariant that holds in EVERY index state is asserted always.
+        See the companion test for a deterministic staged scan.
         """
         head = self._rev_parse("HEAD")
         staged = subprocess.run(
@@ -3367,13 +3369,26 @@ class PrReviewTests(unittest.TestCase):
             capture_output=True,
         ).stdout.strip()
         result = self._run_parser_gate(head)
-        if staged:
-            # A knowable window: the index names what to scan.
+
+        # Holds regardless of what the runner has staged: the evidence line is
+        # never emitted except on a clean exit. A staged violation exits 1, so
+        # requiring exit 0 here would report a false red about the runner's
+        # index rather than about the gate.
+        if re.search(r"(?m)^Gate A PASS head=", result.stdout):
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertRegex(result.stdout, r"(?m)^Gate A PASS head=[0-9a-f]{40} ")
-        else:
-            self.assertEqual(result.returncode, 3, result.stdout)
-            self.assertNotRegex(result.stdout, r"(?m)^Gate A PASS head=")
+
+        if staged:
+            return
+
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertNotRegex(result.stdout, r"(?m)^Gate A PASS head=")
+        # The diagnostic is the deliverable of exit 3, not a courtesy: a bare
+        # non-zero exit would leave the caller unable to act. Assert the parts
+        # that make it actionable, on the stream the gate writes them to.
+        self.assertIn("Gate A CANNOT ANSWER", result.stderr)
+        self.assertIn(head, result.stderr)
+        self.assertIn("cannot tell clean parser work from parser work it never saw", result.stderr)
+        self.assertIn("scripts/check-parser-combinators.sh", result.stderr)
 
     def test_parse_diff_base_selects_non_head_parent_and_never_falls_back(self) -> None:
         script = pr_review.REPO_ROOT / "scripts/parse-diff-base.sh"
