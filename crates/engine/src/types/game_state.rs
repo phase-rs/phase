@@ -13945,7 +13945,7 @@ pub enum WaitingFor {
         /// The zone the commander is currently in (Graveyard, Exile, Hand, or Library).
         current_zone: Zone,
     },
-    /// CR 310.11 + CR 310.12a + CR 704.5w + CR 704.5x: A battle that isn't being attacked has no
+    /// CR 310.11 + CR 310.12a + CR 704.5x: A battle that isn't being attacked has no
     /// protector, an illegal protector, or (for Sieges) a protector equal to its
     /// controller. The battle's controller (`player`) chooses a legal protector from
     /// `candidates`. Emitted only when `candidates.len() > 1`; the SBA auto-applies
@@ -15133,7 +15133,7 @@ impl WaitingFor {
     ///   fixpoint before priority is granted.
     /// * [`WaitingFor::BattleProtectorChoice`] — CR 310.11 ("its controller chooses an
     ///   appropriate player to be its protector ... This is a state-based action")
-    ///   + CR 704.5w / CR 704.5x, likewise answered inside the CR 704.3 fixpoint.
+    ///   + CR 704.5x, likewise answered inside the CR 704.3 fixpoint.
     ///
     /// Those SBA members (the commander-zone, legend and battle-protector choices) are
     /// the COMPLETE set of player-choice pauses `game::sba` opens inside the SBA
@@ -26378,7 +26378,7 @@ mod forced_cascade_window_tests {
                 },
             ),
             (
-                "BattleProtectorChoice (CR 310.11 + CR 704.5w / CR 704.5x — likewise an SBA)",
+                "BattleProtectorChoice (CR 310.11 + CR 704.5x — likewise an SBA)",
                 WaitingFor::BattleProtectorChoice {
                     player: PlayerId(0),
                     battle_id: ObjectId(5),

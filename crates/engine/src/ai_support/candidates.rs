@@ -2739,7 +2739,7 @@ pub fn candidate_actions_broad_with_probe(
             TacticalClass::Selection,
             Some(*player),
         )],
-        // CR 310.11 + CR 704.5w + CR 704.5x: controller chooses a new protector.
+        // CR 310.11 + CR 704.5x: controller chooses a new protector.
         WaitingFor::BattleProtectorChoice {
             player, candidates, ..
         } => candidates
