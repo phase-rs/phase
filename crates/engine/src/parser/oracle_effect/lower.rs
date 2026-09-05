@@ -4970,6 +4970,50 @@ fn parse_excluded_player_anchor(i: &str) -> OracleResult<'_, PlayerFilter> {
     .parse(i)
 }
 
+/// CR 102.2 + CR 102.3 + CR 603.2: Parse the possessive subject
+/// `each of ⟨anchor⟩'s opponents ` into
+/// [`PlayerFilter::OpponentOfTriggeringPlayer`] — the opponents of the player the
+/// TRIGGER EVENT names, which in general is NOT the ability's controller.
+///
+/// Two independent axes, one `alt()` each, nested under the shared `each of `
+/// prefix rather than enumerated as whole phrases:
+///
+/// 1. **Possessive anchor.** Every member names the player that one runtime seam,
+///    `targeting::extract_player_from_event`, reads off the trigger event, so they
+///    share a single `PlayerFilter`:
+///    - `that player` — the acting player of the triggering event: the caster for
+///      a `SpellCast` trigger (Heartwood Storyteller, Standstill, Checks and
+///      Balances) and the mana-loser for Mana Max, Afterburner.
+///    - `its controller` — CR 603.10a + CR 109.4: the controller of the triggering
+///      OBJECT, taken from the `ZoneChangeRecord` look-back snapshot made as the
+///      object left the battlefield, so a dies trigger still names the seat that
+///      controlled the creature (Bounty Board, issue #8440).
+/// 2. **Apostrophe form.** Curly U+2019 and ASCII `'`.
+///
+/// NOT `PlayerFilter::Opponent`: that is the opponents of the ABILITY's controller.
+/// A bounty creature can die under any seat, so in a multiplayer game the two sets
+/// differ — and the Bounty Board controller is themselves a recipient whenever an
+/// opponent's bounty creature dies.
+///
+/// NOT `PlayerFilter::ParentObjectTargetController` either, which is what
+/// `parse_excluded_player_anchor` above maps a bare `its controller` to: that anchor
+/// reads the resolving ability's first OBJECT TARGET (Fractured Identity's exiled
+/// permanent). A dies trigger declares no targets, so it would resolve to no player.
+pub(crate) fn parse_each_of_triggering_players_opponents(
+    i: &str,
+) -> OracleResult<'_, PlayerFilter> {
+    value(
+        PlayerFilter::OpponentOfTriggeringPlayer,
+        (
+            tag("each of "),
+            alt((tag("that player"), tag("its controller"))),
+            alt((tag("\u{2019}s "), tag("'s "))),
+            tag("opponents "),
+        ),
+    )
+    .parse(i)
+}
+
 pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     // CR 701.9a + CR 608.2c: Reserve only the exact Kroxa/Strongarm
     // mandatory-FILTERED decline-tail grammar for its dedicated dispatcher.
@@ -4988,17 +5032,11 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
                 tag("each player with the highest speed among players "),
             ),
             value(PlayerFilter::Opponent, tag("each other player ")),
-            // CR 102.2 + CR 603.2: "each of that player's opponents" — the
-            // caster's opponents (mandatory variant), fanned out per-player.
-            // Apostrophe variants: ASCII ' and curly U+2019 '.
-            value(
-                PlayerFilter::OpponentOfTriggeringPlayer,
-                tag("each of that player's opponents "),
-            ),
-            value(
-                PlayerFilter::OpponentOfTriggeringPlayer,
-                tag("each of that player\u{2019}s opponents "),
-            ),
+            // CR 102.2 + CR 603.2: "each of ⟨that player | its controller⟩'s
+            // opponents" — the TRIGGERING player's opponents (mandatory variant),
+            // fanned out per-player. Must precede the bare "each opponent " arm,
+            // which scopes to the ABILITY CONTROLLER's opponents instead.
+            parse_each_of_triggering_players_opponents,
             value(PlayerFilter::Opponent, tag("each opponent ")),
             // CR 608.2c + CR 109.4 + CR 608.2h: "each player other than <ref>" —
             // all players except the anchor's player (resolved with last-known

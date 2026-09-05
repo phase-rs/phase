@@ -9205,16 +9205,28 @@ pub enum PlayerFilter {
     /// event clause. Falls back to plain `Opponent` semantics when no trigger
     /// event is in scope (i.e. only excludes the controller).
     OpponentOtherThanTriggering,
-    /// CR 102.2 + CR 603.2 + CR 608.2d: Each opponent of the *triggering* player
-    /// (the caster of the spell that fired the trigger), resolved live from
-    /// `state.current_trigger_event` via `extract_player_from_event`. Models
-    /// "each of that player's opponents [may] <effect>" (Heartwood Storyteller) —
-    /// "that player" is the triggering/casting player, NOT the source's controller.
+    /// CR 102.2 + CR 102.3 + CR 603.2 + CR 608.2d: Each opponent of the
+    /// *triggering* player, resolved live from `state.current_trigger_event` via
+    /// `extract_player_from_event`. Never the SOURCE's controller — which is what
+    /// makes this distinct from plain `Opponent`.
+    ///
+    /// Which seat "the triggering player" is comes from the event, so the same
+    /// filter serves every phrasing whose possessive anchors on it:
+    /// - CR 603.2 `SpellCast` — the caster: "each of that player's opponents [may]
+    ///   <effect>" (Heartwood Storyteller, Standstill, Checks and Balances).
+    /// - CR 603.10a `ZoneChanged` — the controller the moving object had in the
+    ///   look-back snapshot: "each of its controller's opponents <effect>" on a
+    ///   dies trigger (Bounty Board). The Bounty Board controller is themselves a
+    ///   recipient when an opponent's bounty creature dies, which `Opponent` — the
+    ///   ability controller's opponents — can never express.
+    ///
     /// The recipient SET is fanned out per-player by the standard `player_scope`
-    /// loop; the body recipient stays `Controller`, rebound per opponent. CR 102.2
-    /// two-player opponent (`p.id != caster`); CR 102.3 teams intentionally not
-    /// modeled (mirrors `Opponent`). Fails closed (no recipient, count 0) when no
-    /// trigger event is in scope — the caster anchor is undefined without it.
+    /// loop; the body recipient stays `Controller`, rebound per opponent.
+    /// Opponent-ness is CR 102.3-aware (2HG teammates are not opponents): every
+    /// consumer — `matches_player_scope`, `deal_damage`, `quantity`,
+    /// `speed_effects` — routes through `players::is_opponent`. Fails closed (no
+    /// recipient, count 0) when no trigger event is in scope, since the anchor is
+    /// undefined without one.
     OpponentOfTriggeringPlayer,
     /// CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the *triggering/attacking*
     /// player (resolved from the active AttackersDeclared trigger event) who is NOT
