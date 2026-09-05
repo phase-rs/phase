@@ -59289,7 +59289,9 @@ fn damage_each_player_scope_accepts_the_partitive_spelling() {
     assert_eq!(
         parse_damage_each_player_scope("each of your opponents"),
         Some(PlayerFilter::Opponent),
-        "CR 109.5: the partitive is a surface variant of 'each opponent'",
+        "CR 109.5: 'your' resolves to the ability's controller, so the \
+         partitive names that controller's opponents — the same set the bare \
+         'each opponent' spelling already lowers to",
     );
     // The singular spelling is unchanged.
     assert_eq!(

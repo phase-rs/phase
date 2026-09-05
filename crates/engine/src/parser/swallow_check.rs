@@ -4948,6 +4948,18 @@ fn at_word_boundary(rest: &str) -> bool {
         .is_some_and(|c| c.is_alphanumeric() || c == '_')
 }
 
+/// Does `rest` open with a possessive clitic?
+///
+/// A possessive tail means the player noun was the POSSESSOR, not the recipient:
+/// "each opponent's creatures" names creatures. `at_word_boundary` accepts it on
+/// its own, because an apostrophe is not a word character — so without this the
+/// entire possessive-object family classifies as `Player` and the detector reads
+/// an object conjunct as a player one. Both the ASCII apostrophe and the
+/// typographic U+2019 occur in Oracle text.
+fn starts_with_possessive(rest: &str) -> bool {
+    rest.starts_with('\'') || rest.starts_with('\u{2019}')
+}
+
 /// The player nouns a scope can name, with their optional plural.
 fn parse_player_noun(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     value(
@@ -5032,7 +5044,7 @@ fn classify_conjunct(conjunct: &str) -> ConjunctShape {
 
     // PLAYER-shaped.
     if let Ok((rest, ())) = parse_player_shaped_conjunct(text) {
-        if at_word_boundary(rest) {
+        if at_word_boundary(rest) && !starts_with_possessive(rest) {
             return ConjunctShape::Player;
         }
     }
@@ -5124,15 +5136,22 @@ fn line_has_qualifying_damage_anchor(line: &str) -> bool {
 
 /// True when some `DamageAll` in this unit's subtree carries BOTH audiences —
 /// an object `target` and a non-null `player_filter`.
+///
+/// `target` carries a serde default of `TargetFilter::None`, so a player-only
+/// `DamageAll` still has the field — it just names nothing. Testing
+/// `player_filter` alone would therefore read such an effect as representing an
+/// object audience it never had, and suppress the swallowed-clause diagnostic
+/// for precisely the single-audience parse this detector exists to report.
 fn unit_represents_both_damage_audiences(parsed: &ParsedAbilities) -> bool {
     let mut found = false;
     let mut check = |effect: &Effect| {
         if matches!(
             effect,
             Effect::DamageAll {
+                target,
                 player_filter: Some(_),
                 ..
-            }
+            } if !matches!(target, TargetFilter::None)
         ) {
             found = true;
         }
@@ -10836,6 +10855,31 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         })
     }
 
+    /// Assert a row is SILENT **and** that its text actually reached the
+    /// detector's conjunct grammar.
+    ///
+    /// `!damage_conjunction_fires(..)` alone is also satisfied by a line that
+    /// produced no qualifying anchor at all, so a row that is silent because the
+    /// fix represents both audiences reads identically to one that is silent
+    /// because the instrument could not fire. This pairs the negative with its
+    /// own positive control.
+    ///
+    /// Rows that are silent *because* they produce no anchor — a
+    /// separately-amounted chain, an object+object subject — deliberately use
+    /// the bare assertion instead: for those the reach failure IS the assertion,
+    /// and a guard here would contradict the row.
+    fn assert_silent_with_anchor_present(text: &str, types: &[&str], why: &str) {
+        let cleaned = text.to_ascii_lowercase();
+        assert!(
+            cleaned
+                .lines()
+                .any(super::line_has_qualifying_damage_anchor),
+            "reach guard: {text:?} produced no qualifying damage anchor, so \
+             asserting silence on it would be vacuous"
+        );
+        assert!(!damage_conjunction_fires(text, types), "{why}");
+    }
+
     /// The normative table from the plan, as a test.
     ///
     /// **Read the states carefully.** The plan's table lists each row's HEAD
@@ -10855,13 +10899,11 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         // qualifying anchor, so the only thing keeping the detector quiet is that
         // the fix now represents both audiences in one `DamageAll`. Revert Unit 1
         // and this flips to firing.
-        assert!(
-            !damage_conjunction_fires(
-                "When this creature enters, it deals 2 damage to each player and each other creature.",
-                &["Creature"],
-            ),
+        assert_silent_with_anchor_present(
+            "When this creature enters, it deals 2 damage to each player and each other creature.",
+            &["Creature"],
             "Exocrine now represents both audiences, so the detector must be silent \
-             on it — a fire here means the player-first fix regressed"
+             on it — a fire here means the player-first fix regressed",
         );
         // SILENT, and DISCRIMINATING — verbatim Hail Storm. Its line carries TWO
         // ` and `s, so the anchor grammar must read only the SECOND anchor's own
@@ -10869,13 +10911,11 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         // first split. That anchor is now represented — MEASURED, and contrary to
         // the plan's expectation that this card was out of Unit 1's reach — so
         // the detector must be silent on it.
-        assert!(
-            !damage_conjunction_fires(
-                "Hail Storm deals 2 damage to each attacking creature and 1 damage to you and each creature you control.",
-                &["Instant"],
-            ),
+        assert_silent_with_anchor_present(
+            "Hail Storm deals 2 damage to each attacking creature and 1 damage to you and each creature you control.",
+            &["Instant"],
             "Hail Storm's second anchor is represented after the bare-'you' opener \
-             fix; a fire here means that opener regressed"
+             fix; a fire here means that opener regressed",
         );
 
         // FIRES — a QUALIFIED player set. The player conjunct carries a relative
@@ -10909,12 +10949,10 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
         // SILENT — already REPRESENTED: the object-first ordering parses to a
         // single `DamageAll` carrying both audiences.
-        assert!(
-            !damage_conjunction_fires(
-                "This spell deals 2 damage to each creature without flying and each player.",
-                &["Sorcery"],
-            ),
-            "the Earthquake/Pyrohemia class is represented and must stay silent"
+        assert_silent_with_anchor_present(
+            "This spell deals 2 damage to each creature without flying and each player.",
+            &["Sorcery"],
+            "the Earthquake/Pyrohemia class is represented and must stay silent",
         );
     }
 
@@ -10967,6 +11005,27 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
         assert_eq!(classify_conjunct("you gain 2 life"), ConjunctShape::Player);
         assert_eq!(classify_conjunct("draws a card"), ConjunctShape::Other);
+
+        // A possessive tail makes the player noun a POSSESSOR: these name
+        // objects. An apostrophe is not a word character, so `at_word_boundary`
+        // alone admits them and the whole family would classify as `Player`.
+        assert_eq!(
+            classify_conjunct("each opponent's creatures"),
+            ConjunctShape::Object
+        );
+        assert_eq!(
+            classify_conjunct("each player's permanents"),
+            ConjunctShape::Object
+        );
+        // The typographic apostrophe must behave identically to the ASCII one.
+        assert_eq!(
+            classify_conjunct("each opponent\u{2019}s creatures"),
+            ConjunctShape::Object
+        );
+        // Control: the same nouns WITHOUT a possessive stay player-shaped, so
+        // the guard above cannot be passing by rejecting everything.
+        assert_eq!(classify_conjunct("each opponent"), ConjunctShape::Player);
+        assert_eq!(classify_conjunct("each player"), ConjunctShape::Player);
     }
 }
 
