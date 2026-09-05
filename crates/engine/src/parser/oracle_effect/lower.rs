@@ -1837,6 +1837,70 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             return TargetChoiceTiming::Resolution;
         }
     }
+    // CR 701.10e + CR 115.10a + CR 608.2d: the untyped counter-multiplication
+    // ("double the number of each kind of counter on <recipient>") names its
+    // recipient by DESCRIPTION unless the text uses the literal word "target".
+    // A described recipient is chosen while the effect is applied, so no
+    // cast/trigger-time target slot is built (`ability_utils::
+    // collect_target_slots_inner` is gated on `TargetChoiceTiming::Stack`).
+    //
+    // `!target.is_context_ref()` mirrors the `PutCounter` arm above: a
+    // deterministic anaphor (`SelfRef` / `TriggeringSource` / `ParentTarget`)
+    // resolves automatically regardless of timing, so re-timing it buys nothing
+    // and would only churn behavior. This is deliberately a SEPARATE arm from the
+    // `MultiplyCounter` one below rather than a shared
+    // `is_counter_multiplication()` arm: `MultiplyCounter` has always omitted the
+    // conjunct, and adding it there would flip THIRTY-ONE shipping cards from
+    // `Resolution` to `Stack` for no behavioral gain, across all FOUR anaphor
+    // classes. Census measured over the full generated corpus by the DEFINITION
+    // of the conjunct — every `MultiplyCounter` whose recipient satisfies
+    // `TargetFilter::is_context_ref()`, not a hand-picked list of variants; all
+    // 31 are `Resolution` today. Not measured over the committed test fixture,
+    // which contains only a fraction of them:
+    //   * `SelfRef` (14)          — Primordial Hydra, Level Up, Lily Bowen (Raging
+    //                               Grandma), Voracious Hydra, Solarion, Mossborn
+    //                               Hydra, Dragonsguard Elite, Evolution Vat,
+    //                               Elvish Vatkeeper, Ascendant Acolyte, Big Mother
+    //                               Mouser, Paradox Zone, Sisterhood of Karn,
+    //                               The Millennium Calendar
+    //   * `TriggeringSource` (5)  — Aragorn (Hornburg Hero), Fractal Harness,
+    //                               Byrke (Long Ear of the Law), Seismic Tutelage,
+    //                               Sword of Hours
+    //   * `TrackedSet` (2)        — Biogenic Upgrade, Omnivorous Flytrap
+    //                               ("distribute N +1/+1 counters among … target
+    //                               creatures, then double the number of +1/+1
+    //                               counters on each of THOSE creatures" — the
+    //                               recipient is the distributed-among set, which
+    //                               `is_context_ref()` covers and a variant-name
+    //                               census would miss)
+    //   * `ParentTarget` (10)     — Scythecat Cub, Turtle Van, Fangs of Kalonia,
+    //                               Growth Curve, Invigorating Surge, Sage of the
+    //                               Fang, Sazh Katzroy, Solidarity of Heroes,
+    //                               Study the Classics, Visions of Dominance
+    //                               (chained sub-abilities whose recipient is the
+    //                               PARENT clause's chosen target; a `Stack`-timed
+    //                               `ParentTarget` would ask
+    //                               `collect_target_slots_inner` to build a
+    //                               player-chosen slot for an anaphor with no
+    //                               chooser)
+    // Sibling parity means each variant gets the rule that is right for it, not
+    // that a working arm is retro-fitted. `counter.rs`'s anaphor pin holds all
+    // three classes at `Resolution`; regenerate the census from the corpus rather
+    // than trusting this card list after a parser change.
+    if let Effect::Double {
+        target_kind: crate::types::ability::DoubleTarget::Counters { .. },
+        target,
+    } = &clause_ir.parsed.effect
+    {
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
     if matches!(clause_ir.parsed.effect, Effect::MultiplyCounter { .. }) {
         let lower = clause_ir
             .source

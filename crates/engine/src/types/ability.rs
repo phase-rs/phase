@@ -18530,6 +18530,77 @@ impl TargetFilter {
         )
     }
 
+    /// CR 115.10a + CR 608.2d: True when this filter DESCRIBES a population that
+    /// a resolver may enumerate against the live board — the non-targeted
+    /// counterpart of a chosen target (CR 115.10a: being affected by a spell or
+    /// ability does not make an object a target unless it is identified by the
+    /// word "target"; CR 608.2d: an untargeted choice is made while the effect is
+    /// applied).
+    ///
+    /// POSITIVE and FAIL-CLOSED by design. A mass resolver that keys off "the
+    /// filter is not one of these bad shapes" is one unhandled shape away from a
+    /// battlefield-wide sweep: `TargetFilter::Any` matches every object
+    /// (the `TargetFilter::Any => true` arm of `game::filter::filter_inner_for_
+    /// object`), and so does a CONTENTLESS `Typed` — with empty `type_filters`
+    /// and `properties` and no `controller`, the type loop iterates nothing, the
+    /// controller check is skipped on `None`, and `properties.iter().all(..)` is
+    /// vacuously true. Those two shapes are what the parser emits for a recipient
+    /// phrase it could not classify AT ALL, so both must be refused here, and any
+    /// variant added later must be refused until someone opts it in.
+    ///
+    /// SCOPE — what this does NOT do. It refuses a recipient that parses to a
+    /// CONTENTLESS `Typed` or to `Any`. It does NOT refuse a PARTIALLY classified
+    /// recipient, and it is not a correctness check on the filter's CONTENT.
+    /// Measured examples that answer TRUE here and still resolve against a wrong
+    /// population: "each permanent that isn't a creature you control" parses to
+    /// `Typed{[Permanent], controller: None}` and "each creature and each
+    /// planeswalker you control" to `Typed{[Creature], controller: None}` — both
+    /// enumerate BOTH players' permanents; "each Spider you control and each
+    /// legendary creature you control" parses to `Typed{[Spider], You}`, silently
+    /// dropping its second conjunct. Those are pre-existing recipient misparses
+    /// (see `docs/parser-misparse-backlog.md` root cause 6 and the repeated-`each`
+    /// class), not defects of this predicate. The contract is "this filter names
+    /// SOME population", never "this filter names the RIGHT population".
+    ///
+    /// `Or`/`And` require EVERY leg to qualify — one contentless leg inside an
+    /// `Or` matches everything, so `any` (which the parse-time shape check
+    /// `oracle_target::target_filter_has_meaningful_content` uses for a
+    /// different question) would be unsound for a sweep gate.
+    ///
+    /// `Not` admits a COMPLEMENT population ("every non-creature"). That is the
+    /// one arm where "every leg enumerable" is not the same as "bounded
+    /// description"; it is kept for uniformity with `Or`/`And` rather than
+    /// silently defaulted to `false`. No counter-multiplication parse path
+    /// produces a top-level `Not` (the recipient comes from `parse_target`), so
+    /// a future consumer must re-argue this arm rather than inherit it.
+    ///
+    /// ZONE CAVEAT: this answers "is it a describable population", not "which
+    /// zone". A zone-qualified filter such as "each creature in your graveyard"
+    /// (`Typed{[Creature], You, InZone(Graveyard)}`) answers TRUE here, but a
+    /// caller that enumerates only `battlefield_phased_in_ids()` will resolve it
+    /// to nothing — which is exactly today's `MultiplyCounter` tier behaviour, so
+    /// it is no regression. Callers that must honour the zone should follow
+    /// `game::effects::resolved_battlefield_object_ids`, which reads
+    /// [`TargetFilter::extract_in_zone`].
+    ///
+    /// Deterministic anaphors (`SelfRef`, `TriggeringSource`, `ParentTarget`,
+    /// `TrackedSet`, ...) are NOT populations; they answer `false` here and are
+    /// resolved by their own tiers. Callers that accept both ask
+    /// `is_context_ref() || names_enumerable_population()`.
+    pub fn names_enumerable_population(&self) -> bool {
+        match self {
+            TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                !filters.is_empty()
+                    && filters
+                        .iter()
+                        .all(TargetFilter::names_enumerable_population)
+            }
+            TargetFilter::Not { filter } => filter.names_enumerable_population(),
+            _ => false,
+        }
+    }
+
     /// CR 115.1a + CR 109.5: Returns true when this filter's TARGET SLOT holds a
     /// player rather than an object — "target player", "target opponent", a
     /// snapshotted specific player.
@@ -18797,6 +18868,29 @@ impl Effect {
             }
             _ => {}
         }
+    }
+
+    /// CR 701.10e: true for the two effects that express "double the number of
+    /// counters on ..." — the typed form (`MultiplyCounter`, "+1/+1 counters")
+    /// and the untyped form (`Double { DoubleTarget::Counters }`, "each kind of
+    /// counter"). Both carry the multiplier intrinsically in the resolver
+    /// ("give as many of those counters as already present"), never as a
+    /// `QuantityExpr`, and both share `counters::nontargeted_counter_population_ids`
+    /// for the non-targeted population tier. Their targeted/anaphoric recipients
+    /// are resolved on separate paths: `MultiplyCounter` through
+    /// `counters::resolve_defined_or_targets`, `Double { Counters }` through
+    /// `effects::double::resolve_object_targets` → `targeting::resolved_targets`.
+    /// Single authority for that pair so the swallow detector and the
+    /// multi-target fixup cannot drift apart.
+    pub(crate) fn is_counter_multiplication(&self) -> bool {
+        matches!(
+            self,
+            Effect::MultiplyCounter { .. }
+                | Effect::Double {
+                    target_kind: DoubleTarget::Counters { .. },
+                    ..
+                }
+        )
     }
 
     pub fn target_filter(&self) -> Option<&TargetFilter> {

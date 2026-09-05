@@ -32,11 +32,10 @@ use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
     ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
-    DoubleTarget, Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint,
-    OpponentMayScope, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, UnlessPayScaling,
+    Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope,
+    ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -2652,16 +2651,7 @@ fn detect_dynamic_qty(
     // "the number of" dynamic marker IS represented by the effect itself — the
     // DynamicQty warning would be a false positive.
     if cleaned_has_only_counter_multiplier_dynamic(cleaned)
-        && evidence.any_effect(|e| {
-            matches!(
-                e,
-                Effect::MultiplyCounter { .. }
-                    | Effect::Double {
-                        target_kind: DoubleTarget::Counters { .. },
-                        ..
-                    }
-            )
-        })
+        && evidence.any_effect(|e| e.is_counter_multiplication())
     {
         return;
     }

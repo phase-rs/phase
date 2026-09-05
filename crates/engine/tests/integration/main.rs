@@ -1171,6 +1171,7 @@ mod twilight_prophet_upkeep_drain_1375;
 mod typhoon_per_opponent_island_count;
 mod tyvar_activate_as_though_haste;
 mod ultimate_nullification;
+mod ultimate_spider_man_mass_counter_double;
 mod unholy_citadel_legendary_color_banding_grant;
 mod unmaterialized_lki_serialization;
 mod unravel_counter_mana_value;

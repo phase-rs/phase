@@ -111,7 +111,7 @@ use crate::types::ability::{
     CombatDamageScope, Comparator, ConjureCard, ConjureSource, ContinuousModification,
     ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DieResultBranch, DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    DieResultBranch, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     GameRestriction, GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint,
     LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole, MultiTargetSpec,
     NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
@@ -126,8 +126,11 @@ use crate::types::ability::{
     TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
     WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
 };
+// `DoubleTarget` has no production use in this module since the counter-doubling
+// discriminator moved to `Effect::is_counter_multiplication()`; the child
+// `tests` module still names it through `use super::*`.
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject};
+use crate::types::ability::{AttackScope, AttackSubject, DoubleTarget};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -17117,15 +17120,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // `MultiTargetSpec` from the shared extractor; without the MultiplyCounter
     // arm, "on any number of other target creatures" drops its bound and the
     // effect binds a single required target (p0 "Unused selected target slots").
-    if (matches!(
-        clause.effect,
-        Effect::Double {
-            target_kind: DoubleTarget::Counters { .. },
-            ..
-        }
-    ) || matches!(clause.effect, Effect::MultiplyCounter { .. }))
-        && clause.multi_target.is_none()
-    {
+    if clause.effect.is_counter_multiplication() && clause.multi_target.is_none() {
         clause.multi_target = extract_double_counter_multi_target(text);
     }
     clause

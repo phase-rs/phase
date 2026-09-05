@@ -2955,6 +2955,44 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 // is a keyword-membership branch folded at the trigger layer, not a
                 // type union, so it is excluded even though the left carried "card".
                 starts_with_type_word(after_trimmed)
+                    // CR 205.4a + CR 205.2a: a disjunct may lead with a SUPERTYPE
+                    // before its type word — "legendary creature", "basic land",
+                    // "snow permanent". `parse_type_phrase_with_ctx` already
+                    // consumes exactly this prefix on the LEFT of a separator (the
+                    // `parse_supertype_prefix` call in the prefix scan above), and
+                    // the COMMA branch already accepts it on the right via
+                    // `starts_with_or_article_type_segment` →
+                    // `starts_with_type_phrase_lead`. Only the bare "and"/"or"
+                    // branch did not, so "each Spider and legendary creature you
+                    // control" silently dropped the whole right conjunct AND the
+                    // shared trailing controller suffix, collapsing to
+                    // `Typed{[Subtype(Spider)]}` with no controller.
+                    //
+                    // NOTE the precise delta: the third disjunct below ALREADY
+                    // accepts a supertype-led right conjunct when the left conjunct
+                    // carried a "card" noun (`left_card_suffix`). What this adds is
+                    // the no-card-suffix case, and ONLY the supertype lead — not
+                    // the rest of `starts_with_type_phrase_lead` (color,
+                    // color-quality, combat-status, leading P/T). Those leads are
+                    // deliberately excluded: "tapped and attacking" / "tapped and
+                    // transformed" are conjoined STATUS adjectives, not a type
+                    // union, and admitting them here would put a heavily-pinned
+                    // combat-status family in the blast radius for no card's gain.
+                    //
+                    // The supertype must be FOLLOWED by a type-phrase lead. A
+                    // supertype word alone is an ADJECTIVE conjunction, not a type
+                    // union: Moritte of the Frost's "except it's legendary and snow
+                    // in addition to its other types" conjoins two supertypes that
+                    // qualify one object, and `become_copy_except.rs` owns that text
+                    // through its own `parse_is_supertype_in_addition`. Without this
+                    // second conjunct the branch builds `Or[Typed{[], Legendary},
+                    // Typed{[], Snow}]` — two legs with NO type filter, which
+                    // `names_enumerable_population` would then accept as a real
+                    // population. Requiring a lead keeps every genuine union site
+                    // (both subtype-led ones included: "legendary Turtle card",
+                    // "basic Plains card").
+                    || nom_target::parse_supertype_prefix(after_trimmed)
+                        .is_ok_and(|(rest, _)| starts_with_type_phrase_lead(rest))
                     || (left_card_suffix
                         && !is_article_led_bare_card(after_trimmed)
                         && starts_with_or_article_type_segment(after_trimmed))
@@ -15495,6 +15533,183 @@ mod tests {
             other => panic!("Expected Or filter, got {:?}", other),
         }
         assert_eq!(rest.trim(), "");
+    }
+
+    /// V5 building block (CR 205.4a + CR 205.2a): the bare "and"/"or" separator
+    /// branch must accept a SUPERTYPE-led right conjunct, exactly as the comma
+    /// branch already does. Comma/no-comma equivalence is the claim, so the two
+    /// forms of one grammar cannot drift.
+    ///
+    /// Revert-failing: without the `parse_supertype_prefix` disjunct the bare
+    /// form collapses to `Typed{[Subtype("Spider")]}` with `controller: None` —
+    /// it drops the whole right conjunct AND the shared trailing suffix.
+    #[test]
+    fn bare_and_supertype_led_conjunct_matches_comma_form() {
+        let (bare, bare_rest) = parse_type_phrase("Spider and legendary creature you control");
+        let (comma, comma_rest) = parse_type_phrase("Spider, and legendary creature you control");
+        assert_eq!(
+            bare, comma,
+            "the bare-\"and\" form must build the same union as the comma form"
+        );
+        assert_eq!(bare_rest.trim(), comma_rest.trim());
+
+        let TargetFilter::Or { ref filters } = bare else {
+            panic!("expected a two-leg Or union, got {bare:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf,
+                other => panic!("expected Typed leg, got {other:?}"),
+            })
+            .collect();
+        let legendary = FilterProp::HasSupertype {
+            value: Supertype::Legendary,
+        };
+        // CR 109.4: the trailing controller suffix is shared by both legs.
+        for leg in &legs {
+            assert_eq!(leg.controller, Some(ControllerRef::You), "{leg:?}");
+        }
+        assert!(legs[0]
+            .type_filters
+            .contains(&TypeFilter::Subtype("Spider".to_string())));
+        assert!(
+            !legs[0].properties.contains(&legendary),
+            "the supertype must not spread backwards onto the Spider leg: {:?}",
+            legs[0].properties
+        );
+        assert!(legs[1].type_filters.contains(&TypeFilter::Creature));
+        assert!(legs[1].properties.contains(&legendary));
+    }
+
+    /// V5 building block, second axis: the same disjunct serves "or" and every
+    /// supertype word in `parse_supertype_word`'s set, for any left conjunct.
+    #[test]
+    fn bare_or_supertype_led_conjunct_unions() {
+        for phrase in [
+            "Spider or legendary creature you control",
+            "artifact and legendary creature you control",
+            "land and basic land you control",
+        ] {
+            let (filter, _) = parse_type_phrase(phrase);
+            let TargetFilter::Or { ref filters } = filter else {
+                panic!("{phrase:?} must build an Or union, got {filter:?}");
+            };
+            assert_eq!(filters.len(), 2, "{phrase:?} -> {filters:?}");
+        }
+    }
+
+    /// V5's paired negative: the disjunct is deliberately narrowed to SUPERTYPE
+    /// leads. Colour, colour-quality, combat-status and leading-P/T leads (the
+    /// rest of `starts_with_type_phrase_lead`) stay OUT, so the heavily-pinned
+    /// "tapped and attacking" family is not in the blast radius; so do the
+    /// commander and article-led-non-card forms the condition layer folds one
+    /// level up.
+    #[test]
+    fn bare_and_non_supertype_lead_is_not_a_type_union() {
+        // Positive reach-guard in the SAME test: the harness does see a working
+        // union, so the negatives below are not vacuous.
+        let (positive, _) = parse_type_phrase("Spider and legendary creature you control");
+        assert!(
+            matches!(positive, TargetFilter::Or { .. }),
+            "reach-guard: the supertype lead must still union, got {positive:?}"
+        );
+
+        for phrase in [
+            "creature and tapped artifact you control",
+            "creature and each player",
+            "creature and each opponent",
+            "creature and commander you control",
+            "creature and a Plan you control",
+            // CR 205.4a: a SUPERTYPE lead not followed by a type-phrase lead is an
+            // ADJECTIVE conjunction qualifying one object, not a type union.
+            // Moritte of the Frost ("except it's legendary and snow in addition to
+            // its other types") is the only corpus instance; `become_copy_except.rs`
+            // owns that text. Without the `starts_with_type_phrase_lead` conjunct on
+            // the supertype disjunct this builds `Or[Typed{[], Legendary},
+            // Typed{[], Snow}]` — two legs carrying no type filter at all.
+            "legendary and snow in addition to its other types",
+            "legendary and snow",
+        ] {
+            let (filter, _) = parse_type_phrase(phrase);
+            assert!(
+                !matches!(filter, TargetFilter::Or { .. }),
+                "{phrase:?} must stay collapsed (no type union), got {filter:?}"
+            );
+        }
+    }
+
+    /// V5b (CR 205.4a + CR 702.21a): the SAME grammar fix, reached through a
+    /// completely different consumer — a Ward keyword cost, not a target phrase.
+    /// This is what makes U3 a building-block fix rather than a counter-doubling
+    /// special case.
+    ///
+    /// Revert-failing: today Sauron's Ward filter drops its `Creature` leg and
+    /// keeps only `Typed{[Artifact], Legendary}` (backlog root cause 6).
+    #[test]
+    fn sauron_the_dark_lord_ward_cost_unions_both_legendary_legs() {
+        use crate::types::keywords::{Keyword, WardCost};
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Ward—Sacrifice a legendary artifact or legendary creature.\n\
+             Whenever an opponent casts a spell, amass Orcs 1.\n\
+             Whenever an Army you control deals combat damage to a player, the Ring tempts you.\n\
+             Whenever the Ring tempts you, you may discard your hand. If you do, draw four cards.",
+            "Sauron, the Dark Lord",
+            &[],
+            &["Legendary".into(), "Creature".into()],
+            &["Avatar".into(), "Horror".into()],
+        );
+
+        let ward = parsed
+            .extracted_keywords
+            .iter()
+            .find_map(|k| match k {
+                Keyword::Ward(WardCost::Sacrifice { count, filter }) => Some((count, filter)),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "Ward—Sacrifice must be extracted: {:?}",
+                    parsed.extracted_keywords
+                )
+            });
+        assert_eq!(*ward.0, 1);
+        let TargetFilter::Or { filters } = ward.1 else {
+            panic!(
+                "the ward cost filter must union both legendary legs, got {:?}",
+                ward.1
+            );
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        let legendary = FilterProp::HasSupertype {
+            value: Supertype::Legendary,
+        };
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf,
+                other => panic!("expected Typed leg, got {other:?}"),
+            })
+            .collect();
+        assert!(legs[0].type_filters.contains(&TypeFilter::Artifact));
+        assert!(legs[0].properties.contains(&legendary));
+        assert!(legs[1].type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            legs[1].properties.contains(&legendary),
+            "the dropped right conjunct is a LEGENDARY creature: {:?}",
+            legs[1].properties
+        );
+
+        // PAIRED POSITIVE: the rest of the card still parses, so a vanished
+        // keyword cannot masquerade as a passing assertion.
+        assert_eq!(
+            parsed.triggers.len(),
+            3,
+            "Sauron's three amass/Ring triggers must still parse: {:?}",
+            parsed.triggers.iter().map(|t| &t.mode).collect::<Vec<_>>()
+        );
     }
 
     #[test]
