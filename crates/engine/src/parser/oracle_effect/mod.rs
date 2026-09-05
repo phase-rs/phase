@@ -9693,11 +9693,29 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(Effect::RingTemptsYou);
     }
 
-    // CR 101.4 + CR 701.17a: "For each player, you choose from among the permanents that
-    // player controls an artifact, a creature, ..." — Tragic Arrogance pattern where
-    // the spell's controller chooses for all players.
-    if let Ok((after_prefix, _)) =
-        tag::<_, _, OracleError<'_>>("for each player, you choose ").parse(tp.lower)
+    // CR 101.4 + CR 608.2c + CR 701.21a: "For each player, [you ]choose from
+    // among the permanents that player controls an artifact, a creature, ..."
+    // — Tragic Arrogance pattern where the spell's controller chooses for all
+    // players. The "you" is grammatically optional: CR 608.2c's imperative
+    // voice already addresses the ability's controller by default, so a bare
+    // "for each player, choose ..." (no "you") is the SAME controller-chooses
+    // idiom, not a per-player self-choice — confirmed by Breach the
+    // Multiverse / Ghouls' Night Out ("For each player, choose a creature
+    // card in that player's graveyard. Put those cards onto the battlefield
+    // under YOUR control"), where the cards end up under the ability's
+    // controller despite no "you" appearing before "choose". The Eternal
+    // Wanderer's −4 ("For each player, choose a creature that player
+    // controls. Each player sacrifices all creatures they control not chosen
+    // this way.") is the same idiom applied to a battlefield-control choose
+    // instead of a zone choose; the second sentence is fully implied by
+    // `ChooseAndSacrificeRest`'s semantics (mirrors how Tragic Arrogance's own
+    // "Then each player sacrifices..." sweep sentence is absorbed rather than
+    // re-parsed) and is superfluous here.
+    if let Ok((after_prefix, _)) = alt((
+        tag::<_, _, OracleError<'_>>("for each player, you choose "),
+        tag("for each player, choose "),
+    ))
+    .parse(tp.lower)
     {
         if let Some(ast) = imperative::parse_category_and_sacrifice_rest_pub(after_prefix) {
             return parsed_clause(imperative::lower_choose_ast(ast));

@@ -224,6 +224,19 @@ pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMod
             },
             tag::<_, _, OracleError<'_>>(" can attack you each combat"),
         ),
+        // CR 508.5: "...can attack ~ each combat" is a defending-PERMANENT-
+        // scoped cap (The Eternal Wanderer) — only attacks declared against
+        // this static's own source (a planeswalker or battle), not against its
+        // controller's other permanents. Self-ref normalization rewrites the
+        // card's own name to `~` before this parser runs. Must precede the
+        // bare " can attack each combat" arm (longest match first).
+        value(
+            StaticMode::MaxAttackersEachCombat {
+                max,
+                defender: Some(AttackDefenderScope::ThisPermanent),
+            },
+            tag(" can attack ~ each combat"),
+        ),
         value(
             StaticMode::MaxAttackersEachCombat {
                 max,
