@@ -59318,3 +59318,118 @@ fn damage_each_player_scope_accepts_the_partitive_spelling() {
         "the anaphoric partitive must decline rather than guess a referent",
     );
 }
+
+/// CR 603.7d + CR 608.2d: a delayed-trigger payload whose "may" the clause
+/// anchors to a NAMED player keeps that "may" — and records who announces it.
+///
+/// Issue #8439, Arcane Denial (Oracle text verified against MTGJSON
+/// `AtomicCards.json`): "Counter target spell. Its controller may draw up to two
+/// cards at the beginning of the next turn's upkeep. / You draw a card at the
+/// beginning of the next turn's upkeep." CR 603.7d makes the delayed ability's
+/// controller the caster, so hoisting the payload's `optional` onto the
+/// `CreateDelayedTrigger` wrapper handed the countered player's choice to the
+/// caster — the countered opponent was never asked and drew nothing.
+///
+/// The class is the subject-anchored modal ("its controller may …" / "its owner
+/// may …" / "that creature's controller may …") under a temporal suffix, which
+/// `subject::parse_subject_application` already lowers to a parent-target player
+/// anaphor; nothing here keys on this card.
+///
+/// Two assertions here, each independently revert-sensitive: the wrapper no
+/// longer carries the "may" and the payload does, and the payload carries the
+/// named announcer as `optional_player`.
+///
+/// This half pins the PARSED SHAPE only. What that shape buys at runtime — that
+/// the production authority picking the seat the CR 608.2d gate asks returns the
+/// countered spell's controller — is pinned by its companion
+/// `game::ability_utils::tests::
+/// subject_anchored_delayed_may_prompts_the_named_player_not_the_controller`.
+/// That half cannot live in this file, nor beside the authority it calls: two
+/// independent source censuses pin those call sites, and this `tests.rs` is
+/// counted as production by one of them (it excludes inline `#[cfg(test)]`
+/// module spans, but not a `mod.rs`-declared `tests.rs`).
+///
+/// Positive control: the caster's own delayed half ("You draw a card at …")
+/// stays mandatory, controller-bound and unstamped, so the stamp is keyed on the
+/// subject anaphor rather than on "is a delayed payload".
+#[test]
+fn subject_anchored_delayed_may_binds_the_named_player_not_the_caster() {
+    let parsed = parse_oracle_text(
+        "Counter target spell. Its controller may draw up to two cards at the beginning of the \
+         next turn's upkeep.\nYou draw a card at the beginning of the next turn's upkeep.",
+        "Arcane Denial",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let counter = parsed.abilities.first().expect("expected a spell ability");
+    assert!(
+        matches!(&*counter.effect, Effect::Counter { .. }),
+        "reach-guard: the head must still counter the spell, got {:#?}",
+        counter.effect
+    );
+
+    let theirs = counter
+        .sub_ability
+        .as_deref()
+        .expect("expected the countered controller's delayed half");
+    let Effect::CreateDelayedTrigger {
+        effect: theirs_payload,
+        ..
+    } = &*theirs.effect
+    else {
+        panic!("expected a delayed trigger, got {:#?}", theirs.effect);
+    };
+    assert!(
+        !theirs.optional,
+        "CR 608.2d: the wrapper's controller does not hold a named player's may"
+    );
+    assert!(
+        theirs_payload.optional,
+        "CR 608.2d: the may is announced while the delayed ability is applied"
+    );
+    assert_eq!(
+        theirs_payload.optional_player,
+        Some(TargetFilter::ParentTargetController),
+        "CR 608.2d: the announcing player is the countered spell's controller"
+    );
+    match &*theirs_payload.effect {
+        Effect::Draw { target, .. } => assert_eq!(
+            *target,
+            TargetFilter::ParentTargetController,
+            "the drawer is the countered spell's controller"
+        ),
+        other => panic!("expected the named half to Draw, got {other:?}"),
+    }
+
+    // Positive control on the caster's own half: same wrapper shape, same
+    // temporal suffix, no named subject — it must stay mandatory and unstamped,
+    // so the stamp is keyed on the subject anaphor rather than on "is delayed".
+    let yours = theirs
+        .sub_ability
+        .as_deref()
+        .expect("expected the caster's delayed half");
+    let Effect::CreateDelayedTrigger {
+        effect: yours_payload,
+        ..
+    } = &*yours.effect
+    else {
+        panic!("expected a delayed trigger, got {:#?}", yours.effect);
+    };
+    assert!(
+        !yours.optional && !yours_payload.optional,
+        "\"You draw a card\" carries no may on either node"
+    );
+    assert_eq!(
+        yours_payload.optional_player, None,
+        "an unnamed subject must not be stamped with an announcer"
+    );
+    match &*yours_payload.effect {
+        Effect::Draw { target, .. } => assert_eq!(
+            *target,
+            TargetFilter::Controller,
+            "the caster's half draws for the caster"
+        ),
+        other => panic!("expected the caster half to Draw, got {other:?}"),
+    }
+}
