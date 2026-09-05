@@ -869,7 +869,7 @@ mod tests {
                 .abilities
                 .iter()
                 .any(|a| *a == draw_ability()),
-            "CR 112.6a: the grant must still land on the ORIGINAL ability \
+            "CR 109.5 + CR 113.8: the grant must still land on the ORIGINAL ability \
              controller's (P0) Horror even though the source has left play \
              and `state.objects` no longer has an entry for it"
         );

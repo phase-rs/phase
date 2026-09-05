@@ -447,7 +447,7 @@ fn battle_protector_narrowing_to_one_auto_applies_silently() {
     assert_eq!(
         runner.state().objects[&battle].protector(),
         Some(PlayerId(3)),
-        "the auto-applied seat is the ONLY surviving legal opponent (CR 310.11a)"
+        "the auto-applied seat is the ONLY surviving legal opponent (CR 310.12a)"
     );
     assert!(runner.state().battlefield.contains(&battle));
 }

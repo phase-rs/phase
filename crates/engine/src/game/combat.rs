@@ -7276,7 +7276,7 @@ mod tests {
         assert_eq!(
             defending_player_cr508_5(&state, source, Some(&ctx)),
             Some(PlayerId(2)),
-            "CR 310.8d: a battle's PROTECTOR is the defending player, not its controller"
+            "CR 310.9d: a battle's PROTECTOR is the defending player, not its controller"
         );
     }
 
