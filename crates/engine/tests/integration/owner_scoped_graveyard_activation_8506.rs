@@ -27,23 +27,54 @@
 //!   zones.rs:538 — so a reader who checks only the first call sees the reset
 //!   and misses the read-back. That is exactly how the two stale comments below
 //!   went wrong.
-//! * A spell's caster lives on its `StackEntry`, not on the `GameObject`, so a
-//!   card one player casts out of another player's zones never diverges either.
+//! * A foreign cast does not diverge either — but the REASON is version-scoped,
+//!   so read the measurement rather than a mechanism. Measured on 4bfe5d886e
+//!   (pre-#8332): `controller_defaults_to_owner_after_a_foreign_cast_resolves`
+//!   green. Re-measured on the merge of #8332 into this branch: still green.
+//!   The two runs are green for DIFFERENT reasons, which is why the mechanism
+//!   must not be stated flatly here:
+//!     - before #8332 a stack object's `controller` was never seeded from its
+//!       `StackEntry`, so there was no divergence to carry off the stack. That
+//!       is the defect #8332's own message describes ("a spell cast from a zone
+//!       its caster does not own kept the OWNER as its controller");
+//!     - after #8332 a stack object DOES carry the live controller, and
+//!       `zones::apply_zone_exit_cleanup` restores the owner on the way out via
+//!       a DESTINATION-keyed reset (`if !matches!(to, Zone::Battlefield |
+//!       Zone::Stack) { controller = base_controller.unwrap_or(owner) }`, cited
+//!       there to CR 109.4 + CR 108.4a).
+//!   An earlier revision of this file said "a spell's caster lives on its
+//!   `StackEntry`, not on the `GameObject`". Post-#8332 that sentence is false
+//!   while the assertion it justified still passes — the exact shape that
+//!   survives a merge unnoticed and gets quoted forward.
 //!
 //! So the owner scope is not repairing an observable drop today; it states the
-//! rule the owner-keyed zone lists already encode. Two mutations were run to
-//! establish exactly that, and NEITHER of them turns this file red:
+//! rule the owner-keyed zone lists already encode. Two mutations establish that,
+//! and NEITHER turns this file red. Both were re-run after the #8332 merge rather
+//! than inherited, because a mutation verdict is only valid for the tree it was
+//! measured in:
 //!
-//! * reverting all six scans to `obj.controller == player` — green, because
-//!   `controller == owner` off the battlefield, so the two guards agree; and
-//! * deleting the six guards outright (`if true`) — also green, because each
-//!   loop already iterates `state.players[player].{hand,graveyard}`, which is
-//!   keyed by owner, so no other player's card can reach the guard.
+//! * reverting all six scans to `obj.controller == player` — measured green on
+//!   4bfe5d886e, and re-measured green in the merged tree (4 passed, 0 failed);
+//! * deleting the six guards outright (`if true`) — measured green on
+//!   4bfe5d886e, and re-measured green in the merged tree (4 passed, 0 failed).
+//!
+//! Mutation B is green because each loop already iterates
+//! `state.players[player].{hand,graveyard}`, which is keyed by owner, so no other
+//! player's card reaches the guard at all. Mutation A is green because nothing
+//! reachable puts a card in a hand or graveyard with `controller != owner`.
 //!
 //! The guard is therefore a statement of scope rather than a live filter, and no
 //! test in this repository can discriminate on its predicate. What the file DOES
 //! pin is the two things a future change could break silently: the zone-exit
 //! invariant the scope relies on, and the read-out/offer partition from #8504.
+//!
+//! One production path DOES produce `controller != owner` off the battlefield and
+//! is deliberately not covered here: `effects/copy_spell.rs` clones the copied
+//! spell's object and overwrites only `controller`, never `owner`, so a Twincast
+//! on an opponent's spell yields a stack object owned by them and controlled by
+//! you (CR 707.10 says the copy is owned by its controller). Filed as its own
+//! issue. It cannot reach these scans — the copy is a token that CR 707.10a
+//! ceases on leaving the stack, and nothing has a stack-zoned activation.
 
 use engine::ai_support::{activation_block_reasons, legal_actions_full};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -283,8 +314,13 @@ fn controller_defaults_to_owner_after_a_foreign_cast_resolves() {
     );
     assert_eq!(
         obj.controller, P0,
-        "a spell's controller lives on its `StackEntry`; the `GameObject` keeps \
-         the owner throughout, so a foreign cast does not diverge either"
+        "CR 108.4a: a card in a graveyard has no controller, so the object reads \
+         its owner. Measured, not derived — this holds in the merged tree for a \
+         DIFFERENT reason than it held pre-#8332, so do not restate it as a \
+         mechanism: post-#8332 the stack object carries the live controller and \
+         `zones::apply_zone_exit_cleanup`'s destination-keyed reset restores the \
+         owner on the Stack->Graveyard leg (CR 109.4 + CR 108.4a). See the module \
+         header before rewriting this message."
     );
 }
 
