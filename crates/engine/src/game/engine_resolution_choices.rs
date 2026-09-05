@@ -6521,6 +6521,34 @@ pub(super) fn handle_resolution_choice(
             // set of dies-events whose triggers issue #423 must not lose.
             let events_after_move = events.len();
 
+            // CR 608.2c + CR 400.7: republish the resolution-local "moved this
+            // way" ledger from the moves THIS selection performed, mirroring
+            // the synchronous publish `resolve_ability_chain` runs after an
+            // effect that completes without pausing. A parent effect that
+            // paused for this prompt already stamped `last_zone_changed_ids`
+            // from its own event slice, which was still EMPTY — so a
+            // `ZoneChangedThisWay` rider (Town Greeter's "If you put a Town
+            // card into your hand this way, you gain 2 life", issue #8455)
+            // deferred onto the continuation would be re-evaluated by the
+            // drain below against that empty set and silently dropped, while
+            // its negated twin ("If you didn't put a card onto the battlefield
+            // this way", Rulik Mons) would fire unconditionally. The sibling
+            // interactive paths already republish here — `DiscardChoice` in
+            // `finalize_discard_choice_completion`, surveil in
+            // `BatchCompletion::SurveilKeepOnTop`, dig in `RevealRestPile`.
+            //
+            // Unconditional, exactly like that synchronous publish: `Sacrifice`
+            // never reaches here (every arm of its completion match diverges),
+            // and a kind that moved nothing republishes the empty set the
+            // synchronous path would have written anyway.
+            state.last_zone_changed_ids = events[events_before_effect..events_after_move]
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+
             // Step B: resolve the reflexive `WhenYouDo` continuation (Grist's
             // `[-2]`). `waiting_for` is still `Priority` here, so
             // `resume_with_error_propagation`'s guard passes and

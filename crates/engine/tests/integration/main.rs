@@ -821,6 +821,7 @@ mod issue_822_erode_path_to_exile_search_controller;
 mod issue_828_full_throttle;
 mod issue_8302_liberator_mana_spent_power;
 mod issue_841_selvala_explorer_returned;
+mod issue_8455_town_greeter;
 mod issue_847_braids_cabal_minion;
 mod issue_852_torrential_gearhulk;
 mod issue_859_weathered_wayfarer;
