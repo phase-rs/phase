@@ -39,6 +39,21 @@
 #
 # Default base-ref is the merge-base with origin/main. In CI, pass the PR
 # target branch's SHA explicitly.
+#
+# Exit status:
+#   0  Gate A PASS      - the window was knowable and holds no violation. Either
+#                         parser files were scanned and came back clean, or the
+#                         window is well defined and holds no parser file at all
+#                         (a commit that stages none, a base..head range that
+#                         changes none). The second case also prints a SKIPPED
+#                         line naming what was empty, so a reader can tell the
+#                         two apart while `Gate A PASS head=<sha> base=<sha>`
+#                         stays where contributor tooling reads it.
+#   1  Gate A/G FAIL    - violations found.
+#   3  CANNOT ANSWER    - the window itself is unknowable: base == head AND the
+#                         index holds nothing in scope, so nothing at all was
+#                         read. Not a failure - the same meaning exit 3 carries
+#                         in scripts/tilt-wait.sh. See the guard below.
 
 set -euo pipefail
 
@@ -270,14 +285,77 @@ filter_allow_noncombinator() {
 # dispatch, which would be dead code under cfg(test). They lose the inline
 # `#[cfg(test)]` marker a line-based scan keys on, so exclude them by name; their
 # parent module file is still fully scanned, including any inline test fixtures.
-files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" \
-    ':(exclude)**/*.md' \
-    ':(exclude)**/tests.rs' \
-    ':(exclude)**/*_tests.rs' 2>/dev/null || true)
+SCOPE_EXCLUDES=(':(exclude)**/*.md' ':(exclude)**/tests.rs' ':(exclude)**/*_tests.rs')
+
+files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" "${SCOPE_EXCLUDES[@]}" 2>/dev/null || true)
+
+# EMPTY SCAN SET. (#8503)
+#
+# `Gate A PASS head=X base=Y` asserts that nothing added between Y and X
+# violates the mandate. When Y == X that range is empty by construction, so the
+# `--cached` fallback above is the whole input; with an empty index this run
+# reads zero lines and the assertion is about nothing. The printed SHAs are
+# identical in that case and everything else looks exactly like a real green -
+# which is how a change touching four parser files collected a PASS that had
+# never seen it.
+#
+# The distinction that matters is whether the WINDOW was knowable, not whether
+# files came back. Two of these three empty-scan cases have a well-defined
+# window that genuinely holds no parser work, and they stay a PASS; only the
+# degenerate one, where the gate cannot tell clean work from unseen work, is
+# fail-closed.
 if [ -z "$files" ]; then
+    if [ -n "${GIT_INDEX_FILE:-}" ]; then
+        # Pre-commit hook. The scan window IS the commit being created, so an
+        # empty scope is a real answer: this commit stages no parser files.
+        # PASS, with a SKIPPED line naming what was empty.
+        printf 'Gate A SKIPPED (pre-commit: no staged files under %s)\n' "$SCOPE"
+        printf 'Gate A PASS head=%s base=%s\n' "$HEAD_SHA" "$BASE_SHA"
+        exit 0
+    fi
+    if [ "$BASE_SHA" = "$HEAD_SHA" ]; then
+        # Degenerate window: empty range AND empty index. Nothing was read, so
+        # the honest report is that the gate cannot answer - not that the tree
+        # is clean. Exit 3 is this repo's "cannot answer", per
+        # scripts/tilt-wait.sh; it is not a failure verdict.
+        unexamined=$( { git diff --name-only -- "$SCOPE" "${SCOPE_EXCLUDES[@]}"; \
+                        git ls-files --others --exclude-standard -- "$SCOPE"; } 2>/dev/null \
+                      | sort -u || true )
+        {
+            echo "Gate A CANNOT ANSWER: nothing was scanned."
+            echo "  base == head ($HEAD_SHA), so the diff range is empty, and the"
+            echo "  index holds no files under $SCOPE. This run read zero lines; it"
+            echo "  cannot tell clean parser work from parser work it never saw."
+            if [ -n "$unexamined" ]; then
+                echo "  Unexamined parser files ARE present in this working tree:"
+                printf '%s\n' "$unexamined" | sed 's/^/    /'
+                echo "  Stage them (git add), or name a base explicitly:"
+            else
+                echo "  To get an answer, name a base explicitly:"
+            fi
+            echo "      scripts/check-parser-combinators.sh <base-ref>   # e.g. HEAD~1, or the PR base"
+        } >&2
+        exit 3
+    fi
+    # Real range holding no parser file. The window is non-degenerate and the
+    # gate did look at all of it, so this is a real PASS over a knowable window;
+    # the SKIPPED line above it says the range held nothing in scope.
+    printf 'Gate A SKIPPED (no files under %s changed in %s..%s)\n' \
+        "$SCOPE" "$BASE_SHA" "$HEAD_SHA"
     printf 'Gate A PASS head=%s base=%s\n' "$HEAD_SHA" "$BASE_SHA"
     exit 0
 fi
+
+# What the PASS below covers. Under `--cached` the two SHAs are identical and
+# the scan is the index alone, so state the size and shape of the input the
+# verdict rests on.
+scanned_count=$(printf '%s\n' "$files" | grep -c . || true)
+if [ -n "$DIFF_MODE" ]; then
+    scanned_window="staged index vs $BASE_SHA"
+else
+    scanned_window="working tree vs $BASE_SHA"
+fi
+printf 'Gate A: scanned %s file(s) under %s (%s).\n' "$scanned_count" "$SCOPE" "$scanned_window"
 
 # (D0) Family (D)'s own seam suite, ahead of the scan it protects — the same
 # shape as section (B0) of check-engine-authorities.sh, and for the same reason.
