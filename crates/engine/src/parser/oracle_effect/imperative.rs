@@ -265,6 +265,23 @@ fn parse_dig_head_noun(input: &str) -> Option<&str> {
     Some(after_noun)
 }
 
+/// CR 401.1: which text shape a call site hands [`parse_dig_library_owner`]. The
+/// two dig surfaces reach the recognizer at different points in the same phrase,
+/// and the source-less elision is sound for exactly one of them — so the shape
+/// is passed explicitly rather than re-derived from the text, which cannot
+/// distinguish "no library named" from "owner boundary already reached".
+#[derive(Clone, Copy)]
+enum DigOwnerPhrase {
+    /// The head noun phrase with its connective unconsumed ("four cards of their
+    /// library"). No connective at all means the instruction names no library of
+    /// its own, so the CR 608.2c carry-over elision applies.
+    WithHeadNoun,
+    /// The owner boundary itself ("their library"), the caller having already
+    /// stepped over the connective. Nothing remains to step over and no elision
+    /// is available, so an owner the table cannot bind must decline.
+    AtOwnerBoundary,
+}
+
 /// CR 401.1 + CR 701.20a + CR 701.20e: Resolve WHOSE library a "look at / reveal
 /// the top N cards of <owner>'s library" instruction reads.
 ///
@@ -303,9 +320,17 @@ fn parse_dig_head_noun(input: &str) -> Option<&str> {
 /// your library, then reveal the top card." (Temporal Aperture, Unexpected
 /// Results) — where the instruction names no library of its own and, per CR
 /// 608.2c, the library named by the preceding clause (the controller's, CR 109.5)
-/// carries over. That arm fires only when there is no "card[s] of" source phrase
-/// at all, so it can never absorb an unrecognized owner.
-fn parse_dig_library_owner(rest_lower: &str, ctx: &ParseContext) -> Option<TargetFilter> {
+/// carries over. That arm is reachable only under `DigOwnerPhrase::WithHeadNoun`
+/// and only when there is no "card[s] of" source phrase at all, so it cannot
+/// absorb an unrecognized owner. Absence of the connective is not by itself
+/// evidence of a source-less instruction: under `AtOwnerBoundary` the caller has
+/// already consumed it, which is why the shape is a parameter rather than
+/// something this function infers from the text it is handed.
+fn parse_dig_library_owner(
+    rest_lower: &str,
+    ctx: &ParseContext,
+    shape: DigOwnerPhrase,
+) -> Option<TargetFilter> {
     // The three arms below scan the WHOLE instruction rather than the owner
     // boundary, because the phrase naming the library can sit in a later clause
     // ("… then put the rest on the bottom of that library" — Gonti, Lord of
@@ -370,6 +395,17 @@ fn parse_dig_library_owner(rest_lower: &str, ctx: &ParseContext) -> Option<Targe
     // in the owner boundary itself.
     if let Some((_, player)) = parse_library_owner_or_opponent_scope(rest_lower, ctx) {
         return Some(player);
+    }
+
+    // CR 401.1 (#8498): at the owner boundary the caller has already consumed
+    // the connective, so there is no head noun left to step over and no
+    // source-less instruction to elide from — an owner the table cannot bind
+    // declines here. Without this the elision below fires unconditionally for
+    // this shape (`parse_dig_head_noun` can never match text the caller already
+    // advanced past), which is the fail-open default this issue removes,
+    // surviving on one of the two call sites.
+    if matches!(shape, DigOwnerPhrase::AtOwnerBoundary) {
+        return None;
     }
 
     // The "the top …" call site hands in the head noun phrase; step over it to
@@ -3335,7 +3371,8 @@ pub(super) fn parse_search_and_creation_ast(
         // CR 401.1 (#8498): an instruction naming a library owner the recognizer
         // cannot bind DECLINES the dig arm rather than defaulting the owner to the
         // ability's controller, so the clause stays honestly unparsed.
-        if let Some(player) = parse_dig_library_owner(rest_lower, ctx) {
+        if let Some(player) = parse_dig_library_owner(rest_lower, ctx, DigOwnerPhrase::WithHeadNoun)
+        {
             // CR 701.20e + CR 701.13a + CR 406.3: "look at the top card ... and
             // exiles it face down" (Gonti, Night Minister) — fuse into ExileTop so
             // the card leaves the library and the trailing play grant can bind to
@@ -3408,7 +3445,9 @@ pub(super) fn parse_search_and_creation_ast(
                     // CR 401.1 (#8498): fail-closed owner — an unrecognized
                     // library owner declines this arm instead of binding the
                     // ability's controller.
-                    if let Some(player) = parse_dig_library_owner(owner_lower, ctx) {
+                    if let Some(player) =
+                        parse_dig_library_owner(owner_lower, ctx, DigOwnerPhrase::AtOwnerBoundary)
+                    {
                         return Some(SearchCreationImperativeAst::Dig {
                             count,
                             reveal,
@@ -24042,6 +24081,14 @@ mod tests {
             dig_owner_of("look at the top two cards of their library").is_some(),
             "reach-guard: the plural head noun must still reach the dig arm"
         );
+        // The count-leading word order needs its OWN reach-guard: it enters the
+        // recognizer at the owner boundary, a different code path from the two
+        // guards above, so their green says nothing about it.
+        assert!(
+            dig_owner_of("look at two cards from the top of their library").is_some(),
+            "reach-guard: a recognized owner in the count-leading word order must \
+             still reach the dig arm"
+        );
 
         for text in [
             // Owners with no `TargetFilter` today (Neck Tangle, Inzerva, Coral
@@ -24051,6 +24098,15 @@ mod tests {
             "look at the top card of defending player's library",
             // Not a library at all (Stairs to Infinity's planar deck).
             "look at the top card of your planar deck",
+            // COUNT-LEADING word order, unrecognized owner. This shape reaches
+            // the recognizer past the "cards from the top of " connective, so
+            // `parse_dig_head_noun` can never match and the source-less elision
+            // used to fire unconditionally here — binding the ability's
+            // controller for a clause that plainly names somebody else. Every
+            // negative row above uses the top-N order and so could not see it.
+            "look at two cards from the top of an opponent's library",
+            "look at two cards from the top of the hydra's library",
+            "look at one card from the top of defending player's library",
         ] {
             assert_eq!(
                 dig_owner_of(text),
@@ -24129,7 +24185,11 @@ mod tests {
             // row is exempt: that is the whole point of the two changes landing
             // together.
             assert_eq!(
-                parse_dig_library_owner(&format!("two cards of {owner}"), &ctx),
+                parse_dig_library_owner(
+                    &format!("two cards of {owner}"),
+                    &ctx,
+                    DigOwnerPhrase::WithHeadNoun
+                ),
                 Some(shared),
                 "dig recognizer diverged on {owner:?}"
             );
@@ -24142,7 +24202,11 @@ mod tests {
         // anaphor arm were ever folded into the table it would decline here.
         for anaphor in ["that player's library", "that opponent's library"] {
             assert_eq!(
-                parse_dig_library_owner(&format!("three cards of {anaphor}"), &ctx),
+                parse_dig_library_owner(
+                    &format!("three cards of {anaphor}"),
+                    &ctx,
+                    DigOwnerPhrase::WithHeadNoun
+                ),
                 Some(that_player_library_filter(&ctx)),
                 "the {anaphor:?} anaphor must resolve through the context-aware \
                  authority, never decline under the fail-closed table"
@@ -24164,8 +24228,28 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_dig_library_owner("two cards of the hydra's library", &ctx),
+            parse_dig_library_owner(
+                "two cards of the hydra's library",
+                &ctx,
+                DigOwnerPhrase::WithHeadNoun
+            ),
             None
+        );
+        // The SAME unrecognized owner entered at the owner boundary — the shape
+        // the count-leading call site hands in. `parse_dig_head_noun` cannot
+        // match text the caller already advanced past, so before the
+        // `AtOwnerBoundary` arm this returned `Some(Controller)` and bound the
+        // ability's controller for a clause naming somebody else.
+        assert_eq!(
+            parse_dig_library_owner("the hydra's library", &ctx, DigOwnerPhrase::AtOwnerBoundary),
+            None
+        );
+        // Reach-guard for the row above: a RECOGNIZED owner in that same
+        // boundary shape must still bind, or the `None` proves only that the
+        // shape is broken.
+        assert_eq!(
+            parse_dig_library_owner("your library", &ctx, DigOwnerPhrase::AtOwnerBoundary),
+            Some(TargetFilter::Controller)
         );
     }
 }
