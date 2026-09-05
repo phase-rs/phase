@@ -2029,6 +2029,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             else {
                                 unreachable!("matched ProposedEvent::ZoneChange above");
                             };
+                            // CR 614.1c + CR 616.1: everything this permanent spell's own entry raises
+                            // from here on is its CHILD. Record the boundary before the delivery producer
+                            // runs so the parked PendingSpellResolution is installed beneath that child
+                            // stack rather than on top of it.
+                            let entry_child_stack_start =
+                                state.resolution_stack.capture_child_boundary();
                             match zone_pipeline::deliver(
                                 state,
                                 approved,
@@ -2055,15 +2061,47 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 // so the choice-answer resume can complete Aura
                                 // attachment / cast-link stamps — mirrors the
                                 // ReplacementResult::NeedsChoice arm below.
+                                //
+                                // CR 616.1 + CR 616.1f + CR 614.1c: the ONLY pause that
+                                // reaches this arm is the delivery tail's
+                                // enters-with-counters step, which pushed a
+                                // CounterAdditions frame onto the stack top
+                                // (`apply_etb_counters`'s pause branch). `deliver` is
+                                // called with `CallerEpilogue`, which disables
+                                // `apply_zone_delivery_tail`'s own post-replacement drain,
+                                // so every other mid-entry prompt surfaces at the caller
+                                // epilogue below instead. `active_counter_additions` is
+                                // top-only by design, so this parent must be INSERTED
+                                // BENEATH that child; pushing it on top makes every resume
+                                // drain read `None` and strands both frames until
+                                // `start_next_turn`'s CR 514.3a + CR 500.1 turn-wrap
+                                // assert.
+                                //
+                                // KNOWN RESIDUAL (deliberate): a Devour-shape entrant
+                                // (CR 702.82a/c) also has a CR 614.13a
+                                // eligibility-snapshot ChangeZone frame beneath the counter
+                                // queue, and the sacrifice that consumes that snapshot
+                                // lives in a PostReplacement frame raised by
+                                // `replace_event` ABOVE this capture — i.e. BELOW the
+                                // parked parent. The counter child still drains; the parent
+                                // is then buried under the snapshot and does not complete.
+                                // Do NOT "fix" that by retiring the snapshot from the
+                                // completion helper: the snapshot IS the eligible-pool
+                                // filter (`game/effects/sacrifice.rs`, `is_none_or`), and
+                                // retiring it early was measured to let the devourer
+                                // sacrifice itself, in violation of CR 614.13a.
                                 zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
-                                    state.push_spell_resolution(pending_spell_resolution_snapshot(
-                                        state,
-                                        &entry,
-                                        ability.as_deref(),
-                                        casting_variant,
-                                        actual_mana_spent,
-                                        &spell_targets,
-                                    ));
+                                    state.push_spell_resolution_after_child(
+                                        pending_spell_resolution_snapshot(
+                                            state,
+                                            &entry,
+                                            ability.as_deref(),
+                                            casting_variant,
+                                            actual_mana_spent,
+                                            &spell_targets,
+                                        ),
+                                        entry_child_stack_start,
+                                    );
                                     events.push(GameEvent::StackResolved {
                                         object_id: entry.id,
                                     });
@@ -2201,6 +2239,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // `ability == None` are not silently de-kicked when a replacement
                     // needs a player choice. `engine_replacement` restores this onto
                     // the permanent unconditionally after the choice resolves.
+                    //
+                    // AUDITED (do not "fix" without a repro): this push is deliberately
+                    // plain. `replace_event`'s CR 616.1f repeat can in principle apply a
+                    // real applier before returning NeedsChoice, so a child frame is
+                    // structurally possible — but two measured fixtures reach here with
+                    // only this SpellResolution frame resident (a MayCopy enter-as-copy
+                    // spell, and a permanent carrying two self-`Moved` replacements), the
+                    // only test on this path
+                    // (`cost_zone_pipeline.rs::mimeoplasm_forced_exile_cost_resumes_after_…`)
+                    // asserts this frame owns the TOP, and `Ordering::Less` cannot be shown
+                    // unreachable across `replace_event`'s applier fan-out. Adopting
+                    // `push_spell_resolution_after_child` here needs a fixture that measures
+                    // a resident child plus its own `Less` analysis first.
                     state.push_spell_resolution(pending_spell_resolution_snapshot(
                         state,
                         &entry,
@@ -2413,6 +2464,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // target for the PersistChosenAttribute resume (CR 608.3c /
             // CR 303.4a). Do not push SpellResolution on top of an
             // AbilityContinuation (Tribute/Siege resume is top-only).
+            //
+            // The plain push is REQUIRED here. This is the caller epilogue's own
+            // prompt, and its answer path (`handle_persist_chosen_attribute_choice`)
+            // reads `active_spell_resolution()` — TOP-ONLY — with no preceding
+            // post-replacement dispatch retire, so this frame must own the top while
+            // the resident PostReplacement frame sits beneath it. A boundary insert
+            // would put this frame BELOW that frame, drop the CR 608.3a / CR 608.3c /
+            // CR 400.7d epilogue, and fall into the Enchant-filter consult that path
+            // explicitly forbids as a spell-path fallback (CR 303.4a). Site A above
+            // inserts beneath its child for the same reason in mirror image: there the
+            // answer path reads the CHILD top-only, here it reads the PARENT.
             if state.has_post_replacement_drain() {
                 state.clear_post_replacement_source();
                 if let Some(wf) = super::engine_replacement::apply_pending_post_replacement_effect(

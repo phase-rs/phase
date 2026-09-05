@@ -21966,10 +21966,47 @@ impl GameState {
         self.resolution_stack.active_spell_resolution_mut()
     }
 
-    /// Parks permanent-spell completion context above the replacement choice
-    /// that suspended its entry.
+    /// Parks permanent-spell completion context as the active frame. This is the
+    /// NO-CHILD case only: a call site that follows a producer which may have
+    /// raised a resolution frame must use `push_spell_resolution_after_child`,
+    /// which parks the parent BENEATH that child stack. Pushing on top of a live
+    /// child makes every top-only resume accessor read `None` and strands both
+    /// frames.
     pub fn push_spell_resolution(&mut self, pending: PendingSpellResolution) {
         self.resolution_stack.push_spell_resolution(pending);
+    }
+
+    /// Park permanent-spell completion context beneath the complete child stack
+    /// its own delivery raised. The recorded depth is structural, not a search for
+    /// a buried parent.
+    ///
+    /// CR 616.1 / CR 616.1f + CR 614.1c: the delivery tail's enters-with-counters
+    /// step can pause on an ordering choice among applicable counter replacements,
+    /// and the queue that owns the remaining work is read TOP-ONLY. That queue is
+    /// therefore a CHILD of the resolving spell, and the CR 608.3a completion
+    /// context parked for it must never sit above it.
+    pub fn push_spell_resolution_after_child(
+        &mut self,
+        pending: PendingSpellResolution,
+        child_stack_start: ChildStackDepth,
+    ) {
+        match self
+            .resolution_stack
+            .capture_child_boundary()
+            .cmp(&child_stack_start)
+        {
+            std::cmp::Ordering::Less => {
+                panic!("spell delivery removed a parent before it could be parked")
+            }
+            std::cmp::Ordering::Equal => self.push_spell_resolution(pending),
+            std::cmp::Ordering::Greater => self
+                .resolution_stack
+                .insert_parent_at_child_boundary(
+                    super::resolution::ResolutionFrame::SpellResolution(pending),
+                    child_stack_start,
+                )
+                .expect("parked spell resolution must be inserted below its child stack"),
+        }
     }
 
     /// Consumes exactly the active permanent-spell completion context. Child
