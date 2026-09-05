@@ -1,13 +1,12 @@
 //! Mulligan policies — sibling trait to `TacticalPolicy` for pre-game hand
 //! evaluation.
 //!
-//! CR 103.5: the mulligan process — each
-//! player may take a mulligan; mulliganed hands shuffle back and the player
-//! draws a new hand, putting `mulligan_count` cards on the bottom.
-//! CR 103.6: opening-hand actions after the
-//! mulligan process is complete (companion reveals, "begin the game with ~"
-//! abilities) — not modeled here, but motivates why the mulligan decision
-//! is a first-class AI concern.
+//! CR 103.5: the mulligan process — each player may take a mulligan;
+//! mulliganed hands shuffle back and the player draws a new hand, putting
+//! `mulligan_count` cards on the bottom. CR 103.6: opening-hand actions
+//! after the mulligan process is complete (companion reveals, "begin the
+//! game with ~" abilities) — not modeled here, but motivates why the
+//! mulligan decision is a first-class AI concern.
 //!
 //! Each `MulliganPolicy` returns a `MulliganScore` — `ForceKeep`, `ForceMulligan`
 //! (hard veto), or `Score { delta, reason }` (additive). The registry runs all

@@ -2516,8 +2516,11 @@ impl ResolutionStack {
         }
     }
 
-    /// Parks permanent-spell completion context above the replacement choice
-    /// that suspended its entry.
+    /// Parks permanent-spell completion context on the stack TOP. Callers that
+    /// follow a producer which may have raised a child frame must go through
+    /// `GameState::push_spell_resolution_after_child` instead, which inserts the
+    /// parent at the recorded child boundary; a parent above its own live child
+    /// makes every top-only resume accessor read `None`.
     pub fn push_spell_resolution(&mut self, pending: PendingSpellResolution) {
         self.push_inner(ResolutionFrame::SpellResolution(pending));
     }

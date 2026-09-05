@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4709
-- **Total card appearances across root causes:** 4742 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4706
+- **Total card appearances across root causes:** 4739 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -17,7 +17,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 329 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 237 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 6 | Disjunctive (or-list) collapsed to first branch | 233 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 209 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
@@ -25,7 +25,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 157 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 138 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 132 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
-| 14 | Granted/quoted ability or continuous modification dropped | 95 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
+| 14 | Granted/quoted ability or continuous modification dropped | 96 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 83 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
@@ -2555,7 +2555,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (237 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (233 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2616,7 +2616,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Deathgazer
 - Deathmark
 - Deeproot Wayfinder
-- Definitely Not a Turtle
 - Degavolver
 - Dire-Strain Anarchist
 - Donna Noble
@@ -2674,7 +2673,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Jodah's Avenger
 - Jukai Trainee
 - Kaalia, Zenith Seeker
-- Kamahl's Druidic Vow
 - Kami of Mourning
 - Kastral, the Windcrested
 - Katara's Reversal
@@ -2735,7 +2733,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rock Basilisk
 - Sarah's Wings
 - Sarkhan the Masterless
-- Sauron, the Dark Lord
 - Savai Triome
 - Sawback Manticore
 - Scarred Puma
@@ -2778,7 +2775,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Track Down
 - Training Compound
 - Traveling Chocobo
-- Ultimate Spider-Man
 - Umara Mystic
 - Umara Wizard
 - Underground Sea
@@ -4074,7 +4070,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 14. Granted/quoted ability or continuous modification dropped  (95 cards)
+### 14. Granted/quoted ability or continuous modification dropped  (96 cards)
 
 **Signature.** A static-grant modification list omits a granted activated/triggered ability, keyword, color, subtype, or P/T conjunct that the Oracle conjoins ('is a … with "<ability>"', 'and has flying').
 
@@ -4158,6 +4154,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - True-Faith Censer
 - U.S.Agent, John Walker
 - Ultima, Origin of Oblivion
+- Ultimate Spider-Man
 - Unable to Scream
 - Uncontrolled Infestation
 - Unexpected Potential

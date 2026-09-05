@@ -19868,12 +19868,11 @@ fn parse_phase_determiner_prefix(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("each player's "), tag("each "), tag("the ")))).parse(input)
 }
 
-/// CR 603.1 + CR 603.7: a triggered ability
-/// is printed as "[When/Whenever/At] [trigger event], [effect]", and a DELAYED
-/// triggered ability "will contain 'when,' 'whenever,' or 'at,' although that word
-/// won't usually begin the ability" — i.e. it appears mid-sentence, with its own
-/// internal comma between head and body. This combinator matches that head,
-/// ANCHORED TO END-OF-INPUT.
+/// CR 603.1 + CR 603.7: a triggered ability is printed as "[When/Whenever/At]
+/// [trigger event], [effect]", and a DELAYED triggered ability "will contain
+/// 'when,' 'whenever,' or 'at,' although that word won't usually begin the
+/// ability" — i.e. it appears mid-sentence, with its own internal comma between
+/// head and body. This combinator matches that head, ANCHORED TO END-OF-INPUT.
 ///
 /// "at the beginning of ⟨possessive|determiner⟩? ⟨'next '⟩? ⟨phase⟩ 's'?
 ///  ⟨' on your turn'⟩? EOF"
@@ -19915,11 +19914,11 @@ pub(crate) fn parse_dangling_phase_trigger_head(input: &str) -> OracleResult<'_,
     .parse(input)
 }
 
-/// CR 500.1: a printed phase or step noun names a
-/// subdivision of a TURN, which is what makes a turn-owner possessive in front of it
-/// ("each of your upkeeps", "an opponent's end step") a statement about WHOSE TURN
-/// the trigger may fire on. Migrated from `CR 503.1a / CR 507.1`, both verified
-/// misfits (upkeep triggers going on the stack; choosing a defending player).
+/// CR 500.1: a printed phase or step noun names a subdivision of a TURN, which is
+/// what makes a turn-owner possessive in front of it ("each of your upkeeps", "an
+/// opponent's end step") a statement about WHOSE TURN the trigger may fire on.
+/// Migrated from `CR 503.1a / CR 507.1`, both verified misfits (upkeep triggers
+/// going on the stack; choosing a defending player).
 ///
 /// The possessive table itself lives in [`parse_turn_possessive_prefix`] — one
 /// table, two consumers. Also checks for a trailing "on your turn" suffix.

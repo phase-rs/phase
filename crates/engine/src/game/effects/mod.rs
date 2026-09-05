@@ -2014,7 +2014,7 @@ pub(crate) fn parent_referent_context_from_events(
         return Some(snapshot);
     }
 
-    if let Some(snapshot) = moved_object_context_from_events(events) {
+    if let Some(snapshot) = moved_object_context_from_events(state, events) {
         return Some(snapshot);
     }
 
@@ -2056,15 +2056,10 @@ fn amassed_army_context_from_events(
     // carrier; quantity resolution reads `ResolvedAbility.amassed_army_object`,
     // not the event log.
     events.iter().rev().find_map(|event| match event {
-        GameEvent::ArmyAmassed { object_id, .. } => {
-            state
-                .objects
-                .get(object_id)
-                .map(|obj| CostPaidObjectSnapshot {
-                    object_id: *object_id,
-                    lki: obj.snapshot_public_characteristics(),
-                })
-        }
+        GameEvent::ArmyAmassed { object_id, .. } => state
+            .objects
+            .get(object_id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics())),
         _ => None,
     })
 }
@@ -2087,15 +2082,10 @@ fn damaged_object_context_from_events(
         GameEvent::DamageDealt {
             target: TargetRef::Object(object_id),
             ..
-        } if seen.insert(*object_id) => {
-            state
-                .objects
-                .get(object_id)
-                .map(|obj| CostPaidObjectSnapshot {
-                    object_id: *object_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                })
-        }
+        } if seen.insert(*object_id) => state
+            .objects
+            .get(object_id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())),
         _ => None,
     });
     // CR 608.2c: single-object guard — a multi-target damage parent has no
@@ -2116,10 +2106,7 @@ fn tapped_object_context_from_events(
         GameEvent::PermanentTapped { object_id, .. } if seen.insert(*object_id) => state
             .objects
             .get(object_id)
-            .map(|obj| CostPaidObjectSnapshot {
-                object_id: *object_id,
-                lki: obj.snapshot_for_mana_spent(),
-            }),
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())),
         _ => None,
     });
     let first = tapped.next()?;
@@ -2159,7 +2146,9 @@ fn snapshot_for_sacrificed_object(
     object_id: ObjectId,
 ) -> Option<CostPaidObjectSnapshot> {
     if let Some(lki) = state.lki_cache.get(&object_id).cloned() {
-        return Some(CostPaidObjectSnapshot { object_id, lki });
+        return Some(CostPaidObjectSnapshot::capture_departed(
+            state, object_id, lki,
+        ));
     }
     events.iter().find_map(|event| match event {
         GameEvent::ZoneChanged {
@@ -2167,15 +2156,21 @@ fn snapshot_for_sacrificed_object(
             from: Some(Zone::Battlefield),
             to,
             record,
-        } if *moved_id == object_id && is_public_zone(*to) => Some(CostPaidObjectSnapshot {
-            object_id,
-            lki: lki_snapshot_from_zone_change_record(record),
-        }),
+        } if *moved_id == object_id && is_public_zone(*to) => {
+            Some(CostPaidObjectSnapshot::capture_departed(
+                state,
+                object_id,
+                lki_snapshot_from_zone_change_record(record),
+            ))
+        }
         _ => None,
     })
 }
 
-fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObjectSnapshot> {
+fn moved_object_context_from_events(
+    state: &GameState,
+    events: &[GameEvent],
+) -> Option<CostPaidObjectSnapshot> {
     let mut moved = events.iter().filter_map(|event| match event {
         GameEvent::ZoneChanged {
             object_id,
@@ -2205,10 +2200,11 @@ fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObje
             // graveyard/exile recursion.
             || (*to == Zone::Hand && is_public_zone(*from_zone)) =>
         {
-            Some(CostPaidObjectSnapshot {
-                object_id: *object_id,
-                lki: lki_snapshot_from_zone_change_record(record),
-            })
+            Some(CostPaidObjectSnapshot::capture_departed(
+                state,
+                *object_id,
+                lki_snapshot_from_zone_change_record(record),
+            ))
         }
         _ => None,
     });
@@ -2222,6 +2218,7 @@ fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObje
 /// general `ParentTarget` referent, but later "that player's" instructions may
 /// still identify the player from the move-time LKI snapshot.
 fn library_move_metadata_context_from_events(
+    state: &GameState,
     events: &[GameEvent],
 ) -> Option<CostPaidObjectSnapshot> {
     let mut moved = events.iter().filter_map(|event| match event {
@@ -2230,10 +2227,11 @@ fn library_move_metadata_context_from_events(
             from: Some(from_zone),
             to: Zone::Library,
             record,
-        } if is_public_zone(*from_zone) => Some(CostPaidObjectSnapshot {
-            object_id: *object_id,
-            lki: lki_snapshot_from_zone_change_record(record),
-        }),
+        } if is_public_zone(*from_zone) => Some(CostPaidObjectSnapshot::capture_departed(
+            state,
+            *object_id,
+            lki_snapshot_from_zone_change_record(record),
+        )),
         _ => None,
     });
     let first = moved.next()?;
@@ -2248,15 +2246,10 @@ fn stack_pushed_object_context_from_events(
     events: &[GameEvent],
 ) -> Option<CostPaidObjectSnapshot> {
     let mut pushed = events.iter().filter_map(|event| match event {
-        GameEvent::StackPushed { object_id } => {
-            state
-                .objects
-                .get(object_id)
-                .map(|obj| CostPaidObjectSnapshot {
-                    object_id: *object_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                })
-        }
+        GameEvent::StackPushed { object_id } => state
+            .objects
+            .get(object_id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())),
         _ => None,
     });
     let first = pushed.next()?;
@@ -2284,10 +2277,7 @@ fn revealed_object_context_from_events(
         return None;
     };
     let obj = state.objects.get(card_id)?;
-    let snapshot = CostPaidObjectSnapshot {
-        object_id: *card_id,
-        lki: obj.snapshot_for_mana_spent(),
-    };
+    let snapshot = CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent());
     // Second `CardsRevealed` event → ambiguous "it" → no referent.
     revealed.next().is_none().then_some(snapshot)
 }
@@ -10910,10 +10900,11 @@ fn stamp_discovered_referent_onto_continuation(state: &mut GameState) {
         } => *hit_card,
         _ => return,
     };
-    let Some(snapshot) = state.objects.get(&hit).map(|obj| CostPaidObjectSnapshot {
-        object_id: hit,
-        lki: obj.snapshot_public_characteristics(),
-    }) else {
+    let Some(snapshot) = state
+        .objects
+        .get(&hit)
+        .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics()))
+    else {
         return;
     };
     if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -11378,10 +11369,10 @@ fn resolve_chain_body(
                 .copied()
                 .find(|id| state.objects.get(id).map(|obj| obj.owner) == Some(*pid));
             let own_snapshot = own_id.and_then(|id| {
-                state.objects.get(&id).map(|obj| CostPaidObjectSnapshot {
-                    object_id: id,
-                    lki: obj.snapshot_for_mana_spent(),
-                })
+                state
+                    .objects
+                    .get(&id)
+                    .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
             });
             let mut sub = sub_template.as_ref().clone();
             // The directed life loss reads the `Player` target; the put reads the
@@ -12736,10 +12727,10 @@ fn resolve_chain_body(
                             *target = TargetFilter::SpecificObject { id: legal[0] };
                             if let Some(object) = state.objects.get(&legal[0]) {
                                 bound.set_effect_context_object_recursive(
-                                    crate::types::ability::CostPaidObjectSnapshot {
-                                        object_id: legal[0],
-                                        lki: object.snapshot_for_mana_spent(),
-                                    },
+                                    crate::types::ability::CostPaidObjectSnapshot::capture(
+                                        object,
+                                        object.snapshot_for_mana_spent(),
+                                    ),
                                 );
                             }
                         } else {
@@ -13435,7 +13426,7 @@ fn resolve_chain_body(
                     effect_refs_parent_target_metadata(&sub.effect)
                         && !effect_requires_parent_target_object(&sub.effect)
                 })
-                .then(|| library_move_metadata_context_from_events(effect_events))
+                .then(|| library_move_metadata_context_from_events(state, effect_events))
                 .flatten()
         });
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
@@ -15708,8 +15699,7 @@ pub(crate) fn evaluate_condition(
             if let Some(snapshot) = &ability.cost_paid_object {
                 crate::game::filter::matches_target_filter_on_cost_paid_reference(
                     state,
-                    snapshot.object_id,
-                    &snapshot.lki,
+                    snapshot,
                     filter,
                     &crate::game::filter::FilterContext::from_ability(ability),
                 )

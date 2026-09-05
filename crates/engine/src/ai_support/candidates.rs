@@ -4324,7 +4324,15 @@ pub(crate) fn priority_actions_with_probe(
         // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
         for &obj_id in &state.players[player.0 as usize].hand {
             if let Some(obj) = state.objects.get(&obj_id) {
-                if obj.controller == player {
+                // CR 108.4 + CR 108.4a: a card in a hand represents neither a
+                // permanent nor a spell, so it has no controller — "if anything
+                // asks for the controller of a card that doesn't have one, use
+                // its owner instead". `obj.controller` is NOT cleared by every
+                // zone change (only a battlefield exit reverts it), so scoping a
+                // hand scan by `controller` asks for a value the rules say does
+                // not exist. Owner is the rule and it is also what this
+                // owner-keyed hand list already means.
+                if obj.owner == player {
                     for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
                             && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
@@ -4359,10 +4367,18 @@ pub(crate) fn priority_actions_with_probe(
         // suppressed by split second, mirroring the hand-zone loop above.
         for &obj_id in &state.players[player.0 as usize].graveyard {
             if let Some(obj) = state.objects.get(&obj_id) {
-                // CR 602.2a: "Only an object's controller (or its owner, if it
-                // doesn't have a controller) can activate its activated
-                // ability." Restrict candidates to the acting player.
-                if obj.controller == player {
+                // CR 602.2: "Only an object's controller (or its owner, if it
+                // doesn't have a controller) can activate its activated ability
+                // unless the object specifically says otherwise." Nothing in a
+                // graveyard says otherwise here, so the restriction stands;
+                // `analysis/resource.rs` is where that exception is honored, via
+                // `activator_filter`. Restrict candidates to the acting player.
+                // CR 108.4 +
+                // CR 108.4a supply that owner fallback: a card in a graveyard is
+                // not a permanent or spell, so it has no controller, and CR 404.1
+                // puts it into its OWNER's graveyard. Owner is therefore the
+                // rules-correct scope for the flashback / unearth / escape class.
+                if obj.owner == player {
                     for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
                             && ability_def.activation_zone
@@ -4397,7 +4413,9 @@ pub(crate) fn priority_actions_with_probe(
     // block above.
     for &obj_id in &state.players[player.0 as usize].hand {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            // CR 108.4 + CR 108.4a: owner fallback for a card with no
+            // controller, mirroring the non-mana hand loop above.
+            if obj.owner == player {
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
                     if ability_def.kind == crate::types::ability::AbilityKind::Activated
                         && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
@@ -4428,10 +4446,11 @@ pub(crate) fn priority_actions_with_probe(
     // "{1}, Exile this card from your graveyard: Add one mana of any color")
     // remain legal under split second because they are mana abilities, so this
     // loop lives outside the split-second-gated block — mirroring the hand-zone
-    // mana loop above. CR 602.2a: only the object's controller can activate it.
+    // mana loop above. CR 602.2: only the object's controller — or its owner,
+    // when it has none (CR 108.4 + CR 108.4a) — can activate it.
     for &obj_id in &state.players[player.0 as usize].graveyard {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            if obj.owner == player {
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
                     if ability_def.kind == crate::types::ability::AbilityKind::Activated
                         && ability_def.activation_zone == Some(crate::types::zones::Zone::Graveyard)

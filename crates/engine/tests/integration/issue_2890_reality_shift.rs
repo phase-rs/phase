@@ -162,6 +162,7 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
             is_suspected: false,
             attachments: Vec::new(),
         },
+        incarnation: 0,
     });
 
     let mut events = Vec::new();

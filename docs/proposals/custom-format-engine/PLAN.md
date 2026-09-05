@@ -1140,8 +1140,8 @@ correct plan for phase 2's four EC-format presets.
   boundary was reached, the pool had already been silently drained at the
   prior intra-phase-group step, with nothing left to burn. Two things
   verified directly this session that the round-2 fix missed:
-  - **Life loss, not damage** (unchanged from round 2, still correct):
-    `docs/MagicCompRules.txt:8278` (obsolete-rules glossary): "unspent mana
+  - **Life loss, not damage** (unchanged from round 2, still correct): the
+    obsolete-rules glossary entry "Mana Burn (Obsolete)": "unspent mana
     caused a player to **lose life**." Damage and life loss are behaviorally
     different in this engine (damage can be prevented/redirected and
     triggers "dealt damage" abilities; life loss does neither).
@@ -1206,11 +1206,11 @@ correct plan for phase 2's four EC-format presets.
      unsynchronized computation point (this resolves the "life loss can
      defer through replacement handling" concern directly).
   Annotate as a pre-M10 rule removed by the M10 update (cite the
-  obsolete-glossary entry `MagicCompRules.txt:8277-8278`). Slightly larger
-  than round 2's estimate (a new `ManaExpiry` variant + its construction-site
-  and clearing-logic wiring, not just a life-loss check at an existing call
-  site) but still small and, critically, reuses a proven pattern rather than
-  adding a new one.
+  obsolete-glossary entry "Mana Burn (Obsolete)"). Slightly larger than round
+  2's estimate (a new `ManaExpiry` variant + its construction-site and
+  clearing-logic wiring, not just a life-loss check at an existing call site)
+  but still small and, critically, reuses a proven pattern rather than adding
+  a new one.
 - **Pre-M10 Wish exile access** (`wish_scope: WishOutsideGameScope`, renamed
   from the placeholder `pre_m10_wish_reaches_exile` bool during round 1 —
   same field, now typed): fully traced in RESEARCH §9. This is a REAL

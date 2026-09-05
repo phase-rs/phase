@@ -1837,6 +1837,70 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             return TargetChoiceTiming::Resolution;
         }
     }
+    // CR 701.10e + CR 115.10a + CR 608.2d: the untyped counter-multiplication
+    // ("double the number of each kind of counter on <recipient>") names its
+    // recipient by DESCRIPTION unless the text uses the literal word "target".
+    // A described recipient is chosen while the effect is applied, so no
+    // cast/trigger-time target slot is built (`ability_utils::
+    // collect_target_slots_inner` is gated on `TargetChoiceTiming::Stack`).
+    //
+    // `!target.is_context_ref()` mirrors the `PutCounter` arm above: a
+    // deterministic anaphor (`SelfRef` / `TriggeringSource` / `ParentTarget`)
+    // resolves automatically regardless of timing, so re-timing it buys nothing
+    // and would only churn behavior. This is deliberately a SEPARATE arm from the
+    // `MultiplyCounter` one below rather than a shared
+    // `is_counter_multiplication()` arm: `MultiplyCounter` has always omitted the
+    // conjunct, and adding it there would flip THIRTY-ONE shipping cards from
+    // `Resolution` to `Stack` for no behavioral gain, across all FOUR anaphor
+    // classes. Census measured over the full generated corpus by the DEFINITION
+    // of the conjunct — every `MultiplyCounter` whose recipient satisfies
+    // `TargetFilter::is_context_ref()`, not a hand-picked list of variants; all
+    // 31 are `Resolution` today. Not measured over the committed test fixture,
+    // which contains only a fraction of them:
+    //   * `SelfRef` (14)          — Primordial Hydra, Level Up, Lily Bowen (Raging
+    //                               Grandma), Voracious Hydra, Solarion, Mossborn
+    //                               Hydra, Dragonsguard Elite, Evolution Vat,
+    //                               Elvish Vatkeeper, Ascendant Acolyte, Big Mother
+    //                               Mouser, Paradox Zone, Sisterhood of Karn,
+    //                               The Millennium Calendar
+    //   * `TriggeringSource` (5)  — Aragorn (Hornburg Hero), Fractal Harness,
+    //                               Byrke (Long Ear of the Law), Seismic Tutelage,
+    //                               Sword of Hours
+    //   * `TrackedSet` (2)        — Biogenic Upgrade, Omnivorous Flytrap
+    //                               ("distribute N +1/+1 counters among … target
+    //                               creatures, then double the number of +1/+1
+    //                               counters on each of THOSE creatures" — the
+    //                               recipient is the distributed-among set, which
+    //                               `is_context_ref()` covers and a variant-name
+    //                               census would miss)
+    //   * `ParentTarget` (10)     — Scythecat Cub, Turtle Van, Fangs of Kalonia,
+    //                               Growth Curve, Invigorating Surge, Sage of the
+    //                               Fang, Sazh Katzroy, Solidarity of Heroes,
+    //                               Study the Classics, Visions of Dominance
+    //                               (chained sub-abilities whose recipient is the
+    //                               PARENT clause's chosen target; a `Stack`-timed
+    //                               `ParentTarget` would ask
+    //                               `collect_target_slots_inner` to build a
+    //                               player-chosen slot for an anaphor with no
+    //                               chooser)
+    // Sibling parity means each variant gets the rule that is right for it, not
+    // that a working arm is retro-fitted. `counter.rs`'s anaphor pin holds all
+    // four classes at `Resolution`; regenerate the census from the corpus rather
+    // than trusting this card list after a parser change.
+    if let Effect::Double {
+        target_kind: crate::types::ability::DoubleTarget::Counters { .. },
+        target,
+    } = &clause_ir.parsed.effect
+    {
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
     if matches!(clause_ir.parsed.effect, Effect::MultiplyCounter { .. }) {
         let lower = clause_ir
             .source
@@ -7433,13 +7497,13 @@ pub(super) fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTa
 pub(super) struct ReturnDestination {
     pub(super) zone: Zone,
     pub(super) transformed: bool,
-    // CR 110.2a: the battlefield-entry control
-    // clause AS WRITTEN — raw syntax, deliberately unbound. A destination
-    // stripper sees only the destination phrase, never the moved object's
-    // filter or the enclosing `ParseContext`, so it cannot resolve a
-    // third-person anaphor ("under their control") without guessing. Binding
-    // happens at the caller via `bind_control_clause`, where both are in scope.
-    // `None` means the effect stated nothing otherwise (CR 110.2's default).
+    // CR 110.2a: the battlefield-entry control clause AS WRITTEN — raw syntax,
+    // deliberately unbound. A destination stripper sees only the destination
+    // phrase, never the moved object's filter or the enclosing `ParseContext`,
+    // so it cannot resolve a third-person anaphor ("under their control")
+    // without guessing. Binding happens at the caller via
+    // `bind_control_clause`, where both are in scope. `None` means the effect
+    // stated nothing otherwise (CR 110.2's default).
     pub(super) control: Option<ControlClausePossessor>,
     // CR 614.1: "tapped" — enters the battlefield tapped.
     pub(super) enter_tapped: bool,
@@ -7553,19 +7617,18 @@ pub(super) fn strip_return_destination_ext_with_remainder(
     text: &str,
 ) -> (&str, Option<ReturnDestination>, &str) {
     let lower = text.to_lowercase();
-    // Ordered longest-first to avoid partial matches.
-    // "transformed" variants must come before their non-transformed counterparts.
-    // Tuples: (phrase, zone, transformed, control, enter_tapped, enters_attacking)
-    // CR 110.2a: the `control` column is the
-    // parser-table carrier for whatever control clause the row's phrase already
-    // spells out — `Some(You)` for "under your control", `Some(Owner)` for every
-    // "under <its|their|his|her> owner('s|s') control" spelling (CR 110.2,
+    // Ordered longest-first to avoid partial matches. "transformed" variants must
+    // come before their non-transformed counterparts. Tuples: (phrase, zone,
+    // transformed, control, enter_tapped, enters_attacking) CR 110.2a: the `control`
+    // column is the parser-table carrier for whatever control clause the row's phrase
+    // already spells out — `Some(You)` for "under your control", `Some(Owner)` for
+    // every "under <its|their|his|her> owner('s|s') control" spelling (CR 110.2,
     // which restates the default rather than overriding it), `None` otherwise.
-    // Non-battlefield rows are always `None`: CR 110.1 gives a controller
-    // only to permanents. Rows whose phrase carries no clause fall through to the
+    // Non-battlefield rows are always `None`: CR 110.1 gives a controller only to
+    // permanents. Rows whose phrase carries no clause fall through to the
     // `parse_leading_control_clause` pass below, which picks up the third-person
-    // forms the table never enumerated.
-    // Ordered longest-first; compound patterns must precede their shorter substrings.
+    // forms the table never enumerated. Ordered longest-first; compound patterns must
+    // precede their shorter substrings.
     let patterns: &[ReturnDestinationPattern] = &[
         // Tapped + transformed + owner's control (compound, longest)
         (
@@ -7865,13 +7928,13 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             // exactly as the pre-existing `pos + phrase_len` indexing already
             // assumes.
             let mut entry_offset = pos + phrase_len;
-            // CR 110.2a: one control-clause
-            // authority, two possible positions — inside the matched table
-            // phrase, or trailing it. Declared OUTSIDE the battlefield block
-            // because it is read at the `ReturnDestination` construction below,
-            // which EVERY row reaches (including the hand/graveyard/command
-            // rows, whose `control` is always `None` per CR 110.1).
-            // `*row_control` is a `Copy` read out of the `&'static` table row.
+            // CR 110.2a: one control-clause authority, two possible positions —
+            // inside the matched table phrase, or trailing it. Declared OUTSIDE
+            // the battlefield block because it is read at the
+            // `ReturnDestination` construction below, which EVERY row reaches
+            // (including the hand/graveyard/command rows, whose `control` is
+            // always `None` per CR 110.1). `*row_control` is a `Copy` read out
+            // of the `&'static` table row.
             let mut control: Option<ControlClausePossessor> = *row_control;
             // CR 122.6: putting counters on an object includes giving
             // counters to it as it enters the battlefield. Battlefield-entry
@@ -8001,13 +8064,13 @@ fn parse_leading_battlefield_return_destination(
         value((false, false, false), tag("")),
     ))
     .parse(input)?;
-    // CR 110.2a: parse the control clause (or its
-    // absence) as raw syntax. The four hand-picked literal arms this replaces
-    // recognized only "under your control", "under their owners' control" and
-    // "under its owner's control"; the singular "under their/his/her owner's
-    // control" spellings fell through to the empty arm and their residue leaked
-    // into the TARGET text. The shared combinator recognizes every printed
-    // owner spelling plus the third-person forms.
+    // CR 110.2a: parse the control clause (or its absence) as raw syntax. The
+    // four hand-picked literal arms this replaces recognized only "under your
+    // control", "under their owners' control" and "under its owner's control";
+    // the singular "under their/his/her owner's control" spellings fell through
+    // to the empty arm and their residue leaked into the TARGET text. The
+    // shared combinator recognizes every printed owner spelling plus the
+    // third-person forms.
     let (input, control) = opt(parse_leading_control_clause).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
     Ok((
@@ -12797,14 +12860,13 @@ mod tests {
         ));
     }
 
-    /// CR 122.6 + CR 110.2a + issue #1498: a counter clause with
-    /// no `" on it"` filler must lift its counters onto `enter_with_counters`,
-    /// and — the discriminating half — whatever is printed AFTER it must survive
-    /// and reach the normal entry-clause path rather than being truncated away.
-    /// Here the trailing "under its owner's control" must land on
-    /// `dest.control`; under the old start-offset truncation it was discarded
-    /// outright, so `control` came back `None` and this test fails if that
-    /// behavior returns.
+    /// CR 122.6 + CR 110.2a + issue #1498: a counter clause with no `" on it"`
+    /// filler must lift its counters onto `enter_with_counters`, and — the
+    /// discriminating half — whatever is printed AFTER it must survive and reach
+    /// the normal entry-clause path rather than being truncated away. Here the
+    /// trailing "under its owner's control" must land on `dest.control`; under
+    /// the old start-offset truncation it was discarded outright, so `control`
+    /// came back `None` and this test fails if that behavior returns.
     ///
     /// SYNTHETIC INPUT — not a printed card. This text was once attributed to
     /// Unstoppable Slasher; that attribution was fabricated. The real card reads
@@ -12843,12 +12905,12 @@ mod tests {
         );
     }
 
-    /// CR 725.1 + CR 608.2c + CR 122.1: Heart-Shaped
-    /// Herb. An instruction printed after the counter clause is NOT part of the
-    /// destination and must be handed back as the remainder for normal clause
-    /// processing. This is the unit-level discriminator for the bug the PR
-    /// fixes: the old start-offset truncation returned "" here, so the monarch
-    /// instruction never reached a dispatcher.
+    /// CR 725.1 + CR 608.2c + CR 122.1: Heart-Shaped Herb. An instruction
+    /// printed after the counter clause is NOT part of the destination and must
+    /// be handed back as the remainder for normal clause processing. This is
+    /// the unit-level discriminator for the bug the PR fixes: the old
+    /// start-offset truncation returned "" here, so the monarch instruction
+    /// never reached a dispatcher.
     ///
     /// The full-sentence form is split upstream by `starts_bare_and_clause`
     /// (sequence.rs) before this function sees it; this test pins the seam

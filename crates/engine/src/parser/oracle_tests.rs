@@ -1788,6 +1788,64 @@ fn parse(
     parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
 }
 
+/// The complete Sentry ETB must retain the token's inline keywords and quoted
+/// self-referential attack requirement instead of silently stopping at Flying.
+#[test]
+fn the_sentry_golden_guardian_token_payload_parses_without_dropping_suffixes() {
+    const ORACLE: &str = "Flying, vigilance, indestructible\nWhen The Sentry enters, target opponent creates The Void, a legendary 5/5 black Horror Villain creature token with flying, indestructible, and \"The Void attacks each combat if able.\"";
+
+    let parsed = parse(
+        ORACLE,
+        "The Sentry, Golden Guardian",
+        &[Keyword::Flying, Keyword::Vigilance, Keyword::Indestructible],
+        &["Creature"],
+        &["Human", "Hero"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "The Sentry must parse with no Unimplemented effects: {parsed:#?}"
+    );
+
+    let etb = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger.mode == TriggerMode::ChangesZone
+                && trigger.destination == Some(Zone::Battlefield)
+        })
+        .expect("The Sentry enter-the-battlefield trigger");
+    let execute = etb.execute.as_deref().expect("The Sentry ETB execute");
+    let Effect::Token {
+        name,
+        owner,
+        keywords,
+        static_abilities,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected Effect::Token, got {:?}", execute.effect);
+    };
+
+    assert_eq!(name, "The Void");
+    assert_eq!(
+        keywords,
+        &[Keyword::Flying, Keyword::Indestructible],
+        "the token's inline Flying and Indestructible must survive parsing"
+    );
+    assert_eq!(
+        owner,
+        &TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        "the targeted opponent must create the token"
+    );
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(static_abilities[0].mode, StaticMode::MustAttack);
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::SelfRef),
+        "the quoted The Void self-reference must be preserved as MustAttack"
+    );
+}
+
 /// CR 506.3 + CR 508.1d + CR 611.2c + CR 615: Gideon Jura (verbatim MTGJSON
 /// Oracle text) parses all three loyalty abilities with zero residual
 /// `Unimplemented`, and each lands on the exact shape its rules text requires.

@@ -303,12 +303,12 @@ pub(crate) fn cost_is_material(
 /// **KNOWN MISPRICING on the `SelfRef` branch when the source is a land.**
 /// `sacrifice_cost` charges `sacrifice_land_penalty`, whose stated rationale is
 /// CR 305.2's one-land-per-turn rate limit on the replacement drop. CR 305.4
-/// refutes that for a fetchland: "Effects may
-/// also allow players to 'put' lands onto the battlefield. This isn't the same
-/// as 'playing a land' and doesn't count as a land played during the current
-/// turn." A fetchland puts its replacement onto the battlefield, so it consumes
-/// no land drop and is close to manabase-neutral — yet this path prices it as a
-/// full land lost, and the AI under-activates it.
+/// refutes that for a fetchland: "Effects may also allow players to 'put' lands
+/// onto the battlefield. This isn't the same as 'playing a land' and doesn't
+/// count as a land played during the current turn." A fetchland puts its
+/// replacement onto the battlefield, so it consumes no land drop and is close
+/// to manabase-neutral — yet this path prices it as a full land lost, and the
+/// AI under-activates it.
 ///
 /// Not corrected here, but the correction is **cheap and the parts already
 /// exist** — this is a scoping decision, not a research problem. The discount

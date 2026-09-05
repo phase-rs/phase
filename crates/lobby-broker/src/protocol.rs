@@ -43,6 +43,27 @@ pub enum ServerErrorCode {
 ///      to attach that socket to the same Full-session lifetime, and Full
 ///      follow-up frames carry the identity needed to reject stale-generation
 ///      traffic. Lobby messages are unchanged.
+/// 64 — Retroactive bump for two new-tag changes that landed under 62/63
+///      WITHOUT their own bump. Both are one-way parse breaks by the rule
+///      entries 46, 51 and 62 state ("no serde default can rescue an unknown
+///      variant"), so the exact-match full-game handshake must refuse the
+///      pairing rather than admit it and fail mid-game:
+///      (a) #8501 added `Effect::OpenBoosterPack`, plus the `BoosterPack`
+///          variants of `OutsideGameChoiceSource` and `OutsideGameSelection`.
+///          Both enums are `#[serde(tag = "type", content = "data")]`, so the
+///          new arms emit TAG VALUES no older peer has a case for, and they
+///          ride `GameState.waiting_for` and `GameAction`.
+///      (b) #8332 added `slots` + `slot_pools` to `WaitingFor::RetargetChoice`
+///          and `controller` to `StackEntryDisplay`. These carry
+///          `#[serde(default)]`, so an old peer decodes and then MISRENDERS —
+///          `RetargetChoiceModal.tsx` indexes `slot_pools`, whose `??` guards
+///          an undefined element rather than an undefined array, so an old
+///          host paired with a new guest throws during render.
+///      No wire shape changes in THIS bump; it exists so the handshake stops
+///      admitting the skew those two PRs opened. `check-protocol-version.mjs`
+///      could not have caught either one: it enforces that the Rust and TS
+///      constants AGREE, not that they were INCREMENTED, and both PRs kept
+///      them agreeing at the wrong value. Lobby messages are unchanged.
 /// 63 — `WaitingFor::ReplacementChoice` gained an engine-owned
 ///      `ReplacementChoiceKind` discriminator and a `last_applied_decides`
 ///      flag. Both are `#[serde(default)]`, so a v62 peer decodes the payload

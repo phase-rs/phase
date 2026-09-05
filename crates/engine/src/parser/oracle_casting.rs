@@ -344,11 +344,11 @@ fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
     Some(option)
 }
 
-/// CR 118.9: "Some spells have alternative costs.
-/// An alternative cost is a cost listed in a spell's text, or applied to it from another
-/// effect, that its controller may pay rather than paying the spell's mana cost. Alternative
-/// costs are usually phrased, 'You may [action] rather than pay [this object's] mana cost,'
-/// or 'You may cast [this object] without paying its mana cost.'"
+/// CR 118.9: "Some spells have alternative costs. An alternative cost is a cost listed in a
+/// spell's text, or applied to it from another effect, that its controller may pay rather
+/// than paying the spell's mana cost. Alternative costs are usually phrased, 'You may
+/// [action] rather than pay [this object's] mana cost,' or 'You may cast [this object]
+/// without paying its mana cost.'"
 ///
 /// Parses both forms. The `"you may [verb-cost] rather than pay this spell's mana cost"`
 /// form is verb-agnostic: the cost text (with verb intact) is delegated to `parse_oracle_cost`,

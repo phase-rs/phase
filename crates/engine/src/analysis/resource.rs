@@ -608,7 +608,7 @@ pub struct PeriodicDelta {
     /// The whole-game resource change across one repetition, measured from the very
     /// frame pair that certified it.
     pub delta: ResourceVector,
-    /// CR 704.5a: per ANNOUNCED target slot, the life magnitude one repetition charges
+    /// CR 119.3: per ANNOUNCED target slot, the life magnitude one repetition charges
     /// to whichever player that slot's declaration names. EMPTY for the untargeted class,
     /// where the victims are already visible in `delta.life`.
     ///
@@ -616,7 +616,7 @@ pub struct PeriodicDelta {
     /// CR 732.2a withholds a decision point for an announcement the PROPOSER does not make
     /// (`game::engine::TargetAnnouncement::NotProposerChoice` — its own doc enumerates the
     /// three routes: a single legal assignment, a CR 601.2c `target_chooser` seated on another
-    /// player, or a non-`Chosen` `TargetSelectionMode`), but CR 704.5a charges that victim all
+    /// player, or a non-`Chosen` `TargetSelectionMode`), but CR 119.3 charges that victim all
     /// the same. A slot present here with no matching `ShortcutDecisionSchema` point is
     /// therefore CORRECT and expected, not a schema/certificate mismatch. Deriving this from
     /// the published points instead let the withhold silently raise the bound.
@@ -1027,7 +1027,7 @@ impl ResourceVector {
             .collect()
     }
 
-    /// CR 704.5a: the per-period life loss ONE published pin slot may charge to whichever
+    /// CR 119.3: the per-period life loss ONE published pin slot may charge to whichever
     /// seat its declaration names — the `slot_magnitude` term
     /// [`ResourceVector::elimination_bounds`] divides the headroom by.
     ///
@@ -1067,7 +1067,7 @@ impl ResourceVector {
         let cap = crate::game::engine::MAX_SHORTCUT_CYCLES as i64;
         // ANNOUNCED, NOT PUBLISHED: `declarable_victims` is the union of the ANNOUNCED target
         // slots' legal player targets (EMPTY for the untargeted class). CR 732.2a withholds a
-        // decision point when the announcement is FORCED, but CR 704.5a charges that victim
+        // decision point when the announcement is FORCED, but CR 119.3 charges that victim
         // regardless of who chose it, so feeding this the PUBLISHED point set drops a forced
         // victim into the `else` arm below and RAISES the bound.
         //
@@ -1106,11 +1106,10 @@ impl ResourceVector {
             if p.is_eliminated {
                 continue;
             }
-            // CR 704.5a (a player at 0 or less life loses): a negative life delta is the
-            // per-period loss.
+            // CR 119.3: a negative life delta is the per-period loss.
             let observed_life_loss = -self.life.get(&p.id).copied().unwrap_or(0);
             let life_magnitude = if declarable_victims.contains(&p.id) {
-                // CR 704.5a + CR 732.2a: the observed per-period loss and the declared slot
+                // CR 119.3 + CR 732.2a: the observed per-period loss and the declared slot
                 // magnitude combine ADDITIVELY, observed term floored at zero. `max` is
                 // correct only if every non-proposer loss in the measured period is
                 // attributable to a published slot, and this signature carries no per-slot
@@ -5112,7 +5111,7 @@ fn prop_is_arrival_invariant(prop: &crate::types::ability::FilterProp) -> bool {
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -9635,7 +9634,7 @@ mod tests {
         }
     }
 
-    /// CR 704.5a — **WITHHOLDING A FORCED ANNOUNCEMENT FROM THE SCHEMA DOES NOT UNCHARGE ITS
+    /// CR 119.3 — **WITHHOLDING A FORCED ANNOUNCEMENT FROM THE SCHEMA DOES NOT UNCHARGE ITS
     /// VICTIM: the bound is the SAME whether or not the point is published.**
     ///
     /// The sibling row above asserts the CR 732.2a WITHHOLD (a forced announcement is not a
@@ -9788,7 +9787,7 @@ mod tests {
             assert_eq!(
                 forced_victims,
                 vec![PlayerId(1)],
-                "{label}: CR 704.5a — the WITHHELD announcement still charges the one seat \
+                "{label}: CR 119.3 — the WITHHELD announcement still charges the one seat \
                  its legal set names, and only that seat"
             );
             assert_eq!(
@@ -9827,7 +9826,7 @@ mod tests {
         }
     }
 
-    /// CR 704.5a + CR 732.2a — **a slot ANNOUNCED TWICE in one window is charged the UNION of
+    /// CR 119.3 + CR 732.2a — **a slot ANNOUNCED TWICE in one window is charged the UNION of
     /// its legal sets, not the first frame's.**
     ///
     /// The two mints agree on WHICH entries the cycle accepts (both read `entry_announces`)
@@ -10020,7 +10019,7 @@ mod tests {
         assert_eq!(
             charged[0].1,
             vec![PlayerId(1), PlayerId(2)],
-            "CR 704.5a: a repeated slot charges the UNION of its announcements' legal player \
+            "CR 119.3: a repeated slot charges the UNION of its announcements' legal player \
              sets. First-wins reads [P1] here, so the schema would offer a P2 pin that \
              `elimination_bounds` never charges and `max_iterations` would GROW"
         );
@@ -10072,7 +10071,7 @@ mod tests {
     ///   so a mint that published nothing fails there.
     /// * *withhold by legal-set size* — arm (a1)/(b) have TWO legal opponents and are still
     ///   withheld; arm (c) has the same two and publishes. Size cannot separate them.
-    /// * *withhold, and also stop charging* — every arm asserts the CR 704.5a charge survives
+    /// * *withhold, and also stop charging* — every arm asserts the CR 119.3 charge survives
     ///   with the full legal player set, which is the half `elimination_bounds` reads.
     /// * *key the chooser on presence rather than on the SEAT* — not discriminated here and
     ///   deliberately so: `collect_target_slots` already drops a chooser equal to the
@@ -10165,7 +10164,7 @@ mod tests {
                 .map(|(_, seats)| seats)
                 .collect::<Vec<_>>(),
             vec![vec![PlayerId(1), PlayerId(2)]],
-            "CR 704.5a: withheld is not uncharged — whoever announces it, the named seat \
+            "CR 119.3: withheld is not uncharged — whoever announces it, the named seat \
              loses the life"
         );
 
@@ -10197,7 +10196,7 @@ mod tests {
                 .map(|(_, seats)| seats)
                 .collect::<Vec<_>>(),
             vec![vec![PlayerId(1)]],
-            "CR 704.5a: still charged, and only the one seat its legal set names"
+            "CR 119.3: still charged, and only the one seat its legal set names"
         );
 
         // ── (b) CR 115.1 overridden: the GAME selects, so nobody is prompted ─────────────
@@ -10232,11 +10231,11 @@ mod tests {
                 .map(|(_, seats)| seats)
                 .collect::<Vec<_>>(),
             vec![vec![PlayerId(1), PlayerId(2)]],
-            "CR 704.5a: the RNG names one of these seats and it loses the life"
+            "CR 119.3: the RNG names one of these seats and it loses the life"
         );
     }
 
-    /// CR 704.5a + CR 732.2a — **the same fix at the PRODUCTION OFFER, on a board that
+    /// CR 119.3 + CR 732.2a — **the same fix at the PRODUCTION OFFER, on a board that
     /// publishes NO decision point at all.**
     ///
     /// [`a_withheld_forced_announcement_is_charged_like_a_published_one`] drives step (7)'s
@@ -10343,7 +10342,7 @@ mod tests {
                 .map(|(_, m)| *m)
                 .collect::<Vec<_>>(),
             vec![2],
-            "CR 704.5a: the forced announcement is CHARGED even though CR 732.2a published no \
+            "CR 119.3: the forced announcement is CHARGED even though CR 732.2a published no \
              point for it — the combination that was unreachable before, because both \
              derivations read the published list; got {:?}",
             per_cycle.victim_slot
@@ -14837,7 +14836,7 @@ mod tests {
             .collect()
     }
 
-    /// CR 704.5a: the MAX-vs-SUM fork in `victim_slot`'s magnitude
+    /// CR 119.3: the MAX-vs-SUM fork in `victim_slot`'s magnitude
     /// derivation, whose wrong answer surfaces in playtesting as a wrong elimination bound
     /// rather than as a failure.
     ///
@@ -14899,7 +14898,7 @@ mod tests {
         // (i) UPPER BOUND — kills `first`, `last`, `min`, and any non-largest per-seat pick.
         assert!(
             v.life.values().all(|&n| (-n).max(0) <= m),
-            "CR 704.5a: a slot aimed at ANY one seat must be charged at least what that seat \
+            "CR 119.3: a slot aimed at ANY one seat must be charged at least what that seat \
              loses per period, else the bound overstates the legal repetition count and the \
              drive can cross a threshold inside the proposal. m = {m}, losses = {losses:?}"
         );

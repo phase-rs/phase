@@ -838,19 +838,19 @@ fn default_lethality_tapout_penalty() -> f64 {
 /// rather than by this gap, which a CMA-ES run could close at any time; this
 /// number is a within-class weight.
 ///
-/// **CR 305.4 — the rate-limit rationale above is FALSE on one of this
-/// penalty's call sites, and that is a known mispricing, not an oversight.**
-/// CR 305.4: "Effects may also allow players to
-/// 'put' lands onto the battlefield. This isn't the same as 'playing a land' and
-/// doesn't count as a land played during the current turn." A fetchland *puts*
-/// its replacement onto the battlefield, so sacrificing it consumes no land
-/// drop and the CR 305.2 rationale does not apply. `self_cost::sacrifice_leaf_cost`
-/// short-circuits on `TargetFilter::SelfRef` and charges this full penalty to a
-/// land that sacrifices itself, so the AI under-activates fetchland-shaped
-/// abilities. Discounting that path is an unmeasured behaviour change and is
-/// deferred, NOT blocked on missing infrastructure: `policies::fetch_land_patience`
-/// (which cites CR 305.4 for the same reason) already carries the predicates —
-/// see the note at `self_cost::sacrifice_leaf_cost`.
+/// **CR 305.4 — the rate-limit rationale above is FALSE on one of this penalty's
+/// call sites, and that is a known mispricing, not an oversight.** CR 305.4:
+/// "Effects may also allow players to 'put' lands onto the battlefield. This isn't
+/// the same as 'playing a land' and doesn't count as a land played during the
+/// current turn." A fetchland *puts* its replacement onto the battlefield, so
+/// sacrificing it consumes no land drop and the CR 305.2 rationale does not apply.
+/// `self_cost::sacrifice_leaf_cost` short-circuits on `TargetFilter::SelfRef` and
+/// charges this full penalty to a land that sacrifices itself, so the AI
+/// under-activates fetchland-shaped abilities. Discounting that path is an
+/// unmeasured behaviour change and is deferred, NOT blocked on missing
+/// infrastructure: `policies::fetch_land_patience` (which cites CR 305.4 for the
+/// same reason) already carries the predicates — see the note at
+/// `self_cost::sacrifice_leaf_cost`.
 fn default_sacrifice_land_penalty() -> f64 {
     4.5
 }

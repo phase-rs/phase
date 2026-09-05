@@ -23112,12 +23112,12 @@ fn cant_be_activated_effect_standalone_targets_creature() {
             duration,
             end_cost: _,
         } => {
-            // CR 611.2a: this sentence states NO
-            // window of its own, so the AST must say so. The recognizer used to
-            // inject `Some(UntilEndOfTurn)` here, indistinguishable from a printed
-            // window, which blocked an enclosing sentence's duration from reaching
-            // the clause — Dovin Baan, Edifice of Authority and Mythos of Vadrok each
-            // print "until your next turn" and had this prohibition end a turn early.
+            // CR 611.2a: this sentence states NO window of its own, so the AST must
+            // say so. The recognizer used to inject `Some(UntilEndOfTurn)` here,
+            // indistinguishable from a printed window, which blocked an enclosing
+            // sentence's duration from reaching the clause — Dovin Baan, Edifice of
+            // Authority and Mythos of Vadrok each print "until your next turn" and
+            // had this prohibition end a turn early.
             //
             // RUNTIME IS UNCHANGED for this standalone form: both carriers are now
             // `None`, and `game/effects/effect.rs` resolves
@@ -34247,9 +34247,8 @@ fn suffix_condition_with_otherwise_integration() {
 
 // --- CR 110.2a controller-override binding (#6691) ---
 
-/// CR 110.2a + CR 400.1 + CR 400.3 +
-/// CR 404.1 + CR 108.3: Jailbreak's
-/// "under their control" binds to the moved card's OWNER, because a card in an
+/// CR 110.2a + CR 400.1 + CR 400.3 + CR 404.1 + CR 108.3: Jailbreak's "under
+/// their control" binds to the moved card's OWNER, because a card in an
 /// opponent's graveyard is in ITS OWNER's graveyard.
 ///
 /// REVERT-FAILING ASSERTION: `enters_under == Some(ParentTargetOwner)`. Before
@@ -34328,9 +34327,9 @@ fn under_your_control_still_binds_to_you_after_the_collapse() {
     }
 }
 
-/// CR 110.2: owner forms use the existing
-/// per-moved-object-owner carrier (`None`), rather than a player override, and
-/// specifically must not be misread as the third-person `TheirAnaphor` (B3).
+/// CR 110.2: owner forms use the existing per-moved-object-owner carrier
+/// (`None`), rather than a player override, and specifically must not be
+/// misread as the third-person `TheirAnaphor` (B3).
 #[test]
 fn owner_forms_still_produce_no_controller_override() {
     for text in [
@@ -34530,10 +34529,9 @@ fn return_destination_tapped() {
 fn return_destination_owners_control_not_under_your_control() {
     let (_, dest) = strip_return_destination_ext("it to the battlefield under its owner's control");
     let d = dest.expect("should parse destination");
-    // CR 110.2: the owner form is RECOGNIZED as a
-    // clause but restates the default, so binding it yields
-    // `EntersUnderSpec::Default` — never a controller override, and never the
-    // third-person `TheirAnaphor`.
+    // CR 110.2: the owner form is RECOGNIZED as a clause but restates the
+    // default, so binding it yields `EntersUnderSpec::Default` — never a
+    // controller override, and never the third-person `TheirAnaphor`.
     assert_eq!(d.control, Some(ControlClausePossessor::Owner));
     assert_eq!(
         bind_control_clause(d.control, ControlAnaphorAntecedent::Unnameable),
@@ -58915,7 +58913,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
