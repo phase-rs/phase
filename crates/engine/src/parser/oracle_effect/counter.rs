@@ -1448,15 +1448,25 @@ fn counter_recipient_is_resolvable(target: &TargetFilter) -> bool {
 /// only, so a zone-qualified recipient ("each creature in your graveyard")
 /// resolves to nothing there. Refuse it at the parser so the clause stays an
 /// honest `Effect::unimplemented` instead of lowering to an effect that silently
-/// does nothing. `None` means the filter imposes no zone constraint — the
-/// battlefield default — and is admissible. The resolver's gate carries the same
-/// conjunct as an independent second guard; widening this to a zone-aware
-/// enumeration must move BOTH.
+/// does nothing. The resolver's gate carries the same conjunct as an independent
+/// second guard; widening this to a zone-aware enumeration must move BOTH.
+///
+/// EVERY written zone is checked, via `population_zones()`, not just the first.
+/// `extract_in_zone()` answers an `Or`/`And` with `find_map`, i.e. the FIRST
+/// leg's zone, so `Or[Typed{…, Battlefield}, Typed{…, Graveyard}]` would report
+/// `Battlefield` and slip past a single-zone check while the resolver silently
+/// dropped the graveyard leg. `population_zones()` is the documented union of
+/// both zone readers and is never narrower than either — it also reports `Stack`
+/// for `StackSpell`/`StackAbility`, which `extract_zones()` alone does not.
+///
+/// An EMPTY list is admissible and is the common case: a filter with no written
+/// zone constraint denotes permanents (CR 110.1), i.e. the battlefield default
+/// this tier already scans.
 fn recipient_zone_is_battlefield(target: &TargetFilter) -> bool {
-    matches!(
-        target.extract_in_zone(),
-        None | Some(crate::types::zones::Zone::Battlefield)
-    )
+    target
+        .population_zones()
+        .iter()
+        .all(|zone| *zone == crate::types::zones::Zone::Battlefield)
 }
 
 /// CR 115.10a + CR 608.2d + CR 701.10e: the single admissibility test both
@@ -2460,6 +2470,51 @@ mod tests {
                 "a zone-qualified recipient must stay honest red, got {effect:?} from {clause:?}"
             );
         }
+
+        // MIXED-ZONE UNION (CR 400.1) — the shape a single-zone check misses.
+        // `extract_in_zone()` answers an `Or` with `find_map`, i.e. the FIRST
+        // leg's zone, so this filter reports `Battlefield` and would slip past a
+        // check written against it while the resolver — which scans the
+        // battlefield only — silently dropped the graveyard leg.
+        // `population_zones()` reports BOTH, so the gate refuses.
+        // The first leg must carry an EXPLICIT battlefield zone: `find_map` returns
+        // the first leg that answers `Some`, so a leg with no zone at all would be
+        // skipped and the graveyard leg found — which the old check DID catch. It
+        // is the battlefield-then-graveyard order that masks.
+        let mixed = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }]),
+                ),
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+            ],
+        };
+        assert_eq!(
+            mixed.extract_in_zone(),
+            Some(Zone::Battlefield),
+            "reach-guard: the single-zone reader reports only the FIRST leg, hiding \
+             the graveyard one — this is the shape a single-zone check misses"
+        );
+        assert!(
+            mixed.population_zones().contains(&Zone::Graveyard),
+            "reach-guard: the union really does constrain a leg to the graveyard: {:?}",
+            mixed.population_zones()
+        );
+        assert!(
+            !recipient_zone_is_battlefield(&mixed),
+            "a union with ANY non-battlefield leg must be refused, or the resolver \
+             silently drops that leg"
+        );
 
         // PAIRED POSITIVE: the same phrase WITHOUT the zone qualifier is admitted,
         // so the refusal is the zone conjunct alone.

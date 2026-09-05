@@ -2073,10 +2073,18 @@ pub(super) fn nontargeted_counter_population_ids(
         || !target.names_enumerable_population()
         // CR 400.1: this enumeration is the BATTLEFIELD only (see ZONE SCOPE
         // above), so a zone-qualified recipient must not be answered with a
-        // battlefield population. `None` = no zone constraint = the battlefield
-        // default. `counter.rs`'s `recipient_zone_is_battlefield` is the parser
-        // half of this guard.
-        || !matches!(target.extract_in_zone(), None | Some(Zone::Battlefield))
+        // battlefield population. EVERY written zone is checked, not just the
+        // first: `extract_in_zone()` answers an `Or` with its FIRST leg's zone,
+        // so a battlefield-then-graveyard union would slip past a single-zone
+        // check while this scan silently dropped the graveyard leg.
+        // `population_zones()` is the union of both zone readers and is never
+        // narrower than either. An EMPTY list means no written constraint — the
+        // battlefield default (CR 110.1) — and is admissible.
+        // `counter.rs`'s `recipient_zone_is_battlefield` is the parser half.
+        || !target
+            .population_zones()
+            .iter()
+            .all(|zone| *zone == Zone::Battlefield)
     {
         return None;
     }
