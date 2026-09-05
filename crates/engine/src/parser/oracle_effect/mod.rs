@@ -18987,11 +18987,13 @@ fn try_parse_compound_object_player_damage(
         .parse(after_player)
         .ok()?;
 
-    // CR 109.5: Reject qualified player phrases. Only accept clause-boundary
-    // characters (whitespace + punctuation) or end-of-string after "each player".
-    // " who", " equal", " that", " whose", and similar word continuations indicate
-    // a relative clause that restricts the player set — those cards are not part
-    // of this class.
+    // Parser scope boundary. This class covers the unqualified universal player
+    // scope, so "each player" must be followed by a clause boundary —
+    // punctuation, whitespace, or end-of-string. A word continuation (" who",
+    // " equal", " that", " whose", ...) opens a relative clause that restricts
+    // the player set; those cards belong to a different parser class.
+    // Deliberately unannotated: which text shapes this function accepts is a
+    // property of this parser, and the CR has no rule that governs it.
     if let Some(c) = after_player_tag.chars().next() {
         if !(c.is_ascii_punctuation() || c == ' ') {
             return None;
