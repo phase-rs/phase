@@ -471,6 +471,92 @@ mod tests {
         assert!(!is_pool_sink_activation(&state, &ObjectId(9999), 0));
     }
 
+    /// PRODUCTION PATH. The schedule only matters if it survives the real
+    /// `PolicyRegistry`, where every other policy also scores the candidate —
+    /// asserting `scheduled_x` alone would pass even if the registry then
+    /// picked a different X, which is exactly what happened before the
+    /// off-schedule veto (a graduated penalty was outbid by the search's own
+    /// "bigger creature is better" value).
+    #[test]
+    fn registry_priors_elevate_the_scheduled_x_over_every_other_value() {
+        use crate::context::AiContext;
+        use crate::policies::context::{PriorsEnv, SearchDepth};
+        use crate::policies::registry::PolicyRegistry;
+        use engine::ai_support::AiDecisionContext;
+        use engine::ai_support::{ActionMetadata, CandidateAction, TacticalClass};
+        use engine::types::game_state::PendingCast;
+        use engine::types::identifiers::CardId;
+        use engine::types::mana::{ManaCost, ManaCostShard};
+
+        // Own turn 6 on the play (turn_number 11), so the schedule wants X=6.
+        let mut state = momir_state(P0, 11);
+        let emblem = engine::game::effects::create_emblem::grant_emblem(
+            &mut state,
+            P0,
+            Vec::new(),
+            Vec::new(),
+            vec![momir_emblem_ability()],
+        );
+        assert_eq!(own_turn_index(&state, P0), 6);
+
+        let max = 9;
+        let pending = PendingCast::new(
+            emblem,
+            CardId(0),
+            engine::types::ability::ResolvedAbility::new(
+                *momir_emblem_ability().effect.clone(),
+                Vec::new(),
+                emblem,
+                P0,
+            ),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 0,
+            },
+        );
+        state.waiting_for = WaitingFor::ChooseXValue {
+            player: P0,
+            min: 0,
+            max,
+            pending_cast: Box::new(pending.clone()),
+            convoke_mode: None,
+            x_cost_previews: vec![],
+        };
+
+        let config = crate::config::AiConfig::default();
+        let ai_context = AiContext::empty(&config.weights);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidates: Vec<CandidateAction> = (0..=max)
+            .map(|value| CandidateAction {
+                action: GameAction::ChooseX { value },
+                metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Selection),
+            })
+            .collect();
+
+        let env = PriorsEnv {
+            state: &state,
+            decision: &decision,
+            ai_player: P0,
+            config: &config,
+            context: &ai_context,
+            search_depth: SearchDepth::Lookahead,
+        };
+        let priors = PolicyRegistry::shared().priors(&env, &candidates);
+
+        let best = priors
+            .iter()
+            .max_by(|a, b| a.prior.partial_cmp(&b.prior).expect("finite priors"))
+            .expect("priors for every candidate");
+        assert_eq!(
+            best.candidate.action,
+            GameAction::ChooseX { value: 6 },
+            "the registry must top-rank the scheduled X, not the largest payable one"
+        );
+    }
+
     /// Nothing payable means the once-each-turn activation would buy a
     /// mana-value-0 creature for a card. Measured in a full AI-vs-AI game
     /// before this guard: the AI activated on a turn whose lands were already
