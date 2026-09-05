@@ -18460,6 +18460,7 @@ mod tests {
     ///   * `the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event`
     ///     counts every code-half occurrence in `game/effects/mod.rs` with no
     ///     test exclusion at all.
+    ///
     /// Neither guard was weakened to place this test.
     ///
     /// CR 603.7d fixes the delayed ability's controller as the caster, which is
