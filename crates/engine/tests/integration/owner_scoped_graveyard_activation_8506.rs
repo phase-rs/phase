@@ -42,10 +42,11 @@
 //!       a DESTINATION-keyed reset (`if !matches!(to, Zone::Battlefield |
 //!       Zone::Stack) { controller = base_controller.unwrap_or(owner) }`, cited
 //!       there to CR 109.4 + CR 108.4a).
-//!   An earlier revision of this file said "a spell's caster lives on its
-//!   `StackEntry`, not on the `GameObject`". Post-#8332 that sentence is false
-//!   while the assertion it justified still passes — the exact shape that
-//!   survives a merge unnoticed and gets quoted forward.
+//!
+//! An earlier revision of this file said "a spell's caster lives on its
+//! `StackEntry`, not on the `GameObject`". Post-#8332 that sentence is false
+//! while the assertion it justified still passes — the exact shape that survives
+//! a merge unnoticed and gets quoted forward.
 //!
 //! So the owner scope is not repairing an observable drop today; it states the
 //! rule the owner-keyed zone lists already encode. Two mutations establish that,
