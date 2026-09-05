@@ -1227,6 +1227,29 @@ fn validate_per_defender_attacker_caps(
             ));
         }
     }
+    // CR 508.1c + CR 508.5: defender-PERMANENT-scoped caps
+    // (`MaxAttackersEachCombat { defender: Some(ThisPermanent) }`, e.g. The
+    // Eternal Wanderer's "No more than one creature can attack ~ each
+    // combat"). Each such static limits only creatures attacking the static's
+    // own source object, so the source's controller and every other
+    // player/planeswalker/battle may still be attacked freely.
+    for (protected_permanent, max) in per_permanent_defender_caps(state) {
+        let count = attacks
+            .iter()
+            .filter(|(_, target)| {
+                matches!(
+                    target,
+                    AttackTarget::Planeswalker(id) | AttackTarget::Battle(id)
+                        if *id == protected_permanent
+                )
+            })
+            .count() as u32;
+        if count > max {
+            return Err(format!(
+                "No more than {max} creature(s) can attack {protected_permanent:?} each combat (CR 508.1c)"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1244,6 +1267,34 @@ fn per_defender_caps(state: &GameState) -> Vec<(PlayerId, u32)> {
                 max,
                 defender: Some(AttackDefenderScope::Controller),
             } => Some((source.controller, max)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 508.1c + CR 508.5: The active per-permanent attacker caps
+/// (`MaxAttackersEachCombat { defender: Some(ThisPermanent) }`, e.g. The
+/// Eternal Wanderer), as `(protected_permanent, max)` pairs. Distinct from
+/// [`per_defender_caps`] (player-scoped): this restricts attacks declared
+/// against the static's own source object specifically, never against the
+/// source's controller or any other permanent that controller defends.
+///
+/// Single authority shared by the strict validator
+/// (`validate_per_defender_attacker_caps`) AND the CR 508.1d solver
+/// (`AttackDeclarationConstraints::per_permanent_defender_caps`,
+/// `max_no_payment` / `best_free_declaration` / `dp_best_suffix`) — mirroring
+/// how [`per_defender_caps`] is shared by both. The solver treats this cap as
+/// the same coupled DP resource as a player-scoped cap, so it never proposes —
+/// and `max_no_payment`'s bar never demands — more attacks against a capped
+/// permanent than this cap allows, even when a `MustAttack*` requirement is
+/// also in play.
+fn per_permanent_defender_caps(state: &GameState) -> Vec<(ObjectId, u32)> {
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(source, def)| match def.mode {
+            StaticMode::MaxAttackersEachCombat {
+                max,
+                defender: Some(AttackDefenderScope::ThisPermanent),
+            } => Some((source.id, max)),
             _ => None,
         })
         .collect()
@@ -3964,6 +4015,14 @@ struct AttackDeclarationConstraints {
     global_cap: Option<u32>,
     /// CR 508.1c per-defender caps as `(protected_player, max)`.
     per_defender_caps: Vec<(PlayerId, u32)>,
+    /// CR 508.1c + CR 508.5 per-permanent-defender caps as
+    /// `(protected_permanent, max)` (`MaxAttackersEachCombat { defender:
+    /// Some(ThisPermanent) }`, The Eternal Wanderer). Modeled as the same
+    /// coupled DP resource as `per_defender_caps` — see
+    /// [`per_permanent_defender_caps`] — so the CR 508.1d solver never
+    /// proposes, and `max_no_payment`'s bar never demands, more attacks
+    /// against a capped permanent than this cap allows.
+    per_permanent_defender_caps: Vec<(ObjectId, u32)>,
     /// CR 506.5: creatures that can't attack alone (`NeedsCompanion`).
     needs_companion: HashSet<ObjectId>,
     /// CR 506.5: creatures that can only attack alone (`MustBeSole`).
@@ -4354,6 +4413,7 @@ impl AttackDeclarationConstraints {
             requirements,
             global_cap: max_attackers_each_combat(state),
             per_defender_caps: per_defender_caps(state),
+            per_permanent_defender_caps: per_permanent_defender_caps(state),
             needs_companion,
             must_be_sole,
         }
@@ -4524,8 +4584,16 @@ fn max_no_payment(constraints: &AttackDeclarationConstraints, state: &GameState)
     // Separable fast path: with no coupling constraint, each creature's obeyed
     // requirements depend only on its own chosen (free) target, so the optimum is
     // the per-creature sum of best single-target scores.
+    //
+    // `per_permanent_defender_caps` (`MaxAttackersEachCombat { defender:
+    // Some(ThisPermanent) }`, The Eternal Wanderer) IS a coupling input here,
+    // same as `per_defender_caps`: two creatures whose only legal target is a
+    // capped permanent are not independently maximizable (attacking it with
+    // both would exceed the cap), so the fast path must be skipped whenever
+    // any such cap is active.
     let coupled = constraints.global_cap.is_some()
         || !constraints.per_defender_caps.is_empty()
+        || !constraints.per_permanent_defender_caps.is_empty()
         || !constraints.needs_companion.is_empty()
         || !constraints.must_be_sole.is_empty();
     if !coupled {
@@ -4591,10 +4659,10 @@ enum AttackTargetUniverse {
 }
 
 /// Memo table for the CR 508.1d scenario-3 DP (`dp_best_suffix`): keyed by
-/// `(candidate index, attackers-used clamped, per-capped-defender counts)`,
-/// storing the best target-universe suffix (`None` when no valid ≥2-attacker
-/// terminal is reachable from that state).
-type DpSuffixMemo = HashMap<(usize, u32, Vec<u32>), Option<AttackAssignment>>;
+/// `(candidate index, attackers-used clamped, per-capped-defender counts,
+/// per-capped-permanent counts)`, storing the best target-universe suffix
+/// (`None` when no valid ≥2-attacker terminal is reachable from that state).
+type DpSuffixMemo = HashMap<(usize, u32, Vec<u32>, Vec<u32>), Option<AttackAssignment>>;
 
 fn best_free_declaration(
     constraints: &AttackDeclarationConstraints,
@@ -4664,6 +4732,15 @@ fn best_declaration(
                     continue;
                 }
             }
+            if let AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) = t {
+                if constraints
+                    .per_permanent_defender_caps
+                    .iter()
+                    .any(|(p, cap)| *p == id && *cap == 0)
+                {
+                    continue;
+                }
+            }
             consider_declaration(constraints, &mut best, vec![(*cid, t)]);
         }
     }
@@ -4690,16 +4767,20 @@ fn best_declaration(
     if !forced_must_be_sole {
         if let Some(clamp) = clamp {
             let capped: Vec<(PlayerId, u32)> = constraints.per_defender_caps.clone();
+            let capped_permanents: Vec<(ObjectId, u32)> =
+                constraints.per_permanent_defender_caps.clone();
             let mut memo: DpSuffixMemo = HashMap::new();
             if let Some(decl) = dp_best_suffix(
                 constraints,
                 &dp_targets,
                 &capped,
+                &capped_permanents,
                 constraints.global_cap,
                 clamp,
                 0,
                 0,
                 vec![0; capped.len()],
+                vec![0; capped_permanents.len()],
                 forced_pair,
                 &mut memo,
             ) {
@@ -4736,21 +4817,32 @@ fn consider_declaration(
 
 /// Decision 1 scenario-3 DP: the best (max-score, then fewest attackers, then
 /// lexicographically smallest) suffix over `dp_targets[idx..]` given that
-/// `used` attackers (clamped) and `defender_counts` have already been committed by
-/// the prefix. Returns `None` when no completion reaches a valid ≥2-attacker
-/// terminal. Memoized on `(idx, used, defender_counts)` so each reachable resource
-/// vector is solved once (dominance pruning). Score is separable, so the suffix
-/// value is independent of how the prefix reached `(used, defender_counts)`.
+/// `used` attackers (clamped), `defender_counts`, and `permanent_counts` have
+/// already been committed by the prefix. Returns `None` when no completion
+/// reaches a valid ≥2-attacker terminal. Memoized on `(idx, used,
+/// defender_counts, permanent_counts)` so each reachable resource vector is
+/// solved once (dominance pruning). Score is separable, so the suffix value is
+/// independent of how the prefix reached that resource state.
+///
+/// `capped_permanents` / `permanent_counts` track `ThisPermanent`-scoped caps
+/// (`MaxAttackersEachCombat { defender: Some(ThisPermanent) }`, The Eternal
+/// Wanderer) as the same kind of coupled resource `capped` / `defender_counts`
+/// already track for `Controller`-scoped caps (Judoon Enforcers) — a parallel
+/// counts vector keyed by protected permanent instead of protected player,
+/// since an `AttackTarget` can only ever consume one of the two resource
+/// kinds.
 #[allow(clippy::too_many_arguments)]
 fn dp_best_suffix(
     constraints: &AttackDeclarationConstraints,
     dp_targets: &[(ObjectId, Vec<AttackTarget>)],
     capped: &[(PlayerId, u32)],
+    capped_permanents: &[(ObjectId, u32)],
     global_cap: Option<u32>,
     clamp: u32,
     idx: usize,
     used: u32,
     defender_counts: Vec<u32>,
+    permanent_counts: Vec<u32>,
     forced_pair: Option<(ObjectId, AttackTarget)>,
     memo: &mut DpSuffixMemo,
 ) -> Option<AttackAssignment> {
@@ -4758,7 +4850,7 @@ fn dp_best_suffix(
         // Valid terminal iff the whole declaration has ≥2 attackers.
         return (used >= 2).then(Vec::new);
     }
-    let key = (idx, used, defender_counts.clone());
+    let key = (idx, used, defender_counts.clone(), permanent_counts.clone());
     if let Some(cached) = memo.get(&key) {
         return cached.clone();
     }
@@ -4773,11 +4865,13 @@ fn dp_best_suffix(
             constraints,
             dp_targets,
             capped,
+            capped_permanents,
             global_cap,
             clamp,
             idx + 1,
             used,
             defender_counts.clone(),
+            permanent_counts.clone(),
             forced_pair,
             memo,
         ) {
@@ -4803,16 +4897,27 @@ fn dp_best_suffix(
                 new_counts[pos] += 1;
             }
         }
+        let mut new_permanent_counts = permanent_counts.clone();
+        if let AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) = t {
+            if let Some(pos) = capped_permanents.iter().position(|(p, _)| *p == id) {
+                if new_permanent_counts[pos] >= capped_permanents[pos].1 {
+                    continue;
+                }
+                new_permanent_counts[pos] += 1;
+            }
+        }
         let new_used = (used + 1).min(clamp);
         if let Some(mut sub) = dp_best_suffix(
             constraints,
             dp_targets,
             capped,
+            capped_permanents,
             global_cap,
             clamp,
             idx + 1,
             new_used,
             new_counts,
+            new_permanent_counts,
             forced_pair,
             memo,
         ) {
@@ -7444,6 +7549,11 @@ mod tests {
             requirements,
             global_cap,
             per_defender_caps,
+            // Not a `mk_constraints` parameter: tests that need a permanent-
+            // scoped cap set this field directly on the returned value (see
+            // `permanent_scoped_cap_bounds_the_solver_not_just_the_validator`),
+            // keeping this helper's signature stable for its many callers.
+            per_permanent_defender_caps: Vec::new(),
             needs_companion: needs_companion.into_iter().map(ObjectId).collect(),
             must_be_sole: must_be_sole.into_iter().map(ObjectId).collect(),
         }
@@ -7566,6 +7676,98 @@ mod tests {
         );
     }
 
+    /// CR 508.1c + CR 508.1d regression (PR #8321 review, Blocker 1): a
+    /// `ThisPermanent`-scoped cap (The Eternal Wanderer's "No more than one
+    /// creature can attack ~ each combat") must be a coupled resource inside
+    /// the CR 508.1d solver itself (`max_no_payment` / `best_declaration` /
+    /// `dp_best_suffix`), not merely a post-hoc check in
+    /// `validate_per_defender_attacker_caps`. Two creatures are each REQUIRED
+    /// to attack the SAME capped planeswalker (a Gideon-Jura-style
+    /// `MustAttackDefender { defender: RequiredDefender::Permanent }` grant
+    /// combined with the Wanderer's cap) — the two requirements are not
+    /// independently satisfiable, since the cap lets only one attacker
+    /// through.
+    ///
+    /// Before the fix, `max_no_payment` took the separable fast path (summing
+    /// each creature's best single-target score independently) whenever no
+    /// OTHER coupling axis (global cap, per-defender cap, CombatAlone) was
+    /// active — so it returned 2 here, a bar NO legal declaration could ever
+    /// meet. `validate_attack_declaration` enforces `score(D) >= required`
+    /// unconditionally, so even the one declaration that respects the cap
+    /// (scoring 1) would have been rejected: the solver computed a witness
+    /// the strict validator could never accept.
+    #[test]
+    fn permanent_scoped_cap_bounds_the_solver_not_just_the_validator() {
+        let mut state = setup();
+
+        let wanderer = create_planeswalker(&mut state, PlayerId(1), "The Eternal Wanderer");
+        state
+            .objects
+            .get_mut(&wanderer)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MaxAttackersEachCombat {
+                max: 1,
+                defender: Some(AttackDefenderScope::ThisPermanent),
+            }));
+        let wanderer_ref = ObjectIncarnationRef::from_object(state.objects.get(&wanderer).unwrap());
+        let pw_target = AttackTarget::Planeswalker(wanderer);
+
+        let c1 = create_creature(&mut state, PlayerId(0), "Forced One", 2, 2);
+        let c2 = create_creature(&mut state, PlayerId(0), "Forced Two", 2, 2);
+        for creature in [c1, c2] {
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Permanent {
+                            permanent: wanderer_ref,
+                        },
+                    })
+                    .affected(TargetFilter::SelfRef),
+                );
+        }
+
+        let constraints = AttackDeclarationConstraints::build(&state);
+
+        // Solver-level: the bar must reflect what's actually achievable under
+        // the cap (only one of the two `MustAttackDefender` requirements is
+        // jointly obeyable), not the sum of each creature's independent best
+        // score.
+        assert_eq!(
+            max_no_payment(&constraints, &state),
+            1,
+            "the ThisPermanent cap must bound the solver's own requirement bar, \
+             not just the strict validator's post-hoc check"
+        );
+
+        let (witness, score) = best_free_declaration(&constraints, &state);
+        assert_eq!(score, 1);
+        assert_eq!(
+            witness.iter().filter(|(_, t)| *t == pw_target).count(),
+            1,
+            "the witness must itself respect the permanent-scoped cap: {witness:?}"
+        );
+
+        // Full pipeline: a declaration that meets the solver's own bar must
+        // ALSO pass strict end-to-end validation — the two authorities must
+        // never disagree.
+        assert!(
+            validate_attack_declaration(&state, &witness, &[]).is_ok(),
+            "the solver's own witness must pass strict validation: {witness:?}"
+        );
+
+        // Sibling check: attacking the capped planeswalker with BOTH
+        // creatures still correctly fails the strict cap check.
+        assert!(
+            validate_attack_declaration(&state, &[(c1, pw_target), (c2, pw_target)], &[]).is_err(),
+            "attacking the capped planeswalker with both required creatures must remain illegal"
+        );
+    }
+
     /// Whether `attacks` obeys every HARD coupling constraint (caps + CombatAlone)
     /// and every pair is a legal target — the brute-force feasibility oracle.
     fn assignment_valid(
@@ -7582,6 +7784,28 @@ mod tests {
             let cnt = attacks
                 .iter()
                 .filter(|(_, t)| matches!(t, AttackTarget::Player(p) if p == pid))
+                .count() as u32;
+            if cnt > *cap {
+                return false;
+            }
+        }
+        // CR 508.1c + CR 508.5: defender-PERMANENT-scoped caps (The Eternal
+        // Wanderer's `MaxAttackersEachCombat { defender: Some(ThisPermanent) }`)
+        // are the same coupled DP resource as `per_defender_caps` above (see
+        // `per_permanent_defender_caps`'s doc comment) — the brute-force oracle
+        // must reject any assignment the strict validator
+        // (`validate_per_defender_attacker_caps`) would reject, or it is not a
+        // valid ground truth for the DP solver's own permanent-cap enforcement.
+        for (permanent, cap) in &c.per_permanent_defender_caps {
+            let cnt = attacks
+                .iter()
+                .filter(|(_, t)| {
+                    matches!(
+                        t,
+                        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id)
+                            if id == permanent
+                    )
+                })
                 .count() as u32;
             if cnt > *cap {
                 return false;
@@ -7836,6 +8060,41 @@ mod tests {
                 ),
                 "tied matching + fixed forces the fixed member",
             ),
+            // CR 508.1c + CR 508.5 (PR #8321 review round 3, [MED]): a
+            // permanent-scoped cap (`per_permanent_defender_caps`, The Eternal
+            // Wanderer's "no more than one creature can attack ~ each combat")
+            // combined with a `MustAttackDefender` coupling axis — two creatures
+            // whose ONLY legal target is the same capped planeswalker, each
+            // individually required to attack it. Without the cap wired into
+            // `assignment_valid`, the brute-force oracle would accept the
+            // both-attack assignment (satisfying both requirements, score 2)
+            // since nothing there enforces the cap — silently diverging from the
+            // DP solver, which already treats this cap as a coupled resource
+            // (`max_no_payment`'s `coupled` gate) and caps its own bar at 1.
+            // Max 1: only one of the two `MustAttackDefender` requirements is
+            // jointly obeyable.
+            {
+                let pw = AttackTarget::Planeswalker(ObjectId(50));
+                let mut c = mk_constraints(
+                    vec![(20, vec![pw]), (21, vec![pw])],
+                    vec![
+                        MustAttackDefender {
+                            creature: ObjectId(20),
+                            defender: pw,
+                        },
+                        MustAttackDefender {
+                            creature: ObjectId(21),
+                            defender: pw,
+                        },
+                    ],
+                    None,
+                    vec![],
+                    vec![],
+                    vec![],
+                );
+                c.per_permanent_defender_caps = vec![(ObjectId(50), 1)];
+                (c, "permanent-scoped cap couples two forced attackers")
+            },
         ];
 
         for (c, label) in &cases {

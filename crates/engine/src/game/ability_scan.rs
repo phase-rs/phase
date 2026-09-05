@@ -4023,12 +4023,15 @@ fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -
         // A phase coordinate. No payload position reaches a `TargetFilter` or a
         // `QuantityExpr`, so there is nothing to walk.
         DelayedTriggerCondition::AtNextPhase { phase: _ } => Axes::NONE,
-        // The same coordinate plus a `PlayerId` and a `TurnGate` turn-floor — a named
-        // player and a turn number. Neither reaches a filter or a quantity.
+        // The same coordinate plus a `PlayerId`, a `TurnGate` turn-floor, and a
+        // `DelayedTriggerPlayerBinding` (which player `player` resolves to at
+        // creation) — a named player, a turn number, and a binding tag. None
+        // reaches a filter or a quantity.
         DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: _,
             player: _,
             gate: _,
+            binding: _,
         } => Axes::NONE,
         // CR 603.7c: a delayed triggered ability that refers to a particular object.
         // `object_id` is already resolved, so there is no filter to walk and no
@@ -9980,6 +9983,7 @@ mod tests {
                     phase: Phase::Upkeep,
                     player: PlayerId(0),
                     gate: TurnGate::AfterCreationTurn,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
             ),
             (

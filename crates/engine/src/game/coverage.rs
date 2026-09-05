@@ -2222,9 +2222,14 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
         DelayedTriggerCondition::AtNextPhase { phase } => {
             format!("at next {}", fmt_phase(phase))
         }
-        DelayedTriggerCondition::AtNextPhaseForPlayer { phase, .. } => {
-            format!("at your next {}", fmt_phase(phase))
-        }
+        DelayedTriggerCondition::AtNextPhaseForPlayer { phase, binding, .. } => match binding {
+            crate::types::ability::DelayedTriggerPlayerBinding::Controller => {
+                format!("at your next {}", fmt_phase(phase))
+            }
+            crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner => {
+                format!("at that player's next {}", fmt_phase(phase))
+            }
+        },
         DelayedTriggerCondition::WhenLeavesPlay { .. } => "when leaves play".into(),
         DelayedTriggerCondition::WhenDies { .. } => "when dies".into(),
         DelayedTriggerCondition::WhenLeavesPlayFiltered { filter } => {

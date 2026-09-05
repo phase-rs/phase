@@ -19811,6 +19811,7 @@ fn strip_temporal_suffix_your_next_main_phase() {
             phase: Phase::PreCombatMain,
             player: crate::types::player::PlayerId(0),
             gate: crate::types::ability::TurnGate::None,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         })
     );
 }
@@ -19856,6 +19857,7 @@ fn strip_temporal_prefix_your_next_main_phase() {
             phase: Phase::PreCombatMain,
             player: crate::types::player::PlayerId(0),
             gate: crate::types::ability::TurnGate::None,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         })
     );
 }
@@ -19873,6 +19875,7 @@ fn temporal_end_step_on_your_next_turn_carries_after_creation_gate() {
         phase: Phase::End,
         player: crate::types::player::PlayerId(0),
         gate: TurnGate::AfterCreationTurn,
+        binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
     };
 
     let (rest, cond) = strip_temporal_prefix(
@@ -19901,6 +19904,7 @@ fn your_next_end_step_keeps_none_gate_not_shadowed_by_kav_arm() {
         phase: Phase::End,
         player: crate::types::player::PlayerId(0),
         gate: TurnGate::None,
+        binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
     };
 
     let (rest, cond) = strip_temporal_prefix(
@@ -19987,6 +19991,7 @@ fn kav_landseeker_etb_lowers_to_token_plus_delayed_sacrifice() {
             phase: Phase::End,
             player: crate::types::player::PlayerId(0),
             gate: TurnGate::AfterCreationTurn,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         },
         "delayed condition must be End-step gated to the creating player's next turn"
     );
