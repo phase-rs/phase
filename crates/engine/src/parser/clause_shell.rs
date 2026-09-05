@@ -69,8 +69,8 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::combinator::{opt, value};
-use nom::sequence::delimited;
+use nom::combinator::{map, opt, value};
+use nom::sequence::{delimited, terminated};
 use nom::Parser;
 
 use super::oracle_effect::conditions::{
@@ -327,17 +327,19 @@ fn try_peel_opponent_may_prefix(
     }
     nom_on_lower(text, &lower, |input| {
         alt((
-            // CR 102.2 + CR 603.2: "each of that player's opponents may" — the
-            // caster's opponents, fanned out per-player. Must precede the bare
-            // "each opponent may" arm (which scopes to the controller's
-            // opponents). Apostrophe variants: ASCII ' and curly U+2019 '.
-            value(
-                (None, Some(PlayerFilter::OpponentOfTriggeringPlayer)),
-                tag("each of that player's opponents may "),
-            ),
-            value(
-                (None, Some(PlayerFilter::OpponentOfTriggeringPlayer)),
-                tag("each of that player\u{2019}s opponents may "),
+            // CR 102.2 + CR 603.2: "each of ⟨that player | its controller⟩'s
+            // opponents may" — the TRIGGERING player's opponents, fanned out
+            // per-player. Must precede the bare "each opponent may" arm (which
+            // scopes to the ABILITY CONTROLLER's opponents). The subject grammar
+            // itself is the single authority in `oracle_effect::lower`, shared with
+            // the mandatory (no-"may") route so the two cannot drift apart; only
+            // the trailing "may " is this site's own.
+            map(
+                terminated(
+                    super::oracle_effect::lower::parse_each_of_triggering_players_opponents,
+                    tag("may "),
+                ),
+                |scope| (None, Some(scope)),
             ),
             value(
                 (None, Some(PlayerFilter::Opponent)),

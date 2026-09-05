@@ -29708,6 +29708,180 @@ fn strip_each_player_subject_still_strips_imperatives() {
     assert_eq!(result, "lose 2 life");
 }
 
+/// CR 102.2 + CR 102.3 + CR 603.2 (issue #8440): the possessive
+/// "each of ⟨anchor⟩'s opponents" subject grammar, pinned across BOTH axes the
+/// combinator composes — the anchor and the apostrophe form — rather than on one
+/// card's sentence.
+///
+/// The anchor axis decides WHOSE opponents. `that player` and `its controller`
+/// both name the player the trigger event carries, so both must reach
+/// `OpponentOfTriggeringPlayer`; only the bare, unpossessed `each opponent`
+/// means the ability CONTROLLER's opponents. That contrast is the whole point of
+/// the variant, so it is asserted here as the negative control — and it is not a
+/// vacuous negative: the same call returns `Some(..)` with a stripped predicate,
+/// proving the input reached and was consumed by this parser rather than being
+/// rejected upstream.
+#[test]
+fn each_of_possessive_opponents_subject_grammar() {
+    // Anchor axis. Both anchors, same filter, predicate deconjugated identically.
+    for anchor in ["that player", "its controller"] {
+        let (scope, result) =
+            strip_each_player_subject(&format!("each of {anchor}'s opponents draws a card"));
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::OpponentOfTriggeringPlayer),
+            "\"each of {anchor}'s opponents\" must scope to the TRIGGERING player's opponents"
+        );
+        assert_eq!(result, "draw a card", "predicate for anchor {anchor}");
+    }
+
+    // Apostrophe axis, crossed with the anchor axis: the curly U+2019 form Oracle
+    // text actually ships must behave identically to the ASCII form.
+    for anchor in ["that player", "its controller"] {
+        let (scope, result) =
+            strip_each_player_subject(&format!("each of {anchor}\u{2019}s opponents gains 2 life"));
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::OpponentOfTriggeringPlayer),
+            "curly apostrophe must parse identically for anchor {anchor}"
+        );
+        assert_eq!(result, "gain 2 life", "predicate for anchor {anchor}");
+    }
+
+    // NEGATIVE CONTROL with a positive reach-guard: the unpossessed subject is a
+    // DIFFERENT player set (the ability controller's opponents). `Some(Opponent)`
+    // plus the stripped predicate proves the text reached this parser, so the
+    // "not OpponentOfTriggeringPlayer" half is a real discrimination.
+    let (scope, result) = strip_each_player_subject("each opponent draws a card");
+    assert_eq!(scope, Some(PlayerFilter::Opponent));
+    assert_ne!(
+        scope,
+        Some(PlayerFilter::OpponentOfTriggeringPlayer),
+        "a bare \"each opponent\" has no possessive anchor and must NOT reroute to \
+         the triggering player's opponents"
+    );
+    assert_eq!(result, "draw a card");
+
+    // The possessive must not match a foreign anchor. Positive reach-guard: the
+    // fallthrough still strips a scope, so the text was parsed, not rejected.
+    let (scope, _) = strip_each_player_subject("each player draws a card");
+    assert_eq!(scope, Some(PlayerFilter::All));
+}
+
+/// CR 603.10a + CR 102.2 (issue #8440): Bounty Board — "Whenever a creature with
+/// a bounty counter on it dies, each of its controller's opponents draws a card
+/// and gains 2 life."
+///
+/// Oracle text verbatim from MTGJSON `AtomicCards.json` (`data["Bounty Board"]`).
+///
+/// BUG: the possessive subject had no arm in `strip_each_player_subject`, so the
+/// recipient fell through to `parse_target` and became a TARGETED player — the UI
+/// prompted for one player and only that player drew and gained life. The
+/// revert-failing assertions are the two `player_scope`s and the `Draw` recipient:
+/// before the fix `player_scope` was `None` and the recipient was a targetable
+/// `TargetFilter::Typed`.
+///
+/// Mathas, Fiend Seeker is the shape control below — the same "draws a card and
+/// gains 2 life" dies-trigger body with the UNPOSSESSED subject, which must keep
+/// its ability-controller-relative `PlayerFilter::Opponent`.
+#[test]
+fn bounty_board_each_of_its_controllers_opponents_is_not_targeted() {
+    let def = crate::parser::oracle_trigger::parse_trigger_line(
+        "Whenever a creature with a bounty counter on it dies, each of its controller's \
+         opponents draws a card and gains 2 life.",
+        "Bounty Board",
+    );
+
+    let execute = def.execute.as_deref().expect("execute body");
+    assert_eq!(
+        execute.player_scope,
+        Some(PlayerFilter::OpponentOfTriggeringPlayer),
+        "the draw must fan out to the DYING creature's controller's opponents"
+    );
+    let Effect::Draw { count, target } = execute.effect.as_ref() else {
+        panic!("expected Draw, got {:?}", execute.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    assert_eq!(
+        *target,
+        TargetFilter::Controller,
+        "the draw recipient must be the per-iteration Controller, never a targeted player"
+    );
+
+    // The second conjunct rides the same per-player iteration (Mathas's shape).
+    let sub = execute
+        .sub_ability
+        .as_deref()
+        .expect("gains 2 life conjunct");
+    assert_eq!(
+        sub.player_scope,
+        Some(PlayerFilter::OpponentOfTriggeringPlayer),
+        "the life gain must fan out to the same opponents as the draw"
+    );
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ),
+        "expected GainLife 2, got {:?}",
+        sub.effect
+    );
+}
+
+/// CR 102.2 (issue #8440) — invariance control. Mathas, Fiend Seeker's granted
+/// trigger is the SAME dies-trigger body with the unpossessed subject: "When this
+/// creature dies, each opponent draws a card and gains 2 life." It must keep
+/// `PlayerFilter::Opponent` (the ability controller's opponents), confirming the
+/// new possessive arm is selective rather than a blanket reroute of every
+/// each-opponent dies trigger.
+#[test]
+fn mathas_unpossessed_each_opponent_dies_trigger_stays_controller_relative() {
+    let def = crate::parser::oracle_trigger::parse_trigger_line(
+        "When this creature dies, each opponent draws a card and gains 2 life.",
+        "Mathas, Fiend Seeker",
+    );
+
+    let execute = def.execute.as_deref().expect("execute body");
+    assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+    let sub = execute
+        .sub_ability
+        .as_deref()
+        .expect("gains 2 life conjunct");
+    assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
+}
+
+/// CR 102.2 + CR 608.2d (issue #8440): the optional ("may") route peels the same
+/// possessive subject through `clause_shell`, which now shares the single
+/// combinator authority with the mandatory route above. Without that sharing the
+/// two sites drift: "that player" would be optional-capable and "its controller"
+/// would not, for no reason in the rules. The "may" axis is orthogonal to the
+/// anchor axis, so both anchors must reach the same scope with `optional: true`.
+#[test]
+fn each_of_possessive_opponents_may_route_shares_the_anchor_grammar() {
+    for anchor in ["that player", "its controller"] {
+        let def = crate::parser::oracle_trigger::parse_trigger_line(
+            &format!(
+                "Whenever a creature with a bounty counter on it dies, \
+                 each of {anchor}'s opponents may draw a card."
+            ),
+            "Test Card",
+        );
+        let execute = def.execute.as_deref().expect("execute body");
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::OpponentOfTriggeringPlayer),
+            "\"may\" route must reach the same scope for anchor {anchor}"
+        );
+        assert!(
+            execute.optional,
+            "the per-recipient \"may\" must survive the peel for anchor {anchor}"
+        );
+    }
+}
+
 /// CR 508.6 + CR 104.3e: An "[source] attacked this turn" relative clause
 /// narrows the player set to `OpponentAttacked { Source, ThisTurn }` (Angel of Destiny,
 /// issue #1599). General over the predicate verb and over the self-ref

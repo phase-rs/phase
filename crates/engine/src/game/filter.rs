@@ -1948,6 +1948,11 @@ pub(crate) fn matches_stack_target_filter(
                 })
         }
         TargetFilter::Typed(tf) => {
+            // CR 205.1: this is a stack-entry-vs-object DISPATCH, not a guard
+            // against an empty conjunction. A type-line constraint is answerable
+            // only against the object, so a non-empty list delegates to the
+            // object matcher; an empty list stays here and is answered by
+            // `controller` / `properties`, matching every other evaluator (#8508).
             if !tf.type_filters.is_empty() {
                 return state.objects.contains_key(&stack_obj_id)
                     && matches_target_filter(state, stack_obj_id, filter, ctx);
@@ -3135,7 +3140,11 @@ fn filter_inner_for_object(
             controller,
             properties,
         }) => {
-            // Type filters check (all must match — conjunction)
+            // CR 205.1: type-filter conjunction. An EMPTY list is an empty conjunction
+            // — "no type-line constraint", not "matches nothing" — and the
+            // `controller` / `properties` checks carry the restriction instead. See
+            // the invariant on `TypedFilter::type_filters` for why the empty case is
+            // load-bearing on both the object and the player axis (#8508).
             for tf in type_filters {
                 if !type_filter_matches(tf, obj, &state.all_creature_types) {
                     return false;
@@ -3802,6 +3811,11 @@ fn zone_change_filter_inner(
             controller,
             properties,
         }) => {
+            // CR 205.1: type-filter conjunction. An EMPTY list is an empty conjunction
+            // — "no type-line constraint", not "matches nothing" — and the
+            // `controller` / `properties` checks carry the restriction instead. See
+            // the invariant on `TypedFilter::type_filters` for why the empty case is
+            // load-bearing on both the object and the player axis (#8508).
             if !type_filters.iter().all(|tf| {
                 zone_change_record_matches_type_filter(record, tf, &state.all_creature_types)
             }) {
@@ -4242,6 +4256,11 @@ pub fn spell_record_matches_filter(
                 }
             }
 
+            // CR 205.1: type-filter conjunction. An EMPTY list is an empty conjunction
+            // — "no type-line constraint", not "matches nothing" — and the
+            // `controller` / `properties` checks carry the restriction instead. See
+            // the invariant on `TypedFilter::type_filters` for why the empty case is
+            // load-bearing on both the object and the player axis (#8508).
             type_filters.iter().all(|type_filter| {
                 spell_record_matches_type_filter(record, type_filter, all_creature_types)
             }) && properties
@@ -4542,6 +4561,11 @@ fn spell_object_matches_filter_inner(
                 }
             }
 
+            // CR 205.1: type-filter conjunction. An EMPTY list is an empty conjunction
+            // — "no type-line constraint", not "matches nothing" — and the
+            // `controller` / `properties` checks carry the restriction instead. See
+            // the invariant on `TypedFilter::type_filters` for why the empty case is
+            // load-bearing on both the object and the player axis (#8508).
             type_filters.iter().all(|type_filter| {
                 spell_record_matches_type_filter(record, type_filter, all_creature_types)
             }) && properties.iter().all(|prop| {
@@ -7781,6 +7805,140 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    /// CR 205.1: the `type_filters` conjunction, pinned at all three arities
+    /// with a positive control that proves the list is really evaluated.
+    ///
+    /// #8508 read the zero arity as a defect (`.all()` on an empty iterator is
+    /// `true`, so "an empty `type_filters` matches every object"). It is instead
+    /// the deliberate encoding of "no type-line constraint" — see the invariant
+    /// on `TypedFilter::type_filters` — and this test is what any change to that
+    /// reading has to break first.
+    #[test]
+    fn typed_filter_type_conjunction_holds_at_every_arity() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let bear = add_creature(&mut state, PlayerId(0), "Bear");
+
+        let typed = |types: Vec<TypeFilter>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: types,
+                ..TypedFilter::default()
+            })
+        };
+
+        // Arity 0: an empty conjunction imposes no type-line constraint.
+        assert!(matches_target_filter(&state, bear, &typed(vec![]), source));
+        // Arity 1.
+        assert!(matches_target_filter(
+            &state,
+            bear,
+            &typed(vec![TypeFilter::Creature]),
+            source
+        ));
+        // Arity many: every element must hold.
+        assert!(matches_target_filter(
+            &state,
+            bear,
+            &typed(vec![TypeFilter::Permanent, TypeFilter::Creature]),
+            source
+        ));
+
+        // Positive control. Without these the arity-0 `true` above would be
+        // equally consistent with a matcher that says yes to everything.
+        assert!(!matches_target_filter(
+            &state,
+            bear,
+            &typed(vec![TypeFilter::Land]),
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            bear,
+            &typed(vec![TypeFilter::Creature, TypeFilter::Land]),
+            source
+        ));
+    }
+
+    /// CR 109.1 + CR 102.1: a player is not an object, so a type-line constraint
+    /// can never be satisfied by a player — which makes an empty `type_filters`
+    /// the ONLY spelling of a player-shaped `Typed` filter ("each opponent").
+    ///
+    /// This is the half of #8508 that forecloses "empty means match nothing":
+    /// that reading would delete this encoding outright.
+    #[test]
+    fn empty_type_filters_is_the_only_player_shaped_typed_filter() {
+        let you = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let each_opponent =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        assert!(player_matches_target_filter(
+            &each_opponent,
+            opponent,
+            Some(you)
+        ));
+        // Positive control on the same filter: it discriminates by controller,
+        // so the match above is not a blanket yes.
+        assert!(!player_matches_target_filter(
+            &each_opponent,
+            you,
+            Some(you)
+        ));
+
+        // The same filter carrying ANY type constraint matches no player.
+        let typed_opponent = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::Opponent),
+        );
+        assert!(!player_matches_target_filter(
+            &typed_opponent,
+            opponent,
+            Some(you)
+        ));
+    }
+
+    /// CR 205.1: the spell-cast-history matcher conjoins `type_filters` exactly
+    /// as the live object matcher does, so a filter cannot match an object and
+    /// then miss that object's own cast record. Same three arities, same
+    /// positive control (#8508).
+    #[test]
+    fn spell_record_type_conjunction_agrees_with_the_object_axis() {
+        let record = SpellCastRecord {
+            core_types: vec![CoreType::Creature],
+            ..SpellCastRecord::default()
+        };
+        let typed = |types: Vec<TypeFilter>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: types,
+                ..TypedFilter::default()
+            })
+        };
+
+        assert!(spell_record_matches_filter(
+            &record,
+            &typed(vec![]),
+            PlayerId(0),
+            &[]
+        ));
+        assert!(spell_record_matches_filter(
+            &record,
+            &typed(vec![TypeFilter::Creature]),
+            PlayerId(0),
+            &[]
+        ));
+        assert!(!spell_record_matches_filter(
+            &record,
+            &typed(vec![TypeFilter::Land]),
+            PlayerId(0),
+            &[]
+        ));
+        assert!(!spell_record_matches_filter(
+            &record,
+            &typed(vec![TypeFilter::Creature, TypeFilter::Land]),
+            PlayerId(0),
+            &[]
+        ));
     }
 
     /// CR 608.2c: every target-relative player seam must recover the root's
