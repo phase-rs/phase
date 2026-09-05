@@ -1760,8 +1760,19 @@ fn mana_ability_ready_without_simulation_gated(
     if !obj.detained_by.is_empty() {
         return false;
     }
-    // CR 602.2: only an object's controller may activate its activated ability.
-    if obj.controller != player {
+    // CR 602.2: "Only an object's controller (or its owner, if it doesn't have a
+    // controller) can activate its activated ability unless the object specifically
+    // says otherwise." CR 108.4: a card is not a permanent or spell — and so has no
+    // controller — in a hand, graveyard, library or exile, and CR 108.4a directs
+    // anything asking for that controller to use the owner instead. This gate admits
+    // those zones (`activation_zone`, checked just below), so it must ask for the
+    // permission reference point rather than a raw `.controller`.
+    //
+    // `GameObject::controller_or_owner` is the single authority for that selection.
+    // Routing through it rather than swapping in `.owner` is what keeps the command
+    // zone correct: CR 109.4c makes an emblem an object that DOES have a controller
+    // while sitting in the command zone, and the helper carries that exception.
+    if obj.controller_or_owner() != player {
         return false;
     }
     // CR 113.6 + CR 113.6b: A permanent's abilities function only on the battlefield by
