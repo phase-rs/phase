@@ -707,14 +707,22 @@ export class LobbyDO {
    *  reader rather than hanging past the timeout. Nothing throws out of here —
    *  the announcer gets a 4xx, never a 5xx.
    *
-   *  `redirect: "error"` is load-bearing twice over. The question this fetch
-   *  asks is whether THIS host serves an info document matching THIS
+   *  Not following redirects is load-bearing twice over. The question this
+   *  fetch asks is whether THIS host serves an info document matching THIS
    *  announcement, and a redirect answers a different question — some other
    *  host does — so following one would verify the wrong server even with no
    *  attacker present. It also closes the pivot: announcing is open by design
    *  (see the charter), so a follower would let any caller aim the verifier at
    *  a public hostname that redirects wherever it likes. Failing closed on a
    *  redirect keeps the destination equal to the announced one.
+   *
+   *  `redirect: "manual"` is how that is spelled on Workers: the runtime
+   *  refuses `redirect: "error"` at the call, throwing
+   *  `TypeError: Invalid redirect value, must be one of "follow" or "manual"`,
+   *  which this method's catch would report as an unreachable host for every
+   *  announcement including the good ones. Under `"manual"` a 3xx arrives as
+   *  an ordinary non-ok response with the redirect NOT taken, so the `ok`
+   *  test below is what refuses it.
    *
    *  What this deliberately does NOT do is resolve the hostname and reject
    *  private, loopback or link-local addresses. Workers exposes no DNS
@@ -727,9 +735,10 @@ export class LobbyDO {
       const response = await fetch(infoUrl, {
         signal: AbortSignal.timeout(INFO_FETCH_TIMEOUT_MS),
         headers: { accept: "application/json" },
-        redirect: "error",
+        redirect: "manual",
       });
-      // A 404 and a refused connection are one fact here: no usable document.
+      // A 3xx, a 404 and a refused connection are one fact here: no usable
+      // document.
       // `body === null` is handled explicitly rather than optional-chained,
       // which would silently read `undefined`.
       if (!response.ok || response.body === null) return { kind: "unreachable" };
