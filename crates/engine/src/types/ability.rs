@@ -6163,8 +6163,35 @@ impl FilterProp {
 /// CR 205: `type_filters` holds all type constraints in conjunction (all must match).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedFilter {
-    /// CR 205: All type constraints that must match (conjunction).
+    /// CR 205.1: All type-line constraints that must match (conjunction).
     /// e.g. "noncreature, nonland permanent" → `[Permanent, Non(Creature), Non(Land)]`
+    ///
+    /// An EMPTY vector is an empty conjunction — "no type-line constraint" —
+    /// and is a deliberate, load-bearing encoding rather than a degenerate one.
+    /// This is the single authority for that reading; every evaluator in
+    /// `game::filter` conjoins the list and so answers "unconstrained by type"
+    /// for the empty case. Two independent consumers depend on it:
+    ///
+    /// * Object axis — a filter whose entire restriction is a property or a
+    ///   controller names no type at all. Aether Gust ("target red or green
+    ///   spell or permanent") is `properties: [AnyOf(HasColor(Red),
+    ///   HasColor(Green))]` with an empty `type_filters`; so are the
+    ///   `Another` / `HasSupertype` / `InZone` property-only filters.
+    /// * Player axis — CR 109.1 enumerates what an object is and a player
+    ///   (CR 102.1) is not one, so a type-line constraint can never be
+    ///   satisfied by a player. `game::filter::player_matches_target_filter_with`
+    ///   uses exactly `type_filters.is_empty()` as the gate that admits a
+    ///   `Typed` filter to the player axis and rejects any non-empty list.
+    ///   An empty `type_filters` is therefore the ONLY spelling of a
+    ///   player-shaped `Typed` filter ("each opponent" is
+    ///   `controller: Some(Opponent)` with no type filters).
+    ///
+    /// Consequently an evaluator must NOT read the empty case as "matches
+    /// nothing": that erases the player-filter encoding and every property-only
+    /// filter above. `TargetFilter::Any` is how this enum spells "matches
+    /// anything". A `Typed` filter that is empty in ALL THREE fields carries no
+    /// information; it is a defect at the parser branch that produced it, not
+    /// at the runtime that faithfully evaluates it (#8508).
     #[serde(default)]
     pub type_filters: Vec<TypeFilter>,
     #[serde(default)]
