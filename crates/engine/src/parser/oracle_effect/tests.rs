@@ -58822,3 +58822,492 @@ fn a_non_open_booster_sentence_is_not_swallowed() {
         "the printed sentence must reach the recognizer"
     );
 }
+
+// ── Issue #8380: compound damage subjects, player-first ordering ─────────
+//
+// These target `try_parse_compound_player_object_damage` — the BUILDING BLOCK —
+// rather than any one card, so the grammar is pinned across its whole input
+// range. The function is called directly (not through `try_split_damage_compound`)
+// because the decline cases must observe THIS parser's answer: the dispatcher
+// would fall through to the object-first sibling, whose own weaker gate this
+// change deliberately does not touch.
+
+/// Parse a player-first compound damage subject through the unit under test.
+fn compound_player_first(subject: &str) -> Option<ParsedEffectClause> {
+    let mut ctx = ParseContext::default();
+    let text = format!("~ deals 2 damage to {subject}");
+    try_parse_compound_player_object_damage(&text, &mut ctx)
+}
+
+/// Unwrap the `DamageAll` a successful player-first parse must produce.
+fn expect_damage_all(clause: &ParsedEffectClause) -> (&TargetFilter, &Option<PlayerFilter>) {
+    assert!(
+        clause.sub_ability.is_none(),
+        "a conjoined subject is ONE simultaneous action (CR 608.2f), never a chain",
+    );
+    match &clause.effect {
+        Effect::DamageAll {
+            target,
+            player_filter,
+            damage_source: None,
+            ..
+        } => (target, player_filter),
+        other => panic!("expected unified DamageAll, got: {other:?}"),
+    }
+}
+
+fn typed_of(filter: &TargetFilter) -> &TypedFilter {
+    match filter {
+        TargetFilter::Typed(tf) => tf,
+        other => panic!("expected Typed filter, got: {other:?}"),
+    }
+}
+
+#[test]
+fn compound_player_object_matches_object_first_sibling() {
+    // R2: the two orderings are semantically identical and must lower to the
+    // identical `Effect`. Scoped to inputs carrying NO anaphoric possessive —
+    // the object-first sibling resolves "they control" through `parse_target`'s
+    // `ControllerRef::You` fallback, so anaphoric inputs are legitimately
+    // asymmetric today (documented, 0 live cards, not fixed here).
+    let mut ctx = ParseContext::default();
+    let player_first = try_parse_compound_player_object_damage(
+        "~ deals 2 damage to each player and each other creature",
+        &mut ctx,
+    )
+    .expect("player-first ordering must parse");
+    let object_first = try_parse_compound_object_player_damage(
+        "~ deals 2 damage to each other creature and each player",
+        &mut ctx,
+    )
+    .expect("object-first ordering must parse");
+    assert_eq!(
+        player_first.effect, object_first.effect,
+        "both conjunct orderings must lower to the same effect",
+    );
+}
+
+#[test]
+fn compound_player_object_accepts_bare_other_object_conjunct() {
+    // R1 (Exocrine's shape). At HEAD the whitelist rejected a bare object
+    // conjunct outright, so the whole clause fell through to `DamageEachPlayer`
+    // and the creatures were never damaged.
+    let clause = compound_player_first("each player and each other creature")
+        .expect("a bare 'each other creature' conjunct must be accepted");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::All));
+    let tf = typed_of(target);
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(
+        tf.properties.contains(&FilterProp::Another),
+        "'each OTHER creature' must exclude the source",
+    );
+    assert_eq!(
+        tf.controller, None,
+        "an unqualified object conjunct names no controller",
+    );
+}
+
+#[test]
+fn compound_player_object_all_scope_possessive_is_unrestricted() {
+    // Rip to Pieces. "those players" refers back to the `each player` conjunct,
+    // and since every player controls their own permanents the union is
+    // unrestricted — `controller: None`, not a narrowing.
+    let clause = compound_player_first("each player and each creature those players control")
+        .expect("an anaphoric possessive on an All scope must be accepted");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::All));
+    assert_eq!(
+        typed_of(target).controller,
+        None,
+        "'those players' over EVERY player restricts nothing",
+    );
+}
+
+#[test]
+fn compound_player_object_binds_anaphoric_possessive_across_or_leaves() {
+    // R3, verbatim Goblin Chainwhirler. The `Or` recursion is load-bearing: the
+    // real card produces two typed leaves, and a non-recursive binding would
+    // drop the relation on one of them. Measured unchanged from HEAD.
+    let clause =
+        compound_player_first("each opponent and each creature and planeswalker they control")
+            .expect("Goblin Chainwhirler must keep parsing");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::Opponent));
+    match target {
+        TargetFilter::Or { filters } => {
+            assert_eq!(filters.len(), 2, "creature and planeswalker are two leaves");
+            for f in filters {
+                assert_eq!(
+                    typed_of(f).controller,
+                    Some(ControllerRef::Opponent),
+                    "EVERY Or leaf must carry the anaphoric binding",
+                );
+            }
+        }
+        other => panic!("expected Or filter, got: {other:?}"),
+    }
+}
+
+#[test]
+fn compound_player_object_binds_anaphoric_possessive_single_typed() {
+    // The single-`Typed` sibling (Soul Immolation, Delayed Blast Fireball).
+    let clause = compound_player_first("each opponent and each creature they control")
+        .expect("the single-typed anaphoric form must keep parsing");
+    let (target, _) = expect_damage_all(&clause);
+    assert_eq!(typed_of(target).controller, Some(ControllerRef::Opponent));
+}
+
+#[test]
+fn compound_player_object_does_not_over_bind_controller() {
+    // R4 — the multi-authority fixture. Two candidate authorities are in scope:
+    // the `Opponent` player conjunct, and the object conjunct's own unrestricted
+    // scope. The correct answer is the object's own — proven by the object-first
+    // twin, which yields `controller: null` for the same subject.
+    //
+    // This is exactly what the deleted blanket `set_opponent_controller` got
+    // wrong: it narrowed the blast to opponents' creatures only.
+    let clause =
+        compound_player_first("each opponent and each other creature").expect("must parse");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::Opponent));
+    assert_eq!(
+        typed_of(target).controller,
+        None,
+        "'each other creature' means EVERY other creature, not only opponents'",
+    );
+}
+
+#[test]
+fn compound_player_object_preserves_battle_protector() {
+    // Joyful Stormsculptor, through the de-verbatimized path. At HEAD this shape
+    // was produced by a literal string comparison against the whole phrase;
+    // the same AST must now come out of the combinator.
+    let clause = compound_player_first("each opponent and each battle they protect")
+        .expect("the battle-protector form must keep parsing");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::Opponent));
+    let tf = typed_of(target);
+    assert!(tf.type_filters.contains(&TypeFilter::Battle));
+    assert!(
+        tf.properties.contains(&FilterProp::ProtectorMatches {
+            controller: ControllerRef::Opponent,
+        }),
+        "CR 310.9e: 'they protect' binds the battle's PROTECTOR, not its controller",
+    );
+    assert_eq!(
+        tf.controller, None,
+        "the protector relation must not also set the controller field",
+    );
+}
+
+#[test]
+fn compound_player_object_preserves_you_dont_control_arm() {
+    // Omnath, Locus of Creation — the sole live card on the " you don't control"
+    // whitelist arm, and the one arm the probe table never exercised. Without
+    // this, Unit 1's deletion of `set_opponent_controller` is unguarded on it.
+    let clause = compound_player_first("each opponent and each planeswalker you don't control")
+        .expect("Omnath must keep parsing");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::Opponent));
+    let tf = typed_of(target);
+    assert!(tf.type_filters.contains(&TypeFilter::Planeswalker));
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::Opponent),
+        "'you don't control' is an EXPLICIT possessive owned by parse_target",
+    );
+}
+
+#[test]
+fn compound_player_object_preserves_your_opponents_control_arm() {
+    // Sarkhan, Dragonsoul — the third whitelist arm.
+    let clause = compound_player_first("each opponent and each creature your opponents control")
+        .expect("Sarkhan must keep parsing");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::Opponent));
+    assert_eq!(typed_of(target).controller, Some(ControllerRef::Opponent),);
+}
+
+#[test]
+fn compound_player_object_accepts_bare_you_opener() {
+    // R9 — Sorrow's Path / Splintering Wind. Measured at HEAD as a bare
+    // `DealDamage{Controller}` with the object conjunct dropped entirely, so
+    // this assertion flips the moment the opener `alt` is reverted.
+    let clause = compound_player_first("you and each creature you control")
+        .expect("the bare 'you' opener must be accepted");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(
+        *player_filter,
+        Some(PlayerFilter::Controller),
+        "CR 109.5: a bare 'you' recipient is the ability's controller",
+    );
+    assert_eq!(
+        typed_of(target).controller,
+        Some(ControllerRef::You),
+        "the object half's explicit 'you control' is owned by parse_target",
+    );
+}
+
+#[test]
+fn compound_player_object_you_opener_requires_the_connector() {
+    // R9's hostile half. The bare "you" arm is gated on a following
+    // " and each " connector; without that gate it would fire inside a
+    // continuation clause and inside the "you" of "your opponents control".
+    assert!(
+        compound_player_first("you and you gain 2 life").is_none(),
+        "'you gain 2 life' is a continuation clause, not a damage recipient",
+    );
+
+    // The "you inside your" guard. This one must still PARSE — it is a valid
+    // object-first subject reaching the player-first parser's own text — and it
+    // must be unchanged from HEAD, with the object half keeping `ctrl:Opponent`.
+    let mut ctx = ParseContext::default();
+    let clause = try_parse_compound_object_player_damage(
+        "~ deals 2 damage to each creature your opponents control and each player",
+        &mut ctx,
+    )
+    .expect("the object-first reading must be unchanged");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::All));
+    assert_eq!(
+        typed_of(target).controller,
+        Some(ControllerRef::Opponent),
+        "the 'you' inside 'your opponents control' must not be read as an opener",
+    );
+}
+
+#[test]
+fn compound_player_object_declines_player_predicate_continuation() {
+    // R7 hostile. "each player draws a card" is a continuation clause, not an
+    // object conjunct; the empty-remainder gate is what rejects it.
+    assert!(
+        compound_player_first("each opponent and each player draws a card").is_none(),
+        "a player predicate continuation must not be claimed as an object conjunct",
+    );
+
+    // REACH GUARD (positive control), through `parse_oracle_text` — the real
+    // production entry for a whole Oracle line. Deliberately NOT
+    // `try_split_damage_compound`: that internal splitter is one layer below the
+    // line router, and for this text production never reaches it, so a guard
+    // anchored there would measure a path the card does not take.
+    let parsed = parse_oracle_text(
+        "~ deals 2 damage to each opponent and each player draws a card.",
+        "Test Card",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let def = parsed
+        .abilities
+        .first()
+        .expect("the line must still produce an ability");
+    assert!(
+        matches!(*def.effect, Effect::DamageEachPlayer { .. }),
+        "expected DamageEachPlayer primary, got: {:?}",
+        def.effect,
+    );
+    let sub = def.sub_ability.as_ref().expect("the draw must chain");
+    assert!(
+        matches!(*sub.effect, Effect::Draw { .. }),
+        "expected a chained Draw, got: {:?}",
+        sub.effect,
+    );
+}
+
+#[test]
+fn compound_player_object_declines_amount_chain() {
+    // R8 hostile — Dagger Caster. A conjunct that begins a fresh amount is a
+    // CHAIN segment; collapsing it into one effect would deal the wrong amounts.
+    assert!(
+        compound_player_first("each opponent and 1 damage to each creature your opponents control")
+            .is_none(),
+        "a separately-amounted segment must not be folded into one effect",
+    );
+
+    // REACH GUARD: the full pipeline still produces the two-effect chain.
+    let mut ctx = ParseContext::default();
+    let clause = try_split_damage_compound(
+        "~ deals 1 damage to each opponent and 1 damage to each creature your opponents control",
+        &mut ctx,
+    )
+    .expect("the two-amount chain must still parse");
+    assert!(matches!(clause.effect, Effect::DamageEachPlayer { .. }));
+    let sub = clause
+        .sub_ability
+        .as_ref()
+        .expect("second segment must chain");
+    assert!(
+        matches!(*sub.effect, Effect::DamageAll { .. }),
+        "expected a chained DamageAll, got: {:?}",
+        sub.effect,
+    );
+}
+
+#[test]
+fn compound_player_object_declines_nway_conjunction() {
+    // An inner " and each " is a three-way conjunction this two-conjunct grammar
+    // does not model. Fail closed rather than silently dropping a conjunct.
+    assert!(
+        compound_player_first("each player and each creature and each planeswalker").is_none(),
+        "an N-way conjunction must be declined, not partially claimed",
+    );
+}
+
+#[test]
+fn compound_player_object_declines_player_shaped_object_conjunct() {
+    // HOSTILE — this is the only thing holding the Step 3 content gate.
+    //
+    // `parse_target("each player")` returns `TargetFilter::Typed` with an EMPTY
+    // `type_filters` vec. An enum-shape gate (`matches!(.., TargetFilter::Typed)`)
+    // accepts that, and `filter.rs`'s `for tf in type_filters` loop is a no-op on
+    // an empty vec — so the resulting filter matches EVERY permanent on the
+    // battlefield rather than none. The gate must therefore require that the
+    // filter NAMES A TYPE, not merely that it is `Typed`.
+    let clause = compound_player_first("each opponent and each player");
+    assert!(
+        clause.is_none(),
+        "a player-shaped object conjunct must be declined, not lowered to an \
+         empty-typed filter that matches every permanent; got {clause:?}",
+    );
+}
+
+// ── Issue #8380 Unit 3: the amount-form axis ─────────────────────────────
+
+#[test]
+fn compound_amount_suffix_object_first_keeps_player_half() {
+    // R11 — Rupture / Magmasaur. At HEAD the amount-suffix spelling made BOTH
+    // compound parsers decline, and the fall-through lift dropped the player half
+    // because the trailing "without flying" made `parse_target` consume past the
+    // connector. `player_filter` is absent at HEAD, so this flips on revert.
+    let mut ctx = ParseContext::default();
+    let clause = try_parse_compound_object_player_damage(
+        "~ deals damage equal to that creature's power to each creature without flying and each player",
+        &mut ctx,
+    )
+    .expect("the amount-suffix spelling must reach the compound grammar");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(
+        *player_filter,
+        Some(PlayerFilter::All),
+        "the player half must survive the amount-suffix spelling",
+    );
+    let tf = typed_of(target);
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(
+        tf.properties.contains(&FilterProp::WithoutKeyword {
+            value: Keyword::Flying
+        }),
+        "the 'without flying' restriction must survive, got: {:?}",
+        tf.properties,
+    );
+}
+
+#[test]
+fn compound_amount_suffix_player_first_keeps_object_half() {
+    // The same defect in the player-first ordering. No live card carries this
+    // spelling today; the test pins the AXIS rather than waiting for a printing.
+    let mut ctx = ParseContext::default();
+    let clause = try_parse_compound_player_object_damage(
+        "~ deals damage equal to that creature's power to each player and each other creature",
+        &mut ctx,
+    )
+    .expect("the amount-suffix spelling must reach the player-first grammar too");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::All));
+    let tf = typed_of(target);
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(tf.properties.contains(&FilterProp::Another));
+}
+
+#[test]
+fn compound_amount_suffix_controls_unchanged() {
+    // Unit 3's one real regression risk: three shapes that ALREADY reached the
+    // right answer via `lower.rs`'s remainder lift, and which this change moves
+    // onto the compound path. Their ASTs must be unchanged.
+    //
+    // The mechanism by which they could differ is named, not hand-waved: the old
+    // route calls `parse_target_with_ctx` plus `refine_damage_target_remainder`,
+    // while the compound parsers call the context-free `parse_target`.
+    for (subject, expect_controller) in [
+        ("each creature and each player", None),
+        ("each red creature and each player", None),
+        (
+            "each creature you control and each player",
+            Some(ControllerRef::You),
+        ),
+    ] {
+        let mut ctx = ParseContext::default();
+        let text =
+            format!("~ deals damage equal to the number of time counters on it to {subject}");
+        let clause = try_parse_compound_object_player_damage(&text, &mut ctx)
+            .unwrap_or_else(|| panic!("'{subject}' must parse"));
+        let (target, player_filter) = expect_damage_all(&clause);
+        assert_eq!(
+            *player_filter,
+            Some(PlayerFilter::All),
+            "'{subject}' must keep its player half",
+        );
+        let tf = typed_of(target);
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "'{subject}' must still name Creature",
+        );
+        assert_eq!(
+            tf.controller, expect_controller,
+            "'{subject}' controller must be unchanged",
+        );
+    }
+}
+
+#[test]
+fn compound_amount_prefix_unchanged() {
+    // The axis control: the PREFIX spelling of the same subject already worked
+    // and must be untouched, proving Unit 3's change is scoped to the suffix form.
+    let mut ctx = ParseContext::default();
+    let clause = try_parse_compound_object_player_damage(
+        "~ deals 3 damage to each creature without flying and each player",
+        &mut ctx,
+    )
+    .expect("the prefix spelling must be unchanged");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::All));
+    assert!(typed_of(target)
+        .properties
+        .iter()
+        .any(|p| matches!(p, FilterProp::WithoutKeyword { .. })));
+}
+
+// ── Issue #8380 Unit 4: the partitive player scope ───────────────────────
+
+#[test]
+fn damage_each_player_scope_accepts_the_partitive_spelling() {
+    // `Aurelia, the Law Above`. At HEAD "each of your opponents" matched no arm,
+    // so the whole player scope declined and the recipient fell through to
+    // `parse_target`, yielding `Typed{type_filters: []}` — a filter naming NO
+    // type, which `filter.rs` then treats as matching EVERY permanent.
+    assert_eq!(
+        parse_damage_each_player_scope("each of your opponents"),
+        Some(PlayerFilter::Opponent),
+        "CR 109.5: the partitive is a surface variant of 'each opponent'",
+    );
+    // The singular spelling is unchanged.
+    assert_eq!(
+        parse_damage_each_player_scope("each opponent"),
+        Some(PlayerFilter::Opponent),
+    );
+    // And the plural bare spelling, which the new `opt(tag("s"))` also admits.
+    assert_eq!(
+        parse_damage_each_player_scope("each opponents"),
+        Some(PlayerFilter::Opponent),
+    );
+    // The anaphoric partitive is deliberately NOT accepted: "their opponents"
+    // binds to some antecedent player rather than to the controller, and mapping
+    // it onto the static controller-relative filter would install a
+    // wrong-referent rule with no card driving it.
+    assert_eq!(
+        parse_damage_each_player_scope("each of their opponents"),
+        None,
+        "the anaphoric partitive must decline rather than guess a referent",
+    );
+}

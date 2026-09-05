@@ -28,6 +28,7 @@ use super::oracle_ir::doc::OracleItemIr;
 use super::oracle_ir::feature::{
     audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
 };
+use super::oracle_nom::error::OracleError;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
@@ -51,7 +52,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while1},
+    bytes::complete::{tag, take_until, take_while1},
     character::complete::digit1,
     combinator::{opt, value},
     Parser,
@@ -222,6 +223,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_optional_may_have(&cleaned, fragment, &evidence, &mut found);
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
         detect_modal_dynamic_max_dropped(&cleaned, fragment, &evidence, &mut found);
+        detect_damage_subject_conjunction(&cleaned, fragment, &scoped, &mut found);
 
         stamp_provenance(&mut found, &unit);
         diagnostics.append(&mut found);
@@ -4906,6 +4908,287 @@ fn detect_apnap(
     }
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::Apnap.detector_label(),
+        truncate(original, 140),
+    ));
+}
+
+// ── Detector P: DamageSubjectConjunction ────────────────────────────────
+
+/// One conjunct's shape, as the anchor grammar classifies it.
+///
+/// A typed enum rather than two booleans: the qualifying condition is that the
+/// two conjuncts have DIFFERENT shapes drawn from a specific pair, which is a
+/// statement about the pair and not about either half alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConjunctShape {
+    /// A player scope — "each player", "each of your opponents", bare "you",
+    /// "target opponent", "that player", …
+    Player,
+    /// An object scope — "each"/"all"/"every" + a noun phrase.
+    Object,
+    /// A conjunct that itself begins a FRESH amount ("1 damage to …"). This is
+    /// the CHAIN form, which is a parser concept with no governing CR: it is not
+    /// a bare conjunct of this anchor, it is its own anchor, and it is the
+    /// legitimate representation whenever the Oracle text gives the segments
+    /// separate amounts (Dagger Caster).
+    ChainSegment,
+    /// Anything else — a continuation clause, a verb phrase, a qualified set.
+    Other,
+}
+
+/// Is `rest` at a word boundary — i.e. does the character that follows a match
+/// end the word, rather than continuing it?
+///
+/// Mirrors a regex `\b`: without it, "each players" and "each playerhood" would
+/// classify identically.
+fn at_word_boundary(rest: &str) -> bool {
+    !rest
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// The player nouns a scope can name, with their optional plural.
+fn parse_player_noun(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    value(
+        (),
+        (alt((
+            tag("players"),
+            tag("player"),
+            tag("opponents"),
+            tag("opponent"),
+            tag("foes"),
+            tag("foe"),
+        )),),
+    )
+    .parse(input)
+}
+
+/// A player-shaped conjunct, in every spelling the anchor grammar admits.
+///
+/// Nested by prefix dispatch: "each " is matched once and hands off to the noun
+/// / partitive sub-grammar, rather than being repeated across full-phrase
+/// literals. `target`/`that`/anaphoric openers are deliberately INCLUDED even
+/// though no current fix handles them — the detector reports position, so it must
+/// see the families that remain deferred.
+fn parse_player_shaped_conjunct(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    alt((
+        // "each [other] player/opponent/foe[s]" and the partitive
+        // "each of your|their opponents|foes".
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("each "),
+                alt((
+                    value((), (opt(tag("other ")), parse_player_noun)),
+                    value(
+                        (),
+                        (
+                            tag("of "),
+                            alt((tag("your "), tag("their "))),
+                            parse_player_noun,
+                        ),
+                    ),
+                )),
+            ),
+        ),
+        value((), (tag("target "), parse_player_noun)),
+        value((), (tag("that "), parse_player_noun)),
+        value((), (tag("those "), parse_player_noun)),
+        value((), (tag("an "), parse_player_noun)),
+        value((), (tag("a "), parse_player_noun)),
+        value((), (alt((tag("its "), tag("their "))), tag("controller"))),
+        value((), tag("you")),
+    ))
+    .parse(input)
+}
+
+/// Classify one conjunct of a damage anchor.
+///
+/// One `alt` per axis, nested by shared prefix ("each " → the player nouns),
+/// rather than an enumeration of full-phrase literals.
+fn classify_conjunct(conjunct: &str) -> ConjunctShape {
+    let text = conjunct.trim();
+
+    // CHAIN first: a fresh amount outranks every other reading, because such a
+    // conjunct is a separate damage action with its own recipient list.
+    let chain_head = alt((
+        value((), digit1::<&str, OracleError<'_>>),
+        value((), tag("x")),
+        value((), tag("that much")),
+        value((), tag("half")),
+    ))
+    .parse(text);
+    if let Ok((rest, ())) = chain_head {
+        // The segment must actually name a damage recipient before the sentence
+        // ends, or a leading number is just part of a noun phrase.
+        // structural: not dispatch — bound the lookahead at the sentence.
+        let up_to_period = rest.split('.').next().unwrap_or("");
+        // allow-noncombinator: swallow detector marker scan on classified text
+        if up_to_period.contains("damage to ") {
+            return ConjunctShape::ChainSegment;
+        }
+    }
+
+    // PLAYER-shaped.
+    if let Ok((rest, ())) = parse_player_shaped_conjunct(text) {
+        if at_word_boundary(rest) {
+            return ConjunctShape::Player;
+        }
+    }
+
+    // OBJECT-shaped: a universal quantifier over a noun phrase. Note that "each
+    // other creature" is object-shaped — the "other" is consumed by the player
+    // arm above only when a PLAYER noun follows it, so the two do not collide.
+    let object = alt((
+        tag::<_, _, OracleError<'_>>("each "),
+        tag("all "),
+        tag("every "),
+    ))
+    .parse(text);
+    if object.is_ok() {
+        return ConjunctShape::Object;
+    }
+
+    ConjunctShape::Other
+}
+
+/// Consume one damage ANCHOR at the head of `input`, returning the slice where
+/// the recipient list begins.
+///
+/// The anchor is `damage to ` or `damage equal to <expr> to `. The `<expr>` may
+/// not span a sentence boundary, which is what keeps a later sentence's " to "
+/// from being read as this clause's preposition.
+fn parse_damage_anchor(input: &str) -> Option<&str> {
+    let (after_damage, _) = tag::<_, _, OracleError<'_>>("damage ").parse(input).ok()?;
+    if let Ok((recipients, _)) = tag::<_, _, OracleError<'_>>("to ").parse(after_damage) {
+        return Some(recipients);
+    }
+    let (after_equal, _) = tag::<_, _, OracleError<'_>>("equal to ")
+        .parse(after_damage)
+        .ok()?;
+    let (after_expr, expr) = take_until::<_, _, OracleError<'_>>(" to ")
+        .parse(after_equal)
+        .ok()?;
+    // structural: not dispatch — a `<expr>` that spans a sentence boundary means
+    // the " to " found belongs to a LATER sentence, so this anchor is not real.
+    if expr.contains('.') {
+        return None;
+    }
+    let (recipients, _) = tag::<_, _, OracleError<'_>>(" to ")
+        .parse(after_expr)
+        .ok()?;
+    Some(recipients)
+}
+
+/// True when this line carries at least one QUALIFYING anchor: a damage clause
+/// whose two conjuncts are one player scope and one object scope, in either
+/// order.
+///
+/// Scans word boundaries and tries the anchor combinator at each — the
+/// established idiom for a phrase that may appear at any position, and more
+/// precise than a substring search because it matches a complete construction.
+fn line_has_qualifying_damage_anchor(line: &str) -> bool {
+    let mut remaining = line;
+    while !remaining.is_empty() {
+        if let Some(recipients) = parse_damage_anchor(remaining) {
+            // structural: not dispatch — the clause ends at the sentence
+            // boundary, so this bounds the slice the conjunct grammar reads.
+            let clause = recipients.split('.').next().unwrap_or("");
+            // Split at the FIRST connector — this anchor's own two conjuncts —
+            // with the same `take_until` + `tag` pair the compound damage
+            // parsers use, rather than a bare string split.
+            if let Ok((b, a)) = (take_until::<_, _, OracleError<'_>>(" and "), tag(" and "))
+                .parse(clause)
+                .map(|(rest, (a, _))| (rest, a))
+            {
+                if matches!(
+                    (classify_conjunct(a), classify_conjunct(b)),
+                    (ConjunctShape::Player, ConjunctShape::Object)
+                        | (ConjunctShape::Object, ConjunctShape::Player)
+                ) {
+                    return true;
+                }
+            }
+        }
+        // structural: not dispatch — advance to the next word boundary so the
+        // anchor combinator above is tried at each one. This is the established
+        // scanning idiom (`scan_timing_restrictions`, `scan_for_phase`).
+        remaining = match remaining.find(' ') {
+            Some(i) => remaining[i + 1..].trim_start(),
+            None => "",
+        };
+    }
+    false
+}
+
+/// True when some `DamageAll` in this unit's subtree carries BOTH audiences —
+/// an object `target` and a non-null `player_filter`.
+fn unit_represents_both_damage_audiences(parsed: &ParsedAbilities) -> bool {
+    let mut found = false;
+    let mut check = |effect: &Effect| {
+        if matches!(
+            effect,
+            Effect::DamageAll {
+                player_filter: Some(_),
+                ..
+            }
+        ) {
+            found = true;
+        }
+        ControlFlow::<()>::Continue(())
+    };
+    for def in &parsed.abilities {
+        let _ = visit_ability_def(def, &mut check);
+    }
+    for trigger in &parsed.triggers {
+        let _ = visit_trigger(trigger, &mut check);
+    }
+    for static_def in &parsed.statics {
+        let _ = visit_static(static_def, &mut check);
+    }
+    for replacement in &parsed.replacements {
+        let _ = visit_replacement(replacement, &mut check);
+    }
+    found
+}
+
+/// CR 608.2f: "Some spells and abilities include actions taken on multiple
+/// players and/or objects. In most cases, each such action is processed
+/// simultaneously." A damage clause whose subject conjoins a player scope and an
+/// object scope — in EITHER ordering — is one such action taken on both
+/// audiences, so the correct representation is a single `Effect::DamageAll`
+/// carrying both `target` and a non-null `player_filter`. A parse that
+/// represents only one audience has silently discarded the other.
+///
+/// CR 120.4b: damage is dealt as modified by replacement and prevention effects
+/// (rules 614 and 615), so that single event is what those shields observe —
+/// which is why splitting the audiences into two chained effects is not merely
+/// untidy but observably wrong.
+///
+/// The detector is POSITION-based, not spelling-based: it classifies each
+/// conjunct by shape rather than matching known phrases, so it reports every
+/// family of this defect including the ones deferred to later work (announced
+/// targets, anaphors, qualified player sets), not only the ones a given fix
+/// happens to repair.
+///
+/// The separately-amounted CHAIN form needs no escape here: its second conjunct
+/// classifies as `ChainSegment`, so such a clause produces no qualifying anchor
+/// at all.
+fn detect_damage_subject_conjunction(
+    cleaned: &str,
+    original: &str,
+    parsed: &ParsedAbilities,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
+    if !cleaned.lines().any(line_has_qualifying_damage_anchor) {
+        return;
+    }
+    if unit_represents_both_damage_audiences(parsed) {
+        return;
+    }
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DamageSubjectConjunction.detector_label(),
         truncate(original, 140),
     ));
 }
@@ -10534,6 +10817,156 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             )),
             "repeat_for must not hide unbacked 'rather than once' wording"
         );
+    }
+    // ── Detector P: DamageSubjectConjunction ────────────────────────────
+
+    /// Run detector P over one line of Oracle text plus the AST that text parsed
+    /// to, exactly as the unit loop calls it.
+    fn damage_conjunction_fires(text: &str, types: &[&str]) -> bool {
+        let parsed = parse(text, types);
+        let cleaned = text.to_ascii_lowercase();
+        let mut found = Vec::new();
+        super::detect_damage_subject_conjunction(&cleaned, text, &parsed, &mut found);
+        found.iter().any(|d| {
+            matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. }
+                    if detector == "DamageSubjectConjunction"
+            )
+        })
+    }
+
+    /// The normative table from the plan, as a test.
+    ///
+    /// **Read the states carefully.** The plan's table lists each row's HEAD
+    /// disposition; a unit test can only observe ONE tree, and this one runs in
+    /// the FIXED tree. Rows the fix repairs are therefore asserted SILENT here,
+    /// and their HEAD-state firing is measured by the paired before/after
+    /// full-population run — the only instrument that can see both states.
+    ///
+    /// The SILENT rows are the load-bearing half: a detector that fires on a
+    /// legitimate two-amount chain (Dagger Caster) or on an object+object clause
+    /// (Hour of Devastation) would bury the real findings in noise, and only a
+    /// negative row can catch that. Each silent row is paired with a firing row
+    /// that reaches the same code, so neither direction is asserted alone.
+    #[test]
+    fn damage_subject_conjunction_detector_matches_the_normative_table() {
+        // SILENT, and DISCRIMINATING — Exocrine's own shape. It carries a
+        // qualifying anchor, so the only thing keeping the detector quiet is that
+        // the fix now represents both audiences in one `DamageAll`. Revert Unit 1
+        // and this flips to firing.
+        assert!(
+            !damage_conjunction_fires(
+                "When this creature enters, it deals 2 damage to each player and each other creature.",
+                &["Creature"],
+            ),
+            "Exocrine now represents both audiences, so the detector must be silent \
+             on it — a fire here means the player-first fix regressed"
+        );
+        // SILENT, and DISCRIMINATING — verbatim Hail Storm. Its line carries TWO
+        // ` and `s, so the anchor grammar must read only the SECOND anchor's own
+        // conjuncts (`you` ‖ `each creature you control`) rather than the line's
+        // first split. That anchor is now represented — MEASURED, and contrary to
+        // the plan's expectation that this card was out of Unit 1's reach — so
+        // the detector must be silent on it.
+        assert!(
+            !damage_conjunction_fires(
+                "Hail Storm deals 2 damage to each attacking creature and 1 damage to you and each creature you control.",
+                &["Instant"],
+            ),
+            "Hail Storm's second anchor is represented after the bare-'you' opener \
+             fix; a fire here means that opener regressed"
+        );
+
+        // FIRES — a QUALIFIED player set. The player conjunct carries a relative
+        // clause restricting it, which no unit here represents, so this stays a
+        // reported residual (Disorder's class).
+        assert!(
+            damage_conjunction_fires(
+                "This spell deals 2 damage to each white creature and each player who controls a white creature.",
+                &["Sorcery"],
+            ),
+            "a qualified player set is still unrepresented and must be reported"
+        );
+
+        // SILENT — a legitimate two-amount CHAIN. The second conjunct begins a
+        // fresh amount, so it is its own anchor rather than a bare conjunct, and
+        // the chain representation is correct for it.
+        assert!(
+            !damage_conjunction_fires(
+                "When this creature enters, it deals 1 damage to each opponent and 1 damage to each creature your opponents control.",
+                &["Creature"],
+            ),
+            "a separately-amounted chain is the CORRECT representation and must stay silent"
+        );
+        // SILENT — object + object; neither conjunct is player-shaped.
+        assert!(
+            !damage_conjunction_fires(
+                "This spell deals 5 damage to each creature and each planeswalker.",
+                &["Sorcery"],
+            ),
+            "an object+object subject produces no qualifying anchor"
+        );
+        // SILENT — already REPRESENTED: the object-first ordering parses to a
+        // single `DamageAll` carrying both audiences.
+        assert!(
+            !damage_conjunction_fires(
+                "This spell deals 2 damage to each creature without flying and each player.",
+                &["Sorcery"],
+            ),
+            "the Earthquake/Pyrohemia class is represented and must stay silent"
+        );
+    }
+
+    /// The detector reports POSITION, not spelling — so the families this fix
+    /// defers (an announced target, an anaphor) must still be visible. Without
+    /// this, deferring them would be silent rather than merely incomplete.
+    #[test]
+    fn damage_subject_conjunction_detector_sees_the_deferred_families() {
+        assert!(
+            damage_conjunction_fires(
+                "This spell deals 3 damage to target player and each creature that player controls.",
+                &["Sorcery"],
+            ),
+            "the announced-target family must be reported even though this change defers it"
+        );
+    }
+
+    /// Conjunct classification is the detector's whole grammar; pin it directly
+    /// so a marker bug localises here rather than in a full-population run.
+    #[test]
+    fn damage_conjunct_shapes_are_classified_by_position() {
+        use super::{classify_conjunct, ConjunctShape};
+        assert_eq!(classify_conjunct("each player"), ConjunctShape::Player);
+        assert_eq!(
+            classify_conjunct("each of your opponents"),
+            ConjunctShape::Player
+        );
+        assert_eq!(classify_conjunct("you"), ConjunctShape::Player);
+        assert_eq!(
+            classify_conjunct("that player controls"),
+            ConjunctShape::Player
+        );
+        // "each other creature" is OBJECT-shaped: the "other" is only consumed by
+        // the player arm when a player noun follows it.
+        assert_eq!(
+            classify_conjunct("each other creature"),
+            ConjunctShape::Object
+        );
+        assert_eq!(
+            classify_conjunct("each other opponent"),
+            ConjunctShape::Player
+        );
+        assert_eq!(
+            classify_conjunct("each creature you control"),
+            ConjunctShape::Object
+        );
+        assert_eq!(
+            classify_conjunct("1 damage to each creature"),
+            ConjunctShape::ChainSegment
+        );
+        assert_eq!(classify_conjunct("you gain 2 life"), ConjunctShape::Player);
+        assert_eq!(classify_conjunct("draws a card"), ConjunctShape::Other);
     }
 }
 
