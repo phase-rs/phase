@@ -7186,6 +7186,10 @@ pub fn parse_oracle_text(
     render_granting_self_descriptions(&mut parsed, card_name);
     demote_unbound_delayed_sweeps(&mut parsed);
     demote_unenforceable_replacement_lifetimes(&mut parsed);
+    #[cfg(debug_assertions)]
+    crate::parser::oracle_effect::debug_assert_exile_top_opponent_sentinel_lifted(
+        &parsed, card_name,
+    );
     parsed
 }
 

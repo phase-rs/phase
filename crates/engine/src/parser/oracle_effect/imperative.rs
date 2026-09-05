@@ -228,6 +228,20 @@ fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
         return TargetFilter::ScopedPlayer;
     }
 
+    // CR 401.1 + CR 102.2 + CR 102.3: "look at the top card of each opponent's library …
+    // and exile those cards" — the opponent-scoped partner of the `each player's` arm
+    // above. Mark the per-opponent scope with `Opponent` so the look-then-exile idiom's
+    // materialized `ExileTop` lifts to a `player_scope: Opponent` fan-out (the same shape
+    // the direct path gets via `parse_library_player_suffix`). Without this arm the
+    // recognizer falls through to `Controller` below and Lobelia, Defender of Bag End
+    // SILENTLY exiles the CONTROLLER's own top card instead of each opponent's.
+    if tag::<_, _, OracleError<'_>>("card of each opponent's library")
+        .parse(rest_lower)
+        .is_ok()
+    {
+        return TargetFilter::Opponent;
+    }
+
     TargetFilter::Controller
 }
 
@@ -8754,6 +8768,7 @@ fn starts_with_target_possessive_zone(rest_lower: &str) -> bool {
 /// - "target opponent's library" → `Typed{controller: Opponent}`
 /// - "target player's library" → `Player`
 /// - "each player's library" → `ScopedPlayer`
+/// - "each opponent's library" → `Opponent` (parse-only scope sentinel)
 ///
 /// The helper performs only the player-suffix match; callers own any trailing
 /// face-down / where-X / destination parsing (the exile and manifest epilogues
@@ -8784,6 +8799,18 @@ pub(super) fn parse_library_player_suffix<'a>(
         ("cards of target player's library", TargetFilter::Player),
         ("card of each player's library", TargetFilter::ScopedPlayer),
         ("cards of each player's library", TargetFilter::ScopedPlayer),
+        // CR 401.1 + CR 102.2 + CR 102.3 + CR 608.2c: "each opponent's library" names ONE
+        // library per opponent — the same one-library-per-player reading as the `each
+        // player's` rows above, restricted to the controller's opponents. `TargetFilter::
+        // Opponent` is the parse-only scope sentinel here (never a targeted single
+        // opponent); `lift_distributive_exile_top_scope` erases it to `Controller` and
+        // stamps `player_scope: Opponent`, so the fan-out rebinds the acting controller to
+        // each opponent in APNAP order and `Effect::ExileTop` reads that opponent's library.
+        // Without these rows the clause falls through to the generic
+        // ChangeZone(Library→Exile) path, which offers a library-wide EffectZoneChoice
+        // tutor prompt over every card in every opponent's library (issue #8392).
+        ("card of each opponent's library", TargetFilter::Opponent),
+        ("cards of each opponent's library", TargetFilter::Opponent),
     ] {
         if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
             return Some((tail, player));

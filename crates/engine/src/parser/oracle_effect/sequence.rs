@@ -5674,7 +5674,9 @@ pub(super) fn apply_clause_continuation(
             // `parse_dig_library_owner` lifts this materialized `ExileTop` into a
             // per-player `player_scope: All` fan-out, the same shape the direct
             // "exile the top card of each player's library" path gets via the lift
-            // in `parse_effect_chain_ir`. This is the symmetric materialization
+            // in `parse_effect_chain_ir`. CR 102.2 + CR 102.3: the `Opponent`
+            // owner marker ("each opponent's library", Lobelia) lifts the same way
+            // into `player_scope: Opponent`. This is the symmetric materialization
             // seam: the direct path lifts where `parse_exile_ast` produces its
             // `ExileTop`, and this look-then-exile path lifts where the `Dig` is
             // back-patched into one. The lift survives assembly because this
@@ -5684,7 +5686,7 @@ pub(super) fn apply_clause_continuation(
             // detached by `split_player_scope_chain` and runs once for the
             // controller over the union of exiled cards.
             let d = &mut defs[bound_index];
-            super::lift_each_player_exile_top_scope(&mut d.effect, &mut d.player_scope);
+            super::lift_distributive_exile_top_scope(&mut d.effect, &mut d.player_scope);
         }
         // CR 702.75a + CR 406.3: "exile one of them face down" patches the
         // preceding private `Dig` into the Hideaway shape — the controller
