@@ -7,9 +7,20 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A deploy runs ~40 minutes; `main` merges more often than that. Cancelling the
+# run in flight therefore starved this workflow completely — every run was
+# superseded before it could publish, so the newest commit never shipped either.
+# On 2026-09-05 that left preview serving five-hour-old content while the
+# Actions tab showed a healthy stream of runs.
+#
+# Queueing instead is bounded, not unbounded: a concurrency group holds at most
+# ONE pending run, because a newly queued run cancels whatever was already
+# pending. Worst case is therefore the run in flight plus one more (~80 min),
+# and the pending slot always carries the newest commit at the moment it starts.
+# We trade "sometimes one deploy behind" for "always makes progress".
 concurrency:
   group: deploy-pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
