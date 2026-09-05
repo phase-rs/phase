@@ -23973,6 +23973,34 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::CopyTokenOf { ref mut owner, .. } if *owner == TargetFilter::Controller => {
             *owner = subject_filter;
         }
+        // CR 701.20a + CR 115.1 (issue #8428): "target opponent reveals THEIR
+        // hand". `parse_hand_possessive_target` resolves the bare possessive
+        // pronoun "their hand" to `TriggeringPlayer`, which is the right answer
+        // only when the clause has no subject of its own to bind to ("Look at
+        // their hand." — the antecedent then comes from the triggering event).
+        // When the clause DOES name a declared target as its subject, that
+        // subject is the antecedent, and it outranks the pronoun default: a
+        // "target opponent" is chosen as the ability goes on the stack (CR
+        // 601.2c, reached via CR 603.3d for a triggered ability), so the reveal
+        // must show THAT player's hand.
+        //
+        // The pronoun default is not `Any`, so the injection group below could
+        // not correct it, and the fabricated antecedent erased the declared
+        // target — Brain Maggot's ETB built no player target slot at all and
+        // `reveal_hand` fell back to the triggering event's player, revealing
+        // its own controller's hand.
+        //
+        // `subject.target` (not `subject.affected`) is the discriminator, the
+        // same one the `Sacrifice` arm below uses: it is `Some` only for a
+        // DECLARED target ("target opponent" / "target player"), so an
+        // anaphoric subject ("that player reveals their hand" — Biting-Palm
+        // Ninja) keeps the triggering-player binding it already resolves to.
+        Effect::RevealHand { target, .. }
+            if *target == TargetFilter::TriggeringPlayer
+                && subject.target.as_ref().is_some_and(TargetFilter::is_player_scope) =>
+        {
+            *target = subject_filter;
+        }
         // CR 701.14a: "enchanted creature fights target creature" — the subject
         // of the fight is the enchanted/equipped creature, not the Aura/Equipment.
         Effect::Fight {
