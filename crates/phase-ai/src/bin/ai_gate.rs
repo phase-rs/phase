@@ -625,6 +625,13 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let real = dir.join("baseline.json");
         std::fs::write(&real, "{}").expect("write");
+        // Every consumer of this path — the `symlink()` call below and both
+        // assertions in the `#[cfg(unix)]` block — is itself Unix-only, so an
+        // unconditional binding is an unused variable on Windows and `-D
+        // warnings` rejects it. Gate the binding alongside its uses rather than
+        // silencing it with a leading underscore, which would hide a genuinely
+        // dead binding if the Unix arms were ever removed.
+        #[cfg(unix)]
         let link = dir.join("link.json");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).expect("symlink");
