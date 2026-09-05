@@ -581,15 +581,15 @@ pub(crate) fn permanent_board_value(
         return 0.0;
     };
     if sacrifice_tier_of(obj) == SacrificeTier::Land {
-        // CR 305.9 (`docs/MagicCompRules.txt:1711`): "If an object is both a
+        // CR 305.9: "If an object is both a
         // land and another card type, it can be played only as a land." The
         // rule presupposes such objects and settles that the LAND nature
         // governs deployment — so a creature-land really does occupy the land
         // drop (CR 305.1) and the land valuation can never simply be skipped.
-        // CR 305.7 (`:1707`): "Setting a land's subtype doesn't add or remove
+        // CR 305.7: "Setting a land's subtype doesn't add or remove
         // any card types (such as creature)" — land-ness and creature-ness are
         // independent axes, so neither classification erases the other.
-        // CR 208.1 (`:1509`): a creature has real power and toughness, so the
+        // CR 208.1: a creature has real power and toughness, so the
         // body is a real thing to lose too.
         //
         // A creature-land (Dryad Arbor; an animated Treetop Village or a

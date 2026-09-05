@@ -1,6 +1,6 @@
 //! `FixedDeckKeepMulligan` — force-keep for engine-supplied fixed decks.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): a player mulligans to find a
+//! CR 103.5: a player mulligans to find a
 //! workable opening hand. That premise assumes a varied deck where some hands
 //! are better than others. The Momir family of formats inverts it: the engine
 //! supplies a fixed 60-card all-basic-land deck (`FormatConfig::

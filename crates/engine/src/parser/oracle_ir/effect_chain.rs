@@ -154,19 +154,19 @@ fn ability_definition_has_result_table_roll_die(def: &AbilityDefinition) -> bool
 ///
 /// # The partition is the rules' own, not an engineering convenience
 ///
-/// CR 602.1 (`MagicCompRules.txt:2514`) — *"Activated abilities have a cost and
+/// CR 602.1 — *"Activated abilities have a cost and
 /// an effect. They are written as `[Cost]: [Effect.] [Activation instructions
 /// (if any).]`"* — draws exactly the seam this type sits on, and CR 113.3b
-/// (:761) repeats the tripartite form for abilities generally. So:
+/// repeats the tripartite form for abilities generally. So:
 ///
 /// | shell field group | CR |
 /// |---|---|
-/// | `cost`, `cost_reduction` | CR 602.1a — everything before the colon (:2516) |
-/// | `activation_restrictions`, `activation_mana_payment_restriction`, `activator_filter`, `activation_zone` | CR 602.1b — activation instructions, *"not part of the ability's effect"* (:2519) |
-/// | `min_x_value` | CR 601.2b — the announced value of a variable cost (:2459) |
+/// | `cost`, `cost_reduction` | CR 602.1a — everything before the colon |
+/// | `activation_restrictions`, `activation_mana_payment_restriction`, `activator_filter`, `activation_zone` | CR 602.1b — activation instructions, *"not part of the ability's effect"* |
+/// | `min_x_value` | CR 601.2b — the announced value of a variable cost |
 /// | `ability_tag`, `cant_be_copied`, `description` | ability-level identity/provenance, not resolution steps |
 ///
-/// while `EffectChainIr` holds the CR 608.2 (:2785) resolution instructions.
+/// while `EffectChainIr` holds the CR 608.2 resolution instructions.
 /// Because the root-vs-clause axis follows a seam CR 602.1 already draws, the
 /// widening satisfies the categorical-boundary rule rather than straddling rule
 /// sections.
@@ -303,9 +303,9 @@ pub(crate) struct AbilityShellIr {
     ///
     /// # This is the one field that is NOT the CR 602.1 activation envelope
     ///
-    /// Everything else on this shell partitions along the seam CR 602.1 (:2514)
+    /// Everything else on this shell partitions along the seam CR 602.1
     /// draws — cost before the colon, activation instructions after it. `optional`
-    /// does not: CR 608.2d (`MagicCompRules.txt:2795`) places the choice
+    /// does not: CR 608.2d places the choice
     /// *"while applying the effect"*, which is CR 608.2 resolution, the half this
     /// type deliberately leaves to [`EffectChainIr`]. So its presence here is an
     /// explicit, named exception rather than an extension of the partition, and
@@ -1243,7 +1243,7 @@ impl ClauseDraft<'_> {
                 // Since #7959 the EMBEDDED-side clobber this branch guards against is refused
                 // structurally: `apply_duration_to_effect` yields to a written embedded window
                 // on every `Option<Duration>` writer, through `duration_is_unset_sentinel`
-                // (CR 611.2a, :2908). This textual gate STAYS, because it guards the OTHER
+                // (CR 611.2a). This textual gate STAYS, because it guards the OTHER
                 // carrier: `AbilityDefinition.duration` is still written unconditionally by
                 // `with_clause_duration`, and an injected `UntilEndOfTurn` is still
                 // indistinguishable from a printed one there (#7962). Do not delete it as

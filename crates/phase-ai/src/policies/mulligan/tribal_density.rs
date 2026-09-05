@@ -1,6 +1,6 @@
 //! `TribalDensityMulligan` — feature-driven mulligan policy for tribal decks.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding to keep after the
+//! CR 103.5: deciding to keep after the
 //! mulligan process. When a deck's tribal commitment is meaningful, opening
 //! hands with a dense mix of tribe members and payoffs are strongly preferred
 //! over sparse hands where the tribal plan can't execute.

@@ -1,6 +1,6 @@
 //! `RampKeepablesMulligan` — feature-driven mulligan policy for mana-ramp decks.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding to keep after the
+//! CR 103.5: deciding to keep after the
 //! mulligan process. When a deck's mana-ramp commitment is meaningful, opening
 //! hands that combine a ramp piece (dork/rock/fetch-spell/ritual/extra-landdrop)
 //! with enough lands to use it are strongly preferred.

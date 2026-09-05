@@ -23107,7 +23107,7 @@ fn cant_be_activated_effect_standalone_targets_creature() {
             duration,
             end_cost: _,
         } => {
-            // CR 611.2a (`docs/MagicCompRules.txt:2908`): this sentence states NO
+            // CR 611.2a: this sentence states NO
             // window of its own, so the AST must say so. The recognizer used to
             // inject `Some(UntilEndOfTurn)` here, indistinguishable from a printed
             // window, which blocked an enclosing sentence's duration from reaching
@@ -34068,8 +34068,8 @@ fn suffix_condition_with_otherwise_integration() {
 
 // --- CR 110.2a controller-override binding (#6691) ---
 
-/// CR 110.2a (docs/MagicCompRules.txt:618) + CR 400.1 (:1933) + CR 400.3
-/// (:1937) + CR 404.1 (:2030) + CR 108.3 (:564): Jailbreak's
+/// CR 110.2a + CR 400.1 + CR 400.3 +
+/// CR 404.1 + CR 108.3: Jailbreak's
 /// "under their control" binds to the moved card's OWNER, because a card in an
 /// opponent's graveyard is in ITS OWNER's graveyard.
 ///
@@ -34149,7 +34149,7 @@ fn under_your_control_still_binds_to_you_after_the_collapse() {
     }
 }
 
-/// CR 110.2 (docs/MagicCompRules.txt:616): owner forms use the existing
+/// CR 110.2: owner forms use the existing
 /// per-moved-object-owner carrier (`None`), rather than a player override, and
 /// specifically must not be misread as the third-person `TheirAnaphor` (B3).
 #[test]
@@ -34351,7 +34351,7 @@ fn return_destination_tapped() {
 fn return_destination_owners_control_not_under_your_control() {
     let (_, dest) = strip_return_destination_ext("it to the battlefield under its owner's control");
     let d = dest.expect("should parse destination");
-    // CR 110.2 (docs/MagicCompRules.txt:616): the owner form is RECOGNIZED as a
+    // CR 110.2: the owner form is RECOGNIZED as a
     // clause but restates the default, so binding it yields
     // `EntersUnderSpec::Default` — never a controller override, and never the
     // third-person `TheirAnaphor`.

@@ -840,7 +840,7 @@ fn default_lethality_tapout_penalty() -> f64 {
 ///
 /// **CR 305.4 — the rate-limit rationale above is FALSE on one of this
 /// penalty's call sites, and that is a known mispricing, not an oversight.**
-/// CR 305.4 (`docs/MagicCompRules.txt:1700`): "Effects may also allow players to
+/// CR 305.4: "Effects may also allow players to
 /// 'put' lands onto the battlefield. This isn't the same as 'playing a land' and
 /// doesn't count as a land played during the current turn." A fetchland *puts*
 /// its replacement onto the battlefield, so sacrificing it consumes no land

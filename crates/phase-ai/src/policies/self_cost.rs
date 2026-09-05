@@ -303,7 +303,7 @@ pub(crate) fn cost_is_material(
 /// **KNOWN MISPRICING on the `SelfRef` branch when the source is a land.**
 /// `sacrifice_cost` charges `sacrifice_land_penalty`, whose stated rationale is
 /// CR 305.2's one-land-per-turn rate limit on the replacement drop. CR 305.4
-/// (`docs/MagicCompRules.txt:1700`) refutes that for a fetchland: "Effects may
+/// refutes that for a fetchland: "Effects may
 /// also allow players to 'put' lands onto the battlefield. This isn't the same
 /// as 'playing a land' and doesn't count as a land played during the current
 /// turn." A fetchland puts its replacement onto the battlefield, so it consumes

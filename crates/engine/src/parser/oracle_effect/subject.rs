@@ -2071,7 +2071,7 @@ fn try_parse_subject_restriction_clause(
         // ties the prohibition to the target's tap state. Without that suffix the
         // window is UNSTATED here, and it must stay `None`.
         //
-        // CR 611.2a (`docs/MagicCompRules.txt:2908`): this value lands on BOTH the
+        // CR 611.2a: this value lands on BOTH the
         // embedded `GenericEffect.duration` and the clause CARRIER below, so an
         // injected `UntilEndOfTurn` default made both indistinguishable from a
         // printed window and `with_clause_chain_duration` / `apply_duration_to_effect`

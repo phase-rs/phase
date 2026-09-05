@@ -1,6 +1,6 @@
 //! `KeepablesByLandCount` — baseline land-count + castability mulligan policy.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding whether to keep or
+//! CR 103.5: deciding whether to keep or
 //! mulligan an opening hand. This policy is the deck-agnostic baseline — it
 //! checks land count, color availability, and early castability.
 //!

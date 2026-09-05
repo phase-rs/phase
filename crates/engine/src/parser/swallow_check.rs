@@ -10179,8 +10179,8 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// which static it truly belongs to — a pre-existing characteristic shared
     /// with the sibling `enters_with_finality_this_way_is_only_if_marker` detector
     /// this fix mirrors, not a new gap this fix introduces). It instead uses CR
-    /// 614.1c's own bare first template ("[This permanent] enters with . . .",
-    /// `docs/MagicCompRules.txt` 3064), which is structurally distinct from the
+    /// 614.1c's own bare first template ("[This permanent] enters with . . ."),
+    /// which is structurally distinct from the
     /// rider grammar and has no carrier of any kind in this fixture's evidence.
     #[test]
     fn replacement_carrier_scoping_ignores_a_second_enters_with_clause_in_the_same_unit() {

@@ -7366,7 +7366,7 @@ pub(super) fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTa
 pub(super) struct ReturnDestination {
     pub(super) zone: Zone,
     pub(super) transformed: bool,
-    // CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry control
+    // CR 110.2a: the battlefield-entry control
     // clause AS WRITTEN — raw syntax, deliberately unbound. A destination
     // stripper sees only the destination phrase, never the moved object's
     // filter or the enclosing `ParseContext`, so it cannot resolve a
@@ -7489,12 +7489,12 @@ pub(super) fn strip_return_destination_ext_with_remainder(
     // Ordered longest-first to avoid partial matches.
     // "transformed" variants must come before their non-transformed counterparts.
     // Tuples: (phrase, zone, transformed, control, enter_tapped, enters_attacking)
-    // CR 110.2a (docs/MagicCompRules.txt:618): the `control` column is the
+    // CR 110.2a: the `control` column is the
     // parser-table carrier for whatever control clause the row's phrase already
     // spells out — `Some(You)` for "under your control", `Some(Owner)` for every
-    // "under <its|their|his|her> owner('s|s') control" spelling (CR 110.2 @ :616,
+    // "under <its|their|his|her> owner('s|s') control" spelling (CR 110.2,
     // which restates the default rather than overriding it), `None` otherwise.
-    // Non-battlefield rows are always `None`: CR 110.1 (:614) gives a controller
+    // Non-battlefield rows are always `None`: CR 110.1 gives a controller
     // only to permanents. Rows whose phrase carries no clause fall through to the
     // `parse_leading_control_clause` pass below, which picks up the third-person
     // forms the table never enumerated.
@@ -7798,15 +7798,15 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             // exactly as the pre-existing `pos + phrase_len` indexing already
             // assumes.
             let mut entry_offset = pos + phrase_len;
-            // CR 110.2a (docs/MagicCompRules.txt:618): one control-clause
+            // CR 110.2a: one control-clause
             // authority, two possible positions — inside the matched table
             // phrase, or trailing it. Declared OUTSIDE the battlefield block
             // because it is read at the `ReturnDestination` construction below,
             // which EVERY row reaches (including the hand/graveyard/command
-            // rows, whose `control` is always `None` per CR 110.1 @ :614).
+            // rows, whose `control` is always `None` per CR 110.1).
             // `*row_control` is a `Copy` read out of the `&'static` table row.
             let mut control: Option<ControlClausePossessor> = *row_control;
-            // CR 122.6 (:1208): putting counters on an object includes giving
+            // CR 122.6: putting counters on an object includes giving
             // counters to it as it enters the battlefield. Battlefield-entry
             // riders, the control
             // clause and the "with … counter(s)" clause are INDEPENDENT entry
@@ -7934,7 +7934,7 @@ fn parse_leading_battlefield_return_destination(
         value((false, false, false), tag("")),
     ))
     .parse(input)?;
-    // CR 110.2a (docs/MagicCompRules.txt:618): parse the control clause (or its
+    // CR 110.2a: parse the control clause (or its
     // absence) as raw syntax. The four hand-picked literal arms this replaces
     // recognized only "under your control", "under their owners' control" and
     // "under its owner's control"; the singular "under their/his/her owner's
@@ -12666,7 +12666,7 @@ mod tests {
         ));
     }
 
-    /// CR 122.6 (:1208) + CR 110.2a (:618) + issue #1498: a counter clause with
+    /// CR 122.6 + CR 110.2a + issue #1498: a counter clause with
     /// no `" on it"` filler must lift its counters onto `enter_with_counters`,
     /// and — the discriminating half — whatever is printed AFTER it must survive
     /// and reach the normal entry-clause path rather than being truncated away.
@@ -12712,7 +12712,7 @@ mod tests {
         );
     }
 
-    /// CR 725.1 (:6240) + CR 608.2c (:2795) + CR 122.1 (:1178): Heart-Shaped
+    /// CR 725.1 + CR 608.2c + CR 122.1: Heart-Shaped
     /// Herb. An instruction printed after the counter clause is NOT part of the
     /// destination and must be handed back as the remainder for normal clause
     /// processing. This is the unit-level discriminator for the bug the PR
@@ -12744,7 +12744,7 @@ mod tests {
         );
     }
 
-    /// CR 122.1 (:1178): conjoined counter clauses inside ONE "with …" rider.
+    /// CR 122.1: conjoined counter clauses inside ONE "with …" rider.
     /// Verbatim Oracle text of Perennation; Gilraen, Dúnedain Protector prints
     /// the same shape after a control clause. Parsing only the first conjunct
     /// (the previous behavior) silently dropped the second counter.

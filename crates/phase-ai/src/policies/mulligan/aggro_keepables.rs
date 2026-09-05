@@ -1,6 +1,6 @@
 //! `AggroKeepablesMulligan` — feature-driven mulligan policy for aggro decks.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding to keep after the
+//! CR 103.5: deciding to keep after the
 //! mulligan process. When a deck's aggro-pressure commitment is meaningful,
 //! opening hands that combine early drops, lands, and evasion/burn are
 //! strongly preferred.

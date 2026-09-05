@@ -3626,7 +3626,7 @@ pub(super) fn push_clause_chunk(
 // Leading-duration conjunct expansion (issue #7923)
 // ---------------------------------------------------------------------------
 
-/// CR 608.2c (:2797) — "read the whole text and apply the rules of English".
+/// CR 608.2c — "read the whole text and apply the rules of English".
 ///
 /// True when this conjunct's LEADING TOKEN IS A CONJUGATED THIRD-PERSON FORM of a
 /// recognized clause-starting verb — the exact shape `starts_clause_text_or_conjugated`
@@ -3673,7 +3673,7 @@ fn recovered_conjunct_continues_prior_subject(text: &str) -> bool {
     !starts_clause_text(t) && starts_clause_text_or_conjugated(t)
 }
 
-/// CR 603.1 (:2559) + CR 603.7 (:2614): a boundary that severs a mid-sentence
+/// CR 603.1 + CR 603.7: a boundary that severs a mid-sentence
 /// delayed-trigger head from its body does not divide two independent instructions —
 /// it divides one printed "[At] [event], [effect]" in half. Splitting there emits the
 /// trigger's body as a one-shot the card never authorizes (measured: Giant Oyster gains
@@ -3865,7 +3865,7 @@ fn chunk_end_offset(body: &str, sub: &[ClauseChunk], k: usize) -> Option<usize> 
     Some(cursor)
 }
 
-/// CR 608.2c + CR 611.2a (:2797, :2908): a leading duration states the lifetime of
+/// CR 608.2c + CR 611.2a: a leading duration states the lifetime of
 /// the WHOLE instruction it prefixes, not only of its first conjunct.
 ///
 /// `starts_prefix_clause` latches `"until "` / `"for as long as "` (as it also latches
@@ -6084,7 +6084,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
             Some(ContinuationAst::SearchDestination {
                 destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
-                // CR 110.2a (docs/MagicCompRules.txt:618): the SAME span
+                // CR 110.2a: the SAME span
                 // (`full_lower`) as the single-literal `scan_contains` this
                 // replaces — no widening. `You`-wins makes the fold
                 // byte-for-byte non-regressive. This seam has no object filter
@@ -14459,7 +14459,7 @@ mod tests {
 mod leading_duration_guard_tests_7923 {
     use super::*;
 
-    /// **V-U2d unit half — `[NEW-UNIT]`.** CR 608.2c (`docs/MagicCompRules.txt:2797`).
+    /// **V-U2d unit half — `[NEW-UNIT]`.** CR 608.2c.
     ///
     /// Anchored against MISCLASSIFICATION of a new helper, not against BASE_SHA
     /// (the helper does not exist there). It pins guard 1's ACTUAL property —
@@ -14551,7 +14551,7 @@ mod leading_duration_guard_tests_7923 {
         }
     }
 
-    /// **V-U2f unit half — `[NEW-UNIT]`.** CR 603.1 (`:2559`) + CR 603.7 (`:2614`).
+    /// **V-U2f unit half — `[NEW-UNIT]`.** CR 603.1 + CR 603.7.
     ///
     /// G8: the negative here is UNIT-LEVEL, not a production boundary — corpus-wide
     /// exactly ONE head reaching guard 2 contains "at the beginning of" (Giant

@@ -1,7 +1,7 @@
 //! `AristocratsKeepablesMulligan` — feature-driven mulligan policy for
 //! aristocrats decks.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding to keep after the
+//! CR 103.5: deciding to keep after the
 //! mulligan process. When a deck's aristocrats commitment is meaningful,
 //! opening hands combining a sacrifice outlet with cheap creatures and lands
 //! are strongly preferred.

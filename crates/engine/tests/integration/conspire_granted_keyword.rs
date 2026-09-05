@@ -9,7 +9,7 @@
 //! casting ladder / `process_triggers` had no granted-Conspire seam. This
 //! mirrors the working granted-Casualty path (CR 702.153).
 //!
-//! CR 702.78a (docs/MagicCompRules.txt:4564): "Conspire" = an additional cost
+//! CR 702.78a: "Conspire" = an additional cost
 //! ("tap two untapped creatures you control that each share a color with it")
 //! plus a reflexive "when you cast this spell, if its conspire cost was paid,
 //! copy it" trigger.

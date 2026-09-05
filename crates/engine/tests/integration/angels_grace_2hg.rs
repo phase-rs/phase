@@ -1,7 +1,7 @@
 //! CR 810.8a — Two-Headed Giant team propagation for `CantLoseTheGame` /
 //! `CantWinTheGame`.
 //!
-//! CR 810.8a (verified against `docs/MagicCompRules.txt:6733`): "Players win
+//! CR 810.8a: "Players win
 //! and lose the game only as a team, not as individuals. ... If an effect
 //! says that a player can't win the game, that player's team can't win the
 //! game. If an effect says that a player can't lose the game, that player's
