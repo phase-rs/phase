@@ -13302,8 +13302,15 @@ fn finalize_mana_payment_with_resume(
         // payment (`pay_spell_mana_before_deferred_sacrifice`, above) runs
         // first — so on a cast with no deferred sacrifice an unconditional
         // re-pin would also bless a LATER move, e.g. a mana ability that
-        // returned the referent from the graveyard. That is precisely what
-        // `deferred_spell_sacrifice_repin_does_not_bless_a_later_move` forbids.
+        // returned the referent from the graveyard.
+        //
+        // NOT covered by a test. `deferred_spell_sacrifice_repin_does_not_bless_a_later_move`
+        // states this rule but cannot constrain this line: it calls
+        // `repin_cost_paid_object_recursive` directly and never enters this
+        // function, so it passes with or without the guard. The guard is latent
+        // for the same reason the re-pin it wraps is (see the SCOPE note on that
+        // test), and the same outstanding work — a test that drives the real
+        // deferred path — would cover both.
         if !pending.deferred_sacrificed_permanents.is_empty() {
             pending.ability.repin_cost_paid_object_recursive(state);
         }
@@ -13708,8 +13715,15 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // payment (`pay_spell_mana_before_deferred_sacrifice`, above) runs
         // first — so on a cast with no deferred sacrifice an unconditional
         // re-pin would also bless a LATER move, e.g. a mana ability that
-        // returned the referent from the graveyard. That is precisely what
-        // `deferred_spell_sacrifice_repin_does_not_bless_a_later_move` forbids.
+        // returned the referent from the graveyard.
+        //
+        // NOT covered by a test. `deferred_spell_sacrifice_repin_does_not_bless_a_later_move`
+        // states this rule but cannot constrain this line: it calls
+        // `repin_cost_paid_object_recursive` directly and never enters this
+        // function, so it passes with or without the guard. The guard is latent
+        // for the same reason the re-pin it wraps is (see the SCOPE note on that
+        // test), and the same outstanding work — a test that drives the real
+        // deferred path — would cover both.
         if !pending.deferred_sacrificed_permanents.is_empty() {
             pending.ability.repin_cost_paid_object_recursive(state);
         }
