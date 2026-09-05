@@ -2879,15 +2879,22 @@ pub fn matches_target_filter_on_lki_snapshot(
 /// and the snapshot clone.
 pub fn matches_target_filter_on_cost_paid_reference(
     state: &GameState,
-    object_id: ObjectId,
-    lki: &LKISnapshot,
+    snapshot: &crate::types::ability::CostPaidObjectSnapshot,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    let object_id = snapshot.object_id;
+    let lki = &snapshot.lki;
     let refreshed = filter
         .queries_keyword_kind()
-        .then(|| state.objects.get(&object_id))
+        // CR 400.7 + CR 608.2h: the live refresh is only legitimate while the
+        // snapshot still names THIS object. CR 608.2h governs characteristics
+        // vs. LKI; it does not authorize reading a different object, which a
+        // returned same-id permanent is under CR 400.7. A stale referent takes
+        // the `None` arm below, which is the LKI fallback CR 608.2h mandates.
+        .then(|| snapshot.live_object_id(state))
         .flatten()
+        .and_then(|id| state.objects.get(&id))
         .filter(|object| object.zone.is_public())
         .map(|_| {
             crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
@@ -3442,13 +3449,19 @@ fn filter_inner_for_object(
         // requires them to keep reporting the departed object's recorded
         // characteristics.
         TargetFilter::CostPaidObject => ability
-            .and_then(|ability| {
-                ability
-                    .cost_paid_object
-                    .as_ref()
-                    .or(ability.effect_context_object.as_ref())
-            })
-            .is_some_and(|snapshot| snapshot.live_object_id(state) == Some(object_id)),
+            // CR 608.2k: each slot is tested INDEPENDENTLY — `Option::or` would
+            // short-circuit on a present-but-stale slot 1 and never reach a live
+            // slot 2, so a departed cost referent would mask a still-current
+            // effect-context referent.
+            .is_some_and(|ability| {
+                let slot_matches = |snapshot: Option<&crate::types::ability::CostPaidObjectSnapshot>| {
+                    snapshot.is_some_and(|snapshot| {
+                        snapshot.live_object_id(state) == Some(object_id)
+                    })
+                };
+                slot_matches(ability.cost_paid_object.as_ref())
+                    || slot_matches(ability.effect_context_object.as_ref())
+            }),
         // CR 701.47c: "the amassed Army" / "the Army you amassed" — the Army
         // creature the current amass instruction chose, threaded via
         // `ability.amassed_army_object` (mirrors `CostPaidObject` immediately

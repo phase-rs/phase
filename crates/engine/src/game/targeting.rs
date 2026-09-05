@@ -813,11 +813,21 @@ pub fn resolved_targets(
         // referent is still on the battlefield or otherwise legal; effects
         // with zone requirements (CR 701.21a sacrifice) enforce those
         // themselves.
+        // CR 608.2k: try each slot INDEPENDENTLY. `Option::or` would short-circuit
+        // on a present-but-stale slot 1 and never reach a live slot 2, so a
+        // departed cost referent would mask an effect-context referent that is
+        // still current. Resolving each in turn keeps the documented slot order
+        // while letting a stale slot fall through.
         return ability
             .cost_paid_object
             .as_ref()
-            .or(ability.effect_context_object.as_ref())
             .and_then(|snap| snap.live_object_id(state))
+            .or_else(|| {
+                ability
+                    .effect_context_object
+                    .as_ref()
+                    .and_then(|snap| snap.live_object_id(state))
+            })
             .into_iter()
             .map(TargetRef::Object)
             .collect();
@@ -6576,7 +6586,7 @@ mod tests {
         );
         assert!(
             returned.incarnation > incarnation_before,
-            "fixture reach-guard: the round trip must have bumped the incarnation              past the captured one ({} -> {})",
+            "fixture reach-guard: the round trip must have bumped the incarnation past the captured one ({} -> {})",
             incarnation_before,
             returned.incarnation
         );

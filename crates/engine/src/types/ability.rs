@@ -8803,7 +8803,7 @@ fn legacy_incarnation() -> u64 {
 }
 
 impl CostPaidObjectSnapshot {
-    /// CR 117.1 + CR 400.7j + CR 608.2k: Capture the cost-paid referent from a
+    /// CR 400.7j + CR 608.2k: Capture the cost-paid referent from a
     /// live object, pinning its current incarnation. The single construction
     /// seam for production binding sites, so no seam can forget the epoch.
     pub fn capture(object: &crate::game::game_object::GameObject, lki: LKISnapshot) -> Self {

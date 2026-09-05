@@ -15236,8 +15236,7 @@ pub(crate) fn evaluate_condition(
             if let Some(snapshot) = &ability.cost_paid_object {
                 crate::game::filter::matches_target_filter_on_cost_paid_reference(
                     state,
-                    snapshot.object_id,
-                    &snapshot.lki,
+                    snapshot,
                     filter,
                     &crate::game::filter::FilterContext::from_ability(ability),
                 )
