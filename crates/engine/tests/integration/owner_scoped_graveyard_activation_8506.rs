@@ -246,7 +246,7 @@ fn controller_defaults_to_owner_after_a_foreign_cast_resolves() {
         // Fleet Daredevil / Sen Triplets class, naming P1 — a player who does
         // NOT own the card — as its caster, for {0}. `resolution_cleanup` and
         // `graveyard_replacement` stay `None` so the spell reaches its owner's
-        // graveyard by the ordinary CR 608.2m route.
+        // graveyard by the ordinary CR 608.2n route.
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
                 cost: ManaCost::Cost {
@@ -273,7 +273,7 @@ fn controller_defaults_to_owner_after_a_foreign_cast_resolves() {
     assert_eq!(
         obj.zone,
         Zone::Graveyard,
-        "CR 608.2m: the spell is graveyarded"
+        "CR 608.2n: the spell is graveyarded"
     );
     assert!(
         runner.state().players[P0.0 as usize]
