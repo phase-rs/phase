@@ -35602,15 +35602,31 @@ pub(crate) fn parse_effect_chain_ir(
             // parent context rather than updating it, so a bare `then_some` silently
             // dropped the trigger-level antecedent on every single-clause trigger
             // body. That drop was invisible while the only producer was the
-            // spell-cast axis, because `resolve_it_pronoun`'s non-self-subject
-            // fallback independently returns the same `TriggeringSource` — the two
-            // paths agreed, so the discarded value was never observable. The
+            // spell-cast axis AND the chunk subject was a non-self filter, because
+            // `resolve_it_pronoun`'s non-self-subject fallback then independently
+            // returns the same `TriggeringSource`. The two paths agree ONLY in that
+            // case: with `chunk_subject = Some(SelfRef)` the fallback returns
+            // `SelfRef` and disagrees, which is why the gate below is required. The
             // passive-voice damage axis is the first producer whose answer
             // (`EventTarget`) DISAGREES with that fallback, which is what made the
             // drop visible (issue #8379).
+            //
+            // The trigger-level antecedent is the OUTERMOST rung, so it must not
+            // outrank one THIS CHUNK established. `binds_source_counter_pronoun`
+            // sets `chunk_subject = SelfRef` above, but `resolve_it_pronoun` reads
+            // `object_pronoun_ref` BEFORE it reaches `subject` — so propagating
+            // unconditionally short-circuits the nearer binding. That is what
+            // regressed the CR 122.1 counter-gate class in #8549: `TriggeringSource`
+            // on a spell-cast trigger is the CAST SPELL, so Decree of Silence and
+            // Charitable Levy stopped sacrificing themselves and Thing in the Ice
+            // and The Emperor of Palamecia stopped transforming.
             object_pronoun_ref: prior_typed_referent
                 .then_some(TargetFilter::ParentTarget)
-                .or_else(|| ctx.object_pronoun_ref.clone()),
+                .or_else(|| {
+                    (!binds_source_counter_pronoun)
+                        .then(|| ctx.object_pronoun_ref.clone())
+                        .flatten()
+                }),
             card_name: ctx.card_name.clone(),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
