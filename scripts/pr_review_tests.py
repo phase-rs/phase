@@ -3287,25 +3287,93 @@ class PrReviewTests(unittest.TestCase):
         parse_step = workflow.split("- name: Parse-detail diff vs base baseline", 1)[1]
         self.assertNotIn("PAYLOAD_BASE_SHA", parse_step)
 
-    def test_gate_a_actual_success_output_is_sha_bound(self) -> None:
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+    def _rev_parse(self, rev: str) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", rev],
             cwd=pr_review.REPO_ROOT,
             check=True,
             text=True,
             capture_output=True,
         ).stdout.strip()
-        result = subprocess.run(
-            [str(pr_review.REPO_ROOT / "scripts/check-parser-combinators.sh"), head],
+
+    def _run_parser_gate(self, base: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            [str(pr_review.REPO_ROOT / "scripts/check-parser-combinators.sh"), base],
+            cwd=pr_review.REPO_ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_gate_a_actual_success_output_is_sha_bound(self) -> None:
+        """A real base..head window prints the SHA-bound PASS evidence line.
+
+        The window is `HEAD~1..HEAD` — a genuine range — rather than `HEAD`
+        against itself. `base == head` names an empty range, which the gate now
+        refuses to certify (see the companion test below), so it is the wrong
+        window to assert success on.
+
+        The match is per-line (`re.MULTILINE`). The gate prints `Gate G` before
+        `Gate A`, so a whole-string `^...$` match can never succeed no matter
+        what the gate emits; the previous anchoring made this assertion
+        unsatisfiable rather than strict.
+        """
+        head = self._rev_parse("HEAD")
+        base = self._rev_parse("HEAD~1")
+        result = self._run_parser_gate(base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stdout,
+            rf"(?m)^Gate A PASS head={re.escape(head)} base={re.escape(base)}$",
+        )
+
+    def test_gate_a_pass_line_is_the_line_pr_review_matches(self) -> None:
+        """The emitted evidence line is the one the review tool parses.
+
+        Two independent readers of one format drift silently. Asserting the
+        real gate output against `pr_review`'s own pattern is what makes the
+        format a contract rather than a coincidence.
+        """
+        head = self._rev_parse("HEAD")
+        base = self._rev_parse("HEAD~1")
+        result = self._run_parser_gate(base)
+        match = re.search(
+            r"(?m)^Gate A PASS head=([0-9a-f]{40}) base=([0-9a-f]{40})$",
+            result.stdout,
+        )
+        self.assertIsNotNone(match, result.stdout)
+        assert match is not None  # narrowing for type checkers
+        self.assertEqual(match.group(1), head)
+        self.assertEqual(match.group(2), base)
+
+    def test_gate_a_refuses_to_certify_an_unknowable_window(self) -> None:
+        """`base == head` with nothing staged scans zero lines, so it cannot PASS.
+
+        This is the defect the gate change addresses: an empty range plus an
+        empty index reads no input, and printing the same green as a real scan
+        reports a verdict the run never earned.
+
+        The index belongs to whoever runs the suite, so the staged state is read
+        rather than assumed, and the assertion branches on it. Asserting exit 3
+        unconditionally would make this test fail for a developer who happens to
+        have parser work staged — a false red about their index, not the gate.
+        """
+        head = self._rev_parse("HEAD")
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--", "crates/engine/src/parser"],
             cwd=pr_review.REPO_ROOT,
             check=True,
             text=True,
             capture_output=True,
-        )
-        self.assertRegex(
-            result.stdout.strip(),
-            rf"^Gate A PASS head={re.escape(head)} base={re.escape(head)}$",
-        )
+        ).stdout.strip()
+        result = self._run_parser_gate(head)
+        if staged:
+            # A knowable window: the index names what to scan.
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertRegex(result.stdout, r"(?m)^Gate A PASS head=[0-9a-f]{40} ")
+        else:
+            self.assertEqual(result.returncode, 3, result.stdout)
+            self.assertNotRegex(result.stdout, r"(?m)^Gate A PASS head=")
 
     def test_parse_diff_base_selects_non_head_parent_and_never_falls_back(self) -> None:
         script = pr_review.REPO_ROOT / "scripts/parse-diff-base.sh"
