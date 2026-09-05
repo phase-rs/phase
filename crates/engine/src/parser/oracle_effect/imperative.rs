@@ -5335,7 +5335,9 @@ fn parse_choose_anaphoric(lower: &str) -> Option<(u32, Chooser, CardSelectionMod
 }
 
 /// Public entry for Tragic Arrogance-style patterns where the chooser_scope is ControllerForAll.
-/// Called from `parse_effect_clause` when "for each player, you choose " prefix is detected.
+/// Called from `parse_effect_clause` when a "for each player, [you ]choose "
+/// prefix is detected — CR 608.2c's imperative voice makes "you" optional
+/// (see the dispatch site's comment), so both forms route here.
 pub(super) fn parse_category_and_sacrifice_rest_pub(
     rest_lower: &str,
 ) -> Option<ChooseImperativeAst> {
@@ -5360,10 +5362,10 @@ pub(super) fn parse_category_and_sacrifice_rest_pub(
 }
 
 /// CR 608.2d + CR 701.21a: Parse the single-category form specific to the
-/// "for each player, you choose" entry point: "a <type> [they/you/that player]
-/// control[s]". Keeping this arm outside the generic `choose` parser prevents
-/// ordinary target-selection text such as "choose a creature they control" from
-/// being misclassified as a choose-and-sacrifice-rest effect.
+/// "for each player, [you ]choose" entry point: "a <type> [they/you/that
+/// player] control[s]". Keeping this arm outside the generic `choose` parser
+/// prevents ordinary target-selection text such as "choose a creature they
+/// control" from being misclassified as a choose-and-sacrifice-rest effect.
 fn parse_single_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
 

@@ -804,6 +804,17 @@ pub enum AttackDefenderScope {
     /// combat"). Resolved against the static source's controller at the
     /// declare-attackers step.
     Controller,
+    /// CR 508.5: the specific permanent (planeswalker or battle) carrying this
+    /// static, as opposed to any other permanent its controller happens to
+    /// defend (The Eternal Wanderer: "No more than one creature can attack
+    /// ~ each combat"). Unlike `Controller`, this does NOT restrict attacks
+    /// against the source's controller directly or against that controller's
+    /// other planeswalkers/battles — only attacks declared against THIS
+    /// object. Resolved against the static source's live `ObjectId` at the
+    /// declare-attackers step (re-scanned each combat via
+    /// `battlefield_active_statics`, so no snapshot is needed even if the
+    /// permanent leaves and re-enters the battlefield between combats).
+    ThisPermanent,
 }
 
 /// CR 508.1d + CR 611.2 / CR 604.2: how the required defending player of a
@@ -954,7 +965,12 @@ pub enum StaticMode {
     /// defending-player cap ("no more than `max` creatures can attack *you*
     /// each combat" — Judoon Enforcers), restricting only attackers whose
     /// defending player (CR 508.5) is this static's controller, so opponents
-    /// may still be attacked freely (CR 802.1 multiplayer range of influence).
+    /// may still be attacked freely (CR 802.1 multiplayer range of influence);
+    /// `Some(AttackDefenderScope::ThisPermanent)` is a defending-PERMANENT cap
+    /// ("no more than `max` creatures can attack ~ each combat" — The Eternal
+    /// Wanderer), restricting only attackers declared against this static's
+    /// own source object, leaving the source's controller and every other
+    /// permanent freely attackable.
     MaxAttackersEachCombat {
         max: u32,
         #[serde(default)]
@@ -2872,6 +2888,9 @@ impl fmt::Display for StaticMode {
                 Some(AttackDefenderScope::Controller) => {
                     write!(f, "MaxAttackersEachCombat({max},Controller)")
                 }
+                Some(AttackDefenderScope::ThisPermanent) => {
+                    write!(f, "MaxAttackersEachCombat({max},ThisPermanent)")
+                }
             },
             StaticMode::MaxBlockersEachCombat { max } => {
                 write!(f, "MaxBlockersEachCombat({max})")
@@ -3982,8 +4001,9 @@ fn parse_static_mode_u32_arg(s: &str, prefix: &str) -> Option<u32> {
         .ok()
 }
 
-/// Round-trip the `MaxAttackersEachCombat(max[,Controller])` Display form back
-/// to its `(max, defender)` arguments. Mirrors the two `fmt::Display` branches.
+/// Round-trip the `MaxAttackersEachCombat(max[,Controller|ThisPermanent])`
+/// Display form back to its `(max, defender)` arguments. Mirrors the three
+/// `fmt::Display` branches.
 fn parse_max_attackers_each_combat_args(s: &str) -> Option<(u32, Option<AttackDefenderScope>)> {
     let args = s
         .strip_prefix("MaxAttackersEachCombat")?
@@ -3993,6 +4013,9 @@ fn parse_max_attackers_each_combat_args(s: &str) -> Option<(u32, Option<AttackDe
         None => Some((args.parse().ok()?, None)),
         Some((max, "Controller")) => {
             Some((max.parse().ok()?, Some(AttackDefenderScope::Controller)))
+        }
+        Some((max, "ThisPermanent")) => {
+            Some((max.parse().ok()?, Some(AttackDefenderScope::ThisPermanent)))
         }
         Some(_) => None,
     }
@@ -4322,6 +4345,10 @@ mod tests {
             StaticMode::MaxAttackersEachCombat {
                 max: 1,
                 defender: Some(AttackDefenderScope::Controller),
+            },
+            StaticMode::MaxAttackersEachCombat {
+                max: 1,
+                defender: Some(AttackDefenderScope::ThisPermanent),
             },
             StaticMode::MaxBlockersEachCombat { max: 3 },
             StaticMode::CantBeBlockedByMoreThan { max: 2 },

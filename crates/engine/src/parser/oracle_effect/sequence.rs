@@ -8231,6 +8231,7 @@ fn parse_choose_and_sacrifice_rest_followup(lower: &str) -> Option<ContinuationA
             opt(tag::<_, _, E>("then ")),
             alt((
                 parse_bare_choose_and_sacrifice_rest_filter,
+                parse_not_chosen_this_way_choose_and_sacrifice_rest_filter,
                 parse_explicit_choose_and_sacrifice_rest_filter,
             )),
         ),
@@ -8247,6 +8248,33 @@ fn parse_bare_choose_and_sacrifice_rest_filter(
     let (input, _) =
         alt((tag::<_, _, OracleError<'_>>("sacrifices"), tag("sacrifice"))).parse(input)?;
     let (input, _) = tag(" the rest").parse(input)?;
+    Ok((input, None))
+}
+
+/// CR 608.2c: "[each player] sacrifice[s] all `<domain>` [they/you/that
+/// player] control[s] not chosen this way" — a fully-explicit but
+/// semantically bare sweep sentence (The Eternal Wanderer's −4: "Each player
+/// sacrifices all creatures they control not chosen this way"). The trailing
+/// "not chosen this way" anaphor names exactly the set `ChooseAndSacrificeRest`
+/// already excludes (CR 608.2c: apply the rules of English — later text
+/// clarifies, rather than overriding, earlier text), so this folds to the SAME
+/// bare-sweep outcome (`None`) as "sacrifice the rest" — never a NEW filter
+/// constraint. Sibling of [`parse_explicit_choose_and_sacrifice_rest_filter`]'s
+/// "all other `<domain>`" shape: that arm requires "other" and narrows the
+/// swept domain; this one requires "not chosen this way" and narrows nothing,
+/// since "not chosen this way" is not a domain qualifier — it is a restatement
+/// of the choose step's own membership test.
+fn parse_not_chosen_this_way_choose_and_sacrifice_rest_filter(
+    input: &str,
+) -> Result<(&str, Option<TargetFilter>), nom::Err<OracleError<'_>>> {
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("each player ")).parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("sacrifices all "),
+        tag("sacrifice all "),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((parse_nonland_permanent_domain, parse_creature_domain)).parse(input)?;
+    let (input, _) = tag(" not chosen this way").parse(input)?;
     Ok((input, None))
 }
 
