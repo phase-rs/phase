@@ -35616,10 +35616,11 @@ pub(crate) fn parse_effect_chain_ir(
             // sets `chunk_subject = SelfRef` above, but `resolve_it_pronoun` reads
             // `object_pronoun_ref` BEFORE it reaches `subject` — so propagating
             // unconditionally short-circuits the nearer binding. That is what
-            // regressed the CR 122.1 counter-gate class in #8549: `TriggeringSource`
-            // on a spell-cast trigger is the CAST SPELL, so Decree of Silence and
-            // Charitable Levy stopped sacrificing themselves and Thing in the Ice
-            // and The Emperor of Palamecia stopped transforming.
+            // regressed the CR 122.1 + CR 608.2k counter-gate class in #8549:
+            // `TriggeringSource` on a spell-cast trigger is the CAST SPELL
+            // (CR 109.2b), not the ability's source (CR 113.7) — so Decree of
+            // Silence and Charitable Levy stopped sacrificing themselves, and
+            // Thing in the Ice and The Emperor of Palamecia stopped transforming.
             object_pronoun_ref: prior_typed_referent
                 .then_some(TargetFilter::ParentTarget)
                 .or_else(|| {

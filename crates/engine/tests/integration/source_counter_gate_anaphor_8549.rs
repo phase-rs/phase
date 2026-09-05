@@ -1,11 +1,22 @@
-//! Regression pins for the CR 122.1 source-counter-gate anaphor class.
+//! Regression pins for the source-counter-gate anaphor class.
 //!
-//! On a spell-cast trigger whose body carries a source-counter gate ("if there
-//! are three or more depletion counters on this enchantment, sacrifice IT"),
-//! the bare object pronoun names the ABILITY'S OWN SOURCE, not the spell that
-//! triggered it. `TriggeringSource` on a spell-cast trigger is the cast spell
-//! on the stack (CR 608.2b), so binding "it" there makes the sacrifice and the
-//! transform name an object that is not the permanent.
+//! CR 608.2k: "If an ability's effect refers to a specific untargeted object
+//! that has been previously referred to by that ability's cost or trigger
+//! condition, it still affects that object even if the object has changed
+//! characteristics." On a spell-cast trigger whose body carries a
+//! source-counter gate ("if there are three or more depletion counters on this
+//! enchantment, sacrifice IT"), the object previously referred to is the
+//! ability's own source.
+//!
+//! CR 113.7: the source of a triggered ability is the object whose ability
+//! triggered — the enchantment. CR 109.2b: a description using the word
+//! "spell" means a spell on the stack. So binding that "it" to the CAST SPELL
+//! makes the sacrifice and the transform name an object that is not the
+//! permanent.
+//!
+//! Which of the two the parser picks is a parser heuristic, not a rule the CR
+//! legislates; the CR numbers above establish what each candidate referent IS,
+//! and the cards below establish which one the class needs.
 //!
 //! PR #8549 propagated the trigger-condition antecedent into every effect chunk
 //! unconditionally. `resolve_it_pronoun` reads `object_pronoun_ref` BEFORE it
@@ -95,18 +106,26 @@ fn a_source_counter_gate_binds_its_anaphor_to_the_source_not_the_cast_spell() {
              would be vacuous"
         );
 
-        // The regression: `TriggeringSource` on a spell-cast trigger is the cast
-        // spell on the stack (CR 608.2b), not the permanent.
+        // The regression: `TriggeringSource` on a spell-cast trigger is the
+        // cast spell on the stack (CR 109.2b), not the permanent (CR 113.7).
         assert!(
             !targets.contains(&TargetFilter::TriggeringSource),
             "{name}: the source-counter gate's bare 'it' must not bind to the cast \
-             spell on the stack (CR 608.2b); regression from #8549, got {targets:?}"
+             spell on the stack (CR 109.2b); regression from #8549, got {targets:?}"
         );
 
-        // Positive: the binding the parse-diff recorded before the regression.
+        // Positive, and EXHAUSTIVE: every gated target must be the binding the
+        // parse-diff recorded before the regression. `contains` would pass while
+        // the parser also emitted some other wrong filter beside the right one —
+        // the negative above rules out exactly one variant, not all of them.
+        //
+        // Asserted as "every element equals" rather than `targets == [expected]`
+        // deliberately: the chain walk can legitimately reach one effect from
+        // two registration points, so a duplicate of the CORRECT binding is not
+        // a defect, while any element that differs is.
         assert!(
-            targets.contains(&expected),
-            "{name}: expected the gated anaphor to bind {expected:?}, got {targets:?}"
+            targets.iter().all(|t| *t == expected),
+            "{name}: every gated anaphor must bind {expected:?}, got {targets:?}"
         );
     }
 }
