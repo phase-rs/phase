@@ -3266,10 +3266,19 @@ mod tests {
     /// stack → `counters::resolve_multiply` → `resolve_defined_or_targets`), not a
     /// hand-built `ResolvedAbility`.
     ///
-    /// REVERT-FAILING, in the sweep direction and across the table: with only the
-    /// old `ability.targets.is_empty()` conjunct guarding the mass tier, zero
-    /// announced targets doubled Mine A (2→4), Mine B (4→8) AND the opponent's
-    /// creature (7→14) — the recipient filter's `controller` is `None`.
+    /// REVERT-FAILING against the PRE-PR GATE, in the sweep direction and across
+    /// the table: with only the old `ability.targets.is_empty()` conjunct guarding
+    /// the mass tier, zero announced targets doubled Mine A (2→4), Mine B (4→8)
+    /// AND the opponent's creature (7→14) — the recipient filter's `controller`
+    /// is `None`. Measured by removing the timing and multi-target conjuncts
+    /// together (`left: 4, right: 2`).
+    ///
+    /// Stated precisely, because neither conjunct alone reproduces it: Kinetic
+    /// Ooze's clause contains the literal word "target", so it lowers `Stack` and
+    /// the LEADING timing conjunct refuses first — dropping only
+    /// `multi_target.is_some()` leaves this row green. The rows that discriminate
+    /// the individual conjuncts are the `resolution_timed` resolver-level tests
+    /// below.
     ///
     /// The committed positive control this gate must not break is
     /// `multiply_counter_with_no_explicit_targets_expands_filter` in this module.
@@ -3565,6 +3574,91 @@ mod tests {
         );
         assert_eq!(state.objects[&ids[1]].counters[&CounterType::Plus1Plus1], 2);
         assert_eq!(state.objects[&ids[2]].counters[&CounterType::Plus1Plus1], 2);
+    }
+
+    /// CR 400.1 - the gate's ZONE conjunct at the RESOLVER, the half the parser
+    /// gate makes unreachable from Oracle text. A hand-built recipient whose union
+    /// carries a battlefield leg and a graveyard leg must not be answered with a
+    /// battlefield population: this tier scans the battlefield only, so
+    /// enumerating it would silently drop the graveyard leg.
+    ///
+    /// `extract_in_zone()` reports only the FIRST leg (`Battlefield`) for this
+    /// filter, which is why the conjunct reads `population_zones()` instead.
+    ///
+    /// REVERT-FAILING: drop the zone conjunct from
+    /// `nontargeted_counter_population_ids` and the battlefield leg is swept.
+    #[test]
+    fn multiply_counter_mixed_zone_recipient_affects_nothing() {
+        let mixed = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }]),
+                ),
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+            ],
+        };
+        assert_eq!(
+            mixed.extract_in_zone(),
+            Some(Zone::Battlefield),
+            "reach-guard: the single-zone reader hides the graveyard leg"
+        );
+
+        let (mut state, ids) = two_player_counter_board();
+        let ability = resolution_timed(
+            Effect::MultiplyCounter {
+                counter_type: CounterType::Plus1Plus1,
+                multiplier: 2,
+                target: mixed,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+        for id in ids {
+            assert_eq!(
+                state.objects[&id].counters[&CounterType::Plus1Plus1],
+                2,
+                "a recipient naming a non-battlefield zone must double nothing"
+            );
+        }
+
+        // PAIRED POSITIVE, same board: the battlefield-only twin DOES double, so
+        // the refusal above is the zone conjunct and not an inert resolver.
+        let ability = resolution_timed(
+            Effect::MultiplyCounter {
+                counter_type: CounterType::Plus1Plus1,
+                multiplier: 2,
+                target: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }]),
+                ),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_eq!(state.objects[&ids[0]].counters[&CounterType::Plus1Plus1], 4);
+        assert_eq!(state.objects[&ids[1]].counters[&CounterType::Plus1Plus1], 4);
+        assert_eq!(
+            state.objects[&ids[2]].counters[&CounterType::Plus1Plus1],
+            2,
+            "`controller: You` still scopes the population"
+        );
     }
 
     /// Two creatures for P0 and one for P1, each carrying two +1/+1 counters.
