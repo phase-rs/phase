@@ -517,6 +517,10 @@ containers:
             name: {{ . }}
             key: {{ $.Values.server.adminTokenSecretKey }}
       {{- end }}
+      {{- with .Values.server.announceTo }}
+      - name: PHASE_ANNOUNCE_TO
+        value: {{ . | quote }}
+      {{- end }}
       {{- with .Values.server.extraEnv }}
       {{- toYaml . | nindent 6 }}
       {{- end }}
