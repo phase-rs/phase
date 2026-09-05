@@ -451,6 +451,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RollDie { .. }
         | Effect::RollToVisitAttractions
         | Effect::RuntimeHandled { .. }
+        | Effect::OpenBoosterPack { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::Seek { .. }
         | Effect::SeparateIntoPiles { .. }

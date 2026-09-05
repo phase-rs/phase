@@ -94,12 +94,43 @@ if [ -f "$workflow" ]; then
 fi
 
 server_src="$repo_root/crates/phase-server/src/main.rs"
-prefixes=$(
+router_src=$(
   { awk '/^fn build_router\(/,/^}/' "$server_src"
-    awk '/^fn mount_admin_routes\(/,/^}/' "$server_src"; } |
-    tr '\n' ' ' |
-    grep -oE '\.route\( *"[^"]+"' |
-    grep -oE '"[^"]+"' | tr -d '"' |
+    awk '/^fn mount_admin_routes\(/,/^}/' "$server_src"; } | tr '\n' ' '
+)
+
+# `.route()` takes a shared path constant as readily as a literal
+# (`.route(INFO_PATH, get(server_info))`), and a literal-only extractor drops
+# those without a word — which is how /info shipped mounted but unrouted, with
+# the SPA catch-all answering it. Each constant is named here with the path it
+# holds, so the next one fails this test instead of vanishing from the surface.
+# The values live in another crate; this list is what keeps them checkable from
+# a script whose only Rust input is the router.
+CONST_ROUTES="INFO_PATH=/info"
+
+const_paths=""
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  path=$(grep -oE "^$name=.*" <<<"$CONST_ROUTES" | cut -d= -f2- || true)
+  [ -n "$path" ] ||
+    fail "the router mounts .route($name, ...) but this test does not know which path $name holds — add it to CONST_ROUTES"
+  const_paths+="$path"$'\n'
+done <<<"$(grep -oE '\.route\( *[A-Z][A-Z0-9_]*' <<<"$router_src" | grep -oE '[A-Z][A-Z0-9_]*$' | sort -u || true)"
+
+# Stale entries are as harmful as missing ones: a constant the router dropped
+# would keep this test demanding an edge route for a path nothing serves. This
+# is also the live control for the extractor above — a pattern that stopped
+# matching fails here rather than reporting an empty constant surface.
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  name=${entry%%=*}
+  grep -qE "\.route\( *$name[^A-Z0-9_]" <<<"$router_src" ||
+    fail "CONST_ROUTES lists $name, but the router no longer mounts it"
+done <<<"$CONST_ROUTES"
+
+prefixes=$(
+  { grep -oE '\.route\( *"[^"]+"' <<<"$router_src" | grep -oE '"[^"]+"' | tr -d '"' || true
+    printf '%s' "$const_paths"; } |
     sed 's|\(/[^/]*\).*|\1|' | sort -u
 )
 # Live instrument: an extractor that silently stopped matching would otherwise

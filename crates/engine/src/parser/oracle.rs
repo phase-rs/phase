@@ -60,9 +60,9 @@ use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_re
 use super::oracle_dispatch::{dispatch_line_nom, NomDispatchIr};
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
-    lower_ability_ir, parse_ability_ir_standalone, parse_ability_ir_with_context,
-    parse_additional_cost_instead_condition_fragment, parse_effect_chain,
-    parse_effect_chain_with_context, rewrite_condition_keyword,
+    ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
+    parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
+    parse_effect_chain, parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
@@ -75,8 +75,8 @@ use super::oracle_ir::doc::{
     UnsupportedAbilityIr,
 };
 use super::oracle_ir::effect_chain::{
-    AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr, ResidualConditionPolicy,
-    ShellStage,
+    AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr, InjectedColorChoice,
+    ResidualConditionPolicy, ShellStage,
 };
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
@@ -514,6 +514,7 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
                     phase: Phase::Upkeep,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 tag("at the beginning of your first upkeep, "),
             ),
@@ -1313,10 +1314,216 @@ fn item_static(item: &OracleItemIr) -> Option<&StaticDefinition> {
 /// list, pairing producer/consumer items by `OracleItemId`. Runs at parse time;
 /// both the main and Class document-construction paths converge here.
 fn finalize_document_relations(mut doc: OracleDocIr, types: &[String]) -> OracleDocIr {
-    let relations = detect_document_relations(&doc.items, types);
+    let mut relations = detect_document_relations(&doc.items, types);
+    // CR 607.2d: `detect_linked_choice_linked_color` no longer reads any
+    // pre-existing relation (it takes only `items`), so its position here is not
+    // ordered against `detect_document_relations`'s own output. What remains
+    // load-bearing: this detector must run BEFORE
+    // `apply_linked_color_choice_suppression`, which is what stamps its verdict
+    // onto the consumers' chains, and its verdict must be in `relations` before
+    // `doc.relations.extend(relations)` below.
+    //
+    // (CR 614.15 self-replacement overrides are still recorded by the dispatch
+    // loop itself, not by `detect_document_relations`, so they are on
+    // `doc.relations` by the time this runs — but `apply_self_replacement_override`
+    // is the consumer of that relation, not this detector.)
+    detect_linked_choice_linked_color(&doc.items, &mut relations);
     finalize_relation_syntheses(&mut doc, &relations);
+    apply_linked_color_choice_suppression(&mut doc, &relations);
     doc.relations.extend(relations);
     doc
+}
+
+// --- CR 607.2d + CR 614.15: linked colour choice → suppressed injection --------
+
+/// CR 607.2d: pair a colour choice made on ONE ability of an object with the
+/// `Protection`/`HexproofFrom(ChosenColor)` grants on OTHER abilities of the same
+/// object that read it back, so lowering does not inject a second chooser for a
+/// value the rules say is already fixed.
+///
+/// Floating Shield is the shape: "As this Aura enters, choose a color." is a
+/// replacement item; "Sacrifice this Aura: Target creature gains protection from
+/// the chosen color until end of turn." is a separate ability item whose grant is
+/// in `inject_chosen_color_choice_grant`'s domain. Without this relation the
+/// activated ability raises its OWN prompt and the Aura ends up carrying two
+/// answers for one printed choice.
+///
+/// The supplier is recognized from the item's PRE-LOWERING representation, which
+/// is the only place the printed/injected distinction still exists: injection
+/// happens inside `assemble_effect_chain`, strictly after this seam, so a
+/// `ChoiceType::Color` chooser visible in the raw IR is necessarily PRINTED. A
+/// lowered representation cannot tell the two apart, and keying on the grant's
+/// wording is not an option either — `types/keywords.rs::parse_protection_target`
+/// maps both "the chosen color" and "the color of your choice" onto
+/// `ProtectionTarget::ChosenColor`, and five of the pool's injected grants carry a
+/// synthesized description, so a description-keyed rule would be both
+/// stringly-typed and wrong.
+///
+/// That objection is about the LOWERED description and does not reach a
+/// PRE-LOWERING `source_text` classifier: `ClauseIr.chosen_color_grant` is
+/// derived at `ClauseDraft::push` from the clause's own verbatim printed
+/// fragment, before any description is synthesized.
+///
+/// CR 614.15 + CR 608.2d: a self-replacement override does NOT
+/// read its base's choice. `game/ability_utils.rs::apply_instead_swap` assigns
+/// `overridden.effect = sub.effect`, so when the override applies, the base's
+/// effect — including a chooser injected above it — is discarded before it
+/// resolves. CR 608.2d puts the choice on the effect that is APPLIED, so each
+/// branch must carry its own chooser. Suppressing the override's chooser here is
+/// what left Faith's Shield's fateful-hour branch with no colour at all: counted
+/// prompts on the fateful branch are 0 with the arm present and 1 with it
+/// removed, and still 1 — not 2 — on the non-fateful branch.
+fn detect_linked_choice_linked_color(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let Some(supplier) = items.iter().find(|item| item_prints_color_choice(item)) else {
+        return;
+    };
+    let consumers: Vec<OracleItemId> = items
+        .iter()
+        .filter(|item| item.id != supplier.id)
+        .filter(|item| item_is_injectable_chosen_color_grant(item))
+        .filter(|item| item_reads_anaphoric_chosen_color(item))
+        .map(|item| item.id)
+        .collect();
+    if consumers.is_empty() {
+        return;
+    }
+    relations.push(DocumentRelationIr::LinkedChoice(
+        LinkedChoiceKind::LinkedColorChoice { consumers },
+    ));
+}
+
+/// CR 607.2d vs CR 608.2d: whether every chosen-colour keyword
+/// grant this item prints is an ANAPHORIC reader of a choice made elsewhere on
+/// the object.
+///
+/// A NARROWING conjunct on `item_is_injectable_chosen_color_grant`, never a
+/// replacement for it: that predicate is what guarantees detection and
+/// application share a domain, and this one only removes items whose own printed
+/// text makes a FRESH CR 608.2d choice.
+///
+/// CALLER CONTRACT: use ONLY in conjunction with
+/// `item_is_injectable_chosen_color_grant`. The `else { return false }` below is
+/// the OPPOSITE polarity from `ClauseIr.chosen_color_grant`'s "unstamped =>
+/// suppress" rule — a non-`Spell` node answers "not an anaphoric reader", which
+/// alone would WITHHOLD suppression. Unreachable in the conjunction (a non-`Spell`
+/// node is already excluded by the other predicate's
+/// `matches!(item.node, OracleNodeIr::Spell(_))`), but a future caller using this
+/// predicate alone would get the unsafe direction.
+///
+/// AGGREGATION RULE (per-clause provenance -> per-item stamp). The suppression is
+/// stamped on `ability_ir.body.injected_color_choice`, at ITEM granularity, while
+/// the provenance is per CLAUSE. An item is a consumer only if NO clause carries
+/// `IncludesIndependentChoice`. CR 608.2d requires the fresh choice to be
+/// announced while applying the effect, so one independent clause forfeits the
+/// whole item's suppression; the item-granular channel cannot express "suppress
+/// clause A but not clause B", and CR 608.2d is the half that must not be lost.
+/// Zero cards in the pool reach this disagreement.
+fn item_reads_anaphoric_chosen_color(item: &OracleItemIr) -> bool {
+    let OracleNodeIr::Spell(ability_ir) = &item.node else {
+        return false;
+    };
+    !ability_ir.body.clauses.iter().any(|clause| {
+        matches!(
+            clause.chosen_color_grant,
+            Some(crate::parser::oracle_nom::filter::ChosenColorGrantReference::IncludesIndependentChoice)
+        )
+    })
+}
+
+/// Whether this item PRINTED a colour choice, read from its pre-lowering IR.
+///
+/// Deliberately narrow and fail-closed: only the two node shapes whose payload is
+/// provably pre-injection are consulted. A replacement is consulted through its
+/// `execute_ir` when it has one; when it has only a lowered definition, an
+/// injected chooser is excluded by requiring the definition to grant no
+/// `ChosenColor` keyword at all (the injector only ever mints a chooser directly
+/// above such a grant). Every other node shape answers `false`, which withholds
+/// the relation and leaves today's lowering untouched.
+fn item_prints_color_choice(item: &OracleItemIr) -> bool {
+    match &item.node {
+        OracleNodeIr::Replacement(replacement_ir) => match &replacement_ir.execute_ir {
+            Some(chain) => chain_ir_has_color_choice(chain),
+            None => replacement_ir
+                .definition
+                .execute
+                .as_deref()
+                .is_some_and(|def| {
+                    ability_chain_has_color_choice(def)
+                        && !ability_chain_grants_chosen_color_keyword(def)
+                }),
+        },
+        OracleNodeIr::Spell(ability_ir) => chain_ir_has_color_choice(&ability_ir.body),
+        _ => false,
+    }
+}
+
+/// Whether this item is an ability chain the keyword-grant injector would visit
+/// AND whose chain reads back a chosen colour. Detection and application share
+/// this predicate so a relation is never emitted for an item the stamp cannot
+/// reach.
+fn item_is_injectable_chosen_color_grant(item: &OracleItemIr) -> bool {
+    matches!(item.node, OracleNodeIr::Spell(_))
+        && item_ability(item).is_some_and(|def| ability_chain_grants_chosen_color_keyword(&def))
+}
+
+/// Whether any clause of a pre-lowering chain (or a clause's nested sub-ability
+/// chain) makes a colour choice.
+fn chain_ir_has_color_choice(chain: &EffectChainIr) -> bool {
+    chain.clauses.iter().any(|clause| {
+        matches!(
+            clause.parsed.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Color { .. },
+                ..
+            }
+        ) || clause
+            .parsed
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_chain_has_color_choice)
+    })
+}
+
+/// Whether an assembled ability chain (recursing sub-abilities) makes a colour
+/// choice. Mirrors `ability_chain_has_player_choice`.
+fn ability_chain_has_color_choice(def: &AbilityDefinition) -> bool {
+    matches!(
+        def.effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::Color { .. },
+            ..
+        }
+    ) || def
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_chain_has_color_choice)
+}
+
+/// CR 607.2d: stamp the suppression onto each linked consumer's chain BEFORE
+/// lowering, so `inject_chosen_color_choice_grant` simply never fires and there
+/// is nothing to unwrap afterwards. Mirrors `finalize_relation_syntheses`'s
+/// in-place, pre-lowering application — and its fail-closed rule: an id that no
+/// longer names a chain-bearing spell node is skipped, never coerced.
+fn apply_linked_color_choice_suppression(doc: &mut OracleDocIr, relations: &[DocumentRelationIr]) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::LinkedColorChoice { consumers }) =
+            relation
+        else {
+            continue;
+        };
+        for id in consumers {
+            let Some(item) = doc.items.iter_mut().find(|item| item.id == *id) else {
+                continue;
+            };
+            if let OracleNodeIr::Spell(ability_ir) = &mut item.node {
+                ability_ir.body.injected_color_choice =
+                    InjectedColorChoice::SuppressedByLinkedAbility;
+            }
+        }
+    }
 }
 
 /// Install relation-derived nodes onto their already-emitted source item. This
@@ -7199,6 +7406,10 @@ pub fn parse_oracle_text(
     render_granting_self_descriptions(&mut parsed, card_name);
     demote_unbound_delayed_sweeps(&mut parsed);
     demote_unenforceable_replacement_lifetimes(&mut parsed);
+    #[cfg(debug_assertions)]
+    crate::parser::oracle_effect::debug_assert_exile_top_opponent_sentinel_lifted(
+        &parsed, card_name,
+    );
     parsed
 }
 
@@ -7631,6 +7842,8 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        // CR 400.11b: carries no `Duration` to demote.
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::Reveal { .. }
         | Effect::RevealChosenNumbers { .. }

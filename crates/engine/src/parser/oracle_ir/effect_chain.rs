@@ -8,13 +8,16 @@
 
 use serde::Serialize;
 
-use super::ast::{ClauseBoundary, ContinuationAst, ParsedEffectClause};
+use super::ast::{with_clause_chain_duration, ClauseBoundary, ContinuationAst, ParsedEffectClause};
 use super::doc::{OracleDocBuilder, OracleSourceSpan, OracleUnitSource};
+use crate::parser::oracle_effect::lower::strip_trailing_duration;
+use crate::parser::oracle_nom::filter::ChosenColorGrantReference;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, ControllerRef, CostReduction,
-    DelayedTriggerCondition, MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr,
-    RoundingMode, SubAbilityLink, TargetFilter, TargetSelectionMode, UnlessPayModifier,
+    ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ControllerRef,
+    CostReduction, DelayedTriggerCondition, Duration, MultiTargetSpec, OpponentMayScope,
+    PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink, TargetFilter, TargetSelectionMode,
+    UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -63,6 +66,43 @@ pub(crate) struct EffectChainIr {
     /// this process" directive is recognized. Lowering applies it to the root
     /// `AbilityDefinition` so the resolver re-follows the whole chain.
     pub(crate) repeat_until: Option<crate::types::ability::RepeatContinuation>,
+    /// CR 607.2d: whether this chain's `Protection`/`HexproofFrom(ChosenColor)`
+    /// grant may have a colour choice injected ahead of it, or reads a choice
+    /// made by a LINKED ability elsewhere on the same object.
+    ///
+    /// Stamped from
+    /// `DocumentRelationIr::LinkedChoice(LinkedChoiceKind::LinkedColorChoice)`
+    /// before lowering, so the injector simply never fires and there is nothing
+    /// to undo. `Permitted` is the default, so a chain that no relation names is
+    /// byte-identical to before this axis existed.
+    #[serde(default, skip_serializing_if = "InjectedColorChoice::is_permitted")]
+    pub(crate) injected_color_choice: InjectedColorChoice,
+}
+
+/// CR 607.2d: whether an effect chain may receive an injected colour chooser
+/// ahead of a `ChosenColor` keyword grant.
+///
+/// A `bool` is prohibited by the project's data-modelling rule and would not say
+/// WHY the injection is withheld; this names the reason, which is what the
+/// injector's guard cites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub(crate) enum InjectedColorChoice {
+    /// No linked ability supplies a colour for this chain's grant, so the
+    /// injector supplies one (Mother of Runes, Knight of Dawn).
+    #[default]
+    Permitted,
+    /// CR 607.2d: a linked ability elsewhere on this object already makes the
+    /// choice this chain's grant reads back (Floating Shield's as-enters
+    /// replacement), so the grant must NOT make a second choice of its own.
+    SuppressedByLinkedAbility,
+}
+
+impl InjectedColorChoice {
+    /// Serialization guard: the default carries no information, so an untouched
+    /// chain serializes exactly as it did before this field existed.
+    pub(crate) fn is_permitted(&self) -> bool {
+        matches!(self, InjectedColorChoice::Permitted)
+    }
 }
 
 /// Whether `lower_effect_chain_ir` rewrites player-scoped references after
@@ -113,6 +153,7 @@ impl EffectChainIr {
             actor,
             in_trigger,
             repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
         }
     }
 }
@@ -152,21 +193,21 @@ fn ability_definition_has_result_table_roll_die(def: &AbilityDefinition) -> bool
 ///
 /// # The partition is the rules' own, not an engineering convenience
 ///
-/// CR 602.1 (`MagicCompRules.txt:2514`) — *"Activated abilities have a cost and
-/// an effect. They are written as `[Cost]: [Effect.] [Activation instructions
-/// (if any).]`"* — draws exactly the seam this type sits on, and CR 113.3b
-/// (:761) repeats the tripartite form for abilities generally. So:
+/// CR 602.1 — *"Activated abilities have a cost and an effect. They are written
+/// as `[Cost]: [Effect.] [Activation instructions (if any).]`"* — draws exactly
+/// the seam this type sits on, and CR 113.3b repeats the tripartite form for
+/// abilities generally. So:
 ///
 /// | shell field group | CR |
 /// |---|---|
-/// | `cost`, `cost_reduction` | CR 602.1a — everything before the colon (:2516) |
-/// | `activation_restrictions`, `activation_mana_payment_restriction`, `activator_filter`, `activation_zone` | CR 602.1b — activation instructions, *"not part of the ability's effect"* (:2519) |
-/// | `min_x_value` | CR 601.2b — the announced value of a variable cost (:2459) |
+/// | `cost`, `cost_reduction` | CR 602.1a — everything before the colon |
+/// | `activation_restrictions`, `activation_mana_payment_restriction`, `activator_filter`, `activation_zone` | CR 602.1b — activation instructions, *"not part of the ability's effect"* |
+/// | `min_x_value` | CR 601.2b — the announced value of a variable cost |
 /// | `ability_tag`, `cant_be_copied`, `description` | ability-level identity/provenance, not resolution steps |
 ///
-/// while `EffectChainIr` holds the CR 608.2 (:2785) resolution instructions.
-/// Because the root-vs-clause axis follows a seam CR 602.1 already draws, the
-/// widening satisfies the categorical-boundary rule rather than straddling rule
+/// while `EffectChainIr` holds the CR 608.2 resolution instructions. Because
+/// the root-vs-clause axis follows a seam CR 602.1 already draws, the widening
+/// satisfies the categorical-boundary rule rather than straddling rule
 /// sections.
 ///
 /// **This is 12 of `AbilityDefinition`'s 38 root fields, deliberately not a
@@ -301,13 +342,13 @@ pub(crate) struct AbilityShellIr {
     ///
     /// # This is the one field that is NOT the CR 602.1 activation envelope
     ///
-    /// Everything else on this shell partitions along the seam CR 602.1 (:2514)
-    /// draws — cost before the colon, activation instructions after it. `optional`
-    /// does not: CR 608.2d (`MagicCompRules.txt:2795`) places the choice
-    /// *"while applying the effect"*, which is CR 608.2 resolution, the half this
-    /// type deliberately leaves to [`EffectChainIr`]. So its presence here is an
-    /// explicit, named exception rather than an extension of the partition, and
-    /// this doc block is where the exception is justified.
+    /// Everything else on this shell partitions along the seam CR 602.1 draws —
+    /// cost before the colon, activation instructions after it. `optional` does
+    /// not: CR 608.2d places the choice *"while applying the effect"*, which is
+    /// CR 608.2 resolution, the half this type deliberately leaves to
+    /// [`EffectChainIr`]. So its presence here is an explicit, named exception
+    /// rather than an extension of the partition, and this doc block is where the
+    /// exception is justified.
     ///
     /// # Why the exception is nonetheless correct
     ///
@@ -851,6 +892,39 @@ pub(crate) struct ClauseIr {
     /// targeted "of their choice" controlled by the phase-trigger active player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) target_chooser: Option<TargetFilter>,
+    /// CR 105.4 + CR 608.2c: this clause's text printed its own colour choice
+    /// ("of the color of your choice"), captured from `ParseContext` after this
+    /// chunk was parsed. Declared per-clause provenance — assembly gates the
+    /// injected `Effect::Choose(Color)` on THIS, never on a shape scan of the
+    /// lowered tree ("antecedents are named, never searched").
+    ///
+    /// Propagated by `absorb_clause` like every other intrinsic field: dropping it
+    /// there is compile-silent (the `ClauseDraft` default supplies `None`) and
+    /// would leave a nested-chain clause with `IsChosenColor` stamped and no
+    /// chooser injected — a fail-closed, match-NOTHING filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) printed_color_choice: Option<ChoiceType>,
+    /// CR 607.2d + CR 608.2d: which KIND of chosen-colour
+    /// reference this clause's KEYWORD GRANT printed, DERIVED ONCE from this
+    /// clause's own verbatim `source_text` at `ClauseDraft::push` — the sealed
+    /// single construction gate.
+    ///
+    /// Deriving here rather than lifting a `ParseContext` channel is deliberate:
+    /// `Protection`/`HexproofFrom(ChosenColor)` are produced by
+    /// `types/keywords.rs::parse_protection_target` / `parse_hexproof_filter`,
+    /// pure context-free functions with ten call sites (backlog F8), so no ctx
+    /// channel exists to lift. Because EVERY `ClauseIr` is minted here, no
+    /// `.push()` site can forget it, and `absorb_clause` RE-DERIVES it from the
+    /// re-located fragment rather than copying it.
+    ///
+    /// FAILURE POLARITY, stated once: `None` means "no chosen-colour grant phrase
+    /// found", which the consumer treats as NOT independent, so the CR 607.2d
+    /// suppression still fires and today's behaviour is preserved byte-for-byte.
+    /// Suppression is withheld ONLY on an affirmative `IncludesIndependentChoice`
+    /// stamp. A missed or unclassifiable clause therefore cannot un-suppress
+    /// Floating Shield, the pool's only live consumer of this relation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) chosen_color_grant: Option<ChosenColorGrantReference>,
     /// CR 608.2c + CR 603.7a: where this clause's lowered definition attaches.
     /// `Sibling` (default) is promoted only when this clause continues an open
     /// delayed payload and is consumed by `assemble_effect_chain`'s relocation step.
@@ -926,6 +1000,17 @@ pub(crate) struct ClauseIrBuilder {
     next_clause_id: u32,
     /// Accumulated clauses in source order.
     clauses: Vec<ClauseIr>,
+    /// CR 611.2a + CR 608.2c: the printed leading duration of the chunk currently
+    /// being processed, when that chunk was produced by
+    /// `sequence::expand_leading_duration_chunks` and therefore does NOT carry the
+    /// duration phrase in its own text.
+    ///
+    /// THE SINGLE FUNNEL. `ClauseDraft::push` is the one point every emitted clause
+    /// passes through — `absorb_clause` re-mints through `clause(..).push()` too — so
+    /// applying the stamp there, rather than at each of the chunk loop's many emit
+    /// sites, is what makes "every recovered conjunct carries the printed duration"
+    /// true by construction instead of by enumeration.
+    pending_leading_duration: Option<Duration>,
 }
 
 impl ClauseIrBuilder {
@@ -944,6 +1029,7 @@ impl ClauseIrBuilder {
             cursor: 0,
             next_clause_id: 0,
             clauses: Vec::new(),
+            pending_leading_duration: None,
         }
     }
 
@@ -1013,6 +1099,7 @@ impl ClauseIrBuilder {
             unless_pay: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             target_chooser: None,
+            printed_color_choice: None,
             placement: ClausePlacement::Sibling,
         }
     }
@@ -1020,6 +1107,14 @@ impl ClauseIrBuilder {
     /// Whether any clause has been pushed yet.
     pub(crate) fn is_empty(&self) -> bool {
         self.clauses.is_empty()
+    }
+
+    /// CR 611.2a: arm (or disarm) the leading-duration stamp for the chunk about to
+    /// be processed. Called once at the top of every chunk-loop iteration with
+    /// `chunk.leading_duration`, so a chunk that carries none clears a previous
+    /// chunk's stamp rather than inheriting it.
+    pub(crate) fn set_pending_leading_duration(&mut self, duration: Option<Duration>) {
+        self.pending_leading_duration = duration;
     }
 
     /// Read the already-built clauses for mid-chain lookback (prior-referent
@@ -1073,6 +1168,7 @@ impl ClauseIrBuilder {
         .unless_pay(c.unless_pay)
         .target_selection_mode(c.target_selection_mode)
         .target_chooser(c.target_chooser)
+        .printed_color_choice(c.printed_color_choice)
         .push();
     }
 
@@ -1105,6 +1201,7 @@ pub(crate) struct ClauseDraft<'a> {
     unless_pay: Option<UnlessPayModifier>,
     target_selection_mode: TargetSelectionMode,
     target_chooser: Option<TargetFilter>,
+    printed_color_choice: Option<ChoiceType>,
     placement: ClausePlacement,
 }
 
@@ -1164,10 +1261,92 @@ impl ClauseDraft<'_> {
         self.target_chooser = v;
         self
     }
+    /// CR 105.4 + CR 608.2c: declare that THIS clause's text printed its own
+    /// colour choice ("… of the color of your choice").
+    ///
+    /// The only writer is the chain chunk loop, lifting
+    /// `ParseContext::pending_printed_color_choice` immediately after the chunk
+    /// parses. Setting it here is what licenses `assemble_effect_chain` to
+    /// inject the matching `Effect::Choose(Color)`; the injector reads THIS
+    /// declared provenance and never a shape scan of the lowered tree, so a
+    /// clause that stamped `FilterProp::IsChosenColor` and a clause that gets a
+    /// chooser are the same clause by construction. Leaving it `None` on a
+    /// clause that did stamp the filter yields a fail-closed, match-NOTHING
+    /// filter with no `Effect::Unimplemented` and no parse warning.
+    pub(crate) fn printed_color_choice(mut self, v: Option<ChoiceType>) -> Self {
+        self.printed_color_choice = v;
+        self
+    }
 
     /// Mint the `ClauseId` + `ChainRelative` `OracleUnitSource` and commit the
     /// clause into the builder's source-ordered list.
-    pub(crate) fn push(self) {
+    pub(crate) fn push(mut self) {
+        // CR 611.2a + CR 608.2c: a chunk severed from a leading-duration sentence
+        // carries the printed duration as a TYPED value rather than in its own text,
+        // so the duration must be applied here — the single funnel every emitted
+        // clause passes through — and through the same chain-distributing authority
+        // U1 installed, so a recovered conjunct that is itself a chain-building
+        // recognizer distributes to its own governed links too.
+        // CR 608.2c (read the whole text): a recovered conjunct is arbitrary printed
+        // text and may state its OWN window, which the sentence's leading duration
+        // must not clobber.
+        if self.builder.pending_leading_duration.is_some() {
+            // "Printed its own window" is a TEXTUAL fact, deliberately NOT read off
+            // `ParsedEffectClause.duration`: several recognizers inject
+            // `Some(Duration::UntilEndOfTurn)` into that field as a DEFAULT which is
+            // byte-identical to a printed window, so the carrier cannot distinguish
+            // the two. `oracle_effect/subject.rs`'s tapped-bound prohibition is the
+            // proof — one recognizer emits a printed `ForAsLongAs{SourceIsTapped}`
+            // (Braided Net) or an injected `UntilEndOfTurn` (Dovin Baan, Xathrid
+            // Gorgon) depending only on a suffix.
+            //
+            // NOTE those two cards are cited for the RECOGNIZER's behaviour, not as
+            // traffic through this seam: `starts_clause_text_or_conjugated` excludes
+            // "its", so Dovin Baan's bare " and its ..." never splits and never
+            // reaches `push` at all. Its link is governed by
+            // `with_clause_chain_duration`'s sub-link walk, whose gate is still
+            // CARRIER-based and therefore still cannot tell an injected default from
+            // a printed window — measured, Dovin Baan, Edifice of Authority and
+            // Mythos of Vadrok carry a link stuck at `UntilEndOfTurn` under an
+            // `UntilNextTurnOf` head. Teferi's Protection is a fourth instance in a
+            // different shape and from a DIFFERENT CAUSE — carrier `None` (which
+            // would PASS the walk's gate), injected `UntilEndOfTurn` on the EMBEDDED
+            // effect duration, different recognizer — so the head window never
+            // reaches that link at all. Both are KNOWN REMAINING GAPS this seam does
+            // not fix, and the second is not closed by the injected-default class
+            // remedy alone; see the U1 section note in the 7923 integration test for
+            // the measured detail and tasks #138/#144 in `game/effects/effect.rs`.
+            //
+            // COUPLING: `strip_trailing_duration` finds only trailing windows, so a
+            // conjunct printing a LEADING window of its own would read as unprinted.
+            // Unreachable today only because no duration phrase is a member of
+            // `starts_clause_text_lower`, so no split ever cuts a chunk immediately
+            // before "until ". If that changes, ask `strip_leading_duration` here too.
+            let printed_own_window = strip_trailing_duration(&self.source_text).1.is_some();
+            let governing = if printed_own_window {
+                // The text printed a window. If the carrier holds it, distribute THAT
+                // down the links. If the carrier is empty, the recognizer routed the
+                // printed window into an embedded effect field instead — stamping the
+                // sentence's window here would have `apply_duration_to_effect`
+                // overwrite it, the exact clobber this gate exists to prevent — so
+                // leave the clause untouched.
+                //
+                // Since #7959 the EMBEDDED-side clobber this branch guards against is refused
+                // structurally: `apply_duration_to_effect` yields to a written embedded window
+                // on every `Option<Duration>` writer, through `duration_is_unset_sentinel`
+                // (CR 611.2a). This textual gate STAYS, because it guards the OTHER
+                // carrier: `AbilityDefinition.duration` is still written unconditionally by
+                // `with_clause_duration`, and an injected `UntilEndOfTurn` is still
+                // indistinguishable from a printed one there (#7962). Do not delete it as
+                // redundant.
+                self.parsed.duration.clone()
+            } else {
+                self.builder.pending_leading_duration.clone()
+            };
+            if let Some(duration) = governing {
+                self.parsed = with_clause_chain_duration(self.parsed, duration);
+            }
+        }
         let id = ClauseId(self.builder.next_clause_id);
         let span = self.builder.locate(&self.source_text);
         // `allocate_with_span` validates containment + fragment/precision. A
@@ -1199,6 +1378,10 @@ impl ClauseDraft<'_> {
             unless_pay: self.unless_pay,
             target_selection_mode: self.target_selection_mode,
             target_chooser: self.target_chooser,
+            printed_color_choice: self.printed_color_choice,
+            chosen_color_grant: crate::parser::oracle_nom::filter::classify_chosen_color_grant(
+                &self.source_text,
+            ),
             placement: self.placement,
             _sealed: (),
         });
@@ -1211,6 +1394,131 @@ mod tests {
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::types::ability::{Duration, Effect};
 
+    /// CR 608.2c + CR 611.2a: `ClauseDraft::push` stamps the sentence's leading
+    /// duration onto a recovered conjunct, but a recovered conjunct is arbitrary
+    /// printed text and may state its OWN window, which the leading duration must
+    /// NOT clobber. Both sides are asserted: the printed window survives, the unset
+    /// clause is stamped. Removing the gate in `push` turns the first row red.
+    ///
+    /// Latent by measurement: no corpus card today pairs a leading-duration sentence
+    /// with a conjunct carrying a differing printed duration, so this shape is
+    /// CONSTRUCTED DIRECTLY rather than drawn from a card.
+    #[test]
+    fn push_yields_to_a_recovered_conjuncts_own_printed_duration() {
+        fn governed() -> Effect {
+            Effect::GenericEffect {
+                static_abilities: Vec::new(),
+                duration: None,
+                target: None,
+                end_cost: None,
+            }
+        }
+        fn emit() -> ClauseDisposition {
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            }
+        }
+
+        // Source text is load-bearing: the gate reads whether the conjunct PRINTED
+        // a window, so a degenerate fixture ("a" / "b") would take the unprinted
+        // branch and never exercise row 1 at all.
+        let mut b = ClauseIrBuilder::new(
+            "tap target creature until end of combat. it can't block. its activated \
+             abilities can't be activated. it gains flying until end of turn",
+        );
+        // Deliberately NOT `UntilEndOfTurn`: row 3's injected default IS
+        // `UntilEndOfTurn`, so an identical leading window would let that row pass
+        // no matter which side of the gate it took.
+        let leading = Duration::UntilNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        };
+        b.set_pending_leading_duration(Some(leading.clone()));
+
+        // Row 1: the conjunct states its own, narrower window -> PRESERVED, and
+        // that window is DISTRIBUTED to the governed link beneath it (which would
+        // otherwise reach the resolver with `None` and fall back to a default).
+        let mut own = parsed_clause(governed());
+        own.duration = Some(Duration::UntilEndOfCombat);
+        own.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            governed(),
+        )));
+        b.clause("tap target creature until end of combat", own, None, emit())
+            .push();
+
+        // Row 2: the conjunct states nothing -> STAMPED with the leading duration.
+        b.clause("it can't block", parsed_clause(governed()), None, emit())
+            .push();
+
+        // Row 3 — THE DISCRIMINATING ROW for the injected-default hazard. The
+        // conjunct PRINTS no window, but a recognizer injected
+        // `Some(UntilEndOfTurn)` into the parsed carrier — exactly what
+        // `oracle_effect/subject.rs`'s tapped-bound prohibition does for Dovin
+        // Baan's PROHIBITION RECOGNIZER — cited for the recognizer, not because
+        // Dovin Baan itself reaches this seam (it never splits, so its link is
+        // governed by the sub-link walk instead). Reading the carrier would mistake
+        // that default for a printed window and skip the stamp.
+        let mut injected = parsed_clause(governed());
+        injected.duration = Some(Duration::UntilEndOfTurn);
+        b.clause(
+            "its activated abilities can't be activated",
+            injected,
+            None,
+            emit(),
+        )
+        .push();
+
+        // Row 4: the text PRINTS a window but the carrier is empty — the recognizer
+        // routed it into an embedded effect field. Stamping the sentence's window
+        // here would clobber that printed inner window, so the clause is left
+        // untouched. (Fourth of the four (printed, carrier) combinations.)
+        b.clause(
+            "it gains flying until end of turn",
+            parsed_clause(governed()),
+            None,
+            emit(),
+        )
+        .push();
+
+        let clauses = b.finish();
+        assert_eq!(clauses.len(), 4);
+        assert_eq!(
+            clauses[0].parsed.duration,
+            Some(Duration::UntilEndOfCombat),
+            "a recovered conjunct's own printed window must survive the sentence's \
+             leading duration"
+        );
+        assert_eq!(
+            clauses[0]
+                .parsed
+                .sub_ability
+                .as_ref()
+                .expect("row 1 sub-link must survive")
+                .duration,
+            Some(Duration::UntilEndOfCombat),
+            "the conjunct's OWN window governs the links beneath it — skipping the \
+             walk entirely would leave this `None` and fall back to a default"
+        );
+        assert_eq!(
+            clauses[1].parsed.duration,
+            Some(leading.clone()),
+            "POSITIVE REACH GUARD: the stamp still fires on an unset conjunct, so \
+             row 1 is not passing because the stamp was disabled outright"
+        );
+        assert_eq!(
+            clauses[2].parsed.duration,
+            Some(leading.clone()),
+            "an INJECTED `UntilEndOfTurn` on a conjunct that printed no window must \
+             not be mistaken for a printed one — the leading window governs"
+        );
+        assert_eq!(
+            clauses[3].parsed.duration, None,
+            "text printed a window but the carrier is empty: the clause must be left \
+             ALONE, not stamped with the sentence's window over a printed inner one"
+        );
+    }
+
     #[test]
     fn effect_chain_ir_empty_construction() {
         let ir = EffectChainIr {
@@ -1222,6 +1530,7 @@ mod tests {
             actor: None,
             in_trigger: false,
             repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
         };
         assert!(ir.clauses.is_empty());
     }
@@ -1339,6 +1648,7 @@ mod tests {
             actor: None,
             in_trigger: false,
             repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
         };
         assert_eq!(ir.clauses.len(), 1);
         assert_eq!(ir.kind, AbilityKind::Spell);

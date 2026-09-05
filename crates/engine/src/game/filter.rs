@@ -338,7 +338,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -767,7 +767,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::Goaded
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
@@ -1010,7 +1010,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -1744,7 +1744,7 @@ pub(crate) fn filter_prop_contains(
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -1955,6 +1955,11 @@ pub(crate) fn matches_stack_target_filter(
                 })
         }
         TargetFilter::Typed(tf) => {
+            // CR 205.1: this is a stack-entry-vs-object DISPATCH, not a guard
+            // against an empty conjunction. A type-line constraint is answerable
+            // only against the object, so a non-empty list delegates to the
+            // object matcher; an empty list stays here and is answered by
+            // `controller` / `properties`, matching every other evaluator (#8508).
             if !tf.type_filters.is_empty() {
                 return state.objects.contains_key(&stack_obj_id)
                     && matches_target_filter(state, stack_obj_id, filter, ctx);
@@ -2481,9 +2486,12 @@ pub fn is_owner_scoped_zone(zone: Zone) -> bool {
 /// In an owner-scoped zone (see [`is_owner_scoped_zone`]) this delegates to
 /// [`matches_target_filter_in_owner_zone`], so a stale `obj.controller` left behind
 /// by a control-change effect cannot exclude the object from its own owner's
-/// player-scoped query — the state `effects::change_zone` documents for a stolen
-/// creature that dies into its owner's graveyard, where `reset_for_battlefield_exit`
-/// leaves `controller = thief`. Everywhere else it delegates to the ordinary
+/// player-scoped query. `zones::apply_zone_exit_cleanup`'s
+/// `revert_layered_characteristics_to_base` call already resets `controller` back
+/// to the owner fallback for a stolen creature that dies into its owner's
+/// graveyard, but this filter is defence-in-depth for a hand-built or serialized
+/// state where the two have diverged — the state `effects::change_zone` documents
+/// at its own site. Everywhere else it delegates to the ordinary
 /// controller-scoped [`matches_target_filter`].
 pub fn matches_target_filter_for_zone(
     state: &GameState,
@@ -2886,15 +2894,22 @@ pub fn matches_target_filter_on_lki_snapshot(
 /// and the snapshot clone.
 pub fn matches_target_filter_on_cost_paid_reference(
     state: &GameState,
-    object_id: ObjectId,
-    lki: &LKISnapshot,
+    snapshot: &crate::types::ability::CostPaidObjectSnapshot,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    let object_id = snapshot.object_id;
+    let lki = &snapshot.lki;
     let refreshed = filter
         .queries_keyword_kind()
-        .then(|| state.objects.get(&object_id))
+        // CR 400.7 + CR 608.2h: the live refresh is only legitimate while the
+        // snapshot still names THIS object. CR 608.2h governs characteristics
+        // vs. LKI; it does not authorize reading a different object, which a
+        // returned same-id permanent is under CR 400.7. A stale referent takes
+        // the `None` arm below, which is the LKI fallback CR 608.2h mandates.
+        .then(|| snapshot.live_object_id(state))
         .flatten()
+        .and_then(|id| state.objects.get(&id))
         .filter(|object| object.zone.is_public())
         .map(|_| {
             crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
@@ -3142,7 +3157,11 @@ fn filter_inner_for_object(
             controller,
             properties,
         }) => {
-            // Type filters check (all must match — conjunction)
+            // CR 205.1: type-filter conjunction. An EMPTY list is an empty conjunction
+            // — "no type-line constraint", not "matches nothing" — and the
+            // `controller` / `properties` checks carry the restriction instead. See
+            // the invariant on `TypedFilter::type_filters` for why the empty case is
+            // load-bearing on both the object and the player axis (#8508).
             for tf in type_filters {
                 if !type_filter_matches(tf, obj, &state.all_creature_types) {
                     return false;
@@ -3440,22 +3459,39 @@ fn filter_inner_for_object(
         // the chain resolver, never into `cost_paid_object`. Without the slot-2
         // fallback the `SharesQuality { reference: CostPaidObject }` reference
         // matched nothing and the reveal dug past the shared-type card.
+        //
+        // CR 400.7: this arm matches a LIVE board object, so it validates the
+        // incarnation captured at binding time. An object that changed zones and
+        // returned is a new object at the same storage id and must not match.
+        // LKI-only readers (the `ObjectScope::CostPaidObject` characteristic
+        // arms in `game/quantity.rs`) deliberately do NOT validate — CR 608.2h
+        // requires them to keep reporting the departed object's recorded
+        // characteristics.
         TargetFilter::CostPaidObject => ability
-            .and_then(|ability| {
-                ability
-                    .cost_paid_object
-                    .as_ref()
-                    .or(ability.effect_context_object.as_ref())
-            })
-            .is_some_and(|snapshot| snapshot.object_id == object_id),
+            // CR 608.2k: each slot is tested INDEPENDENTLY — `Option::or` would
+            // short-circuit on a present-but-stale slot 1 and never reach a live
+            // slot 2, so a departed cost referent would mask a still-current
+            // effect-context referent.
+            .is_some_and(|ability| {
+                let slot_matches = |snapshot: Option<&crate::types::ability::CostPaidObjectSnapshot>| {
+                    snapshot.is_some_and(|snapshot| {
+                        snapshot.live_object_id(state) == Some(object_id)
+                    })
+                };
+                slot_matches(ability.cost_paid_object.as_ref())
+                    || slot_matches(ability.effect_context_object.as_ref())
+            }),
         // CR 701.47c: "the amassed Army" / "the Army you amassed" — the Army
         // creature the current amass instruction chose, threaded via
         // `ability.amassed_army_object` (mirrors `CostPaidObject` immediately
         // above, minus the effect-context-object fallback: amass has no such
         // secondary carrier).
+        // CR 400.7: same live-reference guard as `CostPaidObject` above.
         TargetFilter::AmassedArmy => ability
             .and_then(|ability| ability.amassed_army_object.as_ref())
-            .is_some_and(|snapshot| snapshot.object_id == object_id),
+            .is_some_and(|snapshot| {
+                snapshot.live_object_id(state) == Some(object_id)
+            }),
         // CR 613.1f + CR 611.2c + CR 400.7: the FILTER source's last-remembered
         // card (`ChosenAttribute::Card`, written by `Effect::RememberCard`). Read
         // live each layer pass against `source_id` (the permanent that HAS the
@@ -3612,8 +3648,26 @@ fn filter_inner_for_object(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
         | TargetFilter::TriggeringPlayer
-        | TargetFilter::TriggeringSource
         | TargetFilter::DefendingPlayer => false,
+        // CR 608.2k: `TriggeringSource` IS object-valued (unlike its player-axis
+        // siblings above — types/ability.rs documents it as "the source object
+        // of the triggering event"), but it is still not a population predicate,
+        // so it belongs in its own arm rather than the CR 603.7c group. Its
+        // referent is bound at resolution time by `targeting::resolved_targets`
+        // (delegating to `targeting::resolve_event_context_target` for the event
+        // tier), and `TargetFilter::is_context_ref()` guarantees no target slot
+        // is ever built from it (`ability_utils::collect_target_slots_inner` /
+        // `build_target_slot_specs` skip it). Matching `true` here would make a
+        // resolution-time ref ENUMERABLE — selectable as a population member —
+        // across every `matches_target_filter` consumer, including
+        // `layers::apply_continuous_effect_filtered`, where a `TriggeringSource`
+        // affected-filter would start selecting a population instead of the one
+        // bound referent. It would also fire at trigger DETECTION time through
+        // `quantity::triggering_event_source_object`'s thread-local fallback,
+        // changing trigger-condition and intervening-if evaluation corpus-wide.
+        // Contrast `EventTarget` below: that arm serves a DIFFERENT consumer,
+        // CR 603.4 intervening-if object matching, not population enumeration.
+        TargetFilter::TriggeringSource => false,
         // CR 603.2 + CR 603.4: "that creature"/"that permanent" bound to the
         // object target carried by the current trigger event. Matches only that
         // specific object (including a BecomesTarget object), so an
@@ -3809,6 +3863,11 @@ fn zone_change_filter_inner(
             controller,
             properties,
         }) => {
+            // CR 205.1: type-filter conjunction. An EMPTY list is an empty conjunction
+            // — "no type-line constraint", not "matches nothing" — and the
+            // `controller` / `properties` checks carry the restriction instead. See
+            // the invariant on `TypedFilter::type_filters` for why the empty case is
+            // load-bearing on both the object and the player axis (#8508).
             if !type_filters.iter().all(|tf| {
                 zone_change_record_matches_type_filter(record, tf, &state.all_creature_types)
             }) {
@@ -4249,6 +4308,11 @@ pub fn spell_record_matches_filter(
                 }
             }
 
+            // CR 205.1: type-filter conjunction. An EMPTY list is an empty conjunction
+            // — "no type-line constraint", not "matches nothing" — and the
+            // `controller` / `properties` checks carry the restriction instead. See
+            // the invariant on `TypedFilter::type_filters` for why the empty case is
+            // load-bearing on both the object and the player axis (#8508).
             type_filters.iter().all(|type_filter| {
                 spell_record_matches_type_filter(record, type_filter, all_creature_types)
             }) && properties
@@ -4549,6 +4613,11 @@ fn spell_object_matches_filter_inner(
                 }
             }
 
+            // CR 205.1: type-filter conjunction. An EMPTY list is an empty conjunction
+            // — "no type-line constraint", not "matches nothing" — and the
+            // `controller` / `properties` checks carry the restriction instead. See
+            // the invariant on `TypedFilter::type_filters` for why the empty case is
+            // load-bearing on both the object and the player axis (#8508).
             type_filters.iter().all(|type_filter| {
                 spell_record_matches_type_filter(record, type_filter, all_creature_types)
             }) && properties.iter().all(|prop| {
@@ -4692,18 +4761,16 @@ fn spell_object_matches_property(
                 })
         }),
         FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
+        // CR 608.2d: "the chosen color" for this filter form wants the
+        // CURRENT answer, not the CR 607.2d linked one — mirrors
+        // `GameObject::current_chosen_color`.
         FilterProp::IsChosenColor => context.is_some_and(|context| {
             context
                 .state
                 .objects
                 .get(&context.source_id)
-                .and_then(|source| {
-                    source.chosen_attributes.iter().find_map(|attr| match attr {
-                        ChosenAttribute::Color(color) => Some(color),
-                        _ => None,
-                    })
-                })
-                .is_some_and(|color| record.colors.contains(color))
+                .and_then(|source| source.current_chosen_color())
+                .is_some_and(|color| record.colors.contains(&color))
         }),
         FilterProp::IsChosenCardType => context.is_some_and(|context| {
             // CR 205.2a: `chosen_card_type()` resolves both the `CardType`
@@ -4987,7 +5054,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::DistinctFrom { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -5474,6 +5541,41 @@ fn attacking_defender_matches(
         Some(controller) => source_controller_ref_player(state, source, controller)
             .is_some_and(|player| player == defending_player),
     }
+}
+
+/// CR 120.1 + CR 109.5: Does a damage record's recipient satisfy `recipient`?
+///
+/// `None` leaves the recipient unconstrained. Otherwise the record must name a
+/// PLAYER recipient (CR 120.1 "Objects can deal damage to … players") matching
+/// the scope; a record whose target is an object never satisfies a player scope.
+///
+/// CR 109.5: "you" in a printed clause is the ability's controller *as printed*.
+/// `ResolvedAbility::original_controller` preserves that player across the
+/// resolution-time `player_scope` fan-out, which rebinds `controller` to each
+/// iterated player (`scoped_player_sacrifice_ability`). Reading the rebound
+/// controller would make Witch-king of Angmar's "dealt combat damage to you"
+/// mean "to the opponent currently sacrificing" — so the original controller is
+/// the reference player, falling back to the live controller when no fan-out is
+/// in progress. With no ability context at all the relation is unanswerable, so
+/// this fails closed, matching `player_matches_target_filter_with`.
+fn damage_recipient_matches(
+    state: &GameState,
+    source: &SourceContext<'_>,
+    record: &crate::types::game_state::DamageRecord,
+    recipient: Option<&PlayerFilter>,
+) -> bool {
+    let Some(scope) = recipient else {
+        return true;
+    };
+    let Some(reference) = source
+        .ability
+        .and_then(|ability| ability.original_controller)
+        .or(source.controller)
+    else {
+        return false;
+    };
+    matches!(record.target, TargetRef::Player(pid)
+        if crate::game::effects::matches_player_scope(state, pid, scope, reference, source.id))
 }
 
 /// Check if an object satisfies a single FilterProp.
@@ -6102,11 +6204,17 @@ fn matches_filter_prop(
                     )
                 })
         }
-        // CR 105.4: Match objects whose colors include the source's chosen color.
-        // Used for "of the chosen color" (Hall of Triumph, Prismatic Strands).
+        // CR 105.4 + CR 608.2d: Match objects whose colors include the source's
+        // CURRENT chosen color. Used for "of the chosen color" (Hall of
+        // Triumph, Prismatic Strands). Mirrors `GameObject::current_chosen_color`
+        // (newest / last-match) — this arm cannot call that accessor directly
+        // because `source` here is a `SourceContext`, which carries its own
+        // `chosen_attributes: Vec<ChosenAttribute>` rather than a `GameObject`,
+        // so the newest-match scan is inlined instead.
         FilterProp::IsChosenColor => source
             .chosen_attributes
             .iter()
+            .rev()
             .find_map(|a| match a {
                 crate::types::ability::ChosenAttribute::Color(c) => Some(c),
                 _ => None,
@@ -6248,11 +6356,16 @@ fn matches_filter_prop(
         // CR 120.1: active-voice counterpart — this object DEALT damage this turn,
         // i.e. it was the source of a damage event (Red Guardian, Super-Soldier:
         // "target creature ... that dealt damage this turn"). Reads the same
-        // per-turn ledger the passive arm above does, keyed by `source_id`.
-        FilterProp::DealtDamageThisTurn => state
-            .damage_dealt_this_turn
-            .iter()
-            .any(|record| record.source_id == object_id),
+        // per-turn ledger the passive arm above does, keyed by `source_id`, and
+        // narrows it along the two printed axes: CR 120.2a/120.2b damage class
+        // and CR 120.1 recipient ("that dealt combat damage to you this turn").
+        FilterProp::DealtDamageThisTurn { kind, recipient } => {
+            state.damage_dealt_this_turn.iter().any(|record| {
+                record.source_id == object_id
+                    && crate::game::quantity::damage_record_matches_kind(record, *kind)
+                    && damage_recipient_matches(state, source, record, recipient.as_ref())
+            })
+        }
         // CR 400.7: Object entered the battlefield this turn.
         FilterProp::EnteredThisTurn => obj.entered_battlefield_turn == Some(state.turn_number),
         // CR 302.6 + CR 508.1a: controlled continuously since the controller's
@@ -6745,11 +6858,16 @@ fn zone_change_record_matches_property(
         // CR 120.1: active-voice look-back — the object DEALT damage this turn.
         // The `damage_dealt_this_turn` ledger is keyed by battlefield ObjectId and
         // survives the object's zone change, so the LKI snapshot reads it by the
-        // record's `object_id`, mirroring the passive arm above.
-        FilterProp::DealtDamageThisTurn => state
-            .damage_dealt_this_turn
-            .iter()
-            .any(|r| r.source_id == record.object_id),
+        // record's `object_id`, mirroring the passive arm above. The CR 120.2a
+        // damage-class and CR 120.1 recipient axes are applied exactly as in the
+        // live arm — a look-back rider must not widen the printed restriction.
+        FilterProp::DealtDamageThisTurn { kind, recipient } => {
+            state.damage_dealt_this_turn.iter().any(|r| {
+                r.source_id == record.object_id
+                    && crate::game::quantity::damage_record_matches_kind(r, *kind)
+                    && damage_recipient_matches(state, source, r, recipient.as_ref())
+            })
+        }
         // CR 110.5 + CR 110.5d + CR 608.2h: tap status is battlefield-only — once
         // the object has left its public zone it is neither tapped nor untapped, so
         // the live object can't answer a look-back "was tapped" rider (Brackish
@@ -7733,9 +7851,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
-        Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
-        PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
-        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
+        Comparator, ControllerRef, DamageKindFilter, Effect, FilterProp, ManaContribution,
+        ManaProduction, PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition,
+        ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -7808,6 +7927,140 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    /// CR 205.1: the `type_filters` conjunction, pinned at all three arities
+    /// with a positive control that proves the list is really evaluated.
+    ///
+    /// #8508 read the zero arity as a defect (`.all()` on an empty iterator is
+    /// `true`, so "an empty `type_filters` matches every object"). It is instead
+    /// the deliberate encoding of "no type-line constraint" — see the invariant
+    /// on `TypedFilter::type_filters` — and this test is what any change to that
+    /// reading has to break first.
+    #[test]
+    fn typed_filter_type_conjunction_holds_at_every_arity() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let bear = add_creature(&mut state, PlayerId(0), "Bear");
+
+        let typed = |types: Vec<TypeFilter>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: types,
+                ..TypedFilter::default()
+            })
+        };
+
+        // Arity 0: an empty conjunction imposes no type-line constraint.
+        assert!(matches_target_filter(&state, bear, &typed(vec![]), source));
+        // Arity 1.
+        assert!(matches_target_filter(
+            &state,
+            bear,
+            &typed(vec![TypeFilter::Creature]),
+            source
+        ));
+        // Arity many: every element must hold.
+        assert!(matches_target_filter(
+            &state,
+            bear,
+            &typed(vec![TypeFilter::Permanent, TypeFilter::Creature]),
+            source
+        ));
+
+        // Positive control. Without these the arity-0 `true` above would be
+        // equally consistent with a matcher that says yes to everything.
+        assert!(!matches_target_filter(
+            &state,
+            bear,
+            &typed(vec![TypeFilter::Land]),
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            bear,
+            &typed(vec![TypeFilter::Creature, TypeFilter::Land]),
+            source
+        ));
+    }
+
+    /// CR 109.1 + CR 102.1: a player is not an object, so a type-line constraint
+    /// can never be satisfied by a player — which makes an empty `type_filters`
+    /// the ONLY spelling of a player-shaped `Typed` filter ("each opponent").
+    ///
+    /// This is the half of #8508 that forecloses "empty means match nothing":
+    /// that reading would delete this encoding outright.
+    #[test]
+    fn empty_type_filters_is_the_only_player_shaped_typed_filter() {
+        let you = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let each_opponent =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        assert!(player_matches_target_filter(
+            &each_opponent,
+            opponent,
+            Some(you)
+        ));
+        // Positive control on the same filter: it discriminates by controller,
+        // so the match above is not a blanket yes.
+        assert!(!player_matches_target_filter(
+            &each_opponent,
+            you,
+            Some(you)
+        ));
+
+        // The same filter carrying ANY type constraint matches no player.
+        let typed_opponent = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::Opponent),
+        );
+        assert!(!player_matches_target_filter(
+            &typed_opponent,
+            opponent,
+            Some(you)
+        ));
+    }
+
+    /// CR 205.1: the spell-cast-history matcher conjoins `type_filters` exactly
+    /// as the live object matcher does, so a filter cannot match an object and
+    /// then miss that object's own cast record. Same three arities, same
+    /// positive control (#8508).
+    #[test]
+    fn spell_record_type_conjunction_agrees_with_the_object_axis() {
+        let record = SpellCastRecord {
+            core_types: vec![CoreType::Creature],
+            ..SpellCastRecord::default()
+        };
+        let typed = |types: Vec<TypeFilter>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: types,
+                ..TypedFilter::default()
+            })
+        };
+
+        assert!(spell_record_matches_filter(
+            &record,
+            &typed(vec![]),
+            PlayerId(0),
+            &[]
+        ));
+        assert!(spell_record_matches_filter(
+            &record,
+            &typed(vec![TypeFilter::Creature]),
+            PlayerId(0),
+            &[]
+        ));
+        assert!(!spell_record_matches_filter(
+            &record,
+            &typed(vec![TypeFilter::Land]),
+            PlayerId(0),
+            &[]
+        ));
+        assert!(!spell_record_matches_filter(
+            &record,
+            &typed(vec![TypeFilter::Creature, TypeFilter::Land]),
+            PlayerId(0),
+            &[]
+        ));
     }
 
     /// CR 608.2c: every target-relative player seam must recover the root's
@@ -8895,9 +9148,12 @@ mod tests {
             ..Default::default()
         });
 
-        let dealt = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::DealtDamageThisTurn]),
-        );
+        let dealt = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::Any,
+                recipient: None,
+            },
+        ]));
         // The creature that dealt the damage matches; the one that received it does not.
         assert!(
             matches_target_filter(&state, dealer, &dealt, dealer),
@@ -8914,6 +9170,184 @@ mod tests {
         );
         assert!(matches_target_filter(&state, victim, &was_dealt, victim));
         assert!(!matches_target_filter(&state, dealer, &was_dealt, dealer));
+    }
+
+    /// CR 120.1 + CR 120.2a: the recipient and damage-class axes each narrow the
+    /// active-voice filter independently. Exercised at the axis level rather
+    /// than per card.
+    #[test]
+    fn dealt_damage_this_turn_honors_recipient_and_kind_axes() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        // Combat damage to player 0; noncombat damage to player 1.
+        let combat_at_you = add_creature(&mut state, PlayerId(1), "Combat Dealer");
+        let noncombat_at_them = add_creature(&mut state, PlayerId(1), "Ping Dealer");
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: combat_at_you,
+            source_controller: PlayerId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            target_controller: PlayerId(0),
+            amount: 3,
+            is_combat: true,
+            ..Default::default()
+        });
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: noncombat_at_them,
+            source_controller: PlayerId(1),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 1,
+            is_combat: false,
+            ..Default::default()
+        });
+
+        let source = add_creature(&mut state, PlayerId(0), "Witch-king of Angmar");
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ctx = FilterContext::from_ability(&ability);
+
+        let filter = |kind, recipient| {
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .properties(vec![FilterProp::DealtDamageThisTurn { kind, recipient }]),
+            )
+        };
+
+        // "dealt combat damage to you this turn" — only the combat dealer.
+        let witch_king = filter(DamageKindFilter::CombatOnly, Some(PlayerFilter::Controller));
+        assert!(super::matches_target_filter(
+            &state,
+            combat_at_you,
+            &witch_king,
+            &ctx
+        ));
+        assert!(
+            !super::matches_target_filter(&state, noncombat_at_them, &witch_king, &ctx),
+            "a creature that dealt no damage to you must not be eligible (#8445)"
+        );
+
+        // Recipient axis alone: dropping the combat restriction still excludes
+        // the creature whose damage went to the other player.
+        let to_you_any = filter(DamageKindFilter::Any, Some(PlayerFilter::Controller));
+        assert!(super::matches_target_filter(
+            &state,
+            combat_at_you,
+            &to_you_any,
+            &ctx
+        ));
+        assert!(!super::matches_target_filter(
+            &state,
+            noncombat_at_them,
+            &to_you_any,
+            &ctx
+        ));
+
+        // Kind axis alone: noncombat-only excludes the combat dealer.
+        let noncombat_any = filter(DamageKindFilter::NoncombatOnly, None);
+        assert!(!super::matches_target_filter(
+            &state,
+            combat_at_you,
+            &noncombat_any,
+            &ctx
+        ));
+        assert!(super::matches_target_filter(
+            &state,
+            noncombat_at_them,
+            &noncombat_any,
+            &ctx
+        ));
+
+        // Unrestricted form still matches both, preserving the pre-existing
+        // "dealt damage this turn" semantics (Red Guardian).
+        let unrestricted = filter(DamageKindFilter::Any, None);
+        assert!(super::matches_target_filter(
+            &state,
+            combat_at_you,
+            &unrestricted,
+            &ctx
+        ));
+        assert!(super::matches_target_filter(
+            &state,
+            noncombat_at_them,
+            &unrestricted,
+            &ctx
+        ));
+    }
+
+    /// CR 109.5: "you" is the PRINTED controller. The `player_scope` fan-out
+    /// that drives "each opponent sacrifices ..." rebinds `ResolvedAbility::
+    /// controller` to each iterated opponent while preserving
+    /// `original_controller`. Reading the rebound controller would silently turn
+    /// Witch-king of Angmar's "dealt combat damage to you" into "dealt combat
+    /// damage to the opponent doing the sacrificing" — eligible sets that look
+    /// plausible but are wrong.
+    #[test]
+    fn dealt_damage_recipient_reads_original_controller_under_player_scope() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        let hit_you = add_creature(&mut state, PlayerId(1), "Hit You");
+        let hit_them = add_creature(&mut state, PlayerId(1), "Hit Them");
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: hit_you,
+            source_controller: PlayerId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            target_controller: PlayerId(0),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: hit_them,
+            source_controller: PlayerId(1),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+
+        let source = add_creature(&mut state, PlayerId(0), "Witch-king of Angmar");
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        // Mirror `scoped_player_sacrifice_ability`: the acting controller is the
+        // iterated opponent, the printed controller is preserved.
+        ability.controller = PlayerId(1);
+        ability.original_controller = Some(PlayerId(0));
+        let ctx = FilterContext::from_ability(&ability);
+
+        let to_you = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::CombatOnly,
+                recipient: Some(PlayerFilter::Controller),
+            },
+        ]));
+
+        assert!(
+            super::matches_target_filter(&state, hit_you, &to_you, &ctx),
+            "'to you' must mean the printed controller, not the iterated opponent"
+        );
+        assert!(
+            !super::matches_target_filter(&state, hit_them, &to_you, &ctx),
+            "a creature that damaged the sacrificing opponent must NOT be eligible"
+        );
     }
 
     #[test]
@@ -14379,6 +14813,7 @@ mod tests {
         ability.effect_context_object = Some(CostPaidObjectSnapshot {
             object_id: gone_id,
             lki: creature_lki.clone(),
+            incarnation: 0,
         });
         assert!(
             super::matches_target_filter(
@@ -14394,6 +14829,7 @@ mod tests {
         ability.effect_context_object = Some(CostPaidObjectSnapshot {
             object_id: gone_id,
             lki: land_lki.clone(),
+            incarnation: 0,
         });
         assert!(
             !super::matches_target_filter(
@@ -14420,6 +14856,7 @@ mod tests {
         stale.effect_context_object = Some(CostPaidObjectSnapshot {
             object_id: gone_id,
             lki: creature_lki.clone(),
+            incarnation: 0,
         });
         assert!(
             super::matches_target_filter(
@@ -15293,7 +15730,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::InAnyZone { .. }
             | FilterProp::SharesQuality { .. }
             | FilterProp::WasDealtDamageThisTurn
-            | FilterProp::DealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn { .. }
             | FilterProp::EnteredThisTurn
             | FilterProp::ControlledContinuouslySinceTurnBegan
             | FilterProp::ZoneChangedThisTurn { .. }

@@ -90,6 +90,7 @@ fn activate_to_ordering_prompt() -> (GameRunner, ObjectId, usize) {
             player,
             candidate_count,
             candidates,
+            ..
         } => {
             assert_eq!(*player, P0, "the affected permanent's controller chooses");
             assert_eq!(*candidate_count, 2, "doubler + halver compete");

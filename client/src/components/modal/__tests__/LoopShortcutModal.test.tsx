@@ -258,21 +258,20 @@ function objectCandidate(id: string, name: string | null, reference: string): In
   };
 }
 
+/** One published option, its `value` surface stated by the caller — the axis the modal's
+ *  wording whitelist reads. */
+function mayAnswer(id: string, value: string): InteractionChoice {
+  return {
+    id: cid(id),
+    surfaces: [{ type: "value", data: { role: "accept", index: null, value } }],
+    status: { type: "available" },
+  };
+}
+
 /** A may point's two published options. The control reads the `value` surface these carry —
  *  never the index. */
 function mayCandidates(takeId: string, declineId: string): InteractionChoice[] {
-  return [
-    {
-      id: cid(takeId),
-      surfaces: [{ type: "value", data: { role: "accept", index: null, value: "take" } }],
-      status: { type: "available" },
-    },
-    {
-      id: cid(declineId),
-      surfaces: [{ type: "value", data: { role: "accept", index: null, value: "decline" } }],
-      status: { type: "available" },
-    },
-  ];
+  return [mayAnswer(takeId, "take"), mayAnswer(declineId, "decline")];
 }
 
 function element(
@@ -987,6 +986,39 @@ describe("LoopShortcutModal", () => {
     expect(screen.getByText("Sue Storm — taken each iteration")).toBeInTheDocument();
     expect(screen.getByText("Reed Richards — taken each iteration")).toBeInTheDocument();
     expect(screen.queryByText(/declined each iteration/)).not.toBeInTheDocument();
+  });
+
+  // Hostile: the ONLY declaration content is a may point whose answer this modal has no wording
+  // for, so every row it could render is dropped and the box would be a title over nothing.
+  it("omits the declaration panel when no may row survives", () => {
+    seed(
+      buildRespondToShortcutWaitingFor(),
+      {},
+      respondInteraction({ points: [statementMayPoint(0, "s0", "a0")] }, [
+        objectCandidate("s0", "Sue Storm", "402"),
+        mayAnswer("a0", "abstain"),
+      ]),
+    );
+    render(<RespondToShortcutModal />);
+
+    expect(screen.queryByText("Proposed declaration:")).not.toBeInTheDocument();
+  });
+
+  // The paired positive, one literal apart: the same fixture with a whitelisted answer keeps the
+  // title AND its row, so a renderer that dropped the panel unconditionally fails here.
+  it("keeps the declaration panel when its one may row survives", () => {
+    seed(
+      buildRespondToShortcutWaitingFor(),
+      {},
+      respondInteraction({ points: [statementMayPoint(0, "s0", "a0")] }, [
+        objectCandidate("s0", "Sue Storm", "402"),
+        mayAnswer("a0", "take"),
+      ]),
+    );
+    render(<RespondToShortcutModal />);
+
+    expect(screen.getByText("Proposed declaration:")).toBeInTheDocument();
+    expect(screen.getByText("Sue Storm — taken each iteration")).toBeInTheDocument();
   });
 
   // T6 (non-vacuity): both modals self-gate — a non-matching waitingFor.type

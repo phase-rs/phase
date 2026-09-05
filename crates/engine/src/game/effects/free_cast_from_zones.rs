@@ -160,7 +160,7 @@ pub(crate) fn eligible_candidates(
             let zone_ids = match zone {
                 Zone::Graveyard => &player.graveyard,
                 Zone::Hand => &player.hand,
-                // CR 400.10a + CR 608.2g: Exile is a shared zone — the whole pile
+                // CR 400.1 + CR 608.2g: Exile is a shared zone — the whole pile
                 // is scanned and the `filter` (e.g. `ExiledBySource` +
                 // `Not(InTrackedSet)`) narrows it to this resolution's linked set
                 // regardless of who owns the exiled cards (Plargg and Nassari

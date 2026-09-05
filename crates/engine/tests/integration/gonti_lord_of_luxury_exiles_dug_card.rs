@@ -23,18 +23,28 @@
 //! Pre-fix, no `DigChoice` ever surfaces (the assertion `saw_dig_choice` fails)
 //! AND Gonti ends in exile — both flip with the fix.
 //!
-//! Note on scope: the body parser lowers "an opponent's library" to the
-//! controller's-library `Dig` (`parse_dig_library_owner` returns
-//! `TargetFilter::Controller`), so this test exercises the dig against the
-//! controller's own library. The "an opponent's library" → opponent-targeting
-//! is a separate latent gap, out of scope for #1146 (which concerns WHICH card
-//! is exiled, not WHOSE library is read).
+//! Note on the Oracle text: `GONTI_ORACLE` below is Gonti's REAL printed text
+//! as published by MTGJSON, verbatim. It previously held a hand-written
+//! paraphrase saying "an opponent's library" (and "you may look at and play
+//! that card"), which matches no printing of this card. That paraphrase reached
+//! `parse_dig_library_owner`'s old `TargetFilter::Controller` fallthrough, so
+//! the dig read the CONTROLLER's library and the fixture below was stacked on
+//! `P0` to suit. #8498 made that recognizer fail-closed, which is what exposed
+//! the paraphrase: an owner phrase the table cannot bind now declines the dig
+//! arm instead of silently guessing the controller.
+//!
+//! With the real text the dig binds the announced target ("target opponent's
+//! library" → `Typed{controller: Opponent}`, CR 115.1), so the fixture is
+//! stacked on `P1` and the trigger's target is answered below. The #1146
+//! property under test — WHICH card is exiled — is unchanged by whose library
+//! is read.
 //!
 //! CR 701.20e: looking at cards is private. CR 406.3 / CR 708.2: a card exiled
 //! face down has no characteristics and can't be examined. CR 702.75a: Hideaway
 //! is the structural analog this lowering mirrors.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::ManaCost;
@@ -43,22 +53,23 @@ use engine::types::zones::Zone;
 use engine::types::ObjectId;
 
 const GONTI_ORACLE: &str = "Deathtouch\n\
-When Gonti, Lord of Luxury enters the battlefield, look at the top four cards of an opponent's library, exile one of them face down, then you may look at and play that card for as long as it remains exiled, and you may spend mana as though it were mana of any color to cast that spell.";
+When Gonti enters, look at the top four cards of target opponent's library, exile one of them face down, then put the rest on the bottom of that library in a random order. You may cast that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.";
 
 #[test]
 fn gonti_exiles_the_dug_card_not_himself() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
 
-    // Stack the dug library so the top four are the looked-at cards and a fifth
-    // deeper card must NOT be seen (proves the dig is bounded to 4).
-    // `add_card_to_library_top` inserts at the top (index 0), so add the deepest
-    // card first and the top-of-four last.
-    let lib_deep = scenario.add_card_to_library_top(P0, "Lib Deep Card");
-    let lib4 = scenario.add_card_to_library_top(P0, "Lib Card 4");
-    let lib3 = scenario.add_card_to_library_top(P0, "Lib Card 3");
-    let lib2 = scenario.add_card_to_library_top(P0, "Lib Card 2");
-    let lib1 = scenario.add_card_to_library_top(P0, "Lib Card 1");
+    // Stack the DUG player's library — P1, the opponent Gonti targets (CR 115.1)
+    // — so the top four are the looked-at cards and a fifth deeper card must NOT
+    // be seen (proves the dig is bounded to 4). `add_card_to_library_top` inserts
+    // at the top (index 0), so add the deepest card first and the top-of-four
+    // last.
+    let lib_deep = scenario.add_card_to_library_top(P1, "Lib Deep Card");
+    let lib4 = scenario.add_card_to_library_top(P1, "Lib Card 4");
+    let lib3 = scenario.add_card_to_library_top(P1, "Lib Card 3");
+    let lib2 = scenario.add_card_to_library_top(P1, "Lib Card 2");
+    let lib1 = scenario.add_card_to_library_top(P1, "Lib Card 1");
 
     // Gonti in P0's hand, free to cast.
     let gonti = {
@@ -97,6 +108,37 @@ fn gonti_exiles_the_dug_card_not_himself() {
 
     for _ in 0..96 {
         match runner.state().waiting_for.clone() {
+            // CR 115.1 + CR 603.3d: "target opponent's library" announces a
+            // player target when the ETB trigger goes on the stack. That target
+            // is what `Dig`'s library-owner filter resolves against at
+            // resolution (`Typed{controller: Opponent}` is not a context ref, so
+            // `resolve_player_for_context_ref` reads `ability.targets`).
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            }
+            | WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let slot = &target_slots[selection.current_slot];
+                let choice = slot
+                    .legal_targets
+                    .iter()
+                    .find(|t| **t == TargetRef::Player(P1))
+                    .cloned();
+                assert!(
+                    choice.is_some(),
+                    "the opponent P1 must be a legal target for Gonti's ETB; \
+                     legal targets were {:?}",
+                    slot.legal_targets
+                );
+                runner
+                    .act(GameAction::ChooseTarget { target: choice })
+                    .expect("ChooseTarget accepted");
+            }
             WaitingFor::OptionalEffectChoice { .. } => {
                 // Accept the "you may look at and play that card" rider so the
                 // resolution proceeds to the dig selection.

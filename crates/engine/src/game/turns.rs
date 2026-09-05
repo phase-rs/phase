@@ -3221,7 +3221,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
                 return AutoAdvanceStep::waiting(prompt);
             }
-            // CR 504.3 + CR 117.1c: The active player ALWAYS receives priority
+            // CR 504.2 + CR 117.1c: The active player ALWAYS receives priority
             // during the draw step (after the turn-based draw and any triggers).
             // See the Upkeep arm above for the rationale — same pattern.
             return AutoAdvanceStep::waiting(WaitingFor::Priority {

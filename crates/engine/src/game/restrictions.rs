@@ -1670,6 +1670,22 @@ pub(crate) fn evaluate_condition(
         // CR 702.195b: The enduring story is a player designation effects and
         // restrictions may identify.
         ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),
+        // CR 309.7: "A player completes a dungeon as that dungeon card is removed
+        // from the game." CR 602.5b makes the printed "Activate only if you've
+        // completed a dungeon" (Sarevok's Tome) a restriction on the ability's use.
+        //
+        // Activator-relative like its designation siblings above, not
+        // source-relative like `HasMaxSpeed`: the clause prints "if YOU'VE
+        // completed", addressed to whoever is activating.
+        //
+        // Delegates to the single `game::dungeon` authority that
+        // `AbilityCondition::CompletedDungeon` and
+        // `TriggerCondition::CompletedDungeon` also call, so the restriction
+        // reading of this clause cannot disagree with the resolution and
+        // intervening-if readings about what "completed" means.
+        ParsedCondition::CompletedDungeon { specific } => {
+            crate::game::dungeon::has_completed_dungeon(state, player, specific)
+        }
         // CR 702.178a + the "Max Speed" glossary entry, sense 2: the keyword
         // grants its ability "only if that permanent's controller (or that
         // card's owner, if it isn't on the battlefield) has a speed of 4".
@@ -2507,6 +2523,75 @@ mod tests {
         assert!(!evaluate_condition(&state, player, source_id, &condition));
         state.city_blessing.insert(player);
         assert!(evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    /// CR 309.7 + CR 602.5b: Sarevok's Tome's "Activate only if you've completed
+    /// a dungeon". Peer of the two designation tests around it, and the
+    /// restriction-layer half of the gate: parsing the clause is only half the
+    /// fix — before this variant existed the phrase failed to convert and the
+    /// ability was activatable with no dungeon requirement at all.
+    ///
+    /// Also pins the per-player scoping: an opponent's completion must not
+    /// satisfy your gate, since `dungeon_progress` is keyed by player.
+    #[test]
+    fn completed_dungeon_restriction_checks_player_progress() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let opponent = PlayerId(1);
+        let source_id = ObjectId(10);
+        let condition = ParsedCondition::CompletedDungeon { specific: None };
+
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        // An opponent's completed dungeon must not satisfy your gate.
+        state
+            .dungeon_progress
+            .entry(opponent)
+            .or_default()
+            .completed
+            .insert(crate::game::dungeon::DungeonId::TombOfAnnihilation);
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        state
+            .dungeon_progress
+            .entry(player)
+            .or_default()
+            .completed
+            .insert(crate::game::dungeon::DungeonId::TombOfAnnihilation);
+        assert!(evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    /// CR 309.7: the `specific` axis must discriminate — completing one dungeon
+    /// does not satisfy a gate naming a different one. Guards the field against
+    /// collapsing into the unqualified reading.
+    #[test]
+    fn completed_dungeon_restriction_honors_specific_dungeon() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = ObjectId(10);
+        state
+            .dungeon_progress
+            .entry(player)
+            .or_default()
+            .completed
+            .insert(crate::game::dungeon::DungeonId::TombOfAnnihilation);
+
+        assert!(evaluate_condition(
+            &state,
+            player,
+            source_id,
+            &ParsedCondition::CompletedDungeon {
+                specific: Some(crate::game::dungeon::DungeonId::TombOfAnnihilation),
+            }
+        ));
+        assert!(!evaluate_condition(
+            &state,
+            player,
+            source_id,
+            &ParsedCondition::CompletedDungeon {
+                specific: Some(crate::game::dungeon::DungeonId::Undercity),
+            }
+        ));
     }
 
     #[test]

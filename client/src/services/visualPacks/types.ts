@@ -325,9 +325,17 @@ const CHEAPEST_IMAGE_BYTES = Math.min(...RUNG_MEDIANS);
  * which is NOT measured here; a set of records skewed entirely onto one rung
  * would be overstated ~3.8x (all `small`) or understated ~1.6x (all `normal`).
  *
- * `core` and `printing` also contribute a card back and a set icon, which are
- * not card art at all. One and one per pack against tens of thousands of card
- * images, so they are counted at the same weight rather than modelled.
+ * `printing` also contributes a set icon, which is not card art at all. One per
+ * pack against tens of thousands of card images, so it is counted at the same
+ * weight rather than modelled.
+ *
+ * `core` no longer fits that reasoning and is OVERSTATED here by roughly 20x:
+ * it is a card back plus every finite mana-symbol SVG (~77 records), of which
+ * none are card art and nearly all are 1-2 KB vectors — so a real ~230 KB
+ * download is quoted at ~4.9 MB. Nothing refuses on this figure
+ * (`reserveStorage` gates on `minimumImageBytes`), so the cost is a misleading
+ * label rather than a blocked install. Modelling it needs a per-media weight,
+ * which this signature — a bare record COUNT — cannot express.
  */
 export function estimatedImageBytes(imageRecords: number): number {
   return Math.round(imageRecords * MEAN_IMAGE_BYTES);

@@ -1061,7 +1061,7 @@ pub enum InteractionResponseSpec {
     /// against the announced-target decision's own published ids and total. A declaration whose
     /// partition IS stated and whose magnitudes are not — a proposal carrying no per-period
     /// signature, or one whose per-slot life charge resolves to a seat the declaration never
-    /// announces (CR 704.5a) — is published with its allocation and an EMPTY entry list: segment
+    /// announces (CR 119.3) — is published with its allocation and an EMPTY entry list: segment
     /// lengths are not magnitudes, and a responder judging accept-or-shorten against half the
     /// proposal is the partial statement this projection rules out. See
     /// `game::interaction::declared_sequence_preview`.
@@ -1193,7 +1193,7 @@ pub struct InteractionShortcutPreview {
     /// never empty — and NOT necessarily positive, since a step starting exactly at the count
     /// takes a zero-length segment.
     ///
-    /// CR 704.5a: `entries` follow this allocation ONLY when the period's life map names
+    /// CR 119.3: `entries` follow this allocation ONLY when the period's life map names
     /// exactly one losing seat that this allocation itself announces and the slot's announced
     /// magnitude is the whole of that seat's per-period loss, which is what makes it positive —
     /// per-seat life magnitudes are then this split multiplied by that rate, and they still

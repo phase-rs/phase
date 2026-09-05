@@ -12830,6 +12830,43 @@ fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
 }
 
 #[test]
+fn static_cant_cause_forced_action_sacrifice_only() {
+    // CR 701.21a + CR 609.3 + CR 109.5: Sigarda, Host of Herons / Tajuru
+    // Preserver — protects the player wholesale against ANY opponent-
+    // controlled spell or ability forcing a sacrifice, with no affected-object
+    // filter (unlike CantCauseSacrificeOrExile).
+    let def = parse_static_line(
+        "Spells and abilities your opponents control can't cause you to sacrifice permanents.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCauseForcedAction {
+            cause: ProhibitionScope::Opponents,
+            actions: vec![CostCategory::SacrificesPermanent],
+        }
+    );
+    assert!(def.affected.is_none());
+}
+
+#[test]
+fn static_cant_cause_forced_action_discard_or_sacrifice() {
+    // CR 701.9a + CR 701.21a + CR 609.3: Tamiyo, Collector of Tales — the same
+    // static family, listing two forced actions in one clause.
+    let def = parse_static_line(
+        "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCauseForcedAction {
+            cause: ProhibitionScope::Opponents,
+            actions: vec![CostCategory::Discards, CostCategory::SacrificesPermanent],
+        }
+    );
+}
+
+#[test]
 fn static_legend_rule_defers_unparseable_scopes() {
     // CR 704.5j: scopes this parser cannot resolve precisely, and conditional
     // forms, must NOT be emitted as a LegendRuleDoesntApply static — they are
@@ -31386,6 +31423,87 @@ fn heroic_defiance_pt_grant_gated_on_most_common_color() {
     );
 }
 
+/// CR 105.2 + CR 611.3a (Invasion Djinn cycle — Sulam Djinn): "This creature
+/// gets -2/-2 as long as [color] is the most common color among all permanents
+/// or is tied for most common" must parse to a `StaticCondition::And` of two
+/// `QuantityComparison`s: (1) the largest per-color count across all
+/// permanents (`QuantityRef::ObjectCountBySharedQuality` grouped by
+/// `SharedQuality::Color`, `AggregateFunction::Max`) is at least 1 — a
+/// most-common-color bucket must actually exist — and (2) the named color's
+/// battlefield-wide permanent count (`QuantityRef::ObjectCount`) is at least
+/// that max. `Comparator::GE` already admits ties, matching the printed "or
+/// is tied for most common" tail. The first conjunct is required so an
+/// all-colorless battlefield (no bucket reaches size 1) can never vacuously
+/// satisfy `0 >= 0`.
+#[test]
+fn sulam_djinn_pt_penalty_gated_on_green_being_most_common_color() {
+    let defs = parse_static_line_multi(
+        "This creature gets -2/-2 as long as green is the most common color \
+         among all permanents or is tied for most common.",
+    );
+    let penalty = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("a continuous P/T penalty");
+    assert!(
+        penalty
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: -2 }),
+        "penalty must subtract 2 power, got {:?}",
+        penalty.modifications
+    );
+    assert!(
+        penalty
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: -2 }),
+        "penalty must subtract 2 toughness, got {:?}",
+        penalty.modifications
+    );
+
+    let all_permanents = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Permanent],
+        controller: None,
+        properties: Vec::new(),
+    });
+    let green_permanents = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Permanent],
+        controller: None,
+        properties: vec![FilterProp::HasColor {
+            color: ManaColor::Green,
+        }],
+    });
+    let max_color_bucket = || QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCountBySharedQuality {
+            filter: all_permanents.clone(),
+            quality: SharedQuality::Color,
+            aggregate: AggregateFunction::Max,
+        },
+    };
+    assert_eq!(
+        penalty.condition,
+        Some(StaticCondition::And {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: max_color_bucket(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: green_permanents,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: max_color_bucket(),
+                },
+            ],
+        }),
+        "the -2/-2 must be gated on (max per-color count >= 1) AND (green's count >= the max \
+         per-color count), so an all-colorless battlefield can never vacuously satisfy it"
+    );
+}
+
 /// CR 509.1b (#4590 review): a granted ability's OWN inner "unless" must stay
 /// inside the quoted ability — the attached-subject grant parser must not lift it
 /// onto the static grant as a condition. Coral Net grants a triggered ability
@@ -35011,5 +35129,369 @@ fn attached_conditional_grant_state_backed_gate_still_passes_through() {
             .is_some_and(|c| !c.contains_unrecognized()),
         "a board-state gate must survive the enforcement-point gate unchanged, got {:?}",
         def.condition
+    );
+}
+
+/// Havi's static condition is a live, controller-scoped historic-card graveyard
+/// count. The historic adjective remains on the typed zone filter.
+#[test]
+fn havi_historic_graveyard_gate_parses_with_reminder_text() {
+    let def = parse_static_line(
+        "Havi has indestructible as long as there are four or more historic cards in your graveyard. (Artifacts, legendaries, and Sagas are historic.)",
+    )
+    .expect("Havi's first Oracle line must parse as a static");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible,
+        }]
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![],
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Card],
+                        controller: None,
+                        properties: vec![FilterProp::Historic],
+                    })),
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        })
+    );
+}
+
+// ===========================================================================
+// Issue #8395 — the animation clause silently dropped from compound continuous
+// statics. Idol of False Gods is the type specimen. Each test names the
+// verification-matrix row it discharges and carries an explicit reach-guard:
+// positive evidence the changed path ran, never the mere absence of a failure.
+// ===========================================================================
+
+/// V1 + V2 (CR 613.1d + CR 613.4b + CR 613.1f): Idol of False Gods' printed line,
+/// with the card's self-reference normalized to `~` exactly as the production
+/// pipeline does upstream (`oracle.rs:449` runs `normalize_card_name_refs`
+/// before line splitting).
+///
+/// The whole defect in one assertion set. The line reaches the legacy `" has "`
+/// arm only AFTER `try_split_inverted_as_long_as` rewrites the inverted
+/// "As long as <cond>, <effect>" form into canonical
+/// "<effect> as long as <cond>" order — and in THAT order the conjunct's
+/// `" has "` precedes the gate's `" as long as "`. The old arm sliced from that
+/// `" has "`, discarded the entire animation clause, and hardcoded `SelfRef`,
+/// exporting `[AddKeyword{Annihilator(2)}]` and nothing else.
+///
+/// REACH-GUARD: the Annihilator assertion passes both before and after the fix.
+/// That is precisely what makes it evidence the static was CLAIMED rather than
+/// vanishing — it is deliberately not independent coverage.
+#[test]
+fn idol_of_false_gods_animates_and_keeps_annihilator() {
+    let def = parse_static_line(
+        "As long as ~ has eight or more +1/+1 counters on it, it's a 0/0 creature in addition to its other types and it has annihilator 2.",
+    )
+    .expect("Idol's compound animation static must parse");
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Annihilator(2),
+        }),
+        "reach-guard: Annihilator 2 must still be granted, proving the line was claimed; mods = {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }),
+        "CR 613.1d (Layer 4): Idol must become a creature; mods = {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetPower { value: 0 })
+            && mods.contains(&ContinuousModification::SetToughness { value: 0 }),
+        "CR 613.4b (Layer 7b): base P/T 0/0 must be set; mods = {mods:?}"
+    );
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "CR 205.1b: \"in addition to its other types\" RETAINS the prior card types, \
+         so no replacing SetCardTypes may be emitted; mods = {mods:?}"
+    );
+    assert!(
+        def.condition
+            .as_ref()
+            .is_some_and(|c| !c.contains_unrecognized()),
+        "CR 611.3a: the eight-counter gate must type, not fall back to Unrecognized; \
+         condition = {:?}",
+        def.condition
+    );
+}
+
+/// V6 (CR 613.1d Layer 4 + CR 613.4b Layer 7b + CR 613.1f Layer 6): the conjunct
+/// axis across all four grant verbs — the two pronoun forms times the two verb
+/// families, exercised as one `opt` and one `alt` rather than a permutation
+/// chain.
+///
+/// REACH-GUARD: every case asserts the ANIMATION half and the KEYWORD half in
+/// the SAME definition. A test asserting only the keyword would pass against the
+/// legacy arm that dropped the animation entirely; one asserting only the
+/// animation would pass against a peel that swallowed the conjunct.
+#[test]
+fn animation_conjunct_emits_both_halves_for_every_grant_verb() {
+    for (line, keyword) in [
+        (
+            "it's a 0/0 creature in addition to its other types and it has annihilator 2",
+            Keyword::Annihilator(2),
+        ),
+        (
+            "it's a 0/0 creature in addition to its other types and has trample",
+            Keyword::Trample,
+        ),
+        (
+            "it's a 0/0 creature in addition to its other types and it gains flying",
+            Keyword::Flying,
+        ),
+        (
+            "they're a 0/0 creature in addition to their other types and they gain vigilance",
+            Keyword::Vigilance,
+        ),
+    ] {
+        let def = parse_static_line(line)
+            .unwrap_or_else(|| panic!("compound animation static must parse; line = {line:?}"));
+        let mods = &def.modifications;
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }),
+            "animation half (CR 613.1d) must survive the conjunct; line = {line:?}, mods = {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::SetPower { value: 0 })
+                && mods.contains(&ContinuousModification::SetToughness { value: 0 }),
+            "base P/T (CR 613.4b) must survive the conjunct; line = {line:?}, mods = {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddKeyword {
+                keyword: keyword.clone(),
+            }),
+            "conjunct keyword (CR 613.1f) must be carried; line = {line:?}, mods = {mods:?}"
+        );
+    }
+}
+
+/// V6 hostile sibling: a NON-grant conjunct verb must not be peeled. "and loses
+/// defender" is an ability-REMOVING clause (still CR 613.1f, Layer 6) already
+/// owned elsewhere; the new boundary combinator matches only the four grant
+/// verbs, so this line must keep its existing shape.
+#[test]
+fn animation_conjunct_boundary_ignores_non_grant_verbs() {
+    let def =
+        parse_static_line("it's a 0/0 creature in addition to its other types and loses defender")
+            .expect(
+                "a non-grant conjunct must retain its existing parse path; the previous `if let \
+         Some(def)` let an unintended decline satisfy this test without asserting anything",
+            );
+    assert!(
+        !def.modifications.is_empty(),
+        "a non-grant conjunct must not be turned into an empty-modification static; \
+         mods = {:?}",
+        def.modifications
+    );
+}
+
+/// V7: an unrecognized conjunct is honest, not swallowed.
+///
+/// REACH-GUARD: the SAME line minus the conjunct must still parse fully. That
+/// pairing is what proves the decline is a DECISION taken by the conjunct peel
+/// rather than an unrelated upstream miss — without it, a `None` from any
+/// earlier arm would satisfy the test.
+#[test]
+fn unrecognized_animation_conjunct_declines_rather_than_half_parsing() {
+    let with_nonsense = "it's a 0/0 creature in addition to its other types and it has florblewick";
+    let claimed = parse_static_line(with_nonsense);
+    assert!(
+        claimed.is_none(),
+        "an unmappable conjunct must decline the whole line so it surfaces as unimplemented, \
+         rather than emitting the animation and silently dropping the ability; got {claimed:?}"
+    );
+
+    let without = "it's a 0/0 creature in addition to its other types";
+    let def = parse_static_line(without)
+        .expect("reach-guard: the bare animation clause must still parse");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }),
+        "reach-guard: the animation half is supported on its own, so the decline above is \
+         attributable to the conjunct; mods = {:?}",
+        def.modifications
+    );
+}
+
+/// V8 (CR 604.1): a quoted-ability conjunct no longer vanishes. Before this
+/// change the line exported `[]` — a total silent loss of both halves.
+///
+/// REACH-GUARD: the animation half is asserted alongside the grant, so the test
+/// cannot pass on a downstream arm that claims the line while emitting only one
+/// of the two.
+#[test]
+fn quoted_ability_animation_conjunct_is_granted_not_dropped() {
+    let line = "it's a 0/0 creature in addition to its other types and it has \
+                \"When this creature dies, draw a card.\"";
+    let def = parse_static_line(line)
+        .expect("a quoted-ability conjunct must be claimed by the shared quoted-ability authority");
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }),
+        "reach-guard: the animation half must survive; mods = {mods:?}"
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::GrantTrigger { .. }
+                | ContinuousModification::GrantAbility { .. }
+        )),
+        "CR 604.1: the quoted ability must be granted, not dropped; mods = {mods:?}"
+    );
+}
+
+/// V9: the rewritten `dispatch.rs` self-ref keyword arm keeps its legitimate
+/// coverage, in BOTH printed orientations — the postfix form and the inverted
+/// form that `try_split_inverted_as_long_as` rewrites into it.
+///
+/// REACH-GUARD: assert the condition is a TYPED `IsPresent`, not `Unrecognized`.
+/// A bare "still returns AddKeyword" would pass even if some other arm claimed
+/// the line. This is also where a case-preservation regression surfaces: the new
+/// combinator runs on LOWERED text, so a lowercased "you control a forest"
+/// reaching `parse_static_condition` would degrade the gate to `Unrecognized`
+/// and fail here.
+#[test]
+fn self_ref_keyword_as_long_as_keeps_typed_condition_in_both_orders() {
+    for line in [
+        "~ has flying as long as you control a Forest.",
+        "As long as you control a Forest, ~ has trample.",
+    ] {
+        let def = parse_static_line(line)
+            .unwrap_or_else(|| panic!("legitimate self-ref keyword static must parse; {line:?}"));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::SelfRef),
+            "CR 613.1f: a self-referential grant affects its own source; line = {line:?}"
+        );
+        assert!(
+            def.condition
+                .as_ref()
+                .is_some_and(|c| !c.contains_unrecognized()),
+            "the Forest gate must type; a lowercased subject would degrade it to Unrecognized; \
+             line = {line:?}, condition = {:?}",
+            def.condition
+        );
+    }
+}
+
+/// V10: the empty-modification mouth is closed. The legacy arm returned `Some`
+/// with `modifications: []` whenever the keyword text failed to map — a static
+/// that claims support and does nothing, with no honesty marker at all.
+///
+/// REACH-GUARD: the same shape with a MAPPABLE keyword must still return `Some`
+/// carrying its `AddKeyword`. Without that pair a blanket decline would also
+/// satisfy the first assertion.
+#[test]
+fn self_ref_keyword_as_long_as_never_returns_empty_modifications() {
+    let unmappable = parse_static_line("~ has florblewick as long as you control a Forest.");
+    assert!(
+        unmappable.is_none(),
+        "an unmappable keyword must DECLINE. The weaker `!is_some_and(|d| \
+         d.modifications.is_empty())` this replaces was also satisfied by a `Some` carrying \
+         NON-empty modifications — a static that claims the line while granting something \
+         other than the keyword it failed to map; got {unmappable:?}"
+    );
+
+    let mappable = parse_static_line("~ has flying as long as you control a Forest.")
+        .expect("reach-guard: the mappable sibling must still parse");
+    assert!(
+        mappable
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }),
+        "reach-guard: the arm still runs and only the empty case declines; mods = {:?}",
+        mappable.modifications
+    );
+}
+
+/// V5 (CR 613.1d + CR 613.4b + CR 613.1f): the shared additive-type leaf must
+/// return the COMPLETE modification set for a clause that also states P/T and
+/// keywords.
+///
+/// The input is Case of the Gorgon's Kiss's PRODUCTION string — the
+/// subject-stripped, un-`~`-normalized description the effect pipeline actually
+/// hands the leaf (measured at `/abilities[0]/effect/static_abilities[0]`), not
+/// the printed line. Testing the printed line would exercise a route this card
+/// never takes and could go green while the card stayed broken.
+///
+/// REACH-GUARD: the pre-existing `AddSubtype{Gorgon}` and `AddType{Creature}`
+/// must still be present ALONGSIDE the new `SetPower{4}`. That proves the
+/// pre-marker span is now animation-parsed rather than the leaf merely
+/// declining and something else filling in.
+#[test]
+fn additive_type_leaf_keeps_base_pt_and_pre_marker_keywords() {
+    let mods = parse_additive_type_clause_modifications(
+        "is a 4/4 Gorgon creature with deathtouch and lifelink in addition to its other types",
+    )
+    .expect("the additive-type leaf must claim this clause");
+    for expected in [
+        ContinuousModification::SetPower { value: 4 },
+        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Deathtouch,
+        },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Lifelink,
+        },
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        },
+        ContinuousModification::AddSubtype {
+            subtype: "Gorgon".to_string(),
+        },
+    ] {
+        assert!(
+            mods.contains(&expected),
+            "missing {expected:?}; mods = {mods:?}"
+        );
+    }
+}
+
+/// V5 hostile sibling — the DOUBLE-EMIT GUARD. A clause with no leading `N/M`
+/// must keep the word-classification path: the new animation route is keyed on
+/// a LEADING fixed P/T precisely so it stays disjoint from the trailing
+/// "base power and toughness N/M" form that callers already emit themselves.
+/// If that keying ever loosened, this is what fails.
+#[test]
+fn additive_type_leaf_without_leading_pt_emits_no_base_pt() {
+    let mods =
+        parse_additive_type_clause_modifications("is a Gorgon in addition to its other types")
+            .expect("the type-only clause must still parse");
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Gorgon".to_string(),
+        }),
+        "reach-guard: the type-only clause still yields its subtype; mods = {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetPower { .. } | ContinuousModification::SetToughness { .. }
+        )),
+        "a clause with no leading N/M must not acquire a base P/T; mods = {mods:?}"
     );
 }

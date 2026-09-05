@@ -223,7 +223,7 @@
     },
     "selector": {
       "title": "Selección de catálogo",
-      "core": "Reverso de carta",
+      "core": "Reverso de carta y símbolos de maná",
       "printing": "Impresiones de la colección",
       "complete": "Todas las imágenes actuales de cartas en inglés",
       "curated": "Una imagen por carta",
@@ -343,7 +343,7 @@
       "catalog_state": "No se pudo recuperar el estado del catálogo histórico"
     },
     "packs": {
-      "core": "Reverso de carta",
+      "core": "Reverso de carta y símbolos de maná",
       "complete": "Todas las imágenes actuales de cartas en inglés",
       "curated": "Una imagen por carta",
       "deckLibrary": "Biblioteca de mazos",
@@ -404,17 +404,19 @@
   },
   "offlinePreparation": {
     "title": "Preparación sin conexión",
-    "description": "Prepara este escritorio para juego local sin conexión antes de activar Trabajar sin conexión.",
+    "description": "Prepara este dispositivo para juego local sin conexión antes de activar Trabajar sin conexión.",
     "prepare": "Preparar sin conexión",
     "preparing": "Preparando…",
     "workOffline": "Trabajar sin conexión",
     "checklistLabel": "Lista de preparación sin conexión",
     "visualWarning": "Los paquetes visuales instalados necesitan atención. Ábrelos para repararlos; el juego local sigue disponible.",
+    "cardArtMissing": "No hay imágenes de cartas instaladas. Las cartas se mostrarán sin ilustración sin conexión: instala un paquete en Paquetes visuales, abajo.",
+    "cardArtInstalled": "Imágenes de cartas en caché: {{packs}}",
     "incompleteTitle": "La preparación sin conexión está incompleta",
     "incompleteMessage": "Falta: {{capabilities}}. ¿Activar Trabajar sin conexión de todos modos?",
     "confirmOffline": "Activar Trabajar sin conexión",
     "states": { "needs-preparation": "Prepara este dispositivo antes de trabajar sin conexión.", "preparing": "Preparando capacidades de juego local…", "ready": "Este dispositivo está listo para jugar sin conexión.", "failed": "Algunas capacidades necesarias no están listas.", "reconnect-required": "Vuelve a conectarte antes de preparar el juego sin conexión.", "reload-or-relaunch-required": "Recarga la aplicación o reinicia el escritorio y vuelve a preparar." },
-    "capabilities": { "appShell": "Aplicación", "browserEngine": "Motor y base de cartas", "scryfallSearch": "Datos de búsqueda", "preconCatalog": "Mazos preconstruidos", "bundledAiCatalog": "Catálogo de mazos de IA", "deckLibrary": "Biblioteca de mazos instalada", "nativeEngine": "Motor nativo" },
+    "capabilities": { "appShell": "Aplicación", "browserEngine": "Motor y base de cartas", "scryfallSearch": "Datos de búsqueda", "preconCatalog": "Mazos preconstruidos", "bundledAiCatalog": "Catálogo de mazos de IA", "deckLibrary": "Biblioteca de mazos instalada", "coreVisuals": "Reverso de carta y símbolos de maná", "nativeEngine": "Motor nativo" },
     "capabilityStates": { "ready": "Listo", "not-ready": "No listo", "reload-required": "Debe recargarse", "not-applicable": "No aplicable", "not-installed": "No instalado" }
   },
   "artChain": {

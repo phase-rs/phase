@@ -262,6 +262,30 @@ impl CardDatabase {
         self.printings_index.get(&key).map(Vec::as_slice)
     }
 
+    /// CR 712.2 + CR 601.3e: whether the face stored under `key` (a
+    /// `face_iter` key, already normalized) is the card's FRONT face — the one
+    /// a printed card presents outside the battlefield.
+    ///
+    /// Back faces are stored in `face_index` alongside their fronts and inherit
+    /// the whole card's `printings`/`rarities`, so any consumer that enumerates
+    /// printings (booster collation, set browsing) must exclude them or the
+    /// same physical card is counted twice. Single-faced cards record no face
+    /// order and are fronts by definition.
+    pub fn is_front_face_key(&self, key: &str) -> bool {
+        self.face_order_index.get(key).copied().unwrap_or(0) == 0
+    }
+
+    /// Set codes recorded for a `face_iter` key, without the name normalization
+    /// [`printings_for`](Self::printings_for) performs. Callers iterating
+    /// `face_iter` already hold the storage key; re-deriving it per card costs a
+    /// lowercase allocation and an alias lookup for every face in the corpus.
+    pub fn printings_for_key(&self, key: &str) -> &[String] {
+        self.printings_index
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     /// Returns the official WotC rulings for a card. Returns an empty slice
     /// when the card has no recorded rulings, when the card was loaded via a
     /// path that doesn't record rulings, or when looking up a back-face name

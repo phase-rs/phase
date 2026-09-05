@@ -209,9 +209,9 @@ fn pins_name_hidden_source(
     };
     // A `Scheduled` step carries a whole `Ranking`, so the walk descends one level further
     // than the pin: EVERY subject in every step is inspected, not just the head the current
-    // episode would resolve. The tail is a pre-declaration the responder receives now (it is
-    // part of the proposal they accept or shorten under CR 732.2b), so a hidden identity in
-    // the tail is a leak on exactly the same footing as one in the head.
+    // episode would resolve. The whole ranking travels with the projected declaration the
+    // responder receives under CR 732.2b even though the drive resolves only the head, so a
+    // hidden identity in the tail is a leak on exactly the same footing as one in the head.
     //
     // Wildcard-free over `AnnouncementSubject`: a future subject kind gets a compile-time
     // visit here. The `Seat` arm is `false` for the SEAT reason given above — seat identity is
@@ -6687,6 +6687,7 @@ mod tests {
         pending.cost_paid_object = Some(CostPaidObjectSnapshot {
             object_id: hidden,
             lki: state.objects[&hidden].snapshot_for_mana_spent(),
+            incarnation: 0,
         });
         let mana_resume = PendingCostMoveResume::ManaAbilityPayment {
             pending: Box::new(pending),
@@ -7555,9 +7556,9 @@ mod tests {
     /// hidden one; this is a public *subject* ahead of a hidden one inside a single pin —
     /// which the `Ranking` parameterization newly makes possible. The redaction walk must
     /// descend into every subject of every step, not stop at the head the current episode
-    /// would resolve: the tail is a pre-declaration the responder receives NOW, as part of
-    /// the proposal CR 732.2b lets them accept or shorten, so a hidden identity there leaks
-    /// on exactly the same footing as one in the head.
+    /// would resolve: the whole ranking travels with the projected declaration CR 732.2b
+    /// lets the responder accept or shorten even though the drive resolves only the head, so
+    /// a hidden identity there leaks on exactly the same footing as one in the head.
     ///
     /// # Coverage this row creates rather than repeats
     ///

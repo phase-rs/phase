@@ -468,14 +468,19 @@ function DeclareShortcutOffer({
     // to leak onto. `amounts` is always written explicitly. CR 732.2c: `null` on an unselected
     // subject is the same type-level refusal arm the count uses above, so the dispatched id is
     // the SELECTED value rather than an assertion, a default, a clamp or a fallback.
-    const pinFor = (p: InteractionShortcutPoint): InteractionShortcutPin | null =>
-      p.kind === "mayChoice"
-        ? { group: p.group, choiceIds: [mayPicks[p.group]], amounts: [] }
-        : targetsControl?.kind === "allocation"
-          ? { group: p.group, choiceIds: effective.map((a) => a.choiceId), amounts: effective }
-          : subject === null
-            ? null
-            : { group: p.group, choiceIds: [subject], amounts: [] };
+    const pinFor = (p: InteractionShortcutPoint): InteractionShortcutPin | null => {
+      if (p.kind === "mayChoice") {
+        // An unanswered group takes that same refusal arm, so an unset pick is unrepresentable
+        // in a pin rather than shipped as `[undefined]`.
+        const pick = mayPicks[p.group];
+        return pick === undefined ? null : { group: p.group, choiceIds: [pick], amounts: [] };
+      }
+      return targetsControl?.kind === "allocation"
+        ? { group: p.group, choiceIds: effective.map((a) => a.choiceId), amounts: effective }
+        : subject === null
+          ? null
+          : { group: p.group, choiceIds: [subject], amounts: [] };
+    };
 
     const pins = points.filter((p) => !p.readOnly).map(pinFor);
     if (pins.includes(null)) return null;
@@ -789,11 +794,32 @@ export function RespondToShortcutModal() {
   const allocationGroup = spec?.allocationGroup ?? null;
   const orderPoints = points.filter((p) => p.kind === "targets" && p.group !== allocationGroup);
   const allocation = declared?.allocation ?? [];
-  const mayPoints = points.filter((p) => p.kind === "mayChoice");
+  // One authority for whether a may row exists, so the panel's predicate and its render cannot
+  // drift: a point this modal has no wording for contributes neither a row nor a title.
+  const mayRows = points
+    .filter((p) => p.kind === "mayChoice")
+    .flatMap((point) => {
+      // The engine publishes EXACTLY TWO candidate ids on a `mayChoice` statement point,
+      // read in order as SUBJECT then ANSWER; a decision whose subject cannot be minted
+      // publishes no point at all, so this positional read is total over what arrives.
+      const [subjectId, answerId] = point.candidateIds;
+      if (subjectId === undefined || answerId === undefined) return [];
+      const answer = mayCandidate(candidates, answerId);
+      // A whitelist, deliberately: an answer this modal has no wording for renders
+      // nothing rather than a raw lookup key.
+      if (answer !== "take" && answer !== "decline") return [];
+      return [
+        <p key={point.group} className="text-sm text-slate-200">
+          {t(`comboShortcut.respondDecision.${answer}`, {
+            subject: candidateLabel(t, candidates, subjectId),
+          })}
+        </p>,
+      ];
+    });
   const showsDeclaration =
     allocation.length > 0 ||
     orderPoints.some((p) => p.candidateIds.length > 0) ||
-    mayPoints.length > 0;
+    mayRows.length > 0;
 
   const footer = (
     <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
@@ -853,24 +879,7 @@ export function RespondToShortcutModal() {
                 </p>
               )),
             )}
-            {mayPoints.map((point) => {
-              // The engine publishes EXACTLY TWO candidate ids on a `mayChoice` statement point,
-              // read in order as SUBJECT then ANSWER; a decision whose subject cannot be minted
-              // publishes no point at all, so this positional read is total over what arrives.
-              const [subjectId, answerId] = point.candidateIds;
-              if (subjectId === undefined || answerId === undefined) return null;
-              const answer = mayCandidate(candidates, answerId);
-              // A whitelist, deliberately: an answer this modal has no wording for renders
-              // nothing rather than a raw lookup key.
-              if (answer !== "take" && answer !== "decline") return null;
-              return (
-                <p key={point.group} className="text-sm text-slate-200">
-                  {t(`comboShortcut.respondDecision.${answer}`, {
-                    subject: candidateLabel(t, candidates, subjectId),
-                  })}
-                </p>
-              );
-            })}
+            {mayRows}
           </div>
         )}
       </div>

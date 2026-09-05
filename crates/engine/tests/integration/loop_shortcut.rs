@@ -1574,7 +1574,7 @@ fn setup_2p_vito_optional(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     (runner, kickoff)
 }
 
-/// 3p DRAIN_CLERIC/BLOOD_SIPPER loop where BOTH opponents drain equally (CR 704.5a "each
+/// 3p DRAIN_CLERIC/BLOOD_SIPPER loop where BOTH opponents drain equally (CR 119.3 "each
 /// opponent loses 1"). Configurable opponent life for the F2 ≥2-faller hardening tests: the
 /// per-cycle delta is EQUAL for both (so `live_mandatory_loop_winner`'s ≥2-faller floor
 /// passes), while the ABSOLUTE lives differ iff `p1_life != p2_life` (so the offer's own
@@ -5031,8 +5031,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 133,
-        "`WaitingFor` has 133 variants at this tip, read off the `syn` parse. This number is \
+        total, 135,
+        "`WaitingFor` has 135 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5057,6 +5057,13 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // no merge conflict and could not have, so CI was the only thing between it and shipping.
     // 130 ⇒ 132 is ADJUDICATED: ResolveAllConsent and ResolveAllReady are control-protocol states
     // with no DecisionTemplate payload, so neither expands the carrier set nor the redaction duty.
+    // 133 ⇒ 135 is ADJUDICATED: Ripple's two-decision model (CR 702.60a / 608.2d) added
+    // `RippleRevealChoice { player, source_id, count }` (the optional "you may reveal") and
+    // `RippleBottomOrder { player, source_id, cards, final_cast }` (the "in any order" bottom
+    // placement). Measured, not inferred: neither body holds a `DecisionTemplate` — both are
+    // resolution-choice prompts handled in `engine_resolution_choices`, not shortcut-style
+    // templates — so the carrier vec and the `filter_state_for_viewer` redaction loop below are
+    // unchanged.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(
@@ -9740,7 +9747,7 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
         stated.sort_unstable();
         assert_eq!(
             stated, expected,
-            "CR 704.5a: with no announced slot to charge, every life seat keeps the seat \
+            "CR 119.3: with no announced slot to charge, every life seat keeps the seat \
              `payload_seat` gave it at the raw product of its own count {}",
             element.count
         );
@@ -9777,7 +9784,7 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
     for (seat, _, loss) in losses.iter().filter(|(id, _, _)| *id != proposer) {
         assert!(
             published.contains(&(Some(seat.0), (-loss * suggested) as i32)),
-            "CR 704.5a: victim seat {seat:?} loses {loss} per cycle, so its previewed life \
+            "CR 119.3: victim seat {seat:?} loses {loss} per cycle, so its previewed life \
              entry must be the NEGATIVE finished magnitude on that seat's own key — a \
              proposer-keyed subject map publishes it on the wrong HUD; got {published:?}"
         );

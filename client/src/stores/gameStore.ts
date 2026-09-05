@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import type {
+  AbilityBlockEntry,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -29,7 +30,7 @@ import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersiste
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
-export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "endContinuousEffectOffers" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic" | "viewerInteraction"> {
+export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "endContinuousEffectOffers" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "activationBlockReasons" | "stuckDiagnostic" | "viewerInteraction"> {
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
@@ -37,6 +38,7 @@ export function legalResultState(result: LegalActionsResult): Pick<GameStoreStat
     manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     spellCosts: result.spellCosts ?? {},
     legalActionsByObject: result.legalActionsByObject ?? {},
+    activationBlockReasons: result.activationBlockReasons ?? {},
     stuckDiagnostic: result.stuckDiagnostic ?? null,
     viewerInteraction: result.viewerInteraction ?? null,
   };
@@ -225,6 +227,13 @@ interface GameStoreState {
    */
   legalActionsByObject: Record<string, ObjectAction[]>;
   /**
+   * CR 118.3: acting-player-scoped read-out of activated abilities withheld
+   * solely because their cost is unpayable right now, keyed by object_id
+   * string. Display only — never dispatchable. Default `{}`, matching
+   * `legalActionsByObject`.
+   */
+  activationBlockReasons: Record<string, AbilityBlockEntry[]>;
+  /**
    * Engine-owned non-fatal progress-wedge diagnostic (an engine anomaly, not a
    * rules outcome) — present only when the current decision is wedged (no legal
    * action for any authorized submitter). `null` in normal play. Display-only
@@ -303,6 +312,7 @@ type CommitExtraState = Partial<Omit<GameStoreState,
   | "manaPaymentShortcutActions"
   | "spellCosts"
   | "legalActionsByObject"
+  | "activationBlockReasons"
   | "stuckDiagnostic"
   | "lastCommittedSeq"
   | "engineCommitEpoch"
@@ -465,6 +475,7 @@ const initialState: GameStoreState = {
   manaPaymentShortcutActions: [],
   spellCosts: {},
   legalActionsByObject: {},
+  activationBlockReasons: {},
   stuckDiagnostic: null,
   viewerInteraction: null,
   stateHistory: [],

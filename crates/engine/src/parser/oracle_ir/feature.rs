@@ -108,6 +108,11 @@ pub(crate) enum OracleSemanticFeature {
     Apnap,
     /// CR 700.2: a modal choice whose maximum number of modes is dynamic.
     ModalDynamicMaxDropped,
+    /// CR 608.2f: a damage clause whose subject conjoins a player scope and an
+    /// object scope is ONE action taken on multiple players and/or objects,
+    /// processed simultaneously — so a parse carrying only one of the two
+    /// audiences has silently discarded the other.
+    DamageSubjectConjunction,
 }
 
 impl OracleSemanticFeature {
@@ -140,6 +145,7 @@ impl OracleSemanticFeature {
             Self::ConditionAsLongAs => "Condition_AsLongAs",
             Self::Apnap => "APNAP",
             Self::ModalDynamicMaxDropped => "Modal_DynamicMaxDropped",
+            Self::DamageSubjectConjunction => "DamageSubjectConjunction",
         }
     }
 }
@@ -610,6 +616,7 @@ mod tests {
             (F::ConditionAsLongAs, "Condition_AsLongAs"),
             (F::Apnap, "APNAP"),
             (F::ModalDynamicMaxDropped, "Modal_DynamicMaxDropped"),
+            (F::DamageSubjectConjunction, "DamageSubjectConjunction"),
         ];
         for (feature, label) in expected {
             assert_eq!(feature.detector_label(), label);

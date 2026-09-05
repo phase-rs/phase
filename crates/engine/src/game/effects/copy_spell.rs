@@ -3714,6 +3714,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
 
         let mut obj = GameObject::new(

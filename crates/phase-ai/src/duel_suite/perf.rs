@@ -194,6 +194,9 @@ impl PerfCounters {
             legend_rule_mode_gate_scans,
             sba_battlefield_snapshot_builds,
             sba_empty_battlefield_short_circuits,
+            activation_verdict_passes,
+            activation_block_display_abilities_examined,
+            activation_verdict_flush_clones,
         } = *snapshot;
 
         let mut map = BTreeMap::new();
@@ -337,6 +340,18 @@ impl PerfCounters {
         map.insert(
             "sba_empty_battlefield_short_circuits".to_string(),
             sba_empty_battlefield_short_circuits,
+        );
+        map.insert(
+            "activation_verdict_passes".to_string(),
+            activation_verdict_passes,
+        );
+        map.insert(
+            "activation_block_display_abilities_examined".to_string(),
+            activation_block_display_abilities_examined,
+        );
+        map.insert(
+            "activation_verdict_flush_clones".to_string(),
+            activation_verdict_flush_clones,
         );
         Self(map)
     }
@@ -1206,6 +1221,9 @@ mod tests {
             legend_rule_mode_gate_scans: 26,
             sba_battlefield_snapshot_builds: 27,
             sba_empty_battlefield_short_circuits: 28,
+            activation_verdict_passes: 43,
+            activation_block_display_abilities_examined: 44,
+            activation_verdict_flush_clones: 45,
         };
         let counters = PerfCounters::from_snapshot(&snapshot);
 

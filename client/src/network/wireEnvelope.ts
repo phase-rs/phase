@@ -5,7 +5,6 @@
 
 // Keep this aligned with crates/phase-server/src/wire.rs.
 export const WIRE_COMPRESSION_THRESHOLD = 256;
-export const WIRE_MAX_DECODED_BYTES = 1024 * 1024;
 export type WireFormat = "GzipEnvelopeV1";
 
 const FORMAT_RAW = 0x00;
@@ -38,36 +37,17 @@ export async function decodeJsonEnvelope(bytes: Uint8Array): Promise<string> {
 
   const format = bytes[0];
   const payload = bytes.subarray(1);
+  // No decoded-size ceiling: a full viewer game state (P2P `game_setup` /
+  // `state_update`, server -> client state pushes) is multiple MB of JSON and
+  // grows with seats and board size. A 1 MB cap here silently dropped every
+  // such frame and hung guests on "Waiting for game…".
   if (format === FORMAT_RAW) {
-    if (payload.length > WIRE_MAX_DECODED_BYTES) {
-      throw new Error("wire message exceeds decoded size limit");
-    }
     return new TextDecoder("utf-8", { fatal: true }).decode(payload);
   }
   if (format === FORMAT_GZIP) {
     const stream = new Blob([payload]).stream().pipeThrough(new DecompressionStream("gzip"));
-    const reader = stream.getReader();
-    const decoder = new TextDecoder("utf-8", { fatal: true });
-    let decodedBytes = 0;
-    let decoded = "";
-
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        decodedBytes += value.byteLength;
-        if (decodedBytes > WIRE_MAX_DECODED_BYTES) {
-          throw new Error("wire message exceeds decoded size limit");
-        }
-        decoded += decoder.decode(value, { stream: true });
-      }
-      return decoded + decoder.decode();
-    } catch (error) {
-      await reader.cancel(error).catch(() => undefined);
-      throw error;
-    } finally {
-      reader.releaseLock();
-    }
+    const decoded = new Uint8Array(await new Response(stream).arrayBuffer());
+    return new TextDecoder("utf-8", { fatal: true }).decode(decoded);
   }
   throw new Error(`unknown wire format version: 0x${format.toString(16)}`);
 }

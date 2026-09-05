@@ -1348,6 +1348,20 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
         state.momir_pool = pool;
         state.momir_pool_faces = std::sync::Arc::new(faces);
     }
+
+    // CR 400.11 + CR 400.11b: stock the sealed-booster shelf for a game that can
+    // open a pack. Gated on the card scan AND emptiness for the same two reasons
+    // the Momir pool is: the scan walks the whole game's ability trees and the
+    // stocking walks the whole printed corpus, and `rehydrate_card_db_metadata`
+    // also runs on the mid-game debug-spawn path. `booster_shelf` is
+    // `#[serde(skip)]`, so this is also the rebuild after any deserialize; it is
+    // seeded from the persisted `rng_seed` rather than drawn from `state.rng`,
+    // so a restored or peer-rebuilt state shelves the same products instead of
+    // advancing the game stream a restore-count-dependent number of steps.
+    if state.booster_shelf.is_empty() && crate::game::boosters::game_opens_booster_packs(state, db)
+    {
+        state.booster_shelf = Arc::new(crate::game::boosters::build_shelf(db, state.rng_seed));
+    }
 }
 
 /// CR 701.42b + CR 712.4: derive the physical meld-pair authority from card

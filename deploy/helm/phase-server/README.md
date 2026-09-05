@@ -144,6 +144,35 @@ the host in this chart.
 Cloudflare closes idle WebSockets after ~100 s; the client's 5 s application
 ping keeps game connections alive.
 
+## Announcing to a public directory
+
+`server.announceTo` (`PHASE_ANNOUNCE_TO`) makes the server POST a heartbeat to a
+server directory every 60 s so players can find it without a link — for the
+public one, `https://lobby.phase-rs.dev/servers/announce`.
+
+Three things have to hold, and none of them fails the pod:
+
+- **`PUBLIC_URL` must be `https://`.** The directory lists `wss://` addresses
+  only, and it derives them from the advertised URL. An `http://` or unparseable
+  value logs one `error!` at startup — `--announce-to is set but this server
+  cannot announce itself` — and the heartbeat never starts.
+- **`/info` must be reachable from the public internet.** The directory verifies
+  a claim by fetching the announced host's `/info` and comparing mode, server
+  version and both protocol versions against it. The chart routes `/info` on
+  every host it publishes; a proxy or WAF in front of the cluster that hides it
+  makes the announcement unverifiable.
+- **Outbound 443 must be open.** Setting `server.announceTo` opens the same
+  NetworkPolicy egress rule as `networkPolicy.allowBootstrapEgress`.
+
+A directory that is down or refusing logs a `WARN` per tick and nothing else:
+announcing never affects games. `directory refused this announcement` carries
+the status, so a rejection is distinguishable from an unreachable directory.
+
+Under `scaleOut.enabled` each ordinal announces its own
+`phase-<n>.<domain>` — that is the host a join code resolves to. The entry host
+is deliberately not announced: it load-balances across pods, so a player dialling
+it would land on an arbitrary one.
+
 ## Scaling out
 
 `scaleOut.enabled` replaces the single Deployment with a StatefulSet: one pod,
@@ -257,6 +286,35 @@ looks like a DNS problem and is not. Hand the secret over once:
 kubectl -n phase annotate secret <release>-tls \
   cert-manager.io/certificate-name=<release> --overwrite
 ```
+
+### Upgrading a scale-out release from chart 0.3.0 or earlier
+
+Charts up to 0.3.0 stamped the full label set onto `volumeClaimTemplates`, and
+two of those labels move with the chart: `helm.sh/chart` and
+`app.kubernetes.io/version`. Kubernetes forbids **any** update to
+`volumeClaimTemplates` on an existing StatefulSet, so on such a release every
+chart or appVersion bump fails the upgrade outright:
+
+```
+cannot patch "phase-server" with kind StatefulSet: ... spec: Forbidden: updates
+to statefulset spec for fields other than 'replicas', 'ordinals', 'template',
+'updateStrategy', 'revisionHistoryLimit',
+'persistentVolumeClaimRetentionPolicy' and 'minReadySeconds' are forbidden
+```
+
+Chart 0.3.1 removes those labels — but doing so is itself a
+`volumeClaimTemplates` edit, so the first upgrade onto it needs the StatefulSet
+recreated once:
+
+```bash
+kubectl delete sts phase-server -n phase --cascade=orphan
+helm upgrade phase-server deploy/helm/phase-server -n phase -f <your values>
+```
+
+`--cascade=orphan` leaves the pods and the `data-<release>-N` claims in place and
+the new StatefulSet adopts both by name, so no volume is deleted and no game data
+is lost. The pods still roll for whatever else the upgrade changes, so do this
+between games as usual. Releases installed at 0.3.1 or later never need it.
 
 ## Autoscaling
 
