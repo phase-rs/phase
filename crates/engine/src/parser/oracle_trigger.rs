@@ -10789,6 +10789,25 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
         return Some(TargetFilter::TriggeringSource);
     }
 
+    // CR 608.2c + CR 510.1c / CR 509.1h: a "deals [combat] damage to a creature"
+    // or "blocks a creature" trigger introduces that creature — the damage
+    // recipient / blocked creature, carried by the trigger as its
+    // `ParentTarget` (see the `valid_target` the condition parse assigns) — as
+    // the effect body's untargeted object antecedent. A bare "it" that follows
+    // the "that creature" anaphor in the same body co-refers with it: Orochi
+    // Ranger, the Kashi-Tribe / Matsu-Tribe cycle, Frostwalk Bastion — "tap
+    // that creature and it doesn't untap during its controller's next untap
+    // step." Without this the bare "it" fell through `resolve_it_pronoun` to
+    // the self-watching trigger source, so the CantUntap static locked the
+    // *source* — a silent no-op once it has left combat or died.
+    let introduces_damaged_or_blocked_creature =
+        scan_contains(after_keyword, "deals combat damage to a creature")
+            || scan_contains(after_keyword, "deals damage to a creature")
+            || scan_contains(after_keyword, "blocks a creature");
+    if introduces_damaged_or_blocked_creature {
+        return Some(TargetFilter::ParentTarget);
+    }
+
     None
 }
 

@@ -15705,6 +15705,54 @@ fn trigger_blocks_a_creature() {
 }
 
 #[test]
+fn trigger_combat_damage_tap_and_it_doesnt_untap_binds_parent_target() {
+    // CR 608.2c + CR 502.3: "Whenever this creature deals combat damage to a
+    // creature, tap that creature and it doesn't untap during its controller's
+    // next untap step." The bare "it" co-refers with "that creature" (the
+    // damaged creature = the trigger's `ParentTarget`), NOT the self-watching
+    // trigger source. Regression guard for Orochi Ranger / the Kashi-Tribe /
+    // Matsu-Tribe cycle / Frostwalk Bastion: before the fix the `CantUntap`
+    // static's `affected` was `SelfRef`, so the lock silently did nothing once
+    // the source left combat or died.
+    for (name, text) in [
+        (
+            "Orochi Ranger",
+            "Whenever this creature deals combat damage to a creature, tap that creature and it doesn't untap during its controller's next untap step.",
+        ),
+        (
+            "Queen of Ice",
+            "Whenever this creature deals combat damage to a creature, tap that creature. It doesn't untap during its controller's next untap step.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::DamageDone, "{name}");
+
+        let mut cursor = def.execute.as_deref();
+        let mut affected = None;
+        while let Some(ability) = cursor {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = ability.effect.as_ref()
+            {
+                if let Some(static_def) = static_abilities
+                    .iter()
+                    .find(|s| s.mode == StaticMode::CantUntap)
+                {
+                    affected = static_def.affected.clone();
+                    break;
+                }
+            }
+            cursor = ability.sub_ability.as_deref();
+        }
+        assert_eq!(
+            affected,
+            Some(TargetFilter::ParentTarget),
+            "{name}: CantUntap static must lock the damaged creature (ParentTarget), got {affected:?}",
+        );
+    }
+}
+
+#[test]
 fn trigger_blocks_or_becomes_blocked() {
     // CR 509.1h + CR 509.3d: "blocks or becomes blocked" is a compound trigger —
     // the remainder must no longer be silently dropped into a plain `Blocks`.

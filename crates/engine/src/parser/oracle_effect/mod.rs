@@ -35584,7 +35584,18 @@ pub(crate) fn parse_effect_chain_ir(
             .find_map(|clause| nearest_dig_rest_zone_in_clause(&clause.parsed));
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
-            object_pronoun_ref: prior_typed_referent.then_some(TargetFilter::ParentTarget),
+            // CR 608.2c: a bare "it" in this chunk binds to `ParentTarget` when
+            // an earlier in-body clause chose a typed target (`prior_typed_referent`),
+            // OR when the enclosing trigger's CONDITION already established a
+            // `ParentTarget` object antecedent (a "deals combat damage to a
+            // creature" / "blocks a creature" trigger — Orochi Ranger). The
+            // trigger-level `object_pronoun_ref` is a whole-body property, so it
+            // must reach every chunk, not just the first; only the `ParentTarget`
+            // form is propagated here so an unrelated `TriggeringSource`
+            // spell-cast antecedent keeps its established per-chunk scoping.
+            object_pronoun_ref: (prior_typed_referent
+                || matches!(ctx.object_pronoun_ref, Some(TargetFilter::ParentTarget)))
+            .then_some(TargetFilter::ParentTarget),
             card_name: ctx.card_name.clone(),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
