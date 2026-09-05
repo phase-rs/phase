@@ -2642,6 +2642,31 @@ mod tests {
         assert!(mgr.sessions.is_empty());
     }
 
+    /// Phase 1d production seam: `create_game_n_players` is the only inbound
+    /// gate `format_config.validate_for_player_count` runs behind on the
+    /// native session-creation path — a deleted `?` here would let a
+    /// `player_count` outside the format's own registry range through to
+    /// `GameState::new`, which seats exactly that many players regardless of
+    /// format legality. Standard's registry range is 2..=2, so 3 seats must
+    /// be rejected.
+    #[test]
+    fn create_game_rejects_player_count_outside_format_registry_range() {
+        let mut mgr = SessionManager::new();
+
+        let err = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(FormatConfig::standard()),
+            )
+            .expect_err("Standard's registry range (2..=2) must reject a 3-seat session");
+        assert!(err.contains("player_count"));
+        assert!(mgr.sessions.is_empty());
+    }
+
     /// CR 103.4: each player begins with a starting life total of 20, and some
     /// variant games use a different one — so a host-configured `starting_life`
     /// is the authority, not the format's default.
@@ -3889,15 +3914,14 @@ mod tests {
     fn run_ai_is_noop_while_takeback_is_pending() {
         let mut mgr = SessionManager::new();
         // Phase 1d's `validate_for_player_count` now bounds `player_count`
-        // against the format's own registry range — Standard's default
-        // max_players (2) no longer admits a 3-seat session, so this
-        // format-agnostic seat-mechanics test opens with an explicitly wider
-        // seat count rather than relying on Standard's unbounded-in-practice
-        // default.
-        let format_config = FormatConfig {
-            max_players: 3,
-            ..FormatConfig::standard()
-        };
+        // against the format's own registry range — Standard's registry range
+        // (2..=2) no longer admits a 3-seat session, and a struct-literal
+        // override of `max_players` bypasses that same gate at
+        // `FormatConfig::deserialize` (it would be rejected on any real wire
+        // path), so it is not a legitimate stand-in. This format-agnostic
+        // seat-mechanics test instead opens with Free-for-All, whose registry
+        // range (2..=6) admits 3 seats with no field override.
+        let format_config = FormatConfig::free_for_all();
         let (code, _token0) = mgr
             .create_game_n_players(
                 make_deck(),
@@ -5276,12 +5300,12 @@ mod tests {
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
         // See the comment in `run_ai_is_noop_while_takeback_is_pending`:
         // `validate_for_player_count` now bounds `player_count` against the
-        // format's registry range, so this seat-mechanics test needs an
-        // explicit wider seat count rather than Standard's default of 2.
-        let format_config = FormatConfig {
-            max_players: 3,
-            ..FormatConfig::standard()
-        };
+        // format's registry range, and a struct-literal `max_players`
+        // override bypasses that same gate at `FormatConfig::deserialize`
+        // (unreachable on any real wire path), so this seat-mechanics test
+        // uses Free-for-All, whose registry range (2..=6) admits 3 seats with
+        // no field override.
+        let format_config = FormatConfig::free_for_all();
         let (code, _host) = mgr
             .create_game_n_players(
                 make_deck(),
@@ -6581,14 +6605,13 @@ mod tests {
 
         let mut mgr = SessionManager::new();
         // `validate_for_player_count` now bounds `player_count` against the
-        // format's registry range — Standard's default max_players (2) no
-        // longer admits this test's 3-seat combat scenario, so the seat
-        // ceiling is widened explicitly rather than relying on the old
-        // unenforced default.
-        let format_config = FormatConfig {
-            max_players: 3,
-            ..FormatConfig::standard()
-        };
+        // format's registry range — Standard's registry range (2..=2) no
+        // longer admits this test's 3-seat combat scenario, and a
+        // struct-literal `max_players` override bypasses that same gate at
+        // `FormatConfig::deserialize` (unreachable on any real wire path), so
+        // this test uses Free-for-All, whose registry range (2..=6) admits 3
+        // seats with no field override.
+        let format_config = FormatConfig::free_for_all();
         let (code, token0) = mgr
             .create_game_n_players(
                 make_deck(),

@@ -569,6 +569,24 @@ impl Serialize for FormatConfig {
     }
 }
 
+/// Ceiling on a declared `starting_life` that the built-in-format gate's
+/// `HostChoiceWithin` row admits (see that row, below). This is an ENGINE
+/// INVARIANT, not a Comprehensive Rules limit — no CR caps how high a
+/// variant's starting life total may be, so this constant is never cited
+/// with a `CR` annotation. It exists because life-total arithmetic is raw,
+/// non-saturating `i32` (e.g. `player.life += (frames - i) as i32;` in
+/// `game::engine`'s SBA/effect application), so a `starting_life` admitted
+/// at or near `i32::MAX` would overflow the very first time any effect adds
+/// to it. The value only bounds the STARTING dial — it leaves the rest of
+/// the `i32` range free for in-game life gain/loss to grow into, which is
+/// the property that actually matters; it does not re-cap `Player::life`
+/// itself. 1,000,000 comfortably clears every real starting total in the
+/// registry (Standard 20, Commander/Archenemy 40, Two-Headed Giant 30 shared
+/// / 15 per seat) with vast headroom left for house-rule variant play (e.g.
+/// a "gigantic life total" casual variant), while leaving over two billion
+/// of `i32`'s range for subsequent gameplay-driven life changes.
+pub const MAX_STARTING_LIFE: i32 = 1_000_000;
+
 /// CR 100.2a / CR 100.4a / CR 903.5a / CR 903.5b / CR 904.2a: a BUILT-IN
 /// format's rules are fixed by the Comprehensive Rules and the engine
 /// registry except where the CR itself grants a host a choice — CR 103.4's
@@ -598,8 +616,9 @@ impl Serialize for FormatConfig {
 ///   names its set and the set's source. Applies to: `max_players` (registry
 ///   range `min_players..=max_players`), `deck_size`'s magnitude (the
 ///   registry's closed option list), `commander_damage_threshold`'s magnitude
-///   (`>= 1`, playability), `starting_life` (resolved per-seat total `>= 1`,
-///   playability).
+///   (`>= 1`, playability), `starting_life` (resolved per-seat total `>= 1`
+///   for playability; raw declared value `<= MAX_STARTING_LIFE` as an engine
+///   overflow-safety invariant, not a rules bound).
 ///
 /// `validate_for_player_count` is the runtime pair of the `max_players` row:
 /// that row bounds the format invariant a payload may declare, the other
@@ -653,6 +672,21 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // NOTE: `starting_life_for_seat` has no other production caller — this
     // row is its first. A future edit to it changes this gate; keep the two
     // in step (see the pinning test on `starting_life_for_seat` itself).
+    //
+    // The upper bound is a sibling engineering invariant, not a rules row:
+    // see `MAX_STARTING_LIFE`'s own doc comment for why it exists and why it
+    // carries no CR citation. It is checked against the raw declared field,
+    // not `starting_life_for_seat`, because the floor's playability concern
+    // (a seat that cannot survive the first SBA check) is a per-seat
+    // question but the overflow concern is about the field's own magnitude
+    // before it is ever divided.
+    //
+    // Scope: this row is part of `built_in_axes_no_looser_than_rules`, which
+    // only runs for built-in formats (the `None` arm of the `custom_rules`
+    // match in `FormatConfig::deserialize`). A Custom format's starting life
+    // is instead re-derived from `custom_rules.structural.starting_life` and
+    // checked by blanket equality in the `Some(rules)` arm, which has no
+    // magnitude bound of its own — that arm is out of scope for this change.
     if config.starting_life_for_seat() < 1 {
         return Err(format!(
             "FormatConfig.starting_life is {}, which resolves to {} per seat for {} — every seat \
@@ -661,6 +695,14 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
             config.starting_life,
             config.starting_life_for_seat(),
             config.format,
+        ));
+    }
+    if config.starting_life > MAX_STARTING_LIFE {
+        return Err(format!(
+            "FormatConfig.starting_life is {}, but the engine caps a declared starting life at \
+             {MAX_STARTING_LIFE} to keep in-game life-total arithmetic (raw i32) from overflowing \
+             — this is an engine invariant, not a Comprehensive Rules limit",
+            config.starting_life,
         ));
     }
 
@@ -1825,6 +1867,23 @@ impl FormatConfig {
     /// new field on any `Serialize`/`Deserialize` type), but this IS a
     /// behavioral tightening — a `player_count` outside the format's range
     /// that an older server would have accepted is now rejected.
+    ///
+    /// At most call sites (both ingress guards, the WASM session boundary,
+    /// session creation) that rejection is a retryable wire rejection: the
+    /// client resubmits a corrected request and no state is lost. It is NOT
+    /// retryable at `server_core::session::GameSession::from_persisted` — the
+    /// one call site checked against a PERSISTED `player_count` rather than
+    /// one just supplied on an inbound request. There, this same rejection
+    /// aborts the restore permanently: a session already saved with a
+    /// `player_count` outside its format's registry range can never be
+    /// restored again. This is reachable, not merely hypothetical — a
+    /// Commander session (registry range 2..=6) persisted while
+    /// `player_count` was 8 (`lobby-broker::inbound_guard`'s ingress clamp
+    /// admits up to `MAX_PLAYER_COUNT` = 8, independent of the format's own
+    /// range, at the time the session was created) becomes permanently
+    /// unrestorable the moment this bound is enforced. Whether to repair or
+    /// clamp such a persisted blob at the restore boundary is tracked
+    /// separately from this comment; this paragraph is disclosure only.
     pub fn validate_for_player_count(&self, player_count: u8) -> Result<(), String> {
         // CR 100.1a / CR 100.1b / CR 800.1: a two-player game begins with two
         // players and a multiplayer game with more than two; the exact seat
@@ -2470,13 +2529,19 @@ mod tests {
         assert!(!Unlimited.permits_no_more_than(Forbidden));
     }
 
-    /// Registry-completeness guard for `DeckSizeAuthority`: exactly
-    /// Free-for-All delegates its deck-size magnitude to the table, every
+    /// Registry-completeness guard for `DeckSizeAuthority`: every
     /// `HostChoiceAmong` option list contains that format's OWN registry
     /// magnitude (so `for_format`'s own output always passes its own gate),
     /// `RulesFixed.options()` is empty, and the set is neither empty nor
     /// all-`HostChoiceAmong` — a real building block, not a one-format
     /// special case masquerading as one.
+    ///
+    /// Deliberately does NOT pin which format(s) or how many delegate their
+    /// deck-size magnitude to the table (formerly `GameFormat::FreeForAll`
+    /// and exactly one) — that was a frozen-count/frozen-identity assertion
+    /// on a set this phase's own registry is designed to grow (e.g. a future
+    /// `HostChoiceAmong` preset), not a property the building block actually
+    /// requires. See the R4 review note on this test.
     #[test]
     fn deck_size_authority_registry_completeness() {
         let mut host_choice_count = 0;
@@ -2486,12 +2551,6 @@ mod tests {
             match authority {
                 DeckSizeAuthority::HostChoiceAmong(options) => {
                     host_choice_count += 1;
-                    assert_eq!(
-                        meta.format,
-                        GameFormat::FreeForAll,
-                        "only Free-for-All delegates its deck-size magnitude to the table, got {:?}",
-                        meta.format
-                    );
                     let registry_magnitude = meta.default_config.deck_size.min_cards();
                     assert!(
                         options.contains(&registry_magnitude),
@@ -2506,10 +2565,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(
-            host_choice_count, 1,
-            "exactly Free-for-All must delegate its deck-size magnitude"
-        );
         assert!(rules_fixed_count > 0, "the set must not be empty");
         assert!(
             host_choice_count < GameFormat::registry().len(),
@@ -3046,12 +3101,17 @@ mod tests {
     }
 
     /// The residual-hazard case named in the plan's S7 comment: Two-Headed
-    /// Giant's floor (CR 810.1's "two teams of two players each") is 4, not
-    /// 2, so a 2-seat or 5-seat request must be rejected even though a global
-    /// clamp would previously have floored a sub-2 value at 2. This pins the
-    /// rejection as deliberate and correct, not a regression.
+    /// Giant's registry range (CR 810.1's "two teams of two players each") is
+    /// the single point 4..=4, so both a below-floor 2-seat request and an
+    /// above-ceiling 5-seat request must be rejected. Neither rejection
+    /// traces to the ingress `clamp(2, MAX_PLAYER_COUNT)` guards: those only
+    /// ever RAISE a sub-2 value, which cannot explain the 5-seat rejection,
+    /// and produces exactly 2 for a sub-2 input — never reaching this
+    /// format's own floor check on a value the clamp already handled. Both
+    /// rejections are deliberate consequences of the format's own registry
+    /// range, not an ingress-clamp artifact.
     #[test]
-    fn validate_for_player_count_two_headed_giant_residual_hazard_is_a_deliberate_rejection() {
+    fn validate_for_player_count_two_headed_giant_rejects_outside_its_registry_range() {
         let config = FormatConfig::two_headed_giant();
         assert!(config.validate_for_player_count(4).is_ok());
         assert!(config.validate_for_player_count(2).is_err());
@@ -3077,6 +3137,38 @@ mod tests {
             "the deserialize gate admitting the config must not imply every runtime \
              player_count is admitted too"
         );
+    }
+
+    /// Pins both ends of the `starting_life` admission row: the existing
+    /// floor (a per-seat total that cannot survive the first SBA check) and
+    /// the new `MAX_STARTING_LIFE` ceiling (an engine overflow-safety
+    /// invariant, not a rules bound). Exercised through the same
+    /// `serde_json` round trip as `deserialize_admission_and_validate_for_
+    /// player_count_are_independent_layers`, since `built_in_axes_no_looser_
+    /// than_rules` runs inside `FormatConfig::deserialize`.
+    #[test]
+    fn starting_life_admission_gate_pins_both_bounds() {
+        let mut floor_config = FormatConfig::standard();
+        floor_config.starting_life = 0;
+        let floor_json = serde_json::to_value(&floor_config).unwrap();
+        let floor_err = serde_json::from_value::<FormatConfig>(floor_json)
+            .expect_err("0 starting life loses every seat at the first SBA check");
+        assert!(floor_err.to_string().contains("must begin above 0"));
+
+        let mut at_ceiling = FormatConfig::standard();
+        at_ceiling.starting_life = MAX_STARTING_LIFE;
+        let at_ceiling_json = serde_json::to_value(&at_ceiling).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(at_ceiling_json).is_ok(),
+            "MAX_STARTING_LIFE itself must remain admissible"
+        );
+
+        let mut over_ceiling = FormatConfig::standard();
+        over_ceiling.starting_life = MAX_STARTING_LIFE + 1;
+        let over_ceiling_json = serde_json::to_value(&over_ceiling).unwrap();
+        let over_ceiling_err = serde_json::from_value::<FormatConfig>(over_ceiling_json)
+            .expect_err("MAX_STARTING_LIFE + 1 must be rejected");
+        assert!(over_ceiling_err.to_string().contains("engine caps"));
     }
 
     /// Pin `starting_life_for_seat`'s `FixedTeams` division behavior: the

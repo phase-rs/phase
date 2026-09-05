@@ -2387,6 +2387,18 @@ fn decode_and_rehydrate_restored_game_state(
     let state = restored
         .state
         .finalize_after_rehydration(|state| {
+            // Mirrors `server_core::session::GameSession::from_persisted`'s
+            // `validate_for_player_count` call: `prepare_for_restore` already
+            // rejects an unsupported `range_of_influence` for every restore
+            // caller, but nothing upstream of this closure bounds the seat
+            // count against the format's own registry range. Without this,
+            // a persisted blob whose `players.len()` no longer fits its
+            // format (e.g. a save edited out-of-band, or a format whose
+            // registry range tightened since the save was made) would
+            // rehydrate and become live instead of being rejected here.
+            state
+                .format_config
+                .validate_for_player_count(state.players.len() as u8)?;
             rehydrate_restored_state_from_card_db(state)?;
             // Combat declaration snapshots are display data derived from the rehydrated
             // live board. Rebuild them before this external state becomes interactive.
@@ -2611,6 +2623,28 @@ mod restored_card_db_requirements_tests {
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
+    }
+
+    /// Phase 1d production seam: mirrors `server_core::session::GameSession::
+    /// from_persisted`'s `validate_for_player_count` call, which the WASM
+    /// restore boundary lacked. `FormatConfig::commander_draft()` is
+    /// internally consistent on its own (min 3, max 8) so it passes
+    /// `FormatConfig::deserialize`'s own admission gate unchanged; the
+    /// rejection this test pins comes only from the actual persisted seat
+    /// count (2) falling outside that format's registry range.
+    #[test]
+    fn decoded_restore_rejects_a_persisted_seat_count_outside_the_format_registry_range() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut state = GameState::new_two_player(17);
+        state.format_config = FormatConfig::commander_draft();
+        let json = serde_json::to_string(&state).unwrap();
+
+        let error = decode_and_rehydrate_restored_game_state(&json, |_| {})
+            .expect_err("2 seats must be rejected against CommanderDraft's 3-8 registry range");
+        assert!(error.contains("player_count"));
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
     }
 }
 
