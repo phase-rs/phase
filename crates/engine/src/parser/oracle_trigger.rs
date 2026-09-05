@@ -1499,8 +1499,22 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
         actor: ctx.actor.clone(),
-        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text)
-            .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
+        // CR 608.2k: nearest antecedent wins. An intervening-`if` that pins the
+        // source OFF the battlefield ("... if ~ is in your graveyard, return it")
+        // re-establishes the source card as the antecedent, and it sits nearer to
+        // the effect body than the trigger condition does — so it outranks the
+        // condition-derived antecedent, not the other way round.
+        //
+        // The two were previously ordered condition-first. That was unobservable
+        // while `parse_effect_chain_ir` discarded this field wholesale (see the
+        // `object_pronoun_ref` note in `oracle_effect/mod.rs`): the value never
+        // reached a resolver, so which of the two won could not be seen. Restoring
+        // the propagation makes the ordering load-bearing, and Managorger Phoenix
+        // ("Whenever you cast a spell, if ~ is in your graveyard, ... return it")
+        // is the card that discriminates them — the spell-cast axis would
+        // otherwise bind "return it" to the cast spell instead of the Phoenix.
+        object_pronoun_ref: trigger_object_pronoun_ref_for_intervening_if(&if_condition)
+            .or_else(|| trigger_object_pronoun_ref_for_condition(condition_text, &trigger_subject)),
         plural_object_pronoun_ref: trigger_plural_object_pronoun_ref_for_intervening_if(
             &if_condition,
         ),
@@ -10762,7 +10776,38 @@ fn extract_trigger_subject_for_context(
     subject
 }
 
-fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<TargetFilter> {
+/// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.10: the PASSIVE-voice damage verb
+/// phrase — "is/are dealt [combat|noncombat|excess] damage".
+///
+/// Two independent axes, one `alt()` each, rather than the five printed strings
+/// they expand to: grammatical number ("is " / "are ") and the CR 120.2a/120.2b
+/// damage class, widened by the CR 120.10 excess qualifier. All five
+/// combinations that appear in the printed corpus are covered by composing the
+/// axes; none is enumerated as a whole-phrase `tag`.
+///
+/// Voice is the whole point of this combinator. In the ACTIVE voice ("a creature
+/// DEALS damage") the trigger's grammatical subject is the damage SOURCE; in the
+/// PASSIVE voice ("a creature IS DEALT damage") the subject is the RECIPIENT.
+/// CR 120.1 makes that distinction load-bearing: "an object that deals damage is
+/// the source of that damage", and the recipient is the object that *receives*
+/// it. The two roles are carried by different fields of the same
+/// `GameEvent::DamageDealt`, so a bare object anaphor in the effect body binds to
+/// a different object depending only on voice.
+fn parse_passive_dealt_damage(input: &str) -> OracleResult<'_, ()> {
+    // Axis 1 — grammatical number.
+    let (input, _) = alt((tag("is "), tag("are "))).parse(input)?;
+    let (input, _) = tag("dealt ").parse(input)?;
+    // Axis 2 — CR 120.2a/120.2b damage class, plus the CR 120.10 excess
+    // qualifier. Absent on the bare form, which is the corpus majority.
+    let (input, _) = opt(alt((tag("combat "), tag("noncombat "), tag("excess ")))).parse(input)?;
+    let (input, _) = tag("damage").parse(input)?;
+    Ok((input, ()))
+}
+
+fn trigger_object_pronoun_ref_for_condition(
+    condition_text: &str,
+    trigger_subject: &TargetFilter,
+) -> Option<TargetFilter> {
     let lower = condition_text.to_lowercase();
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
@@ -10787,6 +10832,43 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
     .is_ok();
     if is_spell_cast_trigger {
         return Some(TargetFilter::TriggeringSource);
+    }
+
+    // CR 608.2k + CR 120.1: a PASSIVE-voice damage trigger condition ("whenever
+    // <subject> is dealt damage") makes its grammatical subject the damage
+    // RECIPIENT, so the effect body's untargeted object anaphor ("destroy it",
+    // "put a +1/+1 counter on it") names the damaged permanent — CR 608.2k's
+    // "specific untargeted object … previously referred to by that ability's …
+    // trigger condition". `TargetFilter::EventTarget` reads
+    // `GameEvent::DamageDealt.target`; the subject-derived
+    // `TargetFilter::TriggeringSource` fallback in `resolve_it_pronoun` reads
+    // `.source_id`, which on a passive-voice trigger is the damage DEALER — a
+    // different object entirely (Termination Facilitator destroyed the source of
+    // the damage instead of the bountied creature, issue #8379).
+    //
+    // The subject phrase is arbitrarily long ("a creature or planeswalker an
+    // opponent controls with a bounty counter on it"), so the verb phrase is
+    // found by scanning the shared word-boundary primitive rather than by
+    // anchoring at a fixed offset.
+    //
+    // Gated on the subject NOT being self-referential, mirroring the exclusion
+    // set both pronoun resolvers already apply (`resolve_it_pronoun`,
+    // `resolve_pronoun_target`): on a self-scoped enrage trigger ("whenever this
+    // creature is dealt damage") the recipient IS the source, and `SelfRef` /
+    // `ParentTarget` remain the more precise antecedents — they resolve without
+    // consulting the trigger event at all.
+    let subject_is_self_referential = matches!(
+        trigger_subject,
+        TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+    );
+    if !subject_is_self_referential
+        && crate::parser::oracle_nom::primitives::scan_at_word_boundaries(
+            after_keyword,
+            parse_passive_dealt_damage,
+        )
+        .is_some()
+    {
+        return Some(TargetFilter::EventTarget);
     }
 
     None

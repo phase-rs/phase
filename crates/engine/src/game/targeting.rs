@@ -969,7 +969,7 @@ pub(crate) fn resolve_parent_slot_from_root(
         .nth(index)
 }
 
-fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
+pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
     matches!(
         target_filter,
         TargetFilter::TriggeringSpellController

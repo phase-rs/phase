@@ -1139,6 +1139,7 @@ mod teamwork_aggregate_legal_actions;
 mod teamwork_origin_composition;
 mod teferi_time_raveler_sorcery_speed_lock;
 mod tempt_with_discovery;
+mod termination_facilitator_bounty_damage_8379;
 mod terra_herald_optional_prompt;
 mod terra_magical_adept_milled_enchantment;
 mod terror_of_the_peaks_issue_2911;
