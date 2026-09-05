@@ -12,9 +12,11 @@ use super::*;
 
 use engine::game::sba;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::ChosenAttribute;
+use engine::game::stack;
+use engine::types::ability::{ChosenAttribute, Effect, ResolvedAbility};
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::game_state::{StackEntry, StackEntryKind};
 
 /// Convert an existing battlefield creature into a Siege with the given defense.
 fn make_into_siege(
@@ -165,6 +167,86 @@ fn zero_defense_battle_goes_to_graveyard_via_sba() {
         runner.state().objects[&battle].zone,
         Zone::Graveyard,
         "0-defense battle should be sent to graveyard by SBA"
+    );
+}
+
+/// Put a triggered ability whose source is `source` onto the stack, so the
+/// zero-defense SBA sees the battle as "the source of an ability that has
+/// triggered but not yet left the stack" (CR 704.5v).
+fn push_own_trigger(runner: &mut GameRunner, source: ObjectId, controller: PlayerId) {
+    let entry = {
+        let state = runner.state_mut();
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        StackEntry {
+            id,
+            source_id: source,
+            controller,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::unimplemented("battle trigger", "this battle's own trigger"),
+                    vec![],
+                    source,
+                    controller,
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        }
+    };
+    stack::push_to_stack(runner.state_mut(), entry, &mut Vec::new());
+}
+
+/// CR 704.5v + CR 310.7: a Siege at defense 0 is NOT put into its owner's
+/// graveyard while it is the source of an ability that has triggered but not
+/// yet left the stack — CR 310.12b's victory trigger has to find the Siege on
+/// the battlefield when it resolves.
+#[test]
+fn zero_defense_siege_survives_its_own_trigger_on_stack() {
+    let (mut runner, battle) = prime_siege(P0, P1, "Deferred Siege", 0);
+    push_own_trigger(&mut runner, battle, P0);
+
+    let mut events = Vec::new();
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+    assert_eq!(
+        runner.state().objects[&battle].zone,
+        Zone::Battlefield,
+        "CR 704.5v: a 0-defense Siege must survive while its own triggered ability is on the stack"
+    );
+}
+
+/// CR 704.5w + CR 310.8: a non-Siege battle at defense 0 is put into its owner's
+/// graveyard even while it is the source of an ability that has triggered but
+/// not yet left the stack. CR 704.5w states the rule with no deferral clause at
+/// all — the clause in CR 704.5v is Siege-only.
+#[test]
+fn zero_defense_non_siege_battle_dies_with_its_own_trigger_on_stack() {
+    // CR 310.9a: a battle with no battle type may only have its controller as
+    // its protector, so P0 is both here. The non-Siege battles that ship in the
+    // card data (Occupation of Kulrath / Occupation of Llanowar, "Battle —
+    // Control Point") reach CR 704.5w by the same door: not being a Siege.
+    let (mut runner, battle) = prime_siege(P0, P0, "Occupied Battle", 0);
+    {
+        let obj = runner.state_mut().objects.get_mut(&battle).unwrap();
+        obj.card_types.subtypes.clear();
+        obj.base_card_types.subtypes.clear();
+    }
+    push_own_trigger(&mut runner, battle, P0);
+
+    let mut events = Vec::new();
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+    assert_eq!(
+        runner.state().objects[&battle].zone,
+        Zone::Graveyard,
+        "CR 704.5w: a 0-defense non-Siege battle has no trigger-on-stack deferral"
     );
 }
 
