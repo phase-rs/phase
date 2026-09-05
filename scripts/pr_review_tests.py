@@ -354,6 +354,57 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "request_changes")
         self.assertEqual(recommendation["reason"], "hard_stop")
 
+    def test_approved_for_review_label_yields_to_self_review_and_admission_gates(
+        self,
+    ) -> None:
+        base = {
+            "pr": {
+                "number": 7030,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "labels": ["pr:approved-for-review"],
+                "self_authored": False,
+            },
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "policy": {"labels": {"approved_for_review": "pr:approved-for-review"}},
+            "ci": {"state": "green"},
+        }
+
+        # Positive control: without a competing gate this packet does reach review,
+        # so a non-review result below is the gate winning, not a malformed packet.
+        self.assertEqual(
+            pr_review.recommend_from_packet(base)["advisory_action"], "review"
+        )
+
+        recommendation = pr_review.recommend_from_packet(
+            {**base, "pr": {**base["pr"], "self_authored": True}}
+        )
+        self.assertEqual(recommendation["advisory_action"], "skip")
+        self.assertEqual(recommendation["reason"], "self_authored")
+
+        for key, profile, action, reason in (
+            ("artifacts", {"hold": True}, "hold", "insufficient_admission_data"),
+            (
+                "artifacts",
+                {"decline": True},
+                "decline",
+                "required_artifacts_current_head",
+            ),
+            (
+                "architecture_scope",
+                {"decline": True},
+                "decline",
+                "architecture_scope_not_authorized",
+            ),
+        ):
+            with self.subTest(gate=f"{key}:{sorted(profile)[0]}"):
+                recommendation = pr_review.recommend_from_packet(
+                    {**base, key: profile}
+                )
+
+                self.assertEqual(recommendation["advisory_action"], action)
+                self.assertEqual(recommendation["reason"], reason)
+
     def test_packet_exposes_review_labels_from_policy(self) -> None:
         policy = pr_review.Policy(
             {

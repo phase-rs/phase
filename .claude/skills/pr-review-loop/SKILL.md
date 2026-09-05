@@ -61,10 +61,11 @@ At sweep start, read `.agents/pr-review/campaign-hotspots.toml` if present (lead
 
    **Public-disposition completion gate:** local events and a zero `review` count are necessary but insufficient. For every PR inspected or reviewed this sweep, live-check GitHub before declaring it processed. A substantive blocker must have a current-head formal `CHANGES_REQUESTED` review, unless an existing current-head requested-changes review already states the same unresolved finding. A non-substantive hold must have a current-head maintainer comment explaining the exact external condition and next step. An approval/enqueue must be live-verified as `APPROVED` plus the expected queue/auto-merge state. Do not let a local `blocked`/`held` event substitute for a visible maintainer response.
 
-   **Explicit review-label override:** `pr:approved-for-review` is a maintainer instruction to review the PR. After generating the dashboard, live-list open PRs with that label:
+   **Explicit review-label override:** the label configured as `labels.approved_for_review` in `.agents/pr-review-policy.toml` is a maintainer instruction to review the PR. Read the name from policy rather than repeating it here: the sweep must list the same label `recommend_from_packet` recognises, or renaming it in policy silently stops labelled PRs from being forced into review. After generating the dashboard, live-list open PRs carrying it:
 
    ```bash
-   gh pr list --repo <owner>/<repo> --state open --label pr:approved-for-review \
+   LABEL=$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('.agents/pr-review-policy.toml').read_text())['labels']['approved_for_review'])")
+   gh pr list --repo <owner>/<repo> --state open --label "$LABEL" \
      --json number,author,headRefOid
    ```
 

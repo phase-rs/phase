@@ -2773,16 +2773,6 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif pr.get("self_authored"):
         action = "skip"
         reason = "self_authored"
-    elif label_forces_review:
-        # A maintainer label is a review-routing instruction. It must surface the
-        # current head even when a hard-stop path would normally route directly to
-        # handler-only changes requested. Safety handling remains downstream of the
-        # full review; the record marker prevents re-reviewing the same label/head.
-        action = "review"
-        reason = "approved_for_review_label"
-    elif classification.get("hard_stop_paths"):
-        action = "request_changes"
-        reason = "hard_stop"
     elif artifacts.get("hold") or architecture_scope.get("hold"):
         action = "hold"
         reason = "insufficient_admission_data"
@@ -2792,6 +2782,19 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif architecture_scope.get("decline"):
         action = "decline"
         reason = "architecture_scope_not_authorized"
+    elif label_forces_review:
+        # A maintainer label is a review-routing instruction. It must surface the
+        # current head even when a hard-stop path would normally route directly to
+        # handler-only changes requested. Safety handling remains downstream of the
+        # full review; the record marker prevents re-reviewing the same label/head.
+        # Ordered after the enforced admission gates deliberately: the label confers
+        # review eligibility, and an unproven current head or an unauthorized
+        # architecture scope is a data/authorization blocker no label can waive.
+        action = "review"
+        reason = "approved_for_review_label"
+    elif classification.get("hard_stop_paths"):
+        action = "request_changes"
+        reason = "hard_stop"
     elif (packet.get("contributor") or {}).get("standing") == "skip":
         # Explicit maintainer standing override (private-overrides.json). Ordered
         # after hard_stop deliberately: a skip-listed contributor touching guarded
