@@ -635,7 +635,7 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
     // CR 704.5a headroom is `life - 1`: a seat at exactly 0 has LOST, so a legal shortcut must
     // stop one point above it. CR 104.3c: an empty library is only lethal on the next draw, so
     // the library axis divides the whole remaining library.
-    // CR 704.5a: a published re-aimable `Targets` slot may be pointed at ANY of its legal
+    // CR 119.3: a published re-aimable `Targets` slot may be pointed at ANY of its legal
     // player targets in EVERY remaining repetition, so each of them is charged that slot's
     // magnitude ON TOP of its own observed drain. Both terms come off the offer's OWN
     // published data — `certificate.per_cycle.victim_slot` and `schema.points` — never from
