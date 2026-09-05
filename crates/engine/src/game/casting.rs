@@ -695,9 +695,19 @@ pub(crate) fn targets_commit_crime(
     targets.iter().any(|target| match target {
         TargetRef::Player(player) => super::players::is_opponent(state, controller, *player),
         TargetRef::Object(object_id) => {
+            // CR 700.13: the function's two `||` branches are complementary — the object
+            // branch decides spells (which have a `state.objects` row), the entry branch
+            // decides abilities (which do not, per CR 113.8). Routing the entry branch
+            // through `stack::stack_object_controller` is what makes them agree instead of
+            // over-detecting: without it, a stolen spell still reported "opponent-
+            // controlled" against its own thief.
             let stack_target_is_opponent_controlled = state.stack.iter().any(|entry| {
                 entry.id == *object_id
-                    && super::players::is_opponent(state, controller, entry.controller)
+                    && super::players::is_opponent(
+                        state,
+                        controller,
+                        stack::stack_object_controller(state, entry),
+                    )
             });
             stack_target_is_opponent_controlled
                 || state

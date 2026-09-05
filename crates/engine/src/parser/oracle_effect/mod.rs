@@ -517,8 +517,14 @@ pub(crate) fn replace_first_object_pronoun(body: &str, replacement: &str) -> Opt
 /// In trigger effects where the subject is a non-self filter (e.g. "a creature
 /// you control"), "it" refers to the triggering object (TriggeringSource).
 /// For self-triggers ("~ enters"), "it" stays SelfRef.
-/// For AttachedTo subjects ("equipped creature"), TriggeringSource is also correct
-/// because the triggering event's source IS the attached-to creature.
+/// For AttachedTo subjects ("equipped creature"), TriggeringSource is correct
+/// only when the trigger condition is ACTIVE-voice ("whenever equipped creature
+/// deals combat damage"), where the event's source IS the attached-to creature.
+/// On a PASSIVE-voice condition ("whenever equipped creature is dealt damage")
+/// the event's source is the damage DEALER, so the antecedent is the recipient;
+/// `trigger_object_pronoun_ref_for_condition` (oracle_trigger.rs) pins
+/// `ctx.object_pronoun_ref` to `EventTarget` for that class and the match below
+/// is never consulted.
 pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     if let Some(target) = ctx.object_pronoun_ref.clone() {
         return target;
@@ -35579,7 +35585,27 @@ pub(crate) fn parse_effect_chain_ir(
             .find_map(|clause| nearest_dig_rest_zone_in_clause(&clause.parsed));
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
-            object_pronoun_ref: prior_typed_referent.then_some(TargetFilter::ParentTarget),
+            // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
+            // first. A referent established by an EARLIER CLAUSE OF THIS CHAIN wins
+            // ("exile target creature. If you do, ... it") — that is the
+            // `ParentTarget` rung. Only when the chain has introduced no typed
+            // referent of its own does the anaphor reach back to the antecedent the
+            // TRIGGER CONDITION introduced (`ParseContext::object_pronoun_ref`, set
+            // by `oracle_trigger::trigger_object_pronoun_ref_for_condition`).
+            //
+            // The `.or_else` is load-bearing: this struct literal REPLACES the
+            // parent context rather than updating it, so a bare `then_some` silently
+            // dropped the trigger-level antecedent on every single-clause trigger
+            // body. That drop was invisible while the only producer was the
+            // spell-cast axis, because `resolve_it_pronoun`'s non-self-subject
+            // fallback independently returns the same `TriggeringSource` — the two
+            // paths agreed, so the discarded value was never observable. The
+            // passive-voice damage axis is the first producer whose answer
+            // (`EventTarget`) DISAGREES with that fallback, which is what made the
+            // drop visible (issue #8379).
+            object_pronoun_ref: prior_typed_referent
+                .then_some(TargetFilter::ParentTarget)
+                .or_else(|| ctx.object_pronoun_ref.clone()),
             card_name: ctx.card_name.clone(),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger

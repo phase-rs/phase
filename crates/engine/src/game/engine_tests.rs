@@ -436,6 +436,8 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         stack_entry_index: 0,
         scope: RetargetScope::All,
         current_targets: vec![unchanged.clone()],
+        slots: vec![],
+        slot_pools: vec![],
         legal_new_targets: vec![legal_alternative],
     };
 
