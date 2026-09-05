@@ -20,10 +20,11 @@ use lobby_broker::inbound_guard::{
 use lobby_broker::validation::{
     validate_create_tournament_fields, validate_drop_from_tournament_fields,
     validate_end_tournament_fields, validate_get_tournament_fields,
-    validate_join_tournament_fields, validate_report_match_result_fields,
-    validate_start_tournament_round_fields, validate_unregister_lobby_fields,
-    validate_update_lobby_metadata_fields, CreateTournamentFields, DropFromTournamentFields,
-    EndTournamentFields, JoinTournamentFields, ReportMatchResultFields, StartTournamentRoundFields,
+    validate_join_tournament_fields, validate_renew_tournament_credential_fields,
+    validate_report_match_result_fields, validate_start_tournament_round_fields,
+    validate_unregister_lobby_fields, validate_update_lobby_metadata_fields,
+    CreateTournamentFields, DropFromTournamentFields, EndTournamentFields, JoinTournamentFields,
+    RenewTournamentCredentialFields, ReportMatchResultFields, StartTournamentRoundFields,
     UpdateLobbyMetadataFields,
 };
 
@@ -243,6 +244,14 @@ pub fn guard_client_message_before_dispatch(
             code,
             organizer_token,
         }),
+        ClientMessage::RenewTournamentCredential {
+            code,
+            role: _,
+            token,
+        } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
+            code,
+            token,
+        }),
         ClientMessage::CreateDraftWithSettings {
             display_name,
             source,
@@ -368,7 +377,8 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
         | ClientMessage::DropFromTournament { .. }
-        | ClientMessage::EndTournament { .. } => ServerMessage::error(reason),
+        | ClientMessage::EndTournament { .. }
+        | ClientMessage::RenewTournamentCredential { .. } => ServerMessage::error(reason),
     }
 }
 
@@ -498,6 +508,14 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         } => validate_end_tournament_fields(EndTournamentFields {
             code,
             organizer_token,
+        }),
+        ClientMessage::RenewTournamentCredential {
+            code,
+            role: _,
+            token,
+        } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
+            code,
+            token,
         }),
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -796,7 +814,7 @@ mod tests {
 
     // -- Tournament organizer ----------------------------------------------
 
-    use crate::protocol::{BracketShape, MatchArity, PodOutcome, ScoringPolicy};
+    use crate::protocol::{BracketShape, MatchArity, PodOutcome, ScoringPolicy, TournamentRole};
     use lobby_broker::validation::{
         MAX_DISPLAY_NAME_LEN, MAX_GAME_CODE_LEN, MAX_GAME_WINS_ENTRIES, MAX_ROOM_NAME_LEN,
         MAX_TOKEN_LEN,
@@ -816,7 +834,7 @@ mod tests {
                 ClientMessage::CreateTournament {
                     name: "n".repeat(MAX_ROOM_NAME_LEN + 1),
                     arity: MatchArity::HEAD_TO_HEAD,
-                    scoring: ScoringPolicy::default(),
+                    scoring: Some(ScoringPolicy::default()),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
                 },
@@ -865,8 +883,29 @@ mod tests {
                 "organizer_token",
                 ClientMessage::EndTournament {
                     code: "TOUR01".into(),
-                    organizer_token: long_token,
+                    organizer_token: long_token.clone(),
                     request_id: None,
+                },
+            ),
+            // Lobby protocol 6's rotation frame. Both guards gained an arm for
+            // it, and an arm that returned `Ok(())` in one of them would be
+            // exhaustive and compile — which is precisely the divergence
+            // `both_inbound_guards_agree_on_every_tournament_variant` exists
+            // to rule out, so the new variant has to be in this table.
+            (
+                "token",
+                ClientMessage::RenewTournamentCredential {
+                    code: "TOUR01".into(),
+                    role: TournamentRole::Organizer,
+                    token: long_token,
+                },
+            ),
+            (
+                "code",
+                ClientMessage::RenewTournamentCredential {
+                    code: long_code,
+                    role: TournamentRole::Player,
+                    token: "tok".into(),
                 },
             ),
         ]
@@ -877,7 +916,7 @@ mod tests {
             ClientMessage::CreateTournament {
                 name: "Friday Night".into(),
                 arity: MatchArity::HEAD_TO_HEAD,
-                scoring: ScoringPolicy::default(),
+                scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: Some(3),
             },
@@ -910,6 +949,16 @@ mod tests {
                 code: "TOUR01".into(),
                 organizer_token: "tok".into(),
                 request_id: None,
+            },
+            ClientMessage::RenewTournamentCredential {
+                code: "TOUR01".into(),
+                role: TournamentRole::Organizer,
+                token: "tok".into(),
+            },
+            ClientMessage::RenewTournamentCredential {
+                code: "TOUR01".into(),
+                role: TournamentRole::Player,
+                token: "tok".into(),
             },
         ]
     }

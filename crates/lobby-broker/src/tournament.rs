@@ -36,7 +36,7 @@
 //! tiebreakers, byes, drops, retention) is not CR-governed game logic.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,195 @@ pub const IN_PROGRESS_ABANDON_SECS: u64 = 7 * 24 * 60 * 60;
 /// long after it reached that state — long enough to look up final standings
 /// after the fact, bounded enough that the in-memory map doesn't grow forever.
 pub const TERMINAL_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// How long a freshly minted [`TournamentCredential`] is accepted, in
+/// milliseconds. Twelve hours.
+///
+/// Chosen against the two constants that actually bound it rather than picked
+/// round. It must comfortably exceed a real event — a Swiss event of 8-9
+/// rounds runs well under a day — and it must sit far below
+/// [`IN_PROGRESS_ABANDON_SECS`] (7 days), so a credential stops being accepted
+/// long before the record it authorizes is reaped. The other lifecycle window
+/// that could have bounded it, [`REGISTRATION_TIMEOUT_SECS`], is 300 seconds:
+/// three orders of magnitude below this, so there is no pre-start window in
+/// which an organizer's credential can outlive its usefulness or vice versa.
+///
+/// Longer than the full-game session token's 2h because an organizer's
+/// authority spans an entire event rather than one game; rotation
+/// ([`TournamentManager::renew_credential`]) is what makes the practical
+/// ceiling the event's duration rather than this number.
+pub const TOURNAMENT_CREDENTIAL_TTL_MS: u64 = 12 * 60 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Bearer credentials
+// ---------------------------------------------------------------------------
+
+/// Which authority tier a credential carries. The same axis
+/// [`TournamentMeta::organizer_token`] and [`TournamentPlayer::player_token`]
+/// already divide the model along, named once so
+/// [`TournamentManager::renew_credential`] can be one entry point rather than
+/// two sibling `renew_organizer_*` / `renew_player_*` methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TournamentRole {
+    Organizer,
+    Player,
+}
+
+/// Why a presented secret was, or was not, accepted by a
+/// [`TournamentCredential`].
+///
+/// Three arms rather than a `bool` for the same reason [`ReportGate`] carries
+/// a reason: `Expired` and `Mismatch` are different situations for the caller,
+/// and only the first of them is recoverable by rotation. Telling them apart
+/// leaks nothing — `Expired` is reachable only by a caller who already
+/// presented the exact stored secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialVerdict {
+    /// The secret matches and the credential has not expired.
+    Accepted,
+    /// The secret matches, but `now_ms` has reached the expiry instant.
+    Expired,
+    /// The secret does not match.
+    Mismatch,
+}
+
+/// The plaintext half of a freshly minted or rotated credential: the secret to
+/// hand its owner, and the instant that secret stops being accepted.
+///
+/// A named pair rather than a bare `(String, u64)` because both members are
+/// opaque scalars a positional tuple would let a caller swap silently. It is
+/// also the *only* way either value leaves [`TournamentCredential`] —
+/// deliberately, see that type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintedCredential {
+    pub secret: String,
+    pub expires_at_ms: u64,
+}
+
+/// One tournament bearer credential: the secret, and the instant it stops
+/// being accepted.
+///
+/// A newtype-with-expiry rather than a bare `String` so that "a token" and "a
+/// token that is still valid" cannot be confused at a call site — the same
+/// reason [`crate::protocol::TournamentRequestId`] is a newtype rather than a
+/// second bare integer beside [`PairingId`]. Expiry is checked against the
+/// injected [`BrokerEnv`] clock, never `SystemTime`, so the identical logic
+/// runs in the native shell and the Durable Object.
+///
+/// **Both fields are private and neither has an accessor.** The plaintext
+/// secret and the expiry leave this type exactly once, in the
+/// [`MintedCredential`] that [`Self::mint`] returns; afterwards the only
+/// question anyone may ask is [`Self::verdict`] (or its
+/// [`Self::accepts`] shorthand). That is what makes this a single authority
+/// rather than a struct with a policy bolted beside it: no call site can spell
+/// a plaintext `==` against the secret, and none can forget the expiry
+/// conjunct.
+///
+/// **The expiry boundary is EXCLUSIVE.** [`Self::accepts`] is `true` while
+/// `now_ms < expires_at_ms` and `false` at `now_ms == expires_at_ms`: the
+/// instant named by `expires_at_ms` is the first instant the credential is
+/// refused, not the last it is accepted.
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
+pub struct TournamentCredential {
+    secret: String,
+    expires_at_ms: u64,
+}
+
+impl TournamentCredential {
+    /// Mint a fresh credential valid for [`TOURNAMENT_CREDENTIAL_TTL_MS`] from
+    /// the injected clock's current instant.
+    ///
+    /// Returns the stored credential alongside the [`MintedCredential`] the
+    /// caller must relay to its owner — the one and only egress for the secret
+    /// and the expiry.
+    pub fn mint(env: &impl BrokerEnv) -> (Self, MintedCredential) {
+        let secret = env.new_token();
+        let expires_at_ms = env.now_ms() + TOURNAMENT_CREDENTIAL_TTL_MS;
+        (
+            Self {
+                secret: secret.clone(),
+                expires_at_ms,
+            },
+            MintedCredential {
+                secret,
+                expires_at_ms,
+            },
+        )
+    }
+
+    /// Compare `presented` against the stored secret and the expiry, in that
+    /// order.
+    ///
+    /// The comparison is CONSTANT-TIME over the secret's bytes and runs
+    /// unconditionally before the expiry is consulted, so neither the verdict's
+    /// arm nor its timing reveals how much of a wrong secret was right. An
+    /// empty `presented` can never match: stored secrets come from
+    /// [`BrokerEnv::new_token`] and are never empty, and the length check below
+    /// refuses the mismatch outright.
+    pub fn verdict(&self, presented: &str, now_ms: u64) -> CredentialVerdict {
+        if !constant_time_eq(self.secret.as_bytes(), presented.as_bytes()) {
+            return CredentialVerdict::Mismatch;
+        }
+        // Exclusive boundary — see this type's doc comment. `>=`, not `>`.
+        if now_ms >= self.expires_at_ms {
+            return CredentialVerdict::Expired;
+        }
+        CredentialVerdict::Accepted
+    }
+
+    /// [`Self::verdict`] collapsed to the one question most call sites ask.
+    pub fn accepts(&self, presented: &str, now_ms: u64) -> bool {
+        self.verdict(presented, now_ms) == CredentialVerdict::Accepted
+    }
+
+    /// Build a credential around a caller-chosen secret and expiry.
+    ///
+    /// **Test-only and `cfg`-gated deliberately.** Fixtures need a RECOGNIZABLE
+    /// secret — the leak assertions in `crate::protocol`'s tests search the
+    /// serialized bytes for the literal value, which a counter from
+    /// [`BrokerEnv::new_token`] would make a far weaker needle — and they need
+    /// an expiry they choose rather than one the clock hands them. Gating it
+    /// keeps that convenience from becoming a production back door around
+    /// [`Self::mint`]: a real credential's secret must come from
+    /// [`BrokerEnv::new_token`] and its expiry from the injected clock, never
+    /// from a literal at a call site.
+    #[cfg(test)]
+    pub(crate) fn from_parts(secret: impl Into<String>, expires_at_ms: u64) -> Self {
+        Self {
+            secret: secret.into(),
+            expires_at_ms,
+        }
+    }
+}
+
+/// Equality over a credential is equality over a *secret*, so it is answered
+/// with the same constant-time comparison [`TournamentCredential::verdict`]
+/// uses rather than the byte-wise short-circuit `derive(PartialEq)` would
+/// generate. Nothing in this crate authorizes through `==` — [`
+/// TournamentCredential::verdict`] is the single authority for that — but
+/// [`TournamentPlayer`] derives `PartialEq` for test and snapshot comparisons,
+/// so the derive would exist whether or not anyone meant it to.
+impl PartialEq for TournamentCredential {
+    fn eq(&self, other: &Self) -> bool {
+        self.expires_at_ms == other.expires_at_ms
+            && constant_time_eq(self.secret.as_bytes(), other.secret.as_bytes())
+    }
+}
+
+/// Length-checked, branch-free byte comparison. Mirrors `phase-server`'s
+/// `tokens_match`, which the same repo already uses for the admin bearer —
+/// duplicated here rather than imported because this crate is WASM-safe and
+/// deliberately depends on nothing above it.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 // ---------------------------------------------------------------------------
 // MatchArity
@@ -305,6 +494,60 @@ impl TournamentStatus {
     }
 }
 
+/// One tournament-scoped gated action, as an axis rather than three sibling
+/// `can_start` / `can_end` / `can_drop` booleans.
+///
+/// Three sibling `bool`s would be CLAUDE.md's sibling-cluster smell exactly —
+/// they share a name root, differ only in a label, and a fourth action later
+/// would make it four fields on every carrier. One typed axis plus a
+/// `BTreeSet` says the same thing, extends by one variant, and makes a
+/// consumer's missing arm a compile error.
+///
+/// Reporting is deliberately absent: its gate is *pairing*-scoped and varies
+/// row by row, so it lives on [`ReportGate`] instead. See
+/// [`TournamentMeta::open_actions`] for the authority and
+/// [`TournamentMeta::report_gate`] for its per-pairing counterpart.
+///
+/// `Ord` is derived so a [`BTreeSet`] of these has a stable, deterministic
+/// serialization order — the wire frame must not vary run to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum TournamentAction {
+    /// [`TournamentManager::generate_pairings`].
+    StartRound,
+    /// [`TournamentManager::complete_tournament`].
+    EndTournament,
+    /// [`TournamentManager::drop_player`].
+    Drop,
+}
+
+/// Whether this manager would accept a report for one pairing from a
+/// correctly credentialed, seated, non-dropped entrant — i.e. every conjunct
+/// of [`TournamentManager::report_result`]'s gate that does not depend on WHO
+/// is asking.
+///
+/// Viewer-independent by construction, which is what makes it safe on a frame
+/// fanned out to every subscriber. The authorization conjuncts (the broker's
+/// token and `dropped` checks, and its seat check) are deliberately NOT folded
+/// in here and cannot be: that frame has one payload for all viewers.
+///
+/// Carries the REASON, not a `bool`, so a client can say why a control is
+/// absent and so a new refusal arm is a compile error at every consumer rather
+/// than a silently-flipped boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReportGate {
+    /// A report would proceed to [`validate_match_result`].
+    Open,
+    /// The tournament is no longer running
+    /// ([`TournamentStatus::is_terminal`]).
+    TournamentNotRunning,
+    /// Server-assigned bye — nothing was played, so there is no result to
+    /// report.
+    Bye,
+    /// Server-assigned forfeit, from [`TournamentManager::drop_player`]'s
+    /// auto-settlement. Permanent once assigned.
+    Forfeit,
+}
+
 /// Which bracket shape the same [`TournamentManager`] runs for a tournament.
 /// `SingleElimination` covers MTR Appendix E's 4-8 player case — the whole
 /// contiguous range, byes included, not only the power-of-two counts (see
@@ -457,9 +700,12 @@ pub fn prior_opponents(player_key: &str, pairings: &[TournamentPairing]) -> Hash
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TournamentPlayer {
     pub player_key: String,
-    /// Minted at join via [`BrokerEnv::new_token`], NOT socket-bound: closing
-    /// and reopening a socket must not drop a player's standing.
-    pub player_token: String,
+    /// Minted at join via [`TournamentCredential::mint`], NOT socket-bound:
+    /// closing and reopening a socket must not drop a player's standing. It
+    /// does expire ([`TOURNAMENT_CREDENTIAL_TTL_MS`]) and can be rotated
+    /// ([`TournamentManager::renew_credential`]), which is what bounds a
+    /// leaked bearer token in time without re-binding authority to a socket.
+    pub player_token: TournamentCredential,
     pub display_name: String,
     pub dropped: bool,
 }
@@ -487,8 +733,10 @@ pub struct CreateTournamentRequest {
 pub struct TournamentMeta {
     pub code: String,
     pub name: String,
-    /// Minted at creation via [`BrokerEnv::new_token`], NOT socket-bound.
-    pub organizer_token: String,
+    /// Minted at creation via [`TournamentCredential::mint`], NOT
+    /// socket-bound. Expires and rotates on the same terms as
+    /// [`TournamentPlayer::player_token`].
+    pub organizer_token: TournamentCredential,
     pub arity: MatchArity,
     pub scoring: ScoringPolicy,
     pub bracket: BracketShape,
@@ -599,6 +847,68 @@ impl TournamentMeta {
     /// Which ranked tiebreak list applies, selected by arity.
     pub fn tiebreak_order(&self) -> TiebreakOrder {
         TiebreakOrder::for_arity(self.arity)
+    }
+
+    /// Which tournament-scoped gated actions this manager would currently
+    /// admit from a correctly credentialed actor, independent of who is
+    /// asking.
+    ///
+    /// **The single authority.** [`TournamentManager::generate_pairings`],
+    /// [`TournamentManager::complete_tournament`] and
+    /// [`TournamentManager::drop_player`] each consult this rather than
+    /// re-testing the status themselves, so the value a client is shown and
+    /// the refusal a handler produces cannot disagree. Without that, publishing
+    /// this on the wire would install a *second* server-side authority beside
+    /// the handlers — strictly worse than the client-side duplication it
+    /// replaces.
+    ///
+    /// Scoped to the conjuncts that are viewer-independent AND
+    /// pairing-independent. The round ceiling and the unresolved-pairing guard
+    /// are deliberately absent: both are transient, both are re-checked by
+    /// `generate_pairings` itself, and folding them in would make this answer
+    /// "no" for a round the organizer can make available simply by collecting
+    /// the outstanding result.
+    ///
+    /// `EndTournament` is withheld during [`TournamentStatus::Registration`].
+    /// Completing an event that has never paired a round would mint a
+    /// permanently-retained `Completed` record with no pairings, which
+    /// [`TournamentStatus::Completed`]'s own contract — "every pairing that
+    /// exists has a resolved outcome", a trustworthy final *result* — does not
+    /// describe. Abandoning a registration is already a lifecycle rule
+    /// ([`REGISTRATION_TIMEOUT_SECS`]), not an organizer action.
+    pub fn open_actions(&self) -> BTreeSet<TournamentAction> {
+        let mut open = BTreeSet::new();
+        if self.status.is_terminal() {
+            return open;
+        }
+        open.insert(TournamentAction::StartRound);
+        open.insert(TournamentAction::Drop);
+        if self.status != TournamentStatus::Registration {
+            open.insert(TournamentAction::EndTournament);
+        }
+        open
+    }
+
+    /// The pairing-scoped counterpart of [`Self::open_actions`]: why a report
+    /// for `pairing` would be refused, or [`ReportGate::Open`] if it would not
+    /// be.
+    ///
+    /// **The single authority**, consulted by
+    /// [`TournamentManager::report_result`] rather than duplicated there.
+    ///
+    /// A pairing that already carries a [`PairingOutcome::Reported`] is
+    /// **`Open`**, not refused: `report_result` is a single `outcome` write and
+    /// every derived view recomputes from the corrected history, so
+    /// re-reporting is how a correction is made.
+    pub fn report_gate(&self, pairing: &TournamentPairing) -> ReportGate {
+        if self.status.is_terminal() {
+            return ReportGate::TournamentNotRunning;
+        }
+        match pairing.outcome {
+            Some(PairingOutcome::Bye) => ReportGate::Bye,
+            Some(PairingOutcome::Forfeit { .. }) => ReportGate::Forfeit,
+            Some(PairingOutcome::Reported(_)) | None => ReportGate::Open,
+        }
     }
 }
 
@@ -1495,7 +1805,7 @@ impl TournamentManager {
             .ok_or_else(|| format!("Tournament not found: {code}"))
     }
 
-    /// Creates a tournament and returns the minted `organizer_token`.
+    /// Creates a tournament and returns the minted organizer credential.
     ///
     /// The `code` is caller-supplied, mirroring
     /// [`crate::lobby::LobbyManager::register_game`] exactly rather than
@@ -1507,7 +1817,7 @@ impl TournamentManager {
         code: &str,
         req: CreateTournamentRequest,
         env: &impl BrokerEnv,
-    ) -> Result<String, String> {
+    ) -> Result<MintedCredential, String> {
         if self.tournaments.contains_key(code) {
             return Err(format!("Tournament code already in use: {code}"));
         }
@@ -1525,13 +1835,13 @@ impl TournamentManager {
             return Err("total_rounds override must be at least 1".to_string());
         }
         let now = env.now_ms() / 1000;
-        let organizer_token = env.new_token();
+        let (organizer_token, minted) = TournamentCredential::mint(env);
         self.tournaments.insert(
             code.to_string(),
             TournamentMeta {
                 code: code.to_string(),
                 name: req.name,
-                organizer_token: organizer_token.clone(),
+                organizer_token,
                 arity: req.arity,
                 scoring: req.scoring,
                 bracket: req.bracket,
@@ -1547,10 +1857,10 @@ impl TournamentManager {
                 last_activity_at: now,
             },
         );
-        Ok(organizer_token)
+        Ok(minted)
     }
 
-    /// Registers a player and returns the minted `player_token`. Joins are
+    /// Registers a player and returns the minted player credential. Joins are
     /// accepted only while the tournament is still in `Registration`: a field
     /// that grows after pairings exist would invalidate the round count and
     /// the standings already computed against it.
@@ -1560,9 +1870,9 @@ impl TournamentManager {
         player_key: &str,
         display_name: &str,
         env: &impl BrokerEnv,
-    ) -> Result<String, String> {
+    ) -> Result<MintedCredential, String> {
         let now = env.now_ms() / 1000;
-        let token = env.new_token();
+        let (player_token, minted) = TournamentCredential::mint(env);
         let meta = self.meta_mut(code)?;
         if meta.status != TournamentStatus::Registration {
             return Err(format!(
@@ -1575,12 +1885,99 @@ impl TournamentManager {
         }
         meta.players.push(TournamentPlayer {
             player_key: player_key.to_string(),
-            player_token: token.clone(),
+            player_token,
             display_name: display_name.to_string(),
             dropped: false,
         });
         meta.last_activity_at = now;
-        Ok(token)
+        Ok(minted)
+    }
+
+    /// Rotate one credential: refuse `presented` unless it is currently
+    /// accepted, then replace it with a freshly minted secret and return that.
+    ///
+    /// **Rotation, not extension.** Re-minting the secret bounds a stolen
+    /// credential even against a thief who keeps renewing, because the
+    /// legitimate holder's next renewal locks the thief out — and vice versa,
+    /// which turns silent indefinite shared access into a detectable,
+    /// reportable failure. Extending the expiry in place would give a thief
+    /// exactly the indefinite access this whole mechanism exists to bound.
+    ///
+    /// `role` is the [`TournamentRole`] axis rather than two sibling methods,
+    /// per "parameterize, don't proliferate".
+    ///
+    /// A dropped entrant is refused, at the same point and for the same reason
+    /// the broker's player authority refuses one: a drop is permanent, so that
+    /// player's credential must stop authorizing *anything*, and renewing it
+    /// would be the one operation that outlived the drop.
+    ///
+    /// Deliberately does **not** bump `last_activity_at`. Rotation replaces an
+    /// authority; it changes nothing about the event, and counting it as
+    /// activity would hand any credential holder — including one who has
+    /// stopped participating — a lever to push back the staleness reaper
+    /// indefinitely. That is the same reasoning [`Self::drop_player`]'s
+    /// re-drop refusal already records.
+    ///
+    /// Deliberately not gated on [`TournamentStatus`] either. A terminal
+    /// tournament admits no action, so a rotated credential there authorizes
+    /// nothing; refusing rotation would add a special case that buys nothing.
+    pub fn renew_credential(
+        &mut self,
+        code: &str,
+        role: TournamentRole,
+        presented: &str,
+        env: &impl BrokerEnv,
+    ) -> Result<MintedCredential, String> {
+        let now_ms = env.now_ms();
+        let (credential, minted) = TournamentCredential::mint(env);
+        let meta = self.meta_mut(code)?;
+        match role {
+            TournamentRole::Organizer => {
+                match meta.organizer_token.verdict(presented, now_ms) {
+                    CredentialVerdict::Accepted => {}
+                    CredentialVerdict::Expired => {
+                        return Err(format!(
+                            "Organizer credential for tournament {code} has expired and can no longer be renewed"
+                        ))
+                    }
+                    CredentialVerdict::Mismatch => {
+                        return Err(format!("Invalid organizer token for tournament {code}"))
+                    }
+                }
+                meta.organizer_token = credential;
+            }
+            TournamentRole::Player => {
+                // The scan resolves the token to its owner rather than merely
+                // testing it, exactly as the broker's player authority does:
+                // "some valid token exists" is the check that would let one
+                // entrant rotate another's credential.
+                let mut expired = false;
+                let player = meta.players.iter_mut().find(|p| {
+                    match p.player_token.verdict(presented, now_ms) {
+                        CredentialVerdict::Accepted => true,
+                        CredentialVerdict::Expired => {
+                            expired = true;
+                            false
+                        }
+                        CredentialVerdict::Mismatch => false,
+                    }
+                });
+                let Some(player) = player else {
+                    return Err(if expired {
+                        format!(
+                            "Player credential for tournament {code} has expired and can no longer be renewed"
+                        )
+                    } else {
+                        format!("Invalid player token for tournament {code}")
+                    });
+                };
+                if player.dropped {
+                    return Err(format!("Player has dropped from tournament {code}"));
+                }
+                player.player_token = credential;
+            }
+        }
+        Ok(minted)
     }
 
     /// Generates the next round's pairings and returns their ids.
@@ -1625,7 +2022,12 @@ impl TournamentManager {
     ) -> Result<Vec<PairingId>, String> {
         let now = env.now_ms() / 1000;
         let meta = self.meta_mut(code)?;
-        if meta.status.is_terminal() {
+        // `TournamentMeta::open_actions` is the single authority for whether
+        // this action is admitted at all; it is also what the wire carries, so
+        // this refusal and the value a client was shown cannot disagree.
+        // `StartRound` is withheld only for a terminal status, which is what
+        // makes the message below unconditionally accurate.
+        if !meta.open_actions().contains(&TournamentAction::StartRound) {
             return Err(format!(
                 "Tournament {code} is no longer running (status {:?})",
                 meta.status
@@ -1727,29 +2129,42 @@ impl TournamentManager {
     ) -> Result<(), String> {
         let now = env.now_ms() / 1000;
         let meta = self.meta_mut(code)?;
-        if meta.status.is_terminal() {
-            return Err(format!(
-                "Tournament {code} is no longer running (status {:?})",
-                meta.status
-            ));
-        }
         let index = meta
             .pairings
             .iter()
             .position(|p| p.id == pairing_id)
             .ok_or_else(|| format!("Pairing {pairing_id} not found in {code}"))?;
-        match meta.pairings[index].outcome {
-            Some(PairingOutcome::Bye) => {
+        // `TournamentMeta::report_gate` is the single authority for every
+        // conjunct of this gate that does not depend on WHO is asking — the
+        // terminal-status check and the outcome-arm check alike — and it is
+        // what `PairingView::report_gate` carries, so the wire value and this
+        // refusal cannot disagree. The match is exhaustive so a future arm
+        // cannot be silently admitted here.
+        //
+        // The pairing is resolved BEFORE the gate is asked, which is the one
+        // ordering difference from the hand-written pair of guards this
+        // replaces: a stale id against a finished tournament now answers
+        // "pairing not found" rather than "no longer running". Every id a
+        // terminal tournament actually holds still answers the latter, because
+        // pairings are never pruned.
+        match meta.report_gate(&meta.pairings[index]) {
+            ReportGate::Open => {}
+            ReportGate::TournamentNotRunning => {
+                return Err(format!(
+                    "Tournament {code} is no longer running (status {:?})",
+                    meta.status
+                ))
+            }
+            ReportGate::Bye => {
                 return Err(format!(
                     "Pairing {pairing_id} is a bye and has no result to report"
                 ))
             }
-            Some(PairingOutcome::Forfeit { .. }) => {
+            ReportGate::Forfeit => {
                 return Err(format!(
                     "Pairing {pairing_id} was resolved by forfeit and cannot be reported"
                 ))
             }
-            Some(PairingOutcome::Reported(_)) | None => {}
         }
         validate_match_result(&meta.pairings[index], &outcome, &meta.players)?;
         meta.pairings[index].outcome = Some(PairingOutcome::Reported(outcome));
@@ -1792,7 +2207,10 @@ impl TournamentManager {
     ) -> Result<(), String> {
         let now = env.now_ms() / 1000;
         let meta = self.meta_mut(code)?;
-        if meta.status.is_terminal() {
+        // Same single authority as `generate_pairings` above. `Drop` is
+        // withheld only for a terminal status, so this message is
+        // unconditionally accurate.
+        if !meta.open_actions().contains(&TournamentAction::Drop) {
             return Err(format!(
                 "Tournament {code} is no longer running (status {:?})",
                 meta.status
@@ -1850,14 +2268,33 @@ impl TournamentManager {
     /// venue closing, a top-cut decided early — is a legitimate call the
     /// organizer already owns, not an invariant violation. "Every pairing has
     /// a result" is the property that actually keeps the record honest.
+    ///
+    /// Refused during [`TournamentStatus::Registration`] as well, through
+    /// [`TournamentMeta::open_actions`], which withholds
+    /// [`TournamentAction::EndTournament`] there — see that method for why an
+    /// event that never paired a round has nothing to complete.
     pub fn complete_tournament(&mut self, code: &str, env: &impl BrokerEnv) -> Result<(), String> {
         let now = env.now_ms() / 1000;
         let meta = self.meta_mut(code)?;
-        if meta.status.is_terminal() {
-            return Err(format!(
-                "Tournament {code} is already finished (status {:?})",
-                meta.status
-            ));
+        // The single authority decides WHETHER; the branch below chooses only
+        // the prose, because the two situations `open_actions` withholds this
+        // action for are opposite ends of the lifecycle and one message cannot
+        // describe both.
+        if !meta
+            .open_actions()
+            .contains(&TournamentAction::EndTournament)
+        {
+            return Err(if meta.status.is_terminal() {
+                format!(
+                    "Tournament {code} is already finished (status {:?})",
+                    meta.status
+                )
+            } else {
+                format!(
+                    "Tournament {code} has not started, so there is nothing to complete (status {:?})",
+                    meta.status
+                )
+            });
         }
         if let Some(pending) = meta.first_unresolved_pairing() {
             return Err(format!(
@@ -1962,6 +2399,13 @@ mod tests {
     }
 
     // -- helpers ------------------------------------------------------------
+
+    /// Expiry for hand-built credential fixtures: far enough out that no test
+    /// clock in this module reaches it, so a fixture cannot expire by accident
+    /// and turn an unrelated assertion into a confusing authorization failure.
+    /// Tests that are ABOUT expiry build their own credential with a chosen
+    /// instant instead.
+    const FIXTURE_EXPIRY_MS: u64 = u64::MAX;
 
     fn arity(n: u8) -> MatchArity {
         MatchArity::new(n).expect("test arity must be valid")
@@ -2111,7 +2555,10 @@ mod tests {
         keys.iter()
             .map(|k| TournamentPlayer {
                 player_key: (*k).to_string(),
-                player_token: format!("token-{k}"),
+                player_token: TournamentCredential::from_parts(
+                    format!("token-{k}"),
+                    FIXTURE_EXPIRY_MS,
+                ),
                 display_name: (*k).to_string(),
                 dropped: false,
             })
@@ -2278,7 +2725,13 @@ mod tests {
         let meta = mgr.get("ABCD").expect("tournament");
         assert_eq!(meta.code, "ABCD");
         assert_eq!(meta.name, "Friday Pods");
-        assert_eq!(meta.organizer_token, token);
+        // The stored credential accepts exactly the secret handed back, and
+        // does so through the accessor that is the only way to ask.
+        assert!(meta.organizer_token.accepts(&token.secret, env.now_ms()));
+        assert_eq!(
+            token.expires_at_ms,
+            env.now_ms() + TOURNAMENT_CREDENTIAL_TTL_MS
+        );
         assert_eq!(meta.arity, MatchArity::COMMANDER_POD);
         assert_eq!(meta.scoring, scoring);
         assert_eq!(meta.bracket, BracketShape::Swiss);
@@ -2311,7 +2764,13 @@ mod tests {
             .join_tournament("ABCD", "p00", "Ada", &env)
             .expect("join");
         let player = mgr.get("ABCD").expect("t").player("p00").expect("player");
-        assert_eq!(player.player_token, player_token);
+        assert!(player
+            .player_token
+            .accepts(&player_token.secret, env.now_ms()));
+        assert_eq!(
+            player_token.expires_at_ms,
+            env.now_ms() + TOURNAMENT_CREDENTIAL_TTL_MS
+        );
         assert_eq!(player.display_name, "Ada");
         assert!(!player.dropped);
         assert!(mgr
@@ -4060,5 +4519,540 @@ mod tests {
         let mgr = TournamentManager::new();
         assert_eq!(mgr.iter().count(), 0);
         assert!(mgr.iter().next().is_none());
+    }
+
+    // -- unit: broker-owned action legality (V1, V2, V3) --------------------
+
+    /// A tournament in `status`, with one unresolved round-1 pairing, built
+    /// without going through the manager so every lifecycle status — including
+    /// the two terminal ones — is reachable directly.
+    fn meta_in(status: TournamentStatus) -> TournamentMeta {
+        TournamentMeta {
+            code: "T".to_string(),
+            name: "Test Event".to_string(),
+            organizer_token: TournamentCredential::from_parts("org", FIXTURE_EXPIRY_MS),
+            arity: MatchArity::HEAD_TO_HEAD,
+            scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+            bracket: BracketShape::Swiss,
+            total_rounds_override: None,
+            resolved_total_rounds: Some(3),
+            current_round: 1,
+            status,
+            players: undropped(&["a", "b"]),
+            pairings: vec![head_to_head_pairing("a", "b")],
+            created_at: 1_000,
+            last_activity_at: 1_000,
+        }
+    }
+
+    /// V1. `open_actions` is the wire's answer to "which tournament-scoped
+    /// gated actions would be admitted", and it must answer differently for
+    /// every lifecycle status rather than collapsing to one shape.
+    ///
+    /// The `InProgress` row is the positive control: without it, an
+    /// implementation that returned the empty set unconditionally would satisfy
+    /// both terminal rows and look correct.
+    #[test]
+    fn open_actions_answers_per_lifecycle_status() {
+        use TournamentAction::*;
+
+        // Positive control — the mid-event case, where all three are open.
+        assert_eq!(
+            meta_in(TournamentStatus::InProgress).open_actions(),
+            BTreeSet::from([StartRound, EndTournament, Drop]),
+        );
+
+        // Registration withholds `EndTournament` only: there is nothing to
+        // complete before a round has been paired.
+        assert_eq!(
+            meta_in(TournamentStatus::Registration).open_actions(),
+            BTreeSet::from([StartRound, Drop]),
+        );
+
+        // Both terminal statuses admit nothing. `Abandoned` is the hostile row:
+        // it is reached by the reaper rather than by an organizer, so an
+        // implementation that only special-cased `Completed` would pass every
+        // other assertion here.
+        assert!(meta_in(TournamentStatus::Completed)
+            .open_actions()
+            .is_empty());
+        assert!(meta_in(TournamentStatus::Abandoned)
+            .open_actions()
+            .is_empty());
+    }
+
+    /// V2. Every arm of [`ReportGate`], including the one that is easiest to
+    /// get backwards.
+    ///
+    /// The `Reported(_)` row is the hostile case: an already-reported pairing
+    /// is **`Open`**, not refused, because re-reporting is how a mis-entered
+    /// result is corrected. An implementation that read "has an outcome" as
+    /// "closed" would pass the `Bye` and `Forfeit` rows and silently make
+    /// corrections impossible.
+    #[test]
+    fn report_gate_answers_every_arm_and_reporting_twice_stays_open() {
+        let running = meta_in(TournamentStatus::InProgress);
+
+        let unresolved = head_to_head_pairing("a", "b");
+        assert_eq!(running.report_gate(&unresolved), ReportGate::Open);
+
+        let mut reported = head_to_head_pairing("a", "b");
+        reported.outcome = Some(PairingOutcome::Reported(PodOutcome::Draw));
+        assert_eq!(
+            running.report_gate(&reported),
+            ReportGate::Open,
+            "re-reporting is a correction, not a refusal"
+        );
+
+        let mut bye = head_to_head_pairing("a", "b");
+        bye.outcome = Some(PairingOutcome::Bye);
+        assert_eq!(running.report_gate(&bye), ReportGate::Bye);
+
+        let mut forfeit = head_to_head_pairing("a", "b");
+        forfeit.outcome = Some(PairingOutcome::Forfeit {
+            winner: "a".to_string(),
+        });
+        assert_eq!(running.report_gate(&forfeit), ReportGate::Forfeit);
+
+        // The status conjunct outranks the outcome one: a pairing that would
+        // otherwise be `Open` is refused once the event is terminal.
+        for status in [TournamentStatus::Completed, TournamentStatus::Abandoned] {
+            assert_eq!(
+                meta_in(status).report_gate(&unresolved),
+                ReportGate::TournamentNotRunning,
+            );
+        }
+    }
+
+    /// V3, manager half. The value the wire carries and the refusal a handler
+    /// produces come from the same authority, so they cannot disagree about
+    /// the conjuncts `open_actions` owns.
+    ///
+    /// The equivalence asserted is deliberately about the LIFECYCLE refusal,
+    /// not about success: `open_actions` scopes itself to the conjuncts that
+    /// are viewer- and pairing-independent, and each handler keeps its own
+    /// transient guards (an unresolved pairing, the round ceiling) which it
+    /// re-checks itself. So the contract is: withheld ⇔ the handler produces
+    /// the lifecycle refusal. A handler that admitted an action the wire
+    /// withheld, or that produced a lifecycle refusal for an action the wire
+    /// advertised, breaks it in either direction.
+    ///
+    /// Every status is walked, and `InProgress` is the reach-guard: without
+    /// it, a handler that always produced the lifecycle refusal would satisfy
+    /// every other row.
+    #[test]
+    fn the_handler_guards_refuse_exactly_what_open_actions_withholds() {
+        /// The two lifecycle refusals `open_actions` owns, and nothing else.
+        /// `generate_pairings`'s "cannot pair round N" and
+        /// `complete_tournament`'s unresolved-pairing message are transient
+        /// guards the handlers keep for themselves, so they must NOT count.
+        fn is_lifecycle_refusal(result: &Result<impl std::fmt::Debug, String>) -> bool {
+            match result {
+                Ok(_) => false,
+                Err(reason) => {
+                    reason.contains("no longer running")
+                        || reason.contains("already finished")
+                        || reason.contains("has not started")
+                }
+            }
+        }
+
+        for status in [
+            TournamentStatus::Registration,
+            TournamentStatus::InProgress,
+            TournamentStatus::Completed,
+            TournamentStatus::Abandoned,
+        ] {
+            let env = FakeEnv::new();
+            let mut mgr = swiss(4, 2, &env);
+            if status != TournamentStatus::Registration {
+                // Reach the non-registration statuses through the real path, so
+                // the fixture is a tournament that has actually paired a round.
+                mgr.generate_pairings("T", &env).expect("round 1 pairs");
+            }
+            mgr.meta_mut("T").expect("event").status = status;
+
+            // `open_actions` is re-read immediately before each dispatch. A
+            // successful action can itself move the status (pairing round 1
+            // leaves `Registration`), so a single snapshot taken up front would
+            // compare the second and third handlers against a value that is no
+            // longer what the wire would carry.
+            let open = mgr.get("T").expect("event").open_actions();
+            let started = mgr.generate_pairings("T", &env);
+            assert_eq!(
+                is_lifecycle_refusal(&started),
+                !open.contains(&TournamentAction::StartRound),
+                "StartRound: wire said {open:?} at {status:?}, handler said {started:?}"
+            );
+
+            let open = mgr.get("T").expect("event").open_actions();
+            let dropped = mgr.drop_player("T", "p00", &env);
+            assert_eq!(
+                is_lifecycle_refusal(&dropped),
+                !open.contains(&TournamentAction::Drop),
+                "Drop: wire said {open:?} at {status:?}, handler said {dropped:?}"
+            );
+
+            let open = mgr.get("T").expect("event").open_actions();
+            let ended = mgr.complete_tournament("T", &env);
+            assert_eq!(
+                is_lifecycle_refusal(&ended),
+                !open.contains(&TournamentAction::EndTournament),
+                "EndTournament: wire said {open:?} at {status:?}, handler said {ended:?}"
+            );
+        }
+    }
+
+    /// V3, hostile row. A view is read, the tournament goes terminal, and the
+    /// dispatch arrives afterwards holding the stale `open_actions` the client
+    /// was shown. The handler must still refuse: the wire value is an
+    /// affordance hint, never the authority.
+    #[test]
+    fn a_stale_open_actions_from_before_a_terminal_transition_still_refuses() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(4, 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1 pairs");
+
+        // What the client was shown.
+        let shown = mgr.get("T").expect("event").open_actions();
+        assert!(shown.contains(&TournamentAction::StartRound));
+        assert!(shown.contains(&TournamentAction::Drop));
+
+        // The event ends between the view and the dispatch.
+        mgr.meta_mut("T").expect("event").status = TournamentStatus::Completed;
+
+        for err in [
+            mgr.generate_pairings("T", &env).unwrap_err(),
+            mgr.drop_player("T", "p00", &env).unwrap_err(),
+        ] {
+            assert!(
+                err.contains("no longer running"),
+                "expected the terminal-status refusal, got: {err}"
+            );
+        }
+    }
+
+    /// `EndTournament` during `Registration` is refused, and refused with a
+    /// message that says which end of the lifecycle it is. The two situations
+    /// `open_actions` withholds this action for are opposite, so one message
+    /// cannot describe both.
+    #[test]
+    fn completing_a_registration_is_refused_with_its_own_message() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(4, 2, &env);
+
+        let err = mgr
+            .complete_tournament("T", &env)
+            .expect_err("an event that never paired a round has nothing to complete");
+        assert!(
+            err.contains("has not started"),
+            "expected the not-started message, got: {err}"
+        );
+
+        // Reach-guard: the same call succeeds once a round exists and resolves,
+        // so the refusal above is about the lifecycle and not about the
+        // fixture being unusable.
+        mgr.generate_pairings("T", &env).expect("round 1 pairs");
+        let pairings: Vec<PairingId> = mgr
+            .get("T")
+            .expect("event")
+            .pairings
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        for id in pairings {
+            let players = mgr
+                .get("T")
+                .expect("event")
+                .pairing(id)
+                .expect("p")
+                .players
+                .clone();
+            mgr.report_result(
+                "T",
+                id,
+                PodOutcome::Decisive {
+                    winner: players[0].clone(),
+                    game_wins: bo3(&players[0], 2, &players[1], 0),
+                },
+                &env,
+            )
+            .expect("report");
+        }
+        mgr.complete_tournament("T", &env)
+            .expect("a fully-resolved in-progress event completes");
+    }
+
+    // -- unit: credentials (V10, V11) ---------------------------------------
+
+    /// V10. The expiry boundary is EXCLUSIVE, stated once on
+    /// [`TournamentCredential`]'s own doc comment and read from both sides
+    /// here: the last accepted instant is `expires_at_ms - 1`.
+    #[test]
+    fn a_credential_is_refused_from_its_expiry_instant_onwards() {
+        let env = FakeEnv::new();
+        let (credential, minted) = TournamentCredential::mint(&env);
+        assert_eq!(
+            minted.expires_at_ms,
+            env.now_ms() + TOURNAMENT_CREDENTIAL_TTL_MS,
+            "the expiry is measured from the injected clock, not hardcoded"
+        );
+
+        // Positive control: one millisecond before expiry it is still accepted.
+        assert!(credential.accepts(&minted.secret, minted.expires_at_ms - 1));
+        assert_eq!(
+            credential.verdict(&minted.secret, minted.expires_at_ms - 1),
+            CredentialVerdict::Accepted
+        );
+
+        // The named instant is the FIRST refusal, not the last acceptance.
+        assert!(!credential.accepts(&minted.secret, minted.expires_at_ms));
+        assert_eq!(
+            credential.verdict(&minted.secret, minted.expires_at_ms),
+            CredentialVerdict::Expired
+        );
+        assert_eq!(
+            credential.verdict(&minted.secret, minted.expires_at_ms + 1),
+            CredentialVerdict::Expired
+        );
+
+        // A wrong secret is `Mismatch` and never `Expired`, at any instant —
+        // the arm is reachable only by a caller who already presented the
+        // stored secret, which is what makes telling them apart leak-free.
+        assert_eq!(
+            credential.verdict("not-the-secret", minted.expires_at_ms - 1),
+            CredentialVerdict::Mismatch
+        );
+        assert_eq!(
+            credential.verdict("not-the-secret", minted.expires_at_ms + 1),
+            CredentialVerdict::Mismatch
+        );
+        // An empty presentation can never authorize anything.
+        assert!(!credential.accepts("", env.now_ms()));
+    }
+
+    /// V10, hostile. A rotated-away secret is refused afterwards even while it
+    /// is still inside its original TTL — rotation, not expiry, is what
+    /// invalidates it.
+    #[test]
+    fn a_rotated_away_secret_is_refused_while_still_inside_its_original_ttl() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let original = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                },
+                &env,
+            )
+            .expect("create");
+
+        let rotated = mgr
+            .renew_credential("T", TournamentRole::Organizer, &original.secret, &env)
+            .expect("renew");
+
+        let now = env.now_ms();
+        assert!(
+            now < original.expires_at_ms,
+            "the fixture must still be inside the original TTL, or this proves nothing"
+        );
+        let stored = &mgr.get("T").expect("event").organizer_token;
+        assert!(
+            !stored.accepts(&original.secret, now),
+            "the presented secret must stop being accepted the instant it is rotated"
+        );
+        assert!(stored.accepts(&rotated.secret, now));
+    }
+
+    /// V11. Renewal ROTATES: the presented secret is refused afterwards and the
+    /// returned one is accepted. Extension in place would leave both live,
+    /// which is exactly the indefinite shared access this mechanism bounds.
+    #[test]
+    fn renewal_rotates_both_roles_and_refuses_an_already_expired_credential() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let org = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                },
+                &env,
+            )
+            .expect("create");
+        let player = mgr.join_tournament("T", "p00", "Ada", &env).expect("join");
+
+        // The clock moves, so the new expiry is strictly later than the old —
+        // which is what proves the expiry was re-derived rather than echoed.
+        env.advance_secs(60);
+        let now = env.now_ms();
+
+        for (role, presented) in [
+            (TournamentRole::Organizer, org.secret.clone()),
+            (TournamentRole::Player, player.secret.clone()),
+        ] {
+            let fresh = mgr
+                .renew_credential("T", role, &presented, &env)
+                .expect("renew");
+            assert_ne!(fresh.secret, presented, "renewal must mint a NEW secret");
+            assert!(
+                fresh.expires_at_ms > org.expires_at_ms,
+                "the rotated expiry is measured from now, not echoed from the old one"
+            );
+            assert_eq!(fresh.expires_at_ms, now + TOURNAMENT_CREDENTIAL_TTL_MS);
+
+            // The presented secret is dead; only the returned one authorizes.
+            assert!(
+                mgr.renew_credential("T", role, &presented, &env).is_err(),
+                "the rotated-away secret must not renew again"
+            );
+            mgr.renew_credential("T", role, &fresh.secret, &env)
+                .expect("the freshly returned secret still authorizes");
+        }
+
+        // Hostile: an already-expired credential cannot be renewed. Rotation
+        // recovers a live credential; it is not a resurrection.
+        env.advance_secs(TOURNAMENT_CREDENTIAL_TTL_MS / 1000 + 1);
+        let stale = mgr
+            .create_tournament(
+                "U",
+                CreateTournamentRequest {
+                    name: "Stale".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                },
+                &env,
+            )
+            .expect("create");
+        env.advance_secs(TOURNAMENT_CREDENTIAL_TTL_MS / 1000);
+        let err = mgr
+            .renew_credential("U", TournamentRole::Organizer, &stale.secret, &env)
+            .expect_err("an expired credential cannot be renewed");
+        assert!(
+            err.contains("expired"),
+            "expected the expiry message, got: {err}"
+        );
+    }
+
+    /// A dropped entrant's credential stops authorizing everything, renewal
+    /// included — otherwise rotation would be the one operation that outlived
+    /// the drop.
+    #[test]
+    fn a_dropped_entrants_credential_cannot_be_renewed() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(4, 2, &env);
+        let joined = mgr.join_tournament("T", "p99", "Zoe", &env).expect("join");
+
+        // Reach-guard: it renews fine while the entrant is still seated.
+        let fresh = mgr
+            .renew_credential("T", TournamentRole::Player, &joined.secret, &env)
+            .expect("a seated entrant may rotate");
+
+        mgr.drop_player("T", "p99", &env).expect("drop");
+        let err = mgr
+            .renew_credential("T", TournamentRole::Player, &fresh.secret, &env)
+            .expect_err("a dropped entrant may not rotate");
+        assert!(
+            err.contains("dropped"),
+            "expected the dropped message, got: {err}"
+        );
+    }
+
+    /// Rotation must not count as activity: a credential holder who has stopped
+    /// participating would otherwise hold a lever against the staleness reaper.
+    #[test]
+    fn renewal_does_not_push_back_the_staleness_reaper() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let org = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                },
+                &env,
+            )
+            .expect("create");
+        let before = mgr.get("T").expect("event").last_activity_at;
+
+        env.advance_secs(60);
+        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, &env)
+            .expect("renew");
+
+        assert_eq!(
+            mgr.get("T").expect("event").last_activity_at,
+            before,
+            "rotation replaces an authority; it is not participation"
+        );
+    }
+
+    // -- unit: the numeric validators (V18) ---------------------------------
+
+    /// V18. The two malformed numeric inputs a client's own parsing can round
+    /// into something well-formed — `2.5` and `1e3` — are refused server-side,
+    /// and the test records WHICH layer refuses each so a future reader does
+    /// not have to re-derive it.
+    ///
+    /// `2.5` never reaches [`MatchArity::new`]: it is not an integer, so the
+    /// `#[serde(try_from = "u8")]` deserializer refuses it first. `1e3` is
+    /// `1000`, out of `u8` range, and is refused at the same boundary. The
+    /// validator's own bounds are asserted separately below, so both layers of
+    /// the refusal chain are pinned rather than one standing in for the other.
+    #[test]
+    fn the_wire_and_the_validators_together_refuse_malformed_numeric_input() {
+        // The deserialization boundary. `MatchArity` is `try_from = "u8"`, so
+        // a non-integer and an out-of-range integer are both refused here.
+        assert!(serde_json::from_str::<MatchArity>("2.5").is_err());
+        assert!(serde_json::from_str::<MatchArity>("1e3").is_err());
+        // Positive control — a well-formed value on the same path is accepted,
+        // so the two refusals above are not a parser that rejects everything.
+        assert_eq!(
+            serde_json::from_str::<MatchArity>("4").expect("4 is a valid arity"),
+            MatchArity::COMMANDER_POD
+        );
+
+        // The same for scoring, whose fields are `u8` behind
+        // `RawScoringPolicy`.
+        assert!(serde_json::from_str::<ScoringPolicy>(
+            r#"{"win_points":2.5,"draw_points":1,"loss_points":0}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<ScoringPolicy>(
+            r#"{"win_points":1e3,"draw_points":1,"loss_points":0}"#
+        )
+        .is_err());
+
+        // The validator's own bounds, reached with in-range integers that get
+        // past the deserializer.
+        assert!(MatchArity::new(0).is_err());
+        assert!(MatchArity::new(1).is_err());
+        assert!(MatchArity::new(129).is_err());
+        assert!(MatchArity::new(2).is_ok());
+        assert!(MatchArity::new(128).is_ok());
+
+        // Hostile, and the unchanged guard this fixture must not have loosened:
+        // `win_points: 0` is still rejected, because it is the tiebreak floor's
+        // denominator.
+        assert!(ScoringPolicy::new(0, 1, 0).is_err());
+        assert!(serde_json::from_str::<ScoringPolicy>(
+            r#"{"win_points":0,"draw_points":1,"loss_points":0}"#
+        )
+        .is_err());
+        assert!(ScoringPolicy::new(3, 1, 0).is_ok());
     }
 }

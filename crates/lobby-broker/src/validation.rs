@@ -356,6 +356,21 @@ pub fn validate_end_tournament_fields(fields: EndTournamentFields<'_>) -> Result
     Ok(())
 }
 
+pub struct RenewTournamentCredentialFields<'a> {
+    pub code: &'a str,
+    pub token: &'a str,
+}
+
+/// `role` is deliberately absent: it is a two-variant enum serde already
+/// refuses anything else for, so there is no size or shape left to bound.
+pub fn validate_renew_tournament_credential_fields(
+    fields: RenewTournamentCredentialFields<'_>,
+) -> Result<(), String> {
+    validate_token("code", fields.code, MAX_GAME_CODE_LEN)?;
+    validate_token("token", fields.token, MAX_TOKEN_LEN)?;
+    Ok(())
+}
+
 /// Validate every client-supplied field of a parsed lobby message against the
 /// size/shape bounds above. Returns the first violation as a human-readable
 /// reason suitable for an `Error` reply. Server-populated reply types
@@ -502,6 +517,19 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
             validate_end_tournament_fields(EndTournamentFields {
                 code,
                 organizer_token,
+            })?;
+        }
+        // `role: _` for the same reason the four arms above bind
+        // `request_id: _`: it is a closed enum with nothing to bound, and
+        // binding it explicitly shows the next reader it was considered here.
+        M::RenewTournamentCredential {
+            code,
+            role: _,
+            token,
+        } => {
+            validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
+                code,
+                token,
             })?;
         }
         // No client-supplied bounded fields.
@@ -768,14 +796,14 @@ mod tests {
 
     // -- Tournament organizer ----------------------------------------------
 
-    use crate::tournament::{BracketShape, MatchArity, PodOutcome, ScoringPolicy};
+    use crate::tournament::{BracketShape, MatchArity, PodOutcome, ScoringPolicy, TournamentRole};
     use std::collections::HashMap;
 
     fn create_tournament_with(name: &str) -> M {
         M::CreateTournament {
             name: name.to_string(),
             arity: MatchArity::HEAD_TO_HEAD,
-            scoring: ScoringPolicy::default(),
+            scoring: Some(ScoringPolicy::default()),
             bracket: BracketShape::Swiss,
             total_rounds: None,
         }
@@ -853,6 +881,16 @@ mod tests {
                 organizer_token: "tok".into(),
                 request_id: None,
             },
+            M::RenewTournamentCredential {
+                code: "TOUR01".into(),
+                role: TournamentRole::Organizer,
+                token: "tok".into(),
+            },
+            M::RenewTournamentCredential {
+                code: "TOUR01".into(),
+                role: TournamentRole::Player,
+                token: "tok".into(),
+            },
         ];
         for msg in valid {
             assert!(
@@ -912,6 +950,21 @@ mod tests {
                 code: "TOUR01".into(),
                 organizer_token: long.clone(),
                 request_id: None,
+            },
+            // Lobby protocol 6's rotation frame is token-gated too, and its
+            // token is client-supplied, so it takes the same bound. Without
+            // this row the new `validate_lobby_message` arm would be reachable
+            // only by the accept-path test above, which cannot tell a real
+            // bound apart from an arm that returns `Ok(())` unconditionally.
+            M::RenewTournamentCredential {
+                code: "TOUR01".into(),
+                role: TournamentRole::Organizer,
+                token: long.clone(),
+            },
+            M::RenewTournamentCredential {
+                code: "t".repeat(MAX_GAME_CODE_LEN + 1),
+                role: TournamentRole::Player,
+                token: "tok".into(),
             },
         ] {
             assert!(validate_lobby_message(&msg).is_err(), "{msg:?}");

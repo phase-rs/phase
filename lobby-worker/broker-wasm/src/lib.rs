@@ -187,7 +187,14 @@ fn mutates_lobby(msg: &LobbyClientMessage) -> bool {
         | LobbyClientMessage::StartTournamentRound { .. }
         | LobbyClientMessage::ReportMatchResult { .. }
         | LobbyClientMessage::DropFromTournament { .. }
-        | LobbyClientMessage::EndTournament { .. } => true,
+        | LobbyClientMessage::EndTournament { .. }
+        // Rotation REPLACES the stored secret, so it writes tournament state
+        // exactly as the six above do. Classifying it `false` would lose the
+        // rotation on the next hibernation and hand the holder back a secret
+        // the broker no longer accepts — the sharpest possible instance of
+        // this classification's silent failure mode, because the caller has
+        // already discarded the old one.
+        | LobbyClientMessage::RenewTournamentCredential { .. } => true,
         // `GetTournament` is a pure read, like `SubscribeLobby`: classifying
         // it `true` would write storage on every poll of a public listing.
         LobbyClientMessage::GetTournament { .. }
