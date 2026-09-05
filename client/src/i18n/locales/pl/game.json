@@ -6,7 +6,13 @@
     "prohibited": "Aktywacja tej zdolności jest zabroniona",
     "costNotPayableNow": "Nie możesz teraz zapłacić tego kosztu"
   },
-  "manaSourceSelection": { "title": "Wybierz źródło many", "description": "Ta zdolność many wymaga poświęcenia permanenta.", "sacrifice": "Poświęć", "back": "Wróć do płatności many", "unknownSource": "Źródło many" },
+  "manaSourceSelection": {
+    "title": "Wybierz źródło many",
+    "description": "Ta zdolność many wymaga poświęcenia permanenta.",
+    "sacrifice": "Poświęć",
+    "back": "Wróć do płatności many",
+    "unknownSource": "Źródło many"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -71,9 +77,23 @@
   },
   "restoredAutomation": {
     "dismiss": "Zamknij",
-    "noop": {"title": "Wczytano zapisaną grę", "summary_one": "Nie trzeba było wznawiać automatyzacji stosu.", "summary_other": "Nie trzeba było wznawiać automatyzacji stosu."},
-    "progressed": {"title": "Wznowiono automatyzację stosu", "summary_one": "Silnik ukończył {{count}} automatyczne rozpatrzenie.", "summary_other": "Silnik ukończył {{count}} automatyczne rozpatrzenia.", "omitted_one": "Pominięto {{count}} zdarzenie pośrednie.", "omitted_other": "Pominięto {{count}} zdarzeń pośrednich."},
-    "zeroResolutionRepair": {"title": "Naprawiono automatyzację stosu", "summary_one": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry.", "summary_other": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry."}
+    "noop": {
+      "title": "Wczytano zapisaną grę",
+      "summary_one": "Nie trzeba było wznawiać automatyzacji stosu.",
+      "summary_other": "Nie trzeba było wznawiać automatyzacji stosu."
+    },
+    "progressed": {
+      "title": "Wznowiono automatyzację stosu",
+      "summary_one": "Silnik ukończył {{count}} automatyczne rozpatrzenie.",
+      "summary_other": "Silnik ukończył {{count}} automatyczne rozpatrzenia.",
+      "omitted_one": "Pominięto {{count}} zdarzenie pośrednie.",
+      "omitted_other": "Pominięto {{count}} zdarzeń pośrednich."
+    },
+    "zeroResolutionRepair": {
+      "title": "Naprawiono automatyzację stosu",
+      "summary_one": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry.",
+      "summary_other": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry."
+    }
   },
   "resolveAllConsent": {
     "eyebrow": "Rozpatrz wszystko",
@@ -2253,8 +2273,21 @@
   "replacement": {
     "eyebrow": "Kolejność rozpatrywania",
     "title": "Efekty zastępujące",
-    "subtitle": "Wybierz, który efekt zastępujący zastosować jako pierwszy.",
-    "candidateFallback": "Efekt zastępujący {{number}}"
+    "orderSubtitle": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustalić kolejność — ostatni zastosowany efekt jest tym, który zadziała (CR 616.1).",
+    "appliedFirst": "Zastosowany pierwszy (zostanie nadpisany)",
+    "appliedLast": "Zastosowany ostatni — ten zadziała",
+    "resultLabel": "Wynik: {{outcome}}",
+    "confirmOrder": "Potwierdź kolejność",
+    "dragHint": "Przeciągnij, aby zmienić kolejność, lub użyj strzałek.",
+    "chooseSubtitle": "Wybierz, który efekt zastępujący zastosować.",
+    "candidateFallback": "Efekt zastępujący {{number}}",
+    "orderSubtitleComposing": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustawić kolejność ich zastosowania — każdy zostanie zastosowany, więc kolejność zmienia wynik (CR 616.1).",
+    "appliedEarlier": "Zastosowany wcześniej",
+    "appliedLater": "Zastosowany później",
+    "composesNote": "Każdy efekt zostaje zastosowany — kolejność zmienia sposób ich połączenia.",
+    "moveUpNamed": "Przenieś {{name}} wcześniej",
+    "moveDownNamed": "Przenieś {{name}} później",
+    "positionAnnounce": "Pozycja {{position}} z {{total}}"
   },
   "retargetChoice": {
     "title": "Zmień cel",

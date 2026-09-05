@@ -4284,6 +4284,8 @@ mod tests {
             player: PlayerId(2),
             candidate_count: 1,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
             proposed: ProposedEvent::Draw {

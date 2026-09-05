@@ -6,7 +6,13 @@
     "prohibited": "Activar esta habilidad está prohibido",
     "costNotPayableNow": "No puedes pagar este coste ahora mismo"
   },
-  "manaSourceSelection": { "title": "Elige una fuente de maná", "description": "Esta habilidad de maná requiere sacrificar un permanente.", "sacrifice": "Sacrificar", "back": "Volver al pago de maná", "unknownSource": "Fuente de maná" },
+  "manaSourceSelection": {
+    "title": "Elige una fuente de maná",
+    "description": "Esta habilidad de maná requiere sacrificar un permanente.",
+    "sacrifice": "Sacrificar",
+    "back": "Volver al pago de maná",
+    "unknownSource": "Fuente de maná"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -71,9 +77,23 @@
   },
   "restoredAutomation": {
     "dismiss": "Cerrar",
-    "noop": {"title": "Partida guardada cargada", "summary_one": "No fue necesario reanudar la automatización de la pila.", "summary_other": "No fue necesario reanudar la automatización de la pila."},
-    "progressed": {"title": "Automatización de la pila reanudada", "summary_one": "El motor completó {{count}} resolución automatizada.", "summary_other": "El motor completó {{count}} resoluciones automatizadas.", "omitted_one": "Se omitió {{count}} evento intermedio.", "omitted_other": "Se omitieron {{count}} eventos intermedios."},
-    "zeroResolutionRepair": {"title": "Automatización de la pila reparada", "summary_one": "La automatización guardada se reparó de forma segura antes de reanudar la partida.", "summary_other": "La automatización guardada se reparó de forma segura antes de reanudar la partida."}
+    "noop": {
+      "title": "Partida guardada cargada",
+      "summary_one": "No fue necesario reanudar la automatización de la pila.",
+      "summary_other": "No fue necesario reanudar la automatización de la pila."
+    },
+    "progressed": {
+      "title": "Automatización de la pila reanudada",
+      "summary_one": "El motor completó {{count}} resolución automatizada.",
+      "summary_other": "El motor completó {{count}} resoluciones automatizadas.",
+      "omitted_one": "Se omitió {{count}} evento intermedio.",
+      "omitted_other": "Se omitieron {{count}} eventos intermedios."
+    },
+    "zeroResolutionRepair": {
+      "title": "Automatización de la pila reparada",
+      "summary_one": "La automatización guardada se reparó de forma segura antes de reanudar la partida.",
+      "summary_other": "La automatización guardada se reparó de forma segura antes de reanudar la partida."
+    }
   },
   "resolveAllConsent": {
     "eyebrow": "Resolver todo",
@@ -2253,8 +2273,21 @@
   "replacement": {
     "eyebrow": "Orden de resolución",
     "title": "Efectos de reemplazo",
-    "subtitle": "Elige qué efecto de reemplazo se aplica primero.",
-    "candidateFallback": "Efecto de reemplazo {{number}}"
+    "orderSubtitle": "Todos estos efectos cambian cómo ocurre este evento. Arrastra para establecer el orden en que se aplican: el último aplicado es el que surte efecto (CR 616.1).",
+    "appliedFirst": "Aplicado primero (será sobrescrito)",
+    "appliedLast": "Aplicado el último: este prevalece",
+    "resultLabel": "Resultado: {{outcome}}",
+    "confirmOrder": "Confirmar orden",
+    "dragHint": "Arrastra para reordenar o usa las flechas.",
+    "chooseSubtitle": "Elige qué efecto de reemplazo aplicar.",
+    "candidateFallback": "Efecto de reemplazo {{number}}",
+    "orderSubtitleComposing": "Todos estos efectos cambian cómo ocurre este evento. Arrastra para fijar el orden en que se aplican: todos se aplican, así que el orden cambia el resultado (CR 616.1).",
+    "appliedEarlier": "Aplicado antes",
+    "appliedLater": "Aplicado después",
+    "composesNote": "Todos los efectos se aplican: el orden cambia cómo se combinan.",
+    "moveUpNamed": "Mover {{name}} antes",
+    "moveDownNamed": "Mover {{name}} después",
+    "positionAnnounce": "Posición {{position}} de {{total}}"
   },
   "retargetChoice": {
     "title": "Cambiar objetivo",

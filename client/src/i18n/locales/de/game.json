@@ -6,7 +6,13 @@
     "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten",
     "costNotPayableNow": "Du kannst diese Kosten gerade nicht bezahlen"
   },
-  "manaSourceSelection": { "title": "Manaquelle wählen", "description": "Diese Manafähigkeit erfordert das Opfern einer bleibenden Karte.", "sacrifice": "Opfern", "back": "Zurück zur Manabezahlung", "unknownSource": "Manaquelle" },
+  "manaSourceSelection": {
+    "title": "Manaquelle wählen",
+    "description": "Diese Manafähigkeit erfordert das Opfern einer bleibenden Karte.",
+    "sacrifice": "Opfern",
+    "back": "Zurück zur Manabezahlung",
+    "unknownSource": "Manaquelle"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -71,9 +77,23 @@
   },
   "restoredAutomation": {
     "dismiss": "Schließen",
-    "noop": {"title": "Gespeichertes Spiel geladen", "summary_one": "Keine Stapelautomatisierung zum Fortsetzen erforderlich.", "summary_other": "Keine Stapelautomatisierung zum Fortsetzen erforderlich."},
-    "progressed": {"title": "Stapelautomatisierung fortgesetzt", "summary_one": "Die Engine hat {{count}} automatisierte Auflösung abgeschlossen.", "summary_other": "Die Engine hat {{count}} automatisierte Auflösungen abgeschlossen.", "omitted_one": "{{count}} Zwischenereignis wurde ausgelassen.", "omitted_other": "{{count}} Zwischenereignisse wurden ausgelassen."},
-    "zeroResolutionRepair": {"title": "Stapelautomatisierung repariert", "summary_one": "Die gespeicherte Automatisierung wurde vor der Fortsetzung sicher repariert.", "summary_other": "Die gespeicherte Automatisierung wurde vor der Fortsetzung sicher repariert."}
+    "noop": {
+      "title": "Gespeichertes Spiel geladen",
+      "summary_one": "Keine Stapelautomatisierung zum Fortsetzen erforderlich.",
+      "summary_other": "Keine Stapelautomatisierung zum Fortsetzen erforderlich."
+    },
+    "progressed": {
+      "title": "Stapelautomatisierung fortgesetzt",
+      "summary_one": "Die Engine hat {{count}} automatisierte Auflösung abgeschlossen.",
+      "summary_other": "Die Engine hat {{count}} automatisierte Auflösungen abgeschlossen.",
+      "omitted_one": "{{count}} Zwischenereignis wurde ausgelassen.",
+      "omitted_other": "{{count}} Zwischenereignisse wurden ausgelassen."
+    },
+    "zeroResolutionRepair": {
+      "title": "Stapelautomatisierung repariert",
+      "summary_one": "Die gespeicherte Automatisierung wurde vor der Fortsetzung sicher repariert.",
+      "summary_other": "Die gespeicherte Automatisierung wurde vor der Fortsetzung sicher repariert."
+    }
   },
   "resolveAllConsent": {
     "eyebrow": "Alles auflösen",
@@ -2253,8 +2273,21 @@
   "replacement": {
     "eyebrow": "Auflösungsreihenfolge",
     "title": "Ersatzeffekte",
-    "subtitle": "Wähle, welcher Ersatzeffekt zuerst angewendet wird.",
-    "candidateFallback": "Ersatzeffekt {{number}}"
+    "orderSubtitle": "Diese Effekte ändern alle, wie dieses Ereignis abläuft. Ziehe, um die Reihenfolge festzulegen — der zuletzt angewendete Effekt ist der wirksame (CR 616.1).",
+    "appliedFirst": "Zuerst angewendet (wird überschrieben)",
+    "appliedLast": "Zuletzt angewendet — dieser gilt",
+    "resultLabel": "Ergebnis: {{outcome}}",
+    "confirmOrder": "Reihenfolge bestätigen",
+    "dragHint": "Zum Umsortieren ziehen oder die Pfeile benutzen.",
+    "chooseSubtitle": "Wähle, welcher Ersatzeffekt angewendet wird.",
+    "candidateFallback": "Ersatzeffekt {{number}}",
+    "orderSubtitleComposing": "Diese Effekte ändern alle, wie dieses Ereignis geschieht. Ziehe, um die Reihenfolge festzulegen — jeder wird angewendet, die Reihenfolge ändert das Ergebnis (CR 616.1).",
+    "appliedEarlier": "Früher angewendet",
+    "appliedLater": "Später angewendet",
+    "composesNote": "Jeder Effekt wird angewendet — die Reihenfolge ändert ihre Kombination.",
+    "moveUpNamed": "{{name}} nach vorne verschieben",
+    "moveDownNamed": "{{name}} nach hinten verschieben",
+    "positionAnnounce": "Position {{position}} von {{total}}"
   },
   "retargetChoice": {
     "title": "Ziel ändern",

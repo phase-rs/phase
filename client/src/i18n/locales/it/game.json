@@ -6,7 +6,13 @@
     "prohibited": "L'attivazione di questa abilità è proibita",
     "costNotPayableNow": "Non puoi pagare questo costo in questo momento"
   },
-  "manaSourceSelection": { "title": "Scegli una fonte di mana", "description": "Questa abilità di mana richiede di sacrificare un permanente.", "sacrifice": "Sacrifica", "back": "Torna al pagamento del mana", "unknownSource": "Fonte di mana" },
+  "manaSourceSelection": {
+    "title": "Scegli una fonte di mana",
+    "description": "Questa abilità di mana richiede di sacrificare un permanente.",
+    "sacrifice": "Sacrifica",
+    "back": "Torna al pagamento del mana",
+    "unknownSource": "Fonte di mana"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -71,9 +77,23 @@
   },
   "restoredAutomation": {
     "dismiss": "Chiudi",
-    "noop": {"title": "Partita salvata caricata", "summary_one": "Non è stato necessario riprendere l’automazione della pila.", "summary_other": "Non è stato necessario riprendere l’automazione della pila."},
-    "progressed": {"title": "Automazione della pila ripresa", "summary_one": "Il motore ha completato {{count}} risoluzione automatizzata.", "summary_other": "Il motore ha completato {{count}} risoluzioni automatizzate.", "omitted_one": "È stato omesso {{count}} evento intermedio.", "omitted_other": "Sono stati omessi {{count}} eventi intermedi."},
-    "zeroResolutionRepair": {"title": "Automazione della pila riparata", "summary_one": "L’automazione salvata è stata riparata in modo sicuro prima di riprendere.", "summary_other": "L’automazione salvata è stata riparata in modo sicuro prima di riprendere."}
+    "noop": {
+      "title": "Partita salvata caricata",
+      "summary_one": "Non è stato necessario riprendere l’automazione della pila.",
+      "summary_other": "Non è stato necessario riprendere l’automazione della pila."
+    },
+    "progressed": {
+      "title": "Automazione della pila ripresa",
+      "summary_one": "Il motore ha completato {{count}} risoluzione automatizzata.",
+      "summary_other": "Il motore ha completato {{count}} risoluzioni automatizzate.",
+      "omitted_one": "È stato omesso {{count}} evento intermedio.",
+      "omitted_other": "Sono stati omessi {{count}} eventi intermedi."
+    },
+    "zeroResolutionRepair": {
+      "title": "Automazione della pila riparata",
+      "summary_one": "L’automazione salvata è stata riparata in modo sicuro prima di riprendere.",
+      "summary_other": "L’automazione salvata è stata riparata in modo sicuro prima di riprendere."
+    }
   },
   "resolveAllConsent": {
     "eyebrow": "Risolvi tutto",
@@ -2253,8 +2273,21 @@
   "replacement": {
     "eyebrow": "Ordine di risoluzione",
     "title": "Effetti di sostituzione",
-    "subtitle": "Scegli quale effetto di sostituzione si applica per primo.",
-    "candidateFallback": "Effetto di sostituzione {{number}}"
+    "orderSubtitle": "Questi effetti cambiano tutti il modo in cui avviene questo evento. Trascina per stabilire l'ordine di applicazione: l'ultimo applicato è quello che ha effetto (CR 616.1).",
+    "appliedFirst": "Applicato per primo (verrà sovrascritto)",
+    "appliedLast": "Applicato per ultimo — questo prevale",
+    "resultLabel": "Risultato: {{outcome}}",
+    "confirmOrder": "Conferma ordine",
+    "dragHint": "Trascina per riordinare, o usa le frecce.",
+    "chooseSubtitle": "Scegli quale effetto di sostituzione applicare.",
+    "candidateFallback": "Effetto di sostituzione {{number}}",
+    "orderSubtitleComposing": "Questi effetti cambiano tutti il modo in cui accade questo evento. Trascina per impostare l'ordine di applicazione: si applicano tutti, quindi l'ordine cambia il risultato (CR 616.1).",
+    "appliedEarlier": "Applicato prima",
+    "appliedLater": "Applicato dopo",
+    "composesNote": "Ogni effetto si applica — l'ordine cambia come si combinano.",
+    "moveUpNamed": "Sposta {{name}} prima",
+    "moveDownNamed": "Sposta {{name}} dopo",
+    "positionAnnounce": "Posizione {{position}} di {{total}}"
   },
   "retargetChoice": {
     "title": "Cambia bersaglio",

@@ -8514,6 +8514,33 @@ pub struct ReplacementCandidateSummary {
     pub description: String,
 }
 
+/// CR 616.1: Which *kind* of decision a [`WaitingFor::ReplacementChoice`] asks
+/// for. One `WaitingFor` variant serves three structurally different prompts,
+/// and the display layer cannot tell them apart from the candidate list alone
+/// (an accept/decline pair and a two-effect ordering prompt are both "two
+/// candidates"). The engine owns the distinction; the frontend must never
+/// re-derive it by inspecting label text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum ReplacementChoiceKind {
+    /// CR 616.1e: two or more *distinct* applicable replacements whose order is
+    /// material. The player arranges them; per CR 616.1f the engine applies the
+    /// selected one and re-prompts for whatever is still applicable, so the
+    /// effect applied LAST is the one whose write survives.
+    #[default]
+    Order,
+    /// A single optional ("you may") replacement surfaced as two branches of
+    /// one source — index 0 accepts, index 1 declines. This is an engine
+    /// presentation shape, not a CR-numbered category: the yes/no decision
+    /// belongs to whoever the effect's own text gives it to. It is NOT an
+    /// ordering and must never render as a sortable list.
+    OptionalBranch,
+    /// A choice between destinations for a found card. Like `OptionalBranch`
+    /// this is an engine presentation shape: the options are mutually exclusive
+    /// alternatives rather than a sequence, so it renders as plain options.
+    SearchFoundDestination,
+}
+
 /// CR 603.3b + CR 603.7: One completed normal-plus-delayed trigger collection
 /// for a single raw event batch, produced before any live occurrence is claimed.
 ///
@@ -11623,6 +11650,39 @@ impl TrustedGameStateEnvelope {
 }
 
 impl GameState {
+    /// CR 616.1 load migration: re-derive `ReplacementChoice::kind` from the
+    /// live pending replacement.
+    ///
+    /// `kind` is `#[serde(default)]`, so a save written before the field existed
+    /// deserializes every parked prompt as `Order` — including an optional
+    /// "you may" accept/decline and a search-found destination pick. The
+    /// frontend keys its presentation off `kind`, so a restored legacy save
+    /// would render a sortable ordering list for a yes/no decision.
+    ///
+    /// `replacement_choice_waiting_for` is the single authority that classifies
+    /// a prompt from `pending_replacement`, so re-deriving through it keeps the
+    /// restored value identical to what a live park would have produced. With no
+    /// pending replacement there is nothing to classify and the prompt is left
+    /// untouched (it is already unactionable and handled by the count-0 guard).
+    fn migrate_restored_replacement_choice_kind(&mut self) {
+        let WaitingFor::ReplacementChoice { player, .. } = self.waiting_for else {
+            return;
+        };
+        if self.pending_replacement.is_none() {
+            return;
+        }
+        let rederived = crate::game::replacement::replacement_choice_waiting_for(player, self);
+        if let WaitingFor::ReplacementChoice { kind, .. } = rederived {
+            if let WaitingFor::ReplacementChoice {
+                kind: restored_kind,
+                ..
+            } = &mut self.waiting_for
+            {
+                *restored_kind = kind;
+            }
+        }
+    }
+
     /// CR 732.2a (FIX-3) load migration: `last_loop_action_sequence` is transient loop-detection
     /// bookkeeping that re-accumulates from live play. On restore, DROP it UNLESS the save was
     /// captured inside an object-growth shortcut proposal/response window
@@ -11936,6 +11996,12 @@ impl PersistedGameState {
         // CR 732.2a (FIX-3): drop stale transient loop-detection bookkeeping on load unless the save
         // sits in an object-growth shortcut window whose pending resolution still consumes it.
         state.migrate_transient_loop_sequence();
+        // CR 616.1: re-derive a parked replacement prompt's `kind` (see
+        // `migrate_restored_replacement_choice_kind`). Placed at this shared
+        // chokepoint so BOTH the untrusted `Raw` and trusted envelope paths get
+        // the repair — a legacy save restored through either one would
+        // otherwise present an optional or search-found prompt as an ordering.
+        state.migrate_restored_replacement_choice_kind();
         // `pending_trigger_event_batch` is a construction carrier for the
         // corresponding `pending_trigger`. A historical save can retain the
         // carrier after its trigger was dropped; it cannot represent live
@@ -12324,6 +12390,19 @@ pub enum WaitingFor {
         candidate_count: usize,
         #[serde(default)]
         candidates: Vec<ReplacementCandidateSummary>,
+        /// CR 616.1: which kind of decision this is. Defaults to
+        /// [`ReplacementChoiceKind::Order`] so pre-existing serialized states
+        /// and the many test constructions keep deserializing unchanged.
+        #[serde(default)]
+        kind: ReplacementChoiceKind,
+        /// CR 616.1f: whether the LAST-applied candidate alone decides the
+        /// outcome (every colliding write overwrites the whole field), so the
+        /// UI may name a concrete winning result. False for compositional
+        /// collisions — damage doublers vs adders, count and mana modifiers —
+        /// where both effects apply and there is no single winner. The display
+        /// layer must not assume last-write-wins; this is the engine's answer.
+        #[serde(default)]
+        last_applied_decides: bool,
     },
     /// CR 614.12a: choose the opponent that a permanent enters under before
     /// the zone change is delivered. `candidates` is captured at replacement
@@ -28323,6 +28402,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -28490,6 +28571,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -33644,6 +33727,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),

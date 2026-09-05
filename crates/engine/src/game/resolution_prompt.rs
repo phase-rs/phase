@@ -1041,6 +1041,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         assert!(
             !matches!(base.waiting_for, WaitingFor::ReplacementChoice { .. }),

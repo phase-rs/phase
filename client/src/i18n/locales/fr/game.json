@@ -6,7 +6,13 @@
     "prohibited": "L'activation de cette capacité est interdite",
     "costNotPayableNow": "Vous ne pouvez pas payer ce coût pour le moment"
   },
-  "manaSourceSelection": { "title": "Choisir une source de mana", "description": "Cette capacité de mana demande de sacrifier un permanent.", "sacrifice": "Sacrifier", "back": "Retour au paiement de mana", "unknownSource": "Source de mana" },
+  "manaSourceSelection": {
+    "title": "Choisir une source de mana",
+    "description": "Cette capacité de mana demande de sacrifier un permanent.",
+    "sacrifice": "Sacrifier",
+    "back": "Retour au paiement de mana",
+    "unknownSource": "Source de mana"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -71,9 +77,23 @@
   },
   "restoredAutomation": {
     "dismiss": "Fermer",
-    "noop": {"title": "Partie sauvegardée chargée", "summary_one": "Aucune automatisation de pile n’était nécessaire pour reprendre.", "summary_other": "Aucune automatisation de pile n’était nécessaire pour reprendre."},
-    "progressed": {"title": "Automatisation de la pile reprise", "summary_one": "Le moteur a effectué {{count}} résolution automatisée.", "summary_other": "Le moteur a effectué {{count}} résolutions automatisées.", "omitted_one": "{{count}} événement intermédiaire a été omis.", "omitted_other": "{{count}} événements intermédiaires ont été omis."},
-    "zeroResolutionRepair": {"title": "Automatisation de la pile réparée", "summary_one": "L’automatisation sauvegardée a été réparée en toute sécurité avant la reprise.", "summary_other": "L’automatisation sauvegardée a été réparée en toute sécurité avant la reprise."}
+    "noop": {
+      "title": "Partie sauvegardée chargée",
+      "summary_one": "Aucune automatisation de pile n’était nécessaire pour reprendre.",
+      "summary_other": "Aucune automatisation de pile n’était nécessaire pour reprendre."
+    },
+    "progressed": {
+      "title": "Automatisation de la pile reprise",
+      "summary_one": "Le moteur a effectué {{count}} résolution automatisée.",
+      "summary_other": "Le moteur a effectué {{count}} résolutions automatisées.",
+      "omitted_one": "{{count}} événement intermédiaire a été omis.",
+      "omitted_other": "{{count}} événements intermédiaires ont été omis."
+    },
+    "zeroResolutionRepair": {
+      "title": "Automatisation de la pile réparée",
+      "summary_one": "L’automatisation sauvegardée a été réparée en toute sécurité avant la reprise.",
+      "summary_other": "L’automatisation sauvegardée a été réparée en toute sécurité avant la reprise."
+    }
   },
   "resolveAllConsent": {
     "eyebrow": "Tout résoudre",
@@ -2253,8 +2273,21 @@
   "replacement": {
     "eyebrow": "Ordre de résolution",
     "title": "Effets de remplacement",
-    "subtitle": "Choisissez quel effet de remplacement s'applique en premier.",
-    "candidateFallback": "Effet de remplacement {{number}}"
+    "orderSubtitle": "Ces effets modifient tous la façon dont cet événement se produit. Faites glisser pour définir l'ordre d'application : le dernier appliqué est celui qui prend effet (CR 616.1).",
+    "appliedFirst": "Appliqué en premier (sera écrasé)",
+    "appliedLast": "Appliqué en dernier — celui-ci l'emporte",
+    "resultLabel": "Résultat : {{outcome}}",
+    "confirmOrder": "Confirmer l'ordre",
+    "dragHint": "Faites glisser pour réordonner, ou utilisez les flèches.",
+    "chooseSubtitle": "Choisissez quel effet de remplacement appliquer.",
+    "candidateFallback": "Effet de remplacement {{number}}",
+    "orderSubtitleComposing": "Ces effets modifient tous la façon dont cet événement se produit. Faites glisser pour définir l'ordre d'application : chacun s'applique, donc l'ordre change le résultat (CR 616.1).",
+    "appliedEarlier": "Appliqué avant",
+    "appliedLater": "Appliqué après",
+    "composesNote": "Chaque effet s'applique — l'ordre change leur combinaison.",
+    "moveUpNamed": "Déplacer {{name}} plus tôt",
+    "moveDownNamed": "Déplacer {{name}} plus tard",
+    "positionAnnounce": "Position {{position}} sur {{total}}"
   },
   "retargetChoice": {
     "title": "Changer de cible",

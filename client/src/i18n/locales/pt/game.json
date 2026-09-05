@@ -6,7 +6,13 @@
     "prohibited": "Ativar esta habilidade é proibido",
     "costNotPayableNow": "Você não pode pagar este custo agora"
   },
-  "manaSourceSelection": { "title": "Escolha uma fonte de mana", "description": "Esta habilidade de mana exige sacrificar uma permanente.", "sacrifice": "Sacrificar", "back": "Voltar ao pagamento de mana", "unknownSource": "Fonte de mana" },
+  "manaSourceSelection": {
+    "title": "Escolha uma fonte de mana",
+    "description": "Esta habilidade de mana exige sacrificar uma permanente.",
+    "sacrifice": "Sacrificar",
+    "back": "Voltar ao pagamento de mana",
+    "unknownSource": "Fonte de mana"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -71,9 +77,23 @@
   },
   "restoredAutomation": {
     "dismiss": "Fechar",
-    "noop": {"title": "Jogo salvo carregado", "summary_one": "Não foi necessário retomar a automação da pilha.", "summary_other": "Não foi necessário retomar a automação da pilha."},
-    "progressed": {"title": "Automação da pilha retomada", "summary_one": "O motor concluiu {{count}} resolução automatizada.", "summary_other": "O motor concluiu {{count}} resoluções automatizadas.", "omitted_one": "{{count}} evento intermediário foi omitido.", "omitted_other": "{{count}} eventos intermediários foram omitidos."},
-    "zeroResolutionRepair": {"title": "Automação da pilha reparada", "summary_one": "A automação salva foi reparada com segurança antes de retomar o jogo.", "summary_other": "A automação salva foi reparada com segurança antes de retomar o jogo."}
+    "noop": {
+      "title": "Jogo salvo carregado",
+      "summary_one": "Não foi necessário retomar a automação da pilha.",
+      "summary_other": "Não foi necessário retomar a automação da pilha."
+    },
+    "progressed": {
+      "title": "Automação da pilha retomada",
+      "summary_one": "O motor concluiu {{count}} resolução automatizada.",
+      "summary_other": "O motor concluiu {{count}} resoluções automatizadas.",
+      "omitted_one": "{{count}} evento intermediário foi omitido.",
+      "omitted_other": "{{count}} eventos intermediários foram omitidos."
+    },
+    "zeroResolutionRepair": {
+      "title": "Automação da pilha reparada",
+      "summary_one": "A automação salva foi reparada com segurança antes de retomar o jogo.",
+      "summary_other": "A automação salva foi reparada com segurança antes de retomar o jogo."
+    }
   },
   "resolveAllConsent": {
     "eyebrow": "Resolver tudo",
@@ -2253,8 +2273,21 @@
   "replacement": {
     "eyebrow": "Ordem de Resolução",
     "title": "Efeitos de Substituição",
-    "subtitle": "Escolha qual efeito de substituição se aplica primeiro.",
-    "candidateFallback": "Efeito de Substituição {{number}}"
+    "orderSubtitle": "Todos estes efeitos alteram como este evento acontece. Arraste para definir a ordem de aplicação — o último aplicado é o que prevalece (CR 616.1).",
+    "appliedFirst": "Aplicado primeiro (será sobrescrito)",
+    "appliedLast": "Aplicado por último — este prevalece",
+    "resultLabel": "Resultado: {{outcome}}",
+    "confirmOrder": "Confirmar ordem",
+    "dragHint": "Arraste para reordenar, ou use as setas.",
+    "chooseSubtitle": "Escolha qual efeito de substituição aplicar.",
+    "candidateFallback": "Efeito de Substituição {{number}}",
+    "orderSubtitleComposing": "Todos esses efeitos mudam como este evento acontece. Arraste para definir a ordem em que se aplicam: todos se aplicam, então a ordem muda o resultado (CR 616.1).",
+    "appliedEarlier": "Aplicado antes",
+    "appliedLater": "Aplicado depois",
+    "composesNote": "Todos os efeitos se aplicam — a ordem muda como se combinam.",
+    "moveUpNamed": "Mover {{name}} antes",
+    "moveDownNamed": "Mover {{name}} depois",
+    "positionAnnounce": "Posição {{position}} de {{total}}"
   },
   "retargetChoice": {
     "title": "Mudar Alvo",

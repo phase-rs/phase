@@ -2311,8 +2311,21 @@
   "replacement": {
     "eyebrow": "Resolution Order",
     "title": "Replacement Effects",
-    "subtitle": "Choose which replacement effect applies first.",
-    "candidateFallback": "Replacement Effect {{number}}"
+    "orderSubtitle": "These effects all change how this event happens. Drag to set the order they apply in — the last one applied is the one that takes effect (CR 616.1).",
+    "appliedFirst": "Applied first (overwritten)",
+    "appliedLast": "Applied last — this wins",
+    "resultLabel": "Result: {{outcome}}",
+    "confirmOrder": "Confirm Order",
+    "dragHint": "Drag to reorder, or use the arrows.",
+    "chooseSubtitle": "Choose which replacement effect to apply.",
+    "candidateFallback": "Replacement Effect {{number}}",
+    "orderSubtitleComposing": "These effects all change how this event happens. Drag to set the order they apply in — each one applies, so the order changes the result (CR 616.1).",
+    "appliedEarlier": "Applied earlier",
+    "appliedLater": "Applied later",
+    "composesNote": "Every effect applies — the order changes how they combine.",
+    "moveUpNamed": "Move {{name}} earlier",
+    "moveDownNamed": "Move {{name}} later",
+    "positionAnnounce": "Position {{position}} of {{total}}"
   },
   "retargetChoice": {
     "title": "Change Target",

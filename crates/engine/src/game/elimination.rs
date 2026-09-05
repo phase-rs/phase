@@ -2039,6 +2039,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             logical_zone_change_group: group,
@@ -2104,6 +2106,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.push_change_zone_iteration(pending_change_zone_iteration(
             group,
@@ -3000,6 +3004,8 @@ mod tests {
             player: PlayerId(2),
             candidate_count: 1,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         // Coupled continuation slots the resume drain would clear on a normal answer.
         state.replacement_may_cost_paused = true;
@@ -3137,6 +3143,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.push_connive_reentry(PendingConniveReentry {
             conniver: state
@@ -3188,6 +3196,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.push_batch_delivery(pending_search_found_zone_delivery(found));
         assert!(state.active_batch_delivery().is_some());
@@ -3230,6 +3240,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         let parked_found = ObjectId(77);
         state.pending_search_found_batch =
@@ -3302,6 +3314,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         let source = create_object(
             &mut state,

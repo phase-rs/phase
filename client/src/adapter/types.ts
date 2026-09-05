@@ -1968,6 +1968,22 @@ export interface ReplacementCandidateSummary {
   description: string;
 }
 
+// CR 616.1: which kind of decision a ReplacementChoice is asking for. One
+// WaitingFor serves three structurally different prompts and the candidate list
+// alone cannot distinguish them (an accept/decline pair and a two-effect
+// ordering prompt are both "two candidates"). Engine-owned — never infer this
+// from label text.
+//   Order                  - CR 616.1e: arrange competing effects. CR 616.1f
+//                            applies them in sequence, so the LAST one applied
+//                            is the one whose write survives.
+//   OptionalBranch         - CR 614.1: a "you may" yes/no; index 0 accepts,
+//                            index 1 declines. Never a sortable list.
+//   SearchFoundDestination - alternative destinations for a found card.
+export type ReplacementChoiceKind =
+  | { type: "Order" }
+  | { type: "OptionalBranch" }
+  | { type: "SearchFoundDestination" };
+
 export type EmergeSacrificeQuality =
   | { type: "Artifact" }
   | { type: "Battle" }
@@ -2080,7 +2096,7 @@ export type WaitingFor =
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[]; valid_attack_targets_by_attacker?: Record<string, AttackTarget[]>; attacker_constraints?: Record<string, CombatRequirement> } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, BlockRequirementInfo>; blocker_constraints?: Record<string, CombatRequirement> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
-  | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[] } }
+  | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[]; kind?: ReplacementChoiceKind; last_applied_decides?: boolean } }
   | { type: "EntryControllerChoice"; data: { player: PlayerId; candidates: PlayerId[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" } } }

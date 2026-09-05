@@ -1037,6 +1037,8 @@ mod tests {
             player,
             candidate_count,
             candidates,
+            kind,
+            ..
         } = &state.waiting_for
         else {
             panic!(
@@ -1047,6 +1049,13 @@ mod tests {
         };
         assert_eq!(*player, PlayerId(0));
         assert_eq!(*candidate_count, 2);
+        // CR 616.1e: two distinct competing replacements — an ordering decision,
+        // not an optional accept/decline. The frontend keys its presentation off
+        // this discriminator, so pin it here.
+        assert_eq!(
+            *kind,
+            crate::types::game_state::ReplacementChoiceKind::Order
+        );
         let descriptions: Vec<&str> = candidates.iter().map(|c| c.description.as_str()).collect();
         assert_eq!(
             descriptions.as_slice(),
