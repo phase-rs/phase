@@ -969,11 +969,28 @@ fn parse_animation_conjunct_boundary(input: &str) -> OracleResult<'_, ()> {
 /// grant the keyword twice. This peel is invoked only from
 /// `parse_pronoun_becomes_type_static`, a 6.6× smaller blast radius.
 pub(crate) fn split_animation_conjunct_clause(text: &str) -> Option<(&str, &str)> {
+    // `parse_animation_conjunct_boundary` is built from case-sensitive `tag`s, so
+    // the scan runs over an ASCII-lowered copy and the offsets it yields are
+    // mapped back onto `text`, keeping the returned slices in their original
+    // case. This is the `nom_on_lower` contract applied to a scan rather than to
+    // a single parse. `to_ascii_lowercase` is required, not incidental: it
+    // preserves byte length, which is what makes the offsets transferable —
+    // `to_lowercase` does not and must not be substituted here.
+    //
+    // No current card text reaches the capitalized form, because a conjunct
+    // boundary is mid-sentence by construction. Lowering makes that independent
+    // of which half of a `TextPair` the caller happens to pass, rather than a
+    // property of today's single call site.
+    let lower = text.to_ascii_lowercase();
     let (before, (), tail) =
-        nom_primitives::scan_preceded(text, parse_animation_conjunct_boundary)?;
-    let body = before.trim_end().trim_end_matches(',').trim_end();
+        nom_primitives::scan_preceded(&lower, parse_animation_conjunct_boundary)?;
+    let body = text[..before.len()]
+        .trim_end()
+        .trim_end_matches(',')
+        .trim_end();
+    let tail = text[lower.len() - tail.len()..].trim();
     // A line that is *only* a conjunct is not an animation with a tail.
-    (!body.is_empty()).then_some((body, tail.trim()))
+    (!body.is_empty()).then_some((body, tail))
 }
 
 /// CR 613.1f (Layer 6): map an animation conjunct tail to the keywords it
@@ -994,8 +1011,12 @@ pub(crate) fn parse_animation_conjunct_keywords(tail: &str) -> Option<Vec<Keywor
     if peek(tag::<_, _, OracleError<'_>>("\"")).parse(tail).is_ok() {
         return None;
     }
-    let keyword_text = tail.trim_end_matches('.').trim();
-    let tokens = split_token_keyword_list(keyword_text);
+    // `split_token_keyword_list` recognises only the lowercase separators
+    // (" and ", ", and ", ", "), so the tail is lowered before splitting.
+    // `map_token_keyword` already lowercases its own input, which is why this
+    // split is the only case-sensitive step left in the path.
+    let keyword_text = tail.trim_end_matches('.').trim().to_ascii_lowercase();
+    let tokens = split_token_keyword_list(&keyword_text);
     if tokens.is_empty() {
         return None;
     }
