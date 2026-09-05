@@ -7,6 +7,7 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
+use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{
@@ -291,25 +292,42 @@ fn parse_self_flash_option(
 }
 
 /// CR 702.8a + CR 601.3d: Parse a self-referential conditional flash grant of the
-/// form "~ has flash as long as <condition>" (Take for a Ride: "Take for a Ride
-/// has flash as long as you've committed a crime this turn"). The spell grants
-/// ITSELF flash — a conditional casting permission — rather than the
-/// "you may cast ~ as though it had flash" framing handled by
-/// `parse_self_flash_option`. Self-references are normalized to `~` upstream
-/// (CR 201.4b), so the subject is matched as the `~` token.
+/// form "[~|this spell] has flash as long as <condition>" (Take for a Ride:
+/// "Take for a Ride has flash as long as you've committed a crime this turn";
+/// Graveyard Shift: "This spell has flash as long as there are five or more
+/// mana values among cards in your graveyard"). The spell grants ITSELF
+/// flash — a conditional casting permission — rather than the "you may cast ~
+/// as though it had flash" framing handled by `parse_self_flash_option`. A
+/// card's own printed name normalizes to `~` upstream (an engine
+/// self-reference tokenization convention, not itself a numbered CR rule),
+/// but the generic self-reference "this spell" is deliberately excluded from that
+/// normalization (`SELF_REF_PARSE_ONLY_PHRASES` in `oracle_util.rs`), so both
+/// subject spellings are matched here directly — the same
+/// `alt((tag("~"), tag("this spell")))` idiom used by the sibling
+/// casting-restriction parsers in this file (`parse_cant_spend_mana_restriction`,
+/// `parse_negative_self_casting_restriction`). The classifier
+/// (`oracle_classifier::is_self_conditional_flash_grant`) defers both
+/// spellings past the generic static-line classifier before this function is
+/// ever reached — see that call site for why a naive "has " static reading
+/// would silently produce an inert grant.
 ///
 /// As with the sibling conditional-flash arm, an unrecognized predicate refuses
 /// to emit the option entirely (the `?` on `parse_restriction_condition`): CR
 /// 601.3d only grants flash "if those conditions are met", so degrading to an
 /// unconditional permission would be strictly more permissive than the printed
-/// text. The bare "~ has flash" form (no condition) emits an unconditional
-/// permission.
+/// text. The bare "~ has flash" / "this spell has flash" form (no condition)
+/// emits an unconditional permission.
 fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
     // `body_lower` is already lowercase, so parse it directly with combinators
     // (no `nom_on_lower` case-bridge needed — the condition text is delegated to
     // `parse_restriction_condition`, which lowercases internally).
+    //
+    // Word-boundary guard on "flash" (mirrors `parse_object_recipient_pronoun`'s
+    // idiom): without it, "flash" also matches as a prefix of "flashback",
+    // wrongly claiming "~ has flashback {2}{U}" as a bare unconditional grant
+    // with garbage leftover text.
     let (rest, _) = preceded(
-        tag::<_, _, OracleError<'_>>("~ has flash"),
+        nom_primitives::parse_self_spell_has_flash_prefix,
         opt(tag(" as long as ")),
     )
     .parse(body_lower)
@@ -2255,6 +2273,64 @@ Trample";
             "bare '~ has flash' must be unconditional, got {:?}",
             option.condition
         );
+    }
+
+    /// Word-boundary regression: "flash" is a literal prefix of "flashback",
+    /// so a naive `tag(" has flash")` would wrongly match "~ has flashback"
+    /// and try to parse the leftover "back {2}{u}" as a restriction condition
+    /// instead of declining so the real flashback-keyword-grant static parser
+    /// handles the line.
+    #[test]
+    fn spell_self_has_flash_word_boundary_excludes_flashback() {
+        assert!(
+            parse_spell_casting_option_line("~ has flashback {2}{u}.", "Some Spell").is_none(),
+            "'~ has flashback' must NOT be claimed as a bare self-flash grant"
+        );
+    }
+
+    /// Graveyard Shift: "This spell has flash as long as there are five or more
+    /// mana values among cards in your graveyard." The generic "this spell"
+    /// subject (not the card's own name, so it is NOT normalized to `~` — see
+    /// `SELF_REF_PARSE_ONLY_PHRASES`) must be matched directly, and the
+    /// graveyard-mana-value-diversity condition must attach as a
+    /// `QuantityComparison` over `ObjectCountDistinct[ManaValue]`.
+    /// CR 702.8a (Flash); CR 601.3d (conditional flash); CR 202.3 (mana value).
+    #[test]
+    fn spell_this_spell_has_flash_conditional_on_graveyard_mana_values() {
+        let option = parse_spell_casting_option_line(
+            "This spell has flash as long as there are five or more mana values among cards in your graveyard.",
+            "Graveyard Shift",
+        )
+        .expect("'this spell has flash as long as ...' should parse");
+        assert!(matches!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash
+        ));
+        match option.condition {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountDistinct { filter, qualities },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            }) => {
+                assert_eq!(
+                    qualities,
+                    vec![crate::types::ability::SharedQuality::ManaValue]
+                );
+                let crate::types::ability::TargetFilter::Typed(filter) = filter else {
+                    panic!("expected Typed graveyard filter");
+                };
+                assert_eq!(
+                    filter.controller,
+                    Some(crate::types::ability::ControllerRef::You)
+                );
+            }
+            other => {
+                panic!("expected ObjectCountDistinct[ManaValue] GE 5 condition, got {other:?}")
+            }
+        }
     }
 
     #[test]
