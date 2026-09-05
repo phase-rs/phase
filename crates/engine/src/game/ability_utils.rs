@@ -20137,4 +20137,103 @@ mod tests {
              clause (not something else) is the discriminator"
         );
     }
+
+    /// CR 608.2d + CR 603.7d: the seat asked to announce a delayed payload's
+    /// "may" is the player the clause NAMES, not the delayed ability's
+    /// controller (issue #8439, Arcane Denial).
+    ///
+    /// Runtime companion to `parser::oracle_effect::tests::
+    /// subject_anchored_delayed_may_binds_the_named_player_not_the_caster`,
+    /// which pins the parsed shape. Driven end-to-end through
+    /// `build_resolved_from_def_with_targets` (this module) and
+    /// `parent_target_controller` (this module) — the two hops the stamp has to
+    /// survive — rather than a hand-built ability, so it fails if either half of
+    /// the fix is reverted: the assembly seam must leave `optional` on the
+    /// payload and stamp `optional_player`, and the recipient authority must
+    /// honour the stamp.
+    ///
+    /// It lives HERE rather than beside either the parser test or the authority
+    /// it calls, because two independent source censuses pin
+    /// `optional_prompt_player` call sites and this is the only home neither
+    /// miscounts:
+    ///   * `f2c_the_cr_603_5_conjunct_set_has_one_production_assembler` scans the
+    ///     whole crate and excludes inline `#[cfg(test)]` module spans (this
+    ///     one) but not a `mod.rs`-declared `tests.rs`;
+    ///   * `the_cr_603_5_prompt_census_is_pinned_so_a_sixth_producer_is_a_counted_event`
+    ///     counts every code-half occurrence in `game/effects/mod.rs` with no
+    ///     test exclusion at all.
+    ///
+    /// Neither guard was weakened to place this test.
+    ///
+    /// CR 603.7d fixes the delayed ability's controller as the caster, which is
+    /// exactly why the pre-fix routing was wrong rather than coincidentally so.
+    /// The matched negative below differs from the positive in exactly the stamp
+    /// and reproduces that pre-fix seat.
+    #[test]
+    fn subject_anchored_delayed_may_prompts_the_named_player_not_the_controller() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Counter target spell. Its controller may draw up to two cards at the beginning of \
+             the next turn's upkeep.\nYou draw a card at the beginning of the next turn's upkeep.",
+            "Arcane Denial",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let counter = parsed.abilities.first().expect("expected a spell ability");
+        let theirs = counter
+            .sub_ability
+            .as_deref()
+            .expect("expected the countered controller's delayed half");
+        let crate::types::ability::Effect::CreateDelayedTrigger {
+            effect: payload, ..
+        } = &*theirs.effect
+        else {
+            panic!("expected a delayed trigger, got {:#?}", theirs.effect);
+        };
+
+        let mut state = GameState::new_two_player(8439);
+        let caster = state.players[0].id;
+        let countered_controller = state.players[1].id;
+        assert_ne!(
+            caster, countered_controller,
+            "reach-guard: the two seats must differ or this test cannot discriminate"
+        );
+        // CR 608.2h: the countered spell sits in its owner's graveyard by the
+        // time the delayed ability resolves — the state the anaphor must still
+        // resolve against.
+        let countered_spell = crate::game::zones::create_object(
+            &mut state,
+            CardId(8439),
+            countered_controller,
+            "Countered Spell".to_string(),
+            Zone::Graveyard,
+        );
+        let mut delayed = build_resolved_from_def_with_targets(
+            payload,
+            ObjectId(0),
+            caster,
+            vec![TargetRef::Object(countered_spell)],
+        );
+        assert!(
+            delayed.optional,
+            "reach-guard: the resolved delayed ability must still carry the may, or the \
+             assertion below is about nothing"
+        );
+
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&state, &delayed),
+            countered_controller,
+            "CR 608.2d: the countered spell's controller announces the may and draws"
+        );
+
+        // Matched negative on the same instrument, differing in exactly the
+        // stamp — the shape the parser emitted before the fix.
+        delayed.optional_player = None;
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&state, &delayed),
+            caster,
+            "without the stamp the gate falls back to the ability's controller — the \
+             wrong seat this change exists to correct"
+        );
+    }
 }

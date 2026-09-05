@@ -1489,6 +1489,39 @@ fn bind_chosen_number_anaphor(def: &mut AbilityDefinition, prior: &[AbilityDefin
     }
 }
 
+/// CR 608.2d + CR 603.7d: Which player announces a delayed-trigger payload's
+/// "may", when the clause names that player instead of leaving the choice with
+/// the ability's controller.
+///
+/// The subject grammar (`oracle_effect::subject`) lowers a subject-anchored
+/// modal — "its controller may …", "its owner may …", "that creature's
+/// controller may …" — to `optional: true` plus a parent-target player anaphor
+/// in the effect's own player slot. That anaphor IS the actor: CR 608.2d has the
+/// announcing player make the choice while the effect is applied, and CR 603.7d
+/// fixes the delayed ability's *controller* as the creating spell's controller,
+/// so the two differ exactly when the clause names someone else.
+///
+/// Returns the anaphor to stamp as `AbilityDefinition::optional_player` (the
+/// engine's single authority for "who receives this may", consumed by
+/// `game::effects::optional_prompt_player`), or `None` for a controller-held
+/// "may" — including a payload that is not optional at all.
+///
+/// Deliberately narrow: only the two parent-target PLAYER anaphors qualify.
+/// `TargetFilter::Player` is an announced target and `Controller` is the
+/// wrapper's own controller; neither shifts the announcing player away from the
+/// existing lift.
+fn delayed_payload_optional_actor(def: &AbilityDefinition) -> Option<TargetFilter> {
+    if !def.optional || def.optional_player.is_some() {
+        return None;
+    }
+    match def.effect.target_filter()? {
+        actor @ (TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner) => {
+            Some(actor.clone())
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -2755,7 +2788,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // #4956) would re-check that creation-time "if you do" signal when
                 // the delayed trigger fires at end step and skip the return.
                 let lifted_condition = std::mem::take(&mut inner.condition);
-                let lifted_optional = std::mem::replace(&mut inner.optional, false);
+                // CR 603.7d + CR 608.2d: The lift above is correct only for a
+                // "may" the DELAYED TRIGGER'S OWN CONTROLLER holds — CR 603.7d
+                // makes that the player who controlled the creating spell, so
+                // hoisting the flag onto the wrapper asks the right player at a
+                // harmlessly earlier moment. It is wrong for a subject-anchored
+                // "may" whose actor the clause NAMES as a parent-target player
+                // anaphor ("Counter target spell. Its controller may draw up to
+                // two cards at the beginning of the next turn's upkeep" — Arcane
+                // Denial; "its owner may …" is the same shape). CR 608.2d puts
+                // that announcement inside the delayed ability's own resolution,
+                // and the announcing player is the named one, not the wrapper's
+                // controller. Keep the flag on the payload and stamp the actor so
+                // `effects::optional_prompt_player` routes the prompt there.
+                let lifted_optional = match delayed_payload_optional_actor(&inner) {
+                    Some(actor) => {
+                        inner.optional_player = Some(actor);
+                        false
+                    }
+                    None => std::mem::replace(&mut inner.optional, false),
+                };
                 let lifted_optional_for = std::mem::take(&mut inner.optional_for);
                 let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
                 let lifted_player_scope = std::mem::take(&mut inner.player_scope);
