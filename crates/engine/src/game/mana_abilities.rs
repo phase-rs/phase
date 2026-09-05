@@ -907,7 +907,17 @@ pub fn activate_mana_ability(
             "Phased-out permanents cannot activate abilities (CR 702.26b)".to_string(),
         ));
     }
-    if source.controller != player {
+    // CR 602.2 + CR 108.4a: the executor counterpart of the readiness gate in
+    // `mana_ability_ready_without_simulation_gated`. `GameAction::ActivateAbility`
+    // on a mana ability is routed straight here by `engine.rs` rather than through
+    // `casting::handle_activate_ability`, so this is where a directly-submitted
+    // mana activation is actually authorized and it must apply the same rule.
+    // CR 108.4: a card in a hand, graveyard, library or exile is neither a
+    // permanent nor a spell and so has no controller; CR 108.4a directs the ask to
+    // its owner. `controller_or_owner` is the single authority for that selection
+    // and keeps the CR 109.4c command-zone emblem on its controller. This runs
+    // ahead of the `activation_zone` check below, so it sees every zone.
+    if source.controller_or_owner() != player {
         return Err(EngineError::NotYourPriority);
     }
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
