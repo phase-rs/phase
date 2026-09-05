@@ -2160,13 +2160,19 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
             base.saturating_pow(exp)
         }
         // CR 107.1c + CR 608.2d: Generic resolvers see UpTo transparently as
-        // its upper bound — the 4 effect-specific resolvers (Draw,
-        // Sacrifice, Discard, SearchLibrary) peel the wrapper via
-        // `QuantityExpr::peel_up_to` to extract the "may pick fewer" flag
-        // before reaching arithmetic. Treating it transparently here keeps
-        // legacy serde round-trips correct and makes accidental composition
-        // (e.g., `DivideRounded { inner: UpTo { max: ... } }`) collapse to a
-        // sensible bound rather than panicking.
+        // its upper bound. Extracting the "may pick fewer" permission is the
+        // caller's job, via `QuantityExpr::peel_up_to`, BEFORE the count reaches
+        // arithmetic — this fold returns an `i32` and structurally cannot carry
+        // the flag. Enumerating the resolvers that do so here has already gone
+        // stale once (the pre-#8543 list named `Draw`, which did not peel, and
+        // omitted several that did), so grep for the callers instead:
+        //
+        //     grep -rn "\.peel_up_to()" crates/engine/src/
+        //
+        // Treating it transparently here keeps legacy serde round-trips correct
+        // and makes accidental composition (e.g.,
+        // `DivideRounded { inner: UpTo { max: ... } }`) collapse to a sensible
+        // bound rather than panicking.
         QuantityExpr::UpTo { max } => recurse(max),
         // "The difference between A and B" is an unsigned-magnitude Oracle
         // templating convention — it has no dedicated Comprehensive Rules

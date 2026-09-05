@@ -826,6 +826,7 @@ mod issue_841_selvala_explorer_returned;
 mod issue_8455_town_greeter;
 mod issue_847_braids_cabal_minion;
 mod issue_852_torrential_gearhulk;
+mod issue_8543_up_to_draw_count_choice;
 mod issue_859_weathered_wayfarer;
 mod issue_860_luminarch_aspirant;
 mod issue_861_first_sliver_cascade;
