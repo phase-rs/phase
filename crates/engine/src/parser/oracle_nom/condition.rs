@@ -10676,8 +10676,8 @@ pub(crate) fn match_when_you_do(i: &str) -> OracleResult<'_, ()> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, CountScope, PtStat, PtValueScope, RoundingMode, TriggerCondition,
-        TypeFilter, TypedFilter, ZoneRef,
+        CardTypeSetSource, ControllerRef, CountScope, PtStat, PtValueScope, RoundingMode,
+        TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -15208,6 +15208,38 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 4 },
             } => {}
             other => panic!("expected zone-scoped DistinctCardTypes GE 4, got {other:?}"),
+        }
+    }
+
+    /// CR 202.3 + CR 611.3a: the mana-value-diversity sibling of Delirium — SNC's
+    /// "there are five or more mana values among cards in your graveyard" (Aven
+    /// Heartstabber, Snooping Newsie, Syndicate Infiltrator, Graveyard Shift, and
+    /// their Alchemy variants). Unlike Delirium's `DistinctCardTypes`, this counts
+    /// distinct mana VALUES via the generic `ObjectCountDistinct` axis.
+    #[test]
+    fn test_there_are_mana_values_graveyard_diversity() {
+        let (rest, c) = parse_inner_condition(
+            "there are five or more mana values among cards in your graveyard",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountDistinct { filter, qualities },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => {
+                assert_eq!(qualities, vec![SharedQuality::ManaValue]);
+                assert_eq!(filter.extract_in_zone(), Some(Zone::Graveyard));
+                let TargetFilter::Typed(filter) = filter else {
+                    panic!("expected Typed graveyard filter");
+                };
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected ObjectCountDistinct[ManaValue] GE 5, got {other:?}"),
         }
     }
 

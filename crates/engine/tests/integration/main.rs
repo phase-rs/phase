@@ -909,6 +909,7 @@ mod mana_drain_refund;
 mod mana_payment_preview;
 mod mana_role_fixture_migration;
 mod mana_target_recipient_and_count_source;
+mod mana_values_among_graveyard_condition;
 mod manifest_dread_that_creature_anaphor;
 mod maraxus_team_pump_anthem;
 mod martial_impetus_other_attacker_exclusion_6017;

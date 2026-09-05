@@ -201,6 +201,29 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return true;
     }
 
+    // CR 702.8a + CR 601.3d: "[~|this spell] has flash[ as long as <condition>]"
+    // is a self-referential Flash CASTING PERMISSION
+    // (`SpellCastingOption::AsThoughHadFlash`, built by
+    // `oracle_casting::parse_self_has_flash_option`), not a continuous keyword
+    // static — even though it also matches the generic "has " arm of
+    // `STATIC_CONTAINS_PATTERNS`. Left unclassified, Priority 7 would lower it
+    // to `StaticDefinition { affected: SelfRef, modifications:
+    // [AddKeyword(Flash)] }`, which can never actually apply: CR 611.3b makes
+    // a static's continuous effect apply while its source is on the
+    // battlefield OR in "the appropriate zone", but this engine's
+    // `for_each_static_effect_source` (an implementation choice, not itself a
+    // numbered rule) only indexes continuous-effect SOURCES from the
+    // battlefield and command zone, so a Hand-zone spell's own self-
+    // referential static is never visited. That produces a "supported but
+    // inert" card — the parser reports a non-empty static while the printed
+    // permission never grants instant-speed casting. Deferring here routes
+    // the line past
+    // Priority 7 to Priority 8e (`parse_spell_casting_option_line`), the only
+    // path that actually authorizes the cast.
+    if is_self_conditional_flash_grant(lower) {
+        return true;
+    }
+
     if is_self_spell_cost_modification(lower) {
         return false;
     }
@@ -218,6 +241,18 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         || scan_contains(lower, "until end of turn")
         || scan_contains(lower, "until your next turn")
         || scan_contains(lower, "this turn")
+}
+
+/// CR 702.8a + CR 601.3d: "[~|this spell] has flash" prefix — see the call
+/// site in `should_defer_spell_to_effect` for why this must be deferred past
+/// the static classifier. `this spell` is deliberately excluded from the `~`
+/// self-reference normalization (`SELF_REF_PARSE_ONLY_PHRASES` in
+/// `oracle_util.rs`), so both spellings are matched directly here — the same
+/// `alt((tag("~"), tag("this spell")))` idiom `oracle_casting.rs` already uses
+/// for sibling self-referential casting predicates
+/// (`parse_cant_spend_mana_restriction`, `parse_negative_self_casting_restriction`).
+fn is_self_conditional_flash_grant(lower: &str) -> bool {
+    nom_primitives::parse_self_spell_has_flash_prefix(lower).is_ok()
 }
 
 fn is_spell_resolution_next_untap_restriction(lower: &str) -> bool {
@@ -1211,6 +1246,39 @@ mod tests {
     fn unquoted_cant_block_static_unchanged() {
         // No quotes → fast path → classification unchanged.
         assert!(is_static_pattern("creatures you control can't block"));
+    }
+
+    #[test]
+    fn self_conditional_flash_grant_matches_tilde_and_this_spell() {
+        assert!(is_self_conditional_flash_grant(
+            "~ has flash as long as you've committed a crime this turn."
+        ));
+        assert!(is_self_conditional_flash_grant(
+            "this spell has flash as long as there are five or more mana values \
+             among cards in your graveyard."
+        ));
+        assert!(is_self_conditional_flash_grant("~ has flash."));
+    }
+
+    #[test]
+    fn self_conditional_flash_grant_word_boundary_excludes_flashback() {
+        // Regression: "flash" is a literal prefix of "flashback", so a naive
+        // `tag(" has flash")` would wrongly claim a real keyword-grant line
+        // like "~ has flashback {2}{U}" and defer it away from the static
+        // classifier that actually knows how to parse it.
+        assert!(!is_self_conditional_flash_grant("~ has flashback {2}{u}."));
+        assert!(!is_self_conditional_flash_grant(
+            "this spell has flashback {2}{u}."
+        ));
+    }
+
+    #[test]
+    fn should_defer_spell_to_effect_defers_self_conditional_flash_but_not_flashback() {
+        assert!(should_defer_spell_to_effect(
+            "this spell has flash as long as there are five or more mana values \
+             among cards in your graveyard."
+        ));
+        assert!(!should_defer_spell_to_effect("~ has flashback {2}{u}."));
     }
 
     #[test]
