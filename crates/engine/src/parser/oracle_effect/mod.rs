@@ -23172,12 +23172,32 @@ fn apply_their_library_reveal_anchor(effect: &mut Effect, anchor: &TargetFilter,
     let Effect::RevealTop { player, .. } = effect else {
         return;
     };
-    if matches!(
-        *player,
-        TargetFilter::Controller | TargetFilter::Player | TargetFilter::ParentTargetController
-    ) {
+    if is_repairable_library_owner(player) {
         *player = anchor.clone();
     }
+}
+
+/// CR 608.2c: The library-owner bindings a "their library" reveal can carry
+/// BEFORE an anchor repair — the ability-controller default plus the
+/// relative-player anaphors `that_player_library_filter` produces. The anchor is
+/// the more specific authority in every case, and an explicit "your library"
+/// reveal never reaches here (both callers guard on the possessive first).
+///
+/// The anaphor arms exist because #8498 made the dig recognizer bind the named
+/// owner instead of falling through to `TargetFilter::Controller`: a "their
+/// library" reveal now arrives as `ParentTarget`/`TriggeringPlayer`/
+/// `ScopedPlayer`, where before the fail-open default made it `Controller`. Both
+/// anchors would silently stop firing without these arms.
+fn is_repairable_library_owner(player: &TargetFilter) -> bool {
+    matches!(
+        player,
+        TargetFilter::Controller
+            | TargetFilter::Player
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::ScopedPlayer
+    )
 }
 
 /// CR 109.4: Map a player-reference `TargetFilter` to the `ControllerRef`
@@ -32277,10 +32297,10 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
     }
 
     // CR 108.3 + CR 400.3 + CR 608.2c: after an owner's-library shuffle,
-    // a following "their library" reveal refers to that same owner. The
-    // generic reveal parser defaults subjectless reveals to the controller, so
-    // repair only the owner-shuffle chain and leave explicit "your library"
-    // reveals untouched.
+    // a following "their library" reveal refers to that same owner. The generic
+    // reveal parser binds "their library" to the relative-player anaphor (or, for
+    // a subjectless reveal, to the controller), so repair only the owner-shuffle
+    // chain and leave explicit "your library" reveals untouched.
     let mut saw_owner_shuffle = false;
     let mut current = Some(def);
     while let Some(node) = current {
@@ -32289,13 +32309,7 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
                 saw_owner_shuffle = true;
             }
             Effect::RevealTop { player, .. }
-                if saw_owner_shuffle
-                    && matches!(
-                        *player,
-                        TargetFilter::Controller
-                            | TargetFilter::Player
-                            | TargetFilter::ParentTargetController
-                    ) =>
+                if saw_owner_shuffle && is_repairable_library_owner(player) =>
             {
                 *player = TargetFilter::ParentTargetOwner;
             }
