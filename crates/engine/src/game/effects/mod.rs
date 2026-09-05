@@ -164,6 +164,7 @@ pub mod mill;
 pub mod monstrosity;
 pub mod myriad;
 pub mod note_mana_spent;
+pub mod open_booster_pack;
 pub mod opponent_guess;
 pub mod overload;
 pub mod pair_with;
@@ -5372,6 +5373,7 @@ pub fn resolve_effect(
         Effect::FlipPermanent { .. } => flip_permanent::resolve(state, ability, events),
         Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
         Effect::SearchOutsideGame { .. } => search_outside_game::resolve(state, ability, events),
+        Effect::OpenBoosterPack { .. } => open_booster_pack::resolve(state, ability, events),
         Effect::Seek { .. } => seek::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::RevealFromHand { .. } => reveal_from_hand::resolve(state, ability, events),
@@ -10873,6 +10875,9 @@ pub fn resolve_ability_chain(
         // every instruction, and a new top-level resolution cannot inherit a
         // prior resolution's "that kind" if no such instruction is reached.
         state.chosen_counter_kind_this_resolution = None;
+        // CR 608.2d: same reasoning, one axis over — a new top-level
+        // resolution cannot inherit a prior resolution's announced colour.
+        state.chosen_color_this_resolution = None;
         // CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
         // `apply_parent_chain_context` already consumes this at the very next
         // parent->child hand-off after a Dig/ChooseFromZone/RevealHand sets

@@ -3626,7 +3626,7 @@ pub(super) fn push_clause_chunk(
 // Leading-duration conjunct expansion (issue #7923)
 // ---------------------------------------------------------------------------
 
-/// CR 608.2c (:2797) — "read the whole text and apply the rules of English".
+/// CR 608.2c — "read the whole text and apply the rules of English".
 ///
 /// True when this conjunct's LEADING TOKEN IS A CONJUGATED THIRD-PERSON FORM of a
 /// recognized clause-starting verb — the exact shape `starts_clause_text_or_conjugated`
@@ -3673,7 +3673,7 @@ fn recovered_conjunct_continues_prior_subject(text: &str) -> bool {
     !starts_clause_text(t) && starts_clause_text_or_conjugated(t)
 }
 
-/// CR 603.1 (:2559) + CR 603.7 (:2614): a boundary that severs a mid-sentence
+/// CR 603.1 + CR 603.7: a boundary that severs a mid-sentence
 /// delayed-trigger head from its body does not divide two independent instructions —
 /// it divides one printed "[At] [event], [effect]" in half. Splitting there emits the
 /// trigger's body as a one-shot the card never authorizes (measured: Giant Oyster gains
@@ -3865,7 +3865,7 @@ fn chunk_end_offset(body: &str, sub: &[ClauseChunk], k: usize) -> Option<usize> 
     Some(cursor)
 }
 
-/// CR 608.2c + CR 611.2a (:2797, :2908): a leading duration states the lifetime of
+/// CR 608.2c + CR 611.2a: a leading duration states the lifetime of
 /// the WHOLE instruction it prefixes, not only of its first conjunct.
 ///
 /// `starts_prefix_clause` latches `"until "` / `"for as long as "` (as it also latches
@@ -5674,7 +5674,9 @@ pub(super) fn apply_clause_continuation(
             // `parse_dig_library_owner` lifts this materialized `ExileTop` into a
             // per-player `player_scope: All` fan-out, the same shape the direct
             // "exile the top card of each player's library" path gets via the lift
-            // in `parse_effect_chain_ir`. This is the symmetric materialization
+            // in `parse_effect_chain_ir`. CR 102.2 + CR 102.3: the `Opponent`
+            // owner marker ("each opponent's library", Lobelia) lifts the same way
+            // into `player_scope: Opponent`. This is the symmetric materialization
             // seam: the direct path lifts where `parse_exile_ast` produces its
             // `ExileTop`, and this look-then-exile path lifts where the `Dig` is
             // back-patched into one. The lift survives assembly because this
@@ -5684,7 +5686,7 @@ pub(super) fn apply_clause_continuation(
             // detached by `split_player_scope_chain` and runs once for the
             // controller over the union of exiled cards.
             let d = &mut defs[bound_index];
-            super::lift_each_player_exile_top_scope(&mut d.effect, &mut d.player_scope);
+            super::lift_distributive_exile_top_scope(&mut d.effect, &mut d.player_scope);
         }
         // CR 702.75a + CR 406.3: "exile one of them face down" patches the
         // preceding private `Dig` into the Hideaway shape — the controller
@@ -6082,7 +6084,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
             Some(ContinuationAst::SearchDestination {
                 destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
-                // CR 110.2a (docs/MagicCompRules.txt:618): the SAME span
+                // CR 110.2a: the SAME span
                 // (`full_lower`) as the single-literal `scan_contains` this
                 // replaces — no widening. `You`-wins makes the fold
                 // byte-for-byte non-regressive. This seam has no object filter
@@ -6999,6 +7001,8 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        // CR 400.11: reads a pack from outside the game, never a `Dig` antecedent.
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }
         | Effect::Reveal { .. }
@@ -8227,6 +8231,7 @@ fn parse_choose_and_sacrifice_rest_followup(lower: &str) -> Option<ContinuationA
             opt(tag::<_, _, E>("then ")),
             alt((
                 parse_bare_choose_and_sacrifice_rest_filter,
+                parse_not_chosen_this_way_choose_and_sacrifice_rest_filter,
                 parse_explicit_choose_and_sacrifice_rest_filter,
             )),
         ),
@@ -8243,6 +8248,33 @@ fn parse_bare_choose_and_sacrifice_rest_filter(
     let (input, _) =
         alt((tag::<_, _, OracleError<'_>>("sacrifices"), tag("sacrifice"))).parse(input)?;
     let (input, _) = tag(" the rest").parse(input)?;
+    Ok((input, None))
+}
+
+/// CR 608.2c: "[each player] sacrifice[s] all `<domain>` [they/you/that
+/// player] control[s] not chosen this way" — a fully-explicit but
+/// semantically bare sweep sentence (The Eternal Wanderer's −4: "Each player
+/// sacrifices all creatures they control not chosen this way"). The trailing
+/// "not chosen this way" anaphor names exactly the set `ChooseAndSacrificeRest`
+/// already excludes (CR 608.2c: apply the rules of English — later text
+/// clarifies, rather than overriding, earlier text), so this folds to the SAME
+/// bare-sweep outcome (`None`) as "sacrifice the rest" — never a NEW filter
+/// constraint. Sibling of [`parse_explicit_choose_and_sacrifice_rest_filter`]'s
+/// "all other `<domain>`" shape: that arm requires "other" and narrows the
+/// swept domain; this one requires "not chosen this way" and narrows nothing,
+/// since "not chosen this way" is not a domain qualifier — it is a restatement
+/// of the choose step's own membership test.
+fn parse_not_chosen_this_way_choose_and_sacrifice_rest_filter(
+    input: &str,
+) -> Result<(&str, Option<TargetFilter>), nom::Err<OracleError<'_>>> {
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("each player ")).parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("sacrifices all "),
+        tag("sacrifice all "),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((parse_nonland_permanent_domain, parse_creature_domain)).parse(input)?;
+    let (input, _) = tag(" not chosen this way").parse(input)?;
     Ok((input, None))
 }
 
@@ -14455,7 +14487,7 @@ mod tests {
 mod leading_duration_guard_tests_7923 {
     use super::*;
 
-    /// **V-U2d unit half — `[NEW-UNIT]`.** CR 608.2c (`docs/MagicCompRules.txt:2797`).
+    /// **V-U2d unit half — `[NEW-UNIT]`.** CR 608.2c.
     ///
     /// Anchored against MISCLASSIFICATION of a new helper, not against BASE_SHA
     /// (the helper does not exist there). It pins guard 1's ACTUAL property —
@@ -14547,7 +14579,7 @@ mod leading_duration_guard_tests_7923 {
         }
     }
 
-    /// **V-U2f unit half — `[NEW-UNIT]`.** CR 603.1 (`:2559`) + CR 603.7 (`:2614`).
+    /// **V-U2f unit half — `[NEW-UNIT]`.** CR 603.1 + CR 603.7.
     ///
     /// G8: the negative here is UNIT-LEVEL, not a production boundary — corpus-wide
     /// exactly ONE head reaching guard 2 contains "at the beginning of" (Giant

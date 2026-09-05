@@ -4488,7 +4488,7 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
     if !flatten_targets_in_chain(ability).is_empty() {
         return None;
     }
-    // CR 603.4 (verified docs/MagicCompRules.txt:2588): an entry-level
+    // CR 603.4: an entry-level
     // intervening-if is rechecked per entry at resolution and skips the effect
     // once it flips. The batch path does not recheck per entry, so refuse to
     // group any entry carrying one — it becomes a singleton run and falls back

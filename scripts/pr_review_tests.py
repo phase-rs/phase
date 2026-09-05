@@ -3287,25 +3287,108 @@ class PrReviewTests(unittest.TestCase):
         parse_step = workflow.split("- name: Parse-detail diff vs base baseline", 1)[1]
         self.assertNotIn("PAYLOAD_BASE_SHA", parse_step)
 
-    def test_gate_a_actual_success_output_is_sha_bound(self) -> None:
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+    def _rev_parse(self, rev: str) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", rev],
             cwd=pr_review.REPO_ROOT,
             check=True,
             text=True,
             capture_output=True,
         ).stdout.strip()
-        result = subprocess.run(
-            [str(pr_review.REPO_ROOT / "scripts/check-parser-combinators.sh"), head],
+
+    def _run_parser_gate(self, base: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            [str(pr_review.REPO_ROOT / "scripts/check-parser-combinators.sh"), base],
+            cwd=pr_review.REPO_ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_gate_a_actual_success_output_is_sha_bound(self) -> None:
+        """A real base..head window prints the SHA-bound PASS evidence line.
+
+        The window is `HEAD~1..HEAD` — a genuine range — rather than `HEAD`
+        against itself. `base == head` names an empty range, which the gate now
+        refuses to certify (see the companion test below), so it is the wrong
+        window to assert success on.
+
+        The match is per-line (`re.MULTILINE`). The gate prints `Gate G` before
+        `Gate A`, so a whole-string `^...$` match can never succeed no matter
+        what the gate emits; the previous anchoring made this assertion
+        unsatisfiable rather than strict.
+        """
+        head = self._rev_parse("HEAD")
+        base = self._rev_parse("HEAD~1")
+        result = self._run_parser_gate(base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stdout,
+            rf"(?m)^Gate A PASS head={re.escape(head)} base={re.escape(base)}$",
+        )
+
+    def test_gate_a_pass_line_is_the_line_pr_review_matches(self) -> None:
+        """The emitted evidence line is the one the review tool parses.
+
+        Two independent readers of one format drift silently. Asserting the
+        real gate output against `pr_review`'s own pattern is what makes the
+        format a contract rather than a coincidence.
+        """
+        head = self._rev_parse("HEAD")
+        base = self._rev_parse("HEAD~1")
+        result = self._run_parser_gate(base)
+        match = re.search(
+            r"(?m)^Gate A PASS head=([0-9a-f]{40}) base=([0-9a-f]{40})$",
+            result.stdout,
+        )
+        self.assertIsNotNone(match, result.stdout)
+        assert match is not None  # narrowing for type checkers
+        self.assertEqual(match.group(1), head)
+        self.assertEqual(match.group(2), base)
+
+    def test_gate_a_refuses_to_certify_an_unknowable_window(self) -> None:
+        """`base == head` with nothing staged scans zero lines, so it cannot PASS.
+
+        This is the defect the gate change addresses: an empty range plus an
+        empty index reads no input, and printing the same green as a real scan
+        reports a verdict the run never earned.
+
+        The exit-3 path is reachable only with `GIT_INDEX_FILE` unset — setting
+        it selects the pre-commit branch — so this case necessarily reads the
+        real index, which belongs to whoever runs the suite. The assertions are
+        therefore split: the diagnostic contract is asserted on a clean index,
+        and the invariant that holds in EVERY index state is asserted always.
+        See the companion test for a deterministic staged scan.
+        """
+        head = self._rev_parse("HEAD")
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--", "crates/engine/src/parser"],
             cwd=pr_review.REPO_ROOT,
             check=True,
             text=True,
             capture_output=True,
-        )
-        self.assertRegex(
-            result.stdout.strip(),
-            rf"^Gate A PASS head={re.escape(head)} base={re.escape(head)}$",
-        )
+        ).stdout.strip()
+        result = self._run_parser_gate(head)
+
+        # Holds regardless of what the runner has staged: the evidence line is
+        # never emitted except on a clean exit. A staged violation exits 1, so
+        # requiring exit 0 here would report a false red about the runner's
+        # index rather than about the gate.
+        if re.search(r"(?m)^Gate A PASS head=", result.stdout):
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        if staged:
+            return
+
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertNotRegex(result.stdout, r"(?m)^Gate A PASS head=")
+        # The diagnostic is the deliverable of exit 3, not a courtesy: a bare
+        # non-zero exit would leave the caller unable to act. Assert the parts
+        # that make it actionable, on the stream the gate writes them to.
+        self.assertIn("Gate A CANNOT ANSWER", result.stderr)
+        self.assertIn(head, result.stderr)
+        self.assertIn("cannot tell clean parser work from parser work it never saw", result.stderr)
+        self.assertIn("scripts/check-parser-combinators.sh", result.stderr)
 
     def test_parse_diff_base_selects_non_head_parent_and_never_falls_back(self) -> None:
         script = pr_review.REPO_ROOT / "scripts/parse-diff-base.sh"

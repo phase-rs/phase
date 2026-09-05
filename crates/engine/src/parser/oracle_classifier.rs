@@ -117,7 +117,7 @@ pub(crate) fn is_spells_alternative_cost_pattern(lower: &str) -> bool {
 /// "You may collect evidence N rather than pay the mana cost for [filter]
 /// spells you cast." Conspiracy Unraveler class. Separate from
 /// `is_spells_alternative_cost_pattern` because the verb is "collect evidence",
-/// not "pay". Verified: CR 118.9 (docs/MagicCompRules.txt:1014).
+/// not "pay". Verified: CR 118.9.
 pub(crate) fn is_collect_evidence_alt_cost_pattern(lower: &str) -> bool {
     lower_starts_with(lower, "you may collect evidence ")
         && scan_contains(lower, "rather than pay")
@@ -128,7 +128,7 @@ pub(crate) fn is_collect_evidence_alt_cost_pattern(lower: &str) -> bool {
 /// CR 107.4f: K'rrik-class payment substitution — "For each {C} in a cost,
 /// you may pay 2 life rather than pay that mana." Routes to
 /// `parse_pay_life_as_colored_mana`.
-/// Verified: CR 107.4f (docs/MagicCompRules.txt:507).
+/// Verified: CR 107.4f.
 pub(crate) fn is_pay_life_as_colored_mana_pattern(lower: &str) -> bool {
     lower_starts_with(lower, "for each {")
         && scan_contains(lower, "in a cost")
@@ -142,7 +142,7 @@ pub(crate) fn is_pay_life_as_colored_mana_pattern(lower: &str) -> bool {
 /// optional leading "as long as " gate (New Perspectives); the lowering
 /// (`parse_alternative_keyword_cost`) splits and types the condition, strict-failing
 /// when the gate is unrecognized.
-/// Verified: CR 702.29a (docs/MagicCompRules.txt:4202), CR 702.122a (docs/MagicCompRules.txt:4870).
+/// Verified: CR 702.29a, CR 702.122a.
 pub(crate) fn is_alternative_keyword_cost_pattern(lower: &str) -> bool {
     (lower_starts_with(lower, "you may ")
         || (lower_starts_with(lower, "as long as ") && scan_contains(lower, "you may ")))

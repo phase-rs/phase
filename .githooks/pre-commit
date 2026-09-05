@@ -9,4 +9,7 @@ echo "  [rust] parser combinator gate"
 echo "  [rust] PreLowered ratchet"
 ./scripts/check-prelowered-ratchet.sh
 
+echo "  [rust] CR citation anchors"
+./scripts/check-cr-citation-anchors.sh
+
 echo "All pre-commit checks passed."

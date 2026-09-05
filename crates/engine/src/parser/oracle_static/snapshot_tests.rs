@@ -1050,7 +1050,7 @@ fn three_way_oxford_disjunctive_doubler_source() {
     );
 }
 
-/// CR 613.1d + CR 613.4b + CR 613.1g (issue #2363): Grand Master of Flowers —
+/// CR 613.1d + CR 613.4b + CR 613.1f (issue #2363): Grand Master of Flowers —
 /// "As long as ~ has seven or more loyalty counters on him, he's a 7/7 Dragon
 /// God creature with flying and indestructible."
 /// The parser must emit SetPower(7), SetToughness(7), AddType(Creature),
@@ -1133,7 +1133,7 @@ fn goddric_celebration_grants_complete_dragon_characteristics() {
     assert!(def.condition.is_some());
 }
 
-/// CR 613.1d + CR 613.4b + CR 613.1g (issue #2363): "she's a" gendered pronoun
+/// CR 613.1d + CR 613.4b + CR 613.1f (issue #2363): "she's a" gendered pronoun
 /// variant — confirms the parser accepts feminine pronouns on cards like future
 /// Planeswalkers that become creatures.
 #[test]
@@ -1176,7 +1176,7 @@ fn gendered_pronoun_she_becomes_creature_static() {
     );
 }
 
-/// CR 613.1d + CR 613.4b + CR 613.1g: neutral-plural "they're a" pronoun
+/// CR 613.1d + CR 613.4b + CR 613.1f: neutral-plural "they're a" pronoun
 /// variant stays on the same composable animation path as he/she/it forms.
 #[test]
 fn neutral_plural_pronoun_they_becomes_creature_static() {

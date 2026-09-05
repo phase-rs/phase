@@ -21,6 +21,7 @@ type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
+type RippleBottomOrder = Extract<WaitingFor, { type: "RippleBottomOrder" }>;
 
 export function ReorderableTopChoice({
   cards,
@@ -198,6 +199,84 @@ export function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
       reorderHint={t("cardChoice.reorderHint")}
       keepTone="blue"
     />
+  );
+}
+
+/**
+ * CR 702.60a + CR 608.2d: Ripple — "put all revealed cards not cast this way on
+ * the bottom of your library in any order." The controller drags the uncast
+ * pile into their chosen bottom order and confirms; every card goes to the
+ * bottom in that sequence (`SelectCards` carrying the full permutation).
+ */
+export function RippleBottomOrderModal({
+  data,
+}: {
+  data: RippleBottomOrder["data"];
+}) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const scrollRef = useHorizontalScroll<HTMLDivElement>({ drag: false });
+  const [order, setOrder] = useState<ObjectId[]>(data.cards);
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.rippleBottom.title")}
+      subtitle={t("cardChoice.rippleBottom.subtitle", { count: data.cards.length })}
+      maxWidthClassName="max-w-[38rem] sm:max-w-[48rem] lg:max-w-[58rem]"
+      footer={
+        <ConfirmButton
+          onClick={() =>
+            dispatch({ type: "SelectCards", data: { cards: order } })
+          }
+        />
+      }
+    >
+      <div ref={scrollRef} className="flex min-h-0 flex-1 overflow-x-auto">
+        <Reorder.Group
+          as="div"
+          axis="x"
+          values={order}
+          onReorder={setOrder}
+          layoutScroll
+          className="mx-auto flex w-max items-center gap-2 px-1 py-2 lg:gap-3"
+        >
+          {order.map((id, index) => {
+            const obj = objects[id];
+            if (!obj) return null;
+            return (
+              <Reorder.Item
+                key={id}
+                as="div"
+                value={id}
+                className="relative flex shrink-0 cursor-grab flex-col items-center gap-2 active:cursor-grabbing"
+                whileDrag={{ scale: 1.05, zIndex: 20 }}
+              >
+                <div
+                  className="relative rounded-lg ring-2 ring-amber-400/70 transition hover:shadow-[0_0_16px_rgba(245,180,80,0.3)]"
+                  {...hoverProps(id)}
+                >
+                  <CardImage
+                    {...objectImageProps(obj)}
+                    size="normal"
+                    className={CHOICE_CARD_IMAGE_CLASS}
+                  />
+                  <div className="pointer-events-none absolute left-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-amber-500/90 text-xs font-bold text-white">
+                    {index + 1}
+                  </div>
+                </div>
+              </Reorder.Item>
+            );
+          })}
+        </Reorder.Group>
+      </div>
+      <p className="mt-1 shrink-0 text-center text-xs text-slate-400">
+        {t("cardChoice.rippleBottom.hint")}
+      </p>
+    </ChoiceOverlay>
   );
 }
 

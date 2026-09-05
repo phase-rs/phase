@@ -1,6 +1,6 @@
 //! Issue #7923 — a leading duration must govern EVERY conjunct it prefixes.
 //!
-//! CR 611.2a (`docs/MagicCompRules.txt:2908`) read with CR 608.2c (`:2797`): a
+//! CR 611.2a read with CR 608.2c: a
 //! stated duration "lasts as long as stated by the spell or ability creating it",
 //! and its scope is settled by reading the WHOLE printed text and applying the
 //! rules of English. Two structurally distinct seams:
@@ -334,7 +334,7 @@ fn object_has_static_mode(
 //      which is precisely what tasks #138/#144 in `game/effects/effect.rs` track.
 // ===========================================================================
 
-/// **V-U1a — `[BASE]`, SHAPE.** CR 611.2a (`:2908`).
+/// **V-U1a — `[BASE]`, SHAPE.** CR 611.2a.
 ///
 /// Xanathar's whole "Until end of turn, …" sentence is owned by
 /// `try_parse_cant_cast_spells_effect`, which peels the leading duration itself
@@ -414,7 +414,7 @@ fn xanathar_leading_duration_reaches_governed_chain_links() {
     );
 }
 
-/// **V5 — `[GUARD:unset-sentinel]`, SHAPE.** CR 611.2a (`docs/MagicCompRules.txt:2908`).
+/// **V5 — `[GUARD:unset-sentinel]`, SHAPE.** CR 611.2a.
 ///
 /// **ANCHORED AGAINST NARROWING THE GUARD, NOT AGAINST BASE_SHA — it passes at
 /// BASE_SHA and is a POSITIVE REACH GUARD, not a discriminator.** The named removal
@@ -422,7 +422,7 @@ fn xanathar_leading_duration_reaches_governed_chain_links() {
 /// `None` is no longer in the unset set. The link's embedded window then stays
 /// `None`, the leading "Until end of turn," never reaches it, and the play
 /// permission lasts for the rest of the game (CR 611.2a's second sentence) instead
-/// of being pruned at cleanup (CR 514.2, `:2442`).
+/// of being pruned at cleanup (CR 514.2).
 ///
 /// Its value is that it drives a REAL CARD through the production parser, so it
 /// covers the one way this PR's guard could break the PR's own headline fix.
@@ -471,8 +471,7 @@ fn xanathar_unset_cast_window_still_takes_the_leading_duration() {
     }
 }
 
-/// **V6 — `[GUARD:no-injected-default]`, SHAPE.** CR 611.2a
-/// (`docs/MagicCompRules.txt:2908`).
+/// **V6 — `[GUARD:no-injected-default]`, SHAPE.** CR 611.2a.
 ///
 /// **ANCHORED AGAINST REINTRODUCING AN INJECTED DEFAULT, NOT AGAINST BASE_SHA — it
 /// passes at BASE_SHA and is a POSITIVE REACH GUARD, not a discriminator.** The
@@ -548,7 +547,7 @@ fn one_ring_hoisted_keyword_window_reaches_the_embedded_field() {
     }
 }
 
-/// **V7 — `[BASE]`, SHAPE.** CR 611.2a (`docs/MagicCompRules.txt:2908`).
+/// **V7 — `[BASE]`, SHAPE.** CR 611.2a.
 ///
 /// Temporal Aperture prints TWO bounds on one permission: an outer "Until end of
 /// turn," and an inner "for as long as that card remains on top of your library".
@@ -629,7 +628,7 @@ fn temporal_aperture_unevaluable_inner_window_strict_fails() {
     );
 }
 
-/// **V-U1g — `[BASE]`, SHAPE.** CR 611.2a (`:2908`); CR 615 is the
+/// **V-U1g — `[BASE]`, SHAPE.** CR 611.2a; CR 615 is the
 /// prevention-effects section `Effect::PreventDamage` implements.
 ///
 /// B4 — `PreventDamage`'s `duration_governs` MEMBERSHIP writes the printed window
@@ -786,7 +785,7 @@ fn you_find_some_prisoners_recovers_mana_rider() {
     }
 }
 
-/// **V-U2d integration half — `[GUARD:1+3]`, SHAPE, NEGATIVE.** CR 608.2c (`:2797`).
+/// **V-U2d integration half — `[GUARD:1+3]`, SHAPE, NEGATIVE.** CR 608.2c.
 ///
 /// **THE PLAN LABELLED THIS ROW `[GUARD:1]`; MEASURED, THAT NAMES TOO FEW GUARDS.**
 /// Removing guard 1 (`recovered_conjunct_continues_prior_subject`) ALONE leaves Aurelia
@@ -883,7 +882,7 @@ fn aurelia_bare_conjugated_riders_are_not_reparented() {
 }
 
 /// **V-U2f integration half — `[GUARD:2]`, SHAPE, NEGATIVE.**
-/// CR 603.1 (`:2559`) + CR 603.7 (`:2614`).
+/// CR 603.1 + CR 603.7.
 ///
 /// **REVERT-FAILING AGAINST REMOVAL OF GUARD 2, NOT AGAINST BASE_SHA.** Giant
 /// Oyster's chain contains no top-level `PutCounter`. With U2 landed and
@@ -1372,7 +1371,7 @@ fn leading_duration_merge_cards_unchanged() {
 // ===========================================================================
 
 /// **V-U2a — `[BASE]`, RUNTIME. THE discriminating test.**
-/// CR 611.2a (`:2908`) + CR 608.2c (`:2797`).
+/// CR 611.2a + CR 608.2c.
 ///
 /// Opportunistic Dragon's printed sentence is
 /// "For as long as this creature remains on the battlefield, gain control of that
@@ -1571,7 +1570,7 @@ fn revenge_of_the_hunted_recovers_lure_conjunct() {
     );
 
     // HOSTILE ROW: after cleanup the lure, the +6/+6 AND the trample are all gone
-    // TOGETHER — one printed duration (CR 514.2, `:2442`).
+    // TOGETHER — one printed duration (CR 514.2).
     cross_turn_boundary(&mut runner);
     let after = runner.state();
     assert!(
@@ -1593,7 +1592,7 @@ fn revenge_of_the_hunted_recovers_lure_conjunct() {
     );
 }
 
-/// **V-U1b — `[BASE]`, RUNTIME.** CR 611.2a (`:2908`) + CR 514.2 (`:2442`).
+/// **V-U1b — `[BASE]`, RUNTIME.** CR 611.2a + CR 514.2.
 ///
 /// The permission actually EXPIRES. Xanathar's "you may play the top card of their
 /// library" lowers to `Effect::CastFromZone { mode: Play }`, and
@@ -1657,7 +1656,7 @@ fn xanathar_play_permission_expires_at_cleanup() {
     );
 }
 
-/// **V-U1c SHAPE half — `[BASE]`.** CR 611.2a (`:2908`).
+/// **V-U1c SHAPE half — `[BASE]`.** CR 611.2a.
 ///
 /// The rule is NOT `CastFromZone`-specific: Abeyance's SECOND prohibition ("and
 /// that player can't activate abilities that aren't mana abilities") is a
@@ -1716,7 +1715,7 @@ fn abeyance_second_prohibition_carries_the_printed_duration() {
     );
 }
 
-/// **V-U1c RUNTIME half — `[COVER]`.** CR 514.2 (`:2442`).
+/// **V-U1c RUNTIME half — `[COVER]`.** CR 514.2.
 ///
 /// **PASSES AT BASE_SHA UNCHANGED, BY DESIGN AND BY MEASUREMENT — and the plan's
 /// matrix labelled this row `[BASE]`, which is WRONG.** Measured on the corpus
@@ -1793,7 +1792,7 @@ fn abeyance_prohibitions_bite_and_end_at_the_turn_boundary() {
     );
 }
 
-/// **V-U1d — `[BASE]`, RUNTIME.** CR 611.2a (`:2908`) + CR 514.2 (`:2442`).
+/// **V-U1d — `[BASE]`, RUNTIME.** CR 611.2a + CR 514.2.
 ///
 /// The `Permanent` sentinel YIELDS to a stated duration. Mondo Gecko's activated
 /// ability lowers to `Choose{Color}` with a `ContinuationStep`
@@ -1892,7 +1891,7 @@ fn stated_duration_yields_to_the_permanent_sentinel() {
     evaluate_layers(runner.state_mut());
     assert!(
         gecko_grants(runner.state(), gecko).is_empty(),
-        "CR 514.2 (`:2442`): the grant must end at cleanup; a `Duration::Permanent` \
+        "CR 514.2: the grant must end at cleanup; a `Duration::Permanent` \
          grant (BASE_SHA's shape) survives the boundary: {:?}",
         runner
             .state()
@@ -1965,7 +1964,7 @@ fn ambergris_scenario() -> (GameRunner, ObjectId) {
 }
 
 /// **V-U2e2 — `[COVER]`, RUNTIME.** CR 608.2d (the optional-effect decision) read
-/// with CR 608.2c (`docs/MagicCompRules.txt:2797`).
+/// with CR 608.2c.
 ///
 /// **PASSES AT BASE_SHA — it characterizes an EXISTING engine axis this PR does
 /// not change.** With an OPTIONAL parent and `sub_link == ContinuationStep`, a
@@ -2030,7 +2029,7 @@ fn continuation_step_is_skipped_when_optional_parent_declined() {
     );
 }
 
-/// **V-U1f — `[COVER]`, SHAPE + RUNTIME.** CR 611.2a (`docs/MagicCompRules.txt:2908`).
+/// **V-U1f — `[COVER]`, SHAPE + RUNTIME.** CR 611.2a.
 ///
 /// **PASSES AT BASE_SHA UNCHANGED, BY DESIGN.** `ForceAttack` is a member of
 /// `duration_governs` (so a stated duration reaches `AbilityDefinition.duration`)

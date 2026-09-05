@@ -1,6 +1,6 @@
 //! `TokensWideKeepablesMulligan` — feature-driven mulligan policy for tokens-wide decks.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): the mulligan process — deciding to
+//! CR 103.5: the mulligan process — deciding to
 //! keep based on hand composition. When a deck's tokens-wide commitment is
 //! meaningful, opening hands with token generators, lands, and anthem effects
 //! are preferred.

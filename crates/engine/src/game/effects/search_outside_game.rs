@@ -229,12 +229,35 @@ pub(crate) fn put_sideboard_entry_into_game(
             });
     }
 
+    Ok(put_outside_game_face_into(
+        state,
+        player,
+        &card_face,
+        destination,
+    ))
+}
+
+/// CR 400.11b: Bring one card from OUTSIDE the game into `destination` as a new
+/// object owned by `player`.
+///
+/// Single authority for the outside-the-game half of "some effects bring cards
+/// into a game from outside the game": outside the game is not a zone
+/// (CR 400.11), so there is no origin object to move and no `ChangeZone`
+/// replacement pipeline to run — the card is materialized from its printed face.
+/// Shared by the sideboard/wishboard pool and by booster packs, which differ
+/// only in where the face came from and in the bookkeeping their pool requires.
+pub(crate) fn put_outside_game_face_into(
+    state: &mut GameState,
+    player: PlayerId,
+    card_face: &crate::types::card::CardFace,
+    destination: Zone,
+) -> ObjectId {
     let card_id = CardId(state.next_object_id);
     let obj_id = zones::create_object(state, card_id, player, card_face.name.clone(), destination);
     if let Some(obj) = state.objects.get_mut(&obj_id) {
-        apply_card_face_to_object(obj, &card_face);
+        apply_card_face_to_object(obj, card_face);
     }
-    Ok(obj_id)
+    obj_id
 }
 
 fn available_sideboard_count(

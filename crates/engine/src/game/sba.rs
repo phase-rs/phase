@@ -260,7 +260,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 &battlefield_snapshot,
             );
 
-            // CR 704.5w + CR 704.5x + CR 310.11: Battle with no (or illegal) protector —
+            // CR 704.5x + CR 310.11: Battle with no (or illegal) protector —
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
@@ -1947,7 +1947,7 @@ fn check_illegal_attachment_unattach(
     }
 }
 
-/// CR 704.5w + CR 704.5x + CR 310.11 + CR 310.12a: If a battle that isn't being
+/// CR 704.5x + CR 310.11 + CR 310.12a: If a battle that isn't being
 /// attacked has no protector, an illegal protector, or (for Sieges) a protector
 /// that equals its controller, its controller chooses a legal protector. If no
 /// legal player exists, the battle is put into its owner's graveyard.
@@ -2015,7 +2015,7 @@ fn check_battle_protector(
 
         // Compute legal choices.
         // CR 310.12a: a Siege's controller "must choose its protector from among their
-        // opponents", and CR 704.5w's SBA phrasing — "no player IN THE GAME designated as
+        // opponents", and CR 704.5x's SBA phrasing — "no player IN THE GAME designated as
         // its protector ... chooses an appropriate player" — seats CR 102.1 directly on
         // this seam. A CHOICE, not a target (CR 115.10a), so the candidate list is the
         // CHOOSABLE opponents. The pre-existing `eliminated_players` filter is LEFT IN
@@ -2038,7 +2038,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.11 / CR 704.5w + CR 614.6: No legal protector exists —
+                // CR 310.11 / CR 704.5x + CR 614.6: No legal protector exists —
                 // the battle is put into the graveyard, a "leaves the
                 // battlefield" event that must consult Moved redirects. Bail on a
                 // CR 616.1 pause (the SBA fixpoint re-runs and finds the rest).
@@ -2067,7 +2067,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.11 + CR 704.5w + CR 704.5x: multiple legal protectors —
+                // CR 310.11 + CR 704.5x: multiple legal protectors —
                 // the controller must choose. Pause the SBA fixpoint and yield
                 // a WaitingFor (mirrors `check_legend_rule`). The SBA re-runs
                 // on the next apply and finds any remaining battles.
@@ -4284,6 +4284,8 @@ mod tests {
             player: PlayerId(2),
             candidate_count: 1,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
             proposed: ProposedEvent::Draw {

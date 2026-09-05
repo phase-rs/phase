@@ -22,6 +22,7 @@ import { DeathShatter } from "./DeathShatter.tsx";
 import { FloatingNumber } from "./FloatingNumber.tsx";
 import { MillRevealAnimation } from "./MillRevealAnimation.tsx";
 import type { MillCard } from "./MillRevealAnimation.tsx";
+import { RippleRevealAnimation } from "./RippleRevealAnimation.tsx";
 import { ParticleCanvas } from "./ParticleCanvas.tsx";
 import type { ParticleCanvasHandle } from "./ParticleCanvas.tsx";
 import {
@@ -72,6 +73,12 @@ interface ActiveMillReveal {
   to: { x: number; y: number };
 }
 
+interface ActiveRippleReveal {
+  id: number;
+  cards: MillCard[];
+  from: { x: number; y: number };
+}
+
 interface PendingDeath {
   id: number;
   generation: number;
@@ -94,6 +101,7 @@ let shatterIdCounter = 0;
 let deathCloneIdCounter = 0;
 let castArcIdCounter = 0;
 let millRevealIdCounter = 0;
+let rippleRevealIdCounter = 0;
 
 const DEATH_IMAGE_READY_MAX_MS = 250;
 
@@ -178,6 +186,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const pendingDeathsRef = useRef<PendingDeath[]>([]);
   const [activeCastArcs, setActiveCastArcs] = useState<ActiveCastArc[]>([]);
   const [activeMillReveals, setActiveMillReveals] = useState<ActiveMillReveal[]>([]);
+  const [activeRippleReveals, setActiveRippleReveals] = useState<ActiveRippleReveal[]>([]);
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
@@ -631,6 +640,32 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           break;
         }
 
+        case "CardsRevealed": {
+          // CR 702.60a + CR 701.20b: Ripple (and other "reveal the top N")
+          // effects publish their pile without moving it. Fan the revealed
+          // cards out of the revealing player's library for every seat to read.
+          const { player, card_ids: cardIds } = event.data;
+          if (vfxQuality === "minimal" || !cardIds || cardIds.length === 0) break;
+          const newState = useAnimationStore.getState().animationNewState;
+          const revealCards: MillCard[] = cardIds.map((id) => {
+            const object = newState?.objects[id];
+            const snapshot = visibleAnimationImageSnapshot(object);
+            return {
+              objectId: id,
+              snapshot,
+              colors: snapshot ? getCardColors(object?.color ?? []) : [],
+            };
+          });
+          const libEl = document.querySelector(`[data-library-pile="${player}"]`);
+          const libRect = libEl?.getBoundingClientRect();
+          const fromPos = libRect
+            ? { x: libRect.x + libRect.width / 2, y: libRect.y + libRect.height / 2 }
+            : getPlayerHudPosition(player);
+          const id = ++rippleRevealIdCounter;
+          setActiveRippleReveals((prev) => [...prev, { id, cards: revealCards, from: fromPos }]);
+          break;
+        }
+
         default:
           break;
       }
@@ -690,6 +725,10 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
   const handleMillRevealComplete = useCallback((id: number) => {
     setActiveMillReveals((prev) => prev.filter((m) => m.id !== id));
+  }, []);
+
+  const handleRippleRevealComplete = useCallback((id: number) => {
+    setActiveRippleReveals((prev) => prev.filter((m) => m.id !== id));
   }, []);
 
   return (
@@ -779,6 +818,16 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           from={mill.from}
           to={mill.to}
           onComplete={() => handleMillRevealComplete(mill.id)}
+        />
+      ))}
+
+      {/* Ripple reveal animations (z-46) */}
+      {activeRippleReveals.map((ripple) => (
+        <RippleRevealAnimation
+          key={`ripple-${ripple.id}`}
+          cards={ripple.cards}
+          from={ripple.from}
+          onComplete={() => handleRippleRevealComplete(ripple.id)}
         />
       ))}
 

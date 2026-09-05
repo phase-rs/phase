@@ -1,6 +1,6 @@
 //! `LandfallKeepablesMulligan` — feature-driven mulligan policy for landfall decks.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding to keep after the
+//! CR 103.5: deciding to keep after the
 //! mulligan process. When a deck's landfall commitment is meaningful, opening
 //! hands that combine a landfall payoff with a workable land count are
 //! strongly preferred over hands without a payoff.

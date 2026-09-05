@@ -1255,7 +1255,7 @@ fn suppressed_liminal_copy_token_entry_realizes_through_a_mandatory_as_enters_ch
 /// loses its `"OrderTriggers(2)"` element and fails first, and the Soul Warden assertion goes
 /// 1 → 0. No other test in this file moves.
 ///
-/// CR 603.6a (`docs/MagicCompRules.txt:2599`): this class settles through `handle_tribute_choice`,
+/// CR 603.6a: this class settles through `handle_tribute_choice`,
 /// which builds its `ActionResult` directly in the reducer match and never reaches
 /// `run_post_action_pipeline`, so the action-boundary convergence is what runs the ETB check for
 /// it. TWO abilities trigger — Soul Warden's observer and the copy's own CR 603.4 "if tribute
@@ -1338,7 +1338,7 @@ fn suppressed_liminal_copy_token_entry_realizes_through_an_as_enters_choice_with
         "the emitted ZoneChanged carries the index the recorder assigned"
     );
 
-    // (4) CR 603.6a (`MagicCompRules.txt:2599`): the realized entry is the event that put a
+    // (4) CR 603.6a: the realized entry is the event that put a
     //     permanent onto the battlefield, so every permanent is checked for matching ETB triggers.
     //     `handle_tribute_choice` builds its `ActionResult` straight out of the reducer match, so
     //     the action-boundary convergence in `apply_action_boundary_core` is what runs that check

@@ -11,11 +11,12 @@ use serde::Serialize;
 use super::ast::{with_clause_chain_duration, ClauseBoundary, ContinuationAst, ParsedEffectClause};
 use super::doc::{OracleDocBuilder, OracleSourceSpan, OracleUnitSource};
 use crate::parser::oracle_effect::lower::strip_trailing_duration;
+use crate::parser::oracle_nom::filter::ChosenColorGrantReference;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, ControllerRef, CostReduction,
-    DelayedTriggerCondition, Duration, MultiTargetSpec, OpponentMayScope, PlayerFilter,
-    QuantityExpr, RoundingMode, SubAbilityLink, TargetFilter, TargetSelectionMode,
+    ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ControllerRef,
+    CostReduction, DelayedTriggerCondition, Duration, MultiTargetSpec, OpponentMayScope,
+    PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink, TargetFilter, TargetSelectionMode,
     UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
@@ -65,6 +66,43 @@ pub(crate) struct EffectChainIr {
     /// this process" directive is recognized. Lowering applies it to the root
     /// `AbilityDefinition` so the resolver re-follows the whole chain.
     pub(crate) repeat_until: Option<crate::types::ability::RepeatContinuation>,
+    /// CR 607.2d: whether this chain's `Protection`/`HexproofFrom(ChosenColor)`
+    /// grant may have a colour choice injected ahead of it, or reads a choice
+    /// made by a LINKED ability elsewhere on the same object.
+    ///
+    /// Stamped from
+    /// `DocumentRelationIr::LinkedChoice(LinkedChoiceKind::LinkedColorChoice)`
+    /// before lowering, so the injector simply never fires and there is nothing
+    /// to undo. `Permitted` is the default, so a chain that no relation names is
+    /// byte-identical to before this axis existed.
+    #[serde(default, skip_serializing_if = "InjectedColorChoice::is_permitted")]
+    pub(crate) injected_color_choice: InjectedColorChoice,
+}
+
+/// CR 607.2d: whether an effect chain may receive an injected colour chooser
+/// ahead of a `ChosenColor` keyword grant.
+///
+/// A `bool` is prohibited by the project's data-modelling rule and would not say
+/// WHY the injection is withheld; this names the reason, which is what the
+/// injector's guard cites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub(crate) enum InjectedColorChoice {
+    /// No linked ability supplies a colour for this chain's grant, so the
+    /// injector supplies one (Mother of Runes, Knight of Dawn).
+    #[default]
+    Permitted,
+    /// CR 607.2d: a linked ability elsewhere on this object already makes the
+    /// choice this chain's grant reads back (Floating Shield's as-enters
+    /// replacement), so the grant must NOT make a second choice of its own.
+    SuppressedByLinkedAbility,
+}
+
+impl InjectedColorChoice {
+    /// Serialization guard: the default carries no information, so an untouched
+    /// chain serializes exactly as it did before this field existed.
+    pub(crate) fn is_permitted(&self) -> bool {
+        matches!(self, InjectedColorChoice::Permitted)
+    }
 }
 
 /// Whether `lower_effect_chain_ir` rewrites player-scoped references after
@@ -115,6 +153,7 @@ impl EffectChainIr {
             actor,
             in_trigger,
             repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
         }
     }
 }
@@ -154,19 +193,19 @@ fn ability_definition_has_result_table_roll_die(def: &AbilityDefinition) -> bool
 ///
 /// # The partition is the rules' own, not an engineering convenience
 ///
-/// CR 602.1 (`MagicCompRules.txt:2514`) — *"Activated abilities have a cost and
+/// CR 602.1 — *"Activated abilities have a cost and
 /// an effect. They are written as `[Cost]: [Effect.] [Activation instructions
 /// (if any).]`"* — draws exactly the seam this type sits on, and CR 113.3b
-/// (:761) repeats the tripartite form for abilities generally. So:
+/// repeats the tripartite form for abilities generally. So:
 ///
 /// | shell field group | CR |
 /// |---|---|
-/// | `cost`, `cost_reduction` | CR 602.1a — everything before the colon (:2516) |
-/// | `activation_restrictions`, `activation_mana_payment_restriction`, `activator_filter`, `activation_zone` | CR 602.1b — activation instructions, *"not part of the ability's effect"* (:2519) |
-/// | `min_x_value` | CR 601.2b — the announced value of a variable cost (:2459) |
+/// | `cost`, `cost_reduction` | CR 602.1a — everything before the colon |
+/// | `activation_restrictions`, `activation_mana_payment_restriction`, `activator_filter`, `activation_zone` | CR 602.1b — activation instructions, *"not part of the ability's effect"* |
+/// | `min_x_value` | CR 601.2b — the announced value of a variable cost |
 /// | `ability_tag`, `cant_be_copied`, `description` | ability-level identity/provenance, not resolution steps |
 ///
-/// while `EffectChainIr` holds the CR 608.2 (:2785) resolution instructions.
+/// while `EffectChainIr` holds the CR 608.2 resolution instructions.
 /// Because the root-vs-clause axis follows a seam CR 602.1 already draws, the
 /// widening satisfies the categorical-boundary rule rather than straddling rule
 /// sections.
@@ -303,9 +342,9 @@ pub(crate) struct AbilityShellIr {
     ///
     /// # This is the one field that is NOT the CR 602.1 activation envelope
     ///
-    /// Everything else on this shell partitions along the seam CR 602.1 (:2514)
+    /// Everything else on this shell partitions along the seam CR 602.1
     /// draws — cost before the colon, activation instructions after it. `optional`
-    /// does not: CR 608.2d (`MagicCompRules.txt:2795`) places the choice
+    /// does not: CR 608.2d places the choice
     /// *"while applying the effect"*, which is CR 608.2 resolution, the half this
     /// type deliberately leaves to [`EffectChainIr`]. So its presence here is an
     /// explicit, named exception rather than an extension of the partition, and
@@ -853,6 +892,39 @@ pub(crate) struct ClauseIr {
     /// targeted "of their choice" controlled by the phase-trigger active player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) target_chooser: Option<TargetFilter>,
+    /// CR 105.4 + CR 608.2c: this clause's text printed its own colour choice
+    /// ("of the color of your choice"), captured from `ParseContext` after this
+    /// chunk was parsed. Declared per-clause provenance — assembly gates the
+    /// injected `Effect::Choose(Color)` on THIS, never on a shape scan of the
+    /// lowered tree ("antecedents are named, never searched").
+    ///
+    /// Propagated by `absorb_clause` like every other intrinsic field: dropping it
+    /// there is compile-silent (the `ClauseDraft` default supplies `None`) and
+    /// would leave a nested-chain clause with `IsChosenColor` stamped and no
+    /// chooser injected — a fail-closed, match-NOTHING filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) printed_color_choice: Option<ChoiceType>,
+    /// CR 607.2d + CR 608.2d: which KIND of chosen-colour
+    /// reference this clause's KEYWORD GRANT printed, DERIVED ONCE from this
+    /// clause's own verbatim `source_text` at `ClauseDraft::push` — the sealed
+    /// single construction gate.
+    ///
+    /// Deriving here rather than lifting a `ParseContext` channel is deliberate:
+    /// `Protection`/`HexproofFrom(ChosenColor)` are produced by
+    /// `types/keywords.rs::parse_protection_target` / `parse_hexproof_filter`,
+    /// pure context-free functions with ten call sites (backlog F8), so no ctx
+    /// channel exists to lift. Because EVERY `ClauseIr` is minted here, no
+    /// `.push()` site can forget it, and `absorb_clause` RE-DERIVES it from the
+    /// re-located fragment rather than copying it.
+    ///
+    /// FAILURE POLARITY, stated once: `None` means "no chosen-colour grant phrase
+    /// found", which the consumer treats as NOT independent, so the CR 607.2d
+    /// suppression still fires and today's behaviour is preserved byte-for-byte.
+    /// Suppression is withheld ONLY on an affirmative `IncludesIndependentChoice`
+    /// stamp. A missed or unclassifiable clause therefore cannot un-suppress
+    /// Floating Shield, the pool's only live consumer of this relation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) chosen_color_grant: Option<ChosenColorGrantReference>,
     /// CR 608.2c + CR 603.7a: where this clause's lowered definition attaches.
     /// `Sibling` (default) is promoted only when this clause continues an open
     /// delayed payload and is consumed by `assemble_effect_chain`'s relocation step.
@@ -1027,6 +1099,7 @@ impl ClauseIrBuilder {
             unless_pay: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             target_chooser: None,
+            printed_color_choice: None,
             placement: ClausePlacement::Sibling,
         }
     }
@@ -1095,6 +1168,7 @@ impl ClauseIrBuilder {
         .unless_pay(c.unless_pay)
         .target_selection_mode(c.target_selection_mode)
         .target_chooser(c.target_chooser)
+        .printed_color_choice(c.printed_color_choice)
         .push();
     }
 
@@ -1127,6 +1201,7 @@ pub(crate) struct ClauseDraft<'a> {
     unless_pay: Option<UnlessPayModifier>,
     target_selection_mode: TargetSelectionMode,
     target_chooser: Option<TargetFilter>,
+    printed_color_choice: Option<ChoiceType>,
     placement: ClausePlacement,
 }
 
@@ -1186,6 +1261,22 @@ impl ClauseDraft<'_> {
         self.target_chooser = v;
         self
     }
+    /// CR 105.4 + CR 608.2c: declare that THIS clause's text printed its own
+    /// colour choice ("… of the color of your choice").
+    ///
+    /// The only writer is the chain chunk loop, lifting
+    /// `ParseContext::pending_printed_color_choice` immediately after the chunk
+    /// parses. Setting it here is what licenses `assemble_effect_chain` to
+    /// inject the matching `Effect::Choose(Color)`; the injector reads THIS
+    /// declared provenance and never a shape scan of the lowered tree, so a
+    /// clause that stamped `FilterProp::IsChosenColor` and a clause that gets a
+    /// chooser are the same clause by construction. Leaving it `None` on a
+    /// clause that did stamp the filter yields a fail-closed, match-NOTHING
+    /// filter with no `Effect::Unimplemented` and no parse warning.
+    pub(crate) fn printed_color_choice(mut self, v: Option<ChoiceType>) -> Self {
+        self.printed_color_choice = v;
+        self
+    }
 
     /// Mint the `ClauseId` + `ChainRelative` `OracleUnitSource` and commit the
     /// clause into the builder's source-ordered list.
@@ -1243,7 +1334,7 @@ impl ClauseDraft<'_> {
                 // Since #7959 the EMBEDDED-side clobber this branch guards against is refused
                 // structurally: `apply_duration_to_effect` yields to a written embedded window
                 // on every `Option<Duration>` writer, through `duration_is_unset_sentinel`
-                // (CR 611.2a, :2908). This textual gate STAYS, because it guards the OTHER
+                // (CR 611.2a). This textual gate STAYS, because it guards the OTHER
                 // carrier: `AbilityDefinition.duration` is still written unconditionally by
                 // `with_clause_duration`, and an injected `UntilEndOfTurn` is still
                 // indistinguishable from a printed one there (#7962). Do not delete it as
@@ -1287,6 +1378,10 @@ impl ClauseDraft<'_> {
             unless_pay: self.unless_pay,
             target_selection_mode: self.target_selection_mode,
             target_chooser: self.target_chooser,
+            printed_color_choice: self.printed_color_choice,
+            chosen_color_grant: crate::parser::oracle_nom::filter::classify_chosen_color_grant(
+                &self.source_text,
+            ),
             placement: self.placement,
             _sealed: (),
         });
@@ -1435,6 +1530,7 @@ mod tests {
             actor: None,
             in_trigger: false,
             repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
         };
         assert!(ir.clauses.is_empty());
     }
@@ -1552,6 +1648,7 @@ mod tests {
             actor: None,
             in_trigger: false,
             repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
         };
         assert_eq!(ir.clauses.len(), 1);
         assert_eq!(ir.kind, AbilityKind::Spell);

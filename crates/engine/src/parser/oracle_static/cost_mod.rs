@@ -561,7 +561,7 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
 /// you cast." (Conspiracy Unraveler class).
 /// Structural sibling of `parse_spells_alternative_cost` — same output shape
 /// (`CastWithAlternativeCost`), different cost verb prefix.
-/// Verified: CR 118.9 (docs/MagicCompRules.txt:1014), CR 701.59a.
+/// Verified: CR 118.9, CR 701.59a.
 pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
 
@@ -632,9 +632,9 @@ pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefini
 /// "[As long as <cond>, ]You may [cost] rather than pay [card-ref's] [keyword] cost[s]."
 /// An optional leading "As long as <cond>," gate (New Perspectives) is split off via
 /// `try_split_inverted_as_long_as` and attached as a `StaticCondition`.
-/// Verified: CR 702.29a (docs/MagicCompRules.txt:4202),
-///           CR 702.122a (docs/MagicCompRules.txt:4870),
-///           CR 118.9 (docs/MagicCompRules.txt:1014).
+/// Verified: CR 702.29a,
+///           CR 702.122a,
+///           CR 118.9.
 pub(crate) fn parse_alternative_keyword_cost(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);

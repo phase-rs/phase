@@ -344,7 +344,7 @@ fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
     Some(option)
 }
 
-/// CR 118.9 (verified `docs/MagicCompRules.txt:1014`): "Some spells have alternative costs.
+/// CR 118.9: "Some spells have alternative costs.
 /// An alternative cost is a cost listed in a spell's text, or applied to it from another
 /// effect, that its controller may pay rather than paying the spell's mana cost. Alternative
 /// costs are usually phrased, 'You may [action] rather than pay [this object's] mana cost,'

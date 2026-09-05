@@ -2506,8 +2506,11 @@ mod tests {
     /// lowering. The new `Double { DoubleTarget::Counters }` arm in
     /// `lower::target_choice_timing_for_clause` carries `!target.is_context_ref()`,
     /// which the sibling `MultiplyCounter` arm deliberately does NOT: retro-fitting
-    /// it there would flip seven shipping cards from `Resolution` to `Stack` across
-    /// three anaphor classes. This test is what makes the "separate arms" decision
+    /// it there would flip THIRTY-ONE shipping cards from `Resolution` to `Stack`
+    /// across FOUR anaphor classes — the census measured over the full corpus and
+    /// listed card-by-card on that arm in `lower.rs`. The rows below are one
+    /// exemplar per class, not the population; do not read their count as the
+    /// blast radius. This test is what makes the "separate arms" decision
     /// auditable — unify them and it flips.
     ///
     /// Committed runtime anchors for the `ParentTarget` class:

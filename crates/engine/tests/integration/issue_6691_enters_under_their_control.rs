@@ -2,15 +2,15 @@
 //! `"under their control"` must put the permanent under the named player's
 //! control, not under the resolving player's.
 //!
-//! CR 110.2a (docs/MagicCompRules.txt:618): "If an effect instructs a player to
+//! CR 110.2a: "If an effect instructs a player to
 //! put an object onto the battlefield, that object enters the battlefield under
 //! that player's control **unless the effect states otherwise**." Jailbreak
 //! states otherwise: it returns a permanent card from an OPPONENT's graveyard
 //! "under their control".
 //!
-//! CR 400.1 (:1933) + CR 400.3 (:1937) + CR 404.1 (:2030): a card in a graveyard
+//! CR 400.1 + CR 400.3 + CR 404.1: a card in a graveyard
 //! is in ITS OWNER's graveyard, so "an opponent's graveyard" identifies that
-//! opponent as the card's owner (CR 108.3 @ :564). The parser therefore binds
+//! opponent as the card's owner (CR 108.3). The parser therefore binds
 //! the anaphor to `ControllerRef::ParentTargetOwner`.
 //!
 //! SCOPE OF THIS TEST — read before trusting it as a regression guard.
@@ -71,7 +71,7 @@ fn jailbreak_returns_the_permanent_under_its_owners_control() {
     // The victim: owned by P1, sitting in P1's graveyard.
     let victim = scenario.add_real_card(P1, "Grizzly Bears", Zone::Graveyard, db);
     // A decoy permanent card in a DIFFERENT opponent's graveyard. If the
-    // binding were "an opponent" (a class, CR 102.2 @ :252) rather than the
+    // binding were "an opponent" (a class, CR 102.2) rather than the
     // moved card's owner, the seat this resolves to would be ambiguous.
     let _decoy = scenario.add_real_card(p2, "Grizzly Bears", Zone::Graveyard, db);
     // Jailbreak costs {1}{W}; seed the pool so the cast is about the effect,

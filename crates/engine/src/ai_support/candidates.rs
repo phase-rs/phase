@@ -708,6 +708,25 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 vec![decline, cast]
             }
         }
+        // CR 702.60a: Ripple's initial "you may reveal the top N" decision —
+        // reveal (Cast) or decline (Decline). The AI always reveals: burying
+        // non-matches at the bottom is strictly information-neutral for it.
+        WaitingFor::RippleRevealChoice { player, .. } => vec![
+            candidate(
+                GameAction::RippleChoice {
+                    choice: CastChoice::Cast,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::RippleChoice {
+                    choice: CastChoice::Decline,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — offer
         // casting each eligible candidate plus a decline to finish the window.
         // The engine handler re-validates the MV budget and candidate set, so
@@ -1266,6 +1285,12 @@ pub fn candidate_actions_broad_with_probe(
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
+        // CR 702.60a: the Ripple bottom-order response is a full permutation of
+        // the uncast revealed pile. `select_cards_variants` yields the identity
+        // ordering (+ a couple of variants); `apply()` validates any permutation.
+        WaitingFor::RippleBottomOrder { player, cards, .. } => {
+            select_cards_variants(*player, cards, Some(cards.len()))
+        }
         WaitingFor::ArrangePlanarDeckTopChoice {
             player,
             cards,
@@ -1457,6 +1482,12 @@ pub fn candidate_actions_broad_with_probe(
                     OutsideGameChoiceSource::FaceUpExile { object_id } => {
                         pool.push(OutsideGameSelection::FaceUpExile {
                             object_id: *object_id,
+                        });
+                    }
+                    // CR 400.11b: one physical card per opened pack slot.
+                    OutsideGameChoiceSource::BoosterPack { pack_slot, .. } => {
+                        pool.push(OutsideGameSelection::BoosterPack {
+                            pack_slot: *pack_slot,
                         });
                     }
                 }
@@ -2733,7 +2764,7 @@ pub fn candidate_actions_broad_with_probe(
             TacticalClass::Selection,
             Some(*player),
         )],
-        // CR 310.11 + CR 704.5w + CR 704.5x: controller chooses a new protector.
+        // CR 310.11 + CR 704.5x: controller chooses a new protector.
         WaitingFor::BattleProtectorChoice {
             player, candidates, ..
         } => candidates
@@ -3320,6 +3351,7 @@ pub fn candidate_actions_broad_with_probe(
             kind: CastOfferKind::Ripple { .. },
             ..
         }
+        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::CastOffer {
             kind: CastOfferKind::FreeCastWindow { .. },
             ..

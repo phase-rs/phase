@@ -34,6 +34,7 @@ import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
+import { BoosterPackModal, boosterPackEntries } from "./BoosterPackModal.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
@@ -57,6 +58,7 @@ import {
   CoinFlipKeepModal,
   DigModal,
   RevealModal,
+  RippleBottomOrderModal,
   ScryModal,
   ArrangePlanarDeckTopModal,
   SurveilModal,
@@ -133,6 +135,14 @@ export function CardChoiceModal() {
     case "ArrangePlanarDeckTopChoice":
       if (!canActForWaitingState) return null;
       return <ArrangePlanarDeckTopModal data={waitingFor.data} />;
+    case "RippleBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <RippleBottomOrderModal
+          key={waitingFor.data.cards.join("-")}
+          data={waitingFor.data}
+        />
+      );
     case "CoinFlipKeepChoice":
       if (!canActForWaitingState) return null;
       return <CoinFlipKeepModal data={waitingFor.data} />;
@@ -151,14 +161,28 @@ export function CardChoiceModal() {
     case "SearchPartitionChoice":
       if (!canActForWaitingState) return null;
       return <SearchPartitionModal data={waitingFor.data} />;
-    case "OutsideGameChoice":
+    case "OutsideGameChoice": {
       if (!canActForWaitingState) return null;
+      // CR 400.11b: an opened booster pack is an outside-the-game choice whose
+      // candidates are all revealed cards from one pack — shown as the pack
+      // itself rather than as the wishboard's name list.
+      const pack = boosterPackEntries(waitingFor.data.choices);
+      if (pack) {
+        return (
+          <BoosterPackModal
+            key={outsideGameChoiceKey(waitingFor.data)}
+            data={waitingFor.data}
+            entries={pack}
+          />
+        );
+      }
       return (
         <OutsideGameModal
           key={outsideGameChoiceKey(waitingFor.data)}
           data={waitingFor.data}
         />
       );
+    }
     case "ChooseFromZoneChoice":
       if (!canActForWaitingState) return null;
       // A "for each player, choose ..." iteration (Breach the Multiverse) emits
@@ -723,6 +747,8 @@ function entryKey(entry: OutsideGameChoiceEntry): string {
       return `sb:${entry.source.data.sideboard_index}`;
     case "FaceUpExile":
       return `fx:${entry.source.data.object_id}`;
+    case "BoosterPack":
+      return `bp:${entry.source.data.pack_slot}`;
   }
 }
 
@@ -742,6 +768,11 @@ function entryToSelection(entry: OutsideGameChoiceEntry): OutsideGameSelection {
       return {
         type: "FaceUpExile",
         data: { object_id: entry.source.data.object_id },
+      };
+    case "BoosterPack":
+      return {
+        type: "BoosterPack",
+        data: { pack_slot: entry.source.data.pack_slot },
       };
   }
 }
@@ -830,7 +861,11 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
           const sourceLabel =
             entry.source.type === "FaceUpExile"
               ? t("outsideGame.fromExile")
-              : t("outsideGame.fromSideboard");
+              : entry.source.type === "BoosterPack"
+                ? t("outsideGame.fromBoosterPack", {
+                    setCode: entry.source.data.set_code,
+                  })
+                : t("outsideGame.fromSideboard");
           return (
             <button
               key={key}

@@ -1,12 +1,12 @@
 //! `MulliganCardFloor` — the single authority for the AI's minimum kept-hand
 //! size. Applies to every deck in every format.
 //!
-//! CR 103.5 (`docs/MagicCompRules.txt:295`) defines the mulligan process and,
+//! CR 103.5 defines the mulligan process and,
 //! in its final sentence, permits a player to "take mulligans until their
 //! opening hand would be zero cards." The rules therefore impose NO minimum
 //! kept-hand size above zero — the floor below is an AI *strategy* heuristic
 //! bounding that process, not a rules requirement. CR 103.5c
-//! (`docs/MagicCompRules.txt:301`) supplies the free-first-mulligan discount,
+//! supplies the free-first-mulligan discount,
 //! consumed here via `kept_hand_size_after`.
 //!
 //! Without this floor an ordinary deck can chain-mulligan toward a zero-card

@@ -5,14 +5,14 @@
 //! plus the CR 608.2c antecedent resolution that turns a third-person anaphor
 //! into a bound [`ControllerRef`].
 //!
-//! CR 110.2a (docs/MagicCompRules.txt:618): "If an effect instructs a player to
+//! CR 110.2a: "If an effect instructs a player to
 //! put an object onto the battlefield, that object enters the battlefield under
 //! that player's control unless the effect states otherwise." The clause parsed
 //! here is precisely the "unless the effect states otherwise" escape, so the
 //! grammar and the binding are the authority for who ends up controlling the
 //! permanent.
 //!
-//! CR 110.1 (docs/MagicCompRules.txt:614) scopes this to battlefield
+//! CR 110.1 scopes this to battlefield
 //! destinations only; a `"to its owner's hand"` phrase has no controller.
 //!
 //! Before this module the four rewired seams each recognized a *different*
@@ -36,7 +36,7 @@ use crate::parser::oracle_ir::ast::EntersUnderSpec;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
 
-/// CR 110.2a (docs/MagicCompRules.txt:618): the possessor named by a
+/// CR 110.2a: the possessor named by a
 /// battlefield-entry control clause, AS WRITTEN. A syntax type, deliberately
 /// NOT a `ControllerRef`: a combinator sees only the clause, never its
 /// antecedent, so it cannot produce a bound reference without guessing.
@@ -45,14 +45,14 @@ use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
 /// this out of a `&'static [(...)]` destination table row by value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum ControlClausePossessor {
-    /// CR 109.5 (docs/MagicCompRules.txt:610): `"under your control"` — the
+    /// CR 109.5: `"under your control"` — the
     /// resolving player.
     You,
-    /// CR 110.2 (docs/MagicCompRules.txt:616): `"under its/their/his/her
+    /// CR 110.2: `"under its/their/his/her
     /// owner's control"` — explicitly names the moved object's owner. The
     /// existing `None` carrier preserves that per-object owner at resolution.
     Owner,
-    /// CR 608.2c (docs/MagicCompRules.txt:2793): a bare third-person plural
+    /// CR 608.2c: a bare third-person plural
     /// anaphor, `"under their control"`. Needs an antecedent.
     TheirAnaphor,
     /// CR 608.2c: the demonstrative `"under that player's control"`. Needs an
@@ -76,15 +76,15 @@ impl ControlClausePossessor {
     }
 }
 
-/// CR 608.2c (docs/MagicCompRules.txt:2793): the antecedent a third-person
+/// CR 608.2c: the antecedent a third-person
 /// control-clause anaphor resolves to, already reduced to something the engine
 /// can name. Never a raw parse scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ControlAnaphorAntecedent {
     /// A player reference already MAPPED through [`map_relative_player_scope`].
     ContextPlayer(ControllerRef),
-    /// CR 400.1 (:1933) + CR 400.3 (:1937) + CR 404.1 (:2030) + CR 108.3
-    /// (:564): the moved object's own owner, named by the clause's parsed
+    /// CR 400.1 + CR 400.3 + CR 404.1 + CR 108.3:
+    /// the moved object's own owner, named by the clause's parsed
     /// object filter.
     MovedObjectOwner,
     /// No antecedent can be named — fail closed.
@@ -109,7 +109,7 @@ pub(crate) fn parse_leading_control_clause(i: &str) -> OracleResult<'_, ControlC
     preceded(tag(" "), parse_control_clause).parse(i)
 }
 
-/// CR 108.3 (docs/MagicCompRules.txt:564): the shared possessive-mark axis.
+/// CR 108.3: the shared possessive-mark axis.
 /// `'s` / `’s` singular, bare `'` / `’` plural (`"owners'"`). LONGEST-FIRST, so
 /// the singular mark is never short-matched by the bare apostrophe arm.
 fn parse_possessive_mark(i: &str) -> OracleResult<'_, ()> {
@@ -130,7 +130,7 @@ fn parse_control_clause_possessor(i: &str) -> OracleResult<'_, ControlClausePoss
         // `your`-sub-axis is ever added, this changes silently. Pinned by a
         // module test below.
         value(ControlClausePossessor::You, tag("your")),
-        // CR 110.2 (:616): the owner forms MUST precede the bare `their` arm —
+        // CR 110.2: the owner forms MUST precede the bare `their` arm —
         // nom's alt does not re-enter once the outer terminated(..) step
         // commits, so a leading `value(TheirAnaphor, tag("their"))` would make
         // "under their owner's control" unparseable.
@@ -193,7 +193,7 @@ pub(crate) fn fold_control_clauses(span: &str) -> Option<ControlClausePossessor>
     })
 }
 
-/// CR 608.2c (docs/MagicCompRules.txt:2793): map a relative-player parse scope
+/// CR 608.2c: map a relative-player parse scope
 /// to a `ControllerRef` the CR 110.2a binding may legally use. EXHAUSTIVE, NO
 /// WILDCARD, FAIL-CLOSED — a future `ControllerRef` variant is a compile error
 /// here rather than a silently-admitted controller binding.
@@ -203,7 +203,7 @@ pub(crate) fn fold_control_clauses(span: &str) -> Option<ControlClausePossessor>
 /// reason; unlike it, this table has no `_ =>` arm.
 ///
 /// REJECTED SOURCE, recorded so it is not re-derived: the traced function's
-/// third source — the CR 608.2k (:2814) `ctx.subject` bare-player-filter
+/// third source — the CR 608.2k `ctx.subject` bare-player-filter
 /// fallback — maps unconditionally to `TriggeringPlayer`. At these seams that
 /// is WRONG for The Beamtown Bullies (an ACTIVATED ability whose "target
 /// opponent" subject is a TARGET, so there is no trigger event in scope at all)
@@ -218,10 +218,10 @@ pub(crate) fn fold_control_clauses(span: &str) -> Option<ControlClausePossessor>
 /// closed. That is safe here because the only seeders that place `ScopedPlayer`
 /// in `relative_player_scope` at these seams are the `player_scope.is_some()`
 /// rung and the trigger-scope seeder, both of which mean the clause IS fanned
-/// out over an "each player" population (CR 115.10 @ :886, CR 608.2e @ :2798).
+/// out over an "each player" population (CR 115.10, CR 608.2e).
 fn map_relative_player_scope(scope: &ControllerRef) -> Option<ControllerRef> {
     match scope {
-        // CR 115.10 (:886): the current player of an "each player / each
+        // CR 115.10: the current player of an "each player / each
         // opponent" fan-out. Production-proven end-to-end.
         ControllerRef::ScopedPlayer => Some(ControllerRef::ScopedPlayer),
         // CR 608.2c: a player chosen during resolution by an earlier
@@ -229,7 +229,7 @@ fn map_relative_player_scope(scope: &ControllerRef) -> Option<ControllerRef> {
         ControllerRef::ChosenPlayer { index } => {
             Some(ControllerRef::ChosenPlayer { index: *index })
         }
-        // CR 603.2 (:2561): the player identified by the triggering event.
+        // CR 603.2: the player identified by the triggering event.
         ControllerRef::TriggeringPlayer => Some(ControllerRef::TriggeringPlayer),
         // REFUSED. Two incompatible provenances feed these: a genuine
         // per-opponent fan-out, and a trigger-event alias that the traced
@@ -239,7 +239,7 @@ fn map_relative_player_scope(scope: &ControllerRef) -> Option<ControllerRef> {
         // the moved object (or absent entirely) every permanent would enter
         // under one arbitrary player's control.
         ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => None,
-        // CR 102.2 (:252) / CR 102.3 (:254): `Opponent` is a CLASS of players,
+        // CR 102.2 / CR 102.3: `Opponent` is a CLASS of players,
         // not a player. `controller_ref_player` yields `None` for it, which
         // surfaces at runtime as an `InvalidParam` rather than a controller.
         ControllerRef::Opponent => None,
@@ -281,7 +281,7 @@ pub(crate) fn name_entry_control_antecedent(
     }
 }
 
-/// CR 108.3 (docs/MagicCompRules.txt:564): true when `filter` carries
+/// CR 108.3: true when `filter` carries
 /// `FilterProp::Owned { controller }` for a THIRD-PERSON player — i.e. the
 /// clause's own noun phrase already named an owner that is not the resolving
 /// player. Recursion mirrors `game/filter.rs::filter_contains_last_zone_changed`.
@@ -289,7 +289,7 @@ pub(crate) fn name_entry_control_antecedent(
 /// Deliberately EXCLUDED:
 /// - `Owned { You }` — "you" is not third person, so there is no anaphor to
 ///   bind; synthetic-only, no printed card reaches it.
-/// - `TypedFilter.controller` — that is a CONTROL noun phrase (CR 109.4 @ :594),
+/// - `TypedFilter.controller` — that is a CONTROL noun phrase (CR 109.4),
 ///   and control is not ownership. This is the branch The Beamtown Bullies
 ///   declines under, together with the "no `Owned` prop at all" case.
 fn filter_names_third_person_owner(filter: &TargetFilter) -> bool {
@@ -314,8 +314,8 @@ fn filter_names_third_person_owner(filter: &TargetFilter) -> bool {
 ///
 /// | possessor | antecedent | result | CR |
 /// |---|---|---|---|
-/// | `You` | any | `Override(You)` | 109.5 (:610) |
-/// | `Owner` | any | `Default` | 110.2 (:616), encoded as per-object owner |
+/// | `You` | any | `Override(You)` | 109.5 |
+/// | `Owner` | any | `Default` | 110.2, encoded as per-object owner |
 /// | `TheirAnaphor` | `MovedObjectOwner` | `Override(ParentTargetOwner)` | 400.1+400.3+404.1+108.3 |
 /// | `TheirAnaphor` | `ContextPlayer(r)` | `Override(r)` | 608.2c |
 /// | `TheirAnaphor` | `Unnameable` | `UnboundAnaphor` | fail closed |
@@ -334,15 +334,15 @@ pub(crate) fn bind_control_clause(
         return EntersUnderSpec::Default;
     };
     match (possessor, antecedent) {
-        // CR 109.5 (:610): "you"/"your" names the resolving player as an
+        // CR 109.5: "you"/"your" names the resolving player as an
         // explicit battlefield-entry controller.
         (ControlClausePossessor::You, _) => EntersUnderSpec::Override(ControllerRef::You),
-        // CR 110.2 (:616): `Default` is the existing IR spelling for the
+        // CR 110.2: `Default` is the existing IR spelling for the
         // resolver's per-moved-object owner behavior. It must not be collapsed
         // to the CR 110.2a instructed-player default.
         (ControlClausePossessor::Owner, _) => EntersUnderSpec::Default,
-        // CR 400.1 (:1933) + CR 400.3 (:1937) + CR 404.1 (:2030) + CR 108.3
-        // (:564): a card in a graveyard is in ITS OWNER'S graveyard, so the
+        // CR 400.1 + CR 400.3 + CR 404.1 + CR 108.3:
+        // a card in a graveyard is in ITS OWNER'S graveyard, so the
         // clause's own owner NP and the moved object's owner are the same
         // player. `ParentTargetOwner` reads exactly that.
         (ControlClausePossessor::TheirAnaphor, ControlAnaphorAntecedent::MovedObjectOwner) => {
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn a_control_noun_phrase_does_not_license_n1() {
         // The Beamtown Bullies' real filter: a CONTROL constraint, no `Owned`
-        // prop at all. CR 109.4 (:594) — control is not ownership.
+        // prop at all. CR 109.4 — control is not ownership.
         let beamtown = TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: Some(ControllerRef::You),

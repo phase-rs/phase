@@ -464,6 +464,8 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             let mut sideboard_counts: HashMap<usize, usize> = HashMap::new();
             let mut exile_seen: HashSet<ObjectId> = HashSet::new();
             let mut exile_dup = false;
+            let mut pack_slots_seen: HashSet<usize> = HashSet::new();
+            let mut pack_slot_dup = false;
             for selection in selections {
                 match selection {
                     OutsideGameSelection::Sideboard { sideboard_index } => {
@@ -472,6 +474,11 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                     OutsideGameSelection::FaceUpExile { object_id } => {
                         if !exile_seen.insert(*object_id) {
                             exile_dup = true;
+                        }
+                    }
+                    OutsideGameSelection::BoosterPack { pack_slot } => {
+                        if !pack_slots_seen.insert(*pack_slot) {
+                            pack_slot_dup = true;
                         }
                     }
                 }
@@ -495,7 +502,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                     OutsideGameChoiceSource::FaceUpExile { object_id: oid } if oid == object_id
                 ))
                 });
-            !valid_count || exile_dup || bad_sideboard || bad_exile
+            let bad_pack_slot = pack_slots_seen.iter().any(|pack_slot| {
+                !choices.iter().any(|choice| matches!(
+                    &choice.source,
+                    OutsideGameChoiceSource::BoosterPack { pack_slot: slot, .. } if slot == pack_slot
+                ))
+            });
+            !valid_count || exile_dup || pack_slot_dup || bad_sideboard || bad_exile || bad_pack_slot
         }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
@@ -4111,6 +4124,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
 
         assert!(cheap_reject_candidate(

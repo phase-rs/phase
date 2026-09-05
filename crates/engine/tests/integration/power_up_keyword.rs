@@ -7,7 +7,7 @@
 //! re-parses the Oracle text with the new parser; `GameRunner` drives `apply()`),
 //! and each carries a revert-failing assertion (not an AST-shape assertion).
 //!
-//! CR 602.5b (verified docs/MagicCompRules.txt:2541): activate only once.
+//! CR 602.5b: activate only once.
 //! CR 602.2b + CR 601.2f + CR 302.6: cost reduced by source MV if it entered
 //! this turn.
 //! CR 106.6: tag-scoped mana spend restriction (Quinjet).
