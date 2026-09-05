@@ -969,7 +969,7 @@ pub(crate) fn resolve_parent_slot_from_root(
         .nth(index)
 }
 
-fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
+pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
     matches!(
         target_filter,
         TargetFilter::TriggeringSpellController
@@ -2241,12 +2241,14 @@ fn stack_entry_controller_matches(
 /// CR 400.3 fixes which zones those are.
 ///
 /// Matching them against `obj.controller` excluded a card from its OWN owner's
-/// query whenever a control-change effect left a stale controller behind — the
-/// state `effects::change_zone` documents for a creature stolen via Mind Control
-/// that dies into its owner's graveyard, where `reset_for_battlefield_exit` does
-/// not reset controller and the layer pass that would skips objects off the
-/// battlefield. Exile keeps controller matching deliberately; see
-/// `filter::is_owner_scoped_zone` for why.
+/// query whenever a control-change effect left a stale controller behind.
+/// `zones::apply_zone_exit_cleanup` already resets `controller` back to the
+/// owner fallback on the way into these zones, but this owner-scoped match is
+/// defence-in-depth for a hand-built or serialized state where the two have
+/// diverged — the state `effects::change_zone` documents at its own site, for a
+/// creature stolen via Mind Control that dies into its owner's graveyard. Exile
+/// keeps controller matching deliberately; see `filter::is_owner_scoped_zone`
+/// for why.
 fn add_zone_targets(
     state: &GameState,
     zone: Zone,
@@ -5583,12 +5585,15 @@ mod tests {
     /// resolution and the spell fizzles. Fixing only enumeration would leave exactly
     /// that split, so both are asserted here on one state.
     ///
-    /// The fixture stages the divergence CR 400.3 makes reachable: a card goes to its
-    /// OWNER's graveyard, while `reset_for_battlefield_exit` leaves a stale
-    /// `controller` behind from a control-change effect. So `mine` (owner P0,
-    /// controller P1) is in P0's graveyard and must match "creature card in YOUR
-    /// graveyard"; `theirs` (owner P1, controller P0) is in P1's graveyard and must
-    /// not — under controller matching the two verdicts invert exactly.
+    /// The fixture hand-builds the divergence CR 400.3 makes reachable in principle:
+    /// a card sits in its OWNER's graveyard while `controller` still names a
+    /// different player, as it would if a control-change effect's reset had not
+    /// run (`zones::apply_zone_exit_cleanup` resets it in production; this test
+    /// constructs the divergent state directly, as defence-in-depth coverage). So
+    /// `mine` (owner P0, controller P1) is in P0's graveyard and must match
+    /// "creature card in YOUR graveyard"; `theirs` (owner P1, controller P0) is in
+    /// P1's graveyard and must not — under controller matching the two verdicts
+    /// invert exactly.
     #[test]
     fn owner_scoped_zone_query_agrees_across_selection_and_resolution() {
         let mut state = GameState::new_two_player(42);

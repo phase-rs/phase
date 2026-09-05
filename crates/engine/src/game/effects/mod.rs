@@ -4017,6 +4017,64 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c: the resolver's own verdict on whether its instruction was
+/// actually performed, for the effect classes that can resolve as a legitimate
+/// no-op while a printed tail gates on the outcome.
+///
+/// `None` means "this effect publishes no verdict" — the inherited flag is left
+/// exactly as the accept latch (`resolve_optional_effect_decision`) or the
+/// mandatory-rider seed set it. `Some(v)` is the resolver's answer and
+/// overrides both.
+///
+/// ADMISSION CONTRACT — a new member must satisfy all three:
+///   1. Its resolver emits a discriminating event (or exposes an exact
+///      one-hop result) that is present on success and absent on every no-op
+///      return. A verdict re-derived from post-resolution game state is not
+///      admissible; the state has already moved.
+///   2. It never parks a `WaitingFor` or stashes a continuation. This hook runs
+///      while the parent's event slice is closed, so an effect that suspends
+///      would be judged against an empty slice and wrongly downgraded — and a
+///      parked `ResolutionFrame::AbilityContinuation` would additionally be
+///      re-stamped `true` by `resolve_optional_effect_decision`'s post-chain
+///      continuation writer, silently defeating this verdict. Both current
+///      members are synchronous and self-completing.
+///   3. Its verdict is chain-local — `set_optional_effect_performed_recursive`
+///      stamps the whole local chain including grandchildren, which is correct
+///      only when every gate below belongs to THIS instruction (Volatile
+///      Stormdrake's two-level "If you do ... then ..." is the pinned case).
+fn resolver_performed_outcome(
+    ability: &ResolvedAbility,
+    effect_events: &[GameEvent],
+) -> Option<bool> {
+    match &ability.effect {
+        // CR 608.2c: derives success from its exact one-hop operation result.
+        // A count/cause mismatch is a resolved no-op and keeps `WhenYouDo` /
+        // `IfYouDo` descendants false. (Moved verbatim from the inline block
+        // this authority replaces — behaviour is unchanged.)
+        Effect::CompletePlayerAction { .. } => Some(complete_player_action::succeeded(ability)),
+        // CR 701.12a + CR 701.12b: the exchange may resolve without exchanging
+        // anything. Delegates to the single event-keyed authority rather than
+        // re-deriving — `mandatory_parent_effect_performed`'s
+        // `Effect::ExchangeControl` arm is the one place that mapping lives.
+        //
+        // This is what the MANDATORY-rider seed below cannot supply: the seed is
+        // guarded on `!ability.optional && !ability.context.optional_effect_performed`,
+        // so an OPTIONAL exchange that the controller ACCEPTED arrives here with
+        // `optional` already lowered and the flag already latched true by
+        // `resolve_optional_effect_decision`, and nothing downstream ever lowers
+        // it. Perplexing Chimera's "If you do, you may choose new targets for the
+        // spell" therefore offered a free retarget of an opponent's spell after an
+        // exchange that CR 701.12a had refused, and Arteeoh, Dread Scavenger's
+        // reflexive "When you do" created a token after an exchange CR 701.12b had
+        // refused.
+        Effect::ExchangeControl { .. } => Some(mandatory_parent_effect_performed(
+            &ability.effect,
+            effect_events,
+        )),
+        _ => None,
+    }
+}
+
 fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -6855,6 +6913,29 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
                 } | GameEvent::ControllerChanged { .. }
             )
         }),
+        // CR 701.12a + CR 701.12b + CR 608.2c: an exchange whose subjects can't both
+        // be bound, aren't both in an exchangeable zone (CR 109.4 — battlefield or
+        // stack), or already share a controller resolves and exchanges NOTHING.
+        // `exchange_control::resolve` emits `ControllerChanged` only when control
+        // actually moved, so the event is the authoritative "the exchange happened"
+        // signal. Without this arm the effect fell into the `_ => true` default, which
+        // claimed the exchange always happened: Perplexing Chimera's "If you do, you
+        // may choose new targets for the spell" offered a free retarget of an
+        // opponent's spell after an exchange CR 701.12a had refused, and Gilded
+        // Drake's "If you don't or can't make an exchange, sacrifice this creature"
+        // was suppressed on a CR 701.12b no-op.
+        //
+        // DO NOT also add `Effect::ExchangeControl` to `effect_manages_own_outcome_flag`
+        // as a "restore the segregation invariant" tidy-up. Arteeoh, Dread Scavenger's
+        // reflexive "When you do" is suppressed ONLY by
+        // `when_you_do_mandatory_parent_did_nothing`, which requires
+        // `!effect_manages_own_outcome_flag(&parent.effect)`. Enrolling ExchangeControl
+        // there would silently un-suppress it — pinned by the assertion in this file's
+        // test module and, end to end, by the Arteeoh row in
+        // `tests/integration/exchange_control_of_a_spell.rs`.
+        Effect::ExchangeControl { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ControllerChanged { .. })),
         // CR 708.7 + CR 608.2c: A resolving "turn this creature face up" (Etrata,
         // Deadly Fugitive's granted ability) "did anything" iff a permanent
         // actually became face up. `turn_face_up::resolve` emits `TurnedFaceUp`
@@ -13193,18 +13274,46 @@ fn resolve_chain_body(
         }
     }
 
-    // CR 608.2c: Normalize the actual completion outcome before the printed
-    // tail is evaluated. A count/cause mismatch remains a resolved no-op and
-    // therefore keeps `WhenYouDo` / `IfYouDo` descendants false.
-    let completion_outcome_owned;
-    let ability = if matches!(ability.effect, Effect::CompletePlayerAction { .. }) {
-        let mut owned = ability.clone();
-        owned.set_optional_effect_performed_recursive(complete_player_action::succeeded(ability));
-        completion_outcome_owned = owned;
-        &completion_outcome_owned
-    } else {
-        ability
-    };
+    // CR 608.2c: Normalize the actual outcome before the printed tail is
+    // evaluated. An effect that resolved as a no-op keeps `WhenYouDo` /
+    // `IfYouDo` descendants false and lets `Not(IfYouDo)` descendants fire,
+    // whether the parent was mandatory or an accepted "you may".
+    //
+    // RELATIONSHIP TO THE MANDATORY-RIDER SEED BELOW (per-conjunct; the two are
+    // NOT equivalent and every difference is deliberate):
+    //   * `!ability.optional` / `!...optional_effect_performed` — this block
+    //     omits both ON PURPOSE. The accept path arrives with `optional` lowered
+    //     and the flag latched true; that is exactly the case the seed cannot
+    //     reach.
+    //   * `!state.cost_payment_failed_flag` — omitted, and provably neutral: the
+    //     `IfYouDo` consumer already ANDs that flag, so both polarities of the
+    //     verdict produce identical results at every consumer.
+    //   * `!effect_manages_own_outcome_flag(&effect)` — no divergence;
+    //     `ExchangeControl` is absent from that set (and must stay absent, see
+    //     `mandatory_parent_effect_performed`'s arm).
+    //   * `sub.sub_link == SequentialSibling` and the condition shape — omitted;
+    //     `set_optional_effect_performed_recursive` stamps EVERY `sub_ability` /
+    //     `else_ability` descendant of the parent, transitively. For an
+    //     `ExchangeControl` parent that set is small and enumerable from
+    //     `card-data.json`: most of those descendants carry no outcome-reading
+    //     condition at all, so the stamp is inert on them; the rest already gate
+    //     on the outcome, and reaching the ones the seed's `SequentialSibling`
+    //     and condition-shape conjuncts excluded (a `ContinuationStep`
+    //     grandchild, and a `WhenYouDo` node — `condition_depends_on_effect_performed`
+    //     returns false for `WhenYouDo`) is the intended fix, not a side effect.
+    //     The stamp is in any case largely redundant with
+    //     `apply_parent_chain_context`, which re-clones the parent's whole
+    //     context onto each child at every hand-off.
+    let performed_outcome_owned;
+    let ability =
+        if let Some(performed) = resolver_performed_outcome(ability, &events[events_before..]) {
+            let mut owned = ability.clone();
+            owned.set_optional_effect_performed_recursive(performed);
+            performed_outcome_owned = owned;
+            &performed_outcome_owned
+        } else {
+            ability
+        };
 
     // CR 603.7: Record the objects affected by this effect as a tracked set so
     // downstream sub-abilities can resolve "this way" references (pronouns,
@@ -32839,6 +32948,291 @@ mod tests {
             !mandatory_parent_effect_performed(&give, &not_transferred),
             "GiveControl that failed must not seed the if-they-do rider"
         );
+    }
+
+    /// The `ExchangeControl` shape both of the rows below judge: Gilded Drake's
+    /// "exchange control of this creature and up to one target creature an
+    /// opponent controls".
+    fn exchange_control_effect() -> Effect {
+        Effect::ExchangeControl {
+            target_a: TargetFilter::SelfRef,
+            target_b: TargetFilter::Typed(TypedFilter::creature()),
+        }
+    }
+
+    /// CR 701.12a + CR 701.12b + CR 608.2c: an exchange counts as "performed"
+    /// iff control actually moved, and the only witness of that is
+    /// `ControllerChanged`. Pre-fix `Effect::ExchangeControl` fell into the
+    /// `_ => true` default, which claimed every resolution exchanged something.
+    ///
+    /// NOTE the negative slice: it is the event trail the resolver ACTUALLY
+    /// emits on a no-op (a lone `EffectResolved { ExchangeControl }`), not an
+    /// empty slice. An empty slice is never produced in production, and using
+    /// one would let a regression that keys on `EffectResolved` — the exact
+    /// defect that makes the `GiveControl` arm above vacuous — pass here.
+    #[test]
+    fn exchange_control_performed_tracks_controller_changed_event() {
+        let exchange = exchange_control_effect();
+
+        let exchanged = [
+            GameEvent::ControllerChanged {
+                object_id: ObjectId(1),
+                old_controller: PlayerId(0),
+                new_controller: PlayerId(1),
+            },
+            GameEvent::ControllerChanged {
+                object_id: ObjectId(2),
+                old_controller: PlayerId(1),
+                new_controller: PlayerId(0),
+            },
+            GameEvent::EffectResolved {
+                kind: EffectKind::ExchangeControl,
+                source_id: ObjectId(1),
+                subject: None,
+            },
+        ];
+        assert!(
+            mandatory_parent_effect_performed(&exchange, &exchanged),
+            "an exchange that moved control is 'performed'"
+        );
+
+        // CR 701.12a / CR 701.12b: every reachable no-op return in
+        // `exchange_control::resolve` emits exactly this and nothing else.
+        let not_exchanged = [GameEvent::EffectResolved {
+            kind: EffectKind::ExchangeControl,
+            source_id: ObjectId(1),
+            subject: None,
+        }];
+        assert!(
+            !mandatory_parent_effect_performed(&exchange, &not_exchanged),
+            "an exchange that exchanged nothing must NOT be 'performed' — Gilded Drake's \
+             \"if you don't or can't make an exchange, sacrifice this creature\" rider \
+             depends on this answering no"
+        );
+    }
+
+    /// CR 603.12 + CR 608.2c: Arteeoh, Dread Scavenger's reflexive "When you do,
+    /// create a token ..." under "you may exchange control of two other target
+    /// artifacts".
+    ///
+    /// `when_you_do_mandatory_parent_did_nothing` is the SECOND consumer of the
+    /// new `ExchangeControl` arm, and its suppression path is disjoint from the
+    /// `IfYouDo` / `Not(IfYouDo)` one: `evaluate_condition`'s `WhenYouDo` arm
+    /// reads `ability.optional && !performed`, and the accept path has already
+    /// lowered `optional` to false, so that arm returns true regardless. All
+    /// four of this predicate's conjuncts are therefore load-bearing, and this
+    /// row pins each of them.
+    ///
+    /// The parent is shaped as it arrives POST-ACCEPT: `optional` lowered by
+    /// `resolve_optional_effect_decision`, and `context.optional_effect_performed`
+    /// lowered by the resolver-verdict block in `resolve_ability_chain`.
+    #[test]
+    fn when_you_do_is_suppressed_for_an_exchange_that_exchanged_nothing() {
+        let mut parent = ResolvedAbility::new(
+            exchange_control_effect(),
+            vec![TargetRef::Object(ObjectId(2))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        parent.optional = false;
+        parent.context.optional_effect_performed = false;
+
+        let no_op = [GameEvent::EffectResolved {
+            kind: EffectKind::ExchangeControl,
+            source_id: ObjectId(1),
+            subject: None,
+        }];
+        let exchanged = [GameEvent::ControllerChanged {
+            object_id: ObjectId(2),
+            old_controller: PlayerId(1),
+            new_controller: PlayerId(0),
+        }];
+
+        // (1) The fix: a CR 701.12b no-op suppresses the reflexive trigger.
+        assert!(
+            when_you_do_mandatory_parent_did_nothing(&AbilityCondition::WhenYouDo, &parent, &no_op),
+            "an exchange that exchanged nothing must suppress its reflexive \"When you do\""
+        );
+
+        // (2) PAIRED POSITIVE REACH GUARD: a real exchange must NOT be
+        // suppressed, or the fix would simply delete Arteeoh's token.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &AbilityCondition::WhenYouDo,
+                &parent,
+                &exchanged
+            ),
+            "a completed exchange must still fire its reflexive \"When you do\""
+        );
+
+        // (3) HOSTILE SIBLING: the flag lowering is what unlocks suppression.
+        // Without the resolver-verdict block in `resolve_ability_chain`, the
+        // accept latch leaves this true and nothing downstream lowers it.
+        let mut latched = parent.clone();
+        latched.context.optional_effect_performed = true;
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &AbilityCondition::WhenYouDo,
+                &latched,
+                &no_op
+            ),
+            "a latched performed-flag defeats suppression — the walker's verdict block \
+             lowering it is a precondition of this fix, not an incidental detail"
+        );
+
+        // (4) HOSTILE SIBLING: the predicate is scoped to `WhenYouDo`. An
+        // `EffectOutcome { OptionalEffectPerformed }` gate (Perplexing Chimera's
+        // "If you do") is suppressed by `evaluate_condition` instead, not here.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                },
+                &parent,
+                &no_op
+            ),
+            "only `WhenYouDo` is routed through this predicate"
+        );
+
+        // (5) REGRESSION PIN for a load-bearing EXCLUSION. Enrolling
+        // `Effect::ExchangeControl` in `effect_manages_own_outcome_flag` as a
+        // \"restore the segregation invariant\" tidy-up would make conjunct 4 of
+        // this predicate false and silently un-suppress Arteeoh. Fail here
+        // instead.
+        assert!(
+            !effect_manages_own_outcome_flag(&exchange_control_effect()),
+            "ExchangeControl must NOT manage its own outcome flag — \
+             `when_you_do_mandatory_parent_did_nothing` requires the exclusion"
+        );
+    }
+
+    /// CR 608.2c: Volatile Stormdrake's TWO-LEVEL "If you do ... then ..." —
+    /// "exchange control of this creature and target creature an opponent
+    /// controls. If you do, you get {E}{E}{E}{E}, then sacrifice that creature
+    /// unless you pay ...".
+    ///
+    /// The verdict binds two gate nodes at DIFFERENT chain depths and different
+    /// `sub_link`s. The grandchild's link is `ContinuationStep` (its
+    /// `card-data.json` node carries no `sub_link` key, so it deserialises to
+    /// the `#[default]`), which the mandatory-rider seed's
+    /// `sub_link == SequentialSibling` conjunct excludes outright — reaching it
+    /// is exactly what `set_optional_effect_performed_recursive` buys, and a
+    /// non-recursive stamp would fix the child while leaving the grandchild
+    /// firing after an exchange that never happened.
+    ///
+    /// Unit-level by measurement, not by convenience: this card's trigger
+    /// carries a node-level `unless_pay`, so the ability parks on
+    /// `WaitingFor::UnlessPayment` before `ExchangeControl` ever resolves and
+    /// no end-to-end fixture can reach the gate. The widening itself lives at
+    /// this level, which is where it is pinned.
+    #[test]
+    fn an_exchange_verdict_binds_both_levels_of_a_two_level_if_you_do() {
+        let state = GameState::new_two_player(42);
+
+        let build = || {
+            let mut grandchild = ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: TargetFilter::TriggeringSource,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            grandchild.condition = Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            });
+            grandchild.sub_link = SubAbilityLink::ContinuationStep;
+
+            let mut child = ResolvedAbility::new(
+                Effect::GainEnergy {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            child.condition = Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            });
+            child.sub_link = SubAbilityLink::SequentialSibling;
+            child.sub_ability = Some(Box::new(grandchild));
+
+            let mut parent = ResolvedAbility::new(
+                Effect::ExchangeControl {
+                    target_a: TargetFilter::SelfRef,
+                    target_b: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(ObjectId(2))],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            parent.sub_ability = Some(Box::new(child));
+            // Post-accept shape: `resolve_optional_effect_decision` lowered
+            // `optional` and latched the flag true before the chain ran.
+            parent.optional = false;
+            parent.context.optional_effect_performed = true;
+            parent
+        };
+
+        let gate = AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        };
+        let read_gates = |parent: &ResolvedAbility| {
+            let child = parent.sub_ability.as_deref().expect("child");
+            let grandchild = child.sub_ability.as_deref().expect("grandchild");
+            (
+                evaluate_condition(&gate, &state, child),
+                evaluate_condition(&gate, &state, grandchild),
+            )
+        };
+
+        // CR 701.12a / CR 701.12b: the resolver's no-op trail.
+        let no_op = [GameEvent::EffectResolved {
+            kind: EffectKind::ExchangeControl,
+            source_id: ObjectId(1),
+            subject: None,
+        }];
+        let mut failed = build();
+        let verdict = resolver_performed_outcome(&failed, &no_op)
+            .expect("ExchangeControl is enrolled in the resolver-verdict authority");
+        assert!(
+            !verdict,
+            "an exchange that exchanged nothing is not performed"
+        );
+        failed.set_optional_effect_performed_recursive(verdict);
+        assert_eq!(
+            read_gates(&failed),
+            (false, false),
+            "BOTH levels must go false — the SequentialSibling child AND the \
+             ContinuationStep grandchild the mandatory-rider seed cannot reach"
+        );
+
+        // PAIRED POSITIVE REACH GUARD: a completed exchange leaves both gates
+        // true, so the row cannot pass by suppressing everything.
+        let success = [GameEvent::ControllerChanged {
+            object_id: ObjectId(2),
+            old_controller: PlayerId(1),
+            new_controller: PlayerId(0),
+        }];
+        let mut performed = build();
+        let verdict = resolver_performed_outcome(&performed, &success)
+            .expect("ExchangeControl is enrolled in the resolver-verdict authority");
+        assert!(verdict, "an exchange that moved control IS performed");
+        performed.set_optional_effect_performed_recursive(verdict);
+        assert_eq!(read_gates(&performed), (true, true));
+
+        // HOSTILE SIBLING: an unenrolled effect publishes no verdict at all, so
+        // the inherited flag is left exactly as the accept latch set it. A bare
+        // `bool` return would have stamped `false` here and silently broken
+        // every "you may draw a card. If you do, ..." in the engine.
+        let mut unenrolled = build();
+        unenrolled.effect = Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        };
+        assert_eq!(resolver_performed_outcome(&unenrolled, &no_op), None);
     }
 
     /// CR 702.131b + CR 702.131d (#2873): Ocelot Pride's race. The parent
