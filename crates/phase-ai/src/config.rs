@@ -229,6 +229,14 @@ impl Default for SearchConfig {
 /// All values are `f64` for compatibility with the CMA-ES training pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyPenalties {
+    /// Reward for activating a random-creature mana sink (the Momir's Madness
+    /// emblem) on a turn its schedule opens. Without a positive score here the
+    /// activation loses to `PassPriority` outright: the effect's polarity is
+    /// `Contextual`, so no other policy has an opinion on it.
+    pub momir_curve_activation: f64,
+    /// Reward for choosing the scheduled X at the sink's `{X}` prompt, so the
+    /// AI spends its turn's mana rather than taking the search's default.
+    pub momir_curve_x_on_schedule: f64,
     /// Penalty for targeting a creature already doomed by pending stack effects.
     pub redundant_removal_penalty: f64,
     /// Penalty for targeting a creature with pending (but non-lethal) damage.
@@ -599,6 +607,13 @@ pub struct PolicyPenalties {
 impl Default for PolicyPenalties {
     fn default() -> Self {
         Self {
+            // Strong band: the sink is the format's only source of board
+            // presence, so on a scheduled turn it is the play. Sized to clear
+            // `PassPriority` decisively without eclipsing a lethal attack.
+            momir_curve_activation: 3.0,
+            // Strong band: picking the scheduled X is the whole decision — a
+            // smaller creature is a strictly worse use of the same card.
+            momir_curve_x_on_schedule: 2.5,
             redundant_removal_penalty: -6.0,
             redundant_damage_penalty: -4.0,
             gift_card_penalty: -3.0,
@@ -1013,6 +1028,18 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
+    (
+        "momir_curve_activation",
+        "Momir's Madness schedule — the format has no ai-gate matchup coverage \
+         (ai-duel is Commander-only), so the value is set from the format's own \
+         logic rather than measured play and must not be handed to CMA-ES until \
+         a Momir matchup exists to calibrate against.",
+    ),
+    (
+        "momir_curve_x_on_schedule",
+        "Momir's Madness schedule — same reason as momir_curve_activation: no \
+         Momir matchup exists in the ai-gate suite to calibrate against.",
+    ),
     (
         "gift_extra_turn_penalty",
         "CR 702.174g extra-turn gift downside — one shipped card (Perch Protection); \
