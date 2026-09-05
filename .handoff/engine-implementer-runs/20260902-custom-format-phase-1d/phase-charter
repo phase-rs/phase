@@ -1,0 +1,636 @@
+Run: 20260902-custom-format-phase-1d
+
+## Charter v1 (produced by charter-mode planner, opus)
+
+4 phases, not the 3 hypothesized in the phase-fit entry:
+  Phase A (U1+U2): SelectedFormat carrier + resolved-config validator migration
+    Base: run BASE_SHA 03fbdf709. Scope: deck_validation.rs, game/mod.rs,
+    engine-wasm/lib.rs (defensive), commander_draft_deck_legality.rs (mandatory,
+    C-3 correction). Sizing: 2 units / 4 paths -> gate cannot re-fire.
+  Phase B (U3+U4+U5): real Custom-format evaluation (eligibility gate,
+    card-pool layer, dispatch + guard narrowing). Base: Phase A's accepted
+    candidate. Scope: deck_validation.rs, custom_format.rs, format.rs,
+    custom_format_schema.rs. Sizing: 3 units / 4 paths.
+  Phase C (U7): frontend carrier widening + HostSetup gate removal. Base:
+    Phase B's accepted candidate. Scope: 11 client/src paths (corrected from
+    draft's 8 - missed 3 senders: GameProvider.tsx, HostControlTile.tsx,
+    HostSetup.tsx:291, aiDeckCatalog.ts). Sizing: 1 unit / 11 paths.
+  Phase D (U6): swedish_old_school() preset, registration deferred (D-1/D-2
+    human decisions). Base: Phase C's accepted candidate (or swappable with
+    C - both hard-ordered after B, mutually independent). Scope:
+    custom_format.rs, custom_format_schema.rs. Sizing: 1 unit / 2 paths.
+
+Seam decision: split the hypothesized Phase C (U6+U7) into C/D because U6 and
+U7 share zero files, zero symbols, zero dependency edge, and different
+verification tiers (test-engine vs check-frontend/test-frontend). U7 (real
+user value) sequenced before U6 (deferred value, blocked on 2 human
+decisions) so the deferred-value work doesn't gate the payoff.
+
+Critical ordering constraint: Phase C (removes customFormatHostUnavailable)
+must not land before Phase B (real evaluation) - would reopen the Phase 1c
+dead-end-hosting bug. Called out 3x in the charter.
+
+Recursive phase-fit check (performed by charter planner): every phase's T2
+(scope-paths) is well under 13 (max is Phase C at 11), so T1 AND T2 cannot
+hold for any phase regardless of T1's unit-count threshold. No phase re-fires
+the gate. Feasibility exit not needed - green-tree seam exists at every
+boundary (SelectedFormat::Tag(Custom(_)) stays Err/fail-closed at every seam).
+
+7 scope corrections found by re-measurement (C-1 through C-7) - notably:
+client/src/adapter/types.ts removed from scope (false premise, already
+exports FormatConfig); 3 missed frontend senders added to Phase C;
+commander_draft_deck_legality.rs added to Phase A as mandatory (Phase A
+can't compile its own tests without it); base 03fbdf709 verified clean with
+Phase 1c guard tests present in the blob.
+
+Next: dispatch charter-mode reviewer (opus) with this charter + the original
+draft plan, no other context. Loop until clean (stop conditions: standard
+Step 2 conditions + 4-round T4-inactive backstop, since T4's axis is
+undefined for charter-shaped findings).
+
+## Charter review round 1 (opus, charter-mode reviewer) - NOT CLEAN
+
+4 blocking findings:
+  B1 - Phase A's scope omits crates/engine/tests/integration/custom_format_schema.rs,
+    which constructs DeckCompatibilityRequest at 3 sites (:455,:471,:523) - Phase A
+    cannot compile its own test suite as scoped. (Same class of bug as C-3, missed.)
+  B2 - Phase C's exclusion of client/src/components/menu/MyDecks.tsx is factually
+    wrong - it's a live compat sender at 4 sites feeding the deck-picker grid the
+    player passes through AFTER HostSetup and BEFORE hosting. Removing the
+    HostSetup submit gate without fixing MyDecks relocates the dead-end one screen
+    later instead of removing it. Also missing: AiOpponentConfig.tsx (4th
+    useAiDeckCatalog caller).
+  B3 - Phase C's recursive-gate "T2 fails at 11" argument breaks once B2's
+    omissions are added back (-> 13, exactly the T2 threshold), making the
+    single-unit-sizing assumption load-bearing and fragile; charter itself names
+    a natural 2-unit split.
+  B4 - Phase D's V13 ("run against the real card DB") is unrunnable in CI -
+    card-data.json is gitignored, existing tests needing it use eprintln!+skip,
+    not fail. V13 as written can pass vacuously.
+6 non-blocking (N1: 7th .expect not 6; N2: a 4th Phase-1c-era test changes
+  assertions in Phase B, not just construction; N3: seam-notes table row fix;
+  N4: internal inconsistency about GameProvider.tsx:397; N5: aiDeckCatalog test
+  file at risk from widening, should be enumerated; N6: surface to user that
+  task item 3 (registry preset) ends undelivered/unregistered after Phase 1d,
+  by design per D-1/D-2).
+
+Everything else independently re-verified correct (all C-1..C-7 corrections,
+all engine anchors, CR citation fix, C-before-B procedural enforcement via
+PHASE_BASE_SHA chaining, D-1..D-6 attribution, phase-server needing no scope
+path).
+
+Round count: 1 of 4 (T4 inactive for charter-shaped findings per the 4-round
+backstop). Not T4 - first review round.
+
+Next: dispatch a fresh charter-mode planner (opus) with charter v1 + this
+review to produce charter v2, then re-review (charter-mode reviewer, opus,
+fresh instance, no context beyond charter v2 + task description).
+
+## Charter v2 (revision, opus charter-mode planner)
+
+Resolved all 4 blocking + 6 non-blocking findings from round-1 review:
+  B1 -> custom_format_schema.rs added to Phase A scope (5 paths now); regenerating
+    rg command included instead of hand list.
+  B2 -> MyDecks.tsx + AiOpponentConfig.tsx added to frontend scope; false
+    exclusion rationale for MyDecks.tsx deleted; new verification row V17.
+  B3 -> Phase C SPLIT into C1 (config-carrying senders, 11 paths) + C2 (gate
+    removal, 3 paths) along the seam the reviewer named. Justified: corrected
+    merged Phase C measured at 14 paths (over the 13 threshold), not the
+    reviewer's estimated 13 - splitting was necessary, not optional.
+  B4 -> V13 demoted to a mandatory non-test implementation-time gate (V13-gate,
+    same status as U6-2) + a skip-aware regression test with a MANDATORY
+    positive reach-guard (V13-test) so it can't pass vacuously on an absent DB.
+  N1-N6 -> all addressed (7th .expect enumerated at :478 w/ corrected line
+    numbers throughout - v1's numbers were off by one; N2 names the one
+    Phase-1c-era test whose assertion changes; N4 corrects GameProvider.tsx
+    :397->:381; N5 enumerates aiDeckCatalog.test.ts; N6 states plainly that
+    task item 3 closes only partially - constructed+tested, not registered).
+
+New defect self-caught (not flagged by round-1 review): customFormatHostUnavailable
+(gate variable) and customFormatHostingUnavailable (i18n key) are two DIFFERENT
+identifiers - v1's residue check only covered one. Phase C2's V16 now checks both.
+
+Phases now: A / B / C1 / C2 / D (5 phases, not 4). D stays resequenceable
+anywhere after B (disjoint from both C halves).
+
+Recursive check restated: A=5 paths/2u, B=4/3u, C1=11/1u, C2=3/1u, D=2/1u.
+Max is C1 at 11 (margin restored from B3's corrected 14-path near-miss).
+
+Round count: 2 of 4 max (charter-review backstop). Next: dispatch a FRESH
+independent charter-mode reviewer (opus, no context beyond charter v2 + task
+description) for round 2 review.
+
+## Charter review round 2 (opus, fresh charter-mode reviewer, on v2) - NOT CLEAN
+
+2 blocking findings:
+  B1 - HostSetup.tsx:290 (useAiDeckCatalog for the AI-seat default-deck picker)
+    is a live compat sender that falls into a GAP between C1 (which explicitly
+    excludes HostSetup.tsx, deferring it to C2) and C2 (whose goal is gate+i18n
+    deletion only, no sender migration). Post-C2: gate is deleted, hostDisabled
+    becomes false, but "effectiveAiSeats.length>0 && !defaultAiDeck" is still
+    true because this sender still downgrades to a bare tag -> submit stays
+    permanently disabled with title===undefined (the explaining branch was
+    just deleted). Reopens the Phase 1c dead-end in a new, SILENT way (no
+    error message at all, worse than before).
+  B2 - C1's sender census is hand-counted and incomplete: MenuPage.tsx:42
+    (buildLegalAiDeckCatalog prewarm call) is in neither scope nor exclusion
+    list; would silently stop warming the cache once V15's cache-key fix
+    lands. Also the "4th useAiDeckCatalog caller" count is self-contradictory
+    (only reaches 4 by counting HostSetup.tsx, which C1 simultaneously
+    excludes).
+9 non-blocking: N1 (Phase A's "zero assertion edits" too strong - deleting
+  resolved_copy_limit/default_deck_copy_limit retires real tests, restate
+  scope of the "unchanged" claim), N2 (green-tree property doesn't cover the
+  Resolved(Custom(_)) arm Phase A itself creates), N3 (Option<SelectedFormat>
+  null/omitted state not named), N4 (built-in Resolved arm widens trust
+  surface for starting_life/deck_size/singleton/players - mitigated by
+  existing server-side gate but should be stated), N5 (V13's reach-guard
+  control "Black Lotus" is drawn from inside the set it guards - pick a
+  control outside banned+restricted+legal_sets), N6 (CR 100.2b site list
+  needs enumeration/rg command, not bare "six sites"), N7 (C1's "1 unit"
+  claim is exactly the fragility B3 warns about - 3 independently-testable
+  behaviors at 11 paths, 2 paths from re-firing on B1's fix pushing to 12),
+  N8 (V3 cites test-function lines not construction-site lines), N9 (C1's
+  "every sender carries resolved config" is inexact - MyDecks.tsx's filter-
+  chip fallback path must stay Tag, state the exception).
+
+Verified clean: ordering/dependencies, unit accounting (all U1-U7 land, no
+stale merged-Phase-C references survive renumbering), Phase A derivation
+re-run independently (confirmed exactly 3 files, Phase A compiles as scoped),
+Phase B premises (restricted_copy_violations, legal_sets shape, printings_for
+tri-state matching P-5 exactly), seam note accuracy, delivery-honesty
+statement for task item 3.
+
+Round count: 2 of 4 max. Next: dispatch charter revision round 2 (opus) to
+produce charter v3 fixing B1/B2 + addressing N1-N9, focusing especially on
+giving HostSetup.tsx's sender migration an explicit phase owner (likely
+splitting its file ownership: C1 owns :290-292 the sender, C2 owns the
+gate+i18n+test file) and replacing hand-counted sender censuses with
+regenerating rg commands throughout.
+
+## Charter v3 (round-2 revision, opus charter-mode planner)
+
+Fixed B1 (HostSetup.tsx:290-292 AI-deck sender) via documented split-file
+ownership: C1 owns only :290-292 (the useAiDeckCatalog call), C2 owns the
+gate/i18n/test file - safe because C1->C2 is already a hard sequential edge.
+Added V14b-hostsetup (C1) + V16-aiseat paired assertion (C2, not negative-only).
+
+Fixed B2 structurally, not just by adding 2 more entries: replaced the
+hand-counted sender census with 3 regenerating rg commands whose union is
+closed over the sender surface (direct construction / entry-point calls /
+resolved-config-to-.format downgrades), classified every hit as
+MIGRATE/EXCLUDE-with-rationale, added a BINDING CLOSURE RULE: any hit at
+phase start matching neither classification is a charter defect requiring
+escalation, not silent handling either way. This is meant to make a 4th
+missed sender structurally impossible rather than just less likely (2 prior
+rounds each missed real senders via hand-listing).
+
+Self-caught, beyond both reviews: A SECOND dead-end (D-b) - p2p-adapter.ts's
+guest-kick gate (evaluateDeckFormatGate, always-definite/fail-closed) also
+downgrades to a bare tag; post-C2 this would kick EVERY guest in a Custom
+P2P room. Added V14b-p2p (C1) + V16-guest (C2). Also found GameSetupPage.tsx
+:621 as a 4th downgrade site, and corrected two citation errors in round-2's
+own review (None-downgrade is at deck_validation.rs:273-278 not :2751; shared
+test helper is at :5630 not :5639/:5644).
+
+All 9 non-blocking (N1-N9) addressed in place, each with corrected citations
+verified against live tree. Notably N7 dissolves rather than needing a
+judgment call: T2 excludes test fixtures, so C1's T2-counted total is 11 (not
+12), and the gate can't fire regardless of 1-unit vs 3-unit reading.
+
+Round count: 3 of 4 max. This round's revision is unusually thorough (found
+things neither review flagged) - reasonable chance round 3 review comes back
+clean. Next: dispatch a FRESH independent charter-mode reviewer (opus, no
+context beyond charter v3 + task description) for round 3 review. If round 3
+finds more blocking issues, round 4 is the last revision before the 4-round
+backstop stops the charter loop and surfaces to the user.
+
+## Charter review round 3 (opus, fresh charter-mode reviewer, on v3) - NOT CLEAN
+
+1 blocking finding: the sender census is STILL not closed - a 4th, mechanically
+distinct miss. All 3 census commands key on a VALUE signature (selected_format
+field name, an entry-point function name, or .format property access). A
+format threaded as a camelCase REACT PROP (`selectedFormat`) is invisible to
+all three. Missed: MyDecks.tsx:599 (prop type declaration - MyDecks has ZERO
+references to formatConfig/FormatConfig/CustomFormat/any store, its only
+format channel is this prop), and its two suppliers: GameSetupPage.tsx:340
+(`selectedFormat={selectedFormat ?? undefined}`) and MultiplayerPage.tsx:864
+(`selectedFormat={selectedFormat}`, derived at :667-672 with a MIX of Tag-only
+and Resolved-capable branches). None of these three sites is in the MIGRATE
+table. Consequence: C1's own headline test V17 (deck-picker grid mixed
+true/false verdicts) is UNACHIEVABLE as chartered - MyDecks still gets a bare
+tag via its prop even after all 3 MIGRATE'd internal call sites are fixed,
+so it keeps returning null for every deck and V17 fails, looking like a
+Phase B defect. N9's premise (that the selectedFormat prop already carries
+whatever's needed except the :670 filter-chip fallback) is false today.
+
+Everything else independently re-verified as exact: both of v3's corrections
+to round-2's review citations (None-downgrade at :273-278 not :2751; helper
+at :5630 not :5639/:5644, fn:5612 doesn't use it) confirmed correct. D-a and
+D-b dead-ends both traced end-to-end and confirmed real (no fallback prevents
+either). All 7 .expect() sites, all 4 sideboard_policy() sites, the CR-split
+site list (4 move, 2 don't - confirmed exact including :3077 being the
+doc comment Phase A deletes), N5's Lightning Bolt control (confirmed legal/
+unrestricted, outside all 3 lists), N7's arithmetic (13-2=11 for C1, matches
+the phase-fit skill's fixture-exclusion rule), split-file HostSetup.tsx
+ownership (consistent everywhere, HostSetup.test.tsx has zero references to
+what C1 touches so no green-tree risk), V-N2/V-N4 cross-references.
+
+1 non-blocking: the EXCLUDE row "Plumbing files (wasm-adapter.ts etc.)" is
+not a decidable membership test despite the closure rule requiring one -
+live CMD2 hits files not literally named (engine_wasm.d.ts, engineRuntime.ts).
+
+Root-cause diagnosis (reviewer's own framing, worth preserving): this is a
+DIFFERENT mechanism from both prior misses (round 1's tests-vs-source miss,
+round 2's hand-list incompleteness) - "we made the census command-derived"
+closed those two mechanisms but not the prop-threading mechanism. Suggests
+a 4th regenerating command over the prop-channel signature:
+  rg -n 'selectedFormat\s*[:=]|selectedFormat=\{' client/src --glob '*.ts' --glob '*.tsx' --glob '!**/__tests__/**'
+
+Round count: 3 of 4 max - THIS IS THE LAST REVISION ROUND PERMITTED under the
+4-round charter-review backstop. Next: dispatch charter v4 revision (opus)
+fixing this one blocking issue + the 1 non-blocking. If round-4 review is not
+clean, the backstop requires stopping the charter loop and surfacing to the
+user rather than a round 5.
+
+## Charter v4 (round-3 revision, opus charter-mode planner) - FINAL PERMITTED REVISION
+
+Structural fix rather than another patch: diagnosed that 4 rounds of name-based
+regex census each found a mechanically distinct escape (hand-list -> hand-list
+-> value-signature-blind-to-props -> optional-prop-blind-to-`?:`) and concluded
+a name-based regex over an untyped surface has no termination proof. Replaced
+the closure mechanism with TYPESCRIPT'S OWN COMPILER: mandated SelectedFormat
+be declared as a non-overlapping discriminated union (sound because GameFormat
+is a pure string union, not assignable to any object-union arm), so widening
+just 2 declarations (EvaluateOptions.selectedFormat, AiDeckCatalogOptions.
+selectedFormat) makes tsc reject every remaining bare-tag site in the
+transitive feed graph - exhaustive by construction, not by enumeration.
+Regexes demoted to pre-work planning aids only.
+
+Found 2 MORE sites in its own sweep, beyond what round-3 named:
+  AiOpponentConfig.tsx:27/:63 - identical prop-channel structure to MyDecks,
+    not named by round 3.
+  GameProvider.tsx:301 - an indexed-access-typed param (FormatConfig["format"])
+    - correctly EXCLUDEd (feeds only randomDeckSelection comparison).
+Also fixed round-3's OWN proposed CMD4 regex, which was itself broken (doesn't
+match `selectedFormat?: GameFormat` - the very site it was meant to catch).
+
+Did an honest sweep for other mechanisms (context/spread/URL-params/type-
+erasure) rather than just claiming closure: enumerated all 6 React contexts
+(none carry format), checked all 4 MyDecks/AiOpponentConfig render sites for
+prop spread (none), traced URL params to already-covered lockstep state
+updates, and swept for as-any/ts-ignore/ts-expect-error on the format path
+(zero hits; all as-GameFormat casts are upstream ingress casts, all
+any/unknown is downstream of buildRequest in wasm/worker plumbing and cannot
+reintroduce a bare tag). Explicitly stated the one residual risk it can't
+fully close (a format value entering from a deserialization boundary upstream
+of buildRequest) as an escalation trigger, not a false CLEAN claim.
+
+Replaced the undecidable "plumbing files etc." EXCLUDE row with an explicit
+enumerated table (5 files, every line verified by reading it) plus a
+decidable membership test.
+
+C1 rescoped: 16 listed paths (2 new source: types.ts, AiOpponentConfig.tsx
+already counted; 2 new test files), T2-counted = 12 (was 11). Gate still
+doesn't fire under any unit-count reading (12 < 13 regardless). Added an
+explicit re-adjudication trigger: if the executor finds a 13th non-test
+source path, report to orchestrator rather than absorbing silently.
+
+Everything round-3-verified-exact carried forward unchanged (both citation
+corrections, both dead-ends, all .expect/sideboard_policy sites, CR-citation
+split, N5 Lightning Bolt control, split-file HostSetup ownership).
+
+Round count: 4 of 4 max - THIS IS THE LAST ROUND. Next: dispatch a FRESH
+independent charter-mode reviewer (opus) for the final review. Per the
+4-round backstop: if this comes back NOT CLEAN, the charter loop STOPS here
+and surfaces to the user rather than continuing to a round 5 - regardless of
+how minor the remaining finding is.
+
+## Charter review round 4 (opus, fresh charter-mode reviewer, on v4) - NOT CLEAN
+
+THE 4-ROUND BACKSTOP HAS BEEN HIT. Per the engine-implementer skill's charter
+review loop rules, this STOPS THE LOOP and surfaces to the user rather than
+continuing to round 5, regardless of finding severity.
+
+1 blocking finding: aiDeckCatalog.ts:83-84 has a client-side knownFormat
+  prefilter that runs BEFORE the engine compat call (before the :92-96
+  evaluateDeckCompatibility call and before the :97 drop the charter names
+  as D-a's sole mechanism):
+    const { knownFormat } = candidate;
+    if (knownFormat && options.selectedFormat && knownFormat !== options.selectedFormat) return null;
+  Every precon candidate is unconditionally stamped knownFormat:"Commander"
+  (deckCatalog.ts:124); under a Custom format "Commander" !== "Custom:5"
+  drops EVERY knownFormat-bearing candidate without the engine ever being
+  consulted - reopens dead-end D-a via a DIFFERENT line than the charter
+  analyzed, in exactly the scenario C2 unblocks. CMD-TS DOES force a touch to
+  this line (GameFormat !== SelectedFormat is a real TS2367 type error,
+  confirmed by the reviewer's own tsc probe) - but the charter supplies no
+  semantics for how to fix it, and the naive mechanical fix (compare against
+  selectedFormat.config.format) preserves the bug exactly. This is the
+  reviewer's named failure shape: "a discriminator whose verdict is really
+  decided by an upstream conjunct that dominates it." Root cause: this
+  prefilter is the frontend deciding format legality client-side, which
+  CLAUDE.md's "engine owns all logic" principle forbids - the fix is to skip/
+  bypass this prefilter for a resolved Custom format so the engine decides.
+
+2 material gaps (non-blocking but noted): (a) MyDecks.tsx:1205-1217
+  fabricates a whole DeckCompatibilityResult client-side for precons
+  including selected_format_compatible: knownFormat===selectedFormat -
+  same class of bug, degraded-reachable not hard-blocking because Custom
+  format's contextualFilter is null so nothing is filtered by default: still
+  needs a MIGRATE row; (b) item 3 (registry preset) has no landing phase
+  documented - swedish_old_school never actually reaches
+  custom_format_registry() given the ante-cards gap, and the charter's
+  "charter-level deferrals" list doesn't expand D-4/D-5/D-6 in-document as
+  charter mode requires.
+
+CONFIRMED CORRECT (extensively probed, not just re-read): the entire v4
+type-driven closure mechanism holds up under real adversarial testing -
+reviewer wrote and ran actual standalone tsc probes (8 cases: bare literal,
+bare GameFormat variable, GameFormat!==SelectedFormat comparison [TS2367],
+structural excess-property bypass attempt, generic HOC-forwarding escape
+attempt, null/undefined, any, JSON.parse()) - confirmed the ONLY 2 holes are
+the ones v4 already disclosed (any/unknown erasure), no third hole found.
+Confirmed tsc -b --noEmit is genuinely one project over the whole client
+(no project-reference hiding). Confirmed round-3's regex really was broken
+and v4's fix works (ran CMD4 live: 42 lines, all classified). Confirmed all
+5 React contexts enumerated independently, none carries format. Confirmed
+v4's 2 self-found sites (AiOpponentConfig.tsx, GameProvider.tsx:301) are
+classified correctly. Re-verified essentially everything from rounds 1-3
+(all .expect/sideboard_policy line numbers, CR-citation split, guard line
+numbers, N1/N8 citations, 7 locale count) - all exact. Found 2 more stray
+CR 100.2b test-module sites (:7348,:7380) to fold into Phase B, and some
+minor MIGRATE-table line-drift (cosmetic, not blocking).
+
+STATUS: Charter loop is now STOPPED per the 4-round backstop rule. This must
+be surfaced to the user with the finding and options for how to proceed
+(e.g. authorize a 5th round outside the strict backstop given the narrow,
+well-specified nature of the remaining finding; or proceed to implementation
+with the gap flagged as a mandatory addition to Phase C1's own plan-review
+loop; or some other resolution the user prefers).
+
+## User decision: authorize round 5 (overriding strict backstop)
+
+User explicitly authorized one more targeted revision round, scoped to the
+round-4 blocking finding (aiDeckCatalog.ts:83-84 prefilter) plus the 2
+material gaps, followed by a FOCUSED verification review (confirming just
+this fix, not a full re-review from scratch). This is a user override of the
+4-round backstop's default "stop and surface" behavior, given the narrow and
+well-specified nature of the remaining finding.
+
+## Charter v5 (round-5 scoped revision, opus charter-mode planner)
+
+Surgical patch over v4, touching only the 5 authorized items:
+1. BLOCKING fix: aiDeckCatalog.ts:83-84 knownFormat prefilter - split D-a into
+   D-a.1 (client prefilter, fires first, never consults engine) and D-a.2
+   (the existing :97 engine-verdict drop). Fix: skip the prefilter entirely
+   for kind==="resolved", keep Tag behavior unchanged. Explicitly PROHIBITED
+   the unwrap-and-compare patch (comparing against .config.format) since it
+   reproduces the bug verbatim. Also fixed a companion line at :100
+   (resolveBracket) with different severity (bracket-tier degradation, not
+   suppression). New helper selectedFormatUsesCommander (consumes engine-
+   derived FormatConfig.uses_commander) homed in deckCompatibility.ts
+   specifically to avoid tripping T2 to 13 paths - reasoning stated
+   explicitly with an explicit re-adjudication trigger if the executor
+   disagrees with the homing.
+2. MyDecks.tsx fabricated verdict: CORRECTED THE REVIEWER'S OWN reachability
+   analysis - the real unconditional suppressor is :1028
+   (selectedFormatForCompatibility==="Commander" ? filteredPreconCandidates
+   : []), not just the :1215-1216 fabricated verdict the reviewer named -
+   :1028 empties the precon pool under ANY Custom format regardless of the
+   filter-chip path. Folded into one MIGRATE row with :971 since the
+   closure rule would otherwise leave 3 unresolved tsc errors.
+3. Deferral expansion: D-1 through D-7 each given 1-3 sentences + phase
+   attribution (D-7 is new - built-in-format knownFormat lossiness,
+   deliberately deferred/unchanged, distinct from the Resolved-arm fix).
+4-5. Minor drift: deckCompatibility.ts:59 added to MIGRATE; CR citation site
+   list extended 4->7 moves (found a THIRD stray site :4696 beyond the
+   2 the reviewer named), verified against MagicCompRules.txt line numbers.
+
+New verification rows: V14b-aicatalog-custom (paired positive reach-guard +
+negative control + explicit regression-guard against the prohibited patch),
+V14b-mydecks-precon, V-N6 (asserts exact surviving CR-100.2b site set).
+
+Also caught: a CMD-TS corollary needed stating explicitly (no-string-arm
+property is what catches renamed identifiers like selectedFormatForCompat-
+ibility; N9's Tag(...) wrapping is load-bearing - if left unwrapped,
+DeckFilter's string arm would restore overlap and silently un-error the
+bug sites). C2's V16-aiseat now explicitly depends on V14b-aicatalog-custom
+landing in C1 first.
+
+Path-count re-check: all fixes land in already-scoped files; the one new
+symbol was deliberately homed to avoid a 13th path. C1 stays at 12 paths,
+all phases' T2 counts unchanged, no phase re-fires.
+
+Next: dispatch a FOCUSED verification review (per user's authorization) -
+scoped to confirming just these 5 fixes (plus the reviewer's own 2 additional
+catches) are correct and complete, NOT a full re-review of the 4-rounds-clean
+remainder of the document.
+
+## Focused verification of v5 - found NEW blocking issue (different bug category)
+
+Items 4,5 clean. Items 1,2 correctly fixed as far as they went but incomplete:
+
+NEW BLOCKING: v5's own N9 addendum (wrapping the activeFilter fallback in
+Tag(...) so TS2367 keeps firing) requires selectedFormatForCompatibility to
+become an OBJECT instead of a string. Nothing in the charter requires this
+object be memoized. It's a plain `const`, recomputed every render, fed into
+~9 hook dependency arrays including TWO async engine-scan effects that call
+setState on completion (compatibility scan, coverage scan). New object each
+render -> effect refires -> engine round-trip -> setState -> re-render ->
+new object = unbounded WASM-worker scan loop. Same hazard at
+aiDeckCatalog.ts:181's useEffect dep array for all 3 useAiDeckCatalog
+callers. CRITICALLY: tsc reports NOTHING here - this is a referential-
+stability/runtime bug, a fundamentally different category than everything
+the type-driven closure mechanism (the whole point of v4/v5) was built to
+catch. 5 rounds of adversarial review focused on type-closure correctness
+missed this because it's orthogonal to that axis entirely.
+
+MATERIAL GAP: selectedFormatUsesCommander's consumer list is incomplete -
+AiOpponentConfig.tsx:81 (isCedhFormat = isCommanderFamilyFormat(selectedFormat))
+is the identical defect class to aiDeckCatalog.ts:65, not covered by the new
+helper; :87 (formatSuppliesDeck) is a SIBLING registry-lookup accessor
+(supplies_fixed_deck field exists alongside uses_commander on FormatConfig)
+suggesting this might be a small family of accessors, not one helper;
+GameSetupPage.tsx:90 needs widening too. Reviewer flagged this could
+potentially trip C1's T2 path count to 13 if these aren't already covered
+by existing MIGRATE rows - needs confirmation against the full document.
+
+MATERIAL-MINOR: the import-cycle justification for homing the helper in
+deckCompatibility.ts (rather than bracket.ts) doesn't actually hold - the
+argument only rules out adapter/types.ts, says nothing about bracket.ts,
+and bracket.ts would have worked fine (same acyclic direction, and the
+import is `import type` anyway so even the types.ts cycle claim is a
+static-graph nit not a hard constraint). Framing should be "fine on its own
+merits" not "independently justified" against a threshold-gaming concern
+it doesn't actually address.
+
+Also 2 minor wording notes (D-1/D-7 phrasing reads as landing-phase
+attribution when items are out-of-scope-for-1d-entirely; :1028's fix is an
+unstated Tag-arm behavior CHANGE for built-in commander-family formats
+[Oathbreaker/Brawl/Duel Commander currently show 0 precons, would start
+showing them - correct improvement, not lossiness, but needs its own test
+row so it isn't read as accidental]) and a V-N6 robustness note (asserting
+exact line numbers post-edit is fragile since the citation-text-length
+change may cause a rewrap; restate as a property).
+
+User decision: authorized round 6 - same scoped-revision + focused-
+verification pattern as round 5, targeting exactly: (1) memoization
+requirement for selectedFormatForCompatibility + stable SelectedFormat
+across useAiDeckCatalog callers, (2) complete the helper consumer list
+(AiOpponentConfig.tsx:81/:87, GameSetupPage.tsx:90) and decide one-helper-
+vs-family, (3) fix the import-cycle justification framing.
+
+Next: dispatch charter v6 scoped revision (opus).
+
+## Charter v6 (round-6 scoped revision, opus charter-mode planner)
+
+Fixed all 3 authorized items + 2 wording notes:
+1. New BINDING "Section: Referential stability" in Phase C1 - RS-1 (MyDecks.tsx:670
+   must become useMemo keyed on primitives, not on the object's own identity -
+   memoizing on itself would be circular, PROHIBITED), RS-2 (per-caller
+   disposition for all 3 useAiDeckCatalog callers - HostSetup.tsx's formatConfig
+   is already-stable component state so only the Resolved wrapper needs its
+   own memo; HostControlTile.tsx needs a memo keyed on hostSession?.formatConfig;
+   AiOpponentConfig.tsx receives it as a prop, obligation belongs to parent),
+   RS-3 (GameSetupPage.tsx's two prop sites + MultiplayerPage.tsx:864 need
+   memoized values), RS-4 (resolves the open question: GameSetupPage.tsx:90
+   does NOT need widening - verified :621 is fed by formatConfig?.format at
+   :91, not by :90 at all). Explicitly prohibited escape hatches (useRef-
+   comparison shims, JSON.stringify dep keys, custom deep-equal hooks,
+   eslint-disable on the affected arrays). 2 new BLOCKING verification rows:
+   V-refstable-mydecks and V-refstable-catalog, both requiring N>=5 forced
+   re-renders + spy assertions that the async engine-scan effects fire AT
+   MOST ONCE, with anti-vacuity guards (changing the format must still
+   trigger exactly one new call).
+2. Completed the accessor-family consumer list: promoted single helper to a
+   two-member family (selectedFormatUsesCommander + selectedFormatSuppliesDeck)
+   sharing one 3-line internal dispatch function, added AiOpponentConfig.tsx
+   :81 and :87 as consumers (identical defect class to aiDeckCatalog.ts:65,
+   plus a genuinely different sibling accessor). Justified the "family not
+   generic abstraction" decision (exactly 2 accessors exist today, both
+   Tag-arm lookups already exist and encapsulate their own registry lookup).
+   T2 path count re-derived explicitly as still 12 (no new paths - all 5
+   consumer sites are in already-listed files).
+3. Import-cycle framing corrected: withdrew the claim that bracket.ts was
+   excluded by necessity (verified bracket.ts:1 is `import type`, erased at
+   emit, genuinely acyclic). Real cycle constraint applies only to
+   adapter/types.ts (types.ts -> bracket.ts -> formatRegistry.ts -> types.ts
+   via bracket.ts's VALUE import at :2). deckCompatibility.ts justified on
+   ownership/cohesion grounds honestly, path-count benefit explicitly labeled
+   "a design preference, not a forced consequence."
+
+Wording notes: D-1/D-7 reworded from phase-attribution to "out of scope for
+1d" (matching D-4's phrasing). New "Section: the :1028 Tag-arm improvement is
+deliberate" - states plainly that fixing :1028 also changes Tag-arm behavior
+for built-in commander-family formats (Oathbreaker/Brawl/HistoricBrawl/
+DuelCommander currently show 0 precons, will show them correctly) - this is
+an intended consequence of using the engine-derived predicate, not scope
+creep, with its own verification row V14b-mydecks-precon-builtin.
+
+Self-corrected 2 of its own briefing's premises during verification (not
+new bugs, but corrections to inputs given to this revision round):
+(a) GameSetupPage.tsx:90 doesn't need widening after all (resolved via RS-4);
+(b) HostSetup.tsx's formatConfig is already-stable component state, so only
+the wrapper needs memoizing, not the whole formatConfig - the charter now
+states this precisely rather than over-broadly.
+
+Next: dispatch a FOCUSED verification pass (round-6 pattern) scoped to just
+these changes - the referential-stability section's correctness, the
+accessor-family completeness, and the honest cycle-framing - not a full
+re-review.
+
+## Charter FROZEN as v6 - user decision to stop chartering and move to implementation
+
+User decision after round-6 focused verification: stop the charter loop here.
+Phases A, B, C2, D are accepted as fully clean (4-5 rounds of adversarial
+review each, no open findings). Phase C1 is accepted with a DOCUMENTED LIST
+OF OPEN FINDINGS to be resolved during Phase C1's own future plan-review
+(Step 2 in phase-plan mode, which runs later with full context right before
+C1 is actually implemented - after Phase A and Phase B have landed).
+
+## MANDATORY INPUTS TO PHASE C1'S FUTURE PLAN-REVIEW (from round-6 focused
+## verification, unresolved by design - carry forward, do not silently drop):
+
+1. BLOCKING (B1): V14b-mydecks-precon-builtin's fixture is wrong. Oathbreaker
+   has uses_commander:false (formatRegistry.ts:328-343) despite command_zone:
+   true - isCommanderFamilyFormat returns false for it. The actual
+   uses_commander:true set is: Commander(:232), DuelCommander(:256),
+   PauperCommander(:280), Brawl(:352), HistoricBrawl(:376), CommanderDraft(:400).
+   TinyLeaders(:304) is another command_zone:true/uses_commander:false trap.
+   Fix: re-derive the fixture and the "which formats change" claim from the
+   registry (regenerating grep), pick a fixture actually in the set (Brawl or
+   HistoricBrawl), not Oathbreaker.
+
+2. MATERIAL (M2, highest-value finding): a genuinely NEW referential-stability
+   gap the charter's own RS section didn't cover - CONFIG MUTATION, not just
+   render churn. GameSetupPage.tsx:497's starting_life commit mints a
+   legitimately-new FormatConfig object without touching selectedFormat.
+   Post-1d, RS-3's memo (keyed on [formatConfig, selectedFormat]) correctly
+   produces a new SelectedFormat object on every such edit, which then
+   re-triggers ALL 8 dependency-array consumers including both async scan
+   effects (compat wipe + full re-batch) and the AI-catalog's N-deck
+   sequential engine loop. The charter's own anti-vacuity guard in
+   V-refstable-mydecks/catalog ("changing the format DOES re-issue exactly
+   one new batch") actually BLESSES this as passing, without the charter
+   ever deciding whether re-scanning on every life-total edit is desired
+   behavior. Needs an explicit disposition (key the scan-relevant channel on
+   legality-relevant content only vs. gate on equality vs. accept-and-
+   document) plus a verification row pinning the choice.
+
+3. MATERIAL (M3): the referential-stability hazard table is incomplete and
+   its severity rule is wrong. MISSED a THIRD, worse effect at MyDecks.tsx
+   :840-852 - SYNCHRONOUS (not async), calls setCompatibilities({}) with a
+   fresh object every time -> unbounded synchronous "Maximum update depth
+   exceeded" loop, strictly worse than the 2 async loops already documented.
+   The stated rule ("only async setState effects loop, sync/memo ones are
+   just wasted work") is falsified and must not stand as a durable
+   classification. Fix is unaffected (RS-1's single memo at :670 still
+   covers it) but the recorded reasoning needs correcting so a future reader
+   doesn't rely on the wrong severity rule elsewhere.
+
+4. MATERIAL (M1): the round-6 fix to v5's import-cycle claim repeats the
+   exact same class of error it was correcting. v6 claims formatRegistry.ts
+   value-imports adapter/types.ts creating a real cycle via bracket.ts - but
+   formatRegistry.ts's only import (line 1) is ALSO `import type`, erased at
+   emit, so this replacement cycle claim is equally false. No real import
+   cycle exists anywhere in this chain (types.ts -> bracket.ts ->
+   formatRegistry.ts -> nothing at runtime). The homing decision for the
+   accessor family in deckCompatibility.ts survives on its stated
+   cohesion/ownership grounds without needing any cycle argument - just
+   drop the cycle claim entirely rather than trying a third time to locate
+   a real one.
+
+5. MATERIAL (M4): widening MyDecks.tsx:1028 to use selectedFormatUsesCommander
+   has no accompanying per-deck legality filter - legalPreconCandidates is
+   the ONLY gate on the precon pool; nothing else on that path checks deck
+   size/singleton/etc. This means the fix as scoped would surface unfiltered
+   100-card Commander precons in 60-card-format pickers (Brawl, HistoricBrawl,
+   PauperCommander, CommanderDraft) - decks that are not actually legal there.
+   DuelCommander is the only widened member where "will show them correctly"
+   is clearly true without a companion legality filter. Needs either a
+   legality gate paired with the widening, or an explicit justification for
+   why an unfiltered pool is acceptable per format.
+
+Minor notes also carried forward: RS-3 should name MultiplayerPage's memo key
+explicitly for symmetry (verified sound: pendingAction is useState at :98,
+storeFormatConfig is a stable field selector at :134); V-refstable-catalog's
+per-caller assertion needs arg-capturing mocks (current useAiDeckCatalog
+mocks in HostControlTile.test.tsx/AiOpponentConfig.test.tsx/GameSetupPage
+tests discard arguments; HostSetup has no test file at all yet).
+
+Everything else in charter v6 (Phase A, Phase B, Phase C2, Phase D, the
+overall 4-phase structure, ordering constraints, dead-ends D-a/D-b, the
+type-driven census closure mechanism itself) is CONFIRMED CLEAN across
+4-6 rounds of adversarial review and is NOT reopened.
+
+## RUN STATUS: proceeding to implementation.
+
+PHASE_BASE_SHA for Phase A = run BASE_SHA = 03fbdf709 (unchanged, verified
+clean throughout all charter rounds).
+
+Next: dispatch Phase A's own Step 1 planner (opus, phase-plan mode) using
+the frozen charter + Phase A's entry + its deferral allowlist. Phase A
+touches only crates/engine/** + 2 test files, has zero dependency on any of
+the above open C1 findings, and is fully specified/verified/clean - safe to
+begin immediately.

@@ -1418,4 +1418,105 @@ mod tests {
             ParsedFrame::Malformed(_)
         ));
     }
+
+    /// Phase 1d: `FormatConfig::deserialize`'s admission gate now runs
+    /// through this exact wire chokepoint (`parse_lobby_client_message` ->
+    /// `serde_json::from_str::<LobbyClientMessage>` -> the embedded
+    /// `Option<FormatConfig>` field's own `Deserialize` impl), not just as an
+    /// engine-crate unit test. A single-field-varied host-configured
+    /// Commander config (max_players, starting_life,
+    /// commander_damage_threshold each on its own, then all three together)
+    /// must reach `ParsedFrame::Message`; a value outside the format's own
+    /// registry range must still route to `ParsedFrame::Malformed`.
+    fn create_game_with_settings_frame(format_config: FormatConfig) -> String {
+        let message = LobbyClientMessage::CreateGameWithSettings {
+            deck: DeckData::default(),
+            display_name: "Host".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: MatchConfig::default(),
+            format_config: Some(format_config),
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+        };
+        serde_json::to_string(&message).expect("message serializes")
+    }
+
+    #[test]
+    fn wire_frame_admits_a_single_field_varied_host_chosen_commander_config() {
+        let mut max_players_varied = FormatConfig::commander();
+        max_players_varied.max_players = 2;
+        assert!(
+            matches!(
+                parse_lobby_client_message(&create_game_with_settings_frame(max_players_varied)),
+                ParsedFrame::Message(_)
+            ),
+            "a Commander config with only max_players varied to 2 must parse as a message"
+        );
+
+        let mut starting_life_varied = FormatConfig::commander();
+        starting_life_varied.starting_life = 25;
+        assert!(
+            matches!(
+                parse_lobby_client_message(&create_game_with_settings_frame(starting_life_varied)),
+                ParsedFrame::Message(_)
+            ),
+            "a Commander config with only starting_life varied to 25 must parse as a message"
+        );
+
+        let mut threshold_varied = FormatConfig::commander();
+        threshold_varied.commander_damage_threshold = Some(30);
+        assert!(
+            matches!(
+                parse_lobby_client_message(&create_game_with_settings_frame(threshold_varied)),
+                ParsedFrame::Message(_)
+            ),
+            "a Commander config with only commander_damage_threshold varied to Some(30) must \
+             parse as a message"
+        );
+    }
+
+    #[test]
+    fn wire_frame_admits_the_untouched_commander_config_proving_the_envelope_is_fine() {
+        assert!(
+            matches!(
+                parse_lobby_client_message(&create_game_with_settings_frame(
+                    FormatConfig::commander()
+                )),
+                ParsedFrame::Message(_)
+            ),
+            "the untouched FormatConfig::commander() must parse as a message, proving the \
+             envelope itself is fine"
+        );
+    }
+
+    #[test]
+    fn wire_frame_admits_all_three_host_choices_combined_and_rejects_an_out_of_range_value() {
+        let mut combined = FormatConfig::commander();
+        combined.max_players = 2;
+        combined.starting_life = 25;
+        combined.commander_damage_threshold = Some(30);
+        assert!(
+            matches!(
+                parse_lobby_client_message(&create_game_with_settings_frame(combined)),
+                ParsedFrame::Message(_)
+            ),
+            "the realistic combined case (all three host choices at once) must parse as a message"
+        );
+
+        let mut out_of_range = FormatConfig::commander();
+        out_of_range.max_players = 9;
+        assert!(
+            matches!(
+                parse_lobby_client_message(&create_game_with_settings_frame(out_of_range)),
+                ParsedFrame::Malformed(_)
+            ),
+            "max_players: 9 is outside Commander's registry range and must route to Malformed"
+        );
+    }
 }

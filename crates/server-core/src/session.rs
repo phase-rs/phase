@@ -3809,6 +3809,16 @@ mod tests {
     #[test]
     fn run_ai_is_noop_while_takeback_is_pending() {
         let mut mgr = SessionManager::new();
+        // Phase 1d's `validate_for_player_count` now bounds `player_count`
+        // against the format's own registry range — Standard's default
+        // max_players (2) no longer admits a 3-seat session, so this
+        // format-agnostic seat-mechanics test opens with an explicitly wider
+        // seat count rather than relying on Standard's unbounded-in-practice
+        // default.
+        let format_config = FormatConfig {
+            max_players: 3,
+            ..FormatConfig::standard()
+        };
         let (code, _token0) = mgr
             .create_game_n_players(
                 make_deck(),
@@ -3816,7 +3826,7 @@ mod tests {
                 None,
                 3,
                 MatchConfig::default(),
-                None,
+                Some(format_config),
             )
             .expect("supported format config");
         let (_token1, _) = mgr.join_game(&code, make_deck()).unwrap();
@@ -5185,6 +5195,14 @@ mod tests {
 
         let db = engine::database::CardDatabase::default();
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
+        // See the comment in `run_ai_is_noop_while_takeback_is_pending`:
+        // `validate_for_player_count` now bounds `player_count` against the
+        // format's registry range, so this seat-mechanics test needs an
+        // explicit wider seat count rather than Standard's default of 2.
+        let format_config = FormatConfig {
+            max_players: 3,
+            ..FormatConfig::standard()
+        };
         let (code, _host) = mgr
             .create_game_n_players(
                 make_deck(),
@@ -5192,7 +5210,7 @@ mod tests {
                 None,
                 3,
                 MatchConfig::default(),
-                None,
+                Some(format_config),
             )
             .expect("supported format config");
         // Seat 1 joins; seat 2 is left waiting, because the reducer rejects
@@ -6483,6 +6501,15 @@ mod tests {
         use engine::types::identifiers::CardId;
 
         let mut mgr = SessionManager::new();
+        // `validate_for_player_count` now bounds `player_count` against the
+        // format's registry range — Standard's default max_players (2) no
+        // longer admits this test's 3-seat combat scenario, so the seat
+        // ceiling is widened explicitly rather than relying on the old
+        // unenforced default.
+        let format_config = FormatConfig {
+            max_players: 3,
+            ..FormatConfig::standard()
+        };
         let (code, token0) = mgr
             .create_game_n_players(
                 make_deck(),
@@ -6490,7 +6517,7 @@ mod tests {
                 None,
                 3,
                 MatchConfig::default(),
-                Some(FormatConfig::standard()),
+                Some(format_config),
             )
             .expect("supported format config");
         let _ = mgr.join_game(&code, make_deck()).unwrap();
