@@ -6548,6 +6548,10 @@ mod tests {
         );
 
         let referent_obj = state.objects.get(&referent).expect("referent exists");
+        // Bind the PRE-departure incarnation so the reach-guard below compares
+        // against what was actually captured, not against a hardcoded 0 that
+        // would only discriminate incidentally.
+        let incarnation_before = referent_obj.incarnation;
         let snapshot = CostPaidObjectSnapshot::capture(
             referent_obj,
             referent_obj.snapshot_public_characteristics(),
@@ -6570,9 +6574,11 @@ mod tests {
             "fixture reach-guard: the referent id must be back on the battlefield, \
              or this test would pass for the wrong reason (nothing there to hit)"
         );
-        assert_ne!(
-            returned.incarnation, 0,
-            "fixture reach-guard: the round trip must have bumped the incarnation"
+        assert!(
+            returned.incarnation > incarnation_before,
+            "fixture reach-guard: the round trip must have bumped the incarnation              past the captured one ({} -> {})",
+            incarnation_before,
+            returned.incarnation
         );
 
         let result = resolved_targets(&ability, &TargetFilter::CostPaidObject, &state);

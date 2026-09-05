@@ -6801,9 +6801,15 @@ fn resolve_object_mana_value(
         ObjectScope::AmassedArmy => ability
             .and_then(|a| a.amassed_army_object.as_ref())
             .map(|snapshot| {
-                state
-                    .objects
-                    .get(&snapshot.object_id)
+                // CR 400.7: gate the LIVE read on the captured incarnation, as
+                // the sibling `AmassedArmy` counter and P/T readers above do —
+                // an Army that changed zones and returned is a new object at
+                // the same storage id. CR 608.2h keeps both LKI fallbacks
+                // ungated so a departed Army still reports its recorded mana
+                // value.
+                snapshot
+                    .live_object_id(state)
+                    .and_then(|id| state.objects.get(&id))
                     .map(|obj| {
                         u32_to_i32_saturating(
                             obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
@@ -19206,6 +19212,162 @@ mod tests {
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999)),
             1,
             "two discarded creatures share one card type -> 1 token, not 2"
+        );
+    }
+
+    /// CR 400.7 + CR 608.2h: The `AmassedArmy` mana-value ladder must gate only
+    /// its LIVE first rung on the captured incarnation. An Army that left and
+    /// returned under the same storage id is a new object, so the live read is
+    /// skipped and the reader falls through to the recorded LKI mana value —
+    /// it must NOT report the returned object's live mana value.
+    ///
+    /// Paired with `amassed_army_mana_value_reads_live_object_when_current`,
+    /// which drives the same fixture down the live rung.
+    #[test]
+    fn amassed_army_mana_value_falls_back_to_lki_after_round_trip() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let army = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Army".to_string(),
+            Zone::Battlefield,
+        );
+        // Live MV 7 vs. recorded LKI MV 2 — the two rungs are distinguishable,
+        // so the assertion below cannot pass by reading the wrong one.
+        state.objects.get_mut(&army).expect("army exists").mana_cost = ManaCost::generic(7);
+
+        let army_obj = state.objects.get(&army).expect("army exists");
+        let incarnation_before = army_obj.incarnation;
+        let mut lki = army_obj.snapshot_for_mana_spent();
+        lki.mana_value = 2;
+        let snapshot = CostPaidObjectSnapshot::capture(army_obj, lki);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::AmassedArmy,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+        ability.set_amassed_army_object_recursive(snapshot);
+
+        // CR 400.7: battlefield -> graveyard -> battlefield, same storage id.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, army, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, army, Zone::Battlefield, &mut events);
+
+        // Give the NEW incarnation a live mana value held by neither recorded
+        // source: the departure populated `lki_cache` with the pre-move MV 7 and
+        // the snapshot LKI holds 2, so only an UNGATED live read can yield 11.
+        // Without this the live value would coincide with the cache value and
+        // the assertion would pass whether or not the guard exists.
+        state.objects.get_mut(&army).expect("army exists").mana_cost = ManaCost::generic(11);
+
+        let returned = state.objects.get(&army).expect("row survives the move");
+        assert!(
+            returned.incarnation > incarnation_before,
+            "fixture reach-guard: the round trip must bump the incarnation ({} -> {})",
+            incarnation_before,
+            returned.incarnation
+        );
+        assert_eq!(
+            returned
+                .mana_cost
+                .mana_value_with_x(returned.zone, returned.cost_x_paid),
+            11,
+            "fixture reach-guard: the returned object reads MV 11 live, a value in neither the LKI cache (7) nor the snapshot LKI (2)"
+        );
+
+        let ctx = QuantityContext {
+            entering: None,
+            source: ObjectId(99),
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+        };
+        let got =
+            resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
+
+        assert_ne!(
+            got, 11,
+            "CR 400.7: the returned Army is a new object, so the LIVE rung must be skipped — reporting 11 would mean the guard let a new incarnation through"
+        );
+        assert_eq!(
+            got, 7,
+            "CR 608.2h: with the live rung gated out, the ladder falls to the recorded last-known mana value for that id (7), never the new incarnation's live MV"
+        );
+    }
+
+    /// CR 608.2h: Paired positive for
+    /// `amassed_army_mana_value_falls_back_to_lki_after_round_trip`. Identical
+    /// fixture, but the Army never departs, so the LIVE rung is reached and
+    /// reports MV 7 rather than the recorded 2.
+    #[test]
+    fn amassed_army_mana_value_reads_live_object_when_current() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let army = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Army".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&army).expect("army exists").mana_cost = ManaCost::generic(7);
+
+        let army_obj = state.objects.get(&army).expect("army exists");
+        let mut lki = army_obj.snapshot_for_mana_spent();
+        lki.mana_value = 2;
+        let snapshot = CostPaidObjectSnapshot::capture(army_obj, lki);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::AmassedArmy,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+        ability.set_amassed_army_object_recursive(snapshot);
+
+        let ctx = QuantityContext {
+            entering: None,
+            source: ObjectId(99),
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+        };
+        let got =
+            resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
+
+        assert_eq!(
+            got, 7,
+            "an undeparted Army still reads its LIVE mana value (7), proving the              negative above is not vacuous"
         );
     }
 }
