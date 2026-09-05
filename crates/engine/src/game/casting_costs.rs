@@ -13296,7 +13296,17 @@ fn finalize_mana_payment_with_resume(
         // then resolve it to nothing (Endemic Plague / Fatal Grudge class).
         // CR 400.7j is the rule that mandates the re-pin: a cost that moves an
         // object to a public zone must still let that spell's effects find it.
-        pending.ability.repin_cost_paid_object_recursive(state);
+        //
+        // Guarded on the deferred set being non-empty. CR 400.7j licenses
+        // re-pinning across the COST's own move and nothing else, but mana
+        // payment (`pay_spell_mana_before_deferred_sacrifice`, above) runs
+        // first — so on a cast with no deferred sacrifice an unconditional
+        // re-pin would also bless a LATER move, e.g. a mana ability that
+        // returned the referent from the graveyard. That is precisely what
+        // `deferred_spell_sacrifice_repin_does_not_bless_a_later_move` forbids.
+        if !pending.deferred_sacrificed_permanents.is_empty() {
+            pending.ability.repin_cost_paid_object_recursive(state);
+        }
         let final_cast_cost = if prepaid_actual_mana_spent.is_some() {
             crate::types::mana::ManaCost::NoCost
         } else {
@@ -13692,7 +13702,17 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // then resolve it to nothing (Endemic Plague / Fatal Grudge class).
         // CR 400.7j is the rule that mandates the re-pin: a cost that moves an
         // object to a public zone must still let that spell's effects find it.
-        pending.ability.repin_cost_paid_object_recursive(state);
+        //
+        // Guarded on the deferred set being non-empty. CR 400.7j licenses
+        // re-pinning across the COST's own move and nothing else, but mana
+        // payment (`pay_spell_mana_before_deferred_sacrifice`, above) runs
+        // first — so on a cast with no deferred sacrifice an unconditional
+        // re-pin would also bless a LATER move, e.g. a mana ability that
+        // returned the referent from the graveyard. That is precisely what
+        // `deferred_spell_sacrifice_repin_does_not_bless_a_later_move` forbids.
+        if !pending.deferred_sacrificed_permanents.is_empty() {
+            pending.ability.repin_cost_paid_object_recursive(state);
+        }
         let final_cast_cost = if prepaid_actual_mana_spent.is_some() {
             crate::types::mana::ManaCost::NoCost
         } else {
@@ -25078,9 +25098,28 @@ its replicate cost was paid.)\nDraw a card.";
     /// class: "destroy all creatures that share a creature type with the
     /// sacrificed creature").
     ///
-    /// This pins the SEMANTICS of that path directly: capture, sacrifice, then
-    /// re-pin, and assert the referent is current again afterwards. The paired
-    /// negative below proves the assertion is not vacuous.
+    /// SCOPE — read this before trusting the name. This test drives
+    /// `repin_cost_paid_object_recursive` DIRECTLY. It does NOT enter
+    /// `finalize_mana_payment_with_resume`, so it does **not** pin the
+    /// production call site: deleting the two re-pin calls in that function
+    /// leaves this test green. It pins the re-pin's semantics only — that
+    /// re-pinning after the cost's own move restores the referent.
+    ///
+    /// The call site is deliberately untested because the deferred branch could
+    /// not be reached from a test. `can_defer_spell_sacrifice_until_mana_payment`
+    /// requires `cost_has_x || cost.mana_value() > 0` after the cost-floor pass,
+    /// and an instrumented probe on that gate printed `can_defer=false ...
+    /// cost_mv=0` for an additional-cost sacrifice spell in the scenario
+    /// harness — the mana is already paid by the time the sacrifice prompt runs.
+    /// Endemic Plague and Fatal Grudge, the two cards that reach it in a real
+    /// game, are absent from the test fixture. An integration test written for
+    /// this was deleted rather than shipped because it passed with the
+    /// production fix reverted.
+    ///
+    /// Treat the guarded call in `finalize_mana_payment_with_resume` as latent:
+    /// correct by construction (a path that moves the referent after capture and
+    /// reaches no re-pin must re-pin) but unprotected by coverage. A test that
+    /// drives the real path is the outstanding work.
     #[test]
     fn deferred_spell_sacrifice_repin_restores_the_cost_referent() {
         use crate::game::zones::create_object;

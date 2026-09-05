@@ -6555,13 +6555,22 @@ where
         ObjectScope::AmassedArmy => ability
             .and_then(|a| a.amassed_army_object.as_ref())
             .and_then(|snapshot| {
-                // CR 400.7: gate the live-by-id read on the captured
-                // incarnation; CR 608.2h keeps the snapshot LKI fallback
-                // ungated so a departed Army still reports its recorded P/T.
-                snapshot
-                    .live_object_id(state)
-                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
-                    .or_else(|| lki_extract(&snapshot.lki))
+                // CR 400.7 + CR 608.2h: same ladder as the sibling `AmassedArmy`
+                // counter and mana-value readers — the live rung is gated on the
+                // captured incarnation, and the LKI rung is qualified by that
+                // same incarnation rather than the id-keyed `state.lki_cache`,
+                // which `zones.rs` overwrites on every departure. Threading the
+                // incarnation into `read_object_pt_by_id_for_incarnation` gets
+                // both, plus its documented legacy-save handling. The
+                // binding-time `snapshot.lki` remains the last resort.
+                read_object_pt_by_id_for_incarnation(
+                    state,
+                    snapshot.object_id,
+                    Some(snapshot.incarnation),
+                    &obj_extract,
+                    &lki_extract,
+                )
+                .or_else(|| lki_extract(&snapshot.lki))
             })
             .unwrap_or(0),
         // CR 608.2c: An anaphoric pronoun ("its power"). Shares the
