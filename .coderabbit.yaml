@@ -85,7 +85,7 @@ reviews:
         range/subpart `CR 702.45a/b` — these are the documented convention, not
         format violations. Player-scoped queries on NON-battlefield zones
         (graveyard/library/hand/exile) must filter by `obj.owner`, not `controller`
-        (CR 404.2). Zone changes must route through the replacement-aware pipeline
+        (CR 108.4a). Zone changes must route through the replacement-aware pipeline
         (`ProposedEvent::ZoneChange`), not a direct `zones::move_to_zone`, so
         replacements can apply. Ability costs resolve through one authoritative
         resolver — flag any call site that destructures or branches on an ability's
