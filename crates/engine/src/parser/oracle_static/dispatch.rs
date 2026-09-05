@@ -27,6 +27,43 @@ fn parse_self_reference_subject(input: &str) -> OracleResult<'_, ()> {
     Err(oracle_err(input))
 }
 
+/// CR 613.1f + CR 611.3a: a self-referential keyword grant with a trailing
+/// "as long as" gate — `"<self-ref> has <keyword> as long as <condition>"`.
+/// Returns `(keyword_text, condition_text)`, both slices of `input`.
+///
+/// Replaces a hand-rolled arm that located the first `" has "` and the first
+/// `" as long as "` by raw substring search, and reproduces its accepted-input
+/// set for every line that actually reaches it. The legacy code sliced the span
+/// BETWEEN those two markers, discarded everything before it, and hardcoded
+/// `TargetFilter::SelfRef`.
+///
+/// **The subject peel is not optional and is what makes the arm honest.**
+/// Requiring the pre-verb span to be exactly a self-reference does three things
+/// the legacy slice did not:
+///   * it justifies the `SelfRef` the arm emits, instead of asserting it;
+///   * it keeps the keyword span free of a subject that `map_keyword` could
+///     never map (which would make the empty-modification decline fire on the
+///     very lines this arm exists to serve);
+///   * it declines a line whose pre-verb span is an ANIMATION clause. Such a
+///     line is one animation (CR 613.1d type + CR 613.4b base P/T + CR 613.1f
+///     keyword), not a keyword grant with an unusually long subject, and it
+///     must reach `parse_pronoun_becomes_type_static` intact. `~` and the
+///     `SELF_REF_TYPE_PHRASES` entries are the whole subject vocabulary here, so
+///     no animation clause can satisfy this peel — the decline is structural
+///     rather than a separate test that could drift out of agreement with it.
+///
+/// **Case.** `condition_text` is returned as a slice of whatever `input` was
+/// given. The caller runs this on lowered text and MUST recover the matching
+/// suffix of the original before handing it to `parse_static_condition`, which
+/// received original casing under the legacy arm.
+fn parse_self_keyword_as_long_as(input: &str) -> OracleResult<'_, (&str, &str)> {
+    let (input, ()) = parse_self_reference_subject(input)?;
+    let (input, _) = tag(" has ").parse(input)?;
+    let (input, keyword_text) = take_until(" as long as ").parse(input)?;
+    let (condition_text, _) = tag(" as long as ").parse(input)?;
+    Ok(("", (keyword_text.trim(), condition_text)))
+}
+
 /// CR 707.2c + CR 613.1a + CR 303.4: "Enchanted <subject> is a copy of the
 /// chosen <type>." — Metamorphic Alteration's companion static. Emits the
 /// parse-time `ContinuousModification::CopyChosen` MARKER affecting the
@@ -1972,32 +2009,40 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "~ has [keyword] as long as ..." (must be before generic self-ref "has") ---
-    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-    if let Some(has_pos) = tp.find(" has ") {
-        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        if let Some(cond_pos) = tp.find(" as long as ") {
-            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-            if has_pos < cond_pos {
-                let keyword_text = tp.lower[has_pos + 5..cond_pos].trim();
-                let condition_text = text[cond_pos + 12..].trim().trim_end_matches('.');
-                let mut modifications = Vec::new();
-                if let Some(kw) = map_keyword(keyword_text) {
-                    modifications.push(ContinuousModification::AddKeyword { keyword: kw });
-                }
-                let condition = parse_static_condition(condition_text).unwrap_or(
-                    StaticCondition::Unrecognized {
-                        text: condition_text.to_string(),
-                    },
-                );
-                return Some(
-                    StaticDefinition::continuous()
-                        .affected(TargetFilter::SelfRef)
-                        .modifications(modifications)
-                        .condition(condition)
-                        .description(text.to_string()),
-                );
-            }
+    // --- "<self-ref> has [keyword] as long as ..." (must be before generic self-ref "has") ---
+    //
+    // CR 613.1f + CR 611.3a: a self-referential keyword grant gated by an
+    // "as long as" condition. A line whose pre-verb span is an animation clause
+    // is one animation (CR 613.1d + CR 613.4b), not a keyword grant with a long
+    // subject — `parse_self_keyword_as_long_as` declines it so the animation
+    // authority (`parse_pronoun_becomes_type_static`, below) owns it.
+    if let Ok((_, (keyword_text, condition_lower))) = parse_self_keyword_as_long_as(tp.lower) {
+        // CASE PRESERVATION: `parse_static_condition` received ORIGINAL casing
+        // under the legacy arm, which sliced the condition out of `text` while
+        // taking the keyword out of `tp.lower`. `condition_lower` is a suffix of
+        // `tp.lower`, so the equal-length suffix of `text` is the same span in
+        // original case. Lowercasing it here would silently change how
+        // conditions like "you control a Forest" parse.
+        let condition_text = text[text.len() - condition_lower.len()..]
+            .trim()
+            .trim_end_matches('.');
+        // The keyword MUST map. The legacy arm returned `Some` with an empty
+        // `modifications` vec when it did not — a static that claims support and
+        // does nothing, with no `Effect::Unimplemented` to mark the gap. Decline
+        // instead, so the line reaches an authority that can model it or is
+        // surfaced honestly as unimplemented.
+        if let Some(keyword) = map_keyword(keyword_text) {
+            let condition =
+                parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+                    text: condition_text.to_string(),
+                });
+            return Some(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                    .condition(condition)
+                    .description(text.to_string()),
+            );
         }
     }
 
