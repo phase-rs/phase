@@ -1672,6 +1672,45 @@ impl GameObject {
             .collect();
     }
 
+    /// CR 611.2a + CR 611.2c + CR 613.1: install a replacement effect created by the
+    /// RESOLUTION of a spell or ability onto this object as its HOST.
+    ///
+    /// THE single authority for resolution-time object installs. Callers must never
+    /// push onto `replacement_definitions` or `base_replacement_definitions`
+    /// directly: a raw live push is reset away at the next layer pass (CR 613.1,
+    /// `layers::seed_live_characteristics_from_base`), and a base push would put a
+    /// second, unaddressable copy behind the pipeline's `ReplacementId` index and
+    /// resurrect the def's runtime state — CR 615.3 "used up", CR 615.7 depletion,
+    /// CR 701.19a regeneration consumption — on the next reseed.
+    ///
+    /// INVARIANT: a `Resolution`-origin def is never present in
+    /// `base_replacement_definitions`. Violating it double-applies the effect, and
+    /// it is also what makes the carry-over idempotent under mid-pass re-entry
+    /// (see `reseed_replacements_carrying_resolution_effects`).
+    pub(crate) fn install_resolution_replacement(&mut self, mut def: ReplacementDefinition) {
+        debug_assert!(
+            !self.base_replacement_definitions.contains(&def),
+            "a resolution-installed replacement must not also live in base"
+        );
+        // CR 611.2a: a `Resolution`-origin def is carried across every CR 613.1
+        // reset, so its ONLY removal paths are an expiry prune (`turns.rs`, all
+        // three of which key on `expiry` alone) and a zone change. A def with no
+        // expiry has neither — carrying it would make it immortal. Fail CLOSED:
+        // install it live-only, exactly as this call site behaved before the
+        // authority existed, so it is still reset away at the next pass. The one
+        // caller that can reach this arm is `add_target_replacement`'s
+        // unstated-duration NON-shield rider (`with_resolution_shield_expiry` is
+        // gated on `shield_kind.is_shield()` precisely so those keep `None`);
+        // `prevent_damage`, `create_damage_replacement` and `regenerate` all stamp
+        // an expiry unconditionally.
+        if def.expiry.is_none() {
+            self.replacement_definitions.push(def);
+            return;
+        }
+        def.origin = crate::types::ability::ReplacementOrigin::Resolution;
+        self.replacement_definitions.push(def);
+    }
+
     /// Installs a new intentional base/face/cleave trigger set and then
     /// materializes its ordered printed slots. Allocation occurs before the
     /// live entries become observable.
@@ -2265,8 +2304,26 @@ impl GameObject {
         self.materialize_test_fixture_trigger_base();
         if self.base_replacement_definitions.is_empty() && !self.replacement_definitions.is_empty()
         {
-            self.base_replacement_definitions =
-                Arc::new(self.replacement_definitions.iter_all().cloned().collect());
+            // CR 611.2c: a resolution-created continuous effect is NOT a printed
+            // characteristic, so it must never be back-filled into the base store.
+            // Doing so would put it in base AND in the carried set, double-applying
+            // it and resurrecting its consumed/depleted runtime state at the next
+            // CR 613.1 reseed. This function is the ONLY production path in the tree
+            // that can copy the live store into base; the filter is what makes
+            // `reseed_replacements_carrying_resolution_effects`'s idempotence
+            // invariant ("no baseline ever contains a `Resolution` member")
+            // unconditional rather than true only in practice. Reachable only on a
+            // fixture whose base was never initialized (the function is gated on
+            // `base_characteristics_initialized`).
+            let carried: Vec<ReplacementDefinition> = self
+                .replacement_definitions
+                .iter_all()
+                .filter(|d| !d.is_resolution_installed())
+                .cloned()
+                .collect();
+            if !carried.is_empty() {
+                self.base_replacement_definitions = Arc::new(carried);
+            }
         }
         if self.base_static_definitions.is_empty() && !self.static_definitions.is_empty() {
             self.base_static_definitions =
@@ -3264,6 +3321,87 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
                 })
             })
         })
+}
+
+/// CR 611.2c + CR 613.1: rebuild a live replacement store from a baseline while
+/// CARRYING FORWARD every replacement created by the resolution of a spell or
+/// ability.
+///
+/// CR 613.1 governs an object's CHARACTERISTICS. CR 611.2c settles that a
+/// prevention shield is not one — "An effect that reads 'Prevent all damage
+/// creatures would deal this turn' doesn't modify any object's characteristics,
+/// so it's modifying the rules of the game." A shield is merely stored on an
+/// object so the pipeline can find it, and CR 611.2a gives it the lifetime the
+/// ability stated, not "until the next layer pass". CR 615.3 ends it when it is
+/// used up or its duration expires.
+///
+/// Carried entries keep their runtime state — CR 615.3 consumption, CR 615.7
+/// depletion, CR 701.19a regeneration — because they are the same, single copy
+/// the appliers mutate.
+///
+/// TWO baselines, ONE authority. Within a single layer pass an object's live
+/// store can be wholesale-rewritten up to three times:
+///   1. the Step-1 top-of-pass reset (`layers::reset_recipient_to_base` ->
+///      `seed_live_characteristics_from_base`), baseline `base_replacement_definitions`;
+///   2. the CR 613.1a Layer-1a copy application (`layers.rs` `CopyValues` arm ->
+///      `printed_cards::apply_copiable_values`), baseline `CopiableValues::replacement_definitions`;
+///   3. the CR 613.2b Layer-1b face-down reseed (`layers.rs`, which calls
+///      `seed_live_characteristics_from_base` DIRECTLY, not via
+///      `reset_recipient_to_base`), baseline `base_replacement_definitions` again.
+///
+/// A copy effect has no authority to remove a resolution-created shield: CR 613.1a
+/// applies effects that modify COPIABLE VALUES, and CR 707.2 defines those as the
+/// values derived from the object's printed text, closing "Other effects ...,
+/// status, counters, and stickers are not copied."
+///
+/// IDEMPOTENT under that re-entry: `reseed(reseed(live, X), Y) == reseed(live, Y)`
+/// for any baselines X, Y, because the carried set is exactly the
+/// `Resolution`-origin members of `live` in order, and NO baseline ever contains
+/// a `Resolution`-origin member. THREE legs make that unconditional:
+///   1. `GameObject::install_resolution_replacement`'s `debug_assert!` pins that a
+///      `Resolution` def is never also in `base_replacement_definitions` at
+///      install time.
+///   2. `GameObject::sync_missing_base_characteristics` is the ONLY production path
+///      anywhere in the tree that can copy the LIVE store INTO base, and it filters
+///      `Resolution` defs out.
+///   3. EVERY other production write to `base_replacement_definitions` sources its
+///      content from somewhere a `Resolution` def cannot be — a parsed / printed /
+///      face / snapshot source, or a RETAIN over what is already there, or a
+///      `#[cfg(test)]` fixture. Regenerate that audit with:
+///      `grep -rn "base_replacement_definitions" crates/engine/src | grep -E "=|make_mut"`.
+///      (The `printed_cards.rs` write copies `CopiableValues::replacement_definitions`,
+///      which `copiable_replacement_definitions` derives from base — so it inherits
+///      the invariant rather than threatening it.)
+///
+/// The carried set is therefore invariant across all three rewrites, for every
+/// baseline the two callers can supply. That is why this function takes the
+/// baseline as a PARAMETER rather than reading `obj.base_replacement_definitions`
+/// itself.
+///
+/// Carried entries are appended right after the baseline so the in-pass
+/// consumers (the CR 613.1f / CR 305.7 retains, and the derived-grant dedups)
+/// see them; `layers::settle_resolution_replacements_to_tail` moves them behind
+/// the per-pass derived grants at the end of the pass.
+///
+/// Zero-alloc fast path: with no carried entry this is the pre-existing refcount
+/// bump. Mirrors `printed_cards::copiable_replacement_definitions`.
+pub(crate) fn reseed_replacements_carrying_resolution_effects(
+    live: &Definitions<ReplacementDefinition>,
+    baseline: &Arc<Vec<ReplacementDefinition>>,
+) -> Definitions<ReplacementDefinition> {
+    if !live
+        .iter_all()
+        .any(ReplacementDefinition::is_resolution_installed)
+    {
+        return Arc::clone(baseline).into();
+    }
+    let mut rebuilt: Vec<ReplacementDefinition> = baseline.as_ref().clone();
+    rebuilt.extend(
+        live.iter_all()
+            .filter(|d| d.is_resolution_installed())
+            .cloned(),
+    );
+    rebuilt.into()
 }
 
 #[cfg(test)]
@@ -4325,6 +4463,159 @@ mod tests {
         assert_eq!(canonical["prepared_copy_source"], serde_json::json!(77));
         let restored: GameObject = serde_json::from_value(canonical).unwrap();
         assert_eq!(restored.prepared_copy_source, Some(ObjectId(77)));
+    }
+
+    // ---- Issue #8485: the resolution-install and carry-over authorities ----
+
+    fn eot_shield() -> ReplacementDefinition {
+        ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+            .prevention_shield(crate::types::ability::PreventionAmount::All)
+            .expiry(crate::types::ability::RestrictionExpiry::EndOfTurn)
+    }
+
+    /// CR 611.2a + CR 611.2c: the install authority stamps `Resolution` and leaves
+    /// the base store untouched. The base half is the invariant that makes the
+    /// carry-over idempotent — a def in base AND in the carried set applies twice.
+    #[test]
+    fn install_resolution_replacement_stamps_origin_and_leaves_base_untouched() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        obj.install_resolution_replacement(eot_shield());
+        assert_eq!(obj.replacement_definitions.len(), 1);
+        assert!(obj.replacement_definitions[0].is_resolution_installed());
+        assert!(
+            obj.base_replacement_definitions.is_empty(),
+            "CR 611.2c: a resolution shield is not a printed characteristic"
+        );
+    }
+
+    /// CR 611.2a (issue #8485, round-1 BLOCKER 4): a def with NO expiry is refused
+    /// the `Resolution` stamp and installed live-only — exactly today's behavior,
+    /// layer-fragile but never immortal. All three `turns.rs` prunes key on `expiry`
+    /// alone, so carrying an unbounded def across every reset would make it
+    /// permanent.
+    ///
+    /// The reachable caller is `add_target_replacement`'s unstated-duration NON-shield
+    /// rider: `with_resolution_shield_expiry` is gated on `shield_kind.is_shield()`
+    /// precisely so those keep `None`.
+    #[test]
+    fn resolution_install_refuses_an_unbounded_def() {
+        let unbounded =
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::GainLife);
+        assert!(unbounded.expiry.is_none());
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        obj.install_resolution_replacement(unbounded);
+        assert!(
+            !obj.replacement_definitions[0].is_resolution_installed(),
+            "an unbounded def must NOT be carried across layer passes"
+        );
+
+        // PAIRED POSITIVE REACH-GUARD: the same def WITH an expiry is stamped.
+        let bounded =
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::GainLife)
+                .expiry(crate::types::ability::RestrictionExpiry::EndOfTurn);
+        let mut obj2 = GameObject::new(
+            ObjectId(2),
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        obj2.install_resolution_replacement(bounded);
+        assert!(obj2.replacement_definitions[0].is_resolution_installed());
+    }
+
+    /// The MG2 idempotence contract as an executable assertion, not prose:
+    /// `reseed(reseed(live, X), Y) == reseed(live, Y)` for any baselines X, Y.
+    /// This is what makes the carry-over safe under the up-to-three wholesale live
+    /// rewrites a single layer pass performs (Step-1 reset, Layer-1a copy
+    /// application, Layer-1b face-down reseed).
+    #[test]
+    fn reseed_carrying_resolution_effects_is_idempotent_across_baselines() {
+        let mut carried = eot_shield();
+        carried.origin = crate::types::ability::ReplacementOrigin::Resolution;
+        carried.is_consumed = true;
+
+        let base_x: Arc<Vec<ReplacementDefinition>> = Arc::new(vec![ReplacementDefinition::new(
+            crate::types::replacements::ReplacementEvent::GainLife,
+        )]);
+        let base_y: Arc<Vec<ReplacementDefinition>> = Arc::new(vec![
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Draw),
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone),
+        ]);
+
+        let live: Definitions<ReplacementDefinition> = vec![
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::GainLife),
+            carried.clone(),
+        ]
+        .into();
+
+        let once = reseed_replacements_carrying_resolution_effects(&live, &base_y);
+        let twice = reseed_replacements_carrying_resolution_effects(
+            &reseed_replacements_carrying_resolution_effects(&live, &base_x),
+            &base_y,
+        );
+        assert_eq!(
+            once.as_slice(),
+            twice.as_slice(),
+            "reseed(reseed(live, X), Y) must equal reseed(live, Y)"
+        );
+        assert!(once
+            .iter_all()
+            .any(|d| d.is_resolution_installed() && d.is_consumed));
+
+        // Zero-alloc fast path: no carried entry means the baseline `Arc` itself.
+        let plain: Definitions<ReplacementDefinition> = vec![ReplacementDefinition::new(
+            crate::types::replacements::ReplacementEvent::GainLife,
+        )]
+        .into();
+        let reseeded = reseed_replacements_carrying_resolution_effects(&plain, &base_y);
+        assert_eq!(reseeded.as_slice(), base_y.as_slice());
+    }
+
+    /// CR 611.2c: the base back-fill on an uninitialized fixture must never capture
+    /// a resolution shield — that is what keeps the idempotence invariant ("no
+    /// baseline ever contains a `Resolution` member") unconditional.
+    #[test]
+    fn base_backfill_never_captures_a_resolution_shield() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        obj.base_characteristics_initialized = false;
+        obj.install_resolution_replacement(eot_shield());
+        obj.sync_missing_base_characteristics();
+        assert!(
+            obj.base_replacement_definitions.is_empty(),
+            "a Resolution def must not be back-filled into base"
+        );
+
+        // PAIRED POSITIVE REACH-GUARD: a Characteristic def IS still back-filled.
+        let mut obj2 = GameObject::new(
+            ObjectId(2),
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        obj2.base_characteristics_initialized = false;
+        obj2.replacement_definitions.push(eot_shield());
+        obj2.sync_missing_base_characteristics();
+        assert_eq!(obj2.base_replacement_definitions.len(), 1);
     }
 
     #[test]

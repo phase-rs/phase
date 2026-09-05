@@ -815,6 +815,7 @@ mod issue_828_full_throttle;
 mod issue_8302_liberator_mana_spent_power;
 mod issue_841_selvala_explorer_returned;
 mod issue_847_braids_cabal_minion;
+mod issue_8485_maze_of_ith_defender;
 mod issue_852_torrential_gearhulk;
 mod issue_859_weathered_wayfarer;
 mod issue_860_luminarch_aspirant;
