@@ -5500,7 +5500,10 @@ fn damage_record_source_matches(
     matches_target_filter_on_damage_record_source(state, record, filter, ctx)
 }
 
-fn damage_record_matches_kind(
+/// CR 120.2a + CR 120.2b: does a damage record fall in the requested damage
+/// class? Single authority shared by the quantity/player-scope damage readers
+/// and `filter::matches_filter_prop`'s `DealtDamageThisTurn` arms.
+pub(crate) fn damage_record_matches_kind(
     record: &crate::types::game_state::DamageRecord,
     damage_kind: crate::types::ability::DamageKindFilter,
 ) -> bool {

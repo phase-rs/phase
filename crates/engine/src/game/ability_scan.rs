@@ -4476,7 +4476,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         // per-turn journal a loop pumps and `project_out_resources` clears — a
         // projected-resource read, PROVEN projected, fail closed (mirrors the
         // passive `WasDealtDamageThisTurn` arm above).
-        FilterProp::DealtDamageThisTurn => Axes::CONSERVATIVE,
+        FilterProp::DealtDamageThisTurn { .. } => Axes::CONSERVATIVE,
         // CR 400 / CR 603.6a: runtime eval reads `state.zone_changes_this_turn`, an
         // append-only event journal a loop pumps, cleared by `project_out_resources`
         // and strict-compared by nothing in gate (1). A flicker/blink loop keeps the

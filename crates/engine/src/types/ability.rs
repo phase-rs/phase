@@ -5970,11 +5970,39 @@ pub enum FilterProp {
     /// scanning `state.damage_dealt_this_turn` for a record whose `source_id`
     /// is this object.
     ///
-    /// Parameterization note: these two form a damage-role pair. If a third
-    /// damage-role filter appears (e.g. "dealt combat damage this turn"), fold
-    /// the pair into `DamageThisTurn { role: {Dealt, Received}, combat_only }`
-    /// per the /add-engine-variant sibling-cluster threshold.
-    DealtDamageThisTurn,
+    /// CR 608.2i: a look-back predicate — the record ledger is authoritative, so
+    /// a source that has since left the battlefield or changed characteristics
+    /// still matches. CR 514.2 clears the ledger, scoping it to the turn.
+    ///
+    /// Parameterized along the two axes the printed clause varies on, rather
+    /// than grown as siblings (`DealtCombatDamageThisTurn`,
+    /// `DealtDamageToYouThisTurn`, …):
+    ///
+    /// - `kind` (CR 120.2a / CR 120.2b) restricts to combat or noncombat damage.
+    /// - `recipient` (CR 120.1 "Objects can deal damage to … players") restricts
+    ///   WHO the damage was dealt to. `None` leaves the recipient unconstrained
+    ///   (Red Guardian's bare "dealt damage this turn").
+    ///
+    /// Covers "that dealt damage to you this turn" (Reciprocate, Retaliate,
+    /// Spear of Heliod, Giltspire Avenger, Otherworldly Escort) and
+    /// "that dealt combat damage to you this turn" (Witch-king of Angmar).
+    ///
+    /// The object-recipient forms ("that dealt damage to it this turn", Brine
+    /// Hag / Giant Albatross) are a THIRD axis and deliberately not modeled
+    /// here: they resolve against the trigger's event context, not a player
+    /// scope. Widen `recipient` to an object-or-player reference when that class
+    /// is built, rather than adding a sibling variant.
+    DealtDamageThisTurn {
+        /// CR 120.2a / CR 120.2b: which damage class counts. `Any` (the default,
+        /// and what a bare unit-variant record deserializes to) accepts both.
+        #[serde(default)]
+        kind: DamageKindFilter,
+        /// CR 120.1: the required damage recipient, as a player scope resolved
+        /// against the ability's controller ("to you" → `PlayerFilter::Controller`).
+        /// `None` = any recipient, preserving the unparameterized semantics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient: Option<PlayerFilter>,
+    },
     /// CR 400.7: Object entered the battlefield during this turn.
     /// Checks `entered_battlefield_turn == Some(current_turn)`.
     EnteredThisTurn,

@@ -337,7 +337,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -762,7 +762,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::Goaded
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
@@ -1004,7 +1004,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -1737,7 +1737,7 @@ pub(crate) fn filter_prop_contains(
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -4979,7 +4979,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::DistinctFrom { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -5466,6 +5466,41 @@ fn attacking_defender_matches(
         Some(controller) => source_controller_ref_player(state, source, controller)
             .is_some_and(|player| player == defending_player),
     }
+}
+
+/// CR 120.1 + CR 109.5: Does a damage record's recipient satisfy `recipient`?
+///
+/// `None` leaves the recipient unconstrained. Otherwise the record must name a
+/// PLAYER recipient (CR 120.1 "Objects can deal damage to … players") matching
+/// the scope; a record whose target is an object never satisfies a player scope.
+///
+/// CR 109.5: "you" in a printed clause is the ability's controller *as printed*.
+/// `ResolvedAbility::original_controller` preserves that player across the
+/// resolution-time `player_scope` fan-out, which rebinds `controller` to each
+/// iterated player (`scoped_player_sacrifice_ability`). Reading the rebound
+/// controller would make Witch-king of Angmar's "dealt combat damage to you"
+/// mean "to the opponent currently sacrificing" — so the original controller is
+/// the reference player, falling back to the live controller when no fan-out is
+/// in progress. With no ability context at all the relation is unanswerable, so
+/// this fails closed, matching `player_matches_target_filter_with`.
+fn damage_recipient_matches(
+    state: &GameState,
+    source: &SourceContext<'_>,
+    record: &crate::types::game_state::DamageRecord,
+    recipient: Option<&PlayerFilter>,
+) -> bool {
+    let Some(scope) = recipient else {
+        return true;
+    };
+    let Some(reference) = source
+        .ability
+        .and_then(|ability| ability.original_controller)
+        .or(source.controller)
+    else {
+        return false;
+    };
+    matches!(record.target, TargetRef::Player(pid)
+        if crate::game::effects::matches_player_scope(state, pid, scope, reference, source.id))
 }
 
 /// Check if an object satisfies a single FilterProp.
@@ -6222,11 +6257,16 @@ fn matches_filter_prop(
         // CR 120.1: active-voice counterpart — this object DEALT damage this turn,
         // i.e. it was the source of a damage event (Red Guardian, Super-Soldier:
         // "target creature ... that dealt damage this turn"). Reads the same
-        // per-turn ledger the passive arm above does, keyed by `source_id`.
-        FilterProp::DealtDamageThisTurn => state
-            .damage_dealt_this_turn
-            .iter()
-            .any(|record| record.source_id == object_id),
+        // per-turn ledger the passive arm above does, keyed by `source_id`, and
+        // narrows it along the two printed axes: CR 120.2a/120.2b damage class
+        // and CR 120.1 recipient ("that dealt combat damage to you this turn").
+        FilterProp::DealtDamageThisTurn { kind, recipient } => {
+            state.damage_dealt_this_turn.iter().any(|record| {
+                record.source_id == object_id
+                    && crate::game::quantity::damage_record_matches_kind(record, *kind)
+                    && damage_recipient_matches(state, source, record, recipient.as_ref())
+            })
+        }
         // CR 400.7: Object entered the battlefield this turn.
         FilterProp::EnteredThisTurn => obj.entered_battlefield_turn == Some(state.turn_number),
         // CR 302.6 + CR 508.1a: controlled continuously since the controller's
@@ -6719,11 +6759,16 @@ fn zone_change_record_matches_property(
         // CR 120.1: active-voice look-back — the object DEALT damage this turn.
         // The `damage_dealt_this_turn` ledger is keyed by battlefield ObjectId and
         // survives the object's zone change, so the LKI snapshot reads it by the
-        // record's `object_id`, mirroring the passive arm above.
-        FilterProp::DealtDamageThisTurn => state
-            .damage_dealt_this_turn
-            .iter()
-            .any(|r| r.source_id == record.object_id),
+        // record's `object_id`, mirroring the passive arm above. The CR 120.2a
+        // damage-class and CR 120.1 recipient axes are applied exactly as in the
+        // live arm — a look-back rider must not widen the printed restriction.
+        FilterProp::DealtDamageThisTurn { kind, recipient } => {
+            state.damage_dealt_this_turn.iter().any(|r| {
+                r.source_id == record.object_id
+                    && crate::game::quantity::damage_record_matches_kind(r, *kind)
+                    && damage_recipient_matches(state, source, r, recipient.as_ref())
+            })
+        }
         // CR 110.5 + CR 110.5d + CR 608.2h: tap status is battlefield-only — once
         // the object has left its public zone it is neither tapped nor untapped, so
         // the live object can't answer a look-back "was tapped" rider (Brackish
@@ -7706,9 +7751,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
-        Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
-        PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
-        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
+        Comparator, ControllerRef, DamageKindFilter, Effect, FilterProp, ManaContribution,
+        ManaProduction, PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition,
+        ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -8868,9 +8914,12 @@ mod tests {
             ..Default::default()
         });
 
-        let dealt = TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::DealtDamageThisTurn]),
-        );
+        let dealt = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::Any,
+                recipient: None,
+            },
+        ]));
         // The creature that dealt the damage matches; the one that received it does not.
         assert!(
             matches_target_filter(&state, dealer, &dealt, dealer),
@@ -8887,6 +8936,184 @@ mod tests {
         );
         assert!(matches_target_filter(&state, victim, &was_dealt, victim));
         assert!(!matches_target_filter(&state, dealer, &was_dealt, dealer));
+    }
+
+    /// CR 120.1 + CR 120.2a: the recipient and damage-class axes each narrow the
+    /// active-voice filter independently. Exercised at the axis level rather
+    /// than per card.
+    #[test]
+    fn dealt_damage_this_turn_honors_recipient_and_kind_axes() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        // Combat damage to player 0; noncombat damage to player 1.
+        let combat_at_you = add_creature(&mut state, PlayerId(1), "Combat Dealer");
+        let noncombat_at_them = add_creature(&mut state, PlayerId(1), "Ping Dealer");
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: combat_at_you,
+            source_controller: PlayerId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            target_controller: PlayerId(0),
+            amount: 3,
+            is_combat: true,
+            ..Default::default()
+        });
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: noncombat_at_them,
+            source_controller: PlayerId(1),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 1,
+            is_combat: false,
+            ..Default::default()
+        });
+
+        let source = add_creature(&mut state, PlayerId(0), "Witch-king of Angmar");
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ctx = FilterContext::from_ability(&ability);
+
+        let filter = |kind, recipient| {
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .properties(vec![FilterProp::DealtDamageThisTurn { kind, recipient }]),
+            )
+        };
+
+        // "dealt combat damage to you this turn" — only the combat dealer.
+        let witch_king = filter(DamageKindFilter::CombatOnly, Some(PlayerFilter::Controller));
+        assert!(super::matches_target_filter(
+            &state,
+            combat_at_you,
+            &witch_king,
+            &ctx
+        ));
+        assert!(
+            !super::matches_target_filter(&state, noncombat_at_them, &witch_king, &ctx),
+            "a creature that dealt no damage to you must not be eligible (#8445)"
+        );
+
+        // Recipient axis alone: dropping the combat restriction still excludes
+        // the creature whose damage went to the other player.
+        let to_you_any = filter(DamageKindFilter::Any, Some(PlayerFilter::Controller));
+        assert!(super::matches_target_filter(
+            &state,
+            combat_at_you,
+            &to_you_any,
+            &ctx
+        ));
+        assert!(!super::matches_target_filter(
+            &state,
+            noncombat_at_them,
+            &to_you_any,
+            &ctx
+        ));
+
+        // Kind axis alone: noncombat-only excludes the combat dealer.
+        let noncombat_any = filter(DamageKindFilter::NoncombatOnly, None);
+        assert!(!super::matches_target_filter(
+            &state,
+            combat_at_you,
+            &noncombat_any,
+            &ctx
+        ));
+        assert!(super::matches_target_filter(
+            &state,
+            noncombat_at_them,
+            &noncombat_any,
+            &ctx
+        ));
+
+        // Unrestricted form still matches both, preserving the pre-existing
+        // "dealt damage this turn" semantics (Red Guardian).
+        let unrestricted = filter(DamageKindFilter::Any, None);
+        assert!(super::matches_target_filter(
+            &state,
+            combat_at_you,
+            &unrestricted,
+            &ctx
+        ));
+        assert!(super::matches_target_filter(
+            &state,
+            noncombat_at_them,
+            &unrestricted,
+            &ctx
+        ));
+    }
+
+    /// CR 109.5: "you" is the PRINTED controller. The `player_scope` fan-out
+    /// that drives "each opponent sacrifices ..." rebinds `ResolvedAbility::
+    /// controller` to each iterated opponent while preserving
+    /// `original_controller`. Reading the rebound controller would silently turn
+    /// Witch-king of Angmar's "dealt combat damage to you" into "dealt combat
+    /// damage to the opponent doing the sacrificing" — eligible sets that look
+    /// plausible but are wrong.
+    #[test]
+    fn dealt_damage_recipient_reads_original_controller_under_player_scope() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        let hit_you = add_creature(&mut state, PlayerId(1), "Hit You");
+        let hit_them = add_creature(&mut state, PlayerId(1), "Hit Them");
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: hit_you,
+            source_controller: PlayerId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            target_controller: PlayerId(0),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: hit_them,
+            source_controller: PlayerId(1),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+
+        let source = add_creature(&mut state, PlayerId(0), "Witch-king of Angmar");
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        // Mirror `scoped_player_sacrifice_ability`: the acting controller is the
+        // iterated opponent, the printed controller is preserved.
+        ability.controller = PlayerId(1);
+        ability.original_controller = Some(PlayerId(0));
+        let ctx = FilterContext::from_ability(&ability);
+
+        let to_you = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::CombatOnly,
+                recipient: Some(PlayerFilter::Controller),
+            },
+        ]));
+
+        assert!(
+            super::matches_target_filter(&state, hit_you, &to_you, &ctx),
+            "'to you' must mean the printed controller, not the iterated opponent"
+        );
+        assert!(
+            !super::matches_target_filter(&state, hit_them, &to_you, &ctx),
+            "a creature that damaged the sacrificing opponent must NOT be eligible"
+        );
     }
 
     #[test]
@@ -15165,7 +15392,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::InAnyZone { .. }
             | FilterProp::SharesQuality { .. }
             | FilterProp::WasDealtDamageThisTurn
-            | FilterProp::DealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn { .. }
             | FilterProp::EnteredThisTurn
             | FilterProp::ControlledContinuouslySinceTurnBegan
             | FilterProp::ZoneChangedThisTurn { .. }

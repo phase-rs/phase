@@ -4634,7 +4634,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::DistinctFrom { .. }
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -7921,6 +7921,53 @@ pub(crate) fn attachment_kinds_filter_prop(
     }
 }
 
+/// CR 120.1 + CR 120.2a + CR 120.2b + CR 514.2: the active-voice damage-history
+/// relative clause — "dealt [combat|noncombat] damage [to you|to a player] this
+/// turn", with the leading "that " already consumed by the caller.
+///
+/// Composed along the two axes the printed clause varies on (damage class ×
+/// recipient) rather than enumerated as whole phrases, so all four printed
+/// combinations fall out of two `alt()` calls:
+///
+/// - "dealt damage this turn" — Red Guardian, Super-Soldier
+/// - "dealt damage to you this turn" — Reciprocate, Retaliate, Spear of Heliod,
+///   Giltspire Avenger, Otherworldly Escort
+/// - "dealt combat damage to you this turn" — Witch-king of Angmar
+/// - "dealt combat damage to a player this turn" — Night of the Flying Merfolk
+///
+/// CR 120.1 ("Objects can deal damage to … players") bounds the recipient axis
+/// to players. The object-recipient forms ("that dealt damage to it this turn",
+/// Brine Hag / Giant Albatross) bind to the trigger's event context rather than
+/// a player scope and are deliberately not handled here.
+fn parse_dealt_damage_clause(input: &str) -> OracleResult<'_, FilterProp> {
+    let (input, _) = tag("dealt ").parse(input)?;
+    // CR 120.2a / CR 120.2b: damage-class axis; absent means either class.
+    let (input, kind) = opt(alt((
+        value(DamageKindFilter::CombatOnly, tag("combat ")),
+        value(DamageKindFilter::NoncombatOnly, tag("noncombat ")),
+    )))
+    .parse(input)?;
+    let (input, _) = tag("damage").parse(input)?;
+    // CR 120.1: recipient axis; absent leaves the recipient unconstrained, which
+    // also admits the object recipients the player scopes below exclude.
+    let (input, recipient) = opt(preceded(
+        tag(" to "),
+        alt((
+            value(PlayerFilter::Controller, tag("you")),
+            value(PlayerFilter::All, tag("a player")),
+        )),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" this turn").parse(input)?;
+    Ok((
+        input,
+        FilterProp::DealtDamageThisTurn {
+            kind: kind.unwrap_or_default(),
+            recipient,
+        },
+    ))
+}
+
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
 ///
 /// Handles multiple pattern classes:
@@ -8161,6 +8208,15 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         ));
     }
 
+    // CR 120.1 + CR 120.2a + CR 514.2: "that dealt [combat] damage [to you]
+    // this turn" — the active-voice damage-history clause, parameterized on its
+    // two axes rather than enumerated. Placed before VERB_PHRASES because it
+    // subsumes the bare "dealt damage this turn" form; disjoint from the passive
+    // "was dealt damage this turn" row on the leading verb, so no shadowing.
+    if let Ok((rest, prop)) = parse_dealt_damage_clause(after_that) {
+        return Some((vec![prop], that_len + after_that.len() - rest.len()));
+    }
+
     // --- Verb-phrase patterns: match fixed phrases after "that " ---
     // CR 120.6 + CR 120.9: "that was dealt damage this turn"
     static VERB_PHRASES: &[(&str, FilterProp)] = &[
@@ -8168,9 +8224,6 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             "was dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
-        // CR 120.1: active voice — the creature dealt damage (was the source),
-        // distinct from the passive "was dealt damage" above (Red Guardian).
-        ("dealt damage this turn", FilterProp::DealtDamageThisTurn),
         (
             "entered the battlefield this turn",
             FilterProp::EnteredThisTurn,
@@ -17341,10 +17394,14 @@ mod tests {
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
         assert_eq!(tf.controller, Some(ControllerRef::Opponent));
         assert!(
-            tf.properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::DealtDamageThisTurn)),
-            "Expected DealtDamageThisTurn (active), got: {:?}",
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: None
+                }
+            )),
+            "Expected unrestricted DealtDamageThisTurn (active), got: {:?}",
             tf.properties
         );
         assert!(
@@ -17352,6 +17409,77 @@ mod tests {
                 .iter()
                 .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
             "must NOT collapse to the passive WasDealtDamageThisTurn: {:?}",
+            tf.properties
+        );
+        assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");
+    }
+
+    // CR 120.1 + CR 120.2a: the damage-class and recipient axes of the
+    // active-voice clause are independent, so all four printed combinations must
+    // fall out of the same combinator. Exercised at the building-block level
+    // (the axis pair), not per card.
+    #[test]
+    fn dealt_damage_clause_parses_both_axes() {
+        for (clause, expected) in [
+            (
+                "dealt damage this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: None,
+                },
+            ),
+            (
+                // Reciprocate, Retaliate, Spear of Heliod, Giltspire Avenger.
+                "dealt damage to you this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: Some(PlayerFilter::Controller),
+                },
+            ),
+            (
+                // Witch-king of Angmar.
+                "dealt combat damage to you this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::CombatOnly,
+                    recipient: Some(PlayerFilter::Controller),
+                },
+            ),
+            (
+                // Night of the Flying Merfolk.
+                "dealt combat damage to a player this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::CombatOnly,
+                    recipient: Some(PlayerFilter::All),
+                },
+            ),
+        ] {
+            let (rest, prop) = parse_dealt_damage_clause(clause)
+                .unwrap_or_else(|e| panic!("{clause:?} must parse: {e:?}"));
+            assert_eq!(prop, expected, "wrong props for {clause:?}");
+            assert!(rest.is_empty(), "{clause:?} left remainder {rest:?}");
+        }
+
+        // Negative control: the passive voice must not be consumed by the
+        // active-voice combinator (it routes to `WasDealtDamageThisTurn`).
+        assert!(parse_dealt_damage_clause("was dealt damage this turn").is_err());
+    }
+
+    // CR 120.1: the restrictive clause must reach the target filter's
+    // `properties`. Before this was wired, "that dealt combat damage to you this
+    // turn" was silently discarded and every creature became eligible (#8445).
+    #[test]
+    fn dealt_damage_to_you_clause_reaches_target_filter() {
+        let (filter, rest) =
+            parse_target("target creature that dealt combat damage to you this turn");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::CombatOnly,
+                recipient: Some(PlayerFilter::Controller),
+            }),
+            "restrictive clause dropped, got: {:?}",
             tf.properties
         );
         assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");

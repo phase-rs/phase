@@ -979,12 +979,28 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(format!("{prefix} {name}{suffix}"));
             }
-            // Both damage-role filters share this human coverage label (the AST
-            // variant carries the source-vs-recipient distinction); keeping the
-            // passive label unchanged avoids a cosmetic coverage-diff on every
-            // existing "was dealt damage this turn" card.
-            FilterProp::WasDealtDamageThisTurn | FilterProp::DealtDamageThisTurn => {
-                parts.push("dealt damage this turn".into())
+            // The passive filter keeps the bare label (the AST variant carries
+            // the source-vs-recipient distinction), so every existing "was dealt
+            // damage this turn" card produces no cosmetic coverage-diff. The
+            // active-voice arm below reports the label only when unrestricted,
+            // for the same reason.
+            FilterProp::WasDealtDamageThisTurn => parts.push("dealt damage this turn".into()),
+            // CR 120.2a + CR 120.1: the active-voice filter reports its damage
+            // class and recipient so a restricted clause is distinguishable from
+            // the bare one in coverage output. The unrestricted form keeps the
+            // shared label, so existing cards produce no coverage diff.
+            FilterProp::DealtDamageThisTurn { kind, recipient } => {
+                let class = match kind {
+                    crate::types::ability::DamageKindFilter::Any => "damage",
+                    crate::types::ability::DamageKindFilter::CombatOnly => "combat damage",
+                    crate::types::ability::DamageKindFilter::NoncombatOnly => "noncombat damage",
+                };
+                parts.push(match recipient {
+                    None => format!("dealt {class} this turn"),
+                    Some(player) => {
+                        format!("dealt {class} to {} this turn", fmt_player_filter(player))
+                    }
+                })
             }
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
             FilterProp::ControlledContinuouslySinceTurnBegan => {

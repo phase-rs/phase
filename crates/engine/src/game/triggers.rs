@@ -11921,7 +11921,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::WasPlayed
         | FilterProp::WasKicked
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
