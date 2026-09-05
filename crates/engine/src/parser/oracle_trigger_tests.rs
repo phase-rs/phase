@@ -98,6 +98,75 @@ fn liberator_mana_spent_intervening_if_survives_the_pipeline() {
     );
 }
 
+/// CR 608.2d + CR 122.1b: Crystalline Giant's combat trigger lowers into a real
+/// choice, not `Unimplemented`. Both halves have to land: the producer (a random
+/// pick from the ten PRINTED kinds, minus the ones already on it) and the
+/// consumer ("put a counter of that kind on ~"), whose source-self recipient was
+/// a deliberate strict gap until exactly this producer existed.
+#[test]
+fn crystalline_giant_random_counter_kind_lowers_to_a_real_choice() {
+    use crate::types::ability::{CounterKindChooser, CounterKindDomain};
+    use crate::types::counter::CounterType;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, choose a kind of counter at random that this \
+         creature doesn't have on it from among flying, first strike, deathtouch, hexproof, \
+         lifelink, menace, reach, trample, vigilance, and +1/+1. Put a counter of that kind on \
+         this creature.",
+        "Crystalline Giant",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Golem".to_string()],
+    );
+
+    let trigger = parsed.triggers.first().expect("begin-combat trigger");
+    let choose = trigger.execute.as_deref().expect("choice effect");
+    let Effect::ChooseCounterKind {
+        target,
+        domain,
+        chooser,
+    } = choose.effect.as_ref()
+    else {
+        panic!("expected ChooseCounterKind, got {:?}", choose.effect);
+    };
+    assert_eq!(*target, TargetFilter::SelfRef);
+    assert_eq!(
+        *chooser,
+        CounterKindChooser::Random,
+        "\"at random\" is the game's draw, not a player decision"
+    );
+    let CounterKindDomain::Printed {
+        kinds,
+        excluding_kinds_on_target,
+    } = domain
+    else {
+        panic!("expected the printed list, got {domain:?}");
+    };
+    assert!(
+        *excluding_kinds_on_target,
+        "\"that this creature doesn't have on it\" must narrow the CHOICE, not the placement"
+    );
+    assert_eq!(kinds.len(), 10, "ten printed kinds, got {kinds:?}");
+    assert!(kinds.contains(&CounterType::Plus1Plus1));
+
+    // The consumer: the counter goes on the Giant itself.
+    let put = choose
+        .sub_ability
+        .as_deref()
+        .expect("put-counter continuation");
+    assert!(
+        matches!(
+            put.effect.as_ref(),
+            Effect::PutChosenCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected PutChosenCounter on ~, got {:?}",
+        put.effect
+    );
+}
+
 /// CR 608.2c + CR 119.3: Palantir's final life loss reduces the exact cards
 /// milled by its preceding clause and applies to the opponent targeted when the
 /// trigger was put on the stack.
@@ -4237,6 +4306,149 @@ fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
         "expected PlayFromExile grant bound to the tracked exiled card, got: {:?}",
         grant.effect
     );
+}
+
+/// CR 120.1 + CR 510.2 + CR 701.20e (issue #8467): "Whenever ~ deals combat
+/// damage to a player, look at the top three cards of that player's library"
+/// reads the DAMAGED player's library.
+///
+/// This is the surviving-`Dig` half of the class. The look-then-exile half
+/// (Gonti, Canny Acquisitor, above) rewrites its `Dig` into an `ExileTop` and
+/// re-resolved the owner anaphor on the way; the hideaway half ("exile one of
+/// them face down") keeps the `Dig`, so it kept whatever
+/// `parse_dig_library_owner` produced — a fixed `TargetFilter::ParentTarget`,
+/// which has NO referent on a combat-damage event. `resolve_player_for_context_ref`
+/// then fell through to `ability.controller` and Thief of Sanity dug its own
+/// controller's library.
+#[test]
+fn combat_damage_dig_binds_that_players_library_to_the_damaged_player() {
+    let def = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, look at the top three cards of \
+         that player's library, exile one of them face down, then put the rest into their \
+         graveyard. You may cast that card for as long as it remains exiled, and mana of any \
+         type can be spent to cast that spell.",
+        "Thief of Sanity",
+    );
+    // Reach-guard: the combat-damage trigger scope that supplies the "that
+    // player" antecedent really was established for this body.
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+    let Effect::Dig {
+        player,
+        count,
+        keep_count,
+        destination,
+        rest_destination,
+        ..
+    } = &*execute.effect
+    else {
+        panic!(
+            "the look step must stay an Effect::Dig for the hideaway idiom, got: {:?}",
+            execute.effect
+        );
+    };
+    // Reach-guard: the "exile one of them face down" fusion patched this exact
+    // Dig, so the assertion below is read off the arm production resolves — not
+    // off a bare keep-nothing peek that never reaches the library owner.
+    assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+    assert_eq!(*keep_count, Some(1));
+    assert_eq!(*destination, Some(crate::types::zones::Zone::Exile));
+    assert_eq!(
+        *rest_destination,
+        Some(crate::types::zones::Zone::Graveyard)
+    );
+    assert_eq!(
+        *player,
+        TargetFilter::TriggeringPlayer,
+        "the dug library must belong to the damaged player, not the ability controller"
+    );
+}
+
+/// CR 120.1 + CR 510.2 + CR 102.2 (issue #8467): the `"that opponent's"`
+/// spelling of the same library-owner anaphor. Gonti, Night Minister's damage
+/// trigger names its ACTING player separately ("its controller looks at ...")
+/// from the library it reads ("that opponent's library"), so a binding that
+/// collapses to the ability controller is observably wrong here even when the
+/// two coincide on `"that player's"` cards.
+#[test]
+fn combat_damage_look_binds_that_opponents_library_to_the_damaged_opponent() {
+    let def = parse_trigger_line(
+        "Whenever a creature deals combat damage to one of your opponents, its controller looks \
+         at the top card of that opponent's library and exiles it face down. They may play that \
+         card for as long as it remains exiled. Mana of any type can be spent to cast a spell \
+         this way.",
+        "Gonti, Night Minister",
+    );
+    // Reach-guard: the opponent-recipient damage trigger was recognized, which
+    // is what establishes the "that opponent" antecedent.
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+    let Effect::ExileTop { player, .. } = &*execute.effect else {
+        panic!(
+            "\"looks at ... and exiles it face down\" must fuse into ExileTop, got: {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        *player,
+        TargetFilter::TriggeringPlayer,
+        "the exiled top card must come from the damaged opponent's library"
+    );
+}
+
+/// CR 115.1 (issue #8467) — priority control for the arm above. A clause that
+/// prints BOTH possessives ("Look at the top card of target player's library.
+/// You may put that card on the bottom of that player's library.") must keep
+/// binding the *declared target*, not the anaphor: `"target player's library"`
+/// still outranks the `"that <owner>'s library"` scan.
+#[test]
+fn target_players_library_still_outranks_the_that_player_anaphor() {
+    let parsed = parse_oracle_text(
+        "[+2]: Look at the top card of target player's library. You may put that card on the \
+         bottom of that player's library.\n[0]: Draw three cards, then put two cards from your \
+         hand on top of your library in any order.\n[\u{2212}1]: Return target creature to its \
+         owner's hand.\n[\u{2212}12]: Exile all cards from target player's library, then that \
+         player shuffles their hand into their library.",
+        "Jace, the Mind Sculptor",
+        &[],
+        &["Legendary".to_string(), "Planeswalker".to_string()],
+        &["Jace".to_string()],
+    );
+    let dig_player = parsed
+        .abilities
+        .iter()
+        .find_map(|ability| match &*ability.effect {
+            Effect::Dig { player, .. } => Some(player.clone()),
+            _ => None,
+        })
+        .expect("the +2 look-at ability must lower to an Effect::Dig");
+    assert_eq!(
+        dig_player,
+        TargetFilter::Player,
+        "a declared player target must not be rebound by the \"that player's library\" anaphor"
+    );
+}
+
+/// CR 701.20e (issue #8467) — default control. A first-person library ("your
+/// library") carries no relative-player anaphor at all, so the owner stays
+/// `Controller`; the anaphor arm must not widen to every dig.
+#[test]
+fn your_library_dig_still_binds_the_controller() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, look at the top card of your library.",
+        "Delver of Secrets",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+    let Effect::Dig { player, .. } = &*execute.effect else {
+        panic!("expected an Effect::Dig, got: {:?}", execute.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
 }
 
 /// CR 406.3, CR 406.3a-b, CR 601.2a, and CR 611.2a: Rev's exact Oracle text
@@ -21842,7 +22054,7 @@ fn trigger_copy_token_suffix_condition_attaches_otherwise() {
 fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
     use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
     use crate::parser::oracle_ir::effect_chain::{
-        ClauseDisposition, ClauseIrBuilder, EffectChainIr, OtherwiseKind,
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, InjectedColorChoice, OtherwiseKind,
     };
     use crate::types::ability::SubAbilityLink;
 
@@ -21902,6 +22114,7 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
         actor: None,
         in_trigger: true,
         repeat_until: None,
+        injected_color_choice: InjectedColorChoice::Permitted,
     };
 
     let root = lower_effect_chain_ir(&ir);
@@ -21933,7 +22146,7 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
 fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
     use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
     use crate::parser::oracle_ir::effect_chain::{
-        ClauseDisposition, ClauseIrBuilder, EffectChainIr, OtherwiseKind,
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, InjectedColorChoice, OtherwiseKind,
     };
 
     let draw_one = || Effect::Draw {
@@ -21983,6 +22196,7 @@ fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
         actor: None,
         in_trigger: true,
         repeat_until: None,
+        injected_color_choice: InjectedColorChoice::Permitted,
     };
 
     // Walk the lowered sub_ability chain and collect every effect.
@@ -22021,7 +22235,7 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
     use crate::parser::oracle_ir::effect_chain::{
-        ClauseDisposition, ClauseIrBuilder, EffectChainIr, PriorModifier,
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, InjectedColorChoice, PriorModifier,
     };
 
     let token_def = parse_effect_chain(
@@ -22078,6 +22292,7 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
         actor: None,
         in_trigger: true,
         repeat_until: None,
+        injected_color_choice: InjectedColorChoice::Permitted,
     };
 
     let root = lower_effect_chain_ir(&ir);
@@ -31871,5 +32086,150 @@ fn ogre_marauder_attack_trigger_carries_defending_player_unless_sacrifice() {
     assert!(
         !format!("{:?}", execute.effect).contains("Unimplemented"),
         "the body must not fall through to a parser gap"
+    );
+}
+
+/// CR 701.20a + CR 115.1: "target opponent reveals **their** hand" — when the
+/// clause names a DECLARED target as its subject, that subject is the
+/// possessive pronoun's antecedent, not the player who triggered the ability.
+/// The target is chosen as the triggered ability goes on the stack (CR 603.3d →
+/// CR 601.2c), so the reveal must show that chosen player's hand.
+///
+/// Issue #8428 (Brain Maggot). `parse_hand_possessive_target` resolves a bare
+/// "their hand" to `TriggeringPlayer`, which is correct only for a clause with
+/// no subject to bind to (`parse_look_at_possessive_hands_targets_player_axes`
+/// pins "Look at their hand." to exactly that, and it stays pinned). Because
+/// that default is not `Any`, `inject_subject_target`'s `Any`-guarded group
+/// could not correct it, so the pronoun default outranked a real declared
+/// subject and erased the target.
+///
+/// The two wordings below are the control pair: Brain Maggot and Kitesail
+/// Freebooter print the SAME clause and differ only in whether the choose
+/// clause is fused with "and" or split into its own sentence. Only the fused
+/// wording reaches the possessive parser — the split wording falls through it
+/// and was already binding its subject correctly. Asserting the two agree tests
+/// the building block (a possessive pronoun resolves to its clause subject)
+/// rather than one card's constant.
+#[test]
+fn possessive_their_hand_binds_to_the_clause_subject_not_the_trigger() {
+    fn reveal_target(line: &str) -> TargetFilter {
+        fn find(a: &AbilityDefinition) -> Option<TargetFilter> {
+            if let Effect::RevealHand { target, .. } = &*a.effect {
+                return Some(target.clone());
+            }
+            a.sub_ability.as_deref().and_then(find)
+        }
+        let def = parse_trigger_line(line, "Probe");
+        find(
+            def.execute
+                .as_ref()
+                .expect("trigger must have an execute body"),
+        )
+        .expect("trigger body must contain a RevealHand")
+    }
+
+    let opponent = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+    // Fused ("… and you choose …") — the wording that regressed.
+    let fused = reveal_target(
+        "When this creature enters, target opponent reveals their hand and you choose a nonland card from it. Exile that card until this creature leaves the battlefield.",
+    );
+    assert_eq!(
+        fused, opponent,
+        "\"target opponent reveals their hand\" must reveal the DECLARED target's hand"
+    );
+
+    // Split ("… their hand. You choose …") — the same clause, already correct.
+    let split = reveal_target(
+        "When this creature enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until this creature leaves the battlefield.",
+    );
+    assert_eq!(
+        fused, split,
+        "fusing the choose clause with \"and\" must not change whose hand is revealed"
+    );
+
+    // The same pronoun under a "that player" subject still resolves
+    // to the triggering player — the fix defers to the subject, it does not
+    // rewrite every reveal to an opponent (Biting-Palm Ninja).
+    assert_eq!(
+        reveal_target(
+            "When you do, that player reveals their hand and you choose a nonland card from it. Exile that card.",
+        ),
+        TargetFilter::TriggeringPlayer,
+        "\"that player reveals their hand\" must still bind to the triggering player"
+    );
+}
+
+/// Runtime half of the issue #8428 fix: the corrected AST must actually put the
+/// TARGET OPPONENT's cards in front of the controller. Drives Brain Maggot's
+/// verbatim Oracle text through the real cast pipeline (CR 601.2 cast → ETB
+/// trigger per CR 603.2 → CR 603.3d target choice → CR 701.20a reveal) and
+/// asserts on the hand the engine offers for the choose clause.
+///
+/// A parse-only assertion cannot see this: the reveal resolver reads its player
+/// from `ability.targets` first, and a `TriggeringPlayer` effect target builds
+/// NO player slot at all, so the wrong-hand behavior only becomes visible once
+/// the trigger reaches the stack.
+#[test]
+fn brain_maggot_reveals_the_target_opponents_hand_at_runtime() {
+    use crate::types::phase::Phase;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Black,
+                crate::types::identifiers::ObjectId(98_420),
+                false,
+                Vec::new(),
+            ),
+            crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Black,
+                crate::types::identifiers::ObjectId(98_421),
+                false,
+                Vec::new(),
+            ),
+        ],
+    );
+
+    let maggot = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Brain Maggot",
+            1,
+            1,
+            "When this creature enters, target opponent reveals their hand and you choose a nonland card from it. Exile that card until this creature leaves the battlefield.",
+        )
+        .id();
+
+    // Distinct hands so the revealed set identifies its owner unambiguously.
+    let mine = scenario.add_card_to_hand(P0, "Duress");
+    let theirs_a = scenario.add_card_to_hand(P1, "Llanowar Elves");
+    let theirs_b = scenario.add_card_to_hand(P1, "Giant Growth");
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(maggot).target_player(P1).resolve();
+
+    let WaitingFor::RevealChoice { player, cards, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "expected the reveal's choose prompt, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(
+        *player, P0,
+        "CR 109.5: \"you choose\" is the ability's controller, not the revealing player"
+    );
+
+    let revealed: std::collections::HashSet<_> = cards.iter().copied().collect();
+    assert!(
+        revealed.contains(&theirs_a) && revealed.contains(&theirs_b),
+        "the TARGET OPPONENT's hand must be revealed, got {revealed:?}"
+    );
+    assert!(
+        !revealed.contains(&mine),
+        "the controller's own hand must NOT be revealed (issue #8428), got {revealed:?}"
     );
 }

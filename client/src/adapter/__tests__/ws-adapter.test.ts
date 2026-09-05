@@ -7,7 +7,12 @@ import {
 } from "../ws-adapter";
 import { AdapterError, supportsMatchConcede, supportsServerRewind } from "../types";
 import type { FormatConfig, GameState } from "../types";
-import type { InteractionPreviewRequest } from "../generated/interaction";
+import type {
+  InteractionChoiceId,
+  InteractionId,
+  InteractionPreviewRequest,
+  PreviewRequestId,
+} from "../generated/interaction";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
@@ -86,6 +91,35 @@ async function completeHandshake(adapter: WebSocketAdapter): Promise<MockWebSock
   await Promise.resolve();
   await Promise.resolve();
   return (adapter as unknown as { ws: MockWebSocket }).ws;
+}
+
+/**
+ * Starts observing `promise` immediately and returns a reader that yields the
+ * rejection reason — or the string `"never settled"` if the promise is still
+ * pending.
+ *
+ * Observation has to start before the first `await` so an already-rejected
+ * promise is handled in the same tick, and the drain is what turns an orphaned
+ * promise — the exact defect these settlement fixes prevent — into a readable
+ * assertion failure instead of a suite timeout.
+ *
+ * The reader yields a MACROTASK turn (`setTimeout(…, 0)`), not a microtask
+ * drain: that is strictly more generous than the settlement paths need, since
+ * both `dispose()` and `onclose` reject synchronously. The cost is that it
+ * couples the reader to real timers — a caller running it under
+ * `vi.useFakeTimers()` would hang. No current caller does; the only fake-timer
+ * scope in these suites is closed by a `finally { vi.useRealTimers(); }`.
+ */
+function trackRejection(promise: Promise<unknown>): () => Promise<unknown> {
+  let outcome: unknown = "never settled";
+  void promise.then(
+    (value) => { outcome = { resolvedWith: value }; },
+    (error) => { outcome = error; },
+  );
+  return async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return outcome;
+  };
 }
 
 // Shared session service relies on localStorage in test environments.
@@ -1747,6 +1781,51 @@ describe("WebSocketAdapter", () => {
       expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "aiDriverFault" }));
     });
 
+    // `dispose()` used to null the submission handles instead of rejecting
+    // them, so the caller — which holds the module-level dispatch mutex —
+    // waited forever on a reply the closed socket could never deliver.
+    it("rejects an in-flight submitAction when the adapter is disposed", async () => {
+      const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+
+      adapter.dispose();
+
+      expect(await pending()).toMatchObject({
+        code: "WS_CLOSED",
+        message: "Adapter disposed during action",
+        recoverable: true,
+      });
+    });
+
+    // The `sessionIdentityRejected` guard used to sit ABOVE the pending
+    // submission block in `onclose`, so a close taken on the identity-rejected
+    // path abandoned an in-flight submission.
+    it("settles the pending submission on close even after session identity is rejected", async () => {
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameCreated",
+          data: {
+            game_code: "ABCD",
+            player_token: "tok",
+            // generation < 1 is rejected by `acceptFullSessionKey`, latching
+            // `sessionIdentityRejected`.
+            full_key: { game_code: "ABCD", generation: 0 },
+          },
+        }),
+      );
+      // Reach-guard: the latch really is set, otherwise this test would pass
+      // against the unguarded close path and prove nothing.
+      await expect(adapter.exportPersistenceState()).rejects.toThrow("Session identity rejected");
+
+      const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      ws.dispatchSynthetic("close");
+
+      expect(await pending()).toMatchObject({
+        code: "WS_CLOSED",
+        message: "Connection closed during action",
+      });
+    });
+
     it("emits an error instead of throwing when a fire-and-forget send hits a closed socket", () => {
       const listener = vi.fn();
       adapter.onEvent(listener);
@@ -1765,25 +1844,26 @@ describe("WebSocketAdapter", () => {
      * NOT the candidate publication order, so a sort or a canonicalisation
      * anywhere in the adapter layer is caught rather than coinciding.
      */
+    const cid = (id: string) => id as InteractionChoiceId;
     const request = {
-      requestId: "preview-req-1",
-      interactionId: "interaction-1",
+      requestId: "preview-req-1" as PreviewRequestId,
+      interactionId: "interaction-1" as InteractionId,
       response: {
         type: "shortcut",
         data: {
           decision: { type: "fixed", data: { iterations: 6 } },
           pins: [{
             group: 0,
-            choiceIds: ["choice-c", "choice-a", "choice-b"],
+            choiceIds: [cid("choice-c"), cid("choice-a"), cid("choice-b")],
             amounts: [
-              { choiceId: "choice-c", amount: 3 },
-              { choiceId: "choice-a", amount: 1 },
-              { choiceId: "choice-b", amount: 2 },
+              { choiceId: cid("choice-c"), amount: 3 },
+              { choiceId: cid("choice-a"), amount: 1 },
+              { choiceId: cid("choice-b"), amount: 2 },
             ],
           }],
         },
       },
-    } as never as InteractionPreviewRequest;
+    } satisfies InteractionPreviewRequest;
 
     const answer = (requestId: string) => ({
       requestId,
@@ -1813,18 +1893,22 @@ describe("WebSocketAdapter", () => {
       const frame = sentPreviewFrame();
       expect(frame.type).toBe("PreviewInteraction");
       expect(frame.data.request).toEqual(request);
-      const pins = (frame.data.request.response as never as {
-        data: { pins: { choiceIds: string[]; amounts: { choiceId: string; amount: number }[] }[] };
-      }).data.pins;
+      const response = frame.data.request.response;
+      if (response.type !== "shortcut") throw new Error(`not a shortcut: ${response.type}`);
+      const pins = response.data.pins;
+      const amounts = pins[0].amounts;
+      // `amounts` is OPTIONAL on the wire, so its presence is an assertion rather than a shape
+      // the narrow gives for free.
+      if (amounts === undefined) throw new Error("the sent pin carries no amounts");
       // Reach guard: the asserted allocation has more than one segment, so an
       // adapter that dropped all but the first could not pass.
-      expect(pins[0].amounts.length).toBeGreaterThan(1);
-      expect(pins[0].amounts).toEqual([
+      expect(amounts.length).toBeGreaterThan(1);
+      expect(amounts).toEqual([
         { choiceId: "choice-c", amount: 3 },
         { choiceId: "choice-a", amount: 1 },
         { choiceId: "choice-b", amount: 2 },
       ]);
-      expect(pins[0].amounts.map((a) => a.choiceId)).toEqual(pins[0].choiceIds);
+      expect(amounts.map((a) => a.choiceId)).toEqual(pins[0].choiceIds);
 
       ws.dispatchSynthetic(
         "message",
@@ -1888,7 +1972,7 @@ describe("WebSocketAdapter", () => {
     it("rejects every in-flight preview when the socket closes, keeping answered ones", async () => {
       const answered = adapter.previewInteraction(request, 0);
       const unanswered = adapter.previewInteraction(
-        { ...request, requestId: "preview-req-2" } as InteractionPreviewRequest,
+        { ...request, requestId: "preview-req-2" as PreviewRequestId },
         0,
       );
 

@@ -1028,6 +1028,7 @@ function disposeMatchAdapter(set: SetFn): void {
         endContinuousEffectOffers: [],
         spellCosts: {},
         legalActionsByObject: {},
+        activationBlockReasons: {},
         stateHistory: [],
         turnCheckpoints: [],
       });

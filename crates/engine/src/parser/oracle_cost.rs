@@ -1202,7 +1202,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "reveal your hand" — reveal the controller's entire hand.
     // CR 701.20a: Reveal means show to all players. Used as alternative cost
     // (Land Grant class). Modeled as EffectCost wrapping Effect::RevealHand.
-    // Verified: CR 701.20 (docs/MagicCompRules.txt:3430).
+    // Verified: CR 701.20.
     if nom_on_lower(text, &lower, |i| {
         value((), tag("reveal your hand")).parse(i)
     })

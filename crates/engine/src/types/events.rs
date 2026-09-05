@@ -664,7 +664,7 @@ impl EventObjectSnapshot {
 
             // ---- embedded per-turn history ----
             FilterProp::WasDealtDamageThisTurn
-            | FilterProp::DealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn { .. }
             | FilterProp::EnteredThisTurn
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn

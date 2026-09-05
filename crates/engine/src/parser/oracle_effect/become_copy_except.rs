@@ -81,6 +81,7 @@ use super::super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, split_keyword_list};
 use super::super::oracle_util::canonicalize_subtype_name;
+use super::animation::{core_type_from_animation_word, split_in_addition_tail};
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::{
     ContinuousModification, ObjectScope, QuantityExpr, QuantityRef, RoundingMode,
@@ -605,10 +606,35 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     Some((rest, mods))
 }
 
-/// CR 707.9b + CR 707.9d: Plural token-copy exception — "they're N/M {types}
-/// creature[s] in addition to their other types" (Astral Dragon / Project Image).
-/// Mirrors [`parse_subject_pt_and_types`] but uses the plural anaphor and
-/// terminates on "creature(s)" rather than a bare type list.
+/// CR 707.9b + CR 205.1b: Plural token-copy exception — "they're N/M {types}
+/// creature[s] in addition to their other types" (Astral Dragon, Project Image,
+/// Rebuild the City). Mirrors [`parse_subject_pt_and_types`], which is the
+/// singular sibling and the model for all three corrections below.
+///
+/// Three things this must get right, none of which it previously did:
+///
+/// * **The type text keeps its "creature(s)" head.** It used to be consumed as
+///   a delimiter and discarded, so `AddType{Creature}` was emitted only as a
+///   side effect of the `replace_types && has_exact_creature_subtype` re-add in
+///   [`append_color_and_type_modifications`]. That branch cannot fire for a
+///   token with no creature subtype (Rebuild the City), leaving those tokens
+///   non-creatures entirely.
+/// * **The CR 205.1b carve-out is matched by the shared authority.** The old
+///   phrase lists each began with a space that the `"creatures "` split had
+///   already consumed, so every carve-out branch was unreachable and
+///   `replace_color` / `replace_types` were permanently `true`. That emitted
+///   `RemoveAllSubtypes{Creature}` for a card whose text says "in addition to
+///   their other types" — a CR 205.1b retention violation (Astral Dragon).
+///   `split_in_addition_tail` (`animation.rs`, `pub(crate)` for sharing per its
+///   own doc comment) is the single authority for that marker and brings all
+///   four possessive pronouns and the CR 105.3 "colors and " axis with it.
+///   A "colors"-only carve-out has no plural spelling in that marker class; it
+///   was equally unreachable before, so nothing regresses by omitting it.
+/// * **The remainder is the text AFTER the clause.** The old code kept the
+///   `before` half of [`split_at_body_boundary`] (the singular sibling
+///   correctly takes `after`), orphaning the trailing conjunct instead of
+///   returning it to [`parse_except_clause`]'s loop — which is how "and they
+///   have vigilance and menace" was lost.
 fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("they're "), tag("they are ")))
         .parse(input)
@@ -617,20 +643,27 @@ fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModific
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    let (type_text, rest) = split_on_first_of(rest, &["creatures ", "creature "])?;
-    let (rest, suffix) = if let Some((_, rest)) =
-        split_on_first_of(rest, &[" in addition to their other colors and types"])
-    {
-        (rest, AdditiveSuffix::ColorsAndTypes)
-    } else if let Some((_, rest)) = split_on_first_of(rest, &[" in addition to their other colors"])
-    {
-        (rest, AdditiveSuffix::Colors)
-    } else if let Some((_, rest)) = split_on_first_of(rest, &[" in addition to their other types"])
-    {
-        (rest, AdditiveSuffix::Types)
-    } else {
-        let (rest, _) = split_at_body_boundary(rest);
-        (rest, AdditiveSuffix::None)
+    let (type_text, rest, suffix) = match split_in_addition_tail(rest) {
+        Some((type_text, marker)) => {
+            // `marker` is the matched marker slice; the clause continues
+            // immediately after it. Recover that position the same way
+            // `split_in_addition_tail` computes it — prefix length, then skip
+            // the separating whitespace — so the remainder is exact.
+            let after_prefix = rest[type_text.len()..].trim_start();
+            let after_marker = &after_prefix[marker.len()..];
+            // CR 105.3: the marker itself carries the color axis when it reads
+            // "in addition to their other colors and types".
+            let suffix = if nom_primitives::scan_contains(marker, "colors and ") {
+                AdditiveSuffix::ColorsAndTypes
+            } else {
+                AdditiveSuffix::Types
+            };
+            (type_text, after_marker, suffix)
+        }
+        None => {
+            let (type_text, rest) = split_at_body_boundary(rest);
+            (type_text, rest, AdditiveSuffix::None)
+        }
     };
 
     let (replace_color, replace_types) = match suffix {
@@ -678,6 +711,15 @@ fn append_color_and_type_modifications(
         }
         if let Some((_, supertype)) = parse_supertype_word(word) {
             type_mods.push(ContinuousModification::AddSupertype { supertype });
+            continue;
+        }
+        // CR 205.2a: recognize the core type through the crate's plural-tolerant
+        // recognizer FIRST. `CoreType::from_str` matches the singular literals
+        // only, so a plural head word ("they're 3/3 creatures in addition to
+        // their other types") would fall through and be emitted as a fabricated
+        // `AddSubtype{"Creatures"}` — the tokens would never become creatures.
+        if let Some(core_type) = core_type_from_animation_word(word) {
+            type_mods.push(ContinuousModification::AddType { core_type });
             continue;
         }
         let canonical = canonicalize_subtype_name(word);
@@ -1050,7 +1092,22 @@ pub(super) fn parse_becomes_type_loses_all(
 /// copy-a-vanishing-creature case we only over-grant a redundant, benign
 /// instance rather than producing wrong behavior.
 fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("it has ").parse(input).ok()?;
+    // CR 707.9a: accept the same subject alternation the two quoted-ability arms
+    // beside this one already use (`parse_it_has_quoted_ability`,
+    // `parse_it_has_keywords_then_quoted_ability`). Without the plural "they
+    // have " form a BARE keyword conjunct returned by
+    // `parse_theyre_pt_and_types` has no consumer: `parse_except_clause`'s loop
+    // falls through to `skip_to_next_conjunction` and the keywords are dropped
+    // (Rebuild the City's "and they have vigilance and menace"). Matching the
+    // neighbours exactly also keeps the gendered forms from drifting apart.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it has "),
+        tag("he has "),
+        tag("she has "),
+        tag("they have "),
+    ))
+    .parse(input)
+    .ok()?;
     // Keyword list terminates at " and it " (next body), the period, or end.
     let (kw_text, remainder) = split_at_body_boundary(rest);
     let mut modifications = Vec::new();
@@ -2785,6 +2842,121 @@ mod tests {
                 }
             )),
             "missing AddType(Creature); got {mods:?}"
+        );
+    }
+
+    /// V11 (issue #8395; CR 707.9b + CR 205.1b): Rebuild the City — "Create three
+    /// tokens that are copies of it, except they're 3/3 creatures in addition to
+    /// their other types and they have vigilance and menace."
+    ///
+    /// Three defects had to be corrected together before this card works: the
+    /// `"creatures"` head word was consumed as a delimiter and discarded (so no
+    /// `AddType`), the carve-out markers were unreachable behind a leading space
+    /// the delimiter split had already eaten, and `split_at_body_boundary`'s
+    /// BEFORE half was kept — orphaning the trailing conjunct instead of
+    /// returning it to `parse_except_clause`'s loop.
+    #[test]
+    fn rebuild_the_city_tokens_are_creatures_with_both_keywords() {
+        let (_, mods) = parse_except_clause(
+            ", except they're 3/3 creatures in addition to their other types and they have vigilance and menace",
+            "Rebuild the City",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.contains(&ContinuousModification::SetPower { value: 3 })
+                && mods.contains(&ContinuousModification::SetToughness { value: 3 }),
+            "CR 707.9b: the copy exception sets base 3/3; got {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }),
+            "the \"creatures\" head word must yield AddType(Creature) — it used to be consumed \
+             as a delimiter and thrown away, leaving the tokens non-creatures; got {mods:?}"
+        );
+        for keyword in [Keyword::Vigilance, Keyword::Menace] {
+            assert!(
+                mods.contains(&ContinuousModification::AddKeyword {
+                    keyword: keyword.clone(),
+                }),
+                "the trailing conjunct's {keyword:?} must survive; got {mods:?}"
+            );
+        }
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "CR 205.1b: \"in addition to their other types\" retains the copied types; \
+             got {mods:?}"
+        );
+    }
+
+    /// V11 companion — defect 4 in ISOLATION. The bare plural keyword conjunct
+    /// must be consumed on its own.
+    ///
+    /// Before the plural alternation was added to `parse_it_has_keywords`,
+    /// `parse_except_clause`'s loop fell through to `skip_to_next_conjunction`
+    /// and both keywords were lost, which would have made the orphaned-remainder
+    /// fix inert for the very card it exists to repair. Asserting it separately
+    /// is what proves the test above cannot pass on its P/T half alone.
+    #[test]
+    fn plural_they_have_keyword_conjunct_is_consumed() {
+        let (_, mods) = parse_except_clause(
+            ", except they have vigilance and menace",
+            "Rebuild the City",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        for keyword in [Keyword::Vigilance, Keyword::Menace] {
+            assert!(
+                mods.contains(&ContinuousModification::AddKeyword {
+                    keyword: keyword.clone(),
+                }),
+                "the plural \"they have\" arm must grant {keyword:?}; got {mods:?}"
+            );
+        }
+    }
+
+    /// V12 (CR 205.1b is the retention authority; CR 707.9d's CDA carve-out is
+    /// why the clause is written at all): Astral Dragon — "…create two tokens
+    /// that are copies of target noncreature permanent, except they're 3/3
+    /// Dragon creatures in addition to their other types, and they have flying."
+    ///
+    /// The card says "in addition to their other types", so the copied types are
+    /// RETAINED. The plural arm nonetheless emitted `RemoveAllSubtypes{Creature}`
+    /// because its carve-out markers were unreachable, leaving `replace_types`
+    /// permanently true.
+    ///
+    /// REACH-GUARD: this is the canonical bare-negative hazard — an absence
+    /// assertion alone would pass if the arm simply declined and emitted
+    /// nothing. The paired positives are what make it a test.
+    #[test]
+    fn astral_dragon_retains_copied_types_without_subtype_wipe() {
+        let (_, mods) = parse_except_clause(
+            ", except they're 3/3 dragon creatures in addition to their other types, and they have flying",
+            "Astral Dragon",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Dragon".to_string(),
+            }),
+            "reach-guard: the Dragon subtype must still be added; got {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }),
+            "reach-guard: the tokens must still become creatures; got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "CR 205.1b: an \"in addition to their other types\" carve-out must NOT wipe the \
+             copied creature types; got {mods:?}"
         );
     }
 }

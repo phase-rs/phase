@@ -509,6 +509,7 @@ fn redundancy_delta(
         | Effect::Transform { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }

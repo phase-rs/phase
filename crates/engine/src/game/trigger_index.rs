@@ -862,6 +862,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Shuffle
         | EffectKind::SearchLibrary
         | EffectKind::SearchOutsideGame
+        | EffectKind::OpenBoosterPack
         | EffectKind::ExileTop
         | EffectKind::ExileFaceDownPile
         | EffectKind::TargetOnly

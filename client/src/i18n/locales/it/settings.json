@@ -223,7 +223,7 @@
     },
     "selector": {
       "title": "Selezione del catalogo",
-      "core": "Retro della carta",
+      "core": "Retro della carta e simboli di mana",
       "printing": "Stampe del set",
       "complete": "Tutte le immagini attuali delle carte inglesi",
       "curated": "Un'immagine per carta",
@@ -343,7 +343,7 @@
       "catalog_state": "Impossibile recuperare lo stato del catalogo storico"
     },
     "packs": {
-      "core": "Retro della carta",
+      "core": "Retro della carta e simboli di mana",
       "complete": "Tutte le immagini attuali delle carte inglesi",
       "curated": "Un'immagine per carta",
       "deckLibrary": "Raccolta mazzi",
@@ -404,17 +404,19 @@
   },
   "offlinePreparation": {
     "title": "Preparazione offline",
-    "description": "Prepara questo desktop per il gioco locale offline prima di attivare Lavora offline.",
+    "description": "Prepara questo dispositivo per il gioco locale offline prima di attivare Lavora offline.",
     "prepare": "Prepara per offline",
     "preparing": "Preparazione…",
     "workOffline": "Lavora offline",
     "checklistLabel": "Elenco di preparazione offline",
     "visualWarning": "I pacchetti visivi installati richiedono attenzione. Apri Pacchetti visivi per ripararli; il gioco locale resta disponibile.",
+    "cardArtMissing": "Nessuna immagine delle carte installata. Le carte verranno mostrate senza illustrazione offline: installa un pacchetto in Pacchetti visivi, qui sotto.",
+    "cardArtInstalled": "Immagini delle carte in cache: {{packs}}",
     "incompleteTitle": "La preparazione offline è incompleta",
     "incompleteMessage": "Manca: {{capabilities}}. Attivare Lavora offline comunque?",
     "confirmOffline": "Attiva Lavora offline",
     "states": { "needs-preparation": "Prepara questo dispositivo prima di lavorare offline.", "preparing": "Preparazione delle capacità di gioco locale…", "ready": "Questo dispositivo è pronto per il gioco locale offline.", "failed": "Alcune capacità richieste non sono pronte.", "reconnect-required": "Riconnettiti prima di preparare il gioco offline.", "reload-or-relaunch-required": "Ricarica l’app o riavvia il desktop, quindi riprova." },
-    "capabilities": { "appShell": "App", "browserEngine": "Motore browser e database carte", "scryfallSearch": "Dati di ricerca", "preconCatalog": "Mazzi precostruiti", "bundledAiCatalog": "Catalogo mazzi IA", "deckLibrary": "Libreria mazzi installata", "nativeEngine": "Motore nativo" },
+    "capabilities": { "appShell": "App", "browserEngine": "Motore browser e database carte", "scryfallSearch": "Dati di ricerca", "preconCatalog": "Mazzi precostruiti", "bundledAiCatalog": "Catalogo mazzi IA", "deckLibrary": "Libreria mazzi installata", "coreVisuals": "Retro della carta e simboli di mana", "nativeEngine": "Motore nativo" },
     "capabilityStates": { "ready": "Pronto", "not-ready": "Non pronto", "reload-required": "Ricaricamento richiesto", "not-applicable": "Non applicabile", "not-installed": "Non installato" }
   },
   "artChain": {

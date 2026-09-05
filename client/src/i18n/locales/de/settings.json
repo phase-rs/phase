@@ -404,17 +404,19 @@
   },
   "offlinePreparation": {
     "title": "Offline-Vorbereitung",
-    "description": "Bereite diesen Desktop auf lokales Offline-Spiel vor, bevor Offline arbeiten aktiviert wird.",
+    "description": "Bereite dieses Gerät auf lokales Offline-Spiel vor, bevor Offline arbeiten aktiviert wird.",
     "prepare": "Für Offline vorbereiten",
     "preparing": "Wird vorbereitet…",
     "workOffline": "Offline arbeiten",
     "checklistLabel": "Offline-Bereitschaftsliste",
     "visualWarning": "Installierte Bildpakete benötigen Aufmerksamkeit. Öffne Bildpakete zur Reparatur; lokales Spiel bleibt verfügbar.",
+    "cardArtMissing": "Es sind keine Kartenbilder installiert. Karten werden offline ohne Artwork dargestellt – installiere unten unter Bildpakete ein Paket.",
+    "cardArtInstalled": "Zwischengespeicherte Kartenbilder: {{packs}}",
     "incompleteTitle": "Offline-Vorbereitung ist unvollständig",
     "incompleteMessage": "Fehlt: {{capabilities}}. Offline arbeiten trotzdem aktivieren?",
     "confirmOffline": "Offline arbeiten aktivieren",
     "states": { "needs-preparation": "Bereite dieses Gerät vor dem Offline-Arbeiten vor.", "preparing": "Lokale Spielfunktionen werden vorbereitet…", "ready": "Dieses Gerät ist für lokales Offline-Spiel bereit.", "failed": "Einige erforderliche Funktionen sind nicht bereit.", "reconnect-required": "Stelle die Verbindung wieder her, bevor du Offline-Spiel vorbereitest.", "reload-or-relaunch-required": "Lade die App neu oder starte den Desktop neu und bereite erneut vor." },
-    "capabilities": { "appShell": "App-Shell", "browserEngine": "Browser-Engine und Kartendatenbank", "scryfallSearch": "Kartensuchdaten", "preconCatalog": "Vorgefertigte Decks", "bundledAiCatalog": "KI-Deckkatalog", "deckLibrary": "Installierte Deckbibliothek", "nativeEngine": "Native Engine" },
+    "capabilities": { "appShell": "App-Shell", "browserEngine": "Browser-Engine und Kartendatenbank", "scryfallSearch": "Kartensuchdaten", "preconCatalog": "Vorgefertigte Decks", "bundledAiCatalog": "KI-Deckkatalog", "deckLibrary": "Installierte Deckbibliothek", "coreVisuals": "Kartenrückseite und Manasymbole", "nativeEngine": "Native Engine" },
     "capabilityStates": { "ready": "Bereit", "not-ready": "Nicht bereit", "reload-required": "Neuladen erforderlich", "not-applicable": "Nicht anwendbar", "not-installed": "Nicht installiert" }
   },
   "artChain": {

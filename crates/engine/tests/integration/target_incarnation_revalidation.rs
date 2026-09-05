@@ -9,7 +9,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastingVariant, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    CastingVariant, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::CardId;
 use engine::types::phase::Phase;
@@ -162,11 +162,22 @@ fn stale_target_stack() -> (
 #[test]
 fn interactive_same_object_id_retarget_refreshes_selected_target_pin() {
     let (mut runner, target) = stale_target_stack();
+    // CR 115.7d, INVARIANT SC (phase-rs/phase#8355 round-8 review finding H2):
+    // production-shaped, not the outer-empty `#[serde(default)]` compatibility
+    // shape (N16) — a real prompt always stores `slots`/`slot_pools` for the
+    // position it addresses, and this row exists to exercise THAT path, not
+    // the compatibility fallback (which routes through a different branch in
+    // `apply_retarget` and would leave this row unable to detect H2's defect).
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
         current_targets: vec![TargetRef::Object(target)],
+        slots: vec![RetargetSlotAddress {
+            path: vec![],
+            slot: 0,
+        }],
+        slot_pools: vec![vec![TargetRef::Object(target)]],
         legal_new_targets: vec![TargetRef::Object(target)],
     };
 

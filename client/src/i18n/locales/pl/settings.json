@@ -404,17 +404,19 @@
   },
   "offlinePreparation": {
     "title": "Przygotowanie offline",
-    "description": "Przygotuj ten komputer do lokalnej gry offline przed włączeniem pracy offline.",
+    "description": "Przygotuj to urządzenie do lokalnej gry offline przed włączeniem pracy offline.",
     "prepare": "Przygotuj do pracy offline",
     "preparing": "Przygotowywanie…",
     "workOffline": "Pracuj offline",
     "checklistLabel": "Lista gotowości offline",
     "visualWarning": "Zainstalowane pakiety wizualne wymagają uwagi. Otwórz Pakiety wizualne, aby je naprawić; gra lokalna pozostaje dostępna.",
+    "cardArtMissing": "Nie zainstalowano żadnych obrazów kart. Karty będą wyświetlane offline bez grafiki — zainstaluj pakiet w Pakietach wizualnych poniżej.",
+    "cardArtInstalled": "Zapisane obrazy kart: {{packs}}",
     "incompleteTitle": "Przygotowanie offline jest niepełne",
     "incompleteMessage": "Brakuje: {{capabilities}}. Mimo to włączyć pracę offline?",
     "confirmOffline": "Włącz pracę offline",
     "states": { "needs-preparation": "Przygotuj to urządzenie przed pracą offline.", "preparing": "Przygotowywanie możliwości gry lokalnej…", "ready": "To urządzenie jest gotowe do lokalnej gry offline.", "failed": "Niektóre wymagane możliwości nie są gotowe.", "reconnect-required": "Połącz się ponownie przed przygotowaniem gry offline.", "reload-or-relaunch-required": "Odśwież aplikację lub uruchom ponownie desktop, a następnie spróbuj ponownie." },
-    "capabilities": { "appShell": "Powłoka aplikacji", "browserEngine": "Silnik przeglądarki i baza kart", "scryfallSearch": "Dane wyszukiwania", "preconCatalog": "Wygenerowane talie", "bundledAiCatalog": "Katalog talii SI", "deckLibrary": "Zainstalowana biblioteka talii", "nativeEngine": "Silnik natywny" },
+    "capabilities": { "appShell": "Powłoka aplikacji", "browserEngine": "Silnik przeglądarki i baza kart", "scryfallSearch": "Dane wyszukiwania", "preconCatalog": "Wygenerowane talie", "bundledAiCatalog": "Katalog talii SI", "deckLibrary": "Zainstalowana biblioteka talii", "coreVisuals": "Rewers karty i symbole many", "nativeEngine": "Silnik natywny" },
     "capabilityStates": { "ready": "Gotowe", "not-ready": "Nie gotowe", "reload-required": "Wymagane odświeżenie", "not-applicable": "Nie dotyczy", "not-installed": "Nie zainstalowano" }
   },
   "artChain": {

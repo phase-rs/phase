@@ -1879,10 +1879,10 @@ pub(crate) fn handle_discard_for_cost(
         if let Some(obj) = state.objects.get(&first) {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: first,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
         }
     }
     // CR 601.2h + CR 602.2b (issue #4948): Record EVERY discarded card, not
@@ -2050,6 +2050,20 @@ fn finish_cost_object_moves(
             }
         }
     }
+
+    // CR 400.7j + CR 400.7 + CR 608.2k: Every cost object move above is now complete, so
+    // re-pin the cost-paid referent to the incarnation the cost's own move
+    // produced. The binding seams capture BEFORE the move (their `lki` must
+    // record pre-move characteristics — CR 608.2h), and without this the
+    // reference would read as stale against the object its own cost just moved
+    // (Jhoira of the Ghitu: exile a card as a cost, then put counters on that
+    // exiled card). Only a LATER zone change makes it stale from here.
+    //
+    // Placed after the loop so it is correct regardless of how many zones the
+    // move traversed or whether a replacement effect redirected it; the
+    // `NeedsChoice` arm above returns early and re-enters here on resume.
+    let mut pending = pending;
+    pending.ability.repin_cost_paid_object_recursive(state);
 
     let waiting_for = match completion {
         PendingCostMoveCompletion::FinishPending => {
@@ -3055,7 +3069,18 @@ fn finish_sacrifice_for_cost(
             Some(pending),
             PendingSacrificeCostCompletion::SelectedNonSelf
             | PendingSacrificeCostCompletion::SelfRef,
-        ) => finish_pending_cost_or_cast(state, player, pending, events)?,
+        ) => {
+            // CR 400.7j + CR 400.7 + CR 608.2k: this is the RESUMED sacrifice path — the
+            // moves above completed after a replacement-effect choice, so
+            // re-pin here exactly as the non-paused paths do. A redirected
+            // sacrifice is precisely the case where the referent's incarnation
+            // cannot be predicted from the pre-move capture, so omitting this
+            // would leave the resumed cost reading as stale against the object
+            // its own cost just moved.
+            let mut pending = pending;
+            pending.ability.repin_cost_paid_object_recursive(state);
+            finish_pending_cost_or_cast(state, player, pending, events)?
+        }
         (None, PendingSacrificeCostCompletion::ResolutionOptionalPayment { frame, .. }) => {
             let mut frame = *frame;
             let Effect::PayCost { cost, .. } = &mut frame.ability.effect else {
@@ -3228,10 +3253,11 @@ pub(crate) fn handle_sacrifice_for_cost(
     // characteristics BEFORE it leaves the battlefield, stamping it onto the
     // resolving ability for later cost-paid-object references.
     if let Some(&first) = chosen.first() {
-        if let Some(snapshot) = state.objects.get(&first).map(|obj| CostPaidObjectSnapshot {
-            object_id: first,
-            lki: obj.snapshot_for_mana_spent(),
-        }) {
+        if let Some(snapshot) = state
+            .objects
+            .get(&first)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
+        {
             pending
                 .ability
                 .set_cost_paid_object_recursive(snapshot.clone());
@@ -3362,6 +3388,13 @@ pub(crate) fn handle_sacrifice_for_cost(
         events,
         &crate::game::zones::departed_subset(state, chosen),
     );
+
+    // CR 400.7j + CR 400.7 + CR 608.2k: the sacrifice moves above are the cost's own, so
+    // re-pin the referent to the incarnation they produced (see
+    // `finish_cost_object_moves` for the same step on the shared move seam, and
+    // `CostPaidObjectSnapshot::repin_to_current_incarnation` for why the pin
+    // must not be assumed to advance by a fixed amount).
+    pending.ability.repin_cost_paid_object_recursive(state);
 
     if pending.activation_ability_index.is_some() {
         pending.mark_activation_cost_committed();
@@ -3548,10 +3581,11 @@ pub(crate) fn handle_unattach_for_cost(
     // BEFORE it leaves the source, stamping it onto the resolving ability as the
     // cost-paid-object referent for "that Equipment's mana value".
     if let Some(&first) = chosen.first() {
-        if let Some(snapshot) = state.objects.get(&first).map(|obj| CostPaidObjectSnapshot {
-            object_id: first,
-            lki: obj.snapshot_for_mana_spent(),
-        }) {
+        if let Some(snapshot) = state
+            .objects
+            .get(&first)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
+        {
             pending
                 .ability
                 .set_cost_paid_object_recursive(snapshot.clone());
@@ -3815,10 +3849,10 @@ pub(crate) fn handle_remove_counter_for_cost(
     if let Some(obj) = paid_object.and_then(|id| state.objects.get(&id).map(|obj| (id, obj))) {
         pending
             .ability
-            .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                object_id: obj.0,
-                lki: obj.1.snapshot_for_mana_spent(),
-            });
+            .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                obj.1,
+                obj.1.snapshot_for_mana_spent(),
+            ));
     }
 
     pending.mark_activation_cost_committed();
@@ -3989,10 +4023,10 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
         if let Some(obj) = state.objects.get(&choice.object_id) {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: choice.object_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
         }
     }
 
@@ -4072,10 +4106,10 @@ pub(crate) fn handle_blight_choice(
     if let Some(obj) = state.objects.get(&chosen[0]) {
         pending
             .ability
-            .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                object_id: chosen[0],
-                lki: obj.snapshot_for_mana_spent(),
-            });
+            .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                obj,
+                obj.snapshot_for_mana_spent(),
+            ));
     }
 
     if counters > 0
@@ -4325,10 +4359,10 @@ pub(crate) fn handle_behold_for_cost(
             ));
         }
         if snapshot.is_none() {
-            snapshot = Some(CostPaidObjectSnapshot {
-                object_id: chosen_id,
-                lki: obj.snapshot_for_mana_spent(),
-            });
+            snapshot = Some(CostPaidObjectSnapshot::capture(
+                obj,
+                obj.snapshot_for_mana_spent(),
+            ));
         }
         if action == BeholdCostAction::ChooseOrReveal && from_hand {
             revealed_ids.push(chosen_id);
@@ -4589,10 +4623,10 @@ fn finish_exile_selection_for_cost(
             }
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: first,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
         }
     }
     // CR 601.2h + CR 602.2b (issue #4948): Record EVERY exiled object, not
@@ -5496,10 +5530,10 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         if let Some(obj) = state.objects.get(&source_id) {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: source_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
             events.push(GameEvent::CardsRevealed {
                 player,
                 card_ids: vec![source_id],
@@ -8142,12 +8176,9 @@ fn pay_additional_cost_with_source(
             // there is no choice to make, the object is already known.
             let Some(filter) = filter else {
                 if let Some(obj) = state.objects.get(&pending.object_id) {
-                    pending
-                        .ability
-                        .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                            object_id: pending.object_id,
-                            lki: obj.snapshot_for_mana_spent(),
-                        });
+                    pending.ability.set_cost_paid_object_recursive(
+                        CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()),
+                    );
                     events.push(GameEvent::CardsRevealed {
                         player,
                         card_ids: vec![pending.object_id],
@@ -8227,10 +8258,10 @@ pub(crate) fn handle_reveal_for_cost(
         if index == 0 {
             pending
                 .ability
-                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                    object_id: card_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                });
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
+                    obj,
+                    obj.snapshot_for_mana_spent(),
+                ));
         }
     }
 
@@ -10755,35 +10786,35 @@ fn handle_resolution_cast_success(
         ResolutionCastSuccessAction::RippleOfferRemaining { mut remaining_hits } => {
             if remaining_hits.is_empty() {
                 // CR 702.60a: after the last accepted hit, put the revealed
-                // cards not cast this way on the library bottom.
+                // cards not cast this way on the bottom "in any order" (CR
+                // 608.2d). 2+ cards raise `WaitingFor::RippleBottomOrder`; 0/1
+                // place directly. Either way `RippleTerminalComplete` (carrying
+                // this final cast) fires once the cards land.
                 //
-                // This marker is installed before the replacement-aware batch
-                // because that batch can pause. The resumed cast must still
-                // collect its eventual SpellCast trigger with the earlier
-                // accepted hits, rather than drain them during the prompt.
+                // The marker is installed before the (possibly pausing)
+                // placement so the resumed cast still collects its eventual
+                // SpellCast trigger with the earlier accepted hits.
                 state.pending_resolution_completion =
                     Some(crate::types::game_state::PendingResolutionCompletion {
                         player,
                         source_id,
                         final_cast: Some(cast_object),
                     });
-                match crate::game::effects::cascade::shuffle_to_bottom(
+                crate::game::effects::ripple::open_bottom_order_or_place(
                     state,
-                    &exiled_misses,
                     source_id,
-                    Some(
-                        crate::types::game_state::BatchCompletion::RippleTerminalComplete {
-                            player,
-                            source_id,
-                            final_cast: Some(cast_object),
-                        },
-                    ),
+                    player,
+                    exiled_misses,
+                    Some(cast_object),
                     events,
+                );
+                if matches!(
+                    state.waiting_for,
+                    WaitingFor::RippleBottomOrder { .. } | WaitingFor::ReplacementChoice { .. }
                 ) {
-                    crate::game::zone_pipeline::BatchMoveResult::Done => None,
-                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                        Some(Box::new(state.waiting_for.clone()))
-                    }
+                    Some(Box::new(state.waiting_for.clone()))
+                } else {
+                    None
                 }
             } else {
                 let hit_card = remaining_hits.remove(0);
@@ -13256,6 +13287,33 @@ fn finalize_mana_payment_with_resume(
         validate_deferred_spell_sacrifices_at_commit(state, player, &pending)?;
         let deferred_sacrifice_events =
             pay_deferred_spell_sacrifices_at_commit(state, player, &pending, events)?;
+        // CR 400.7j + CR 400.7 + CR 608.2k: the fourth cost-completion path. A
+        // spell sacrifice deferred until mana payment is captured in
+        // `handle_sacrifice_for_cost` BEFORE the move, then paid here — the
+        // deferral branch returns above the re-pin in that function, so without
+        // this the referent stays pinned to the pre-sacrifice incarnation while
+        // the live row has already advanced, and every guarded consumer would
+        // then resolve it to nothing (Endemic Plague / Fatal Grudge class).
+        // CR 400.7j is the rule that mandates the re-pin: a cost that moves an
+        // object to a public zone must still let that spell's effects find it.
+        //
+        // Guarded on the deferred set being non-empty. CR 400.7j licenses
+        // re-pinning across the COST's own move and nothing else, but mana
+        // payment (`pay_spell_mana_before_deferred_sacrifice`, above) runs
+        // first — so on a cast with no deferred sacrifice an unconditional
+        // re-pin would also bless a LATER move, e.g. a mana ability that
+        // returned the referent from the graveyard.
+        //
+        // NOT covered by a test. `deferred_spell_sacrifice_repin_does_not_bless_a_later_move`
+        // states this rule but cannot constrain this line: it calls
+        // `repin_cost_paid_object_recursive` directly and never enters this
+        // function, so it passes with or without the guard. The guard is latent
+        // for the same reason the re-pin it wraps is (see the SCOPE note on that
+        // test), and the same outstanding work — a test that drives the real
+        // deferred path — would cover both.
+        if !pending.deferred_sacrificed_permanents.is_empty() {
+            pending.ability.repin_cost_paid_object_recursive(state);
+        }
         let final_cast_cost = if prepaid_actual_mana_spent.is_some() {
             crate::types::mana::ManaCost::NoCost
         } else {
@@ -13642,6 +13700,33 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         validate_deferred_spell_sacrifices_at_commit(state, player, &pending)?;
         let deferred_sacrifice_events =
             pay_deferred_spell_sacrifices_at_commit(state, player, &pending, events)?;
+        // CR 400.7j + CR 400.7 + CR 608.2k: the fourth cost-completion path. A
+        // spell sacrifice deferred until mana payment is captured in
+        // `handle_sacrifice_for_cost` BEFORE the move, then paid here — the
+        // deferral branch returns above the re-pin in that function, so without
+        // this the referent stays pinned to the pre-sacrifice incarnation while
+        // the live row has already advanced, and every guarded consumer would
+        // then resolve it to nothing (Endemic Plague / Fatal Grudge class).
+        // CR 400.7j is the rule that mandates the re-pin: a cost that moves an
+        // object to a public zone must still let that spell's effects find it.
+        //
+        // Guarded on the deferred set being non-empty. CR 400.7j licenses
+        // re-pinning across the COST's own move and nothing else, but mana
+        // payment (`pay_spell_mana_before_deferred_sacrifice`, above) runs
+        // first — so on a cast with no deferred sacrifice an unconditional
+        // re-pin would also bless a LATER move, e.g. a mana ability that
+        // returned the referent from the graveyard.
+        //
+        // NOT covered by a test. `deferred_spell_sacrifice_repin_does_not_bless_a_later_move`
+        // states this rule but cannot constrain this line: it calls
+        // `repin_cost_paid_object_recursive` directly and never enters this
+        // function, so it passes with or without the guard. The guard is latent
+        // for the same reason the re-pin it wraps is (see the SCOPE note on that
+        // test), and the same outstanding work — a test that drives the real
+        // deferred path — would cover both.
+        if !pending.deferred_sacrificed_permanents.is_empty() {
+            pending.ability.repin_cost_paid_object_recursive(state);
+        }
         let final_cast_cost = if prepaid_actual_mana_spent.is_some() {
             crate::types::mana::ManaCost::NoCost
         } else {
@@ -25015,6 +25100,175 @@ its replicate cost was paid.)\nDraw a card.";
             payable_spell_alternative_cost(&state, caster, recast),
             None,
             "the in-flight graveyard origin must outrank the stale Hand stamp"
+        );
+    }
+
+    /// CR 400.7j + CR 400.7 + CR 608.2k: A spell sacrifice DEFERRED until mana
+    /// payment is captured before the move and paid on a separate completion
+    /// path (`pay_deferred_spell_sacrifices_at_commit`). That path must re-pin
+    /// the referent, or the snapshot stays at the pre-sacrifice incarnation
+    /// while the live row has advanced — and every guarded consumer then
+    /// resolves the cost referent to nothing (Endemic Plague / Fatal Grudge
+    /// class: "destroy all creatures that share a creature type with the
+    /// sacrificed creature").
+    ///
+    /// SCOPE — read this before trusting the name. This test drives
+    /// `repin_cost_paid_object_recursive` DIRECTLY. It does NOT enter
+    /// `finalize_mana_payment_with_resume`, so it does **not** pin the
+    /// production call site: deleting the two re-pin calls in that function
+    /// leaves this test green. It pins the re-pin's semantics only — that
+    /// re-pinning after the cost's own move restores the referent.
+    ///
+    /// The call site is deliberately untested because the deferred branch could
+    /// not be reached from a test. `can_defer_spell_sacrifice_until_mana_payment`
+    /// requires `cost_has_x || cost.mana_value() > 0` after the cost-floor pass,
+    /// and an instrumented probe on that gate printed `can_defer=false ...
+    /// cost_mv=0` for an additional-cost sacrifice spell in the scenario
+    /// harness — the mana is already paid by the time the sacrifice prompt runs.
+    /// Endemic Plague and Fatal Grudge, the two cards that reach it in a real
+    /// game, are absent from the test fixture. An integration test written for
+    /// this was deleted rather than shipped because it passed with the
+    /// production fix reverted.
+    ///
+    /// Treat the guarded call in `finalize_mana_payment_with_resume` as latent:
+    /// correct by construction (a path that moves the referent after capture and
+    /// reaches no re-pin must re-pin) but unprotected by coverage. A test that
+    /// drives the real path is the outstanding work.
+    #[test]
+    fn deferred_spell_sacrifice_repin_restores_the_cost_referent() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let sacrificed = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sacrificed Creature".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Captured BEFORE the sacrifice, exactly as `handle_sacrifice_for_cost` does.
+        let obj = state.objects.get(&sacrificed).expect("creature exists");
+        let captured_incarnation = obj.incarnation;
+        let snapshot = CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent());
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(snapshot);
+        assert!(
+            ability
+                .cost_paid_object
+                .as_ref()
+                .expect("bound")
+                .is_current(&state),
+            "precondition: the referent is current before the deferred sacrifice"
+        );
+
+        // The deferred payment performs the sacrifice later, on its own path.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, sacrificed, Zone::Graveyard, &mut events);
+
+        let after = state.objects.get(&sacrificed).expect("row survives");
+        assert!(
+            after.incarnation > captured_incarnation,
+            "fixture reach-guard: the sacrifice must advance the incarnation ({} -> {})",
+            captured_incarnation,
+            after.incarnation
+        );
+        assert!(
+            !ability
+                .cost_paid_object
+                .as_ref()
+                .expect("bound")
+                .is_current(&state),
+            "fixture reach-guard: without a re-pin the referent IS stale — this is              the state the deferred path used to reach resolution in"
+        );
+
+        // What the fix adds after `pay_deferred_spell_sacrifices_at_commit`.
+        ability.repin_cost_paid_object_recursive(&state);
+
+        assert!(
+            ability
+                .cost_paid_object
+                .as_ref()
+                .expect("bound")
+                .is_current(&state),
+            "CR 400.7j: after the deferred sacrifice completes, the re-pin must              restore the referent so the spell's own effects can still find the              object its cost moved"
+        );
+        assert_eq!(
+            ability
+                .cost_paid_object
+                .as_ref()
+                .expect("bound")
+                .live_object_id(&state),
+            Some(sacrificed),
+            "the guarded consumers must resolve the sacrificed permanent again"
+        );
+    }
+
+    /// CR 400.7: Paired negative for
+    /// `deferred_spell_sacrifice_repin_restores_the_cost_referent`. A referent
+    /// that moves AGAIN after the re-pin is genuinely stale and must stay
+    /// rejected — the re-pin restores the cost's own move, not every later one.
+    #[test]
+    fn deferred_spell_sacrifice_repin_does_not_bless_a_later_move() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let sacrificed = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sacrificed Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get(&sacrificed).expect("creature exists");
+        let snapshot = CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent());
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(snapshot);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, sacrificed, Zone::Graveyard, &mut events);
+        ability.repin_cost_paid_object_recursive(&state);
+        assert!(
+            ability
+                .cost_paid_object
+                .as_ref()
+                .expect("bound")
+                .is_current(&state),
+            "reach-guard: the re-pin made the referent current, so the assertion              below is about the LATER move and not about the sacrifice"
+        );
+
+        // A later, unrelated zone change — not the cost's own move.
+        crate::game::zones::move_to_zone(&mut state, sacrificed, Zone::Exile, &mut events);
+
+        assert!(
+            !ability
+                .cost_paid_object
+                .as_ref()
+                .expect("bound")
+                .is_current(&state),
+            "CR 400.7: a move AFTER the cost completed makes the referent a new              object again; the re-pin must not bless it"
         );
     }
 }

@@ -461,16 +461,16 @@ minimize re-reads.
 
 ## CR Numbers (all grep-verified against `docs/MagicCompRules.txt`)
 
-- **CR 702.40** — Storm keyword ability (line 4298). ✓ (phantom keyword to drop)
-- **CR 201.5 / 201.5b** — a name reference on an object means just that object (lines 1320/1325). ✓
+- **CR 702.40** — Storm keyword ability. ✓ (phantom keyword to drop)
+- **CR 201.5 / 201.5b** — a name reference on an object means just that object. ✓
   (memory note "CR 201.4" is imprecise — 201.4 is "choose a card name"; the correct rule is 201.5.)
-- **CR 400.7** — object becomes a new object on zone change; entered-battlefield look-back basis (line 1948). ✓
-- **CR 302.6** — summoning sickness / "since their most recent turn began" (line 1628). ✓ (existing `ParsedCondition::SourceEnteredThisTurn` cites this)
-- **CR 602.5b** — activation restriction persists on the object (line 2541). ✓ (Fixer)
-- **CR 120.3** — damage results (line 1095); noncombat damage is damage not dealt as combat damage (CR 510.2). ✓ (Molten Lavamancer)
-- **CR 111.1** — token creation (line 645). ✓ (Molten Lavamancer 1/1 Elemental)
-- **CR 701.26** — Tap and Untap keyword action (line 3512). ✓ (Captain America tap ledger + untap)
-- **CR 603.4** — intervening-"if" clause, checked at trigger time AND resolution (line 2588). ✓ (Captain America)
+- **CR 400.7** — object becomes a new object on zone change; entered-battlefield look-back basis. ✓
+- **CR 302.6** — summoning sickness / "since their most recent turn began". ✓ (existing `ParsedCondition::SourceEnteredThisTurn` cites this)
+- **CR 602.5b** — activation restriction persists on the object. ✓ (Fixer)
+- **CR 120.3** — damage results; noncombat damage is damage not dealt as combat damage (CR 510.2). ✓ (Molten Lavamancer)
+- **CR 111.1** — token creation. ✓ (Molten Lavamancer 1/1 Elemental)
+- **CR 701.26** — Tap and Untap keyword action. ✓ (Captain America tap ledger + untap)
+- **CR 603.4** — intervening-"if" clause, checked at trigger time AND resolution. ✓ (Captain America)
 
 ---
 

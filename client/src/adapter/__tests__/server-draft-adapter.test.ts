@@ -5,7 +5,12 @@ import { ServerDraftAdapter } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import type { DraftPlayerView } from "../draft-adapter";
 import type { GameLogEntry, GameState, LegalActionsResult, ObjectAction } from "../types";
-import type { InteractionPreviewRequest } from "../generated/interaction";
+import type {
+  InteractionChoiceId,
+  InteractionId,
+  InteractionPreviewRequest,
+  PreviewRequestId,
+} from "../generated/interaction";
 
 // ── MockWebSocket (copied from ws-adapter.test.ts) ─────────────────────
 
@@ -57,6 +62,35 @@ async function completeHandshake(): Promise<MockWebSocket> {
   await Promise.resolve();
   await Promise.resolve();
   return ws;
+}
+
+/**
+ * Starts observing `promise` immediately and returns a reader that yields the
+ * rejection reason — or the string `"never settled"` if the promise is still
+ * pending.
+ *
+ * Observation has to start before the first `await` so an already-rejected
+ * promise is handled in the same tick, and the drain is what turns an orphaned
+ * promise — the exact defect these settlement fixes prevent — into a readable
+ * assertion failure instead of a suite timeout.
+ *
+ * The reader yields a MACROTASK turn (`setTimeout(…, 0)`), not a microtask
+ * drain: that is strictly more generous than the settlement paths need, since
+ * both `dispose()` and `onclose` reject synchronously. The cost is that it
+ * couples the reader to real timers — a caller running it under
+ * `vi.useFakeTimers()` would hang. No current caller does; the only fake-timer
+ * scope in these suites is closed by a `finally { vi.useRealTimers(); }`.
+ */
+function trackRejection(promise: Promise<unknown>): () => Promise<unknown> {
+  let outcome: unknown = "never settled";
+  void promise.then(
+    (value) => { outcome = { resolvedWith: value }; },
+    (error) => { outcome = error; },
+  );
+  return async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return outcome;
+  };
 }
 
 function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
@@ -662,6 +696,40 @@ describe("ServerDraftAdapter", () => {
     expect(adapter.currentMatchId).toBeNull();
   });
 
+  // `dispose()` used to null all three handle pairs instead of rejecting them,
+  // so every caller awaiting a server reply was orphaned — and a gameplay
+  // caller holds the module-level dispatch mutex while it waits.
+  it("dispose rejects the in-flight submit, draft and init promises", async () => {
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "DraftMatchStart",
+        data: {
+          match_id: "r1-t0",
+          round: 1,
+          game_code: "GAME01",
+          player_token: "gametok",
+          your_player: 0,
+          opponent_name: "Bob",
+        },
+      }),
+    );
+
+    const submit = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    const pick = trackRejection(adapter.submitPick("card-1"));
+    const reconnect = trackRejection(adapter.reconnectDraft());
+
+    adapter.dispose();
+
+    // Asserted as one tuple rather than three statements: a per-leg assertion
+    // would abort on the first orphan and leave the other two unprobeable.
+    expect([await submit(), await pick(), await reconnect()]).toMatchObject([
+      { code: "WS_CLOSED", message: "Adapter disposed during action", recoverable: true },
+      { code: "WS_CLOSED", message: "Adapter disposed during draft operation", recoverable: true },
+      { code: "WS_CLOSED", message: "Adapter disposed before draft started", recoverable: true },
+    ]);
+  });
+
   it("DraftOver sets phase to complete", () => {
     ws.dispatchSynthetic(
       "message",
@@ -832,25 +900,26 @@ describe("ServerDraftAdapter", () => {
      * NOT the candidate publication order, so a sort or a canonicalisation in
      * the adapter layer is caught rather than coinciding.
      */
+    const cid = (id: string) => id as InteractionChoiceId;
     const previewRequest = {
-      requestId: "preview-req-1",
-      interactionId: "interaction-1",
+      requestId: "preview-req-1" as PreviewRequestId,
+      interactionId: "interaction-1" as InteractionId,
       response: {
         type: "shortcut",
         data: {
           decision: { type: "fixed", data: { iterations: 6 } },
           pins: [{
             group: 0,
-            choiceIds: ["choice-c", "choice-a", "choice-b"],
+            choiceIds: [cid("choice-c"), cid("choice-a"), cid("choice-b")],
             amounts: [
-              { choiceId: "choice-c", amount: 3 },
-              { choiceId: "choice-a", amount: 1 },
-              { choiceId: "choice-b", amount: 2 },
+              { choiceId: cid("choice-c"), amount: 3 },
+              { choiceId: cid("choice-a"), amount: 1 },
+              { choiceId: cid("choice-b"), amount: 2 },
             ],
           }],
         },
       },
-    } as never as InteractionPreviewRequest;
+    } satisfies InteractionPreviewRequest;
 
     const previewAnswer = (requestId: string) => ({
       requestId,
@@ -902,7 +971,7 @@ describe("ServerDraftAdapter", () => {
     it("rejects in-flight previews on socket close, keeping answered ones", async () => {
       const answered = adapter.previewInteraction(previewRequest, 0);
       const unanswered = adapter.previewInteraction(
-        { ...previewRequest, requestId: "preview-req-2" } as InteractionPreviewRequest,
+        { ...previewRequest, requestId: "preview-req-2" as PreviewRequestId },
         0,
       );
 

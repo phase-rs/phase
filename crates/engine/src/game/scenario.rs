@@ -1962,6 +1962,8 @@ impl GameRunner {
             WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
+            WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -3144,6 +3146,7 @@ pub struct AbilityActivation<'a> {
     pay_with: Vec<ObjectId>,
     search_pick: SearchPolicy,
     optional: OptionalPolicy,
+    named_choice: Option<String>,
     spellbook_pick: Option<String>,
 }
 
@@ -3160,6 +3163,7 @@ impl<'a> AbilityActivation<'a> {
             pay_with: Vec::new(),
             search_pick: SearchPolicy::default(),
             optional: OptionalPolicy::default(),
+            named_choice: None,
             spellbook_pick: None,
         }
     }
@@ -3231,6 +3235,14 @@ impl<'a> AbilityActivation<'a> {
         self
     }
 
+    /// Choose a named/string option at a `NamedChoice` prompt during
+    /// resolution. Mirrors [`SpellCast::choose_option`]; the shared
+    /// [`drive_resolution`] honours [`ResolutionPolicy::named_choice`].
+    pub fn choose_option(mut self, choice: &str) -> Self {
+        self.named_choice = Some(choice.to_string());
+        self
+    }
+
     /// Draft this card name at any `SpellbookDraft` prompt during resolution
     /// (Alchemy `Effect::DraftFromSpellbook`). Mirrors [`SpellCast::spellbook_pick`].
     pub fn spellbook_pick(mut self, name: &str) -> Self {
@@ -3252,6 +3264,7 @@ impl<'a> AbilityActivation<'a> {
             pay_with,
             search_pick,
             optional,
+            named_choice,
             spellbook_pick,
         } = self;
 
@@ -3390,7 +3403,7 @@ impl<'a> AbilityActivation<'a> {
             search_pick,
             optional,
             replacement_choice: None,
-            named_choice: None,
+            named_choice,
             discard_cards: Vec::new(),
             effect_zone_cards: Vec::new(),
             copy_target: None,

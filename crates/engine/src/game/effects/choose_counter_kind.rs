@@ -14,7 +14,8 @@
 //! read it without leaking a persistent attribute onto the source.
 
 use crate::types::ability::{
-    ChoiceType, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    ChoiceType, CounterKindChooser, CounterKindDomain, Effect, EffectError, EffectKind,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -26,8 +27,12 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let target_filter = match &ability.effect {
-        Effect::ChooseCounterKind { target } => target,
+    let (target_filter, kind_source, chooser) = match &ability.effect {
+        Effect::ChooseCounterKind {
+            target,
+            domain,
+            chooser,
+        } => (target, domain, chooser),
         _ => return Err(EffectError::MissingParam("ChooseCounterKind".to_string())),
     };
 
@@ -70,8 +75,31 @@ pub fn resolve(
         } else {
             target_filter
         };
-    let kinds =
-        crate::game::quantity::distinct_counter_kinds_among(state, kind_domain, &filter_ctx);
+    // CR 608.2d: the card text names the population. "choose a counter on it"
+    // reads what the object carries; "from among <list>" prints its own closed
+    // set, and an exclusion clause narrows THAT set before anything is chosen —
+    // never after, or a random draw could pick an already-present kind and then
+    // place nothing.
+    let kinds: Vec<CounterType> = match kind_source {
+        CounterKindDomain::OnTarget => {
+            crate::game::quantity::distinct_counter_kinds_among(state, kind_domain, &filter_ctx)
+        }
+        CounterKindDomain::Printed {
+            kinds,
+            excluding_kinds_on_target,
+        } => {
+            let mut candidates = kinds.clone();
+            if *excluding_kinds_on_target {
+                let present = crate::game::quantity::distinct_counter_kinds_among(
+                    state,
+                    kind_domain,
+                    &filter_ctx,
+                );
+                candidates.retain(|kind| !present.contains(kind));
+            }
+            candidates
+        }
+    };
 
     let resolved = || GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -88,6 +116,30 @@ pub fn resolve(
     let choice_type = ChoiceType::CounterKind {
         options: kinds.clone(),
     };
+
+    // The card's "at random" takes the decision off the player, so the game
+    // draws from the seeded RNG and binds the result, exactly as the modal
+    // random axis does. CR 608.2d governs only WHEN the choice is announced;
+    // see `CounterKindChooser::Random` for why no rule number sits on the
+    // randomness itself. No prompt is emitted, so this must come before the
+    // interactive branch.
+    if matches!(chooser, CounterKindChooser::Random) {
+        use rand::seq::IndexedRandom; // rand 0.9: `choose` on `[T]`
+        let drawn = kinds
+            .choose(&mut state.rng)
+            .expect("non-empty: the zero-kind branch returned above")
+            .as_str()
+            .into_owned();
+        crate::game::effects::choose::bind_named_choice(
+            state,
+            &choice_type,
+            &drawn,
+            source.as_mut(),
+            persist_player,
+        );
+        events.push(resolved());
+        return Ok(());
+    }
 
     // CR 608.2d: a single legal option is auto-selected — no interactive prompt.
     if kinds.len() == 1 {
@@ -137,6 +189,8 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::ChooseCounterKind {
                 target: TargetFilter::ParentTarget,
+                domain: Default::default(),
+                chooser: Default::default(),
             },
             vec![TargetRef::Object(target_obj)],
             source,
@@ -267,6 +321,8 @@ mod tests {
                 target: TargetFilter::Typed(
                     TypedFilter::permanent().controller(ControllerRef::You),
                 ),
+                domain: Default::default(),
+                chooser: Default::default(),
             },
             vec![TargetRef::Object(downstream_target)],
             source,
@@ -354,6 +410,8 @@ mod tests {
                         zone: crate::types::zones::Zone::Exile,
                     }],
                 }),
+                domain: Default::default(),
+                chooser: Default::default(),
             },
             Vec::new(),
             source,

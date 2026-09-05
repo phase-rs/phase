@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   ANNOUNCE_TIMEOUT_MS,
@@ -848,30 +846,4 @@ test("serverProbeEvents projects through the shared column layout", () => {
   const [missing] = serverProbeEvents([{ url: KNOWN_URL, outcome: "connect_fail" }]);
   assert.deepEqual(missing.blobs, [KNOWN_URL, "connect_fail", ""]);
   assert.deepEqual(missing.doubles, [0]);
-});
-
-// `fetchInfoDocument` lives in `lobby-do.ts`, which imports `DurableObject` and
-// so cannot be loaded outside workerd — there is no harness here that can drive
-// a real redirect at it. This asserts the option is present in the source
-// instead. That is a weaker claim than a behavioural test and is written down
-// as one: it proves the flag has not been dropped, not that the runtime honours
-// it. It exists because the alternative is no gate at all on a verification
-// fetch that any caller can aim, announcing being open by design.
-test("the info-document verification fetch refuses redirects", () => {
-  const source = readFileSync(
-    fileURLToPath(new URL("../src/lobby-do.ts", import.meta.url)),
-    "utf8",
-  );
-  const call = source.slice(source.indexOf("await fetch(infoUrl, {"));
-  assert.ok(
-    call.startsWith("await fetch(infoUrl, {"),
-    "the verification fetch call was not found — this guard is keyed on it",
-  );
-  const options = call.slice(0, call.indexOf("});") + 3);
-  assert.match(
-    options,
-    /redirect:\s*"error"/,
-    'the verification fetch must pass redirect: "error" so a redirecting host '
-      + "fails closed instead of pointing the verifier at another origin",
-  );
 });

@@ -116,8 +116,9 @@ spec:
       {{- end }}
 {{- if .Values.web.enabled }}
 {{- /* The server's non-/ws HTTP surface, walked from build_router and
-     mount_admin_routes rather than recalled: /health, /p2p-draft-backup (and
-     its /{code} form, covered by the same prefix), and /admin/drafts[/{code}]
+     mount_admin_routes rather than recalled: /health, /info,
+     /p2p-draft-backup (and its /{code} form, covered by the same prefix), and
+     /admin/drafts[/{code}]
      when an admin token is mounted. Each match string is the catch-all's plus a
      PathPrefix suffix, so it is unconditionally longer and wins under Traefik's
      default rule-length ordering — the same contract the /ws rule relies on, and
@@ -125,7 +126,7 @@ spec:
      so the first two rules keep the positions
      tests/assert-compression-boundary.sh slices by. */}}
 {{- /* `/admin/*` is deliberately absent here too — see templates/ingress.yaml. */}}
-{{- $serverPaths := list "/health" "/p2p-draft-backup" }}
+{{- $serverPaths := list "/health" "/info" "/p2p-draft-backup" }}
 {{- range $p := $serverPaths }}
     - kind: Rule
       match: Host(`{{ $host }}`) && PathPrefix(`{{ $p }}`)

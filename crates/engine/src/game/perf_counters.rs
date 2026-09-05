@@ -23,6 +23,25 @@ pub struct PerfCounterSnapshot {
     pub layers_escalated: u64,
     pub mana_display_sweeps: u64,
     pub mana_display_swept_objects: u64,
+    /// CR 602.5 + CR 118.3: how many times the shared activation-legality core
+    /// (`casting::activation_verdict`) ran, across BOTH the enforcement shim and
+    /// the display read-out. Pins "one core evaluation per examined ability".
+    pub activation_verdict_passes: u64,
+    /// CR 118.3: activated abilities examined by
+    /// `ai_support::activation_block_reasons`. Paired with the counter above so
+    /// a passes-per-ability ratio is attributable rather than coincidental.
+    pub activation_block_display_abilities_examined: u64,
+    /// CR 613.1: whole-state flush clones taken by `casting::activation_verdict`'s
+    /// target-legality tail, which now clones only when `layers_dirty` is dirty
+    /// (it cloned unconditionally before, and incremented no counter at all).
+    ///
+    /// Deliberately its OWN field rather than `state_clone_for_legality`. That
+    /// field is a per-candidate legality-clone budget consumed by shipped memo
+    /// tests in `ai_support::filter`; folding a previously-uncounted clone into
+    /// it would silently double their expected budgets and turn a pure
+    /// instrumentation change into a behavioural-looking regression. Counting it
+    /// separately keeps both numbers attributable.
+    pub activation_verdict_flush_clones: u64,
     pub stack_batch_candidates: u64,
     pub stack_batch_plans: u64,
     pub stack_batch_observer_refusals: u64,
@@ -103,6 +122,9 @@ thread_local! {
         layers_escalated: 0,
         mana_display_sweeps: 0,
         mana_display_swept_objects: 0,
+        activation_verdict_passes: 0,
+        activation_block_display_abilities_examined: 0,
+        activation_verdict_flush_clones: 0,
         stack_batch_candidates: 0,
         stack_batch_plans: 0,
         stack_batch_observer_refusals: 0,
@@ -374,6 +396,18 @@ pub fn record_layers_incremental() {
 
 pub fn record_layers_escalated() {
     with_mut(|s| s.layers_escalated += 1);
+}
+
+pub fn record_activation_verdict_pass() {
+    with_mut(|s| s.activation_verdict_passes += 1);
+}
+
+pub fn record_activation_block_display_abilities_examined(examined: usize) {
+    with_mut(|s| s.activation_block_display_abilities_examined += examined as u64);
+}
+
+pub fn record_activation_verdict_flush_clone() {
+    with_mut(|s| s.activation_verdict_flush_clones += 1);
 }
 
 pub fn record_mana_display_sweep(swept_objects: usize) {

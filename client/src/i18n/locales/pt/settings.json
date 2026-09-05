@@ -404,17 +404,19 @@
   },
   "offlinePreparation": {
     "title": "Preparação offline",
-    "description": "Prepare este desktop para jogo local offline antes de ativar Trabalhar offline.",
+    "description": "Prepare este dispositivo para jogo local offline antes de ativar Trabalhar offline.",
     "prepare": "Preparar para offline",
     "preparing": "Preparando…",
     "workOffline": "Trabalhar offline",
     "checklistLabel": "Lista de preparação offline",
     "visualWarning": "Os pacotes visuais instalados precisam de atenção. Abra Pacotes visuais para repará-los; o jogo local continua disponível.",
+    "cardArtMissing": "Nenhuma imagem de carta instalada. As cartas serão exibidas sem arte offline — instale um pacote em Pacotes visuais, abaixo.",
+    "cardArtInstalled": "Imagens de cartas em cache: {{packs}}",
     "incompleteTitle": "A preparação offline está incompleta",
     "incompleteMessage": "Falta: {{capabilities}}. Ativar Trabalhar offline mesmo assim?",
     "confirmOffline": "Ativar Trabalhar offline",
     "states": { "needs-preparation": "Prepare este dispositivo antes de trabalhar offline.", "preparing": "Preparando capacidades de jogo local…", "ready": "Este dispositivo está pronto para jogo local offline.", "failed": "Algumas capacidades necessárias não estão prontas.", "reconnect-required": "Reconecte-se antes de preparar o jogo offline.", "reload-or-relaunch-required": "Recarregue o aplicativo ou reinicie o desktop e tente novamente." },
-    "capabilities": { "appShell": "Aplicativo", "browserEngine": "Motor do navegador e banco de cartas", "scryfallSearch": "Dados de busca", "preconCatalog": "Decks pré-construídos", "bundledAiCatalog": "Catálogo de decks de IA", "deckLibrary": "Biblioteca de decks instalada", "nativeEngine": "Motor nativo" },
+    "capabilities": { "appShell": "Aplicativo", "browserEngine": "Motor do navegador e banco de cartas", "scryfallSearch": "Dados de busca", "preconCatalog": "Decks pré-construídos", "bundledAiCatalog": "Catálogo de decks de IA", "deckLibrary": "Biblioteca de decks instalada", "coreVisuals": "Verso da carta e símbolos de mana", "nativeEngine": "Motor nativo" },
     "capabilityStates": { "ready": "Pronto", "not-ready": "Não pronto", "reload-required": "Recarga necessária", "not-applicable": "Não aplicável", "not-installed": "Não instalado" }
   },
   "artChain": {

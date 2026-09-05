@@ -47,6 +47,57 @@ fn maybe_drain_each_player_copy_chosen(state: &mut GameState, events: &mut Vec<G
     }
 }
 
+/// CR 608.3a / CR 608.3c + CR 400.7d + CR 616.1f: complete a permanent spell's
+/// parked resolution frame once the child stack its own entry raised has retired.
+///
+/// The parked frame is that child's structural PARENT, so it becomes the active
+/// frame only here — after this resume's drain stages have settled. `subject` is
+/// the object whose replacement this resume answered; the frame completes only
+/// when it is that same object's, so an unrelated parked spell is never touched.
+/// `active_spell_resolution` stays top-only: this reads the frame the drain just
+/// exposed and never reaches through a live child. This function is the SINGLE
+/// settle authority for that completion — call sites add no `Priority` guard of
+/// their own.
+///
+/// This mirrors the existing completion authority at the ZoneChange Execute site
+/// below, which cannot serve the counter path: it runs before the counter drain
+/// and keys on `zone_change_object_id`, which is `None` when the resumed event is
+/// an AddCounter.
+///
+/// KNOWN RESIDUAL — do not "fix" it here (measured):
+/// On a Devour-shape entrant (CR 702.82a/c) the counter drain exposes the entry's
+/// CR 614.13a eligibility snapshot, not the parent, so this helper correctly
+/// no-ops and the entry strands exactly as it does without this change. Retiring
+/// that snapshot here removes the strand and VIOLATES CR 614.13a: the snapshot is
+/// the eligible-pool filter in `game::effects::sacrifice` (`is_none_or` — vacuous
+/// once cleared), and the sacrifice that consumes it has not run at this program
+/// point, so the devourer becomes legal fodder for its own Devour. Measured on
+/// both arms. The blocking shape is `[PostReplacement(sacrifice, Ready),
+/// SpellResolution(parent), ChangeZone(snapshot)]`, in which
+/// `ResolutionStack::active_post_replacement_parent_slot` — top, or exactly one
+/// below — cannot resolve, so neither the sacrifice nor the snapshot's own
+/// retirement authority can run while the parent sits between them. The fix is an
+/// ordering change at the capture site in `stack.rs`, not a retirement call here.
+fn finish_spell_resolution_exposed_by_child(
+    state: &mut GameState,
+    subject: Option<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    if !state
+        .active_spell_resolution()
+        .is_some_and(|ctx| Some(ctx.object_id) == subject)
+    {
+        return;
+    }
+    let ctx = state
+        .take_active_spell_resolution()
+        .expect("matching spell-resolution frame was checked above");
+    apply_pending_spell_resolution(state, &ctx, events);
+}
+
 /// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
 /// sacrifice replacement — a `Moved` (ETB-style) event whose post-effect is a
 /// `Sacrifice` over a `Typed`/`Any` scope filter (the chooser-driven "sacrifice
@@ -239,6 +290,16 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.sacrifice_provenance);
+    // CR 122.1 + CR 616.1f: the object whose counter placement this resume answers.
+    // Captured here, with the file's other `parked_*` reads, because
+    // `continue_replacement` below consumes the pending record. The Execute arm's
+    // own `zone_change_object_id` cannot serve: it is `None` on the counter path
+    // (the Execute payload is an AddCounter event, not a ZoneChange) and it is
+    // out of scope in the Prevented arm.
+    let parked_affected_object_id = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.proposed.affected_object_id());
     // A replacement-paused zone move belongs to its logical owner by both the
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
@@ -1226,6 +1287,24 @@ fn handle_replacement_choice_inner(
             // advances the typed phase owner exactly once.
             if matches!(waiting_for, WaitingFor::Priority { .. }) {
                 state.waiting_for = waiting_for;
+
+                // CR 608.3a + CR 616.1f: the parked entry context is the structural PARENT
+                // of every drain stage above. Complete it only once they have all retired
+                // and it owns the top — after the counter/batch/copy-token/continuation
+                // stages, and before the shared continuation boundary, which must not
+                // observe a frame no priority-time drain is allowed to touch.
+                //
+                // Placed AFTER the line above, deliberately: this arm reconciles
+                // `state.waiting_for` with its arm-local ONLY there, and three stages
+                // between the counter drain and this block assign a returned value
+                // straight into the arm-local (the deferred-step-trigger resume, the cost
+                // move resume, and the interrupted cost payment). Before that line the
+                // helper's `state.waiting_for` guard would be reading a value stale by up
+                // to three stages; after it, the guard reads this arm's settled
+                // authority. The helper's own guard remains the single settle authority —
+                // this call site adds none.
+                finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
+
                 super::engine::resume_pending_continuation_if_priority(state, events)?;
                 waiting_for = state.waiting_for.clone();
             }
@@ -1404,6 +1483,10 @@ fn handle_replacement_choice_inner(
                 // CR 101.4 + CR 616.1: resume an `EachPlayerCopyChosen` walk whose
                 // counter placement was prevented — advance to the next player.
                 maybe_drain_each_player_copy_chosen(state, events);
+                // Same position as the Execute arm's call in program terms: this block
+                // RETURNS at the next line, so "after every drain of this arm" and "here"
+                // are the same point.
+                finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
                 return Ok(state.waiting_for.clone());
             }
             if pending_was_counter_move {
@@ -2976,14 +3059,22 @@ pub(crate) fn apply_pending_spell_resolution(
         }
     }
 
-    // CR 709.5d: the replacement-choice resume path delivers the same entry as
-    // the ordinary resolution tail in `stack.rs`, so it asks the same single
-    // authority. Previously it granted `RoomDoor::Left` unconditionally — no
-    // door check and no Room check: every permanent spell that paused for a
-    // replacement choice and then entered as a copy of a Room (Copy
-    // Enchantment, Mirrormade, Estrid's Invocation) was handed a designation
-    // although neither of ITS halves was cast, which is exactly the case
-    // CR 709.5d's last sentence covers.
+    // CR 709.5d / CR 702.185a + CR 603.7d: both of these are KEEP-classified
+    // consumers of the historical cast-time controller (`entry.controller` on
+    // the unpaused `stack.rs` path — the same known limitation noted there),
+    // NOT the live/CR 608.2c re-stamped controller `ctx.controller` carries.
+    // Reading `ctx.controller` here would make a warp/Room rider resolve under
+    // a DIFFERENT controller than the unpaused path resolves it under,
+    // depending only on whether the resolution paused for a choice.
+    // `cast_controller` is always `Some` (set unconditionally in
+    // `pending_spell_resolution_snapshot`); the fallback only guards the type.
+    let cast_time_controller = ctx.cast_controller.unwrap_or(ctx.controller);
+
+    // CR 709.5d: same single authority as the ordinary resolution tail in
+    // `stack.rs`. Previously this granted `RoomDoor::Left` unconditionally —
+    // every permanent spell that paused for a replacement choice and then
+    // entered as a copy of a Room was handed a designation although neither
+    // of ITS halves was cast (CR 709.5d last sentence).
     if let Some(cast_door) = state
         .objects
         .get(&ctx.object_id)
@@ -2992,7 +3083,7 @@ pub(crate) fn apply_pending_spell_resolution(
         super::room::unlock_door_designation(
             state,
             ctx.object_id,
-            ctx.controller,
+            cast_time_controller,
             cast_door,
             events,
         );
@@ -3006,7 +3097,12 @@ pub(crate) fn apply_pending_spell_resolution(
                 .any(|k| matches!(k, crate::types::keywords::Keyword::Warp(_)))
         });
         if has_warp {
-            super::stack::create_warp_delayed_trigger(state, ctx.object_id, ctx.controller, events);
+            super::stack::create_warp_delayed_trigger(
+                state,
+                ctx.object_id,
+                cast_time_controller,
+                events,
+            );
         }
     }
 

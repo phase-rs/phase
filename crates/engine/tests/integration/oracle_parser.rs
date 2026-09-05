@@ -1295,3 +1295,41 @@ fn ice_cauldron_note_type_and_amount_stays_unimplemented() {
         mana_ability.effect
     );
 }
+
+/// Havi's historic graveyard threshold must lower as a typed static condition
+/// without disturbing Sage Project's supported `ChangeZone` return.
+#[test]
+fn havi_the_all_father_full_card_parser_snapshot() {
+    let parsed = parse(
+        "Havi has indestructible as long as there are four or more historic cards in your graveyard. (Artifacts, legendaries, and Sagas are historic.)\nSage Project — Whenever Havi or another legendary creature you control dies, return target legendary creature card with lesser mana value from your graveyard to the battlefield tapped.",
+        "Havi, the All-Father",
+        &[],
+        &["Legendary", "Creature"],
+        &["God"],
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            matches!(
+                &static_def.condition,
+                Some(StaticCondition::QuantityComparison { .. })
+            )
+        }),
+        "Havi's first line must produce its conditional static: {parsed:#?}"
+    );
+    fn contains_change_zone(def: &engine::types::ability::AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::ChangeZone { .. })
+            || def.sub_ability.as_deref().is_some_and(contains_change_zone)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(contains_change_zone)
+    }
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|trigger| trigger.execute.as_deref().is_some_and(contains_change_zone)),
+        "Sage Project's supported return must remain a ChangeZone effect: {parsed:#?}"
+    );
+    insta::assert_json_snapshot!("havi_the_all_father_full_card", &parsed);
+}

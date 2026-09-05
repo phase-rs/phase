@@ -328,6 +328,10 @@ struct LegalActionsResult {
     /// Frontend uses this for "what can I do with this card?" lookups so it
     /// doesn't have to introspect `GameAction` variants client-side.
     legal_actions_by_object: BTreeMap<String, Vec<engine::game::interaction::ObjectActionPayload>>,
+    /// CR 118.3: per-object read-out of activated abilities the ACTING player is
+    /// not offered solely because they can't pay the cost right now, keyed by
+    /// object_id. Display only — deliberately not dispatchable.
+    activation_block_reasons: BTreeMap<String, Vec<engine::types::ability::AbilityBlockEntry>>,
     /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
     /// decision has no legal action for any authorized submitter (an engine
     /// anomaly, not a rules outcome). `None` normally.
@@ -2006,8 +2010,10 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
     }
 }
 
-/// Get the legal actions, auto-pass recommendation, and spell costs for the current game state.
-/// Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<string, ManaCost> }`.
+/// Get the legal actions, auto-pass recommendation, spell costs, and the CR 118.3
+/// "can't pay this cost right now" read-out for the current game state.
+/// Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<string, ManaCost>,
+/// activationBlockReasons: Record<string, AbilityBlockEntry[]> }`.
 #[wasm_bindgen]
 pub fn get_legal_actions_js() -> JsValue {
     match with_state_mut(|state| {
@@ -2025,6 +2031,13 @@ pub fn get_legal_actions_js() -> JsValue {
             spell_costs: object_id_record(spell_costs),
             legal_actions_by_object: object_id_record(
                 engine::game::interaction::object_action_payloads(&legal_actions_by_object),
+            ),
+            // CR 117.1: the UNSCOPED sibling is correct here and only here —
+            // this entry point takes no viewer and serves a single-player local
+            // surface with exactly one recipient. Every multi-recipient
+            // transport must call `activation_block_reasons_for_viewer`.
+            activation_block_reasons: object_id_record(
+                engine::ai_support::activation_block_reasons(state),
             ),
             stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
             viewer_interaction: engine::game::interaction::derive_viewer_interaction(
@@ -2113,6 +2126,8 @@ struct ViewerSnapshot<'a> {
     mana_payment_shortcut_actions: Vec<GameAction>,
     spell_costs: BTreeMap<String, ManaCost>,
     legal_actions_by_object: BTreeMap<String, Vec<engine::game::interaction::ObjectActionPayload>>,
+    /// CR 118.3: mirrored from `LegalActionsResult` — see the doc there.
+    activation_block_reasons: BTreeMap<String, Vec<engine::types::ability::AbilityBlockEntry>>,
     /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
     /// decision has no legal action for any authorized submitter (an engine
     /// anomaly, not a rules outcome). `None` normally.
@@ -2135,6 +2150,11 @@ fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> Legal
         spell_costs: object_id_record(spell_costs),
         legal_actions_by_object: object_id_record(
             engine::game::interaction::object_action_payloads(&legal_actions_by_object),
+        ),
+        // CR 117.1: viewer-scoped sibling — empty for a viewer without action
+        // authority, mirroring `legal_actions_for_viewer` above.
+        activation_block_reasons: object_id_record(
+            engine::ai_support::activation_block_reasons_for_viewer(state, viewer),
         ),
         stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
         viewer_interaction: engine::game::interaction::derive_viewer_interaction(
@@ -2225,6 +2245,7 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
             mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
             spell_costs: legal.spell_costs,
             legal_actions_by_object: legal.legal_actions_by_object,
+            activation_block_reasons: legal.activation_block_reasons,
             stuck_diagnostic: legal.stuck_diagnostic,
             viewer_interaction,
         })

@@ -36,6 +36,62 @@ pub(crate) enum TriggerConditionScope {
     Delayed,
 }
 
+/// CR 105.4: whether THIS parse can supply the `Effect::Choose(Color)` that a
+/// printed "of the color of your choice" object-filter qualifier needs.
+///
+/// CONTAINMENT, stated honestly: `ChainBound` is WRITTEN at exactly one
+/// struct-literal line (the effect-chain chunk context in
+/// `oracle_effect/mod.rs`), but `ParseContext` derives `Clone`, so the value is
+/// INHERITED by every context cloned from that one. A clone-derived context
+/// whose result is merged back with `*ctx = ..` propagates its
+/// `pending_printed_color_choice` correctly; a throwaway clone DISCARDS it,
+/// which would stamp `FilterProp::IsChosenColor` with no injected chooser — a
+/// fail-closed, match-NOTHING filter with no `Effect::Unimplemented` and
+/// therefore no coverage signal.
+///
+/// RULE, both halves — the same two hazards `pending_damage_multi_target`
+/// documents below:
+///   1. A clone-derived `ParseContext` that is NOT merged back with `*ctx = ..`
+///      must reset this field to `Unbound` at construction. Use
+///      [`ParseContext::clone_throwaway`] rather than `.clone()` at those sites —
+///      it is the named, greppable spelling of this half of the rule, and the
+///      plain `.clone()` that remains is then a positive signal that the site
+///      really does merge back.
+///   2. A speculative sub-parse that runs against the REAL `&mut ctx` and can
+///      abandon its result must clear `pending_printed_color_choice` on the
+///      abandonment path — otherwise the surviving context carries a pending
+///      choice for a clause that was never emitted, and the chain gets a
+///      spurious colour prompt with no `IsChosenColor` anywhere. The
+///      alternative, and the shape already used elsewhere in this file's
+///      neighbourhood, is to run against a clone and commit with
+///      `*ctx = tentative_ctx` only on success.
+///
+///      AUDIT, so the next reader inherits it rather than re-deriving it: one
+///      site structurally matches this half — `parse_leading_subject_application`
+///      (`oracle_effect/subject.rs`), which is called with the real `chunk_ctx`
+///      and can abandon its result. It is UNREACHABLE for this hazard: it
+///      extracts the SUBJECT phrase, and the printed qualifier is only ever
+///      consumed off an object filter in predicate position (no card in the pool
+///      prints "of the color of your choice" in subject position). Left unedited
+///      deliberately; revisit if a subject-position printed qualifier ever
+///      appears. No other site runs a speculative sub-parse against the real
+///      `&mut ctx` while this gate is `ChainBound`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ChosenColorQualifierScope {
+    /// Default, and the value every `ParseContext::default()` carries — which
+    /// is every `parse_type_phrase` call site, by construction of the wrapper
+    /// in `oracle_target.rs`. The printed form must NOT be consumed here.
+    #[default]
+    Unbound,
+    /// An effect-chain chunk parse. This is the SINGLE context that both opens
+    /// this channel and reads `pending_printed_color_choice` back
+    /// (`oracle_effect/mod.rs`: the chunk-ctx literal and the chunk loop's
+    /// `.push()` sites), so "consumed" and "supplied" are one decision made in
+    /// one place. Phrased by role rather than by count so it cannot go stale
+    /// when the loop grows another emit arm.
+    ChainBound,
+}
+
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
 ///
@@ -182,6 +238,17 @@ pub(crate) struct ParseContext {
     /// printed abilities (CR 607.2d). Mirrors `chosen_player_count` as a
     /// parse-time accumulator (not serialized).
     pub pending_choice_type: Option<crate::types::ability::ChoiceType>,
+    /// CR 105.4: gate for the printed chosen-colour object-filter qualifier.
+    /// See `ChosenColorQualifierScope`, including its clone-inheritance rule.
+    pub chosen_color_qualifier: ChosenColorQualifierScope,
+    /// CR 105.4 + CR 608.2c: this chunk's type-phrase parse consumed a printed
+    /// "of the color of your choice" qualifier, so the chunk's clause must be
+    /// wrapped in an injected `Effect::Choose(Color)`. Carries the `ChoiceType`
+    /// the injector needs rather than a yes/no. Lifted into
+    /// `ClauseIr.printed_color_choice` by the chain chunk loop. Set and consumed
+    /// within a single chunk parse; never serialized. A speculative sub-parse that
+    /// discards its cloned context also discards this — see the scope enum's rule.
+    pub pending_printed_color_choice: Option<crate::types::ability::ChoiceType>,
     /// CR 115.1 + CR 701.9b: Target selection mode for the most recent target
     /// phrase parsed via `parse_target_with_ctx`. The chunk loop in
     /// `parse_effect_chain_ir` snapshots this into the produced `ClauseIr` and
@@ -408,6 +475,28 @@ impl ParseContext {
             return;
         }
         self.diagnostics.push(d);
+    }
+
+    /// CR 105.4: clone this context for a sub-parse whose CONTEXT is DISCARDED —
+    /// the parsed value is kept, but `*ctx = <derived>` never runs.
+    ///
+    /// This is the runnable half of `ChosenColorQualifierScope`'s rule 1. A plain
+    /// `.clone()` inherits `ChainBound`, so a throwaway derived context can stamp
+    /// `FilterProp::IsChosenColor` on a filter it keeps while dropping the
+    /// `pending_printed_color_choice` that would have injected the matching
+    /// `Effect::Choose(Color)` — a fail-closed, match-NOTHING filter with no
+    /// `Effect::Unimplemented` and therefore no coverage signal.
+    ///
+    /// Deliberately NOT a `Clone` impl: a `Clone` that silently drops state is a
+    /// worse defect than the one it fixes, and the merge-back sites
+    /// (`*ctx = tentative_ctx`, `*ctx = body_ctx`, `*ctx = candidate_ctx`,
+    /// `*ctx = fanout_ctx`) genuinely need the inheriting `.clone()`. The two
+    /// spellings are the two intents, and `clone_throwaway` is greppable.
+    pub fn clone_throwaway(&self) -> Self {
+        Self {
+            chosen_color_qualifier: ChosenColorQualifierScope::Unbound,
+            ..self.clone()
+        }
     }
 
     /// Execute `f` with a temporary relative-player scope, restoring the prior

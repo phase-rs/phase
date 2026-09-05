@@ -7,7 +7,8 @@ import {
 } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { AbilityBlockKind, ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
+import type { ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
+import { ABILITY_BLOCK_REASON_KEY } from "../../viewmodel/abilityBlockReason.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { abilityLabel, loyaltyBadge, spellCostDisplay, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
@@ -59,17 +60,6 @@ type CardPreviewArt =
       rungs?: ImageRungs;
       advanceFailedSource?(failedSrc: string): void;
     };
-
-/**
- * CR 602.5: Maps an engine `AbilityBlockKind` to its i18n reason key. Pure
- * display formatting — no game logic. Kept exhaustive so a new kind is a
- * compile error until a key is added.
- */
-const ABILITY_BLOCK_REASON_KEY: Record<AbilityBlockKind, string> = {
-  CantBeActivated: "abilityBlock.cantBeActivated",
-  CantActivateDuring: "abilityBlock.cantActivateDuring",
-  Prohibited: "abilityBlock.prohibited",
-};
 
 let lastPointerPosition: { x: number; y: number } | null = null;
 

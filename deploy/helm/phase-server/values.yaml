@@ -42,6 +42,15 @@ server:
   # small replicas so one process cannot absorb the whole fleet's traffic.
   maxConnections: ""
   maxGames: ""
+  # Sets PHASE_ANNOUNCE_TO: the public directory endpoint this server announces
+  # itself to every 60s, e.g. https://lobby.phase-rs.dev/servers/announce. Empty
+  # leaves the server unlisted. The directory lists `wss://` addresses derived
+  # from the advertised PUBLIC_URL, so `publicUrl` (or the `ingress.host` it is
+  # derived from) must be https, and it verifies the claim by fetching that
+  # host's `/info` — which the chart routes, but which must also be reachable
+  # from the public internet. Announcing needs outbound 443, so setting this
+  # opens the same egress `networkPolicy.allowBootstrapEgress` does.
+  announceTo: ""
   extraEnv: []
 
 # PHASE_DATA_DIR: card-data.json (~100 MiB, downloaded on first boot),

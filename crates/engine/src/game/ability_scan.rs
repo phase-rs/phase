@@ -733,7 +733,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::ChooseCounterKind { target } => {
+        Effect::ChooseCounterKind { target, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
@@ -1225,6 +1225,20 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             reveal: _,
             destination: _,
             source_pool: _,
+        } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(filter, target_ctx, mode));
+            acc = acc.or(scan_quantity_expr(count, mode));
+            acc
+        }
+        // CR 400.11b: identical scan shape to `SearchOutsideGame` — the only
+        // reads are the effect's own candidate filter and its take count. The
+        // pack's contents come from the shelf, not from board state.
+        Effect::OpenBoosterPack {
+            filter,
+            count,
+            destination: _,
+            reveal: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(filter, target_ctx, mode));
@@ -4009,12 +4023,15 @@ fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -
         // A phase coordinate. No payload position reaches a `TargetFilter` or a
         // `QuantityExpr`, so there is nothing to walk.
         DelayedTriggerCondition::AtNextPhase { phase: _ } => Axes::NONE,
-        // The same coordinate plus a `PlayerId` and a `TurnGate` turn-floor — a named
-        // player and a turn number. Neither reaches a filter or a quantity.
+        // The same coordinate plus a `PlayerId`, a `TurnGate` turn-floor, and a
+        // `DelayedTriggerPlayerBinding` (which player `player` resolves to at
+        // creation) — a named player, a turn number, and a binding tag. None
+        // reaches a filter or a quantity.
         DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: _,
             player: _,
             gate: _,
+            binding: _,
         } => Axes::NONE,
         // CR 603.7c: a delayed triggered ability that refers to a particular object.
         // `object_id` is already resolved, so there is no filter to walk and no
@@ -4460,7 +4477,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         // per-turn journal a loop pumps and `project_out_resources` clears — a
         // projected-resource read, PROVEN projected, fail closed (mirrors the
         // passive `WasDealtDamageThisTurn` arm above).
-        FilterProp::DealtDamageThisTurn => Axes::CONSERVATIVE,
+        FilterProp::DealtDamageThisTurn { .. } => Axes::CONSERVATIVE,
         // CR 400 / CR 603.6a: runtime eval reads `state.zone_changes_this_turn`, an
         // append-only event journal a loop pumps, cleared by `project_out_resources`
         // and strict-compared by nothing in gate (1). A flicker/blink loop keeps the
@@ -6015,6 +6032,20 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         //     `battlefield_phased_in_ids()` for a non-targeted "double the counters on
         //     each matching permanent" when `ability.targets.is_empty()`.
         | Effect::MultiplyCounter { .. }
+        //   CR 701.10e (Double{Counters}): `double.rs` `resolve_double_counters` falls
+        //     through to `counters::nontargeted_counter_population_ids`, which mass-scans
+        //     `battlefield_phased_in_ids()` for a non-targeted "double the number of each
+        //     kind of counter on each matching permanent". Nothing STATIC separates
+        //     that mass mode from the announced-target mode — both are
+        //     `Double{Counters}` and only the resolved ability tells them apart — so
+        //     the counter-doubling sub-variant must census. `target_kind` WOULD let
+        //     the arm be narrowed to exclude the `LifeTotal` / `ManaPool` modes (the
+        //     `Effect::Suspect { scope: EffectScope::All, .. }` arm above field-gates
+        //     exactly that way); censusing the whole variant is a deliberate choice
+        //     for arm simplicity, and it is safe because it only over-vetoes — a
+        //     missed combo shortcut certificate, never a wrong game result. Narrowing
+        //     it needs its own census re-measurement, not just a tighter pattern.
+        | Effect::Double { .. }
         //   CR 608.2d + CR 122.1: a typed counter-kind source domain enumerates
         //     every matching permanent at resolution and unions the kinds of
         //     counters on them, so the read scales with battlefield growth.
@@ -6130,6 +6161,8 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        // CR 400.11: the filter reads the OPENED PACK's cards, never the board.
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }
         | Effect::Reveal { .. }
@@ -6226,7 +6259,6 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::SkipNextTurn { .. }
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
-        | Effect::Double { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -6365,6 +6397,11 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::TurnFaceUp { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::MultiplyCounter { .. }
+        // CR 701.10e: `Double{Counters}` shares `MultiplyCounter`'s non-targeted mass
+        // tier via `counters::nontargeted_counter_population_ids`; the variant carries
+        // no static discriminator for that mode, so it censuses whole. Mirror of the
+        // `effect_target_ctx` census member.
+        | Effect::Double { .. }
         // CR 608.2d + CR 122.1: a typed counter-kind source domain scans the
         // matching battlefield population and unions its counter kinds.
         | Effect::ChooseCounterKind { .. }
@@ -6415,6 +6452,8 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Seek { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        // CR 400.11: reads a pack from OUTSIDE the game — no board population at all.
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }
         | Effect::Reveal { .. }
@@ -6595,7 +6634,6 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::SkipNextTurn { .. }
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
-        | Effect::Double { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -6651,6 +6689,12 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::ChaosEnsues
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptionsFromRollDifference
+        // CR 400.11 + CR 701.9b: opening a booster pack draws the seeded RNG
+        // twice — the shelf product and the pack's collation — and the cards it
+        // produces determine what the controller may then take. Unpredictable at
+        // pin time, so a loop body containing one is not a legal CR 732.2a
+        // shortcut.
+        | Effect::OpenBoosterPack { .. }
         // CR 701.30a: a clash reveals the top card of each player's (shuffled) library — hidden
         // information the recast injector cannot know at pin time. CR 701.30d: the winner is
         // decided by comparing those revealed mana values, so the outcome (and any action it
@@ -8242,6 +8286,7 @@ mod tests {
             // variant censuses, fail-closed). See the census-arm comment for CR cites.
             "BecomeCopy",
             "CopyTokenBlockingAttacker",
+            "Double",
             "GainActivatedAbilitiesOfTarget",
             "MultiplyCounter",
             "PhaseIn",
@@ -8254,7 +8299,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 31, "exactly 31 mass-population census tags");
+        assert_eq!(got.len(), 32, "exactly 32 mass-population census tags");
     }
 
     /// With `SnapshotOrEvent` the DEFAULT, the obligation-(ii)-PROVEN census-role
@@ -8401,7 +8446,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 31, "exactly 31 census members");
+        assert_eq!(ecr_census.len(), 32, "exactly 32 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`
@@ -8456,7 +8501,14 @@ mod tests {
         census(&settap, false);
         census(&Effect::HeistExile, false);
         census(&Effect::NoOp, false);
-        census(&Effect::ChooseCounterKind { target: f() }, true);
+        census(
+            &Effect::ChooseCounterKind {
+                target: f(),
+                domain: Default::default(),
+                chooser: Default::default(),
+            },
+            true,
+        );
         // CR 701.27a + CR 115.10a: mass Transform is a battlefield census in BOTH oracles
         // (scope:All), and a bounded single-target read (scope:Single) that relaxes. It is
         // a true Census, NOT the SetTapState relax exception (ObjectPt/ability write).
@@ -8533,8 +8585,9 @@ mod tests {
     /// CR 732.2a: the dual-mode mass-battlefield resolvers each census in BOTH
     /// oracles under `LoopFirewall`. Each
     /// enumerates the battlefield and applies the effect to EVERY matching object (scales
-    /// with the growing class) — six via a dual-mode "no explicit target ⇒ mass scan"
-    /// fallback, `CopyTokenBlockingAttacker` UNCONDITIONALLY — so relaxing its filter read
+    /// with the growing class) — each entry below via a dual-mode "no explicit target ⇒
+    /// mass scan" fallback, except `CopyTokenBlockingAttacker`, which scans
+    /// UNCONDITIONALLY — so relaxing its filter read
     /// risks a false combo certificate. There is no static discriminator between
     /// announced-single and mass modes, so the entire variant censuses.
     ///
@@ -8543,6 +8596,7 @@ mod tests {
     /// `effect_census_role`) flips its assertion below to a mismatch, turning this RED.
     #[test]
     fn round2_mass_battlefield_resolvers_census_in_both_oracles() {
+        use crate::types::ability::DoubleTarget;
         use crate::types::ability::GrantedAbilityScope;
         use ScanMode::LoopFirewall;
         let f = || TargetFilter::Typed(TypedFilter::creature());
@@ -8578,8 +8632,15 @@ mod tests {
                 source_filter: f(),
                 owner: TargetFilter::Controller,
             },
+            // CR 701.10e: `Double{Counters}` joined the dual-mode class when
+            // `resolve_double_counters` gained the shared non-targeted population
+            // fall-through (`counters::nontargeted_counter_population_ids`).
+            Effect::Double {
+                target_kind: DoubleTarget::Counters { counter_type: None },
+                target: f(),
+            },
         ];
-        assert_eq!(cases.len(), 8, "the eight round-2 census additions");
+        assert_eq!(cases.len(), 9, "the nine round-2 census additions");
         for e in &cases {
             assert_eq!(
                 effect_target_ctx(e, LoopFirewall),
@@ -8659,8 +8720,10 @@ mod tests {
             (
                 "counters.rs",
                 true,
-                "PutCounterAll (resolve_add_all) + MultiplyCounter (resolve_defined_or_\
-                 targets, targets-empty) mass battlefield counter scans",
+                "PutCounterAll (resolve_add_all) + the shared nontargeted_counter_\
+                 population_ids mass battlefield counter scan, consumed by \
+                 MultiplyCounter (resolve_defined_or_targets, targets-empty) here \
+                 and by Double{Counters} in double.rs",
             ),
             (
                 "goad.rs",
@@ -9950,6 +10013,7 @@ mod tests {
                     phase: Phase::Upkeep,
                     player: PlayerId(0),
                     gate: TurnGate::AfterCreationTurn,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
             ),
             (

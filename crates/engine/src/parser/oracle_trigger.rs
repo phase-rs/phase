@@ -1499,8 +1499,22 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
         actor: ctx.actor.clone(),
-        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text)
-            .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
+        // CR 608.2k: nearest antecedent wins. An intervening-`if` that pins the
+        // source OFF the battlefield ("... if ~ is in your graveyard, return it")
+        // re-establishes the source card as the antecedent, and it sits nearer to
+        // the effect body than the trigger condition does — so it outranks the
+        // condition-derived antecedent, not the other way round.
+        //
+        // The two were previously ordered condition-first. That was unobservable
+        // while `parse_effect_chain_ir` discarded this field wholesale (see the
+        // `object_pronoun_ref` note in `oracle_effect/mod.rs`): the value never
+        // reached a resolver, so which of the two won could not be seen. Restoring
+        // the propagation makes the ordering load-bearing, and Managorger Phoenix
+        // ("Whenever you cast a spell, if ~ is in your graveyard, ... return it")
+        // is the card that discriminates them — the spell-cast axis would
+        // otherwise bind "return it" to the cast spell instead of the Phoenix.
+        object_pronoun_ref: trigger_object_pronoun_ref_for_intervening_if(&if_condition)
+            .or_else(|| trigger_object_pronoun_ref_for_condition(condition_text, &trigger_subject)),
         plural_object_pronoun_ref: trigger_plural_object_pronoun_ref_for_intervening_if(
             &if_condition,
         ),
@@ -5064,7 +5078,7 @@ pub(crate) fn attack_intervening_if_anaphor_is_defending_player(def: &TriggerDef
 ///   supplies no antecedent.
 ///
 /// `Planeswalker` and `Battle` name no player noun at all — the correct anaphor
-/// for a battle would be "its protector" (CR 310.8d), a different reference.
+/// for a battle would be "its protector" (CR 310.9d), a different reference.
 /// `Owner`, `OwnerOrPlaneswalker` and `PlayerOrPermanents` are attack-RESTRICTION
 /// scopes with no arm in `attack_target_type_matches`, so a trigger carrying one
 /// never fires at all. Exhaustive — a future attack scope must decide here.
@@ -10762,7 +10776,38 @@ fn extract_trigger_subject_for_context(
     subject
 }
 
-fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<TargetFilter> {
+/// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.10: the PASSIVE-voice damage verb
+/// phrase — "is/are dealt [combat|noncombat|excess] damage".
+///
+/// Two independent axes, one `alt()` each, rather than the five printed strings
+/// they expand to: grammatical number ("is " / "are ") and the CR 120.2a/120.2b
+/// damage class, widened by the CR 120.10 excess qualifier. All five
+/// combinations that appear in the printed corpus are covered by composing the
+/// axes; none is enumerated as a whole-phrase `tag`.
+///
+/// Voice is the whole point of this combinator. In the ACTIVE voice ("a creature
+/// DEALS damage") the trigger's grammatical subject is the damage SOURCE; in the
+/// PASSIVE voice ("a creature IS DEALT damage") the subject is the RECIPIENT.
+/// CR 120.1 makes that distinction load-bearing: "an object that deals damage is
+/// the source of that damage", and the recipient is the object that *receives*
+/// it. The two roles are carried by different fields of the same
+/// `GameEvent::DamageDealt`, so a bare object anaphor in the effect body binds to
+/// a different object depending only on voice.
+fn parse_passive_dealt_damage(input: &str) -> OracleResult<'_, ()> {
+    // Axis 1 — grammatical number.
+    let (input, _) = alt((tag("is "), tag("are "))).parse(input)?;
+    let (input, _) = tag("dealt ").parse(input)?;
+    // Axis 2 — CR 120.2a/120.2b damage class, plus the CR 120.10 excess
+    // qualifier. Absent on the bare form, which is the corpus majority.
+    let (input, _) = opt(alt((tag("combat "), tag("noncombat "), tag("excess ")))).parse(input)?;
+    let (input, _) = tag("damage").parse(input)?;
+    Ok((input, ()))
+}
+
+fn trigger_object_pronoun_ref_for_condition(
+    condition_text: &str,
+    trigger_subject: &TargetFilter,
+) -> Option<TargetFilter> {
     let lower = condition_text.to_lowercase();
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
@@ -10787,6 +10832,43 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
     .is_ok();
     if is_spell_cast_trigger {
         return Some(TargetFilter::TriggeringSource);
+    }
+
+    // CR 608.2k + CR 120.1: a PASSIVE-voice damage trigger condition ("whenever
+    // <subject> is dealt damage") makes its grammatical subject the damage
+    // RECIPIENT, so the effect body's untargeted object anaphor ("destroy it",
+    // "put a +1/+1 counter on it") names the damaged permanent — CR 608.2k's
+    // "specific untargeted object … previously referred to by that ability's …
+    // trigger condition". `TargetFilter::EventTarget` reads
+    // `GameEvent::DamageDealt.target`; the subject-derived
+    // `TargetFilter::TriggeringSource` fallback in `resolve_it_pronoun` reads
+    // `.source_id`, which on a passive-voice trigger is the damage DEALER — a
+    // different object entirely (Termination Facilitator destroyed the source of
+    // the damage instead of the bountied creature, issue #8379).
+    //
+    // The subject phrase is arbitrarily long ("a creature or planeswalker an
+    // opponent controls with a bounty counter on it"), so the verb phrase is
+    // found by scanning the shared word-boundary primitive rather than by
+    // anchoring at a fixed offset.
+    //
+    // Gated on the subject NOT being self-referential, mirroring the exclusion
+    // set both pronoun resolvers already apply (`resolve_it_pronoun`,
+    // `resolve_pronoun_target`): on a self-scoped enrage trigger ("whenever this
+    // creature is dealt damage") the recipient IS the source, and `SelfRef` /
+    // `ParentTarget` remain the more precise antecedents — they resolve without
+    // consulting the trigger event at all.
+    let subject_is_self_referential = matches!(
+        trigger_subject,
+        TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+    );
+    if !subject_is_self_referential
+        && crate::parser::oracle_nom::primitives::scan_at_word_boundaries(
+            after_keyword,
+            parse_passive_dealt_damage,
+        )
+        .is_some()
+    {
+        return Some(TargetFilter::EventTarget);
     }
 
     None
@@ -19728,34 +19810,122 @@ fn scan_for_generic_main_phase(text: &str) -> bool {
         .is_some()
 }
 
-/// CR 503.1a / CR 507.1: Parse turn constraint from phase text using nom prefix dispatch.
+/// The English turn-owner possessive that may precede a printed phase noun:
+/// "your ", "each of your ", "an opponent's ", "each opponent's ", the four
+/// apostrophe/curly-apostrophe opponent-plural forms, "each of your opponents' ".
+/// Single authority, shared by [`parse_turn_constraint`] (which maps it to a
+/// `TriggerConstraint`) and by [`parse_dangling_phase_trigger_head`] (which only
+/// needs it consumed).
 ///
-/// Tries opponent possessives first (more specific) before bare "your" to avoid
-/// the substring ambiguity where "your opponent's" would match "your".
-/// Also checks for trailing "on your turn" suffix.
+/// NO CR ANNOTATION, deliberately: this consumes an English possessive and
+/// produces no rules verdict of its own — the verdict is `parse_turn_constraint`'s,
+/// and CR 500.1 is annotated there. Same ruling as `parse_phase_determiner_prefix`
+/// below (CLAUDE.md — annotate rules, not grammar plumbing).
+///
+/// Longest-first ordering is LOAD-BEARING, and on two axes, not one:
+/// `"each of your opponents' "` before `"each of your "` before `"your "`, and
+/// `"your opponent's "` / `"your opponents' "` before `"your "` — otherwise the
+/// bare `"your "` swallows the opponent forms and flips the constraint from
+/// `OnlyDuringOpponentsTurn` to `OnlyDuringYourTurn`.
+fn parse_turn_possessive_prefix(input: &str) -> OracleResult<'_, TriggerConstraint> {
+    alt((
+        value(
+            TriggerConstraint::OnlyDuringOpponentsTurn,
+            alt((
+                tag("an opponent's "),
+                tag("each opponent's "),
+                tag("each opponents\u{2019} "),
+                tag("each opponents' "),
+                tag("each of your opponents\u{2019} "),
+                tag("each of your opponents' "),
+                tag("your opponent's "),
+                tag("your opponents\u{2019} "),
+                tag("your opponents' "),
+            )),
+        ),
+        value(
+            TriggerConstraint::OnlyDuringYourTurn,
+            alt((tag("each of your "), tag("your "))),
+        ),
+    ))
+    .parse(input)
+}
+
+/// The English determiner that may precede a printed phase noun when no turn
+/// constraint is stated: "the ", "each ", "each player's ". Longest-first:
+/// "each player's " precedes "each ".
+///
+/// NO CR ANNOTATION, deliberately: this consumes a determiner and implements no
+/// game rule (CLAUDE.md — annotate rules, not grammar plumbing).
+///
+/// "next " is DELIBERATELY NOT IN THIS TABLE. It is an orthogonal axis that can
+/// follow either a possessive or a determiner ("your next end step", "the next end
+/// step", "each opponent's next upkeep"), and putting it here made
+/// `"your next "` UNREACHABLE: `parse_turn_possessive_prefix` contains
+/// `tag("your ")`, `alt` commits on first success, and `opt` does not backtrack, so
+/// the possessive branch consumed `your ` and stranded `next end step`.
+fn parse_phase_determiner_prefix(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("each player's "), tag("each "), tag("the ")))).parse(input)
+}
+
+/// CR 603.1 + CR 603.7: a triggered ability is printed as "[When/Whenever/At]
+/// [trigger event], [effect]", and a DELAYED triggered ability "will contain
+/// 'when,' 'whenever,' or 'at,' although that word won't usually begin the
+/// ability" — i.e. it appears mid-sentence, with its own internal comma between
+/// head and body. This combinator matches that head, ANCHORED TO END-OF-INPUT.
+///
+/// "at the beginning of ⟨possessive|determiner⟩? ⟨'next '⟩? ⟨phase⟩ 's'?
+///  ⟨' on your turn'⟩? EOF"
+///
+/// The `eof` anchor is the whole point: it distinguishes a head that DANGLES a
+/// trigger head (its body was severed into the tail — Giant Oyster's
+/// "…, and at the beginning of each of your draw steps") from a head that contains a
+/// COMPLETE trigger ("…, and at the beginning of your upkeep, draw a card"), which is
+/// a genuine conjunct boundary and must still split.
+///
+/// Consumes the WHOLE printed phase phrase. A bare `preceded(tag("at the beginning
+/// of "), parse_phase_keyword)` does NOT: `parse_phase_keyword` is a keyword
+/// alternation and cannot consume "each of your draw steps" — measured, that form
+/// fires zero times corpus-wide.
+pub(crate) fn parse_dangling_phase_trigger_head(input: &str) -> OracleResult<'_, Phase> {
+    terminated(
+        preceded(
+            tag("at the beginning of "),
+            map(
+                (
+                    opt(alt((
+                        value((), parse_turn_possessive_prefix),
+                        parse_phase_determiner_prefix,
+                    ))),
+                    opt(tag("next ")),
+                    terminated(parse_phase_keyword, opt(tag("s"))),
+                ),
+                |(_, _, phase)| phase,
+            ),
+        ),
+        (
+            opt(preceded(
+                tag(" "),
+                alt((tag("on your turn"), tag("on each of your turns"))),
+            )),
+            eof,
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 500.1: a printed phase or step noun names a subdivision of a TURN, which is
+/// what makes a turn-owner possessive in front of it ("each of your upkeeps", "an
+/// opponent's end step") a statement about WHOSE TURN the trigger may fire on.
+/// Migrated from `CR 503.1a / CR 507.1`, both verified misfits (upkeep triggers
+/// going on the stack; choosing a defending player).
+///
+/// The possessive table itself lives in [`parse_turn_possessive_prefix`] — one
+/// table, two consumers. Also checks for a trailing "on your turn" suffix.
 fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     // Prefix-based: try at the start of the text
-    if alt((
-        tag::<_, _, OracleError<'_>>("an opponent's "),
-        tag::<_, _, OracleError<'_>>("each opponent's "),
-        tag("each opponents\u{2019} "),
-        tag("each opponents' "),
-        tag("your opponent's "),
-        tag("your opponents\u{2019} "),
-        tag("your opponents' "),
-        tag("each of your opponents\u{2019} "),
-        tag("each of your opponents' "),
-    ))
-    .parse(phase_text)
-    .is_ok()
-    {
-        return Some(TriggerConstraint::OnlyDuringOpponentsTurn);
-    }
-    if alt((tag::<_, _, OracleError<'_>>("each of your "), tag("your ")))
-        .parse(phase_text)
-        .is_ok()
-    {
-        return Some(TriggerConstraint::OnlyDuringYourTurn);
+    if let Ok((_, constraint)) = parse_turn_possessive_prefix(phase_text) {
+        return Some(constraint);
     }
     // Suffix-based: "combat on your turn", "each combat on your turn"
     let mut remaining = phase_text;
