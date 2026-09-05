@@ -12455,6 +12455,25 @@ mod full_create_guard_tests {
         assert!(err.contains("archenemy_player"));
     }
 
+    /// The `format_config.validate_for_player_count(pc)?` call
+    /// (`guard_full_create_game_settings_inbound`, line 1265) is one of the
+    /// six production call sites; `fields()`'s `player_count: 2` clamps to
+    /// `pc == 2`, which falls outside `CommanderDraft`'s own registry range
+    /// (3-8) — this is a retryable wire rejection (the client can resubmit
+    /// with a corrected `player_count`), unlike the same check's use at
+    /// `server_core::session::GameSession::from_persisted`.
+    #[test]
+    fn full_create_guard_rejects_player_count_outside_format_registry_range() {
+        let deck = deck();
+        let mut fields = fields(&deck, None, None);
+        let format_config = engine::types::format::FormatConfig::commander_draft();
+        fields.format_config = Some(&format_config);
+
+        let err = guard_full_create_game_settings_inbound(fields, &[]).unwrap_err();
+
+        assert!(err.contains("player_count"));
+    }
+
     #[test]
     fn full_create_guard_rejects_limited_range_until_supported() {
         let deck = deck();

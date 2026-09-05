@@ -584,8 +584,74 @@ impl Serialize for FormatConfig {
 /// registry (Standard 20, Commander/Archenemy 40, Two-Headed Giant 30 shared
 /// / 15 per seat) with vast headroom left for house-rule variant play (e.g.
 /// a "gigantic life total" casual variant), while leaving over two billion
-/// of `i32`'s range for subsequent gameplay-driven life changes.
+/// of `i32`'s range for subsequent gameplay-driven life changes. This ceiling
+/// — and the CR 704.5a / CR 810.8c playability floor beside it — is enforced
+/// by `validate_starting_life_bounds`, which is the single shared authority
+/// called from BOTH arms of `FormatConfig::deserialize` (built-in and
+/// Custom): neither a built-in payload's `starting_life` nor a Custom
+/// payload's `custom_rules.structural.starting_life` may cross either bound.
 pub const MAX_STARTING_LIFE: i32 = 1_000_000;
+
+/// CR 704.5a / CR 810.8c playability floor, and the `MAX_STARTING_LIFE`
+/// overflow-safety ceiling, on a resolved `FormatConfig`. This is the single
+/// shared authority for both bounds, called from BOTH arms of
+/// `FormatConfig::deserialize`:
+///
+/// - the built-in (`None`) arm, via `built_in_axes_no_looser_than_rules`'s
+///   `starting_life` `HostChoiceWithin` row;
+/// - the Custom (`Some(rules)`) arm, directly, on the config resolved from
+///   `custom_rules.structural.starting_life` — that arm's blanket-equality
+///   check against `FormatConfig::for_custom_rules` only proves internal
+///   self-consistency, not that the declared life total is playable or
+///   within the engine's arithmetic-safety ceiling, so this call is what
+///   actually bounds it.
+///
+/// CR 103.4 licenses a VARIANT starting life total; it does not by itself
+/// hand the number to a host. What does is the product: the shipped host UI
+/// has always exposed `starting_life` for every format, and
+/// `server-core`'s `create_game_honors_a_configured_starting_life` documents
+/// it as supported. The one real bound is playability: CR 704.5a ("If a
+/// player has 0 or less life, that player loses the game") and, for
+/// shared-life team formats, CR 810.8c ("If a team's life total is 0 or
+/// less, the team loses the game"). A total resolving to 0 or less per seat
+/// means every seat loses at the first state-based-action check and no game
+/// can start.
+///
+/// Checked through `starting_life_for_seat` rather than the raw field, and
+/// rather than `starting_life_for_player` (what `GameState::new` actually
+/// calls) — see `built_in_axes_no_looser_than_rules`'s history for the full
+/// rationale, which still applies unchanged: the two agree on
+/// `IndividualSeats`/`FixedTeams` (the only topologies where this field is
+/// live), and `starting_life_for_seat` is strictly more conservative on
+/// `OneVsMany`.
+///
+/// The ceiling is a sibling engineering invariant, not a rules row — see
+/// `MAX_STARTING_LIFE`'s own doc comment. It is checked against the raw
+/// declared field, not `starting_life_for_seat`, because the floor's
+/// playability concern (a seat that cannot survive the first SBA check) is a
+/// per-seat question but the overflow concern is about the field's own
+/// magnitude before it is ever divided.
+fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String> {
+    if config.starting_life_for_seat() < 1 {
+        return Err(format!(
+            "FormatConfig.starting_life is {}, which resolves to {} per seat for {} — every seat \
+             must begin above 0 life or the game ends immediately at the first \
+             state-based-action check (CR 704.5a; CR 810.8c for shared-life team formats)",
+            config.starting_life,
+            config.starting_life_for_seat(),
+            config.format,
+        ));
+    }
+    if config.starting_life > MAX_STARTING_LIFE {
+        return Err(format!(
+            "FormatConfig.starting_life is {}, but the engine caps a declared starting life at \
+             {MAX_STARTING_LIFE} to keep in-game life-total arithmetic (raw i32) from overflowing \
+             — this is an engine invariant, not a Comprehensive Rules limit",
+            config.starting_life,
+        ));
+    }
+    Ok(())
+}
 
 /// CR 100.2a / CR 100.4a / CR 903.5a / CR 903.5b / CR 904.2a: a BUILT-IN
 /// format's rules are fixed by the Comprehensive Rules and the engine
@@ -635,76 +701,16 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // very key `for_format` was looked up by, so equality is tautological.
 
     // starting_life: HostChoiceWithin — free, except that every seat must be
-    // able to start the game.
-    //
-    // CR 103.4: "Each player begins the game with a starting life total of
-    // 20. Some variant games have different starting life totals." That
-    // licenses a VARIANT total; it does not by itself hand the number to a
-    // host. What does is the product: the shipped host UI has always exposed
-    // `starting_life` for every format, `server-core`'s
-    // `create_game_honors_a_configured_starting_life` documents it as
-    // supported, and before this gate existed the built-in arm checked only
-    // `default_deck_copy_limit` — so an equality row here was a NEW
-    // restriction on shipped behavior. No registry ceiling exists to be
-    // looser than.
-    //
-    // The one real bound is playability. CR 704.5a: "If a player has 0 or
-    // less life, that player loses the game." A total resolving to 0 or less
-    // means every seat loses at the first state-based-action check and no
-    // game can start. For a shared-life team format the corresponding rule is
-    // CR 810.8c ("If a team's life total is 0 or less, the team loses the
-    // game"); CR 810.4 sets Two-Headed Giant's shared total at 30, which this
-    // engine represents as a per-seat half (see `starting_life_for_seat`), so
-    // a raw `starting_life: 1` resolves to 0 per seat and must be rejected.
-    //
-    // Checked through `starting_life_for_seat` rather than the raw field, and
-    // rather than `starting_life_for_player` (which is what `GameState::new`
-    // actually calls), for three reasons. (1) The two agree exactly on
-    // `IndividualSeats` and `FixedTeams` — the only topologies where this
-    // field is live — so nothing is lost. (2) On `OneVsMany`,
-    // `starting_life_for_player` returns CR 904.5's hardcoded 40/20 and
-    // ignores this field entirely, so it would validate nothing;
-    // `starting_life_for_seat` returns the declared value and is therefore
-    // strictly MORE conservative, refusing to admit a nonsense value that
-    // would become live if Archenemy ever starts honoring the field. (3) It
-    // needs no `PlayerId`; passing an arbitrary seat index would be a
-    // question the deserializer has no basis to answer.
-    // NOTE: `starting_life_for_seat` has no other production caller — this
-    // row is its first. A future edit to it changes this gate; keep the two
-    // in step (see the pinning test on `starting_life_for_seat` itself).
-    //
-    // The upper bound is a sibling engineering invariant, not a rules row:
-    // see `MAX_STARTING_LIFE`'s own doc comment for why it exists and why it
-    // carries no CR citation. It is checked against the raw declared field,
-    // not `starting_life_for_seat`, because the floor's playability concern
-    // (a seat that cannot survive the first SBA check) is a per-seat
-    // question but the overflow concern is about the field's own magnitude
-    // before it is ever divided.
-    //
-    // Scope: this row is part of `built_in_axes_no_looser_than_rules`, which
-    // only runs for built-in formats (the `None` arm of the `custom_rules`
-    // match in `FormatConfig::deserialize`). A Custom format's starting life
-    // is instead re-derived from `custom_rules.structural.starting_life` and
-    // checked by blanket equality in the `Some(rules)` arm, which has no
-    // magnitude bound of its own — that arm is out of scope for this change.
-    if config.starting_life_for_seat() < 1 {
-        return Err(format!(
-            "FormatConfig.starting_life is {}, which resolves to {} per seat for {} — every seat \
-             must begin above 0 life or the game ends immediately at the first \
-             state-based-action check (CR 704.5a; CR 810.8c for shared-life team formats)",
-            config.starting_life,
-            config.starting_life_for_seat(),
-            config.format,
-        ));
-    }
-    if config.starting_life > MAX_STARTING_LIFE {
-        return Err(format!(
-            "FormatConfig.starting_life is {}, but the engine caps a declared starting life at \
-             {MAX_STARTING_LIFE} to keep in-game life-total arithmetic (raw i32) from overflowing \
-             — this is an engine invariant, not a Comprehensive Rules limit",
-            config.starting_life,
-        ));
-    }
+    // able to start the game (CR 704.5a; CR 810.8c for shared-life team
+    // formats) and the declared value must not cross the engine's
+    // arithmetic-safety ceiling (`MAX_STARTING_LIFE`, no CR — it is not a
+    // rules bound). Both bounds are enforced by `validate_starting_life_
+    // bounds`, the single shared authority called from BOTH arms of
+    // `FormatConfig::deserialize` — see that function's own doc comment for
+    // the full rationale, including why the floor is checked through
+    // `starting_life_for_seat` rather than the raw field or
+    // `starting_life_for_player`.
+    validate_starting_life_bounds(config)?;
 
     // min_players: Locked — no serde default.
     if config.min_players != rules.min_players {
@@ -1070,6 +1076,15 @@ impl<'de> Deserialize<'de> for FormatConfig {
                         expected.range_of_influence.is_some(),
                     )));
                 }
+                // The equality check above only proves `config` is internally
+                // self-consistent with its own `custom_rules.structural` — it
+                // does not bound the declared `starting_life` itself. Apply
+                // the same floor/ceiling a built-in payload gets (see
+                // `validate_starting_life_bounds`'s own doc comment), so a
+                // Custom format cannot post an unplayable (CR 704.5a / CR
+                // 810.8c) or overflow-prone (`MAX_STARTING_LIFE`) starting
+                // life just because it is internally consistent about it.
+                validate_starting_life_bounds(&config).map_err(serde::de::Error::custom)?;
             }
             // A built-in format's rules are fixed by the Comprehensive Rules
             // and the engine registry, except where the CR itself grants a
@@ -1818,10 +1833,11 @@ impl FormatConfig {
         }
     }
 
-    /// NOTE: `built_in_axes_no_looser_than_rules`'s `starting_life` admission
-    /// row now depends on this function's `FixedTeams` division behavior
-    /// (declared life divided by `team_size`) to floor every seat above 0 —
-    /// see that row's own comment and the pinning test on this function.
+    /// NOTE: `validate_starting_life_bounds` (shared by both
+    /// `FormatConfig::deserialize` arms) depends on this function's
+    /// `FixedTeams` division behavior (declared life divided by
+    /// `team_size`) to floor every seat above 0 — see that function's own
+    /// comment and the pinning test on this function.
     pub fn starting_life_for_seat(&self) -> i32 {
         match self.topology() {
             FormatTopology::IndividualSeats => self.starting_life,
@@ -1868,22 +1884,44 @@ impl FormatConfig {
     /// behavioral tightening — a `player_count` outside the format's range
     /// that an older server would have accepted is now rejected.
     ///
-    /// At most call sites (both ingress guards, the WASM session boundary,
-    /// session creation) that rejection is a retryable wire rejection: the
-    /// client resubmits a corrected request and no state is lost. It is NOT
-    /// retryable at `server_core::session::GameSession::from_persisted` — the
-    /// one call site checked against a PERSISTED `player_count` rather than
-    /// one just supplied on an inbound request. There, this same rejection
-    /// aborts the restore permanently: a session already saved with a
-    /// `player_count` outside its format's registry range can never be
-    /// restored again. This is reachable, not merely hypothetical — a
-    /// Commander session (registry range 2..=6) persisted while
-    /// `player_count` was 8 (`lobby-broker::inbound_guard`'s ingress clamp
-    /// admits up to `MAX_PLAYER_COUNT` = 8, independent of the format's own
-    /// range, at the time the session was created) becomes permanently
-    /// unrestorable the moment this bound is enforced. Whether to repair or
-    /// clamp such a persisted blob at the restore boundary is tracked
-    /// separately from this comment; this paragraph is disclosure only.
+    /// Six production call sites reach this check, and they split into three
+    /// groups by what they are validating:
+    ///
+    /// - Retryable wire rejections, validating a player_count just supplied
+    ///   on an inbound request against a *declared* `FormatConfig`: both
+    ///   ingress guards (`lobby_broker::inbound_guard::guard_create_game_
+    ///   settings_inbound` for `ServerMode::LobbyOnly`, and `phase-server`'s
+    ///   own `guard_full_create_game_settings_inbound` for `ServerMode::Full`,
+    ///   which clamps to `MAX_FULL_GAME_PLAYER_COUNT`), and the WASM
+    ///   `initialize_game_impl`'s `validate_external_format_config`. The
+    ///   client resubmits a corrected request and no state is lost.
+    /// - Session creation itself: `server_core::session::SessionManager::
+    ///   create_game_n_players` re-checks the same bound the ingress guard
+    ///   in front of it already checked, as defense in depth.
+    /// - Checked against a PERSISTED `player_count` instead — a game that
+    ///   already exists, not a fresh request. `server_core::session::
+    ///   GameSession::from_persisted` remains a hard rejection here: a
+    ///   session already saved with a `player_count` outside its format's
+    ///   registry range can never be restored again through that path (see
+    ///   `from_persisted_rejects_a_persisted_player_count_outside_the_
+    ///   format_registry_range`). This is reachable, not merely
+    ///   hypothetical — e.g. a `CommanderDraft` session (registry range
+    ///   3..=8) persisted with `player_count` 2 from before this bound
+    ///   existed on whichever path created it. The WASM restore boundary
+    ///   (`decode_and_rehydrate_restored_game_state`, shared by
+    ///   `restore_game_state` and `resume_multiplayer_host_state`) is
+    ///   checked against the same kind of persisted, already-exists state,
+    ///   but instead REPAIRS: it widens the restored `format_config`'s
+    ///   `min_players`/`max_players` to admit the persisted seat count
+    ///   before calling this same validator (see
+    ///   `decoded_restore_repairs_a_persisted_seat_count_outside_the_
+    ///   format_registry_range`), because that boundary serves undo,
+    ///   localStorage save restore, and P2P host crash recovery — all cases
+    ///   where refusing the restore would strand user-owned state that was
+    ///   already playable. See that function's own comment for the full
+    ///   rationale. Whether `from_persisted` itself should someday repair
+    ///   the same way, rather than reject, is untracked and currently
+    ///   accepted as-is; this paragraph is disclosure only.
     pub fn validate_for_player_count(&self, player_count: u8) -> Result<(), String> {
         // CR 100.1a / CR 100.1b / CR 800.1: a two-player game begins with two
         // players and a multiplayer game with more than two; the exact seat
@@ -2567,6 +2605,10 @@ mod tests {
         }
         assert!(rules_fixed_count > 0, "the set must not be empty");
         assert!(
+            host_choice_count > 0,
+            "at least one format must delegate — the building block must not go dead"
+        );
+        assert!(
             host_choice_count < GameFormat::registry().len(),
             "the set must not be all-HostChoiceAmong"
         );
@@ -3168,6 +3210,49 @@ mod tests {
         let over_ceiling_json = serde_json::to_value(&over_ceiling).unwrap();
         let over_ceiling_err = serde_json::from_value::<FormatConfig>(over_ceiling_json)
             .expect_err("MAX_STARTING_LIFE + 1 must be rejected");
+        assert!(over_ceiling_err.to_string().contains("engine caps"));
+    }
+
+    /// The Custom counterpart of `starting_life_admission_gate_pins_both_
+    /// bounds`: review-impl round 5 found that the `Some(rules)` arm of
+    /// `FormatConfig::deserialize` settled by blanket equality against
+    /// `FormatConfig::for_custom_rules` alone, which copies
+    /// `structural.starting_life` through unchanged with no magnitude bound
+    /// of its own — so a self-consistent Custom payload could declare
+    /// `starting_life: 0` or `i32::MAX` and be admitted. Pins that
+    /// `validate_starting_life_bounds` is now called from that arm too, via
+    /// a payload built entirely from `FormatConfig::for_custom_rules` (so
+    /// the blanket-equality check trivially passes and only the bounds check
+    /// can fail it).
+    #[test]
+    fn starting_life_admission_gate_pins_both_bounds_for_custom_format() {
+        let def = crate::types::custom_format::CustomFormatDef::from_lobby_config(
+            "Test Custom Format".to_string(),
+            &FormatConfig::standard(),
+        )
+        .expect("Standard has no unrepresentable auxiliary deck component");
+        let rules = def.rules;
+
+        let build = |starting_life: i32| {
+            let mut rules = rules.clone();
+            rules.structural.starting_life = starting_life;
+            FormatConfig::for_custom_rules(&rules)
+        };
+
+        let floor_json = serde_json::to_value(build(0)).unwrap();
+        let floor_err = serde_json::from_value::<FormatConfig>(floor_json)
+            .expect_err("0 starting life loses every seat at the first SBA check");
+        assert!(floor_err.to_string().contains("must begin above 0"));
+
+        let at_ceiling_json = serde_json::to_value(build(MAX_STARTING_LIFE)).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(at_ceiling_json).is_ok(),
+            "MAX_STARTING_LIFE itself must remain admissible for a Custom format"
+        );
+
+        let over_ceiling_json = serde_json::to_value(build(MAX_STARTING_LIFE + 1)).unwrap();
+        let over_ceiling_err = serde_json::from_value::<FormatConfig>(over_ceiling_json)
+            .expect_err("MAX_STARTING_LIFE + 1 must be rejected for a Custom format");
         assert!(over_ceiling_err.to_string().contains("engine caps"));
     }
 

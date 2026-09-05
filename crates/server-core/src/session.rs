@@ -2543,6 +2543,31 @@ mod tests {
         );
     }
 
+    /// `from_persisted` is the one call site checked against a PERSISTED
+    /// `player_count` rather than one just supplied on an inbound request
+    /// (see `FormatConfig::validate_for_player_count`'s own doc comment),
+    /// which makes its rejection irreversible: a session already saved with
+    /// a `player_count` outside its format's registry range can never be
+    /// restored again. `create_game` builds a Standard (registry range 2-2)
+    /// session; the persisted blob's own `player_count` field (what
+    /// `from_persisted` actually validates, independent of
+    /// `state.players.len()`) is mutated to 5 here to land squarely outside
+    /// that range.
+    #[test]
+    fn from_persisted_rejects_a_persisted_player_count_outside_the_format_registry_range() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck());
+        let mut persisted = mgr.sessions.get(&code).unwrap().to_persisted();
+        persisted.player_count = 5;
+
+        let error = GameSession::from_persisted(persisted, &CardDatabase::default())
+            .err()
+            .expect(
+                "a persisted player_count outside the format's registry range must be rejected",
+            );
+        assert!(error.contains("player_count"));
+    }
+
     #[test]
     fn persisted_session_with_limited_range_is_rejected() {
         let mut mgr = SessionManager::new();

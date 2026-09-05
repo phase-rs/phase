@@ -237,6 +237,21 @@ mod external_format_config_tests {
             .contains("not supported"));
     }
 
+    /// `validate_external_format_config`'s `validate_for_player_count` call
+    /// (used by `initialize_game_impl`) is one of the six production call
+    /// sites: `CommanderDraft`'s registry range is 3-8, so a 2-player
+    /// initialize request must be rejected here too — a retryable wire
+    /// rejection, unlike the same check's use at
+    /// `server_core::session::GameSession::from_persisted`.
+    #[test]
+    fn external_initialization_rejects_player_count_outside_format_registry_range() {
+        let config = FormatConfig::commander_draft();
+
+        assert!(validate_external_format_config(&config, 2)
+            .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
+            .contains("player_count"));
+    }
+
     #[test]
     fn malformed_initialize_format_config_returns_an_error_envelope() {
         let malformed_js_config = serde_json::json!(42);
@@ -2388,17 +2403,35 @@ fn decode_and_rehydrate_restored_game_state(
         .state
         .finalize_after_rehydration(|state| {
             // Mirrors `server_core::session::GameSession::from_persisted`'s
-            // `validate_for_player_count` call: `prepare_for_restore` already
-            // rejects an unsupported `range_of_influence` for every restore
-            // caller, but nothing upstream of this closure bounds the seat
-            // count against the format's own registry range. Without this,
-            // a persisted blob whose `players.len()` no longer fits its
-            // format (e.g. a save edited out-of-band, or a format whose
-            // registry range tightened since the save was made) would
-            // rehydrate and become live instead of being rejected here.
+            // `validate_for_player_count` call, but REPAIRS rather than
+            // rejects: this closure is the shared body of both
+            // `restore_game_state` (undo, and resuming a localStorage save)
+            // and `resume_multiplayer_host_state` (P2P host crash recovery),
+            // so a hard rejection here would strand user-owned state that
+            // was already playable — undo would die, a saved game could
+            // never load again, and a returning P2P host could never resume.
+            // `from_persisted` faces the identical dilemma (a persisted
+            // `player_count` outside its format's registry range) and
+            // chooses to reject anyway, because there a server operator can
+            // intervene; here there is no operator, only the player whose
+            // state this is. Either way, the game ALREADY EXISTS with
+            // `players.len()` seats — the persisted seat count is
+            // authoritative and the format's registry range is what must
+            // yield. Widen `min_players`/`max_players` to admit the
+            // persisted seat count — never touch `players` itself — then run
+            // the normal validator so its other checks (e.g.
+            // `archenemy_player` bounds, `range_of_influence` radius) still
+            // apply unchanged.
+            let restored_player_count = state.players.len() as u8;
+            if restored_player_count < state.format_config.min_players {
+                state.format_config.min_players = restored_player_count;
+            }
+            if restored_player_count > state.format_config.max_players {
+                state.format_config.max_players = restored_player_count;
+            }
             state
                 .format_config
-                .validate_for_player_count(state.players.len() as u8)?;
+                .validate_for_player_count(restored_player_count)?;
             rehydrate_restored_state_from_card_db(state)?;
             // Combat declaration snapshots are display data derived from the rehydrated
             // live board. Rebuild them before this external state becomes interactive.
@@ -2625,15 +2658,21 @@ mod restored_card_db_requirements_tests {
         assert!(!is_multiplayer_mode());
     }
 
-    /// Phase 1d production seam: mirrors `server_core::session::GameSession::
-    /// from_persisted`'s `validate_for_player_count` call, which the WASM
-    /// restore boundary lacked. `FormatConfig::commander_draft()` is
-    /// internally consistent on its own (min 3, max 8) so it passes
+    /// Phase 1d production seam, round-5-corrected: mirrors
+    /// `server_core::session::GameSession::from_persisted`'s
+    /// `validate_for_player_count` call, which the WASM restore boundary
+    /// lacked, but REPAIRS instead of rejecting (see
+    /// `decode_and_rehydrate_restored_game_state`'s own comment on this
+    /// closure for why: this boundary serves undo, localStorage save
+    /// restore, and P2P host crash recovery, all of which must not strand
+    /// already-playable user-owned state). `FormatConfig::commander_draft()`
+    /// is internally consistent on its own (min 3, max 8) so it passes
     /// `FormatConfig::deserialize`'s own admission gate unchanged; the
-    /// rejection this test pins comes only from the actual persisted seat
-    /// count (2) falling outside that format's registry range.
+    /// persisted seat count (2) falls outside that format's registry range,
+    /// so this test pins that the restore now WIDENS `min_players` to admit
+    /// it (2) rather than rejecting the restore or touching `players`.
     #[test]
-    fn decoded_restore_rejects_a_persisted_seat_count_outside_the_format_registry_range() {
+    fn decoded_restore_repairs_a_persisted_seat_count_outside_the_format_registry_range() {
         clear_game_state();
         set_multiplayer_mode(false);
         load_minimal_test_card_database();
@@ -2641,9 +2680,21 @@ mod restored_card_db_requirements_tests {
         state.format_config = FormatConfig::commander_draft();
         let json = serde_json::to_string(&state).unwrap();
 
-        let error = decode_and_rehydrate_restored_game_state(&json, |_| {})
-            .expect_err("2 seats must be rejected against CommanderDraft's 3-8 registry range");
-        assert!(error.contains("player_count"));
+        let restored = decode_and_rehydrate_restored_game_state(&json, |_| {})
+            .expect("2 seats must be repaired, not rejected, against CommanderDraft's 3-8 range");
+        assert_eq!(
+            restored.state.players.len(),
+            2,
+            "repair must never drop, add, or otherwise touch the persisted seats"
+        );
+        assert_eq!(
+            restored.state.format_config.min_players, 2,
+            "min_players must widen to admit the persisted seat count"
+        );
+        assert_eq!(
+            restored.state.format_config.max_players, 8,
+            "max_players was already >= the persisted seat count and must stay unchanged"
+        );
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
     }
 }
