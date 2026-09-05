@@ -1300,9 +1300,9 @@ fn per_permanent_defender_caps(state: &GameState) -> Vec<(ObjectId, u32)> {
         .collect()
 }
 
-/// CR 508.5 + CR 310.8d: Resolve the defending player for an `AttackTarget` —
+/// CR 508.5 + CR 310.9d: Resolve the defending player for an `AttackTarget` —
 /// the player for a direct attack, the CONTROLLER of the planeswalker being
-/// attacked, or the PROTECTOR of the battle being attacked. CR 310.8d is
+/// attacked, or the PROTECTOR of the battle being attacked. CR 310.9d is
 /// explicit that when a battle's protector differs from its controller, every
 /// rule and effect referring to the "defending player" relative to that battle
 /// means the protector.
@@ -1316,10 +1316,12 @@ fn per_permanent_defender_caps(state: &GameState) -> Vec<(ObjectId, u32)> {
 /// `match` with a caller-supplied fallback. One `AttackTarget` → player rule,
 /// one home, next to `AttackTarget` itself.
 ///
-/// (This corrects a pre-existing citation on this function and at
-/// `apply_attack_declarations`, both of which pointed at a `310.9d` subrule
-/// that does not exist: CR 310.9 is the battle-attachment state-based action
-/// and has no lettered subrules. Verified absent from `docs/MagicCompRules.txt`.)
+/// (An earlier edit rewrote this function and `apply_attack_declarations`
+/// from `310.9d` to `310.8d`, believing CR 310.9 to be the battle-attachment
+/// state-based action. That was backwards. WotC inserted the non-Siege
+/// defense-0 SBA at CR 310.8, which moved the protector block down to
+/// CR 310.9 — so `310.9d` is correct and `310.8d` does not exist, and
+/// attachment is now CR 310.10. Do not re-invert this.)
 pub(crate) fn defending_player_for_target_or(
     state: &GameState,
     target: AttackTarget,
@@ -1340,7 +1342,7 @@ pub(crate) fn defending_player_for_target_or(
     }
 }
 
-/// CR 508.5 + CR 310.8d: [`defending_player_for_target_or`] with the historical
+/// CR 508.5 + CR 310.9d: [`defending_player_for_target_or`] with the historical
 /// `PlayerId(0)` fallback used by attack-declaration bookkeeping.
 fn defending_player_for_target(state: &GameState, target: AttackTarget) -> PlayerId {
     defending_player_for_target_or(state, target, PlayerId(0))
@@ -4042,7 +4044,7 @@ fn attacker_can_attack_target(
     gates: &CombatStaticGates,
     active_team: &[PlayerId],
 ) -> bool {
-    // CR 508.1b + CR 310.5/310.8b: target validity + active-team exclusion.
+    // CR 508.1b + CR 310.5/310.9b: target validity + active-team exclusion.
     match target {
         AttackTarget::Player(pid) => {
             if !state.players.iter().any(|p| p.id == pid)
@@ -5173,7 +5175,7 @@ pub(super) fn commit_attack_declaration(
     let mut attackers: Vec<AttackerInfo> = attacks
         .iter()
         .map(|(object_id, target)| {
-            // CR 508.5 + CR 310.8d: Defending player for a battle = its protector,
+            // CR 508.5 + CR 310.9d: Defending player for a battle = its protector,
             // not its controller. For planeswalkers, defending player = controller.
             let defending_player = defending_player_for_target(state, *target);
             AttackerInfo::new(*object_id, *target, defending_player)
@@ -6551,7 +6553,7 @@ fn attack_entries(event: &GameEvent) -> Option<(&[(ObjectId, AttackTarget)], Pla
 /// asker" — so it skipped past the asker's own entry and fell through to the
 /// coarse global field. Resolving the matched entry through
 /// [`defending_player_for_target_or`] answers with the planeswalker's
-/// controller or the battle's protector (CR 310.8d) instead.
+/// controller or the battle's protector (CR 310.9d) instead.
 fn entry_defender(
     state: &GameState,
     entries: &[(ObjectId, AttackTarget)],
@@ -6632,7 +6634,7 @@ fn sole_attacker_defender(
 ///    clause — "an ability of an attacking creature refers to a defending
 ///    player". Resolved through [`defending_player_for_target_or`], so a
 ///    planeswalker target answers with its controller and a battle target with
-///    its protector (CR 310.8d) instead of being skipped.
+///    its protector (CR 310.9d) instead of being skipped.
 /// 2. The bound event's SOLE attacker, when the event names exactly one.
 ///
 ///    **THIS STEP EXISTS TO OUTRANK THE LATCH (step 3), NOT TO RESOLVE THE
@@ -6818,11 +6820,11 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
         }
     }
 
-    // CR 310.8b + CR 506.2: A battle can be attacked by any attacking player for whom
+    // CR 310.9b + CR 506.2: A battle can be attacked by any attacking player for whom
     // its protector is a defending player. Notably a Siege can be attacked by its own
-    // controller if the protector is a different player (CR 310.8b "Notably, a Siege
+    // controller if the protector is a different player (CR 310.9b "Notably, a Siege
     // battle can be attacked by its own controller"). The only player who cannot
-    // attack is the battle's protector (CR 310.8b: "A battle's protector can never
+    // attack is the battle's protector (CR 310.9b: "A battle's protector can never
     // attack it").
     for &id in &state.battlefield {
         if let Some(obj) = state.objects.get(&id) {
@@ -7212,7 +7214,7 @@ mod tests {
         );
     }
 
-    /// CR 508.5 + CR 310.8d hardening: the asker's own entry resolves a
+    /// CR 508.5 + CR 310.9d hardening: the asker's own entry resolves a
     /// PLANESWALKER target to its controller and a BATTLE target to its
     /// PROTECTOR, instead of being skipped.
     ///
@@ -7256,7 +7258,7 @@ mod tests {
             "Battle".to_string(),
             Zone::Battlefield,
         );
-        // CR 310.8d: the protector is the durable `ChosenAttribute::Player`
+        // CR 310.9d: the protector is the durable `ChosenAttribute::Player`
         // persisted by the Siege's "as ~ enters" replacement, and it is
         // deliberately DIFFERENT from the battle's controller (P0) here.
         {
@@ -7274,7 +7276,7 @@ mod tests {
         assert_eq!(
             defending_player_cr508_5(&state, source, Some(&ctx)),
             Some(PlayerId(2)),
-            "CR 310.8d: a battle's PROTECTOR is the defending player, not its controller"
+            "CR 310.9d: a battle's PROTECTOR is the defending player, not its controller"
         );
     }
 

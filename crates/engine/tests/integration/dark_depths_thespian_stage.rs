@@ -24,7 +24,7 @@
 //! end-to-end.
 //!
 //! CR references (verified against `docs/MagicCompRules.txt`):
-//!   - CR 121.1c: a permanent enters with no counters except as the result of
+//!   - CR 614.1c: a permanent enters with no counters except as the result of
 //!     a replacement / sub-effect specifying otherwise.
 //!   - CR 122.1: counter handling.
 //!   - CR 603.8: state triggers re-evaluate after each SBA cycle.

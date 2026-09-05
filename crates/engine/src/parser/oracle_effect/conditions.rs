@@ -6991,7 +6991,7 @@ fn parse_objects_share_quality_reference<'a>(
     }
     if let Ok((rest, ())) = crate::parser::oracle_target::parse_word_bounded(&lower, "it") {
         let offset = text.len() - rest.len();
-        let mut ctx_mut = ctx.clone();
+        let mut ctx_mut = ctx.clone_throwaway();
         return Some((
             crate::parser::oracle_target::resolve_pronoun_target(&mut ctx_mut, "it"),
             &text[offset..],

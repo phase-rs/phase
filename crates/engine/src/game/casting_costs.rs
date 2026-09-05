@@ -10755,35 +10755,35 @@ fn handle_resolution_cast_success(
         ResolutionCastSuccessAction::RippleOfferRemaining { mut remaining_hits } => {
             if remaining_hits.is_empty() {
                 // CR 702.60a: after the last accepted hit, put the revealed
-                // cards not cast this way on the library bottom.
+                // cards not cast this way on the bottom "in any order" (CR
+                // 608.2d). 2+ cards raise `WaitingFor::RippleBottomOrder`; 0/1
+                // place directly. Either way `RippleTerminalComplete` (carrying
+                // this final cast) fires once the cards land.
                 //
-                // This marker is installed before the replacement-aware batch
-                // because that batch can pause. The resumed cast must still
-                // collect its eventual SpellCast trigger with the earlier
-                // accepted hits, rather than drain them during the prompt.
+                // The marker is installed before the (possibly pausing)
+                // placement so the resumed cast still collects its eventual
+                // SpellCast trigger with the earlier accepted hits.
                 state.pending_resolution_completion =
                     Some(crate::types::game_state::PendingResolutionCompletion {
                         player,
                         source_id,
                         final_cast: Some(cast_object),
                     });
-                match crate::game::effects::cascade::shuffle_to_bottom(
+                crate::game::effects::ripple::open_bottom_order_or_place(
                     state,
-                    &exiled_misses,
                     source_id,
-                    Some(
-                        crate::types::game_state::BatchCompletion::RippleTerminalComplete {
-                            player,
-                            source_id,
-                            final_cast: Some(cast_object),
-                        },
-                    ),
+                    player,
+                    exiled_misses,
+                    Some(cast_object),
                     events,
+                );
+                if matches!(
+                    state.waiting_for,
+                    WaitingFor::RippleBottomOrder { .. } | WaitingFor::ReplacementChoice { .. }
                 ) {
-                    crate::game::zone_pipeline::BatchMoveResult::Done => None,
-                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                        Some(Box::new(state.waiting_for.clone()))
-                    }
+                    Some(Box::new(state.waiting_for.clone()))
+                } else {
+                    None
                 }
             } else {
                 let hit_card = remaining_hits.remove(0);

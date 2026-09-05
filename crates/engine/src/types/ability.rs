@@ -4649,7 +4649,9 @@ pub struct ResolutionCastCleanup {
     /// original `CastOffer`, so its cleanup payload is the typed source carrier.
     pub source_id: super::identifiers::ObjectId,
     /// Cards exiled/revealed during the dig that were not the hit.
-    /// Empty for Suspend's self-free-cast (no dig).
+    /// Empty for Suspend's self-free-cast (no dig). For Ripple (CR 701.20b)
+    /// these are still in the controller's library — the "exiled" name is
+    /// Cascade/Discover legacy; the cleanup only ever bottoms them.
     pub exiled_misses: Vec<super::identifiers::ObjectId>,
     /// Where the hit goes if the player declines or the cast-time MV check
     /// rejects the cast.
@@ -6191,8 +6193,35 @@ impl FilterProp {
 /// CR 205: `type_filters` holds all type constraints in conjunction (all must match).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedFilter {
-    /// CR 205: All type constraints that must match (conjunction).
+    /// CR 205.1: All type-line constraints that must match (conjunction).
     /// e.g. "noncreature, nonland permanent" → `[Permanent, Non(Creature), Non(Land)]`
+    ///
+    /// An EMPTY vector is an empty conjunction — "no type-line constraint" —
+    /// and is a deliberate, load-bearing encoding rather than a degenerate one.
+    /// This is the single authority for that reading; every evaluator in
+    /// `game::filter` conjoins the list and so answers "unconstrained by type"
+    /// for the empty case. Two independent consumers depend on it:
+    ///
+    /// * Object axis — a filter whose entire restriction is a property or a
+    ///   controller names no type at all. Aether Gust ("target red or green
+    ///   spell or permanent") is `properties: [AnyOf(HasColor(Red),
+    ///   HasColor(Green))]` with an empty `type_filters`; so are the
+    ///   `Another` / `HasSupertype` / `InZone` property-only filters.
+    /// * Player axis — CR 109.1 enumerates what an object is and a player
+    ///   (CR 102.1) is not one, so a type-line constraint can never be
+    ///   satisfied by a player. `game::filter::player_matches_target_filter_with`
+    ///   uses exactly `type_filters.is_empty()` as the gate that admits a
+    ///   `Typed` filter to the player axis and rejects any non-empty list.
+    ///   An empty `type_filters` is therefore the ONLY spelling of a
+    ///   player-shaped `Typed` filter ("each opponent" is
+    ///   `controller: Some(Opponent)` with no type filters).
+    ///
+    /// Consequently an evaluator must NOT read the empty case as "matches
+    /// nothing": that erases the player-filter encoding and every property-only
+    /// filter above. `TargetFilter::Any` is how this enum spells "matches
+    /// anything". A `Typed` filter that is empty in ALL THREE fields carries no
+    /// information; it is a defect at the parser branch that produced it, not
+    /// at the runtime that faithfully evaluates it (#8508).
     #[serde(default)]
     pub type_filters: Vec<TypeFilter>,
     #[serde(default)]
@@ -9233,16 +9262,28 @@ pub enum PlayerFilter {
     /// event clause. Falls back to plain `Opponent` semantics when no trigger
     /// event is in scope (i.e. only excludes the controller).
     OpponentOtherThanTriggering,
-    /// CR 102.2 + CR 603.2 + CR 608.2d: Each opponent of the *triggering* player
-    /// (the caster of the spell that fired the trigger), resolved live from
-    /// `state.current_trigger_event` via `extract_player_from_event`. Models
-    /// "each of that player's opponents [may] <effect>" (Heartwood Storyteller) —
-    /// "that player" is the triggering/casting player, NOT the source's controller.
+    /// CR 102.2 + CR 102.3 + CR 603.2 + CR 608.2d: Each opponent of the
+    /// *triggering* player, resolved live from `state.current_trigger_event` via
+    /// `extract_player_from_event`. Never the SOURCE's controller — which is what
+    /// makes this distinct from plain `Opponent`.
+    ///
+    /// Which seat "the triggering player" is comes from the event, so the same
+    /// filter serves every phrasing whose possessive anchors on it:
+    /// - CR 603.2 `SpellCast` — the caster: "each of that player's opponents [may]
+    ///   <effect>" (Heartwood Storyteller, Standstill, Checks and Balances).
+    /// - CR 603.10a `ZoneChanged` — the controller the moving object had in the
+    ///   look-back snapshot: "each of its controller's opponents <effect>" on a
+    ///   dies trigger (Bounty Board). The Bounty Board controller is themselves a
+    ///   recipient when an opponent's bounty creature dies, which `Opponent` — the
+    ///   ability controller's opponents — can never express.
+    ///
     /// The recipient SET is fanned out per-player by the standard `player_scope`
-    /// loop; the body recipient stays `Controller`, rebound per opponent. CR 102.2
-    /// two-player opponent (`p.id != caster`); CR 102.3 teams intentionally not
-    /// modeled (mirrors `Opponent`). Fails closed (no recipient, count 0) when no
-    /// trigger event is in scope — the caster anchor is undefined without it.
+    /// loop; the body recipient stays `Controller`, rebound per opponent.
+    /// Opponent-ness is CR 102.3-aware (2HG teammates are not opponents): every
+    /// consumer — `matches_player_scope`, `deal_damage`, `quantity`,
+    /// `speed_effects` — routes through `players::is_opponent`. Fails closed (no
+    /// recipient, count 0) when no trigger event is in scope, since the anchor is
+    /// undefined without one.
     OpponentOfTriggeringPlayer,
     /// CR 506.2 + CR 508.6 + CR 603.4: Each opponent of the *triggering/attacking*
     /// player (resolved from the active AttackersDeclared trigger event) who is NOT

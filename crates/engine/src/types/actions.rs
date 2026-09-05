@@ -94,7 +94,7 @@ pub enum AlternativeCastDecision {
     Normal,
     /// Pay the keyword-granted alternative cost. Resolution applies the
     /// keyword's post-payment effects (Overload's target→each text change per
-    /// CR 702.96b-c, Evoke's ETB-sacrifice trigger per CR 702.74b, Bestow's
+    /// CR 702.96b-c, Evoke's ETB-sacrifice trigger per CR 702.74a, Bestow's
     /// Aura transformation per CR 702.103b, Warp's exile-at-end-step rider).
     Alternative,
 }
@@ -710,7 +710,7 @@ pub enum GameAction {
     ChooseLegend {
         keep: ObjectId,
     },
-    /// CR 310.11 + CR 704.5w + CR 704.5x: Choose which player becomes the
+    /// CR 310.11 + CR 704.5x: Choose which player becomes the
     /// battle's new protector when the SBA pauses with a `BattleProtectorChoice`.
     ChooseBattleProtector {
         protector: PlayerId,

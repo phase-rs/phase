@@ -84,6 +84,7 @@ import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.t
 import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
+import { RippleRevealChoiceModal } from "../components/modal/RippleRevealChoiceModal.tsx";
 import { FreeCastWindowModal } from "../components/modal/FreeCastWindowModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
 import { AlternativeCostModal } from "../components/modal/AlternativeCostModal.tsx";
@@ -2046,6 +2047,7 @@ function GamePageContent({
         <LifeRedistributionModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
+        <RippleRevealChoiceModal />
         <SpellbookDraftModal />
         <FreeCastWindowModal />
         <ModalFaceModal />

@@ -5031,8 +5031,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 133,
-        "`WaitingFor` has 133 variants at this tip, read off the `syn` parse. This number is \
+        total, 135,
+        "`WaitingFor` has 135 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5057,6 +5057,13 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // no merge conflict and could not have, so CI was the only thing between it and shipping.
     // 130 ⇒ 132 is ADJUDICATED: ResolveAllConsent and ResolveAllReady are control-protocol states
     // with no DecisionTemplate payload, so neither expands the carrier set nor the redaction duty.
+    // 133 ⇒ 135 is ADJUDICATED: Ripple's two-decision model (CR 702.60a / 608.2d) added
+    // `RippleRevealChoice { player, source_id, count }` (the optional "you may reveal") and
+    // `RippleBottomOrder { player, source_id, cards, final_cast }` (the "in any order" bottom
+    // placement). Measured, not inferred: neither body holds a `DecisionTemplate` — both are
+    // resolution-choice prompts handled in `engine_resolution_choices`, not shortcut-style
+    // templates — so the carrier vec and the `filter_state_for_viewer` redaction loop below are
+    // unchanged.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(

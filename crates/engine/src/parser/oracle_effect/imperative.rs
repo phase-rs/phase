@@ -169,7 +169,25 @@ pub(super) fn filter_has_controller_scope(filter: &TargetFilter) -> bool {
     }
 }
 
-fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
+/// CR 701.20e + CR 401.1: Map the possessive owner of the library that a
+/// "look at / reveal the top N cards" instruction reads to its library-owner
+/// `TargetFilter`.
+///
+/// The `"that player's"` / `"that opponent's"` anaphor is deliberately NOT
+/// resolved here. It is delegated to [`that_player_library_filter`], the
+/// context-aware single authority that this module's sibling library-owner
+/// surface (`parse_library_player_suffix`, the `"card[s] of <owner>'s library"`
+/// form) already routes the same anaphor through. Binding it locally to a fixed
+/// `TargetFilter::ParentTarget` silently mis-bound the whole damage-trigger
+/// class: on a CR 120.1 + CR 510.2 combat-damage event `ParentTarget` has no
+/// referent, so `resolve_player_for_context_ref` fell through to
+/// `ability.controller` and "whenever ~ deals combat damage to a player, look at
+/// the top three cards of that player's library" read the ABILITY CONTROLLER's
+/// library (Thief of Sanity, issue #8467). The shared resolver returns
+/// `TriggeringPlayer` for that scope — the damaged player — and still returns
+/// `ParentTarget` as its own default, so contexts that introduce no relative
+/// player scope keep their existing binding.
+fn parse_dig_library_owner(rest_lower: &str, ctx: &ParseContext) -> TargetFilter {
     if preceded(
         take_until::<_, _, OracleError<'_>>("target player's library"),
         tag::<_, _, OracleError<'_>>("target player's library"),
@@ -180,24 +198,24 @@ fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
         return TargetFilter::Player;
     }
 
-    if preceded(
-        take_until::<_, _, OracleError<'_>>("that player's library"),
-        tag::<_, _, OracleError<'_>>("that player's library"),
-    )
-    .parse(rest_lower)
-    .is_ok()
+    // One `alt()` over the owner-noun axis of a single `"that <owner>'s
+    // library"` anaphor, nested under its shared `"that "` prefix and tried at
+    // each word boundary (the possessive trails the card-count noun phrase, so
+    // it never sits at offset 0).
+    if nom_primitives::scan_at_word_boundaries(rest_lower, |input| {
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("that "),
+                alt((tag("player's"), tag("opponent's"))),
+                tag(" library"),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some()
     {
-        return TargetFilter::ParentTarget;
-    }
-
-    if preceded(
-        take_until::<_, _, OracleError<'_>>("that opponent's library"),
-        tag::<_, _, OracleError<'_>>("that opponent's library"),
-    )
-    .parse(rest_lower)
-    .is_ok()
-    {
-        return TargetFilter::ParentTarget;
+        return that_player_library_filter(ctx);
     }
 
     // CR 608.2c + CR 400.3: "that library" — anaphoric to a library
@@ -3196,7 +3214,7 @@ pub(super) fn parse_search_and_creation_ast(
         } else {
             QuantityExpr::Fixed { value: 1 }
         };
-        let player = parse_dig_library_owner(rest_lower);
+        let player = parse_dig_library_owner(rest_lower, ctx);
         // CR 701.20e + CR 701.13a + CR 406.3: "look at the top card ... and
         // exiles it face down" (Gonti, Night Minister) — fuse into ExileTop so
         // the card leaves the library and the trailing play grant can bind to
@@ -3265,7 +3283,7 @@ pub(super) fn parse_search_and_creation_ast(
                 ))
                 .parse(after_count)
                 {
-                    let player = parse_dig_library_owner(owner_lower);
+                    let player = parse_dig_library_owner(owner_lower, ctx);
                     return Some(SearchCreationImperativeAst::Dig {
                         count,
                         reveal,

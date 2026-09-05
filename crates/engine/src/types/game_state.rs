@@ -8799,7 +8799,7 @@ pub enum AlternativeCastKeyword {
     /// Custom Warp keyword — exile-at-end-step rider; no CR section.
     Warp,
     /// CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent
-    /// was cast for its evoke cost (CR 702.74b).
+    /// was cast for its evoke cost.
     Evoke,
     /// CR 702.119a-c: Emerge alternative cost requires sacrificing the specified
     /// permanent quality while casting and reduces the emerge cost by that
@@ -9063,7 +9063,10 @@ pub enum CastOfferKind {
     /// mana cost, or decline. `hit_card` is the matching revealed card being
     /// offered, `remaining_hits` are other same-named cards from the same reveal
     /// still eligible to cast, and `revealed_misses` are revealed cards that
-    /// cannot be cast this way.
+    /// cannot be cast this way. CR 701.20b: every id here names a card that is
+    /// still in the controller's library (the reveal does not move them); the
+    /// hit is cast from the library and the misses are placed on the bottom
+    /// once the offers are exhausted.
     Ripple {
         hit_card: ObjectId,
         remaining_hits: Vec<ObjectId>,
@@ -12530,6 +12533,42 @@ pub enum WaitingFor {
         player: PlayerId,
         cards: Vec<ObjectId>,
     },
+    /// CR 702.60a: "you **may** reveal the top N cards of your library" — the
+    /// initial optional-reveal decision of a resolving Ripple trigger. The
+    /// controller answers with `GameAction::RippleChoice` (`Cast` = reveal,
+    /// `Decline` = don't). On decline nothing is revealed, the library is left
+    /// untouched, and no `CardsRevealed` / `revealed_cards` publication occurs.
+    RippleRevealChoice {
+        player: PlayerId,
+        /// The resolving Ripple ability's source spell (CR 702.60a).
+        source_id: ObjectId,
+        /// N from "Ripple N" — how many cards the reveal would show. Carried for
+        /// the prompt UI; the actual pile is re-read from the live library top
+        /// when the reveal is accepted.
+        count: u32,
+    },
+    /// CR 702.60a + CR 608.2d: "put all revealed cards not cast this way on the
+    /// bottom of your library **in any order**." Once the same-named free-cast
+    /// offers are exhausted (or declined, or there was no hit), the controller
+    /// announces the order for the uncast revealed cards. The response is
+    /// `GameAction::SelectCards { cards }` carrying a permutation of `cards`;
+    /// the engine places them on the library bottom in that submitted order.
+    /// Raised only when 2+ cards remain — a single card has no ordering choice.
+    RippleBottomOrder {
+        player: PlayerId,
+        /// The resolving Ripple ability's source spell (CR 702.60a).
+        source_id: ObjectId,
+        /// The uncast revealed cards awaiting a bottom-placement order. Still in
+        /// the controller's library and still publicly revealed (CR 701.20a)
+        /// until the order is submitted.
+        cards: Vec<ObjectId>,
+        /// CR 603.3b + CR 608.2g: the same-named card cast from the terminal
+        /// free-cast offer, if any. Threaded into
+        /// `BatchCompletion::RippleTerminalComplete` when the order is submitted
+        /// so the parked-trigger / terminal-`SpellCast` settlement still fires.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_cast: Option<ObjectId>,
+    },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
     /// rest on the bottom in any order (Susan Foreman).
@@ -13125,7 +13164,7 @@ pub enum WaitingFor {
     ///   may be recast from exile later (no CR section; rider lives on the
     ///   keyword).
     /// - `Evoke` (CR 702.74a) — creature ETBs and sacrifices itself when cast
-    ///   for the evoke cost (CR 702.74b).
+    ///   for the evoke cost.
     /// - `Overload` (CR 702.96a) — substitutes the overload cost and rewrites
     ///   every "target" in the spell's text to "each" (CR 702.96b-c).
     /// - `Bestow` (CR 702.103a) — substitutes the bestow cost and turns the
@@ -13945,7 +13984,7 @@ pub enum WaitingFor {
         /// The zone the commander is currently in (Graveyard, Exile, Hand, or Library).
         current_zone: Zone,
     },
-    /// CR 310.11 + CR 310.12a + CR 704.5w + CR 704.5x: A battle that isn't being attacked has no
+    /// CR 310.11 + CR 310.12a + CR 704.5x: A battle that isn't being attacked has no
     /// protector, an illegal protector, or (for Sieges) a protector equal to its
     /// controller. The battle's controller (`player`) chooses a legal protector from
     /// `candidates`. Emitted only when `candidates.len() > 1`; the SBA auto-applies
@@ -14238,14 +14277,52 @@ pub enum WaitingFor {
         pending_mana_ability: Option<Box<PendingManaAbility>>,
     },
     /// CR 115.7: Change the target(s) of a spell or ability on the stack.
-    /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
-    /// TODO: Add Effect::ChangeTargets variant + resolver in effects/change_targets.rs.
-    /// Requires parser support for "change the target of" Oracle text patterns.
     RetargetChoice {
         player: PlayerId,
         stack_entry_index: usize,
         scope: RetargetScope,
+        /// CR 115.7d: the chain's currently declared targets, flat, in
+        /// `chain_retarget_slots` order and positionally aligned with `slots`
+        /// and `slot_pools`. The submission (`GameAction::RetargetSpell.new_targets`)
+        /// uses the same index space, so the frontend stays width-agnostic and
+        /// learns nothing about chain nodes. Its first `root.targets.len()`
+        /// entries are exactly what this field held before phase-rs/phase#8355,
+        /// so the index space is a backward-compatible prefix extension.
         current_targets: Vec<TargetRef>,
+        /// CR 115.7d: where each position of `current_targets` LIVES — the chain
+        /// node and the slot within it. Validation, pool admission and the
+        /// target-incarnation pin refresh all follow this address, so they reach
+        /// every affected node rather than only the root (phase-rs/phase#8355).
+        ///
+        /// `serde(default)`: `GameState`/`PersistedGameState` cross the
+        /// multiplayer/WASM boundary against a HAND-WRITTEN TS mirror, and a
+        /// peer or a stored state predating this field must still load. An
+        /// empty `slots` is inert — `apply_retarget`'s alignment check trivially
+        /// passes and the per-address write loop visits nothing.
+        #[serde(default)]
+        slots: Vec<RetargetSlotAddress>,
+        /// CR 115.7d, INVARIANT SC: the candidate set for EACH position,
+        /// aligned 1:1 with `slots`. Produced once by
+        /// `change_targets::slot_pool` and thereafter only READ — see that
+        /// function's doc for the single-computation invariant.
+        ///
+        /// EMPTY MEANS TWO DIFFERENT THINGS, deliberately:
+        ///   * an empty OUTER vec = "no per-position refinement was recorded",
+        ///     which is the truth for any payload predating this field. Every
+        ///     consumer then falls back to `legal_new_targets`, which in
+        ///     exactly that case IS BASE's cascade — BASE behaviour by
+        ///     construction, not by convention.
+        ///   * an empty INNER vec = "this position has no legal alternative",
+        ///     and admits nothing. `slot_pools.get(i)` yields `Some(&[])`
+        ///     there, so the fallback correctly does NOT fire. Do not
+        ///     "helpfully" collapse an all-empty `slot_pools` to `Vec::new()`.
+        #[serde(default)]
+        slot_pools: Vec<Vec<TargetRef>>,
+        /// CR 115.7d: the UNION — BASE's cascade verbatim, extended with every
+        /// `slot_pools` member not already present. Read by `interaction.rs`'s
+        /// projection and by the frontend, both of which stay width- and
+        /// node-agnostic. NOT the admission set for any single position: that
+        /// is `slot_pools[i]`. Prefix-identical to BASE's cascade.
         legal_new_targets: Vec<TargetRef>,
     },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: A combat declaration is paused
@@ -14565,6 +14642,39 @@ pub enum RetargetScope {
     ForcedTo(TargetRef),
 }
 
+/// CR 601.2c: one descent step from a stack entry's root `ResolvedAbility`
+/// toward a node that owns declared targets.
+///
+/// Two variants because `ResolvedAbility` has exactly two child links. The
+/// enumerator (`ability_utils::chain_retarget_slots`) emits only `SubAbility`
+/// today, because `assign_targets_recursive` never descends into
+/// `else_ability` — read-verified; only `stamp_other_batch_source_targets`
+/// visits that branch, and its writes are synthesized rather than declared.
+/// `ElseAbility` exists so that a future else-branch owner is addressed
+/// correctly instead of being silently mis-addressed as a sub-branch one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChainStep {
+    SubAbility,
+    ElseAbility,
+}
+
+/// CR 115.7d: the address of ONE declared-target slot inside a resolved chain.
+/// `path` walks from the stack entry's root ability; `slot` indexes that node's
+/// OWN `targets`. Carried on `WaitingFor::RetargetChoice` so a submission is
+/// validated, admitted and written against the exact slot the prompt offered.
+///
+/// NOTE: an empty `path` is NOT the same predicate as "BASE already exposes
+/// this position". Under `AdditionalCostPaidInstead` delegation the BASE-exposed
+/// node is the SUB (`assign_targets_recursive:7008-7019` mirrors its targets
+/// onto the parent), so its addresses carry `path == [SubAbility]`. Consumers
+/// must never re-derive the position class from `path`; the enumerator settles
+/// it once, in `SlotEnforcement` (`ability_utils.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetargetSlotAddress {
+    pub path: Vec<ChainStep>,
+    pub slot: usize,
+}
+
 /// CR 103.5 / CR 104.1: who — if anyone — may act in a `WaitingFor` state. THE single authority
 /// behind [`WaitingFor::acting_player`] and [`WaitingFor::acting_players`], which are adapters
 /// over [`WaitingFor::acting_authority`], whose exhaustive per-variant match lives there and
@@ -14663,6 +14773,8 @@ impl WaitingFor {
             WaitingFor::StationTarget { .. } => "StationTarget",
             WaitingFor::SaddleMount { .. } => "SaddleMount",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
+            WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -14820,6 +14932,8 @@ impl WaitingFor {
             | WaitingFor::StationTarget { player, .. }
             | WaitingFor::SaddleMount { player, .. }
             | WaitingFor::ScryChoice { player, .. }
+            | WaitingFor::RippleRevealChoice { player, .. }
+            | WaitingFor::RippleBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -15133,7 +15247,7 @@ impl WaitingFor {
     ///   fixpoint before priority is granted.
     /// * [`WaitingFor::BattleProtectorChoice`] — CR 310.11 ("its controller chooses an
     ///   appropriate player to be its protector ... This is a state-based action")
-    ///   + CR 704.5w / CR 704.5x, likewise answered inside the CR 704.3 fixpoint.
+    ///   + CR 704.5x, likewise answered inside the CR 704.3 fixpoint.
     ///
     /// Those SBA members (the commander-zone, legend and battle-protector choices) are
     /// the COMPLETE set of player-choice pauses `game::sba` opens inside the SBA
@@ -15270,6 +15384,10 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
+                // CR 702.60a: the Ripple bottom-order response is a free
+                // permutation of the offered pile — the candidate enumerator
+                // only lists {identity}, so `apply()` is the real validator.
+                | WaitingFor::RippleBottomOrder { .. }
         )
     }
 
@@ -18753,6 +18871,17 @@ declare_game_state! {
     /// `PutChosenCounter` cannot read a stale source or prior-iteration answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_counter_kind_this_resolution: Option<CounterType>,
+
+    /// CR 608.2d: the colour a PERSISTING chooser bound during the current
+    /// resolution. Separate from `last_named_choice` (set for every named choice,
+    /// persisting or not, and not resolution-scoped) and from the source's
+    /// `ChosenAttribute::Color` history (which CR 607.2d readers own).
+    ///
+    /// Written only on the exact-object binding path, so a `persist: false`
+    /// printed `Choose a color.` — the F1 class — still writes nothing and
+    /// still resolves to a no-op. That gate is what keeps F1 out of this change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_color_this_resolution: Option<crate::types::mana::ManaColor>,
 
     /// CR 609.7a-b: The most recently chosen damage source and its source
     /// filter. Set by `DamageSourceChoice`, consumed by prevention/replacement
@@ -23574,6 +23703,7 @@ impl GameState {
             resolving_begin_game_abilities: false,
             last_named_choice: None,
             chosen_counter_kind_this_resolution: None,
+            chosen_color_this_resolution: None,
             last_chosen_damage_source: None,
             all_creature_types: Vec::new(),
             all_card_names: Arc::from([]),
@@ -24353,6 +24483,7 @@ impl GameState {
         // following PutChosenCounter, so distinct live values must not share a
         // loop pre-filter fingerprint.
         self.chosen_counter_kind_this_resolution.hash(&mut h);
+        self.chosen_color_this_resolution.hash(&mut h);
         self.stack.len().hash(&mut h);
         self.objects.len().hash(&mut h);
         // im::Vector<ObjectId>: Hash, ordered.
@@ -25593,6 +25724,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_begin_game_abilities: _,
         last_named_choice: _,
         chosen_counter_kind_this_resolution: _,
+        chosen_color_this_resolution: _,
         last_chosen_damage_source: _,
         all_creature_types: _,
         all_card_names: _,
@@ -25946,6 +26078,7 @@ impl PartialEq for GameState {
             && self.last_named_choice == other.last_named_choice
             && self.chosen_counter_kind_this_resolution
                 == other.chosen_counter_kind_this_resolution
+            && self.chosen_color_this_resolution == other.chosen_color_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
             && self.private_look_ids == other.private_look_ids
             && self.private_look_player == other.private_look_player
@@ -26378,7 +26511,7 @@ mod forced_cascade_window_tests {
                 },
             ),
             (
-                "BattleProtectorChoice (CR 310.11 + CR 704.5w / CR 704.5x — likewise an SBA)",
+                "BattleProtectorChoice (CR 310.11 + CR 704.5x — likewise an SBA)",
                 WaitingFor::BattleProtectorChoice {
                     player: PlayerId(0),
                     battle_id: ObjectId(5),
