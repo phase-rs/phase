@@ -8018,6 +8018,32 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             target: TargetFilter::Player,
         });
     }
+    // CR 701.24a + CR 608.2c: "shuffle that pile" / "shuffle those piles"
+    // (Ghastly Conscription, Jeskai Infiltrator, Mangara's Tome, Parallel
+    // Thoughts, Triumph of Saint Katherine, The Good Time Sleuth, Become
+    // Anonymous) — randomize the order of the chain's already-formed
+    // face-down pile (the tracked set an earlier "exile ... in a face-down
+    // pile" step published), a distinct target axis from every other arm in
+    // this function, which all resolve to a player's LIBRARY. `target` is
+    // the `TrackedSetId(0)` sentinel that `resolve_tracked_set_sentinel`
+    // binds to the chain's published set at resolution time; the resolver's
+    // `Effect::Shuffle` arm already special-cases a `TrackedSet` target to
+    // reorder that set in place without emitting a library-shuffle action
+    // (so "whenever you shuffle your library" triggers correctly do not
+    // fire for a pile shuffle).
+    if all_consuming(preceded(
+        alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))),
+        value((), alt((tag("that pile"), tag("those piles")))),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(ShuffleImperativeAst::ShuffleLibrary {
+            target: TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+        });
+    }
     if tag::<_, _, OracleError<'_>>("shuffle")
         .parse(lower)
         .is_err()
@@ -11081,7 +11107,33 @@ pub(super) fn parse_imperative_family_ast(
                     target,
                     count,
                     from_zone: None,
+                    object_source: None,
                     enters_under,
+                })
+            } else if all_consuming(preceded(
+                alt((tag::<_, _, OracleError<'_>>("manifest "), tag("manifests "))),
+                value((), alt((tag("them"), tag("those cards")))),
+            ))
+            .parse(lower.trim())
+            .is_ok()
+            {
+                // CR 701.40a + CR 608.2c: "manifest them" / "manifest those
+                // cards" (Ghastly Conscription, Jeskai Infiltrator, The Good
+                // Time Sleuth) — manifest the chain's already-formed
+                // face-down pile directly; no further selection is made, so
+                // `count` is inert (mirrors the analogous `Cloak` tracked-set
+                // arm, `parse_exile_pile_shuffle_cloak_ir`). CR 110.2a: the
+                // imperative "you" subject manifests, so each card enters
+                // under the instruction controller's control (Scryfall
+                // ruling: "If you manifest a card owned by an opponent ...").
+                Some(ImperativeFamilyAst::Manifest {
+                    target: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    from_zone: None,
+                    object_source: Some(TargetFilter::TrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                    }),
+                    enters_under: Some(ControllerRef::You),
                 })
             } else {
                 // CR 701.40a: "manifest a card from your hand" (Scroll of
@@ -11103,6 +11155,7 @@ pub(super) fn parse_imperative_family_ast(
                         target: TargetFilter::Controller,
                         count: QuantityExpr::Fixed { value: 1 },
                         from_zone: Some(Zone::Hand),
+                        object_source: None,
                         // CR 110.2a: the imperative "you" subject manifests, so
                         // the card enters under the instruction controller's
                         // control.
@@ -13283,6 +13336,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             target,
             count,
             from_zone: Some(zone),
+            object_source: _,
             enters_under,
         } => {
             let mut clause = parsed_clause(Effect::ChooseFromZone {
@@ -13591,19 +13645,22 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // carries no effect-specified face-down profile; `enters_under` records
         // the instruction-controller default. The put-form manifest may also
         // seed an effect-specified profile (see `lower_put_ast`).
-        // CR 701.40a: Manifest the top card(s) of a library. The from-hand
-        // form (`from_zone: Some`) is intercepted upstream in
+        // CR 701.40a: Manifest the top card(s) of a library, OR (when
+        // `object_source` is `Some`) the chain's already-formed tracked pile
+        // ("manifest them" / "manifest those cards"). The from-hand form
+        // (`from_zone: Some`) is intercepted upstream in
         // `lower_imperative_family_ast` (Cloak pattern); only the library-top
-        // source reaches here.
+        // and tracked-set sources reach here.
         ImperativeFamilyAst::Manifest {
             target,
             count,
+            object_source,
             enters_under,
             ..
         } => Effect::Manifest {
             target,
             count,
-            object_source: None,
+            object_source,
             profile: None,
             enters_under,
         },

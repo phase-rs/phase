@@ -6423,6 +6423,7 @@ fn parse_graveyard_exile_replacement(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
+    use crate::types::ability::RestrictionExpiry;
     use nom::sequence::preceded;
 
     // Scope of the subject's destination graveyard. Valid-card filter is keyed
@@ -6468,7 +6469,7 @@ fn parse_graveyard_exile_replacement(
         NonToken,
     }
 
-    let ((scope, token_scope, outcome, subject), _rest) =
+    let ((scope, token_scope, outcome, subject, window), _rest) =
         nom_on_lower(original_text, norm_lower, |i| {
             // Prefix: "if <subject> would be put into <scope> graveyard[ from anywhere], "
             let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
@@ -6524,6 +6525,22 @@ fn parse_graveyard_exile_replacement(
             ))
             .parse(i)?;
             let (i, _) = opt(tag(" from anywhere")).parse(i)?;
+            // CR 614.1a + CR 611.2a + CR 514.2: a stated window may sit INSIDE
+            // the antecedent — "if a card would be put into your graveyard from
+            // anywhere THIS TURN, exile that card instead" (Yawgmoth's Will /
+            // Gaea's Will / Magus of the Will). Captured as a typed `Duration`
+            // rather than dropped, because CR 611.2a makes an UNSTATED duration
+            // mean "until the end of the game": silently losing the window would
+            // turn a one-turn shield into a PERMANENT replacement.
+            //
+            // Positionally bound between `" from anywhere"` and `", "`, so no
+            // attribution heuristic is needed (contrast `stated_clause_expiry`,
+            // which owns TRAILING windows and gates on a prevention verb this
+            // grammar does not contain).
+            //
+            // `opt`-shaped and placed BEFORE outcome dispatch: a window-free
+            // clause reaches `tag(", ")` byte-identically.
+            let (i, window) = opt(preceded(tag(" "), parse_duration)).parse(i)?;
             let (i, _) = tag(", ").parse(i)?;
 
             // Outcome dispatch. The exile variant delegates to the shared
@@ -6554,7 +6571,10 @@ fn parse_graveyard_exile_replacement(
                 .parse(i)?
             };
 
-            Ok((i, (scope, token_scope, outcome, subject.to_string())))
+            Ok((
+                i,
+                (scope, token_scope, outcome, subject.to_string(), window),
+            ))
         })?;
 
     let subject = subject.trim();
@@ -6667,6 +6687,50 @@ fn parse_graveyard_exile_replacement(
     if let Some(filter) = valid_card {
         def = def.valid_card(filter);
     }
+
+    // CR 514.2 + CR 611.2a + CR 604.2: stamp the stated antecedent window onto
+    // `expiry`, the SINGLE AUTHORITY for when a replacement ends —
+    // `turns::execute_cleanup` reads that field and only that field, so a
+    // window captured but not stamped is a definition nothing can ever remove.
+    //
+    // A window-free clause keeps `expiry: None`, which is CORRECT for the
+    // CR 604.2 printed statics in this class (Rest in Peace, Leyline of the
+    // Void, Forbidden Crypt, Dauthi Voidwalker): a printed static's shield
+    // lasts as long as its object remains in the appropriate zone, and it
+    // states no window.
+    //
+    // Exhaustive over `Duration` with NO wildcard arm, mirroring
+    // `stated_clause_expiry`: a future `Duration` variant must break this build
+    // and force re-adjudication rather than silently falling through to
+    // "durable".
+    match window {
+        None => {}
+        // CR 514.2: "this turn" / "until end of turn" effects end during the
+        // cleanup step.
+        Some(Duration::UntilEndOfTurn) => def = def.expiry(RestrictionExpiry::EndOfTurn),
+        // CR 511.2: effects that last "until end of combat" expire at the end
+        // of the combat phase.
+        Some(Duration::UntilEndOfCombat) => def = def.expiry(RestrictionExpiry::EndOfCombat),
+        // CR 611.2a + CR 500.4: a parsed static replacement has no installation
+        // context from which to bind these player/step-relative windows.
+        // DECLINING the whole definition keeps coverage honest; mapping them to
+        // EndOfTurn would silently SHORTEN the card's stated duration. Same
+        // judgement as `stated_clause_expiry` and `expiry_from_duration`.
+        Some(Duration::UntilNextTurnOf { .. })
+        | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilNextStepOf { .. }) => return None,
+        // CR 604.2 + CR 611.2b: these end on an event or a condition rather
+        // than a turn window, so `expiry: None` is the CORRECT answer, not an
+        // unmapped one — stamping any turn expiry would cut them short.
+        Some(Duration::UntilHostLeavesPlay)
+        | Some(Duration::WhileControllingHost)
+        | Some(Duration::WhileHostOnBattlefield)
+        | Some(Duration::ForAsLongAs { .. })
+        | Some(Duration::UntilSourceExilesAnotherCard)
+        | Some(Duration::UntilOpponentBecomesMonarch)
+        | Some(Duration::Permanent) => {}
+    }
+
     Some(def)
 }
 

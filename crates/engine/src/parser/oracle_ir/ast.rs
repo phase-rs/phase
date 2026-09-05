@@ -772,6 +772,14 @@ pub(crate) enum ImperativeFamilyAst {
         /// to a `ChooseFromZone` parent + `Manifest { object_source }`
         /// sub-chain.
         from_zone: Option<Zone>,
+        /// CR 701.40a + CR 608.2c: when `Some`, manifest these SPECIFIC
+        /// objects directly with no further selection — "manifest them" /
+        /// "manifest those cards" (Ghastly Conscription, Jeskai Infiltrator),
+        /// which read the chain's already-formed face-down pile (an earlier
+        /// "exile ... in a face-down pile" step's published tracked set).
+        /// Mutually exclusive with `from_zone` (which still requires an
+        /// interactive choice); `None` preserves the two source forms above.
+        object_source: Option<TargetFilter>,
         /// CR 110.2a: Direct imperative manifest defaults to the instruction's
         /// controller; subject-predicate forms leave this unset so the subject's
         /// library owner controls the manifested card.
@@ -1664,6 +1672,12 @@ pub(crate) enum PutImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ShuffleImperativeAst {
+    /// CR 701.24a: Lowers straight to `Effect::Shuffle { target }`. `target`
+    /// is usually a player-resolving filter ("shuffle your library"), but
+    /// CR 608.2c's "shuffle that pile" / "shuffle those piles" reuses this
+    /// same variant with a `TrackedSet` sentinel target — the resolver's
+    /// `Effect::Shuffle` arm already dispatches on whether `target` names a
+    /// player or a tracked object set.
     ShuffleLibrary {
         target: TargetFilter,
     },

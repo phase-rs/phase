@@ -2004,6 +2004,43 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         return Some(def);
     }
 
+    // CR 611.2a + CR 514.2: Optional LEADING duration head — "Until end of
+    // turn, you may play lands and cast spells from your graveyard."
+    // (Yawgmoth's Will / Gaea's Will / Magus of the Will class). Without this
+    // head the whole permission body below is unreachable for any sentence
+    // that states its window up front; with it, the body is reachable under
+    // the ENTIRE duration grammar, not one hard-coded phrase.
+    //
+    // The phrase -> `Duration` mapping is owned by the single duration grammar
+    // (`oracle_nom::duration::parse_duration`); this site owns only the leading
+    // position and the ", " split. It is the general-duration sibling of the
+    // fixed "during your turn, " head immediately below.
+    //
+    // CR 611.2a's second sentence ("If no duration is stated, it lasts until
+    // the end of the game") is what makes the captured window load-bearing —
+    // but `StaticDefinition` has NO duration/expiry field, so there is no
+    // storage site at this layer. The value is therefore consumed and
+    // EXPLICITLY DISCARDED so the body below is reachable; its host is
+    // `Effect::GenericEffect { static_abilities, duration }`, and threading it
+    // there is deferred to a later phase. Measured safe: the cards carrying
+    // this shape reach the effect path rather than the static-line path, so
+    // this head produces no duration-less permission static today.
+    //
+    // CR 305.1 + CR 601.2a: the body below grants both the land play and the
+    // spell cast, so a single stated window scopes both halves.
+    //
+    // `opt`-shaped: text with no leading duration reaches the body
+    // byte-identically.
+    let lower = {
+        use crate::parser::oracle_nom::duration::parse_duration;
+        match nom_on_lower(lower, lower, |i| {
+            terminated(parse_duration, tag::<_, _, OracleError<'_>>(", ")).parse(i)
+        }) {
+            Some((_duration, rest)) => rest,
+            None => lower,
+        }
+    };
+
     // CR 117.1c: Optional "during your turn, " timing qualifier (Festival of
     // Embers). When present, the permission is gated to the source controller's
     // turn via a `ParsedCondition::IsYourTurn` static condition
