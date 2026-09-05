@@ -19302,7 +19302,7 @@ pub(crate) fn can_pay_ability_cost_now(
     )
 }
 
-/// CR 602.2a: Whether `player` may begin to activate an activated ability on
+/// CR 602.2: Whether `player` may begin to activate an activated ability on
 /// a permanent controlled by `source_controller`.
 fn player_may_begin_activating(
     state: &GameState,
@@ -19321,6 +19321,67 @@ fn player_may_begin_activating(
     }
 }
 
+/// CR 602.5 + CR 118.3: what the activation gate was asked to decide.
+///
+/// The gate has one body and two consumers. `Legality` is enforcement: it
+/// short-circuits at the CR 118.3 affordability exit, which is the cheapest
+/// correct answer for "may this be activated". `BlockReason` is the display
+/// read-out: it records the affordability verdict and CONTINUES into the
+/// target-legality tail, because "you can't pay for this" is only a truthful
+/// explanation once everything else about the activation is known to be legal.
+/// `BlockReason` is therefore strictly MORE work than `Legality`, which is why
+/// it lives behind a separate entry point (`ai_support::activation_block_reasons`)
+/// rather than a widened `legal_actions_full`.
+///
+/// **`Legal` is not authoritative under `BlockReason`.** That mode additionally
+/// declines the display carve-outs (costless / tap-only costs, and refusals that
+/// are structural rather than resource-based) by returning `Illegal` before the
+/// payability probe runs, so an affordable tap-only ability reports `Illegal`
+/// there. Only `CostNotPayableNow` carries meaning in that mode. Every
+/// enforcement caller must use `Legality`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationQuery {
+    /// Enforcement: may this player activate this ability right now?
+    Legality,
+    /// Display: is this ability being withheld SOLELY because the cost is
+    /// unpayable right now?
+    BlockReason,
+}
+
+/// CR 602.5 + CR 118.3: the activation gate's verdict.
+///
+/// `CostNotPayableNow` means every other activation requirement passed — the
+/// CR 602.5 prohibition statics, the activation zone (CR 602.1), the timing
+/// restrictions, CR 302.6 summoning sickness, the modal-mode count and target
+/// legality (CR 601.2c) — and only the CR 118.3 resource gate refused. Anything
+/// else that refuses yields `Illegal`, so a missing target can never be reported
+/// as a payment problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationVerdict {
+    /// The ability may be activated right now.
+    Legal,
+    /// The ability may not be activated, for a reason that is not a CR 118.3
+    /// resource shortfall (or for a shortfall under `ActivationQuery::Legality`,
+    /// which does not distinguish).
+    Illegal,
+    /// CR 118.3: legal in every other respect; the player cannot pay the
+    /// post-reduction activation cost right now.
+    CostNotPayableNow,
+}
+
+impl ActivationVerdict {
+    /// CR 118.3: combine the gate's non-cost legality with the affordability
+    /// flag. A `false` legality dominates — an ability that could not be
+    /// activated anyway is `Illegal`, never a payment complaint.
+    fn from_gate(legal_ignoring_cost: bool, cost_not_payable: bool) -> Self {
+        match (legal_ignoring_cost, cost_not_payable) {
+            (false, _) => ActivationVerdict::Illegal,
+            (true, true) => ActivationVerdict::CostNotPayableNow,
+            (true, false) => ActivationVerdict::Legal,
+        }
+    }
+}
+
 pub fn can_activate_ability_now(
     state: &GameState,
     player: PlayerId,
@@ -19331,6 +19392,9 @@ pub fn can_activate_ability_now(
     can_activate_ability_now_with_restriction_gates(state, player, source_id, ability_index, &gates)
 }
 
+/// CR 602.5: enforcement shim over [`activation_verdict`]. The verdict core is
+/// the single activation-legality authority; this preserves the shipped `bool`
+/// signature for its six call sites so display and enforcement can never drift.
 pub fn can_activate_ability_now_with_restriction_gates(
     state: &GameState,
     player: PlayerId,
@@ -19338,12 +19402,38 @@ pub fn can_activate_ability_now_with_restriction_gates(
     ability_index: usize,
     restriction_gates: &restrictions::ActivationRestrictionStaticGates,
 ) -> bool {
+    matches!(
+        activation_verdict(
+            state,
+            player,
+            source_id,
+            ability_index,
+            restriction_gates,
+            ActivationQuery::Legality,
+        ),
+        ActivationVerdict::Legal
+    )
+}
+
+/// CR 602.5 + CR 118.3: the one activation-legality evaluation, shared by
+/// enforcement (`ActivationQuery::Legality`) and the display read-out
+/// (`ActivationQuery::BlockReason`). See [`ActivationQuery`] for what the two
+/// modes do differently and why `Legal` is meaningless under `BlockReason`.
+pub(crate) fn activation_verdict(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    restriction_gates: &restrictions::ActivationRestrictionStaticGates,
+    query: ActivationQuery,
+) -> ActivationVerdict {
+    crate::game::perf_counters::record_activation_verdict_pass();
     let Some(obj) = state.objects.get(&source_id) else {
-        return false;
+        return ActivationVerdict::Illegal;
     };
     let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
     else {
-        return false;
+        return ActivationVerdict::Illegal;
     };
     if !player_may_begin_activating(
         state,
@@ -19351,12 +19441,12 @@ pub fn can_activate_ability_now_with_restriction_gates(
         obj.controller,
         ability_def.activator_filter.as_ref(),
     ) {
-        return false;
+        return ActivationVerdict::Illegal;
     }
     // CR 702.49: Ninjutsu-family marker abilities are not normal activated
     // abilities — they must route through `GameAction::ActivateNinjutsu`.
     if super::keywords::is_ninjutsu_family_marker_ability(&ability_def) {
-        return false;
+        return ActivationVerdict::Illegal;
     }
 
     // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
@@ -19364,17 +19454,17 @@ pub fn can_activate_ability_now_with_restriction_gates(
     if super::keywords::stack_has_split_second(state)
         && !super::mana_abilities::is_mana_ability(&ability_def)
     {
-        return false;
+        return ActivationVerdict::Illegal;
     }
 
     // CR 602.1: Check activation zone — default to battlefield.
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
     if obj.zone != required_zone {
-        return false;
+        return ActivationVerdict::Illegal;
     }
     // CR 701.35a: Detained permanents' activated abilities can't be activated.
     if !obj.detained_by.is_empty() {
-        return false;
+        return ActivationVerdict::Illegal;
     }
     // CR 702.170b + CR 116.2k + CR 602.1c: Plot is a SPECIAL ACTION, not an activated
     // ability, so the activated-ability prohibition gates must not block it. Mirrors
@@ -19391,14 +19481,14 @@ pub fn can_activate_ability_now_with_restriction_gates(
         // CR 605.1a: The ability definition is passed through so the prohibition can apply
         // its mana-ability exemption (Pithing Needle class) via the single classifier authority.
         if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
-            return false;
+            return ActivationVerdict::Illegal;
         }
         // CR 602.5 + CR 117.1b: Time-axis activation prohibition (City of Solitude class).
         if is_blocked_by_cant_activate_during(state, player, &ability_def) {
-            return false;
+            return ActivationVerdict::Illegal;
         }
         if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
-            return false;
+            return ActivationVerdict::Illegal;
         }
     }
     let is_loyalty_ability = ability_def
@@ -19420,7 +19510,7 @@ pub fn can_activate_ability_now_with_restriction_gates(
             ability_index,
             restriction_gates,
         ) {
-            return false;
+            return ActivationVerdict::Illegal;
         }
     } else if restrictions::check_activation_restrictions_with_static_gates(
         state,
@@ -19432,14 +19522,18 @@ pub fn can_activate_ability_now_with_restriction_gates(
     )
     .is_err()
     {
-        return false;
+        return ActivationVerdict::Illegal;
     }
     // CR 302.6 + CR 602.5a: Universal summoning-sickness gate for {T}/{Q} activated
     // abilities on creatures. Applies to every activated ability regardless of Oracle
     // text, so it lives as a structural helper rather than an ActivationRestriction.
+    //
+    // NOT an affordability failure, even though it reads like one: the source's
+    // summoning sickness is already published on `GameObject::has_summoning_sickness`
+    // and rendered on the card face, so the player is already told. `Illegal`.
     if let Some(ref cost) = ability_def.cost {
         if restrictions::check_summoning_sickness_for_cost(state, obj, cost).is_err() {
-            return false;
+            return ActivationVerdict::Illegal;
         }
     }
     // CR 601.2f: Apply self-referential cost reduction before affordability check.
@@ -19448,61 +19542,111 @@ pub fn can_activate_ability_now_with_restriction_gates(
         .cost
         .clone()
         .map(|cost| activation_cost_for_affordability(cost, ability_def.ability_tag));
-    if affordability_cost.as_ref().is_some_and(|cost| {
+
+    // CR 118.3 read-out declinations, placed BEFORE the payability probe so
+    // these abilities never reach `costs::can_pay`'s dry-run clone.
+    //   (a) `cost_conclusively_payable_by_cheap_gate` — BOTH its arms:
+    //       `None` (no cost at all, so never unaffordable) and a tap/untap-ONLY
+    //       cost, whose payability is decided by the source's rotation state,
+    //       which the card already carries on its face. Do not restate this
+    //       predicate as "tap/untap-only", which omits `None`.
+    //   (b) CR 118.3: a cost whose refusal is STRUCTURAL rather than a resource
+    //       shortfall is not "not payable RIGHT NOW" — this engine's payment
+    //       authority cannot resolve the shape at all, so the refusal holds on
+    //       every board, at any life and mana total. See
+    //       `payability_verdict_is_resource_based`. ~49 shipped cards carry such
+    //       a cost.
+    if query == ActivationQuery::BlockReason
+        && (super::mana_sources::cost_conclusively_payable_by_cheap_gate(&affordability_cost)
+            || affordability_cost
+                .as_ref()
+                .is_some_and(|cost| !cost.payability_verdict_is_resource_based()))
+    {
+        return ActivationVerdict::Illegal;
+    }
+    // CR 118.3: the resource-availability gate — the ONE evaluation.
+    let cost_not_payable = affordability_cost.as_ref().is_some_and(|cost| {
         !can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index))
-    }) {
-        return false;
+    });
+    if cost_not_payable && query == ActivationQuery::Legality {
+        return ActivationVerdict::Illegal;
     }
 
-    if let Some(ref modal) = ability_def.modal {
-        if affordability_cost.as_ref().is_some_and(requires_untapped) && obj.tapped {
-            return false;
-        }
-        return modal.mode_count > 0;
+    // CR 118.3: a modal ability whose cost needs the source untapped, on a
+    // tapped source. NOT an affordability read-out: it is a modal-activation
+    // restriction that the source's rotation already communicates on the card
+    // face, and it is a strict sub-case of the tap/untap carve-out above.
+    if ability_def.modal.is_some()
+        && affordability_cost.as_ref().is_some_and(requires_untapped)
+        && obj.tapped
+    {
+        return ActivationVerdict::Illegal;
     }
 
-    // CR 608.2 + CR 109.5: Build via the canonical helper so target-slot
-    // collection sees `multi_target`, `target_choice_timing`, `player_scope`,
-    // and the rest of the ability surface that affects legality. Mirrors the
-    // spell-cast path fix from issue #310.
-    let resolved = build_resolved_from_def(&ability_def, source_id, player);
+    let legal_ignoring_cost = if let Some(ref modal) = ability_def.modal {
+        modal.mode_count > 0
+    } else {
+        // CR 608.2 + CR 109.5: Build via the canonical helper so target-slot
+        // collection sees `multi_target`, `target_choice_timing`, `player_scope`,
+        // and the rest of the ability surface that affects legality. Mirrors the
+        // spell-cast path fix from issue #310.
+        let resolved = build_resolved_from_def(&ability_def, source_id, player);
 
-    let mut simulated = state.clone();
-    super::layers::flush_layers(&mut simulated);
+        // CR 613.1: an object's characteristics are determined by starting with
+        // the actual object, so when `layers_dirty` is clean the live state IS
+        // the flushed state and cloning it would produce a byte-identical copy.
+        // Clone only when there are unapplied continuous effects. The clone is
+        // counted, which it was not before — no budget test could previously
+        // see it.
+        let flushed_owned;
+        let simulated: &GameState = if state.layers_dirty.is_dirty() {
+            crate::game::perf_counters::record_activation_verdict_flush_clone();
+            flushed_owned = {
+                let mut flushed = state.clone();
+                super::layers::flush_layers(&mut flushed);
+                flushed
+            };
+            &flushed_owned
+        } else {
+            state
+        };
 
-    if let Some(has_target) = simple_legal_target_assignment_exists_for_ability(
-        &simulated,
-        &resolved,
-        &ability_def.target_constraints,
-    ) {
-        return has_target;
-    }
-
-    match build_target_slots_for_announcement(&simulated, &resolved) {
-        Ok(TargetSlotBuildOutcome::Slots(target_slots)) => {
-            if target_slots.is_empty() {
-                return true;
+        if let Some(has_target) = simple_legal_target_assignment_exists_for_ability(
+            simulated,
+            &resolved,
+            &ability_def.target_constraints,
+        ) {
+            has_target
+        } else {
+            match build_target_slots_for_announcement(simulated, &resolved) {
+                Ok(TargetSlotBuildOutcome::Slots(target_slots)) => {
+                    if target_slots.is_empty() {
+                        true
+                    } else if ability_def.target_constraints.is_empty() && target_slots.len() == 1 {
+                        target_slots[0].optional || !target_slots[0].legal_targets.is_empty()
+                    } else {
+                        has_legal_target_assignment_for_ability(
+                            simulated,
+                            &resolved,
+                            &target_slots,
+                            &ability_def.target_constraints,
+                        )
+                    }
+                }
+                Ok(TargetSlotBuildOutcome::RequiresChosenX) => {
+                    ability_def.cost.as_ref().is_some_and(|cost| {
+                        casting_costs::extract_x_mana_cost(cost).is_some()
+                            || find_non_self_sacrifice_cost(cost)
+                                .is_some_and(|(count, _)| count == u32::MAX)
+                            || casting_costs::activation_cost_needs_x_choice(&resolved, cost)
+                    })
+                }
+                Err(_) => false,
             }
-            if ability_def.target_constraints.is_empty() && target_slots.len() == 1 {
-                return target_slots[0].optional || !target_slots[0].legal_targets.is_empty();
-            }
-            has_legal_target_assignment_for_ability(
-                &simulated,
-                &resolved,
-                &target_slots,
-                &ability_def.target_constraints,
-            )
         }
-        Ok(TargetSlotBuildOutcome::RequiresChosenX) => {
-            ability_def.cost.as_ref().is_some_and(|cost| {
-                casting_costs::extract_x_mana_cost(cost).is_some()
-                    || find_non_self_sacrifice_cost(cost)
-                        .is_some_and(|(count, _)| count == u32::MAX)
-                    || casting_costs::activation_cost_needs_x_choice(&resolved, cost)
-            })
-        }
-        Err(_) => false,
-    }
+    };
+
+    ActivationVerdict::from_gate(legal_ignoring_cost, cost_not_payable)
 }
 
 /// CR 608.2c: Evaluate an activated ability's intervening-if `condition` against
@@ -19780,8 +19924,8 @@ fn try_finalize_activation_mana_payment_from_root(
 }
 
 /// CR 602.2: To activate an ability is to put it onto the stack and pay its costs.
-/// CR 602.2a: Only an object's controller can activate its activated ability unless
-/// the object specifically says otherwise.
+/// Only an object's controller (or its owner, if it doesn't have a controller) can
+/// activate its activated ability unless the object specifically says otherwise.
 pub fn handle_activate_ability(
     state: &mut GameState,
     player: PlayerId,
@@ -19794,7 +19938,7 @@ pub fn handle_activate_ability(
         .get(&source_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
 
-    // CR 602.2a: Only players permitted by `activator_filter` may begin activation.
+    // CR 602.2: Only players permitted by `activator_filter` may begin activation.
     let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
     else {
         return Err(EngineError::InvalidAction(
@@ -21909,6 +22053,47 @@ pub(super) fn activation_prohibition_reason(
     cant_be_activated_reason(state, player, source_id, ability)
         .or_else(|| cant_activate_during_reason(state, player, ability))
         .or_else(|| cant_activate_abilities_reason(state, player, ability))
+}
+
+/// CR 118.3: display read-out for an activated ability that is legal in every
+/// respect EXCEPT that the acting player can't pay its post-reduction
+/// activation cost right now.
+///
+/// The payability sibling of [`activation_prohibition_reason`], and the same
+/// shape: display-only, no enforcement authority. Both are `.is_some()`-shaped
+/// views over the shared `activation_verdict` core, so the read-out and the
+/// enforcement bool are the SAME evaluation and cannot drift.
+///
+/// `sources` is always empty — CR 118.3 is about the player's own resources,
+/// so no external object prohibits the activation (contrast the CR 602.5 arms,
+/// which name their prohibiting permanents).
+///
+/// Consumed only by `ai_support::activation_block_reasons`. Enforcement keeps
+/// calling `can_activate_ability_now_with_restriction_gates` and is never
+/// routed through this.
+pub(crate) fn activation_cost_block_reason(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    restriction_gates: &restrictions::ActivationRestrictionStaticGates,
+) -> Option<AbilityBlockReason> {
+    // Exhaustive, no wildcard: a future `ActivationVerdict` arm must be
+    // classified deliberately rather than silently falling into "no read-out".
+    match activation_verdict(
+        state,
+        player,
+        source_id,
+        ability_index,
+        restriction_gates,
+        ActivationQuery::BlockReason,
+    ) {
+        ActivationVerdict::CostNotPayableNow => Some(AbilityBlockReason {
+            sources: Vec::new(),
+            kind: AbilityBlockKind::CostNotPayableNow,
+        }),
+        ActivationVerdict::Legal | ActivationVerdict::Illegal => None,
+    }
 }
 
 /// CR 101.2: Check if any CantBeCast static on the battlefield prevents

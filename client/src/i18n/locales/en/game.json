@@ -3,7 +3,8 @@
     "badge": "Blocked",
     "cantBeActivated": "This ability can't be activated",
     "cantActivateDuring": "Can't be activated right now",
-    "prohibited": "Activating this ability is prohibited"
+    "prohibited": "Activating this ability is prohibited",
+    "costNotPayableNow": "You can't pay this cost right now"
   },
   "manaSourceSelection": {
     "title": "Choose a mana source",

@@ -3,7 +3,8 @@
     "badge": "Bloquée",
     "cantBeActivated": "Cette capacité ne peut pas être activée",
     "cantActivateDuring": "Ne peut pas être activée pour l'instant",
-    "prohibited": "L'activation de cette capacité est interdite"
+    "prohibited": "L'activation de cette capacité est interdite",
+    "costNotPayableNow": "Vous ne pouvez pas payer ce coût pour le moment"
   },
   "manaSourceSelection": { "title": "Choisir une source de mana", "description": "Cette capacité de mana demande de sacrifier un permanent.", "sacrifice": "Sacrifier", "back": "Retour au paiement de mana", "unknownSource": "Source de mana" },
   "comboShortcut": {

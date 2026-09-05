@@ -21,9 +21,11 @@ use crate::game::layers;
 use crate::game::mana_abilities;
 use crate::game::mana_payment;
 use crate::game::mana_sources;
+use crate::game::restrictions;
 use crate::game::triggers;
 use crate::types::ability::{
-    AbilityKind, CounterCostSelection, TapCreaturesSelectionMode, TargetRef, TriggerDefinition,
+    AbilityBlockEntry, AbilityKind, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
+    TriggerDefinition,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
@@ -2494,6 +2496,295 @@ pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalAct
         legal_actions_full(state)
     } else {
         (Vec::new(), HashMap::new(), HashMap::new())
+    }
+}
+
+/// CR 118.3: maximum TOTAL read-out entries summed across every object bucket
+/// in one `activation_block_reasons` result.
+///
+/// **On the total, NOT the key count.** The map is vector-valued
+/// (`ObjectId -> Vec<AbilityBlockEntry>`), so its correct sibling is
+/// `MAX_SNAPSHOT_LEGAL_ACTIONS_BY_OBJECT_TOTAL`, whose guard sums
+/// `map.values().map(Vec::len).sum()` — NOT `MAX_SNAPSHOT_SPELL_COSTS`, which is
+/// a key-count bound and is complete only because `spell_costs` holds one scalar
+/// per key. A key-count bound here would leave every per-object vector
+/// unbounded, which is the exact failure class this read-out's design exists to
+/// avoid.
+///
+/// The bound lives in the ENGINE rather than in `server-core`'s wire guard
+/// because the guard returns `Result` and a broadcast site drops the whole
+/// message on `Err` — so a bound on a DISPLAY map could suppress a FUNCTIONAL
+/// broadcast. `activation_block_reasons` truncates and returns a map instead:
+/// it has no failure mode, so that path is never constructed. CLAUDE.md also
+/// puts logic in the engine and keeps the transport a serialization boundary.
+///
+/// The value is generous by design: the read-out covers ONE seat across five
+/// zones, so a real board produces tens of entries, not thousands.
+pub const MAX_ACTIVATION_BLOCK_TOTAL: usize = 1_000;
+
+/// CR 118.3: collect one object's unaffordable non-mana activated abilities.
+///
+/// Mirrors the per-object filter shape of the five enforcement loops in
+/// `candidates.rs::priority_actions_with_probe` — `AbilityKind::Activated`, the
+/// per-zone `activation_zone` filter, and `!is_mana_ability` — so the read-out's
+/// population is a subset of the population the enforcement gate decides. The
+/// two traversals are parallel by construction (see `activation_block_reasons`);
+/// only the loop structure is duplicated, never the authority.
+fn collect_activation_block_reasons_for_object(
+    state: &GameState,
+    player: PlayerId,
+    gates: &restrictions::ActivationRestrictionStaticGates,
+    obj_id: ObjectId,
+    required_activation_zone: Option<Zone>,
+    examined: &mut usize,
+    out: &mut HashMap<ObjectId, Vec<AbilityBlockEntry>>,
+) {
+    let mut entries: Vec<AbilityBlockEntry> = Vec::new();
+    for (ability_index, ability_def) in casting::activated_ability_definitions(state, obj_id) {
+        if ability_def.kind != AbilityKind::Activated {
+            continue;
+        }
+        if let Some(zone) = required_activation_zone {
+            if ability_def.activation_zone != Some(zone) {
+                continue;
+            }
+        }
+        // CR 605.1a: mana abilities are a different class decided by a different
+        // authority (`mana_abilities::can_activate_mana_ability_now`), which
+        // shares no code with the activation gate. Excluding them is what keeps
+        // the read-out's population a strict subset of the population
+        // `casting::activation_verdict` decides, so the two authorities are
+        // never asked the same question and cannot disagree. Byte-identical to
+        // the `!is_mana_ability` conjunct at all five enforcement sites.
+        if mana_abilities::is_mana_ability(&ability_def) {
+            continue;
+        }
+        *examined += 1;
+        if let Some(reason) =
+            casting::activation_cost_block_reason(state, player, obj_id, ability_index, gates)
+        {
+            entries.push(AbilityBlockEntry {
+                ability_index,
+                reason,
+            });
+        }
+    }
+    if !entries.is_empty() {
+        out.insert(obj_id, entries);
+    }
+}
+
+/// CR 118.3 + CR 602.5: per-object read-out of activated abilities the acting
+/// player is NOT being offered solely because they can't pay the cost right now.
+///
+/// TRANSPORT CALLERS MUST USE [`activation_block_reasons_for_viewer`].
+///
+/// CR 117.1: this function is UNSCOPED. It returns the acting player's read-out
+/// regardless of who is asking. It is `pub` only for the viewer-less
+/// `engine-wasm` entry point (`get_legal_actions_js`), a single-player local
+/// surface with exactly one recipient. Publishing this map from a
+/// multi-recipient transport leaks a controller-relative payability read-out to
+/// opponents — the disclosure defect this design exists to avoid.
+///
+/// Deliberately NOT part of `LegalActionsFull`. Learning the reason requires
+/// running the target-legality tail that `ActivationQuery::Legality`
+/// short-circuits past at the CR 118.3 exit, so this is strictly more work than
+/// enforcement needs. `server-core::session`, the three `phase-ai` policies and
+/// `legal_actions_bench` call `legal_actions_full` and must never pay for it —
+/// a separate entry point is how they don't. Same split as
+/// `flat_priority_actions` deliberately doing less than `legal_actions_full`.
+///
+/// CR 117.1b — "A player may activate an activated ability any time they have
+/// priority" — is why this is gated on `WaitingFor::Priority` rather than
+/// computed on every tick: an activated ability can ONLY be activated at
+/// priority, so an explanation of why you cannot activate one is only
+/// actionable in that window. The gate is the rule, not an optimisation.
+///
+/// Scoped to the acting player across the same five zones and behind the same
+/// `obj.controller == player` / `!is_mana_ability` filters as the enforcement
+/// sites in `candidates.rs`, so an entry can only ever describe an object the
+/// viewer controls.
+///
+/// Bounded by [`MAX_ACTIVATION_BLOCK_TOTAL`]. Returns a map, never a `Result`.
+pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<AbilityBlockEntry>> {
+    // CR 117.1b: only actionable at priority.
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        return HashMap::new();
+    };
+    let player = *player;
+
+    // CR 613.1: the read-out must be produced from the SAME state binding the
+    // offered actions come from, or `activated_ability_definitions`'
+    // layer-sensitive ability indices disagree with the indices the offered
+    // `GameAction::ActivateAbility`s carry. Same layers-flush handling
+    // `legal_actions_full` uses, and the same counter, so the once-per-call
+    // whole-state clone is visible to a clone-budget measurement.
+    let flushed_owned;
+    let state: &GameState = if state.layers_dirty.is_dirty() {
+        crate::game::perf_counters::record_priority_cast_probe_state_clone();
+        flushed_owned = {
+            let mut flushed = state.clone();
+            layers::flush_layers(&mut flushed);
+            flushed
+        };
+        &flushed_owned
+    } else {
+        state
+    };
+
+    // Hoisted once, exactly as `candidates.rs::priority_actions_with_probe`
+    // hoists it for the five enforcement loops.
+    let gates = restrictions::ActivationRestrictionStaticGates::compute(state);
+    let mut blocked: HashMap<ObjectId, Vec<AbilityBlockEntry>> = HashMap::new();
+    let mut examined = 0usize;
+
+    // The same five zones, with the same filters, as the five enforcement sites
+    // in `candidates.rs::priority_actions_with_probe`. A comment there names
+    // this traversal; sharing one traversal between them would touch the AI
+    // search hot path and is deliberately out of scope.
+
+    // CR 602.2: "Only an object's controller (or its owner, if it doesn't have a
+    // controller) can activate its activated ability" — battlefield, therefore
+    // controller-scoped, with no `activation_zone` filter
+    // (the gate itself checks `obj.zone != required_zone`).
+    for &obj_id in &state.battlefield {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if obj.controller == player {
+                collect_activation_block_reasons_for_object(
+                    state,
+                    player,
+                    &gates,
+                    obj_id,
+                    None,
+                    &mut examined,
+                    &mut blocked,
+                );
+            }
+        }
+    }
+
+    // CR 408.3: the command zone holds specially designated cards only in the
+    // casual variants that define them (Commander, Planechase, ...), so this
+    // scan costs formats without one nothing.
+    if state.format_config.command_zone {
+        for &obj_id in &state.command_zone {
+            if let Some(obj) = state.objects.get(&obj_id) {
+                if obj.controller == player {
+                    collect_activation_block_reasons_for_object(
+                        state,
+                        player,
+                        &gates,
+                        obj_id,
+                        None,
+                        &mut examined,
+                        &mut blocked,
+                    );
+                }
+            }
+        }
+    }
+
+    // CR 602.1: hand-activated abilities (Cycling per CR 702.29a, etc.).
+    for &obj_id in &state.players[player.0 as usize].hand {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if obj.controller == player {
+                collect_activation_block_reasons_for_object(
+                    state,
+                    player,
+                    &gates,
+                    obj_id,
+                    Some(Zone::Hand),
+                    &mut examined,
+                    &mut blocked,
+                );
+            }
+        }
+    }
+
+    // CR 113.6b + CR 602.2: graveyard-activated abilities.
+    for &obj_id in &state.players[player.0 as usize].graveyard {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if obj.controller == player {
+                collect_activation_block_reasons_for_object(
+                    state,
+                    player,
+                    &gates,
+                    obj_id,
+                    Some(Zone::Graveyard),
+                    &mut examined,
+                    &mut blocked,
+                );
+            }
+        }
+    }
+
+    // CR 702.170b: the plot special action on the top card of this player's own
+    // library. Player-scoped BY CONSTRUCTION (it is the top of that player's
+    // library), not by an `obj.controller` filter — the same shape the fifth
+    // enforcement site has.
+    if let Some((top_id, _src_id)) = casting::top_of_library_plot_source(state, player) {
+        collect_activation_block_reasons_for_object(
+            state,
+            player,
+            &gates,
+            top_id,
+            Some(Zone::Library),
+            &mut examined,
+            &mut blocked,
+        );
+    }
+
+    crate::game::perf_counters::record_activation_block_display_abilities_examined(examined);
+
+    truncate_activation_block_reasons(blocked)
+}
+
+/// CR 118.3: enforce [`MAX_ACTIVATION_BLOCK_TOTAL`] on the TOTAL entry count
+/// across every bucket, deterministically.
+///
+/// Truncation walks objects in `ObjectId` order and abilities in
+/// `ability_index` order, so the same board truncates identically for every
+/// recipient and across repeated calls. Returns a map and cannot fail.
+fn truncate_activation_block_reasons(
+    mut blocked: HashMap<ObjectId, Vec<AbilityBlockEntry>>,
+) -> HashMap<ObjectId, Vec<AbilityBlockEntry>> {
+    let total: usize = blocked.values().map(Vec::len).sum();
+    if total <= MAX_ACTIVATION_BLOCK_TOTAL {
+        return blocked;
+    }
+    let mut ids: Vec<ObjectId> = blocked.keys().copied().collect();
+    ids.sort_unstable();
+    let mut remaining = MAX_ACTIVATION_BLOCK_TOTAL;
+    let mut truncated: HashMap<ObjectId, Vec<AbilityBlockEntry>> = HashMap::new();
+    for id in ids {
+        if remaining == 0 {
+            break;
+        }
+        let Some(mut entries) = blocked.remove(&id) else {
+            continue;
+        };
+        entries.sort_unstable_by_key(|entry| entry.ability_index);
+        entries.truncate(remaining);
+        remaining -= entries.len();
+        if !entries.is_empty() {
+            truncated.insert(id, entries);
+        }
+    }
+    truncated
+}
+
+/// CR 117.1: viewer-scoped sibling of [`activation_block_reasons`], mirroring
+/// `legal_actions_for_viewer` — empty for any viewer without action authority.
+///
+/// This is the entry point every multi-recipient transport must call.
+pub fn activation_block_reasons_for_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+) -> HashMap<ObjectId, Vec<AbilityBlockEntry>> {
+    if crate::game::turn_control::is_authorized_submitter(state, viewer) {
+        activation_block_reasons(state)
+    } else {
+        HashMap::new()
     }
 }
 

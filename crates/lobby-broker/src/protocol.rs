@@ -38,6 +38,19 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 62 — `ServerMessage::{GameStarted, StateUpdate}` gained
+///      `activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>` —
+///      the CR 118.3 "you can't pay this cost right now" read-out, scoped to the
+///      acting player and empty for everyone else. It carries
+///      `#[serde(default, skip_serializing_if = "HashMap::is_empty")]`, so a v61
+///      payload reads as the absent/empty map it always meant. The break is the
+///      other direction, and it is over-determined: `AbilityBlockKind` is
+///      `#[serde(tag = "type")]`, so the new `CostNotPayableNow` arm emits a TAG
+///      VALUE no v61 peer has a case for — a v61 Rust peer fails to deserialize
+///      the entry, and a v61 client indexes its reason-key record with an
+///      unknown member and renders `t(undefined)`. New tag, not merely a new
+///      field, so the bump does not rest on the serde attributes above.
+///
 /// 61 — `Effect::ChooseCounterKind` gained `domain: CounterKindDomain` and
 ///      `chooser: CounterKindChooser` — the population a counter-kind choice
 ///      draws its legal kinds from, and whether the GAME draws one at random
@@ -317,7 +330,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 61;
+pub const PROTOCOL_VERSION: u32 = 62;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1063,12 +1076,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 61);
+        assert_eq!(PROTOCOL_VERSION, 62);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 60);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 61);
     }
 
     #[test]

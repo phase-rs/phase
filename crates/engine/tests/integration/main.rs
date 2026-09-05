@@ -8,6 +8,8 @@
 mod source_census;
 
 mod abigale_integration;
+mod ability_block_display_clone_gate;
+mod ability_cost_block_readout;
 mod abundance_optional_draw_replacement;
 mod action_rejection;
 mod ad_nauseam_repeat;

@@ -38,6 +38,7 @@ export function clearPromptOverlayState(): void {
     manaPaymentShortcutActions: [],
     spellCosts: {},
     legalActionsByObject: {},
+    activationBlockReasons: {},
     restoredStackAutomation: null,
   });
   useUiStore.getState().setPendingAbilityChoice(null);

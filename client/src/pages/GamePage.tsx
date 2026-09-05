@@ -176,12 +176,16 @@ import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
+import { ABILITY_BLOCK_REASON_KEY } from "../viewmodel/abilityBlockReason.ts";
 import {
   abilityChoiceLabel,
+  abilityLabel,
   formatAbilityCost,
   loyaltyBadge,
+  stripCostPrefix,
   stripLoyaltyCostPrefix,
 } from "../viewmodel/costLabel.ts";
+import { renderDescription } from "../utils/description.ts";
 import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
 import {
   getCastableZoneViewerTarget,
@@ -3293,6 +3297,16 @@ function AbilityChoiceModal() {
     (s) => s.gameState?.derived?.room_half_identities,
   );
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  // CR 118.3: the engine-authored "can't pay this cost right now" read-out.
+  // Read from the store slice (not from `uiStore.pendingAbilityChoice`) so the
+  // rows stay live against the current state rather than latched to whatever
+  // was true when the choice was queued.
+  // `?? {}` is load-bearing, not defensive noise: a store SNAPSHOT that predates
+  // this slice (a restored session, or any consumer holding an older store
+  // shape) yields `undefined`, and subscripting it would crash the whole game
+  // page for a display-only feature. Mirrors `legalResultState`'s own
+  // `result.activationBlockReasons ?? {}` default.
+  const activationBlockReasons = useGameStore((s) => s.activationBlockReasons) ?? {};
 
   if (!pending || !obj) return null;
 
@@ -3332,7 +3346,8 @@ function AbilityChoiceModal() {
       subtitle={subtitle}
       previewCardName={obj.name}
       previewCardTypes={obj.card_types}
-      options={pending.actions.map((action, i) => {
+      options={[
+        ...pending.actions.map((action, i) => {
         let { label, description } = abilityChoiceLabel(
           action,
           obj,
@@ -3360,16 +3375,62 @@ function AbilityChoiceModal() {
             // badge already expresses its cost, so keeping the effect in the
             // secondary description would visually detach it from that badge.
             label: description ?? stripLoyaltyCostPrefix(label),
-            labelTone: "secondary",
+            // `as const`: a spread element no longer receives `ChoiceOption[]`
+            // as its contextual type, so this would otherwise widen to `string`.
+            labelTone: "secondary" as const,
             icon: (
               <LoyaltyBadge amount={badge.amount} kind="cost" />
             ),
           };
         }
         return { id: String(i), label, description };
-      })}
+        }),
+        // CR 118.3: display-only rows for abilities the engine is withholding
+        // solely because the cost is unpayable right now. Appended AFTER the
+        // action rows so the positional `id = String(i)` <-> `pending.actions[Number(id)]`
+        // contract above is preserved byte-for-byte.
+        //
+        // No de-duplication against the offered rows is needed: the engine's
+        // read-out and its offered set are produced by the SAME
+        // `activation_verdict` core, so an ability is in exactly one of them.
+        ...(activationBlockReasons[String(pending.objectId)] ?? []).map((entry) => {
+          // CR 201.5: `~` is the engine's self-reference token; bind it to the
+          // host object, the idiom both shipped consumers use. A runtime-granted
+          // index has no printed description, so the row falls back to the
+          // reason alone (matching `PermanentCard`'s badge).
+          const ability = entry.ability_index < obj.abilities.length
+            ? obj.abilities[entry.ability_index]
+            : undefined;
+          const reason = t(ABILITY_BLOCK_REASON_KEY[entry.type]);
+          // Same label/description split the OFFERED rows above get from
+          // `abilityChoiceLabel` (`costLabel.ts`: `abilityLabel` for the label,
+          // `stripCostPrefix` for the description). A blocked `{3}` and an
+          // offered `{3}` therefore render identically in the same list and
+          // differ only by the disabled styling — which is the comparison the
+          // reported defect is about, since the card face shows both. Reusing
+          // the shipped helpers rather than re-deriving the split here keeps the
+          // two row kinds from drifting apart. `RichLabel` inside `ChoiceModal`
+          // renders `{3}` as a real mana pip, so no cost plumbing is needed.
+          const effect = ability?.description
+            ? renderDescription(stripCostPrefix(ability.description), obj.name)
+            : undefined;
+          return {
+            id: `blocked:${entry.ability_index}`,
+            label: ability ? renderDescription(abilityLabel(ability), obj.name) : reason,
+            description: effect ? `${effect} — ${reason}` : ability ? reason : undefined,
+            disabled: true,
+          };
+        }),
+      ]}
       onChoose={(id) => {
-        dispatch(pending.actions[Number(id)]);
+        // CR 118.3: blocked rows are display-only and carry a non-numeric id.
+        // Without this guard `Number("blocked:0")` is `NaN`, so
+        // `pending.actions[NaN]` is `undefined` and a malformed dispatch
+        // reaches the engine.
+        if (id.startsWith("blocked:")) return;
+        const action = pending.actions[Number(id)];
+        if (!action) return;
+        dispatch(action);
         setPending(null);
       }}
       onClose={() => setPending(null)}

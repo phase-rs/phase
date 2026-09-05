@@ -3838,9 +3838,16 @@ pub enum ProhibitedActivity {
 
 /// Why a specific activated ability is currently blocked from activation.
 ///
-/// Display read-out only (populated by the derive sweep): carries no enforcement
-/// authority. The three arms mirror the three enforcement predicates in
-/// `game::casting`, in the same order those gates consult them.
+/// Display read-out only: carries no enforcement authority.
+///
+/// **Two channels, one enum.** The first three arms mirror the three CR 602.5
+/// enforcement predicates in `game::casting`, in the order those gates consult
+/// them, and are published on `GameObject::blocked_abilities` by the
+/// `derived.rs` sweep. The fourth arm mirrors the CR 118.3 affordability gate
+/// that follows them in the same function, and is published on the
+/// legal-actions payload for the acting player only — see
+/// `ai_support::activation_block_reasons`. A consumer of one channel will never
+/// observe the other's kinds; the object field is NOT missing the fourth arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AbilityBlockKind {
@@ -3853,6 +3860,31 @@ pub enum AbilityBlockKind {
     /// CR 602.5: A temporary continuous effect prohibits this activity axis for
     /// the affected players (Kang-class `ProhibitActivity`).
     Prohibited,
+    /// CR 118.3: The player can't pay this ability's activation cost right now —
+    /// they lack the necessary resources ("a player with only 1 life can't pay a
+    /// cost of 2 life"). Every other activation requirement is satisfied: the
+    /// CR 602.5 prohibitions above, the zone, the timing restrictions, CR 302.6
+    /// summoning sickness and target legality all passed.
+    ///
+    /// CR 602.2b + CR 601.2f: the cost weighed is the POST-REDUCTION activation
+    /// cost — CR 602.2b makes an activated ability's activation cost the analog
+    /// of a spell's mana cost "as referenced in rule 601.2f", so the gate applies
+    /// cost reduction before asking whether the player can pay.
+    ///
+    /// `sources` is always empty for this arm: a resource shortfall is a property
+    /// of the player's own board, so no external object prohibits it.
+    ///
+    /// **The name deliberately avoids CR 118.6's "unpayable".** CR 118.6 makes
+    /// that a term of art for a cost that can NEVER be paid (an object with no
+    /// mana cost, or a cost derived from one); this arm is the opposite — a
+    /// shortfall *right now*, which more mana or more life clears. The
+    /// distinction is enforced by `AbilityCost::payability_verdict_is_resource_based`,
+    /// which keeps refusals that are structural rather than resource-based out of
+    /// this arm.
+    ///
+    /// Published only on the legal-actions payload (see the two-channel note on
+    /// this enum), never on `GameObject::blocked_abilities`.
+    CostNotPayableNow,
 }
 
 /// A block reason paired with every prohibiting source object of this kind.
@@ -3860,6 +3892,9 @@ pub enum AbilityBlockKind {
 pub struct AbilityBlockReason {
     /// CR 602.5: sorted, deduped permanents whose static/effect each independently
     /// impose this block kind (two Pithing Needles naming the same card → both).
+    ///
+    /// CR 118.3: empty for `AbilityBlockKind::CostNotPayableNow` — a resource
+    /// shortfall has no prohibiting source object.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<ObjectId>,
     #[serde(flatten)]
@@ -12193,6 +12228,123 @@ impl AbilityCost {
             | AbilityCost::KeywordCostOfCastSpell { .. }
             | AbilityCost::GetPlayerCounters { .. }
             | AbilityCost::Unimplemented { .. } => false,
+        }
+    }
+
+    /// CR 118.3: `true` when a `false` from `costs::can_pay` for this cost is a
+    /// statement about the player's RESOURCES right now — the thing
+    /// `AbilityBlockKind::CostNotPayableNow` claims. `false` when the refusal is
+    /// structural: the payment authority cannot resolve this cost shape at all,
+    /// so the refusal holds forever, on every board, at any life and mana total.
+    ///
+    /// **The structural arms are NOT CR 118.6 cases and this doc does not claim
+    /// they are.** CR 118.6 is about *objects with no mana cost* — a property of
+    /// the card. `Unimplemented`, an unexpanded `PerCounter`, and an `EffectCost`
+    /// shape outside `supports_effect_cost_payment` are limits of **this engine's
+    /// payment authority**, which CR 118.6 says nothing about. What IS borrowed
+    /// from CR 118.6 is only the *distinction it names* — never-payable versus a
+    /// shortfall right now — and that distinction is why the variant must not be
+    /// called `UnpayableCost`. The distinction is the citation's whole job here.
+    ///
+    /// Exhaustive with no wildcard so a new `AbilityCost` variant forces a
+    /// deliberate decision, mirroring `all_components_cheap_gate_covered` above.
+    ///
+    /// THIRD OBLIGATION on `supports_effect_cost_payment`. `costs.rs` already
+    /// warns that widening that predicate owes a matching arm in the dry-run
+    /// payment path; this is a second such site and the `EffectCost` fallback in
+    /// `costs.rs` a third. Widening it without revisiting all three silently
+    /// changes what this read-out claims.
+    pub fn payability_verdict_is_resource_based(&self) -> bool {
+        match self {
+            // The dry run has a real arm for exactly the shapes
+            // `supports_effect_cost_payment` admits (PutCounter{SelfRef} /
+            // Mana{Fixed}); every other shape hits the payment-path fallback and
+            // is refused on every board. `supports_cumulative_upkeep_payment`
+            // below delegates to the same predicate, but as a MATCH GUARD
+            // (`EffectCost { .. } if self.supports_effect_cost_payment() => true`)
+            // because that function has a `_ => false` fallthrough to absorb the
+            // guard's false case. This predicate is wildcard-free, so a guard arm
+            // here would be non-exhaustive. Same delegation, different arm shape —
+            // do not copy that syntax.
+            AbilityCost::EffectCost { .. } => self.supports_effect_cost_payment(),
+            // CR 702.24a: cumulative upkeep is "put an age counter on this
+            // permanent. Then you may pay [cost] for each age counter on it" —
+            // the per-counter cost multiplication `PerCounter` models.
+            //
+            // ENGINE CONSEQUENCE (not part of the rule): the wrapper must be
+            // expanded against the live counter count before it reaches
+            // `pay_ability_cost`, so an unexpanded wrapper is refused
+            // structurally on every board. The `AbilityCost` TYPE recurses into
+            // `base` in four shipped places (`for_each_quantity_expr`,
+            // `moves_card_to_or_from_library`, `categories`, `consumes_source`);
+            // the PAYMENT AUTHORITY does not, and this arm tracks the payment
+            // authority. It MUST become `base.payability_verdict_is_resource_based()`
+            // the moment `pay_ability_cost` grows a `PerCounter` arm.
+            AbilityCost::PerCounter { .. } => false,
+            // The parser could not classify this cost, so no payment path exists
+            // for it and the refusal is permanent rather than a shortfall.
+            AbilityCost::Unimplemented { .. } => false,
+            // CR 117.1 + CR 118.3: `can_pay` answers a conjunction with `.all()`, so
+            // a refusal is a resource verdict only when every component's is — one
+            // structurally refused component makes the whole refusal structural.
+            AbilityCost::Composite { costs } => costs
+                .iter()
+                .all(AbilityCost::payability_verdict_is_resource_based),
+            // CR 118.12a: `can_pay` answers a disjunction with `.any()` at
+            // Activation scope, so a refusal means EVERY alternative was refused. If
+            // any alternative's refusal is a resource verdict, more resources could
+            // have flipped that alternative and with it the whole cost — so the
+            // disjunction is a resource verdict iff ANY alternative is. This arm
+            // MIRRORS `can_pay`'s operator; the De Morgan dual belongs to the
+            // prohibition predicate (`resolution_cost_includes_impossible_event`),
+            // not here. Writing `.all()` would suppress a legitimate read-out for
+            // `OneOf([<structural>, Mana{3}])` held by a player with an empty pool.
+            AbilityCost::OneOf { costs } => costs
+                .iter()
+                .any(AbilityCost::payability_verdict_is_resource_based),
+            // CR 118.3: every remaining variant's `can_pay` refusal is a
+            // statement about resources the player does or does not have right
+            // now — mana in pool or producible (`Mana`, `ManaDynamic`), loyalty
+            // counters (`Loyalty`), permanents to sacrifice/tap/return/unattach
+            // (`Sacrifice`, `TapCreatures`, `ReturnToHand`, `Unattach`,
+            // `UnattachFrom`), life (`PayLife`), cards in a hidden or public zone
+            // (`Discard`, `Exile`, `ExileMaterials`, `ExileWithAggregate`,
+            // `CollectEvidence`, `Mill`, `Reveal`, `Behold`), counters on an
+            // object or player (`RemoveCounter`, `GetPlayerCounters`), a player
+            // counter pool (`PayEnergy`, `PaySpeed`), an untapped/unexerted or
+            // rotatable source (`Tap`, `Untap`, `Exert`, `Blight`), or a
+            // specific castable/returnable object (`NinjutsuFamily`,
+            // `KeywordCostOfCastSpell`, `Waterbend`). Each of these clears the
+            // moment the board supplies the resource, which is exactly what
+            // `CostNotPayableNow` tells the player.
+            AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. } => true,
         }
     }
 

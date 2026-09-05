@@ -7,6 +7,7 @@ import {
   decodeWireMessage,
   encodeWireMessage,
   legalActionsFromWire,
+  legalActionsToWire,
   validateMessage,
 } from "../protocol";
 import type { P2PMessage } from "../protocol";
@@ -70,12 +71,44 @@ const PREVIEW_ANSWER = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v45", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(45);
+  it("pins the P2P wire protocol to v46", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(46);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
     expect(legalActionsFromWire({ legalActions: [] }).manaPaymentShortcutActions).toEqual([]);
+  });
+
+  // CR 118.3 — matrix row 20: the acting-player "can't pay this cost right now"
+  // read-out must survive the P2P host->guest wire. Omit it from either
+  // projection helper and a P2P guest silently loses the read-out; because the
+  // field is OPTIONAL, `type-check` stays green, so this round-trip is the only
+  // instrument that catches it.
+  it("round-trips the CR 118.3 activation-block read-out host->guest", () => {
+    const activationBlockReasons = {
+      "408": [
+        { ability_index: 0, type: "CostNotPayableNow" as const },
+        { ability_index: 1, type: "CostNotPayableNow" as const },
+      ],
+    };
+
+    const wire = legalActionsToWire({
+      actions: [],
+      autoPassRecommended: false,
+      activationBlockReasons,
+    });
+    // Guard the HOST half separately: a `legalActionsToWire` that dropped the
+    // field would still round-trip to `undefined` below and could be read as an
+    // absent-field pass.
+    expect(wire.activationBlockReasons).toEqual(activationBlockReasons);
+
+    expect(legalActionsFromWire(wire).activationBlockReasons).toEqual(activationBlockReasons);
+  });
+
+  // The absent direction: a v45 peer sends no field at all. It must hydrate to
+  // `undefined` (the store applies its own `?? {}` default) rather than throwing.
+  it("hydrates an absent activation-block read-out without crashing", () => {
+    expect(legalActionsFromWire({ legalActions: [] }).activationBlockReasons).toBeUndefined();
   });
 
   it("preserves the engine-authored pay-to-end offer order and display payload", () => {

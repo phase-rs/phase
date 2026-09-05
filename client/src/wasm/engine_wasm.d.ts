@@ -270,8 +270,10 @@ export function get_game_state(): any;
 export function get_legal_actions_for_viewer_js(player_id: number): any;
 
 /**
- * Get the legal actions, auto-pass recommendation, and spell costs for the current game state.
- * Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<string, ManaCost> }`.
+ * Get the legal actions, auto-pass recommendation, spell costs, and the CR 118.3
+ * "can't pay this cost right now" read-out for the current game state.
+ * Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<string, ManaCost>,
+ * activationBlockReasons: Record<string, AbilityBlockEntry[]> }`.
  */
 export function get_legal_actions_js(): any;
 

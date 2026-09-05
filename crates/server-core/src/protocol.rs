@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use engine::game::interaction::ObjectActionPayload;
+use engine::types::ability::AbilityBlockEntry;
 use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -646,6 +647,12 @@ pub enum ServerMessage {
         /// introspecting `GameAction` variants client-side. Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
+        /// CR 118.3: per-object read-out of activated abilities the acting player
+        /// is not being offered solely because they can't pay the cost right now.
+        /// Acting-player-scoped and empty for non-actors, exactly like
+        /// `legal_actions_by_object` above. Display only — never dispatchable.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>,
         /// Engine-authored presentation projections computed alongside
         /// `state`. See `engine::game::derived_views::DerivedViews`.
         /// Required for Commander-format games so the CommanderDamage HUD
@@ -704,6 +711,11 @@ pub enum ServerMessage {
         /// Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
+        /// CR 118.3: per-object "can't pay this cost right now" read-out.
+        /// Acting-player-scoped and empty for non-actors, exactly like
+        /// `legal_actions_by_object` above. Display only — never dispatchable.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>,
         /// Engine-authored presentation projections for this state snapshot.
         /// See `engine::game::derived_views::DerivedViews`. Always populated
         /// by server construction sites — the `#[serde(default)]` exists
@@ -1685,6 +1697,7 @@ mod tests {
                     interaction_action_id: interaction_action_id.clone(),
                 }],
             )]),
+            activation_block_reasons: HashMap::new(),
             derived: Default::default(),
             viewer_interaction: viewer_interaction.clone(),
             player_token: None,
@@ -1736,6 +1749,7 @@ mod tests {
             mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
+            activation_block_reasons: HashMap::new(),
             derived: Default::default(),
             viewer_interaction: engine::game::interaction::derive_viewer_interaction(
                 &state,
@@ -3085,8 +3099,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_61_for_counter_kind_domain() {
-        assert_eq!(PROTOCOL_VERSION, 61);
+    fn protocol_version_is_62_for_activation_block_readout() {
+        assert_eq!(PROTOCOL_VERSION, 62);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3097,7 +3111,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_61_for_counter_kind_domain` stays
+    /// `protocol_version_is_62_for_activation_block_readout` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -3253,6 +3267,7 @@ mod tests {
             log_entries: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
+            activation_block_reasons: HashMap::new(),
             derived: Default::default(),
             viewer_interaction: viewer_interaction.clone(),
             rewind_targets,

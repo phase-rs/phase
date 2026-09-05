@@ -3,7 +3,8 @@
     "badge": "Blockiert",
     "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
     "cantActivateDuring": "Kann derzeit nicht aktiviert werden",
-    "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten"
+    "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten",
+    "costNotPayableNow": "Du kannst diese Kosten gerade nicht bezahlen"
   },
   "manaSourceSelection": { "title": "Manaquelle wählen", "description": "Diese Manafähigkeit erfordert das Opfern einer bleibenden Karte.", "sacrifice": "Opfern", "back": "Zurück zur Manabezahlung", "unknownSource": "Manaquelle" },
   "comboShortcut": {

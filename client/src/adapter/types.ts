@@ -1295,14 +1295,22 @@ export type PhaseStatus =
   | { status: "PhasedOut"; cause: "Directly" | "Indirectly" };
 
 /**
- * CR 602.5: Why one of an object's activated abilities is blocked from
- * activation. Mirrors the Rust `AbilityBlockKind` (serde `tag = "type"`).
+ * CR 602.5 + CR 118.3: Why one of an object's activated abilities is blocked
+ * from activation. Mirrors the Rust `AbilityBlockKind` (serde `tag = "type"`).
  * Display only.
+ *
+ * **Two channels, one union.** The first three members arrive on
+ * `GameObject.blocked_abilities` (the CR 602.5 prohibition sweep).
+ * `"CostNotPayableNow"` arrives ONLY on the legal-actions payload
+ * (`LegalActionsResult.activationBlockReasons`), is scoped to the acting
+ * player, and never appears on `blocked_abilities`. A consumer of one channel
+ * will never observe the other's members.
  */
 export type AbilityBlockKind =
   | "CantBeActivated"
   | "CantActivateDuring"
-  | "Prohibited";
+  | "Prohibited"
+  | "CostNotPayableNow";
 
 /**
  * CR 602.5: A single blocked-ability read-out entry. `ability_index` indexes the
@@ -4237,6 +4245,13 @@ export interface LegalActionsResult {
    * availability from objects.
    */
   legalActionsByObject?: Record<string, ObjectAction[]>;
+  /**
+   * CR 118.3: per-object read-out of activated abilities the ACTING player is
+   * not being offered solely because they can't pay the cost right now, keyed by
+   * object_id string. Empty for any viewer without action authority. Display
+   * only — these entries are deliberately NOT dispatchable.
+   */
+  activationBlockReasons?: Record<string, AbilityBlockEntry[]>;
   /** Engine progress-wedge diagnostic: present only when the current decision is wedged. */
   stuckDiagnostic?: StuckDecisionDiagnostic;
   /** Engine-authored, viewer-scoped interaction opportunities for this snapshot. */
@@ -4259,6 +4274,8 @@ export interface ViewerSnapshot {
   manaPaymentShortcutActions?: GameAction[];
   spellCosts?: Record<string, ManaCost>;
   legalActionsByObject?: Record<string, ObjectAction[]>;
+  /** CR 118.3: mirrored from `LegalActionsResult` — see the doc there. */
+  activationBlockReasons?: Record<string, AbilityBlockEntry[]>;
   /**
    * Engine progress-wedge diagnostic, mirrored from `LegalActionsResult` for
    * shape parity. Currently inert on this path: the store's `stuckDiagnostic`

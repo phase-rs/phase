@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 61;
+const EXPECTED_PROTOCOL_VERSION = 62;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -14,7 +14,7 @@ const EXPECTED_LOBBY_PROTOCOL_VERSION = 4;
 // here, so a full-game bump could ship with an unbumped P2P version and CI
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
-const EXPECTED_WIRE_PROTOCOL_VERSION = 45;
+const EXPECTED_WIRE_PROTOCOL_VERSION = 46;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);

@@ -3,7 +3,8 @@
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidade não pode ser ativada",
     "cantActivateDuring": "Não pode ser ativada agora",
-    "prohibited": "Ativar esta habilidade é proibido"
+    "prohibited": "Ativar esta habilidade é proibido",
+    "costNotPayableNow": "Você não pode pagar este custo agora"
   },
   "manaSourceSelection": { "title": "Escolha uma fonte de mana", "description": "Esta habilidade de mana exige sacrificar uma permanente.", "sacrifice": "Sacrificar", "back": "Voltar ao pagamento de mana", "unknownSource": "Fonte de mana" },
   "comboShortcut": {

@@ -88,6 +88,7 @@ export const useReplayStore = create<ReplayStore>()((set, get) => ({
         legalActions: [],
         endContinuousEffectOffers: [],
         legalActionsByObject: {},
+        activationBlockReasons: {},
         autoPassRecommended: false,
         spellCosts: {},
         stateHistory: [],

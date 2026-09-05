@@ -1,4 +1,5 @@
 import type {
+  AbilityBlockEntry,
   EndContinuousEffectOffer,
   GameAction,
   GameEvent,
@@ -49,6 +50,8 @@ export interface LegalActionsWire {
   manaPaymentShortcutActions?: GameAction[];
   legalActionsByObject?: Record<string, ObjectAction[]>;
   spellCosts?: Record<string, ManaCost>;
+  /** CR 118.3: acting-player-scoped "can't pay this cost right now" read-out. */
+  activationBlockReasons?: Record<string, AbilityBlockEntry[]>;
   viewerInteraction?: ViewerInteraction;
 }
 
@@ -61,6 +64,7 @@ export function legalActionsToWire(result: LegalActionsResult): LegalActionsWire
     manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     legalActionsByObject: result.legalActionsByObject,
     spellCosts: result.spellCosts,
+    activationBlockReasons: result.activationBlockReasons,
     viewerInteraction: result.viewerInteraction,
   };
 }
@@ -74,6 +78,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
     manaPaymentShortcutActions: wire.manaPaymentShortcutActions ?? [],
     legalActionsByObject: wire.legalActionsByObject,
     spellCosts: wire.spellCosts,
+    activationBlockReasons: wire.activationBlockReasons,
     viewerInteraction: wire.viewerInteraction,
   };
 }
@@ -322,7 +327,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 45 as const;
+export const WIRE_PROTOCOL_VERSION = 46 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

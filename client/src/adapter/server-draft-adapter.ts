@@ -1,4 +1,5 @@
 import type {
+  AbilityBlockEntry,
   EngineAdapter,
   EngineSnapshot,
   GameAction,
@@ -692,6 +693,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
           legal_actions_by_object?: Record<string, ObjectAction[]>;
+          activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
           viewer_interaction?: LegalActionsResult["viewerInteraction"];
           derived?: GameState["derived"];
         };
@@ -704,6 +706,7 @@ export class ServerDraftAdapter implements EngineAdapter {
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            activationBlockReasons: data.activation_block_reasons,
             viewerInteraction: data.viewer_interaction,
           },
         );
@@ -727,6 +730,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
           legal_actions_by_object?: Record<string, ObjectAction[]>;
+          activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
           viewer_interaction?: LegalActionsResult["viewerInteraction"];
           log_entries?: GameLogEntry[];
           derived?: GameState["derived"];
@@ -740,6 +744,7 @@ export class ServerDraftAdapter implements EngineAdapter {
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            activationBlockReasons: data.activation_block_reasons,
             viewerInteraction: data.viewer_interaction,
           },
         );
