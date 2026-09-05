@@ -11,7 +11,7 @@ use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::resolution::OptionalEffectFrame;
 use crate::types::resolved_commands::{
-    ResolvedPlayerLeaveCommand, ResolvedPlayerLeaveReplayInvariantError,
+    ResolvedPlayerLeaveCommand, ResolvedPlayerLeaveReplayInvariantError, RulesExecutionNodeRef,
 };
 use crate::types::zones::Zone;
 
@@ -202,6 +202,12 @@ pub fn eliminate_players_simultaneously(
 ) {
     let mut eliminated_any = false;
     let mut leaving_set = HashSet::new();
+    // CR 733: the CR 800.4a stack step is batch-scoped over the whole
+    // `leaving_set` (below), so each player's own leave node is collected here
+    // — in elimination order, never via the `HashSet` — for
+    // `remove_stack_objects_controlled_by_leaving_players` to re-install around
+    // that player's own sweep.
+    let mut leave_nodes: Vec<(PlayerId, RulesExecutionNodeRef)> = Vec::new();
 
     for &player in players_to_eliminate {
         if !players::is_alive(state, player) {
@@ -277,13 +283,16 @@ pub fn eliminate_players_simultaneously(
             continue;
         }
 
-        do_eliminate(state, player, &leaving_set, events);
+        leave_nodes.push((player, do_eliminate(state, player, &leaving_set, events)));
         eliminated_any = true;
 
         if super::topology::has_two_headed_giant_shared_resources(state) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
-                    do_eliminate(state, teammate, &leaving_set, events);
+                    leave_nodes.push((
+                        teammate,
+                        do_eliminate(state, teammate, &leaving_set, events),
+                    ));
                 }
             }
         }
@@ -298,6 +307,14 @@ pub fn eliminate_players_simultaneously(
     // the full `leaving_set` — the retain+sweep scope is what makes a co-leaver's
     // steal of a survivor's object revert instead of being over-exiled.
     end_control_effects_for_leaving_players(state, &leaving_set, events);
+
+    // CR 800.4a, third and fourth steps, in the rule's own order: "Then, if that
+    // player controlled any objects on the stack not represented by cards, those
+    // objects cease to exist. Then, if there are any objects still controlled by
+    // that player, those objects are exiled." Both run AFTER the first two steps
+    // — the owned-object exiles inside `do_eliminate` and the control-effect end
+    // directly above — which is why this cannot live in `do_eliminate`.
+    remove_stack_objects_controlled_by_leaving_players(state, &leave_nodes, events);
 
     // CR 800.4a + CR 101.4: A player that leaves during an APNAP unless poll
     // neither answers nor remains an eligible future chooser. Preserve the
@@ -509,10 +526,10 @@ pub fn eliminate_players_simultaneously(
         // CR 800.4a: A live trigger-construction batch can carry a priority
         // recipient who is not the prompt's controller, so neither cursor-
         // clearing site above fires when that recipient alone leaves. Priority
-        // passes to the next player in turn order who is still in the game
-        // (`docs/MagicCompRules.txt:6424`), so the carried recipient is
-        // re-pointed rather than stranded — the same authority and remedy the
-        // `waiting_for` re-point directly above uses for a dead acting player.
+        // passes to the next player in turn order who is still in the game, so
+        // the carried recipient is re-pointed rather than stranded — the same
+        // authority and remedy the `waiting_for` re-point directly above uses
+        // for a dead acting player.
         if let Some(recipient) = state.pending_trigger_construction_priority_recipient {
             if !players::is_alive(state, recipient) {
                 state.pending_trigger_construction_priority_recipient =
@@ -899,13 +916,140 @@ fn abandon_pending_zone_change_member_for_player_left(
     }
 }
 
+/// CR 800.4a (third and fourth steps): remove every stack object a leaving
+/// player still controls, once the first two steps have settled.
+///
+/// ORDER IS THE WHOLE POINT. CR 800.4a is written as four sequential steps and
+/// the engine now maps 1:1 onto them:
+///   1. objects OWNED by a leaver leave the game  →
+///      `exile_owned_objects_on_player_left_game`, inside `do_eliminate`.
+///   2. effects giving a leaver control of anything END  →
+///      `end_control_effects_for_leaving_players`, immediately above this call.
+///   3. objects on the stack NOT represented by cards, controlled by a leaver,
+///      cease to exist  →  the ability entries this loop removes.
+///   4. anything STILL controlled by a leaver is exiled  →  the card-backed
+///      entries this loop removes and then routes to Exile.
+///
+/// Because steps 1 and 2 have already run, `stack::stack_object_controller` IS
+/// the rule's "still controlled by that player" answer, and it is correct in
+/// BOTH directions — which `entry.controller` was not:
+///   * the leaver is the THIEF: their control effect ended in step 2, the
+///     object reverted to its by-default controller, the predicate is false,
+///     and the spell stays on the stack (CR 800.4a says revert, not remove).
+///   * the leaver is the CASTER of a card a SURVIVOR owns, and another survivor
+///     stole it: the surviving thief's control effect did NOT end, so the
+///     predicate is false and the spell keeps resolving for the thief. Keying
+///     on `entry.controller` removed it — MEASURED.
+///
+/// For an ability entry (no `state.objects` row) `stack_object_controller`
+/// degrades to `entry.controller` (CR 113.8), so one predicate serves both
+/// steps.
+///
+/// CR 733: each removal is journaled under the departing player's OWN leave
+/// node, re-installed here around that player's sweep, so relocating the sweep
+/// out of `do_eliminate` does not re-attribute the removals to whatever rules
+/// work happens to be live. Iterated in elimination order over `leave_nodes`
+/// (never over the `HashSet`) so the journal is replay-deterministic.
+fn remove_stack_objects_controlled_by_leaving_players(
+    state: &mut GameState,
+    leave_nodes: &[(PlayerId, RulesExecutionNodeRef)],
+    events: &mut Vec<GameEvent>,
+) {
+    for (player, leave_node) in leave_nodes.iter().copied() {
+        let enclosing_node = state.active_rules_execution_node.replace(leave_node);
+
+        // Removed by position through the shared stack-removal authority rather
+        // than by `retain`: a `retain` would drop several entries in one
+        // unjournalable mutation, while removing by position records each entry
+        // with the index it occupied at the moment IT was removed, so a replay
+        // reproduces both the count and the surviving entries' relative order.
+        let mut abandoned_spell_ids = Vec::new();
+        while let Some(idx) = state
+            .stack
+            .iter()
+            .position(|entry| super::stack::stack_object_controller(state, entry) == player)
+        {
+            let removed = super::stack::remove_nonresolving_stack_entry_at(
+                state,
+                idx,
+                super::lifecycle::DelayedTerminalDisposition::Eliminated,
+            )
+            .expect("position yielded a live stack index");
+            if matches!(
+                removed.entry.kind,
+                crate::types::game_state::StackEntryKind::Spell { .. }
+            ) {
+                abandoned_spell_ids.push(removed.entry.id);
+            }
+        }
+        abandon_pending_spell_casts(state, player, &abandoned_spell_ids);
+
+        // CR 800.4a fourth step: a CARD-represented stack object is EXILED, not
+        // merely un-stacked. A leaver-OWNED spell already left in step 1 (which
+        // removed its entry through `remove_from_zone`'s Stack arm), so what
+        // reaches here is the survivor-owned card the leaver was still
+        // controlling. Routed through the same player-left-game authority step 1
+        // uses, so the pending-zone-change retirement and the exempt
+        // `PlayerLeftGame` cause are identical on both legs.
+        for id in abandoned_spell_ids {
+            if state
+                .objects
+                .get(&id)
+                .is_some_and(|obj| obj.zone == Zone::Stack)
+            {
+                move_object_for_player_left_game(state, id, player, events);
+            }
+        }
+
+        state.active_rules_execution_node = enclosing_node;
+    }
+
+    // CR 800.4a: A paused triggered ability on the stack is "an object on the
+    // stack not represented by a card" and ceases to exist when its controller
+    // leaves the game. The sweep in `remove_stack_objects_controlled_by_leaving_players`
+    // drops that entry, but a trigger paused mid-target-selection (e.g.
+    // Lathiel's end-step trigger awaiting `WaitingFor::DistributeAmong`) also
+    // leaves a live cursor in `state.pending_trigger` / `pending_trigger_entry`
+    // pointing at that now-gone entry. Left dangling, the next surviving
+    // player's action drives `begin_pending_trigger_target_selection` (which
+    // gates on `pending_trigger`) back into target selection for a dead entry
+    // id, panicking in `mutate_pending_trigger_entry`. Clear the cursor only
+    // when the entry it tracks is no longer on the stack, mirroring the early
+    // `abandon_pending_spell_casts` teardown above.
+    if state
+        .pending_trigger_entry
+        .is_some_and(|entry_id| !state.stack.iter().any(|entry| entry.id == entry_id))
+    {
+        if let Some(firing) = state.pending_trigger_firing.take() {
+            crate::game::lifecycle::record_delayed_terminal(
+                firing,
+                crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+            );
+        }
+        state.pending_trigger_entry = None;
+        state.pending_trigger = None;
+        state.pending_trigger_event_batch.clear();
+        // CR 117.3c: The batch this recipient was scheduled for has ceased with
+        // its tracked entry. Clear it with the cursors — unconditionally, not
+        // only when the departing player happens to be the recipient — so the
+        // next construction cannot consume a stale carrier and mis-route its
+        // terminal priority.
+        state.pending_trigger_construction_priority_recipient = None;
+    }
+}
+
 /// Perform the actual elimination of a single player (CR 800.4).
+///
+/// Returns the CR 733 leave node opened for this player's departure, so the
+/// batch-scoped CR 800.4a stack step
+/// (`remove_stack_objects_controlled_by_leaving_players`) can re-install it
+/// around that same player's later, relocated sweep.
 fn do_eliminate(
     state: &mut GameState,
     player: PlayerId,
     leaving_set: &HashSet<PlayerId>,
     events: &mut Vec<GameEvent>,
-) {
+) -> RulesExecutionNodeRef {
     let planar_handoff =
         crate::game::planechase::prepare_player_left_game_handoff(state, player, leaving_set);
 
@@ -936,33 +1080,6 @@ fn do_eliminate(
     abandon_change_zone_family_for_controller(state, player);
 
     crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
-
-    // CR 800.4a: Remove spells they control from the stack, one at a time
-    // through the shared stack-removal authority — the same shape as the
-    // scheduled-control release below. A `retain` would drop several entries in
-    // one unjournalable mutation; removing by position instead records each
-    // entry with the index it occupied at the moment IT was removed, so a replay
-    // reproduces both the count and the surviving entries' relative order.
-    let mut abandoned_spell_ids = Vec::new();
-    while let Some(idx) = state
-        .stack
-        .iter()
-        .position(|entry| entry.controller == player)
-    {
-        let removed = super::stack::remove_nonresolving_stack_entry_at(
-            state,
-            idx,
-            super::lifecycle::DelayedTerminalDisposition::Eliminated,
-        )
-        .expect("position yielded a live stack index");
-        if matches!(
-            removed.entry.kind,
-            crate::types::game_state::StackEntryKind::Spell { .. }
-        ) {
-            abandoned_spell_ids.push(removed.entry.id);
-        }
-    }
-    abandon_pending_spell_casts(state, player, &abandoned_spell_ids);
 
     // CR 800.4a + CR 800.4b: A control-another-player effect (CR 723, e.g.
     // Mindslaver / Secret of Bloodbending) ends when EITHER party leaves the
@@ -1120,39 +1237,6 @@ fn do_eliminate(
         grants.retain(|(_, grant)| grant.grantee != player && grant.controller != player);
     }
 
-    // CR 800.4a: A paused triggered ability on the stack is "an object on the
-    // stack not represented by a card" and ceases to exist when its controller
-    // leaves the game. The stack retain above drops that entry, but a trigger
-    // paused mid-target-selection (e.g. Lathiel's end-step trigger awaiting
-    // `WaitingFor::DistributeAmong`) also leaves a live cursor in
-    // `state.pending_trigger` / `pending_trigger_entry` pointing at that now-gone
-    // entry. Left dangling, the next surviving player's action drives
-    // `begin_pending_trigger_target_selection` (which gates on `pending_trigger`)
-    // back into target selection for a dead entry id, panicking in
-    // `mutate_pending_trigger_entry`. Clear the cursor only when the entry it
-    // tracks is no longer on the stack, mirroring the early
-    // `abandon_pending_spell_casts` teardown above.
-    if state
-        .pending_trigger_entry
-        .is_some_and(|entry_id| !state.stack.iter().any(|entry| entry.id == entry_id))
-    {
-        if let Some(firing) = state.pending_trigger_firing.take() {
-            crate::game::lifecycle::record_delayed_terminal(
-                firing,
-                crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
-            );
-        }
-        state.pending_trigger_entry = None;
-        state.pending_trigger = None;
-        state.pending_trigger_event_batch.clear();
-        // CR 117.3c: The batch this recipient was scheduled for has ceased with
-        // its tracked entry. Clear it with the cursors — unconditionally, not
-        // only when the departing player happens to be the recipient — so the
-        // next construction cannot consume a stale carrier and mis-route its
-        // terminal priority.
-        state.pending_trigger_construction_priority_recipient = None;
-    }
-
     // CR 800.4a + CR 616.1 + CR 704.4: Abandon a parked replacement choice this
     // leaving player was answering. A CR 616.1 replacement-order (or optional
     // MayCost / MayCost sub-choice re-park) is held in `state.pending_replacement`
@@ -1251,9 +1335,33 @@ fn do_eliminate(
     // guard — cleared only for the LEAVING player's own resolution (mirroring the
     // cast-abandonment controller key above) so a living player's paused resolution
     // survives an opponent's departure.
+    //
+    // KEYED ON `cast_controller`, NOT `controller`. `PendingSpellResolution.
+    // controller` became the LIVE controller when a spell's controller became a
+    // derived value (CR 608.2c re-stamp in `stack::resolve_top`), so for a spell
+    // stolen mid-resolution — Perplexing Chimera pausing on an as-enters choice —
+    // it names the thief, not the caster. This frame is torn down for the
+    // player whose CAST it is, because that is the frame's owner — a question
+    // that does not change when a mid-resolution steal changes who controls the
+    // eventual permanent. The relocated CR 800.4a stack sweep
+    // (`remove_stack_objects_controlled_by_leaving_players`) answers a
+    // different question (who controls the object NOW) at a different time
+    // (after control effects end), so the two are deliberately no longer
+    // mirrors of each other.
+    //
+    // Honest note: a Gonti-class spell (owner != caster) paused mid-resolution
+    // and then stolen by a survivor still has this frame torn down on the
+    // CASTER's departure, even though the survivor now controls the eventual
+    // permanent. This is an UNTOUCHED PRE-EXISTING behavior, not a gap this
+    // change introduces — closing it would require answering the same
+    // live-vs-owner disposition question for `resolving_stack_entry` that U1/U2
+    // answer for the stack and zone-exit seams, which sits outside this
+    // change's scope.
+    // `cast_controller` is `Some` at every production construction; the
+    // `unwrap_or` preserves the prior reading for hand-built fixtures.
     if state
         .active_spell_resolution()
-        .is_some_and(|psr| psr.controller == player)
+        .is_some_and(|psr| psr.cast_controller.unwrap_or(psr.controller) == player)
     {
         let _ = state.take_active_spell_resolution();
     }
@@ -1376,6 +1484,7 @@ fn do_eliminate(
     // The leave node covers this sweep only. Restoring the enclosing scope keeps
     // a later, unrelated command from being attributed to the departure.
     state.active_rules_execution_node = enclosing_node;
+    leave_node
 }
 
 /// CR 800.4 + CR 104.3a: Installs one already-resolved player departure verbatim.
@@ -2039,6 +2148,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             logical_zone_change_group: group,
@@ -2104,6 +2215,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.push_change_zone_iteration(pending_change_zone_iteration(
             group,
@@ -3000,6 +3113,8 @@ mod tests {
             player: PlayerId(2),
             candidate_count: 1,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         // Coupled continuation slots the resume drain would clear on a normal answer.
         state.replacement_may_cost_paused = true;
@@ -3137,6 +3252,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.push_connive_reentry(PendingConniveReentry {
             conniver: state
@@ -3188,6 +3305,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.push_batch_delivery(pending_search_found_zone_delivery(found));
         assert!(state.active_batch_delivery().is_some());
@@ -3230,6 +3349,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         let parked_found = ObjectId(77);
         state.pending_search_found_batch =
@@ -3302,6 +3423,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 1,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         let source = create_object(
             &mut state,
@@ -3400,6 +3523,64 @@ mod tests {
         assert!(
             state.active_spell_resolution().is_none(),
             "the leaving controller's active spell frame must be torn down"
+        );
+    }
+
+    /// CR 800.4a (final review) — the active-spell-resolution teardown must key
+    /// on the CASTER, not on the live controller.
+    ///
+    /// `PendingSpellResolution.controller` became the LIVE controller once a
+    /// spell's controller became a derived value, so for a spell stolen
+    /// mid-resolution (Perplexing Chimera pausing on an as-enters choice) it
+    /// names the thief. The sibling row above cannot catch the difference: its
+    /// fixture leaves `cast_controller: None`, so both readings coincide. This
+    /// row sets them to DIFFERENT players, which is the only shape that
+    /// discriminates.
+    ///
+    /// REVERT-FAILING: keying on `psr.controller` tears the frame down when the
+    /// THIEF leaves (CR 800.4a says the control effect merely ends and the
+    /// spell reverts to its caster and keeps resolving) and leaves it dangling
+    /// when the CASTER leaves.
+    #[test]
+    fn elimination_keys_the_active_spell_frame_on_the_caster_not_the_thief() {
+        let mut state = setup_three_player();
+        let caster = PlayerId(0);
+        let thief = PlayerId(1);
+        let spell = create_object(
+            &mut state,
+            CardId(8),
+            caster,
+            "Stolen paused permanent".into(),
+            Zone::Stack,
+        );
+        state.push_spell_resolution(PendingSpellResolution {
+            object_id: spell,
+            // Stolen: the live controller is the thief...
+            controller: thief,
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            // ...but the caster is who the CR 800.4a teardown is keyed to.
+            cast_controller: Some(caster),
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent: 0,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        });
+
+        eliminate_player(&mut state, thief, &mut Vec::new());
+        assert!(
+            state.active_spell_resolution().is_some(),
+            "the THIEF leaving must not tear down the frame — CR 800.4a ends the control \
+             effect and the spell reverts to its caster and keeps resolving"
+        );
+
+        eliminate_player(&mut state, caster, &mut Vec::new());
+        assert!(
+            state.active_spell_resolution().is_none(),
+            "the CASTER leaving must tear the frame down, or it dangles past the object"
         );
     }
 

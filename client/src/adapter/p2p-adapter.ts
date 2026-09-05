@@ -558,6 +558,97 @@ const DEFAULT_GRACE_PERIOD_MS = 30_000;
  */
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
+
+/**
+ * Budget for a guest's in-flight submission — the window between sending an
+ * `action`/`interaction` frame and the host reply that settles it.
+ *
+ * Sizing input is host turnaround: a WASM engine submit plus a per-guest
+ * viewer snapshot, on a possibly-mobile host with a large Commander board.
+ * 30s is chosen so a merely slow host is never failed. The timer is a bound on
+ * an unanswerable wait; it is deliberately too coarse to be a latency signal.
+ *
+ * One legitimate wait can still exceed it: the host answers a guest action
+ * before `runAiLoop()`, but `runAiLoop` drives the SAME engine-worker client,
+ * and a long WASM AI search blocks that worker's event loop. A guest action
+ * arriving during one queues behind it, and a multi-minute Commander decision
+ * is on record. The degradation there is graceful rather than lossy — the guest
+ * gets a recoverable toast, and the late `state_update` still lands and
+ * resyncs through `processRemoteUpdate`.
+ *
+ * ## Why a timer at all
+ *
+ * The #8360 acceptance ledger covers ONE of the four frame types that settle a
+ * guest submission. `state_update` is acked (`sendStateAck`), tracked
+ * (`recordGuestAck`) and resent by the host's redelivery sweep.
+ * `action_rejected` and `action_failed` have no ack, no ledger entry and no
+ * redelivery — `redeliverGuestState` sends only `state_update` and
+ * `terminal_result` — and the host's `send` returns `Promise<boolean>` without
+ * throwing, a boolean the `action_*` dispatch sites discard. (`action_noop` is
+ * uncovered too, but it is debug-only — `isZeroCountDebugCreate` — so there are
+ * two reachable uncovered classes, not three.)
+ *
+ * The primary measured route is the host lease fence. `ownsAuthority()` is
+ * `ownsP2PHostLease()` plus a trace, and `ownsP2PHostLease`
+ * (`services/p2pSession.ts`) re-reads the lease on EVERY call, so it can flip
+ * during an await; on `false` it only traces and never closes the channel. So
+ * the guest's action APPLIES, and then `broadcastStateUpdateInner` bails on
+ * `!ownsAuthority()` before `++authoritativeRevision`, with
+ * `queueLaggingRedeliveries`, `redeliverGuestState` and `send()` fenced by the
+ * same predicate. The action has applied, but no frame goes out and the
+ * revision never rises, so the sweep is disarmed and the channel stays healthy
+ * and ponging. A liveness detector therefore has nothing to find, and the guest
+ * waits forever while holding the module-level dispatch mutex.
+ *
+ * Reachability precondition: tab A's PeerJS SIGNALING socket must have dropped
+ * (freeing the peer id) while its WebRTC DataConnections stay up. That state is
+ * durable — no `peer.on("disconnected")` handler and no `.reconnect()` call
+ * exists repo-wide — and is produced by sleep, a network change, or mobile
+ * backgrounding. Opening a second tab does NOT reach it on its own: `hostRoom`
+ * opens the peer before the adapter is constructed, so tab B fails
+ * `unavailable-id` and never reaches `claimP2PHostLease`. The lease flip must
+ * land inside the `submitAction` → `broadcastStateUpdateInner` window, so
+ * exactly ONE in-flight submission is stranded — matching a game that freezes
+ * once, mid-match.
+ *
+ * ## Why reject, when this repo's convention for gameplay round-trips is notify
+ *
+ * `engine-worker-client.ts` deliberately went the other way:
+ * `ENGINE_REQUEST_TIMEOUT_MS = 60_000` with `RequestTimeoutBehavior` defaulting
+ * to `"notify"` for gameplay, `"reject"` reserved for init, after
+ * reject-on-timer for gameplay was walked back. P2P differs in the one way that
+ * matters: after this rejection `pendingResolve` is null, so a late
+ * `state_update` still lands — the handler emits `stateChanged`, which
+ * `GameProvider` routes into `processRemoteUpdate`. The late reply is NOT lost.
+ * At the worker boundary it would have been, which is exactly why "notify" won
+ * there.
+ *
+ * The code is `P2P_ERROR`, not `ENGINE_UNRESPONSIVE`: the latter is suppressed
+ * by `shouldShowActionError` in `dispatch.ts` and routes to `notifyEngineLost`,
+ * the wrong surface for a peer that may simply be gone.
+ *
+ * ## Honest residual
+ *
+ * Rejecting UNFREEZES the client but does not RESYNC it. On the lease-fence
+ * route the guest's cached state is STALE — the action applied on a host that
+ * then sent nothing — so a post-timeout retry re-submits against a board the
+ * guest has wrong; the user's recovery is a reload, not a retry. The
+ * stale-state watchdog cannot help: for a guest, the adapter cache and the
+ * screen go stale together, so the fingerprints match and its check returns.
+ *
+ * A SECOND residual is new here, and it belongs to the single unkeyed pending
+ * slot. Once this timer has rejected submission A, a retry B parks in that same
+ * slot, and A's late `state_update` settles B: its revision is NEWER than the
+ * guest's cached one, so the stale-revision guard above does not drop it. B's
+ * own frame then arrives, finds nothing pending, and emits `stateChanged`, so
+ * the board still converges — the cost is one early resolve carrying another
+ * action's events. Routing replies correctly needs a wire request id echoed on
+ * every settlement frame, i.e. a `WIRE_PROTOCOL_VERSION` bump, and is deferred.
+ * Do NOT instead widen the revision guard to drop such frames: dropping the
+ * frame that reports application is the deadlock the acceptance ledger exists
+ * to end.
+ */
+const SUBMISSION_TIMEOUT_MS = 30_000;
 // A stale proposal leaves the prompt unchanged, so cap retries to prevent a
 // persistent authority race from becoming a tight host-loop spin.
 const MAX_AI_PROPOSAL_STALE_RETRIES = 3;
@@ -3607,6 +3698,15 @@ export class P2PHostAdapter implements EngineAdapter {
 }
 
 /**
+ * How a parked guest submission is being settled. A typed union rather than a
+ * pair of methods so that BOTH arms are forced through the single settlement
+ * path that clears the slot handles and the submission timeout together.
+ */
+type PendingSubmissionOutcome =
+  | { kind: "resolve"; result: SubmitResult }
+  | { kind: "reject"; error: Error };
+
+/**
  * Guest-side P2P adapter. Maintains the `Peer` reference for auto-reconnect,
  * persists session token to `sessionStorage` (via `p2pSession` service), and
  * applies host-broadcasted state updates locally.
@@ -3624,6 +3724,9 @@ export class P2PGuestAdapter implements EngineAdapter {
   private listeners: P2PAdapterEventListener[] = [];
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
+  /** Armed with the slot in `parkPendingSubmission`, cleared only by
+   *  `settlePendingSubmission` — see `SUBMISSION_TIMEOUT_MS`. */
+  private pendingSubmissionTimer: ReturnType<typeof setTimeout> | null = null;
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
@@ -3766,8 +3869,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     // action before touching the engine.
     this.requireAuthenticatedSession();
     return new Promise<SubmitResult>((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
+      this.parkPendingSubmission(resolve, reject);
       this.send({
         type: "action",
         senderPlayerId: this.assignedPlayerId!,
@@ -3782,8 +3884,7 @@ export class P2PGuestAdapter implements EngineAdapter {
   ): Promise<SubmitResult> {
     this.requireAuthenticatedSession();
     return new Promise<SubmitResult>((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
+      this.parkPendingSubmission(resolve, reject);
       this.send({
         type: "interaction",
         senderPlayerId: this.assignedPlayerId!,
@@ -4164,11 +4265,11 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.cachedRevision = msg.revision ?? null;
         const updateSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         this.sendStateAck();
-        if (this.pendingResolve) {
-          this.pendingResolve({ events: msg.events, log_entries: msg.logEntries });
-          this.pendingResolve = null;
-          this.pendingReject = null;
-        } else {
+        const settled = this.settlePendingSubmission({
+          kind: "resolve",
+          result: { events: msg.events, log_entries: msg.logEntries },
+        });
+        if (!settled) {
           this.emit({
             type: "stateChanged",
             snapshot: updateSnapshot,
@@ -4186,31 +4287,23 @@ export class P2PGuestAdapter implements EngineAdapter {
             "Host sent an invalid action rejection",
             true,
           );
-        if (this.pendingReject) {
-          this.pendingReject(error);
-          this.pendingResolve = null;
-          this.pendingReject = null;
-        } else {
+        if (!this.settlePendingSubmission({ kind: "reject", error })) {
           this.emit({ type: "error", message: error.message });
         }
         break;
       }
       case "action_failed": {
-        if (this.pendingReject) {
-          this.pendingReject(new AdapterError("P2P_ERROR", msg.message, true));
-          this.pendingResolve = null;
-          this.pendingReject = null;
-        } else {
+        const failure = new AdapterError("P2P_ERROR", msg.message, true);
+        if (!this.settlePendingSubmission({ kind: "reject", error: failure })) {
           this.emit({ type: "error", message: msg.message });
         }
         break;
       }
       case "action_noop": {
-        if (this.pendingResolve) {
-          this.pendingResolve({ events: [], log_entries: [] });
-          this.pendingResolve = null;
-          this.pendingReject = null;
-        }
+        this.settlePendingSubmission({
+          kind: "resolve",
+          result: { events: [], log_entries: [] },
+        });
         break;
       }
       case "mana_payment_preview": {
@@ -4352,10 +4445,91 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.pendingInteractionPreviews.clear();
   }
 
-  private rejectPendingSubmission(error: Error): void {
-    this.pendingReject?.(error);
+  /**
+   * The SINGLE settlement path for the parked submission slot. Every site that
+   * finishes a guest submission routes through here — the four inbound reply
+   * frames (`state_update`, `action_rejected`, `action_failed`, `action_noop`),
+   * `rejectPendingSubmission` (attach/disconnect/terminate), the submission
+   * timeout, and a displacement — so the two slot handles and the timeout are
+   * cleared together, in one place.
+   *
+   * A settlement path that bypassed this would be a NEW bug, not a missing
+   * tidy-up: the timer would survive a SUCCESSFUL submit and, because the slot
+   * is unkeyed, fire `SUBMISSION_TIMEOUT_MS` later against whatever unrelated
+   * submission happened to be parked by then.
+   *
+   * Returns whether a submission was actually parked, so callers can fall back
+   * to their unsolicited-frame behaviour (`stateChanged` / `error`).
+   */
+  private settlePendingSubmission(outcome: PendingSubmissionOutcome): boolean {
+    if (this.pendingSubmissionTimer !== null) {
+      clearTimeout(this.pendingSubmissionTimer);
+      this.pendingSubmissionTimer = null;
+    }
+    const resolve = this.pendingResolve;
+    const reject = this.pendingReject;
     this.pendingResolve = null;
     this.pendingReject = null;
+    if (outcome.kind === "resolve") {
+      if (!resolve) return false;
+      resolve(outcome.result);
+      return true;
+    }
+    if (!reject) return false;
+    reject(outcome.error);
+    return true;
+  }
+
+  /**
+   * Take the single submission slot for a new caller and arm its timeout.
+   *
+   * A submission parked while one is already pending SETTLES the displaced one
+   * (retryable rejection) instead of dropping the reference and leaving that
+   * caller's promise parked forever. Displacement is reachable:
+   * `dispatchInteraction` never touches `isAnimating`/`inFlightLocalAction`
+   * while `dispatchActionInternal` does, so an interaction submit can overlap
+   * an action submit, and two concurrent `dispatchInteraction` calls can
+   * displace each other.
+   *
+   * The slot deliberately stays single and unkeyed, and it still MIS-ROUTES
+   * after a displacement: whichever reply arrives first settles the SECOND
+   * submission, because no reply frame carries anything to correlate against.
+   * That is pre-existing and is NOT fixed here — a correct fix needs a
+   * wire-level correlation id, which means a `WIRE_PROTOCOL_VERSION` bump
+   * (currently 44) and is deferred. Nothing here makes the slot correct; it
+   * only stops the displaced caller from waiting on a promise that can never
+   * settle. A keyed map would not help: it cannot route replies that carry no
+   * id.
+   */
+  private parkPendingSubmission(
+    resolve: (result: SubmitResult) => void,
+    reject: (error: Error) => void,
+  ): void {
+    this.settlePendingSubmission({
+      kind: "reject",
+      error: new AdapterError(
+        "P2P_ERROR",
+        "Superseded by a later submission before the host replied",
+        true,
+      ),
+    });
+    this.pendingResolve = resolve;
+    this.pendingReject = reject;
+    this.pendingSubmissionTimer = setTimeout(() => {
+      this.pendingSubmissionTimer = null;
+      this.settlePendingSubmission({
+        kind: "reject",
+        error: new AdapterError(
+          "P2P_ERROR",
+          "The host did not answer this action in time",
+          true,
+        ),
+      });
+    }, SUBMISSION_TIMEOUT_MS);
+  }
+
+  private rejectPendingSubmission(error: Error): void {
+    this.settlePendingSubmission({ kind: "reject", error });
   }
 
   private acceptsHostAuthority(msg: P2PMessage): boolean {

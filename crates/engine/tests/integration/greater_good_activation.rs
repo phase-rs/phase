@@ -21,7 +21,7 @@
 //! CR 400.7j + CR 608.2k: the sacrificed object's last-known information is
 //! captured before it changes zones, so cost-paid-object property references
 //! resolve at ability resolution.
-//! CR 701.21: Sacrifice keyword action (verified: docs/MagicCompRules.txt:3443).
+//! CR 701.21: Sacrifice keyword action.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{

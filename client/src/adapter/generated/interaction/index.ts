@@ -111,7 +111,7 @@ export type InteractionShortcutPreview = { count: number, entries: Array<Interac
  * never empty — and NOT necessarily positive, since a step starting exactly at the count
  * takes a zero-length segment.
  *
- * CR 704.5a: `entries` follow this allocation ONLY when the period's life map names
+ * CR 119.3: `entries` follow this allocation ONLY when the period's life map names
  * exactly one losing seat that this allocation itself announces and the slot's announced
  * magnitude is the whole of that seat's per-period loss, which is what makes it positive —
  * per-seat life magnitudes are then this split multiplied by that rate, and they still

@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 60;
+const EXPECTED_PROTOCOL_VERSION = 64;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -14,7 +14,7 @@ const EXPECTED_LOBBY_PROTOCOL_VERSION = 4;
 // here, so a full-game bump could ship with an unbumped P2P version and CI
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
-const EXPECTED_WIRE_PROTOCOL_VERSION = 44;
+const EXPECTED_WIRE_PROTOCOL_VERSION = 48;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
@@ -322,10 +322,20 @@ requirePattern(serverCoreSource, new RegExp(`fn protocol_version_is_${P}(?![0-9]
 refusePattern(serverCoreSource, new RegExp(`protocol_version_is_${P - 1}(?![0-9])`),
   "crates/server-core/src/protocol.rs");
 
-requirePattern(p2pProtocolTestSource, new RegExp(`\\bv${W}\\b`),
-  `client/src/network/__tests__/protocol.test.ts v${W}`);
-refusePattern(p2pProtocolTestSource, new RegExp(`\\bv${W - 1}\\b`),
-  "client/src/network/__tests__/protocol.test.ts");
+// Both legs read the file's test TITLES, not its whole source, so coverage that legitimately
+// drives the superseded version in a body is not a bump leftover. Ceiling: double-quoted titles
+// only, so a backtick or single-quoted title falls out of the slice — admit-only, never a false
+// refusal, which is what makes the narrowing safe.
+const p2pProtocolTestTitles = [
+  ...p2pProtocolTestSource.matchAll(/\b(?:describe|it|test)\(\s*"([^"]*)"/g),
+]
+  .map((match) => match[1])
+  .join("\n");
+
+requirePattern(p2pProtocolTestTitles, new RegExp(`\\bv${W}\\b`),
+  `client/src/network/__tests__/protocol.test.ts titles v${W}`);
+refusePattern(p2pProtocolTestTitles, new RegExp(`\\bv${W - 1}\\b`),
+  "client/src/network/__tests__/protocol.test.ts titles");
 
 const P2P_GATE = 'describe("P2P wire-protocol version gate"';
 if (!p2pAdapterTestSource.includes(P2P_GATE)) {
@@ -336,14 +346,21 @@ if (!p2pAdapterTestSource.includes(P2P_GATE)) {
   process.exit(1);
 }
 const gateLabel = "client/src/adapter/__tests__/p2p-adapter-multiplayer.test.ts";
-// The legs below deliberately scan the whole file rather than the block just
-// located: a require leg fails on absence, so a wider haystack can only admit and
-// never falsely refuse. The prose leg is require-only for a second reason: this
-// title names the superseded version too, so a refuse leg would red a correct
-// title.
-for (const n of [W - 1, W]) {
-  requirePattern(p2pAdapterTestSource, new RegExp(`setupFrameAt\\(${n}\\)`),
-    `${gateLabel} setupFrameAt(${n})`);
-  requirePattern(p2pAdapterTestSource, new RegExp(`\\bv${n}\\b`),
-    `${gateLabel} v${n}`);
-}
+// Scoped to the gate block: the anchor above to the next top-level `describe(`,
+// or EOF if this is the last one. The slice starts AT the anchor, so it can
+// never widen back to the whole file.
+const gateBlockStart = p2pAdapterTestSource.indexOf(P2P_GATE);
+const gateBlockEnd = p2pAdapterTestSource.indexOf("\ndescribe(", gateBlockStart);
+const gateBlock = p2pAdapterTestSource.slice(
+  gateBlockStart,
+  gateBlockEnd === -1 ? undefined : gateBlockEnd,
+);
+
+// Order binds each numeral to its role: refused named and sent before admitted.
+// Raw-source match: a comment in the block quoting an it(...) title passes the title leg.
+requirePattern(gateBlock,
+  new RegExp(`\\bit\\("[^"]*\\bv${W - 1}\\b[^"]*\\bv${W}\\b[^"]*"`),
+  `${gateLabel} an it(...) title naming refused v${W - 1} before admitted v${W}`);
+requirePattern(gateBlock,
+  new RegExp(`setupFrameAt\\(${W - 1}\\)[\\s\\S]*setupFrameAt\\(${W}\\)`),
+  `${gateLabel} refused setupFrameAt(${W - 1}) before admitted setupFrameAt(${W})`);

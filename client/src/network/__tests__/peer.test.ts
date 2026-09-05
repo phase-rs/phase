@@ -276,3 +276,122 @@ describe("PeerSession", () => {
     session.close();
   });
 });
+
+/**
+ * A channel whose peer never answers a ping — i.e. a HALF-OPEN channel:
+ * `open` stays true, `conn.on("close")` never fires, and nothing comes back.
+ * The keep-alive silence check is the only thing that can detect it.
+ */
+class SilentPeerConnection extends FakeDataConnection {
+  protected override onDecodedSend(): void {}
+}
+
+// Fake timers are scoped per-test: the rest of this file runs on real timers
+// and would be slowed (or made order-dependent) by a suite-wide fake clock.
+//
+// `ping`/`pong` are far below `WIRE_COMPRESSION_THRESHOLD`, so they take the
+// raw envelope path — no `CompressionStream`, which is what lets the real
+// protocol module run under fake timers here.
+describe("PeerSession keep-alive", () => {
+  it("disconnects a peer that stops answering pings", async () => {
+    vi.useFakeTimers();
+    try {
+      const conn = new SilentPeerConnection();
+      const session = createPeerSession(conn as never);
+      const onDisconnect = vi.fn();
+      session.onDisconnect(onDisconnect);
+
+      // First tick: a ping goes out, but only 5s of silence has accrued.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(onDisconnect).not.toHaveBeenCalled();
+
+      // Second tick: 10s with no pong, and the inter-tick gap is a healthy 5s,
+      // so the silence is real evidence.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(onDisconnect).toHaveBeenCalledWith("Ping timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a ponging peer connected indefinitely", async () => {
+    vi.useFakeTimers();
+    try {
+      const conn = new FakeDataConnection();
+      const session = createPeerSession(conn as never);
+      const onDisconnect = vi.fn();
+      session.onDisconnect(onDisconnect);
+
+      // Six ticks' worth — three times the silence budget.
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(onDisconnect).not.toHaveBeenCalled();
+      // The pongs are real: they arrived over the wire in response to pings.
+      const sent = await conn.getSentMessages();
+      expect(sent.filter((m) => (m as P2PMessage).type === "ping").length).toBe(6);
+      session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not disconnect a healthy peer across a suspend/resume clock jump", async () => {
+    vi.useFakeTimers();
+    try {
+      const conn = new FakeDataConnection();
+      const session = createPeerSession(conn as never);
+      const onDisconnect = vi.fn();
+      session.onDisconnect(onDisconnect);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(onDisconnect).not.toHaveBeenCalled();
+
+      // Suspend: move the wall clock five minutes WITHOUT running the
+      // interval. `setSystemTime` shifts pending timers' deadlines along with
+      // the clock, so no tick fires — which is what a frozen tab looks like.
+      // `advanceTimersByTime(300_000)` would instead run sixty ticks that each
+      // observe a healthy 5s gap, and would pass against any implementation.
+      vi.setSystemTime(Date.now() + 300_000);
+
+      // Resume: the next tick observes a 305s gap since its predecessor. A
+      // bare `now - lastPongAt` check cannot tell that from 305s of real
+      // silence and would disconnect here; the inter-tick gap can, and
+      // re-baselines instead.
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(onDisconnect).not.toHaveBeenCalled();
+      session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-baselines after the wall clock moves backward", async () => {
+    vi.useFakeTimers();
+    try {
+      const conn = new SilentPeerConnection();
+      const session = createPeerSession(conn as never);
+      const onDisconnect = vi.fn();
+      session.onDisconnect(onDisconnect);
+
+      // One healthy tick: 5s of silence, not yet the budget.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(onDisconnect).not.toHaveBeenCalled();
+
+      // The wall clock steps BACKWARD a minute (NTP correction, manual clock
+      // change, VM restore). `setSystemTime` moves pending deadlines with it,
+      // so ticks keep their 5s spacing — only `Date.now()` jumps.
+      vi.setSystemTime(Date.now() - 60_000);
+
+      // The peer has never ponged, so it must still be declared dead. Without
+      // the negative-gap re-baseline, `lastPongAt` is stranded a minute in the
+      // future and `now - lastPongAt` stays negative, so this detector would
+      // stay disabled until the clock caught up — the failure this guards.
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(onDisconnect).toHaveBeenCalledWith("Ping timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -635,7 +635,7 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
     // CR 704.5a headroom is `life - 1`: a seat at exactly 0 has LOST, so a legal shortcut must
     // stop one point above it. CR 104.3c: an empty library is only lethal on the next draw, so
     // the library axis divides the whole remaining library.
-    // CR 704.5a: a published re-aimable `Targets` slot may be pointed at ANY of its legal
+    // CR 119.3: a published re-aimable `Targets` slot may be pointed at ANY of its legal
     // player targets in EVERY remaining repetition, so each of them is charged that slot's
     // magnitude ON TOP of its own observed drain. Both terms come off the offer's OWN
     // published data — `certificate.per_cycle.victim_slot` and `schema.points` — never from
@@ -4183,7 +4183,7 @@ fn c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone() {
 /// `NotALoopDecision` rather than as `UnexposedSlot`.
 ///
 /// The two sets diverge by construction and legitimately so: `victim_slot` is derived from the
-/// period's ANNOUNCED targets, which CR 704.5a charges whoever announces them, while
+/// period's ANNOUNCED targets, which CR 119.3 charges whoever announces them, while
 /// `schema.points` publishes only the proposer's own CR 601.2c choices. A period whose announced
 /// target is nobody's published choice therefore mints a charged slot with no point beside it,
 /// and a fabricated pin naming that slot is what the per-cycle conformance check would size its
@@ -4227,7 +4227,7 @@ fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
     );
     assert!(
         magnitude > 0,
-        "REACH-GUARD: the charged slot must carry a strictly positive CR 704.5a magnitude; \
+        "REACH-GUARD: the charged slot must carry a strictly positive CR 119.3 magnitude; \
          got {magnitude} from {:?}",
         per_cycle.victim_slot
     );
@@ -4519,7 +4519,7 @@ fn u2_the_published_victim_domain_gates_the_committed_drive() {
         );
         assert!(
             per_cycle.victim_slot.iter().any(|(_, m)| *m > 0),
-            "REACH-GUARD: a charged slot with a strictly positive CR 704.5a magnitude, else the \
+            "REACH-GUARD: a charged slot with a strictly positive CR 119.3 magnitude, else the \
              lift is the identity whatever the domain. got {:?}",
             per_cycle.victim_slot
         );
@@ -5131,7 +5131,7 @@ fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
         assert_eq!(
             life_of(element),
             expected,
-            "CR 704.5a: at count {} the drain is charged to each announced candidate at the \
+            "CR 119.3: at count {} the drain is charged to each announced candidate at the \
              published rate {rate} times its own share",
             element.count
         );
@@ -7100,7 +7100,7 @@ fn the_responder_reads_the_declared_partition_and_its_per_seat_magnitudes() {
     assert_eq!(
         f4_life_entries(element),
         expected,
-        "CR 704.5a: each declared seat's magnitude is the published per-cycle rate times ITS \
+        "CR 119.3: each declared seat's magnitude is the published per-cycle rate times ITS \
          OWN segment — {expected:?} — so a producer that re-attributed the drain uniformly, or \
          keyed it on the seat the period was measured on, fails here"
     );

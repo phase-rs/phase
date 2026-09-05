@@ -44,6 +44,18 @@ fn live_battlefield_object_mut<'a>(
     })
 }
 
+/// CR 205.3q + CR 310.3: does this permanent have the Siege battle type?
+/// ("Battles have a unique subtype, called a battle type.")
+///
+/// Single authority for the Siege test inside this state-based-action sweep, so
+/// the CR 704.5v zero-defense deferral and the CR 310.12a protector-legality
+/// rule can never disagree about what a Siege is. Reads the layer-derived
+/// `card_types` rather than `base_card_types`, so a type-changing effect that
+/// grants or removes the Siege battle type is honored.
+fn has_siege_type(obj: &crate::game::game_object::GameObject) -> bool {
+    obj.card_types.subtypes.iter().any(|s| s == "Siege")
+}
+
 /// CR 704.4: state-based actions pay no attention to what happens during the
 /// resolution of a spell or ability. An entry that is mid-resolution — parked on
 /// a CR 616.1 replacement-ordering choice, or on a CR 303.4f Aura-host choice —
@@ -240,9 +252,10 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 return;
             }
 
-            // CR 704.5v + CR 310.7: If a battle has defense 0 and isn't the source of an
-            // ability that has triggered but not yet left the stack, it's put into its
-            // owner's graveyard.
+            // CR 704.5v + CR 310.7: a Siege with defense 0 that isn't the source of an
+            // ability that has triggered but not yet left the stack is put into its
+            // owner's graveyard. CR 704.5w + CR 310.8: a non-Siege battle with defense 0
+            // is put into its owner's graveyard with no such deferral.
             check_zero_defense(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
                 return;
@@ -260,7 +273,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 &battlefield_snapshot,
             );
 
-            // CR 704.5w + CR 704.5x + CR 310.11: Battle with no (or illegal) protector —
+            // CR 704.5x + CR 310.11: Battle with no (or illegal) protector —
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
@@ -1771,9 +1784,24 @@ fn check_zero_loyalty(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
-/// CR 704.5v + CR 310.7: A battle with defense 0 is put into its owner's graveyard,
-/// unless it's the source of an ability that has triggered but not yet left the
-/// stack (e.g., the Siege's victory trigger).
+/// CR 704.5v + CR 704.5w: a battle with defense 0 is put into its owner's
+/// graveyard. The rule is split across two sub-rules by battle type, and only
+/// the Siege half carries a trigger-on-stack deferral:
+///
+/// > 704.5v If a Siege battle has defense 0 and it isn't the source of an
+/// > ability that has triggered but not yet left the stack, it's put into its
+/// > owner's graveyard.
+///
+/// > 704.5w If a non-Siege battle has defense 0, it's put into its owner's
+/// > graveyard.
+///
+/// CR 310.12b is why the carve-out is Siege-shaped: a Siege's intrinsic "when
+/// the last defense counter is removed from this permanent, exile it, then you
+/// may cast it transformed without paying its mana cost" has to find its source
+/// still on the battlefield when it resolves. A battle with any other battle
+/// type has no such intrinsic, so CR 704.5w grants it no deferral — it is put
+/// into its owner's graveyard immediately, even with one of its own triggered
+/// abilities still on the stack.
 fn check_zero_defense(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -1796,8 +1824,14 @@ fn check_zero_defense(
             if obj.defense.unwrap_or(0) != 0 {
                 return false;
             }
-            // CR 310.7: Don't SBA-destroy while one of this battle's triggered
-            // abilities is still on the stack (mirrors CR 714.4 Saga deferral).
+            // CR 704.5w: a non-Siege battle has no trigger-on-stack deferral —
+            // it dies now.
+            if !has_siege_type(obj) {
+                return true;
+            }
+            // CR 704.5v: a Siege is spared while one of its own abilities has
+            // triggered but not yet left the stack (mirrors the CR 714.4 Saga
+            // deferral), so its CR 310.12b victory trigger can resolve.
             let ability_on_stack = state.stack.iter().any(|entry| {
                 matches!(
                     &entry.kind,
@@ -1947,7 +1981,7 @@ fn check_illegal_attachment_unattach(
     }
 }
 
-/// CR 704.5w + CR 704.5x + CR 310.11 + CR 310.12a: If a battle that isn't being
+/// CR 704.5x + CR 310.11 + CR 310.12a: If a battle that isn't being
 /// attacked has no protector, an illegal protector, or (for Sieges) a protector
 /// that equals its controller, its controller chooses a legal protector. If no
 /// legal player exists, the battle is put into its owner's graveyard.
@@ -1993,7 +2027,7 @@ fn check_battle_protector(
             continue;
         };
         let controller = battle.controller;
-        let is_siege = battle.card_types.subtypes.iter().any(|s| s == "Siege");
+        let is_siege = has_siege_type(battle);
         let protector = battle.protector();
 
         // Legal protectors for a Siege are opponents of the controller (CR 310.12a).
@@ -2015,7 +2049,7 @@ fn check_battle_protector(
 
         // Compute legal choices.
         // CR 310.12a: a Siege's controller "must choose its protector from among their
-        // opponents", and CR 704.5w's SBA phrasing — "no player IN THE GAME designated as
+        // opponents", and CR 704.5x's SBA phrasing — "no player IN THE GAME designated as
         // its protector ... chooses an appropriate player" — seats CR 102.1 directly on
         // this seam. A CHOICE, not a target (CR 115.10a), so the candidate list is the
         // CHOOSABLE opponents. The pre-existing `eliminated_players` filter is LEFT IN
@@ -2038,7 +2072,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.11 / CR 704.5w + CR 614.6: No legal protector exists —
+                // CR 310.11 / CR 704.5x + CR 614.6: No legal protector exists —
                 // the battle is put into the graveyard, a "leaves the
                 // battlefield" event that must consult Moved redirects. Bail on a
                 // CR 616.1 pause (the SBA fixpoint re-runs and finds the rest).
@@ -2067,7 +2101,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.11 + CR 704.5w + CR 704.5x: multiple legal protectors —
+                // CR 310.11 + CR 704.5x: multiple legal protectors —
                 // the controller must choose. Pause the SBA fixpoint and yield
                 // a WaitingFor (mirrors `check_legend_rule`). The SBA re-runs
                 // on the next apply and finds any remaining battles.
@@ -4284,6 +4318,8 @@ mod tests {
             player: PlayerId(2),
             candidate_count: 1,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
             proposed: ProposedEvent::Draw {

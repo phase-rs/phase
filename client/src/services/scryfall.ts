@@ -40,14 +40,72 @@ interface ScryfallDataEntry {
 export const CARD_BACK_URL =
   "https://backs.scryfall.io/normal/0/a/0aeebaf5-8c7d-4636-9e82-8c27447861f7.jpg";
 
-/** Build the authoritative Scryfall source URL for an admitted mana shard. */
-export function manaSymbolSourceUrl(shard: string): string {
-  const code = shard === "∞"
+declare const manaSymbolShardBrand: unique symbol;
+/** A mana shard string admitted by the finite Scryfall card-symbol catalog. */
+export type ManaSymbolShard = string & { readonly [manaSymbolShardBrand]: true };
+
+/**
+ * The catalog below is the COMPLETE set published by Scryfall's `/symbology`
+ * endpoint — all 84 symbols, every one of which has an SVG asset.
+ *
+ * "Complete" is the definition on purpose, rather than "the ones we happen to
+ * have needed". A symbol missing from here is not merely un-rendered: it is
+ * also never installed by `coreDescriptors()`, so it breaks offline in exactly
+ * the way this catalog exists to prevent. `manaSymbolCatalog.test.ts` pins the
+ * full expected set against an independently-authored literal, because a test
+ * that derives its expectation from `MANA_SYMBOL_SHARDS` cannot see an omission.
+ */
+const SINGLE_MANA_SYMBOL_SHARDS = [
+  "W", "U", "B", "R", "G", "C", "S", "T", "Q", "E", "P", "X", "Y", "Z", "A", "∞", "½", "CHAOS",
+  // One colored mana or two life, one-half white/red mana, one mana from a
+  // legendary source, one potential land drop, planeswalker, ticket counter.
+  "H", "HW", "HR", "L", "D", "PW", "TK",
+] as const;
+const COMPOSITE_MANA_SYMBOL_SHARDS = [
+  "W/U", "W/B", "U/B", "U/R", "B/R", "B/G", "R/W", "R/G", "G/W", "G/U",
+  "2/W", "2/U", "2/B", "2/R", "2/G",
+  "W/P", "U/P", "B/P", "R/P", "G/P",
+  "W/U/P", "W/B/P", "U/B/P", "U/R/P", "B/R/P", "B/G/P", "R/W/P", "R/G/P", "G/W/P", "G/U/P",
+  "C/W", "C/U", "C/B", "C/R", "C/G",
+  // Colorless Phyrexian: one colorless mana or two life.
+  "C/P",
+] as const;
+const FINITE_NUMERIC_MANA_SYMBOL_SHARDS: readonly string[] = [
+  ...Array.from({ length: 21 }, (_, value) => String(value)),
+  "100",
+  "1000000",
+];
+const MANA_SYMBOL_SHARD_SET = new Set<string>([
+  ...SINGLE_MANA_SYMBOL_SHARDS,
+  ...COMPOSITE_MANA_SYMBOL_SHARDS,
+  ...FINITE_NUMERIC_MANA_SYMBOL_SHARDS,
+]);
+
+/** True when `shard` has a corresponding Scryfall card-symbol SVG. */
+export function isManaSymbolShard(shard: string): shard is ManaSymbolShard {
+  return MANA_SYMBOL_SHARD_SET.has(shard);
+}
+
+/** Every admitted mana shard, for callers that must enumerate the whole
+ *  finite catalog (e.g. pre-caching every symbol for offline play). */
+export const MANA_SYMBOL_SHARDS: readonly ManaSymbolShard[] =
+  Array.from(MANA_SYMBOL_SHARD_SET) as ManaSymbolShard[];
+
+/** The URL- and asset-key-safe code for an admitted mana shard: strips the
+ *  hybrid/Phyrexian slash separators and spells out the two symbols with no
+ *  ASCII representation, matching Scryfall's `card-symbols` filenames. Also
+ *  usable verbatim as an `[A-Za-z0-9_-]+` visual-pack asset-key suffix. */
+export function manaSymbolCode(shard: string): string {
+  return shard === "∞"
     ? "INFINITY"
     : shard === "½"
       ? "HALF"
       : shard.replace(/\//g, "");
-  return `https://svgs.scryfall.io/card-symbols/${encodeURIComponent(code)}.svg`;
+}
+
+/** Build the authoritative Scryfall source URL for an admitted mana shard. */
+export function manaSymbolSourceUrl(shard: string): string {
+  return `https://svgs.scryfall.io/card-symbols/${encodeURIComponent(manaSymbolCode(shard))}.svg`;
 }
 
 export interface PrintingEntry {

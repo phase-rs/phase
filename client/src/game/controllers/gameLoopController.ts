@@ -107,7 +107,13 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
       ) {
         return;
       }
-      dispatchAction({ type: "PassPriority" });
+      // The auto-pass beat has no caller to propagate to, and `dispatchAction`
+      // already surfaces the failure itself through `reportActionError`. Every
+      // rejecting submission path therefore has to be absorbed here or it
+      // escapes as an unhandled rejection: a P2P guest sitting in auto-pass now
+      // rejects on `action_rejected` / `action_failed` / host disconnect AND on
+      // the guest adapter's submission timeout (`SUBMISSION_TIMEOUT_MS`).
+      void dispatchAction({ type: "PassPriority" }).catch(() => undefined);
     }, beat);
   }
 

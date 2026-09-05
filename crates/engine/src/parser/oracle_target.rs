@@ -25,7 +25,7 @@ use crate::types::zones::Zone;
 use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, resolve_it_pronoun,
 };
-use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::context::{ChosenColorQualifierScope, ParseContext};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
@@ -2955,6 +2955,44 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 // is a keyword-membership branch folded at the trigger layer, not a
                 // type union, so it is excluded even though the left carried "card".
                 starts_with_type_word(after_trimmed)
+                    // CR 205.4a + CR 205.2a: a disjunct may lead with a SUPERTYPE
+                    // before its type word — "legendary creature", "basic land",
+                    // "snow permanent". `parse_type_phrase_with_ctx` already
+                    // consumes exactly this prefix on the LEFT of a separator (the
+                    // `parse_supertype_prefix` call in the prefix scan above), and
+                    // the COMMA branch already accepts it on the right via
+                    // `starts_with_or_article_type_segment` →
+                    // `starts_with_type_phrase_lead`. Only the bare "and"/"or"
+                    // branch did not, so "each Spider and legendary creature you
+                    // control" silently dropped the whole right conjunct AND the
+                    // shared trailing controller suffix, collapsing to
+                    // `Typed{[Subtype(Spider)]}` with no controller.
+                    //
+                    // NOTE the precise delta: the third disjunct below ALREADY
+                    // accepts a supertype-led right conjunct when the left conjunct
+                    // carried a "card" noun (`left_card_suffix`). What this adds is
+                    // the no-card-suffix case, and ONLY the supertype lead — not
+                    // the rest of `starts_with_type_phrase_lead` (color,
+                    // color-quality, combat-status, leading P/T). Those leads are
+                    // deliberately excluded: "tapped and attacking" / "tapped and
+                    // transformed" are conjoined STATUS adjectives, not a type
+                    // union, and admitting them here would put a heavily-pinned
+                    // combat-status family in the blast radius for no card's gain.
+                    //
+                    // The supertype must be FOLLOWED by a type-phrase lead. A
+                    // supertype word alone is an ADJECTIVE conjunction, not a type
+                    // union: Moritte of the Frost's "except it's legendary and snow
+                    // in addition to its other types" conjoins two supertypes that
+                    // qualify one object, and `become_copy_except.rs` owns that text
+                    // through its own `parse_is_supertype_in_addition`. Without this
+                    // second conjunct the branch builds `Or[Typed{[], Legendary},
+                    // Typed{[], Snow}]` — two legs with NO type filter, which
+                    // `names_enumerable_population` would then accept as a real
+                    // population. Requiring a lead keeps every genuine union site
+                    // (both subtype-led ones included: "legendary Turtle card",
+                    // "basic Plains card").
+                    || nom_target::parse_supertype_prefix(after_trimmed)
+                        .is_ok_and(|(rest, _)| starts_with_type_phrase_lead(rest))
                     || (left_card_suffix
                         && !is_article_led_bare_card(after_trimmed)
                         && starts_with_or_article_type_segment(after_trimmed))
@@ -3415,6 +3453,43 @@ pub fn parse_type_phrase_with_ctx<'a>(
         };
         properties.push(chosen_prop);
         pos += remaining_offset + of_chosen_len;
+    }
+
+    // CR 105.4 + CR 608.2c + CR 109.2: a trailing "of the color of your choice"
+    // qualifier restricts the described permanents to one colour. Sibling of the
+    // chosen-TYPE arm directly above: same position (after both controller
+    // passes, before the trailing CR 115.2 zone pass), same accumulator idiom,
+    // same whitespace handling, same ctx-provenance question.
+    //
+    // CONSUMPTION IS GATED. `FilterProp::IsChosenColor` is a fail-closed read of
+    // the source's `ChosenAttribute::Color` (both `game/filter.rs` arms are
+    // `is_some_and`), so stamping it where no chooser will exist turns an
+    // over-broad filter into one that matches NOTHING — silently, with no
+    // `Effect::Unimplemented` and therefore no coverage signal. `ChainBound` is
+    // WRITTEN only by the effect-chain chunk context, which is also the context
+    // that reads `pending_printed_color_choice` back and injects the
+    // `Effect::Choose(Color)`; so "consumed" and "supplied" are one decision.
+    // NOTE: `ParseContext` is `Clone`, so `ChainBound` is INHERITED by derived
+    // contexts. A derived context that is not merged back with `*ctx = ..` must
+    // reset this field to `Unbound` — see `ChosenColorQualifierScope`'s doc and
+    // the same discipline documented for `pending_damage_multi_target`.
+    // When the gate is closed the qualifier is LEFT IN THE REMAINDER — exactly
+    // today's behaviour — so the existing `target-fallback:` diagnostic stays
+    // honest.
+    let remaining = lower[pos..].trim_start();
+    let remaining_offset = lower[pos..].len() - remaining.len();
+    if let Ok((rest, prop)) = nom_filter::parse_printed_color_choice_qualifier(remaining) {
+        if matches!(
+            ctx.chosen_color_qualifier,
+            ChosenColorQualifierScope::ChainBound
+        ) {
+            properties.push(prop);
+            pos += remaining_offset + (remaining.len() - rest.len());
+            // CR 608.2c: the choice must resolve before the filter is evaluated.
+            // Declared per-clause provenance for the assembly-time injector —
+            // never a shape scan of the lowered tree.
+            ctx.pending_printed_color_choice = Some(ChoiceType::color());
+        }
     }
 
     // CR 115.2: A spell or ability may target an object in a zone other than
@@ -4634,7 +4709,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::DistinctFrom { .. }
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -7719,7 +7794,9 @@ fn parse_shared_quality_reference<'a>(
     }
 
     if let Ok((rest, ())) = parse_word_bounded(input, "it") {
-        let mut ctx_mut = ctx.clone();
+        // Throwaway (`ChosenColorQualifierScope` rule 1) — only the resolved
+        // filter is kept.
+        let mut ctx_mut = ctx.clone_throwaway();
         return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
     }
 
@@ -7734,7 +7811,9 @@ fn parse_shared_quality_reference<'a>(
     // ("a creature you control") still parses as its own filter below.
     for demonstrative in ["that creature", "that permanent", "that card", "that token"] {
         if let Ok((rest, ())) = parse_word_bounded(input, demonstrative) {
-            let mut ctx_mut = ctx.clone();
+            // Throwaway (`ChosenColorQualifierScope` rule 1) — only the resolved
+            // filter is kept.
+            let mut ctx_mut = ctx.clone_throwaway();
             return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
         }
     }
@@ -7919,6 +7998,53 @@ pub(crate) fn attachment_kinds_filter_prop(
         },
         _ => FilterProp::HasAnyAttachmentOf { kinds, controller },
     }
+}
+
+/// CR 120.1 + CR 120.2a + CR 120.2b + CR 514.2: the active-voice damage-history
+/// relative clause — "dealt [combat|noncombat] damage [to you|to a player] this
+/// turn", with the leading "that " already consumed by the caller.
+///
+/// Composed along the two axes the printed clause varies on (damage class ×
+/// recipient) rather than enumerated as whole phrases, so all four printed
+/// combinations fall out of two `alt()` calls:
+///
+/// - "dealt damage this turn" — Red Guardian, Super-Soldier
+/// - "dealt damage to you this turn" — Reciprocate, Retaliate, Spear of Heliod,
+///   Giltspire Avenger, Otherworldly Escort
+/// - "dealt combat damage to you this turn" — Witch-king of Angmar
+/// - "dealt combat damage to a player this turn" — Night of the Flying Merfolk
+///
+/// CR 120.1 ("Objects can deal damage to … players") bounds the recipient axis
+/// to players. The object-recipient forms ("that dealt damage to it this turn",
+/// Brine Hag / Giant Albatross) bind to the trigger's event context rather than
+/// a player scope and are deliberately not handled here.
+fn parse_dealt_damage_clause(input: &str) -> OracleResult<'_, FilterProp> {
+    let (input, _) = tag("dealt ").parse(input)?;
+    // CR 120.2a / CR 120.2b: damage-class axis; absent means either class.
+    let (input, kind) = opt(alt((
+        value(DamageKindFilter::CombatOnly, tag("combat ")),
+        value(DamageKindFilter::NoncombatOnly, tag("noncombat ")),
+    )))
+    .parse(input)?;
+    let (input, _) = tag("damage").parse(input)?;
+    // CR 120.1: recipient axis; absent leaves the recipient unconstrained, which
+    // also admits the object recipients the player scopes below exclude.
+    let (input, recipient) = opt(preceded(
+        tag(" to "),
+        alt((
+            value(PlayerFilter::Controller, tag("you")),
+            value(PlayerFilter::All, tag("a player")),
+        )),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" this turn").parse(input)?;
+    Ok((
+        input,
+        FilterProp::DealtDamageThisTurn {
+            kind: kind.unwrap_or_default(),
+            recipient,
+        },
+    ))
 }
 
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
@@ -8161,6 +8287,15 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         ));
     }
 
+    // CR 120.1 + CR 120.2a + CR 514.2: "that dealt [combat] damage [to you]
+    // this turn" — the active-voice damage-history clause, parameterized on its
+    // two axes rather than enumerated. Placed before VERB_PHRASES because it
+    // subsumes the bare "dealt damage this turn" form; disjoint from the passive
+    // "was dealt damage this turn" row on the leading verb, so no shadowing.
+    if let Ok((rest, prop)) = parse_dealt_damage_clause(after_that) {
+        return Some((vec![prop], that_len + after_that.len() - rest.len()));
+    }
+
     // --- Verb-phrase patterns: match fixed phrases after "that " ---
     // CR 120.6 + CR 120.9: "that was dealt damage this turn"
     static VERB_PHRASES: &[(&str, FilterProp)] = &[
@@ -8168,9 +8303,6 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             "was dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
-        // CR 120.1: active voice — the creature dealt damage (was the source),
-        // distinct from the passive "was dealt damage" above (Red Guardian).
-        ("dealt damage this turn", FilterProp::DealtDamageThisTurn),
         (
             "entered the battlefield this turn",
             FilterProp::EnteredThisTurn,
@@ -15497,6 +15629,183 @@ mod tests {
         assert_eq!(rest.trim(), "");
     }
 
+    /// V5 building block (CR 205.4a + CR 205.2a): the bare "and"/"or" separator
+    /// branch must accept a SUPERTYPE-led right conjunct, exactly as the comma
+    /// branch already does. Comma/no-comma equivalence is the claim, so the two
+    /// forms of one grammar cannot drift.
+    ///
+    /// Revert-failing: without the `parse_supertype_prefix` disjunct the bare
+    /// form collapses to `Typed{[Subtype("Spider")]}` with `controller: None` —
+    /// it drops the whole right conjunct AND the shared trailing suffix.
+    #[test]
+    fn bare_and_supertype_led_conjunct_matches_comma_form() {
+        let (bare, bare_rest) = parse_type_phrase("Spider and legendary creature you control");
+        let (comma, comma_rest) = parse_type_phrase("Spider, and legendary creature you control");
+        assert_eq!(
+            bare, comma,
+            "the bare-\"and\" form must build the same union as the comma form"
+        );
+        assert_eq!(bare_rest.trim(), comma_rest.trim());
+
+        let TargetFilter::Or { ref filters } = bare else {
+            panic!("expected a two-leg Or union, got {bare:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf,
+                other => panic!("expected Typed leg, got {other:?}"),
+            })
+            .collect();
+        let legendary = FilterProp::HasSupertype {
+            value: Supertype::Legendary,
+        };
+        // CR 109.4: the trailing controller suffix is shared by both legs.
+        for leg in &legs {
+            assert_eq!(leg.controller, Some(ControllerRef::You), "{leg:?}");
+        }
+        assert!(legs[0]
+            .type_filters
+            .contains(&TypeFilter::Subtype("Spider".to_string())));
+        assert!(
+            !legs[0].properties.contains(&legendary),
+            "the supertype must not spread backwards onto the Spider leg: {:?}",
+            legs[0].properties
+        );
+        assert!(legs[1].type_filters.contains(&TypeFilter::Creature));
+        assert!(legs[1].properties.contains(&legendary));
+    }
+
+    /// V5 building block, second axis: the same disjunct serves "or" and every
+    /// supertype word in `parse_supertype_word`'s set, for any left conjunct.
+    #[test]
+    fn bare_or_supertype_led_conjunct_unions() {
+        for phrase in [
+            "Spider or legendary creature you control",
+            "artifact and legendary creature you control",
+            "land and basic land you control",
+        ] {
+            let (filter, _) = parse_type_phrase(phrase);
+            let TargetFilter::Or { ref filters } = filter else {
+                panic!("{phrase:?} must build an Or union, got {filter:?}");
+            };
+            assert_eq!(filters.len(), 2, "{phrase:?} -> {filters:?}");
+        }
+    }
+
+    /// V5's paired negative: the disjunct is deliberately narrowed to SUPERTYPE
+    /// leads. Colour, colour-quality, combat-status and leading-P/T leads (the
+    /// rest of `starts_with_type_phrase_lead`) stay OUT, so the heavily-pinned
+    /// "tapped and attacking" family is not in the blast radius; so do the
+    /// commander and article-led-non-card forms the condition layer folds one
+    /// level up.
+    #[test]
+    fn bare_and_non_supertype_lead_is_not_a_type_union() {
+        // Positive reach-guard in the SAME test: the harness does see a working
+        // union, so the negatives below are not vacuous.
+        let (positive, _) = parse_type_phrase("Spider and legendary creature you control");
+        assert!(
+            matches!(positive, TargetFilter::Or { .. }),
+            "reach-guard: the supertype lead must still union, got {positive:?}"
+        );
+
+        for phrase in [
+            "creature and tapped artifact you control",
+            "creature and each player",
+            "creature and each opponent",
+            "creature and commander you control",
+            "creature and a Plan you control",
+            // CR 205.4a: a SUPERTYPE lead not followed by a type-phrase lead is an
+            // ADJECTIVE conjunction qualifying one object, not a type union.
+            // Moritte of the Frost ("except it's legendary and snow in addition to
+            // its other types") is the only corpus instance; `become_copy_except.rs`
+            // owns that text. Without the `starts_with_type_phrase_lead` conjunct on
+            // the supertype disjunct this builds `Or[Typed{[], Legendary},
+            // Typed{[], Snow}]` — two legs carrying no type filter at all.
+            "legendary and snow in addition to its other types",
+            "legendary and snow",
+        ] {
+            let (filter, _) = parse_type_phrase(phrase);
+            assert!(
+                !matches!(filter, TargetFilter::Or { .. }),
+                "{phrase:?} must stay collapsed (no type union), got {filter:?}"
+            );
+        }
+    }
+
+    /// V5b (CR 205.4a + CR 702.21a): the SAME grammar fix, reached through a
+    /// completely different consumer — a Ward keyword cost, not a target phrase.
+    /// This is what makes U3 a building-block fix rather than a counter-doubling
+    /// special case.
+    ///
+    /// Revert-failing: today Sauron's Ward filter drops its `Creature` leg and
+    /// keeps only `Typed{[Artifact], Legendary}` (backlog root cause 6).
+    #[test]
+    fn sauron_the_dark_lord_ward_cost_unions_both_legendary_legs() {
+        use crate::types::keywords::{Keyword, WardCost};
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Ward—Sacrifice a legendary artifact or legendary creature.\n\
+             Whenever an opponent casts a spell, amass Orcs 1.\n\
+             Whenever an Army you control deals combat damage to a player, the Ring tempts you.\n\
+             Whenever the Ring tempts you, you may discard your hand. If you do, draw four cards.",
+            "Sauron, the Dark Lord",
+            &[],
+            &["Legendary".into(), "Creature".into()],
+            &["Avatar".into(), "Horror".into()],
+        );
+
+        let ward = parsed
+            .extracted_keywords
+            .iter()
+            .find_map(|k| match k {
+                Keyword::Ward(WardCost::Sacrifice { count, filter }) => Some((count, filter)),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "Ward—Sacrifice must be extracted: {:?}",
+                    parsed.extracted_keywords
+                )
+            });
+        assert_eq!(*ward.0, 1);
+        let TargetFilter::Or { filters } = ward.1 else {
+            panic!(
+                "the ward cost filter must union both legendary legs, got {:?}",
+                ward.1
+            );
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        let legendary = FilterProp::HasSupertype {
+            value: Supertype::Legendary,
+        };
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf,
+                other => panic!("expected Typed leg, got {other:?}"),
+            })
+            .collect();
+        assert!(legs[0].type_filters.contains(&TypeFilter::Artifact));
+        assert!(legs[0].properties.contains(&legendary));
+        assert!(legs[1].type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            legs[1].properties.contains(&legendary),
+            "the dropped right conjunct is a LEGENDARY creature: {:?}",
+            legs[1].properties
+        );
+
+        // PAIRED POSITIVE: the rest of the card still parses, so a vanished
+        // keyword cannot masquerade as a passing assertion.
+        assert_eq!(
+            parsed.triggers.len(),
+            3,
+            "Sauron's three amass/Ring triggers must still parse: {:?}",
+            parsed.triggers.iter().map(|t| &t.mode).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn forest_land_subtype() {
         let (f, _) = parse_type_phrase("forest");
@@ -17341,10 +17650,14 @@ mod tests {
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
         assert_eq!(tf.controller, Some(ControllerRef::Opponent));
         assert!(
-            tf.properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::DealtDamageThisTurn)),
-            "Expected DealtDamageThisTurn (active), got: {:?}",
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: None
+                }
+            )),
+            "Expected unrestricted DealtDamageThisTurn (active), got: {:?}",
             tf.properties
         );
         assert!(
@@ -17352,6 +17665,77 @@ mod tests {
                 .iter()
                 .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
             "must NOT collapse to the passive WasDealtDamageThisTurn: {:?}",
+            tf.properties
+        );
+        assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");
+    }
+
+    // CR 120.1 + CR 120.2a: the damage-class and recipient axes of the
+    // active-voice clause are independent, so all four printed combinations must
+    // fall out of the same combinator. Exercised at the building-block level
+    // (the axis pair), not per card.
+    #[test]
+    fn dealt_damage_clause_parses_both_axes() {
+        for (clause, expected) in [
+            (
+                "dealt damage this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: None,
+                },
+            ),
+            (
+                // Reciprocate, Retaliate, Spear of Heliod, Giltspire Avenger.
+                "dealt damage to you this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: Some(PlayerFilter::Controller),
+                },
+            ),
+            (
+                // Witch-king of Angmar.
+                "dealt combat damage to you this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::CombatOnly,
+                    recipient: Some(PlayerFilter::Controller),
+                },
+            ),
+            (
+                // Night of the Flying Merfolk.
+                "dealt combat damage to a player this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::CombatOnly,
+                    recipient: Some(PlayerFilter::All),
+                },
+            ),
+        ] {
+            let (rest, prop) = parse_dealt_damage_clause(clause)
+                .unwrap_or_else(|e| panic!("{clause:?} must parse: {e:?}"));
+            assert_eq!(prop, expected, "wrong props for {clause:?}");
+            assert!(rest.is_empty(), "{clause:?} left remainder {rest:?}");
+        }
+
+        // Negative control: the passive voice must not be consumed by the
+        // active-voice combinator (it routes to `WasDealtDamageThisTurn`).
+        assert!(parse_dealt_damage_clause("was dealt damage this turn").is_err());
+    }
+
+    // CR 120.1: the restrictive clause must reach the target filter's
+    // `properties`. Before this was wired, "that dealt combat damage to you this
+    // turn" was silently discarded and every creature became eligible (#8445).
+    #[test]
+    fn dealt_damage_to_you_clause_reaches_target_filter() {
+        let (filter, rest) =
+            parse_target("target creature that dealt combat damage to you this turn");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::CombatOnly,
+                recipient: Some(PlayerFilter::Controller),
+            }),
+            "restrictive clause dropped, got: {:?}",
             tf.properties
         );
         assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");
@@ -20534,6 +20918,116 @@ mod tests {
                 && pop.type_filters.contains(&TypeFilter::Permanent),
             "the population must carry the SAME type set as the candidates, got {:?}",
             pop.type_filters
+        );
+    }
+
+    /// V-CONTAIN (SHAPE) — CR 105.4. The printed chosen-colour qualifier arm is
+    /// gated on `ChosenColorQualifierScope::ChainBound`, and the gate must hold
+    /// in BOTH directions.
+    ///
+    /// Reverting the gate in either direction fails this test: dropping the
+    /// `ChainBound` check makes the negative half stamp `IsChosenColor` on a
+    /// throwaway `ParseContext::default()`; dropping the arm entirely makes the
+    /// positive half stop stamping it.
+    #[test]
+    fn printed_color_choice_qualifier_is_gated_on_chain_bound_scope() {
+        const PHRASE: &str = "permanents of the color of your choice";
+
+        // NEGATIVE — the exact throwaway call every `parse_type_phrase` call
+        // site makes (the wrapper builds a fresh `ParseContext::default()`).
+        let (unbound_filter, unbound_rest) = parse_type_phrase(PHRASE);
+        let unbound = typed_leg(&unbound_filter).expect("typed");
+        assert!(
+            !unbound
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "an Unbound context must NOT stamp IsChosenColor, got {:?}",
+            unbound.properties
+        );
+        assert_eq!(
+            unbound_rest.trim_start(),
+            "of the color of your choice",
+            "when the gate is closed the qualifier stays in the remainder so the \
+             existing target-fallback diagnostic stays honest"
+        );
+
+        // POSITIVE REACH-GUARD, same test — the arm does fire under ChainBound,
+        // so the negative above cannot pass because the arm is unreachable.
+        let mut bound_ctx = ParseContext {
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        let (bound_filter, bound_rest) = parse_type_phrase_with_ctx(PHRASE, &mut bound_ctx);
+        let bound = typed_leg(&bound_filter).expect("typed");
+        assert!(
+            bound
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "a ChainBound context MUST stamp IsChosenColor, got {:?}",
+            bound.properties
+        );
+        assert_eq!(bound_rest, "", "the qualifier must be fully consumed");
+        assert!(
+            matches!(
+                bound_ctx.pending_printed_color_choice,
+                Some(ChoiceType::Color { .. })
+            ),
+            "the arm must declare per-clause provenance for the assembly injector, got {:?}",
+            bound_ctx.pending_printed_color_choice
+        );
+
+        // WHITESPACE CASE — an upstream suffix arm that already consumed the
+        // separating space must not defeat the space-free tag.
+        let mut ws_ctx = ParseContext {
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        let (ws_filter, _) =
+            parse_type_phrase_with_ctx("permanents  of the color of your choice", &mut ws_ctx);
+        let ws = typed_leg(&ws_filter).expect("typed");
+        assert!(
+            ws.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "extra separating whitespace must not defeat the arm, got {:?}",
+            ws.properties
+        );
+
+        // ANAPHOR NEGATIVE — `ChainBound` must not widen the arm to the anaphor
+        // forms; those stay with `parse_pre_controller_chosen_filter_suffix`.
+        let mut anaphor_ctx = ParseContext {
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        let (anaphor_filter, anaphor_rest) =
+            parse_type_phrase_with_ctx("permanents of the chosen color", &mut anaphor_ctx);
+        let anaphor = typed_leg(&anaphor_filter).expect("typed");
+        assert!(
+            !anaphor
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "the anaphor form must NOT be consumed by this arm, got {:?}",
+            anaphor.properties
+        );
+        assert_eq!(anaphor_rest.trim_start(), "of the chosen color");
+        assert!(anaphor_ctx.pending_printed_color_choice.is_none());
+
+        // CLONE CASE — `ParseContext` derives `Clone`, so `ChainBound` is
+        // INHERITED by derived contexts (documented honestly on the enum), while
+        // a `..Default::default()`-constructed context is not.
+        let cloned = bound_ctx.clone();
+        assert_eq!(
+            cloned.chosen_color_qualifier,
+            ChosenColorQualifierScope::ChainBound,
+            "a clone inherits ChainBound — this is the documented hazard, not a bug"
+        );
+        assert_eq!(
+            ParseContext::default().chosen_color_qualifier,
+            ChosenColorQualifierScope::Unbound,
+            "a freshly defaulted context leaves the gate closed"
         );
     }
 }

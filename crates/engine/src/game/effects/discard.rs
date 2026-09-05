@@ -403,6 +403,18 @@ pub fn resolve(
             }
             let player_id = obj.owner;
 
+            // CR 701.9a + CR 609.3: Tamiyo, Collector of Tales class — an
+            // opponent's spell or ability can't force the protected player to
+            // discard ANY card, regardless of which one.
+            if crate::game::static_abilities::forced_action_muzzled(
+                state,
+                ability.controller,
+                player_id,
+                crate::types::ability::CostCategory::Discards,
+            ) {
+                continue;
+            }
+
             let proposed = ProposedEvent::Discard {
                 player_id,
                 object_id: obj_id,
@@ -526,6 +538,29 @@ pub fn resolve(
         // the wrong hand. `resolve_player_for_context_ref` skips `ability.targets`
         // when the filter is a context-ref and falls back to `ability.controller`.
         let discard_player = super::resolve_player_for_context_ref(state, ability, &target_filter);
+
+        // CR 701.9a + CR 609.3: Tamiyo, Collector of Tales class — an
+        // opponent's spell or ability can't force the protected player to
+        // discard ANY card, regardless of which one. Treated as an impossible
+        // action for that player: a mandatory discard is a failed no-op
+        // (mirrors the empty-hand mandatory-discard path below), an "up to"
+        // discard simply discards zero.
+        if crate::game::static_abilities::forced_action_muzzled(
+            state,
+            ability.controller,
+            discard_player,
+            crate::types::ability::CostCategory::Discards,
+        ) {
+            if !up_to {
+                state.cost_payment_failed_flag = true;
+            }
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
 
         // CR 701.9b: Player chooses which card(s) to discard (not "at random").
         let hand_cards: Vec<ObjectId> = state

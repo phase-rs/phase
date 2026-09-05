@@ -227,7 +227,7 @@
     },
     "selector": {
       "title": "Download selection",
-      "core": "Card back",
+      "core": "Card back and mana symbols",
       "printing": "Set printings",
       "complete": "All current English card images",
       "curated": "One image per card",
@@ -347,7 +347,7 @@
       "catalog_state": "Historical catalog state could not be reclaimed"
     },
     "packs": {
-      "core": "Card back",
+      "core": "Card back and mana symbols",
       "complete": "All current English card images",
       "curated": "One image per card",
       "deckLibrary": "Deck library",
@@ -408,12 +408,14 @@
   },
   "offlinePreparation": {
     "title": "Offline preparation",
-    "description": "Prepare this desktop for cold-launch local play before enabling Work Offline.",
+    "description": "Prepare this device for cold-launch local play before enabling Work Offline.",
     "prepare": "Prepare for Offline",
     "preparing": "Preparing…",
     "workOffline": "Work Offline",
     "checklistLabel": "Offline readiness checklist",
     "visualWarning": "Installed visual packs need attention. Open Visual Packs to repair them; local play remains available.",
+    "cardArtMissing": "No card images are installed. Cards will render without art offline — install a pack in Visual Packs below.",
+    "cardArtInstalled": "Card images cached: {{packs}}",
     "incompleteTitle": "Offline preparation is incomplete",
     "incompleteMessage": "Missing: {{capabilities}}. Enable Work Offline anyway?",
     "confirmOffline": "Enable Work Offline",
@@ -432,6 +434,7 @@
       "preconCatalog": "Generated preconstructed decks",
       "bundledAiCatalog": "Bundled AI deck catalog",
       "deckLibrary": "Installed Deck Library",
+      "coreVisuals": "Card back and mana symbols",
       "nativeEngine": "Native engine"
     },
     "capabilityStates": {

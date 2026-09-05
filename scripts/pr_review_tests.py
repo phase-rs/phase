@@ -321,8 +321,99 @@ class PrReviewTests(unittest.TestCase):
             [".claude/skills/pr-review-loop/SKILL.md"],
         )
 
-    def test_packet_exposes_quality_label_from_policy(self) -> None:
-        policy = pr_review.Policy({"labels": {"quality": "quality"}})
+    def test_approved_for_review_label_forces_one_review_before_hard_stop(self) -> None:
+        packet = {
+            "pr": {
+                "number": 7029,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "labels": ["pr:approved-for-review"],
+                "self_authored": False,
+            },
+            "classification": {
+                "hard_stop_paths": [".github/workflows/ci.yml"],
+                "surface": "hard_stop",
+            },
+            "policy": {
+                "labels": {"approved_for_review": "pr:approved-for-review"}
+            },
+            "ci": {"state": "green"},
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "approved_for_review_label")
+
+        packet["local_current_event"] = {
+            "event_type": "changes_requested",
+            "review_routing_label": "pr:approved-for-review",
+        }
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "request_changes")
+        self.assertEqual(recommendation["reason"], "hard_stop")
+
+    def test_approved_for_review_label_yields_to_self_review_and_admission_gates(
+        self,
+    ) -> None:
+        base = {
+            "pr": {
+                "number": 7030,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "labels": ["pr:approved-for-review"],
+                "self_authored": False,
+            },
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "policy": {"labels": {"approved_for_review": "pr:approved-for-review"}},
+            "ci": {"state": "green"},
+        }
+
+        # Positive control: without a competing gate this packet does reach review,
+        # so a non-review result below is the gate winning, not a malformed packet.
+        self.assertEqual(
+            pr_review.recommend_from_packet(base)["advisory_action"], "review"
+        )
+
+        recommendation = pr_review.recommend_from_packet(
+            {**base, "pr": {**base["pr"], "self_authored": True}}
+        )
+        self.assertEqual(recommendation["advisory_action"], "skip")
+        self.assertEqual(recommendation["reason"], "self_authored")
+
+        for key, profile, action, reason in (
+            ("artifacts", {"hold": True}, "hold", "insufficient_admission_data"),
+            (
+                "artifacts",
+                {"decline": True},
+                "decline",
+                "required_artifacts_current_head",
+            ),
+            (
+                "architecture_scope",
+                {"decline": True},
+                "decline",
+                "architecture_scope_not_authorized",
+            ),
+        ):
+            with self.subTest(gate=f"{key}:{sorted(profile)[0]}"):
+                recommendation = pr_review.recommend_from_packet(
+                    {**base, key: profile}
+                )
+
+                self.assertEqual(recommendation["advisory_action"], action)
+                self.assertEqual(recommendation["reason"], reason)
+
+    def test_packet_exposes_review_labels_from_policy(self) -> None:
+        policy = pr_review.Policy(
+            {
+                "labels": {
+                    "quality": "quality",
+                    "approved_for_review": "pr:approved-for-review",
+                }
+            }
+        )
         packet = pr_review.make_packet(
             {
                 "number": 5200,
@@ -338,6 +429,10 @@ class PrReviewTests(unittest.TestCase):
         )
 
         self.assertEqual(packet["policy"]["labels"]["quality"], "quality")
+        self.assertEqual(
+            packet["policy"]["labels"]["approved_for_review"],
+            "pr:approved-for-review",
+        )
 
     def test_stale_approval_recommends_dequeue_when_queued(self) -> None:
         packet = {
@@ -1257,6 +1352,87 @@ class PrReviewTests(unittest.TestCase):
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "hold")
+        self.assertEqual(recommendation["reason"], "local_hold_current_head")
+
+    def test_ci_hold_rechecks_after_required_ci_settles(self) -> None:
+        packet = {
+            "pr": {
+                "number": 4576,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+            },
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "hold_ci",
+                "head_sha": "head",
+            },
+            "policy_trace": [],
+        }
+
+        for ci_state in ("green", "failed"):
+            with self.subTest(ci_state=ci_state):
+                recommendation = pr_review.recommend_from_packet(
+                    {**packet, "ci": {"state": ci_state}}
+                )
+
+                self.assertEqual(
+                    recommendation["advisory_action"], "recheck_ci_hold_for_handler"
+                )
+                self.assertEqual(recommendation["reason"], "ci_hold_settled")
+
+    def test_ci_hold_remains_held_while_required_ci_is_pending(self) -> None:
+        packet = {
+            "pr": {
+                "number": 4577,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+            },
+            "ci": {"state": "pending"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "hold_ci",
+                "head_sha": "head",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "hold_ci")
+        self.assertEqual(recommendation["reason"], "local_hold_current_head")
+
+    def test_ci_hold_recheck_does_not_hide_a_current_head_conflict(self) -> None:
+        packet = {
+            "pr": {
+                "number": 4578,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+                "mergeStateStatus": "DIRTY",
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "hold_ci",
+                "head_sha": "head",
+            },
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "blocked")
         self.assertEqual(recommendation["reason"], "local_hold_current_head")
 
     def test_bare_local_hold_resurfaces_on_parse_diff(self) -> None:
@@ -3287,25 +3463,108 @@ class PrReviewTests(unittest.TestCase):
         parse_step = workflow.split("- name: Parse-detail diff vs base baseline", 1)[1]
         self.assertNotIn("PAYLOAD_BASE_SHA", parse_step)
 
-    def test_gate_a_actual_success_output_is_sha_bound(self) -> None:
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+    def _rev_parse(self, rev: str) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", rev],
             cwd=pr_review.REPO_ROOT,
             check=True,
             text=True,
             capture_output=True,
         ).stdout.strip()
-        result = subprocess.run(
-            [str(pr_review.REPO_ROOT / "scripts/check-parser-combinators.sh"), head],
+
+    def _run_parser_gate(self, base: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            [str(pr_review.REPO_ROOT / "scripts/check-parser-combinators.sh"), base],
+            cwd=pr_review.REPO_ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_gate_a_actual_success_output_is_sha_bound(self) -> None:
+        """A real base..head window prints the SHA-bound PASS evidence line.
+
+        The window is `HEAD~1..HEAD` — a genuine range — rather than `HEAD`
+        against itself. `base == head` names an empty range, which the gate now
+        refuses to certify (see the companion test below), so it is the wrong
+        window to assert success on.
+
+        The match is per-line (`re.MULTILINE`). The gate prints `Gate G` before
+        `Gate A`, so a whole-string `^...$` match can never succeed no matter
+        what the gate emits; the previous anchoring made this assertion
+        unsatisfiable rather than strict.
+        """
+        head = self._rev_parse("HEAD")
+        base = self._rev_parse("HEAD~1")
+        result = self._run_parser_gate(base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stdout,
+            rf"(?m)^Gate A PASS head={re.escape(head)} base={re.escape(base)}$",
+        )
+
+    def test_gate_a_pass_line_is_the_line_pr_review_matches(self) -> None:
+        """The emitted evidence line is the one the review tool parses.
+
+        Two independent readers of one format drift silently. Asserting the
+        real gate output against `pr_review`'s own pattern is what makes the
+        format a contract rather than a coincidence.
+        """
+        head = self._rev_parse("HEAD")
+        base = self._rev_parse("HEAD~1")
+        result = self._run_parser_gate(base)
+        match = re.search(
+            r"(?m)^Gate A PASS head=([0-9a-f]{40}) base=([0-9a-f]{40})$",
+            result.stdout,
+        )
+        self.assertIsNotNone(match, result.stdout)
+        assert match is not None  # narrowing for type checkers
+        self.assertEqual(match.group(1), head)
+        self.assertEqual(match.group(2), base)
+
+    def test_gate_a_refuses_to_certify_an_unknowable_window(self) -> None:
+        """`base == head` with nothing staged scans zero lines, so it cannot PASS.
+
+        This is the defect the gate change addresses: an empty range plus an
+        empty index reads no input, and printing the same green as a real scan
+        reports a verdict the run never earned.
+
+        The exit-3 path is reachable only with `GIT_INDEX_FILE` unset — setting
+        it selects the pre-commit branch — so this case necessarily reads the
+        real index, which belongs to whoever runs the suite. The assertions are
+        therefore split: the diagnostic contract is asserted on a clean index,
+        and the invariant that holds in EVERY index state is asserted always.
+        See the companion test for a deterministic staged scan.
+        """
+        head = self._rev_parse("HEAD")
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--", "crates/engine/src/parser"],
             cwd=pr_review.REPO_ROOT,
             check=True,
             text=True,
             capture_output=True,
-        )
-        self.assertRegex(
-            result.stdout.strip(),
-            rf"^Gate A PASS head={re.escape(head)} base={re.escape(head)}$",
-        )
+        ).stdout.strip()
+        result = self._run_parser_gate(head)
+
+        # Holds regardless of what the runner has staged: the evidence line is
+        # never emitted except on a clean exit. A staged violation exits 1, so
+        # requiring exit 0 here would report a false red about the runner's
+        # index rather than about the gate.
+        if re.search(r"(?m)^Gate A PASS head=", result.stdout):
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        if staged:
+            return
+
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertNotRegex(result.stdout, r"(?m)^Gate A PASS head=")
+        # The diagnostic is the deliverable of exit 3, not a courtesy: a bare
+        # non-zero exit would leave the caller unable to act. Assert the parts
+        # that make it actionable, on the stream the gate writes them to.
+        self.assertIn("Gate A CANNOT ANSWER", result.stderr)
+        self.assertIn(head, result.stderr)
+        self.assertIn("cannot tell clean parser work from parser work it never saw", result.stderr)
+        self.assertIn("scripts/check-parser-combinators.sh", result.stderr)
 
     def test_parse_diff_base_selects_non_head_parent_and_never_falls_back(self) -> None:
         script = pr_review.REPO_ROOT / "scripts/parse-diff-base.sh"

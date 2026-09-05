@@ -2,7 +2,9 @@ use engine::ai_support::{
     adversarial_swarm_witness, SwarmWitnessIndeterminate, SwarmWitnessResult,
 };
 #[cfg(feature = "test-support")]
-use engine::ai_support::{adversarial_swarm_witness_with_counters, SwarmWitnessCounters};
+use engine::ai_support::{
+    adversarial_swarm_witness_with_counters, SwarmWitnessCounters, SWARM_WITNESS_MAX_DECLARATIONS,
+};
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
@@ -57,15 +59,30 @@ fn swarm_witness_fails_fast_after_multiblock_replacement() {
     );
 }
 
+/// The declaration cap is a product over *blockers* of `legal targets + 1`, so
+/// two reach blockers that can each block every flier need only
+/// `isqrt(cap)` attackers to exceed it: by the definition of an integer square
+/// root, `(isqrt(cap) + 1)^2 > cap`. That is the smallest fixture that reaches
+/// the capping branch through attacker multiplicity, and it stays smallest if
+/// the cap constant changes.
 #[cfg(feature = "test-support")]
 #[test]
 fn swarm_witness_caps_before_enumerating_many_flying_attackers() {
+    const BLOCKERS: u32 = 2;
+    let attacker_count = SWARM_WITNESS_MAX_DECLARATIONS.isqrt();
+    assert!(
+        (attacker_count + 1).pow(BLOCKERS) > SWARM_WITNESS_MAX_DECLARATIONS,
+        "fixture must exceed the declaration cap, not merely approach it"
+    );
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let attackers: Vec<_> = (0..4096)
+    let attackers: Vec<_> = (0..attacker_count)
         .map(|_| scenario.add_creature(P0, "Flyer", 1, 1).flying().id())
         .collect();
-    scenario.add_creature(P1, "Reach", 0, 2).reach();
+    for _ in 0..BLOCKERS {
+        scenario.add_creature(P1, "Reach", 0, 2).reach();
+    }
     let mut runner = scenario.build();
     runner.advance_to_combat();
     let mut counters = SwarmWitnessCounters::default();
@@ -83,7 +100,9 @@ fn swarm_witness_caps_before_enumerating_many_flying_attackers() {
         SwarmWitnessCounters {
             root_clone_applies: 1,
             ..Default::default()
-        }
+        },
+        "the cap must be refused before streaming a single leaf, so no leaf is \
+         raised, validated, or cloned"
     );
 }
 

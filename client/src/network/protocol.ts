@@ -1,4 +1,5 @@
 import type {
+  AbilityBlockEntry,
   EndContinuousEffectOffer,
   GameAction,
   GameEvent,
@@ -49,6 +50,8 @@ export interface LegalActionsWire {
   manaPaymentShortcutActions?: GameAction[];
   legalActionsByObject?: Record<string, ObjectAction[]>;
   spellCosts?: Record<string, ManaCost>;
+  /** CR 118.3: acting-player-scoped "can't pay this cost right now" read-out. */
+  activationBlockReasons?: Record<string, AbilityBlockEntry[]>;
   viewerInteraction?: ViewerInteraction;
 }
 
@@ -61,6 +64,7 @@ export function legalActionsToWire(result: LegalActionsResult): LegalActionsWire
     manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     legalActionsByObject: result.legalActionsByObject,
     spellCosts: result.spellCosts,
+    activationBlockReasons: result.activationBlockReasons,
     viewerInteraction: result.viewerInteraction,
   };
 }
@@ -74,6 +78,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
     manaPaymentShortcutActions: wire.manaPaymentShortcutActions ?? [],
     legalActionsByObject: wire.legalActionsByObject,
     spellCosts: wire.spellCosts,
+    activationBlockReasons: wire.activationBlockReasons,
     viewerInteraction: wire.viewerInteraction,
   };
 }
@@ -101,6 +106,28 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  48 — Retroactive bump for two new-tag changes that landed without one.
+ *       #8501 added Effect.OpenBoosterPack and the BoosterPack arms of
+ *       OutsideGameChoiceSource / OutsideGameSelection (adjacently-tagged, so
+ *       an old peer cannot decode them at all); #8332 added slots/slot_pools to
+ *       WaitingFor.RetargetChoice and controller to StackEntryDisplay (optional,
+ *       so an old peer decodes and then misrenders — RetargetChoiceModal
+ *       indexes slot_pools, and its ?? guards an undefined element, not an
+ *       undefined array, so an old host + new guest throws during render).
+ *       No wire shape changes here; this exists so first contact stops admitting
+ *       the skew. Bumped in lockstep with PROTOCOL_VERSION 64.
+ *  47 — WaitingFor.ReplacementChoice gained an engine-owned
+ *       ReplacementChoiceKind discriminator and a last_applied_decides flag.
+ *       Both are optional on the wire, so a skewed host/guest pair decodes
+ *       successfully and then misrenders the prompt instead of failing at
+ *       first contact.
+ *  45 — Effect.ChooseCounterKind gained domain and chooser, carried inside
+ *       GameObject.abilities and trigger definitions on every GameState frame
+ *       (CR 608.2d). Additive behind serde defaults; a v44 peer has no field to
+ *       receive the printed list or the random chooser into and silently reads
+ *       both as an on-target prompt, placing no counter. Since game_setup and
+ *       reconnect_ack carry GameState, first contact rejects the version skew.
+ *       Bumped in lockstep with PROTOCOL_VERSION 61.
  *  44 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
  *       may cast whose player chooses a spell face at cast time (a split card
  *       such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the live
@@ -315,7 +342,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 44 as const;
+export const WIRE_PROTOCOL_VERSION = 48 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

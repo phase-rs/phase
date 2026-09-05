@@ -3,7 +3,7 @@ import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { AbilityBlockKind, GameObject, Keyword } from "../../adapter/types.ts";
+import type { GameObject, Keyword } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -19,6 +19,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { ABILITY_BLOCK_REASON_KEY } from "../../viewmodel/abilityBlockReason.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
 import { COUNTER_COLORS, computePTDisplay, counterIconClass, formatCounterType, toRoman } from "../../viewmodel/cardProps.ts";
 import { getCardDisplayColors } from "../card/cardFrame.ts";
@@ -75,17 +76,6 @@ const ATTACHMENT_STACK_STEP_PX = 22;
 const HOVERED_CARD_Z_INDEX = 60;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 const EMPTY_KEYWORD_BADGES: Keyword[] = [];
-
-/**
- * CR 602.5: Maps an engine `AbilityBlockKind` to its i18n reason key. Pure
- * display formatting — no game logic. Exhaustive so a new kind is a compile
- * error until a key is added.
- */
-const ABILITY_BLOCK_REASON_KEY: Record<AbilityBlockKind, string> = {
-  CantBeActivated: "abilityBlock.cantBeActivated",
-  CantActivateDuring: "abilityBlock.cantActivateDuring",
-  Prohibited: "abilityBlock.prohibited",
-};
 
 // CR 602.5: display-only badge summarizing which of this permanent's activated
 // abilities are currently blocked, and why. Reads the engine-provided

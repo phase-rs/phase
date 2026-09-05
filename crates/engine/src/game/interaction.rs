@@ -228,6 +228,8 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
+        | WaitingFor::RippleRevealChoice { .. }
+        | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
@@ -501,6 +503,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
+        | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
@@ -551,6 +554,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::CastOffer { .. }
+        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::MutateMergeChoice { .. }
@@ -1356,11 +1360,27 @@ fn target_sequence_projection(
         WaitingFor::RetargetChoice {
             scope,
             current_targets,
+            slot_pools,
             legal_new_targets,
             ..
         } => {
             let (candidates, count) = match scope {
-                crate::types::game_state::RetargetScope::Single => (legal_new_targets.clone(), 1),
+                // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review
+                // finding MED-2): admission for a `Single` submission is
+                // `slot_pools[0]` (`engine::apply_retarget`'s `pool_for(0)`),
+                // not the flat union — offering the union here can project a
+                // candidate this projection's own reducer rejects, the same
+                // defect fixed for `RetargetChoiceModal.tsx`. `slot_pools`
+                // empty is the deliberate outer-empty compat fallback
+                // (INVARIANT SC), where the union already equals the sole
+                // position's real pool.
+                crate::types::game_state::RetargetScope::Single => (
+                    slot_pools
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| legal_new_targets.clone()),
+                    1,
+                ),
                 crate::types::game_state::RetargetScope::All => {
                     (legal_new_targets.clone(), current_targets.len())
                 }
@@ -1867,7 +1887,9 @@ fn outside_selection_projection(
         } else {
             total.checked_add(match &choice.source {
                 OutsideGameChoiceSource::Sideboard { .. } => choice.count as usize,
-                OutsideGameChoiceSource::FaceUpExile { .. } => 1,
+                // CR 400.11b + CR 406.3: a single physical card each.
+                OutsideGameChoiceSource::FaceUpExile { .. }
+                | OutsideGameChoiceSource::BoosterPack { .. } => 1,
             })
         }
     });
@@ -1890,10 +1912,16 @@ fn outside_selection_projection(
                         object_id: *object_id,
                     }
                 }
+                OutsideGameChoiceSource::BoosterPack { pack_slot, .. } => {
+                    OutsideGameSelection::BoosterPack {
+                        pack_slot: *pack_slot,
+                    }
+                }
             };
             let copies = match &choice.source {
                 OutsideGameChoiceSource::Sideboard { .. } => choice.count as usize,
-                OutsideGameChoiceSource::FaceUpExile { .. } => 1,
+                OutsideGameChoiceSource::FaceUpExile { .. }
+                | OutsideGameChoiceSource::BoosterPack { .. } => 1,
             };
             (0..copies).map(move |_| OutsideSelectionCandidate {
                 selection: selection.clone(),
@@ -2635,7 +2663,7 @@ fn shortcut_preview_entries(
             .into_iter()
             .map(|(key, per_cycle)| (key, per_cycle.saturating_mul(i64::from(count))))
             .collect();
-    // CR 704.5a: the announced slot charges a LIFE magnitude, so the re-attribution moves the
+    // CR 119.3: the announced slot charges a LIFE magnitude, so the re-attribution moves the
     // `Life` family and nothing else. `DamageDealt`, `LibraryDelta` and `Poison` are seat-keyed
     // by `payload_seat` too, and keep the seat it gave them.
     if let Some(split) = victim {
@@ -2667,7 +2695,7 @@ fn shortcut_preview_entries(
 /// interior is thinned by a stride wide enough that the whole sample fits under
 /// `MAX_SHORTCUT_PREVIEW_ELEMENTS`; the length guard, not the stride, is what enforces the cap.
 ///
-/// `k` starts at 1 rather than 0 deliberately: at 0 the loop regenerates `min` itself, and the
+/// `step` starts at 1 rather than 0 deliberately: at 0 the loop regenerates `min` itself, and the
 /// explicit `min` seed would then be unfalsifiable.
 ///
 /// The exhaustive match is also the offer's single finite-count gate — `UntilLethal` names no
@@ -2734,7 +2762,7 @@ fn canonical_allocation(ids: &[InteractionChoiceId], count: u32) -> Vec<AmountAs
         .collect()
 }
 
-/// CR 704.5a: the life magnitude one repetition charges through an announced slot, and the
+/// CR 119.3: the life magnitude one repetition charges through an announced slot, and the
 /// single seat that magnitude currently lands on.
 #[derive(Debug, Clone, Copy)]
 struct VictimCharge {
@@ -2742,7 +2770,7 @@ struct VictimCharge {
     seat: PlayerId,
 }
 
-/// CR 704.5a: what the period charges through THIS announced slot, or `None` when the period
+/// CR 119.3: what the period charges through THIS announced slot, or `None` when the period
 /// does not say.
 ///
 /// **A `victim_slot` magnitude is an aggregate, not a per-slot charge.** Every entry carries
@@ -2771,7 +2799,7 @@ struct VictimCharge {
 /// the charged seat's life by dropping that axis and re-adding `rate` once per allocated cycle.
 /// The substitution preserves the period's life total exactly when `rate` is the seat's whole
 /// loss; under any other charge the published magnitudes total less than the drain the
-/// declaration takes, and CR 704.5a is the number the player is deciding on. The equality is
+/// declaration takes, and CR 119.3 is the number the player is deciding on. The equality is
 /// tested on the already-identified seat rather than used to pick one — filtering the life map
 /// by it would name whichever seat happened to match the aggregate.
 fn victim_charge(
@@ -2794,7 +2822,7 @@ fn victim_charge(
         .then_some(VictimCharge { rate, seat: *seat })
 }
 
-/// CR 704.5a: how one element's count spreads the charged life magnitude over the seats the
+/// CR 119.3: how one element's count spreads the charged life magnitude over the seats the
 /// declaration allocates it to.
 ///
 /// `cycles` is never empty — the one constructor filters that case away — so "a split with no
@@ -2854,7 +2882,7 @@ fn allocation_point<'a>(
     Some((u32::try_from(index).ok()?, point))
 }
 
-/// CR 704.5a: the seats a point's candidates name, in published order, or `None` when any
+/// CR 119.3: the seats a point's candidates name, in published order, or `None` when any
 /// candidate is not a player.
 ///
 /// Exhaustive over the candidate kinds so a new one must decide for itself rather than being
@@ -3397,7 +3425,7 @@ fn declared_sequence_preview(
         })
         .collect();
 
-    // CR 704.5a: the period charges this announced slot's life to whoever the DECLARATION names.
+    // CR 119.3: the period charges this announced slot's life to whoever the DECLARATION names.
     //
     // `victim_charge` refuses for FOUR reasons: no `victim_slot` entry for this point's slot; a
     // life map naming zero or several losing seats; a losing seat the seats-in-hand do not name;
@@ -3480,20 +3508,19 @@ fn loop_shortcut_projection(
     }
     let count = match schema.iteration_count {
         crate::analysis::decision_template::IterationCount::Fixed(suggested) => {
-            // CR 732.2a (MagicCompRules.txt:6372): the picker's ceiling is the offer's own
-            // CR 704 bound, never the raw global safety limit — a count above it would
-            // specify a sequence containing an elimination, which is a conditional action.
-            // The engine owns this number; the frontend renders it. An unnarrowed offer
-            // states `MAX_SHORTCUT_CYCLES`; a bounded offer states less. Either way this is
-            // the offer's own bound, clamped at the same authority.
+            // CR 732.2a: the picker's ceiling is the offer's own CR 704 bound, never the raw
+            // global safety limit — a count above it would specify a sequence containing an
+            // elimination, which is a conditional action. The engine owns this number; the
+            // frontend renders it. An unnarrowed offer states `MAX_SHORTCUT_CYCLES`; a bounded
+            // offer states less. Either way this is the offer's own bound, clamped at the same
+            // authority.
             //
-            // CR 704.5a (MagicCompRules.txt:5492): `elimination_bounds` returns `0` to
-            // mean "no legal repetition exists and the caller must not offer". A
-            // published offer carrying
-            // `0` is an authority violation, not a number to repair — clamping it to `1`
-            // renders a one-iteration offer whose single iteration eliminates a player
-            // mid-proposal. Reject it in EVERY build: a `debug_assert!` disappears from
-            // release, which is precisely where the clamp is what the player sees.
+            // CR 704.5a: `elimination_bounds` returns `0` to mean "no legal repetition exists and
+            // the caller must not offer". A published offer carrying `0` is an authority
+            // violation, not a number to repair — clamping it to `1` renders a one-iteration
+            // offer whose single iteration eliminates a player mid-proposal. Reject it in EVERY
+            // build: a `debug_assert!` disappears from release, which is precisely where the
+            // clamp is what the player sees.
             //
             // THIS GUARD IS ALSO LOAD-BEARING AGAINST A PANIC, not merely against a bad
             // offer. With the lower clamp replaced by `.min(MAX_SHORTCUT_CYCLES)` below,
@@ -3931,6 +3958,7 @@ fn selection_projection(
             selectable_cards, ..
         } => selectable_cards.len(),
         WaitingFor::SeparatePilesPartition { eligible, .. } => eligible.len(),
+        WaitingFor::RippleBottomOrder { cards, .. } => cards.len(),
         _ => 0,
     };
     if candidate_count > MAX_INTERACTION_LIST_LEN {
@@ -4242,6 +4270,18 @@ fn selection_projection(
                 source_id: None,
             })
         }
+        // CR 702.60a + CR 608.2d: the controller submits a full permutation of
+        // the uncast revealed pile as its bottom-placement order.
+        WaitingFor::RippleBottomOrder {
+            cards, source_id, ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(cards.len(), cards.len()),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: Some(*source_id),
+        }),
         WaitingFor::ArrangePlanarDeckTopChoice {
             cards, keep_on_top, ..
         } => Some(SelectionProjection {
@@ -4498,6 +4538,7 @@ fn selection_projection(
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::CastOffer { .. }
+        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::MutateMergeChoice { .. }
@@ -5506,6 +5547,11 @@ fn project_action_payload(
                         *object_id,
                         InteractionRoleCode::FaceUpExile,
                     ),
+                    // CR 400.11b: the pack's card is not an in-game object, so
+                    // its slot in the opened pack is the surfaced identity.
+                    OutsideGameSelection::BoosterPack { pack_slot } => {
+                        push_value_surface(surfaces, InteractionRoleCode::CandidateIndex, pack_slot)
+                    }
                 }
             }
         }
@@ -7032,6 +7078,20 @@ fn outside_selection_choices(
                         filtered_state,
                         object_id,
                         InteractionRoleCode::FaceUpExile,
+                    );
+                }
+                // CR 400.11b: a pack card has no `ObjectId` until it is taken,
+                // so the pack slot plus the printed name identify the candidate.
+                OutsideGameSelection::BoosterPack { pack_slot } => {
+                    push_value_surface(
+                        &mut surfaces,
+                        InteractionRoleCode::CandidateIndex,
+                        pack_slot,
+                    );
+                    push_value_surface(
+                        &mut surfaces,
+                        InteractionRoleCode::CardName,
+                        &candidate.name,
                     );
                 }
             }
@@ -10261,7 +10321,14 @@ fn materialize_loop_shortcut_response(
                     .iter()
                     .map(|index| match &projection.candidates[*index] {
                         LoopShortcutCandidateValue::Mode(mode) => Ok(*mode),
-                        _ => Err(InteractionReasonCode::InvalidAuthorityState),
+                        LoopShortcutCandidateValue::Target(TargetRef::Player(_))
+                        | LoopShortcutCandidateValue::Target(TargetRef::Object(_))
+                        | LoopShortcutCandidateValue::ConvokeObject(_)
+                        | LoopShortcutCandidateValue::May(_)
+                        | LoopShortcutCandidateValue::Unless(_)
+                        | LoopShortcutCandidateValue::ManaColor(_) => {
+                            Err(InteractionReasonCode::InvalidAuthorityState)
+                        }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 decisions.push(PinnedDecision::Mode {
@@ -10396,7 +10463,13 @@ fn shortcut_announcement_subject(
                 },
             ))
         }
-        _ => Err(InteractionReasonCode::InvalidAuthorityState),
+        LoopShortcutCandidateValue::ConvokeObject(_)
+        | LoopShortcutCandidateValue::Mode(_)
+        | LoopShortcutCandidateValue::May(_)
+        | LoopShortcutCandidateValue::Unless(_)
+        | LoopShortcutCandidateValue::ManaColor(_) => {
+            Err(InteractionReasonCode::InvalidAuthorityState)
+        }
     }
 }
 
@@ -11068,6 +11141,66 @@ mod tests {
             .expect("choose-objects is a target sequence");
         assert_eq!((projection.min, projection.max), (1, 3));
         assert!(projection.unique);
+    }
+
+    /// MED-2 (phase-rs/phase#8355 round-8 review, second pass): CR 115.7a +
+    /// INVARIANT SC — admission for a `Single` retarget submission is
+    /// `slot_pools[0]` (`engine::apply_retarget`'s `pool_for(0)`), not the flat
+    /// union. This projection fed the union to every consumer regardless,
+    /// which could offer a candidate the reducer then rejects — measured on a
+    /// prompt whose union has 3 entries but `slot_pools[0]` has 1.
+    #[test]
+    fn retarget_choice_single_scope_projection_uses_the_slot_pool_not_the_union() {
+        let object_a = TargetRef::Object(ObjectId(1));
+        let object_b = TargetRef::Object(ObjectId(2));
+        let object_c = TargetRef::Object(ObjectId(3));
+        let waiting = WaitingFor::RetargetChoice {
+            player: PlayerId(0),
+            stack_entry_index: 0,
+            scope: crate::types::game_state::RetargetScope::Single,
+            current_targets: vec![object_a.clone()],
+            slots: vec![crate::types::game_state::RetargetSlotAddress {
+                path: vec![],
+                slot: 0,
+            }],
+            slot_pools: vec![vec![object_b.clone()]],
+            legal_new_targets: vec![object_a, object_b.clone(), object_c],
+        };
+        let projection = target_sequence_projection(&waiting)
+            .expect("projection must succeed")
+            .expect("RetargetChoice is a target sequence");
+        assert_eq!(
+            projection.candidates,
+            vec![object_b],
+            "CR 115.7a: a Single-scope projection must offer the addressed \
+             position's own pool, not the 3-entry flat union"
+        );
+    }
+
+    /// Paired positive control: an outer-empty `slot_pools` (a compat payload
+    /// predating the field, INVARIANT SC) falls back to the union — the fix
+    /// above must not turn this row's absence into a silent "offer nothing."
+    #[test]
+    fn retarget_choice_single_scope_projection_falls_back_to_the_union_when_slot_pools_is_empty() {
+        let object_a = TargetRef::Object(ObjectId(1));
+        let object_b = TargetRef::Object(ObjectId(2));
+        let waiting = WaitingFor::RetargetChoice {
+            player: PlayerId(0),
+            stack_entry_index: 0,
+            scope: crate::types::game_state::RetargetScope::Single,
+            current_targets: vec![object_a.clone()],
+            slots: vec![],
+            slot_pools: vec![],
+            legal_new_targets: vec![object_a, object_b],
+        };
+        let projection = target_sequence_projection(&waiting)
+            .expect("projection must succeed")
+            .expect("RetargetChoice is a target sequence");
+        assert_eq!(
+            projection.candidates.len(),
+            2,
+            "an outer-empty slot_pools must fall back to the union"
+        );
     }
 
     /// F4 — the preview is budgeted like every other outbound list on the shortcut spec, at

@@ -505,7 +505,7 @@ fn ordruun_mentor_offers_exactly_the_attackers_of_the_attacked_player_cr_603_3d(
 ///
 /// It also answers the reachability question the per-attacked-player split
 /// raises: that split maps a planeswalker to its controller (CR 508.5a /
-/// CR 310.8d) when grouping, which in isolation looks like it could admit a
+/// CR 310.9d) when grouping, which in isolation looks like it could admit a
 /// planeswalker attack as a player attack. It cannot — the
 /// `attack_target_filter` type gate runs UPSTREAM, inside
 /// `matching_you_attack_pairs`, so a planeswalker-only declaration produces

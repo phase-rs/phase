@@ -21,6 +21,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
 use engine::ai_support::{
+    activation_block_reasons_for_viewer as engine_activation_block_reasons_for_viewer,
     auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
     end_continuous_effect_offers as engine_end_continuous_effect_offers,
     legal_actions_full as engine_legal_actions_full,
@@ -486,6 +487,16 @@ fn build_game_started_message(
         });
     let derived = derive_transport_views(&session.state, &filtered, Some(player));
     let viewer_interaction = derive_viewer_interaction(&session.state, &filtered, player);
+    // CR 118.3 + CR 117.1: derived per recipient from the same raw pre-filter
+    // state binding its sibling `spell_costs` came from. No `if is_actor`
+    // wrapper: the entry point self-gates on `turn_control::is_authorized_submitter`,
+    // which is the SAME function `server_core::is_acting` delegates to.
+    let activation_block_reasons =
+        engine_activation_block_reasons_for_viewer(&session.state, player);
+    debug_assert!(
+        activation_block_reasons.is_empty() || is_actor,
+        "a non-empty CR 118.3 read-out implies an authorized viewer"
+    );
 
     ServerMessage::GameStarted {
         state_revision: session.state_revision,
@@ -507,6 +518,7 @@ fn build_game_started_message(
         } else {
             HashMap::new()
         },
+        activation_block_reasons,
         derived,
         viewer_interaction,
         player_token,
@@ -584,6 +596,13 @@ fn build_state_update_message(
     } else {
         Vec::new()
     };
+    // CR 118.3 + CR 117.1: same raw state binding the sibling `spell_costs`
+    // came from (both destructured from this `ActionResult`).
+    let activation_block_reasons = engine_activation_block_reasons_for_viewer(raw_state, player);
+    debug_assert!(
+        activation_block_reasons.is_empty() || is_actor,
+        "a non-empty CR 118.3 read-out implies an authorized viewer"
+    );
 
     Ok(ServerMessage::StateUpdate {
         state_revision,
@@ -609,6 +628,7 @@ fn build_state_update_message(
         } else {
             HashMap::new()
         },
+        activation_block_reasons,
         derived,
         viewer_interaction,
         rewind_targets,
@@ -638,6 +658,10 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
         mana_payment_shortcut_actions: Vec::new(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
+        // CR 117.1: a spectator is a non-seat viewer with no action authority,
+        // so the read-out is empty by the same existing design as the two
+        // siblings above.
+        activation_block_reasons: HashMap::new(),
         derived,
         viewer_interaction,
         player_token: None,
@@ -684,6 +708,9 @@ fn build_spectator_state_update_message(
         log_entries: log_entries.to_vec(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
+        // CR 117.1: spectators have no action authority — empty by the same
+        // existing design as the two siblings above.
+        activation_block_reasons: HashMap::new(),
         derived,
         viewer_interaction,
         // Empty for the same reason as the spectator `GameStarted` builder
@@ -2620,9 +2647,123 @@ mod lifecycle_tests {
     use url::Url;
 
     use super::{
-        bootstrap_required, origin_is_allowed, prune_game_connections, select_card_data_source,
-        validate_public_url, CardDataSource, Cli, SharedConnections,
+        bootstrap_required, build_state_update_message, origin_is_allowed, prune_game_connections,
+        select_card_data_source, validate_public_url, CardDataSource, Cli, ServerMessage,
+        SharedConnections,
     };
+
+    /// CR 118.3 + CR 117.1 — matrix row 21 (actor axis), at a REAL
+    /// `ServerMessage` construction site rather than at the engine entry point.
+    ///
+    /// `build_state_update_message` is the sync builder behind `phase-server`'s
+    /// `StateUpdate` fan-out. It derives `activation_block_reasons` from the
+    /// SAME `raw_state` binding its sibling `spell_costs` is destructured from,
+    /// and passes no `if is_actor` wrapper — the engine entry point self-gates
+    /// on `turn_control::is_authorized_submitter`, which is exactly what
+    /// `server_core::is_acting` delegates to.
+    ///
+    /// Both halves asserted in one test so neither is vacuous: the acting seat
+    /// receives a NON-EMPTY read-out, and the non-acting seat receives an empty
+    /// one from the SAME `ActionResult`.
+    ///
+    /// RUNNER: CI. Tilt's test resources are scoped `-p phase-engine -p phase-ai`
+    /// and never compile `phase-server`, so a green `test-engine` is no evidence
+    /// for this test.
+    #[test]
+    fn state_update_publishes_the_cost_block_readout_only_to_the_acting_seat() {
+        // DB-free by construction: `GameState::new_two_player` + `create_object`
+        // only, mirroring `mana_display_self_sacrifice_clone_gate.rs`. `phase-server`
+        // does not enable the engine's `test-support` feature, so `GameScenario`
+        // is not available here.
+        use engine::game::game_object::GameObject;
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+        };
+        use engine::types::game_state::{GameState, WaitingFor};
+        use engine::types::identifiers::CardId;
+        use engine::types::phase::Phase;
+        use engine::types::player::PlayerId;
+        use engine::types::zones::Zone;
+        use std::sync::Arc as StdArc;
+
+        const P0: PlayerId = PlayerId(0);
+        const P1: PlayerId = PlayerId(1);
+
+        let mut raw_state = GameState::new_two_player(42);
+        raw_state.phase = Phase::PreCombatMain;
+        raw_state.waiting_for = WaitingFor::Priority { player: P0 };
+        raw_state.priority_player = P0;
+        raw_state.players[0].life = 1;
+
+        // `game::zones` is `pub(crate)`, so the object is placed directly:
+        // insert into `objects` and push onto the battlefield, which is exactly
+        // what `create_object` does for a pre-existing permanent.
+        let obj = engine::types::identifiers::ObjectId(raw_state.next_object_id);
+        raw_state.next_object_id += 1;
+        raw_state.objects.insert(
+            obj,
+            GameObject::new(
+                obj,
+                CardId(1),
+                P0,
+                "Costly Engine".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        raw_state.battlefield.push_back(obj);
+        // One unaffordable, resource-verdict ability: `Pay 5 life: draw` at 1 life.
+        {
+            let o = raw_state.objects.get_mut(&obj).expect("object exists");
+            StdArc::make_mut(&mut o.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                }),
+            );
+        }
+
+        let (legal_actions, spell_costs, by_object) =
+            engine::ai_support::legal_actions_full(&raw_state);
+        let result: server_core::session::ActionResult = (
+            raw_state,
+            Vec::new(),
+            legal_actions,
+            Vec::new(),
+            false,
+            spell_costs,
+            by_object,
+        );
+
+        let readout_for = |player| match build_state_update_message(&result, 1, player, Vec::new())
+            .expect("the snapshot guard admits this small board")
+        {
+            ServerMessage::StateUpdate {
+                activation_block_reasons,
+                ..
+            } => activation_block_reasons,
+            other => panic!("expected a StateUpdate, got {other:?}"),
+        };
+
+        let acting = readout_for(P0);
+        let other = readout_for(P1);
+
+        // PAIRED POSITIVE, mandatory: without it, a builder that dropped the
+        // field entirely would satisfy the negative below.
+        assert!(
+            acting.get(&obj).is_some_and(|entries| entries.len() == 1),
+            "the acting seat's StateUpdate carries the CR 118.3 read-out; got {acting:?}"
+        );
+        assert!(
+            other.is_empty(),
+            "a non-acting recipient of the SAME ActionResult gets an empty map; got {other:?}"
+        );
+    }
 
     #[test]
     fn bind_flag_defaults_to_lan_and_accepts_loopback() {
@@ -5332,6 +5473,22 @@ async fn broadcast_ai_results(
                     } else {
                         HashMap::new()
                     };
+                    // CR 118.3: the STALENESS axis is the one part of disclosure
+                    // the engine cannot self-gate — "is this the final transition
+                    // of the fan-out" is a property of the transport's batch, not
+                    // of any `GameState`. An intermediate transition advertises no
+                    // actions, so it must advertise no read-out either. The
+                    // `is_actor` half is redundant with the entry point's own gate
+                    // and is kept only to mirror its `p_spell_costs` sibling above.
+                    let p_activation_block_reasons = if is_last && is_actor {
+                        engine_activation_block_reasons_for_viewer(ai_raw_state, *pid)
+                    } else {
+                        HashMap::new()
+                    };
+                    debug_assert!(
+                        p_activation_block_reasons.is_empty() || is_actor,
+                        "a non-empty CR 118.3 read-out implies an authorized viewer"
+                    );
                     let _ = s.send(ServerMessage::StateUpdate {
                         state_revision: *ai_revision,
                         state: pstate.clone(),
@@ -5348,6 +5505,7 @@ async fn broadcast_ai_results(
                         log_entries: ai_log_entries.clone(),
                         spell_costs: p_spell_costs,
                         legal_actions_by_object: object_action_payloads(&p_by_object),
+                        activation_block_reasons: p_activation_block_reasons,
                         derived: derive_transport_views(ai_raw_state, pstate, Some(*pid)),
                         viewer_interaction: derive_viewer_interaction(ai_raw_state, pstate, *pid),
                         rewind_targets: rewind_targets.to_vec(),
@@ -5447,6 +5605,17 @@ async fn broadcast_takeback_approved(
                 } else {
                     HashMap::new()
                 };
+                // CR 118.3 + CR 117.1: derived from `raw_state` (`snapshot.0`) —
+                // the SAME binding the sibling `spell_costs` (`snapshot.3`) came
+                // from. This path has no `session` in scope, and reading a
+                // different state here is precisely the freshness hazard the
+                // per-site state-binding rule exists to prevent.
+                let p_activation_block_reasons =
+                    engine_activation_block_reasons_for_viewer(&raw_state, *pid);
+                debug_assert!(
+                    p_activation_block_reasons.is_empty() || is_actor,
+                    "a non-empty CR 118.3 read-out implies an authorized viewer"
+                );
                 let _ = s.send(ServerMessage::StateUpdate {
                     state_revision,
                     state: pstate.clone(),
@@ -5459,6 +5628,7 @@ async fn broadcast_takeback_approved(
                     log_entries: vec![],
                     spell_costs: p_spell_costs,
                     legal_actions_by_object: object_action_payloads(&p_by_object),
+                    activation_block_reasons: p_activation_block_reasons,
                     derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
                     viewer_interaction: derive_viewer_interaction(&raw_state, pstate, *pid),
                     // Captured by the caller under the same lock as the
@@ -5988,6 +6158,22 @@ async fn handle_full_game_submission(
                             } else {
                                 HashMap::new()
                             };
+                            // CR 118.3: the STALENESS axis again — a human action
+                            // followed by AI play must not advertise the pre-AI
+                            // action set, so it must not advertise a read-out
+                            // describing a board the player is not being offered
+                            // actions on. `is_actor` mirrors the `p_spell_costs`
+                            // sibling above and is redundant with the entry
+                            // point's own gate.
+                            let p_activation_block_reasons = if ai_results.is_empty() && is_actor {
+                                engine_activation_block_reasons_for_viewer(&raw_state, *pid)
+                            } else {
+                                HashMap::new()
+                            };
+                            debug_assert!(
+                                p_activation_block_reasons.is_empty() || is_actor,
+                                "a non-empty CR 118.3 read-out implies an authorized viewer"
+                            );
                             let _ = s.send(ServerMessage::StateUpdate {
                                 state_revision: human_revision,
                                 state: pstate.clone(),
@@ -6002,6 +6188,7 @@ async fn handle_full_game_submission(
                                 log_entries: log_entries.clone(),
                                 spell_costs: p_spell_costs,
                                 legal_actions_by_object: object_action_payloads(&p_by_object),
+                                activation_block_reasons: p_activation_block_reasons,
                                 derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
                                 viewer_interaction: derive_viewer_interaction(
                                     &raw_state, pstate, *pid,
@@ -8323,6 +8510,11 @@ async fn handle_client_message(
                         log_entries: vec![],
                         spell_costs: HashMap::new(),
                         legal_actions_by_object: HashMap::new(),
+                        // CR 117.1b: the game has not started, so no player has
+                        // priority and no activated ability can be activated —
+                        // the read-out has nothing to describe. Empty by the
+                        // same existing design as its two siblings above.
+                        activation_block_reasons: HashMap::new(),
                         derived,
                         viewer_interaction,
                         // `JoinOutcome::Waiting` — the game has not started, so

@@ -474,6 +474,72 @@ pub(crate) fn parse_collection_counter_play_permission_static(
     )
 }
 
+/// CR 613.4b (Layer 7b base P/T) + CR 613.1f (Layer 6 keywords): recover the
+/// two characteristic axes that word-classifying an additive-type span cannot
+/// express.
+///
+/// The pre-marker span of an additive clause — "a 4/4 Gorgon creature with
+/// deathtouch and lifelink" in "…is a 4/4 Gorgon creature with deathtouch and
+/// lifelink in addition to its other types" — is word-split by the caller, and
+/// `classify_additive_type_word` returns `None` for every token it does not
+/// recognize as a color, core type, supertype or subtype. Dropping stray words
+/// is deliberate, but it also swallows the `4/4` and the whole `with <keywords>`
+/// tail: exactly the CR 205.1b-retained characteristics the clause exists to
+/// state. `parse_animation_spec` already parses that shape.
+///
+/// **This is STRICTLY ADDITIVE — it never replaces the word-split result.**
+/// That is not a stylistic choice, it is a correctness requirement: a span may
+/// be COMPOUND ("1/1 green Saproling creatures **and Forest lands**" — Life and
+/// Limb), and `parse_animation_spec` parses only the first type sequence, so
+/// substituting its output for the word-split would silently drop
+/// `AddType{Land}` and `AddSubtype{Forest}`. Word-splitting is crude but it sees
+/// every type token in the span; the animation spec is precise but sees only the
+/// first clause. Taking the P/T and keywords from the spec and the types from the
+/// word-split uses each for what it is actually good at.
+///
+/// **Keyed on a LEADING fixed `N/M`, and that key is the double-emit guard.**
+/// The other P/T shape an additive clause can carry — "with base power and
+/// toughness N/M" — states its P/T *after* the type words, and the callers that
+/// see that form already emit the P/T themselves (Kudo, King Among Bears;
+/// Graaz, Unstoppable Juggernaut; March of the World Ooze; Raised by Giants).
+/// Requiring the P/T at the head of the span keeps the two routes disjoint, so
+/// no caller can receive a second `SetPower`.
+///
+/// Returns an empty vector for every span without a leading `N/M`, so all such
+/// clauses keep the word-split path byte-for-byte.
+fn animated_additive_span_pt_and_keywords(
+    span: &str,
+    span_lower: &str,
+) -> Vec<ContinuousModification> {
+    // The article belongs to the span ("a 4/4 …"), so peel it with the shared
+    // `parse_article` primitive before testing for the leading P/T.
+    let after_article_lower =
+        nom_primitives::parse_article(span_lower).map_or(span_lower, |(rest, ())| rest);
+    if super::oracle_effect::animation::parse_fixed_become_pt_prefix(after_article_lower).is_none()
+    {
+        return Vec::new();
+    }
+    let Some(spec) =
+        super::oracle_effect::animation::parse_animation_spec(span, &mut ParseContext::default())
+    else {
+        return Vec::new();
+    };
+    // Keep ONLY the two axes the word-split cannot produce. Types, subtypes,
+    // supertypes and color are deliberately left to the word-split, which is the
+    // only one of the two that sees a compound span in full.
+    super::oracle_effect::animation::animation_modifications(&spec)
+        .into_iter()
+        .filter(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::SetPower { .. }
+                    | ContinuousModification::SetToughness { .. }
+                    | ContinuousModification::AddKeyword { .. }
+            )
+        })
+        .collect()
+}
+
 /// CR 205.1 / CR 205.3a: Extract additive-type modifications from a predicate
 /// like `"are Food artifacts in addition to their other types"` or its
 /// compound/granted-ability variants. Used both as the body of
@@ -567,6 +633,9 @@ pub(crate) fn parse_additive_type_clause_modifications(
         &clause_original[clause_original.len() - after_suffix_lower.len()..];
     let granted_modifications = parse_continuous_modifications(after_suffix_original);
 
+    // The word-split is the BASE and stays authoritative for every type token in
+    // the span — it is the only reader that sees a compound span ("… creatures
+    // and Forest lands") in full.
     let mut modifications = Vec::new();
     for raw_word in type_words.split_whitespace() {
         let word = raw_word.trim_matches(|c: char| c == ',' || c == '.');
@@ -574,6 +643,16 @@ pub(crate) fn parse_additive_type_clause_modifications(
             continue;
         }
         if let Some(modification) = classify_additive_type_word(&word.to_lowercase()) {
+            modifications.push(modification);
+        }
+    }
+
+    // CR 613.4b (Layer 7b) + CR 613.1f (Layer 6): then recover the base P/T and
+    // the pre-marker keyword tail, which word-classification silently swallows.
+    // Additive only — a span with no leading `N/M` contributes nothing here and
+    // keeps byte-identical output.
+    for modification in animated_additive_span_pt_and_keywords(type_words, type_words_lower) {
+        if !modifications.contains(&modification) {
             modifications.push(modification);
         }
     }
@@ -1643,13 +1722,41 @@ pub(crate) fn parse_bare_becomes_type_replacement_modifications(
     modifications
 }
 
+/// CR 613.1f (Layer 6): resolve an animation conjunct tail to the modifications
+/// it grants, or `None` if no authority can model it.
+///
+/// Two shapes, each delegated to the authority that already owns it rather than
+/// re-implemented here:
+///   1. a bare keyword list ("trample", "vigilance and menace") →
+///      `parse_animation_conjunct_keywords`, which shares the token splitter and
+///      keyword mapper used by the sibling `" with "` tail;
+///   2. a quoted granted ability (`"When this creature dies, draw a card."`) →
+///      the shared `parse_quoted_ability_modifications` (CR 604.1), which
+///      classifies triggers, keywords, statics and activated abilities.
+///
+/// `None` when neither claims the tail, so the caller declines the line instead
+/// of emitting the animation with its ability clause silently dropped.
+fn parse_animation_conjunct_modifications(tail: &str) -> Option<Vec<ContinuousModification>> {
+    if let Some(keywords) = super::oracle_effect::animation::parse_animation_conjunct_keywords(tail)
+    {
+        return Some(
+            keywords
+                .into_iter()
+                .map(|keyword| ContinuousModification::AddKeyword { keyword })
+                .collect(),
+        );
+    }
+    let granted = super::keyword_grant::parse_quoted_ability_modifications(tail);
+    (!granted.is_empty()).then_some(granted)
+}
+
 /// CR 613.1d + CR 613.1g: "[pronoun]'s a/an <descriptor> [as long as <condition>]"
 /// — self-referential conditional animation static. Covers:
 ///   - Dynamic-P/T-by-mana-value: "it's an artifact creature with power and
 ///     toughness each equal to its mana value" (Animate Artifact)
 ///   - Fixed P/T + types + keywords: "he's a 7/7 Dragon God creature with flying
 ///     and indestructible" (Grand Master of Flowers — CR 613.4b fixed P/T,
-///     CR 613.1d type grant, CR 613.1g keyword grant)
+///     CR 613.1d type grant, CR 613.1f keyword grant)
 ///
 /// Accepts gender-neutral and gendered pronouns ("it's", "~'s", "they're",
 /// "he's", "she's"). Delegates body parsing to
@@ -1712,15 +1819,42 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         .or_else(|| nom_tag_tp(&effect_tp, "she's a "))
         .or_else(|| nom_tag_tp(&effect_tp, "she's an "))?;
 
+    // STEP B.1 — peel a conjoined ability clause ("… and it has annihilator 2",
+    // "… and they gain flying") off the animation body.
+    //
+    // CR 613.1d + CR 613.4b + CR 613.1f: one printed sentence yields type
+    // (Layer 4), base P/T (Layer 7b) and keyword (Layer 6) modifications;
+    // CR 205.1b retains the prior types. Left in place the conjunct defeats the
+    // animation parse and the type/P/T half is lost (Idol of False Gods).
+    //
+    // A conjunct no authority can model declines the WHOLE line (the `?` below)
+    // rather than emitting the animation and silently dropping the granted
+    // ability. The line then falls through to the unclassified path and surfaces
+    // `Effect::unimplemented`, which is honest.
+    let body_text = body.original.trim().trim_end_matches('.');
+    let (body_text, conjunct_modifications) =
+        match super::oracle_effect::animation::split_animation_conjunct_clause(body_text) {
+            Some((animation_body, tail)) => (
+                animation_body,
+                Some(parse_animation_conjunct_modifications(tail)?),
+            ),
+            None => (body_text, None),
+        };
+
     // STEP C — delegate body parsing to parse_animation_spec which handles
     // fixed P/T (CR 613.4b), dynamic P/T-by-mana-value, types (CR 613.1d),
-    // subtypes (CR 205.3), and keyword tails (CR 613.1g) in one composable pass.
-    let body_text = body.original.trim().trim_end_matches('.');
+    // subtypes (CR 205.3), and keyword tails (CR 613.1f) in one composable pass.
     let modifications = if let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
         body_text,
         &mut ParseContext::default(),
     ) {
         super::oracle_effect::animation::animation_modifications(&spec)
+    } else if conjunct_modifications.is_some() {
+        // A conjunct WAS peeled but the spec parser cannot claim the animation
+        // half. The legacy fallback below is not an alternative here: it reads
+        // the unpeeled `body` TextPair, so it would parse the conjunct's words
+        // as type tokens. Decline instead of fabricating.
+        return None;
     } else {
         // Fallback: type-token parse + mana-value dynamic P/T. Handles edge
         // cases where parse_animation_spec returns None (e.g., unusual clause
@@ -1748,7 +1882,12 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     // card-type change with no retention marker therefore REPLACES — Arixmethes,
     // Slumbering Isle's "it's a land. (It's not a creature.)" must stop the
     // Kraken from being a creature, not leave it a "Creature Land" (issue #5213).
-    let modifications = maybe_replace_card_types(modifications, body.lower);
+    let mut modifications = maybe_replace_card_types(modifications, body.lower);
+
+    // CR 613.1f (Layer 6): append the conjoined ability clause AFTER the
+    // CR 205.1a replacement decision above, which is a question about card types
+    // alone — a granted keyword must not perturb it.
+    modifications.extend(conjunct_modifications.unwrap_or_default());
 
     // STEP D — attach the condition(s). The leading "during your turn, " timing
     // peel (STEP A.0) and the trailing " as long as <cond>" peel (STEP A) are

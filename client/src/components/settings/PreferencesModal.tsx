@@ -808,7 +808,13 @@ export function PreferencesModal({
 
               {activeTab === "data" && (
         <>
-          {isDesktopTauri() && <OfflinePreparationSection nativeEngineEnabled={nativeEngineEnabled} />}
+          {/* Not gated on the desktop shell. The service worker precaches the
+              app shell, engine WASM and card data for the browser too, so a
+              readiness checklist is meaningful there — and the browser is where
+              a player is most likely to be surprised by a broken offline
+              session. The native-engine row reports "not applicable" off
+              desktop, which is exactly what it is. */}
+          <OfflinePreparationSection nativeEngineEnabled={nativeEngineEnabled} />
           <VisualPackManager />
           <CloudSyncSection />
           <DataSection />

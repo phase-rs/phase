@@ -902,6 +902,10 @@ where
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        // CR 400.11b: brings cards in from outside the game; carries no nested
+        // ability and no statically-named card (the pack is generated at
+        // resolution), so there is nothing for the conjure walker to seed.
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }

@@ -3860,7 +3860,7 @@ fn declared_amounts(element: &InteractionShortcutPreview) -> Vec<u32> {
         .collect()
 }
 
-/// **CR 704.5a — the attribution guard fires on ONE board and on no other.**
+/// **CR 119.3 — the attribution guard fires on ONE board and on no other.**
 ///
 /// `victim_charge` refuses for FOUR reasons; only one of them is about this
 /// call site's narrower seat domain. The guard therefore re-asks that same rule over the period's
@@ -3926,7 +3926,7 @@ fn the_declared_magnitudes_are_withheld_only_when_the_periods_charge_escapes_the
     );
     assert!(
         element.entries.is_empty(),
-        "CR 704.5a: the period's per-slot charge resolves to a seat this declaration never \
+        "CR 119.3: the period's per-slot charge resolves to a seat this declaration never \
          announces, so NO magnitude is stated rather than one keying the whole drain on the seat \
          the period was measured on. got {:?}",
         element.entries
@@ -3950,7 +3950,7 @@ fn the_declared_magnitudes_are_withheld_only_when_the_periods_charge_escapes_the
     let element = reply
         .declared
         .as_ref()
-        .expect("CR 704.5a: a declaration that announces the charged seat states its magnitudes");
+        .expect("CR 119.3: a declaration that announces the charged seat states its magnitudes");
     assert_eq!(
         declared_amounts(element),
         segments_from(&STARTS, COUNT),
@@ -3976,7 +3976,7 @@ fn the_declared_magnitudes_are_withheld_only_when_the_periods_charge_escapes_the
                 -24
             ),
         ],
-        "CR 704.5a: the drain follows the DECLARATION — 2 cycles on the announced victim and 4 \
+        "CR 119.3: the drain follows the DECLARATION — 2 cycles on the announced victim and 4 \
          on the seat it named second, at the period's own rate — and the two magnitudes differ, \
          so a producer that re-attributed uniformly fails here"
     );
@@ -5867,7 +5867,7 @@ fn the_allocation_is_empty_exactly_when_the_first_targets_point_holds_no_candida
     );
 }
 
-/// CR 704.5a: the published life magnitudes follow the allocation when — and only when — the
+/// CR 119.3: the published life magnitudes follow the allocation when — and only when — the
 /// period's life map names exactly one losing seat that the declaration itself announces and
 /// the announced charge is the whole of that seat's loss, which is what makes the charge
 /// positive.
@@ -5970,7 +5970,7 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
         assert_eq!(
             life_entries(element),
             expected,
-            "CR 704.5a: each allocated candidate is charged the rate times ITS OWN share of \
+            "CR 119.3: each allocated candidate is charged the rate times ITS OWN share of \
              count {}",
             element.count
         );
@@ -6128,7 +6128,7 @@ fn the_preview_spreads_a_charged_life_magnitude_only_over_an_unambiguous_positiv
                 .map(|(_, amount)| i64::from(*amount))
                 .sum::<i64>(),
             -seat_loss * i64::from(element.count),
-            "CR 704.5a: the published life magnitudes total the period the count runs — a \
+            "CR 119.3: the published life magnitudes total the period the count runs — a \
              split at the announced charge states {undercharge} per cycle where the period \
              takes {seat_loss}"
         );
@@ -8568,7 +8568,7 @@ fn an_authored_split_is_previewed_per_declared_seat() {
             .map(|entry| entry.player)
             .collect()
     };
-    // CR 704.5a governs the LIFE re-attribution and nothing else, so every other family is this
+    // CR 119.3 governs the LIFE re-attribution and nothing else, so every other family is this
     // row's allocation-invariant control.
     let invariant = |element: &InteractionShortcutPreview| -> Vec<InteractionShortcutPreviewEntry> {
         element
@@ -8632,7 +8632,7 @@ fn an_authored_split_is_previewed_per_declared_seat() {
         assert_eq!(
             invariant(element),
             invariant(&canonical),
-            "control: the entries CR 704.5a does not re-attribute are identical across the \
+            "control: the entries CR 119.3 does not re-attribute are identical across the \
              canonical and every authored shape; {name} moved one"
         );
     }

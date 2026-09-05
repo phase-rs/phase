@@ -745,9 +745,14 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // 132 -> 133 is adjudicated: `ResolutionOptionalPaymentChoice` names one
     // payer and is explicitly classified by `WaitingFor::acting_authority` as
     // `ActingAuthority::One(player)`.
-    if declared.len() != 133 {
+    // 133 -> 135 is adjudicated: Ripple's two-decision model (CR 702.60a /
+    // 608.2d) added `RippleRevealChoice` (the optional "you may reveal") and
+    // `RippleBottomOrder` (the "in any order" bottom placement). Both name one
+    // acting `player` and are classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)` — neither is actorless.
+    if declared.len() != 135 {
         failures.push(format!(
-            "PIN declared.len()={} != 133.\n\
+            "PIN declared.len()={} != 135.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

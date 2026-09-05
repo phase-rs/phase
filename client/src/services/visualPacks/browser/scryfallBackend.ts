@@ -598,11 +598,24 @@ async function sha256(bytes: Uint8Array): Promise<CatalogRoot> {
 }
 
 async function fetchImage(descriptor: ScryfallAssetDescriptor, signal: AbortSignal): Promise<Uint8Array> {
+  // `reload`, not `default`: this install MUST bypass the HTTP cache, because a
+  // cached entry for a Scryfall image URL can be unusable by a CORS request.
+  // Scryfall's edge emits `access-control-allow-origin` only when the request
+  // carries an `Origin` header, and the no-Origin response carries no
+  // `vary: Origin` to keep the two apart. So a plain no-cors `<img>` load of a
+  // card, back or symbol stores the single cached variant for that URL WITHOUT
+  // the header, and this fetch — which is CORS by necessity, since opaque bytes
+  // can be neither hashed nor verified — is then handed that variant and fails
+  // the CORS check. The page renders the image fine and the install dies, which
+  // is why it reproduces only after the user has looked at cards first.
+  // `reload` re-requests from the network, so the response always answers an
+  // `Origin` and always carries the header. See the CORS note in
+  // `client/vite.config.ts` and the #4822 / #4855 incident.
   const response = await fetch(descriptor.sourceUrl, {
     headers: { Accept: descriptor.media === "image/svg+xml" ? "image/svg+xml,*/*;q=0.8" : "image/jpeg,*/*;q=0.8" },
     credentials: "omit",
     redirect: "error",
-    cache: "default",
+    cache: "reload",
     signal,
   });
   const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? "";

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VisualPackManager } from "../../../../components/settings/visual-packs/VisualPackManager.tsx";
 import { useVisualPackManager } from "../../../../components/settings/visual-packs/useVisualPackManager.ts";
 import { usePreferencesStore, type ArtChainEntry } from "../../../../stores/preferencesStore.ts";
-import type { PrintingEntry } from "../../../scryfall.ts";
+import { MANA_SYMBOL_SHARDS, type PrintingEntry } from "../../../scryfall.ts";
 import { packId } from "../../types.ts";
 import type { CatalogRoot, InstallSelector, OperationId, ProgressEvent, ResolutionResponse } from "../../types.ts";
 import type { ScryfallAssetDescriptor } from "../descriptors.ts";
@@ -135,6 +135,12 @@ function imageResponse(source: string): Response {
   return new Response(new TextEncoder().encode(source), { status: 200, headers: { "Content-Type": "image/jpeg" } });
 }
 
+/** `fetchImage` rejects a response whose Content-Type doesn't match the
+ *  descriptor's declared media, so mana-symbol SVGs need their own stub. */
+function svgResponse(source: string): Response {
+  return new Response(new TextEncoder().encode(source), { status: 200, headers: { "Content-Type": "image/svg+xml" } });
+}
+
 /** A transient image outage: `fetchImage` rejects a non-200 as `network`. */
 let failImages = false;
 let holdLaterImages = false;
@@ -147,6 +153,10 @@ const fetchStub = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
   if (source === BULK_INDEX_URL) return jsonResponse({ data: [BULK_RECORD] });
   if (source === "/scryfall-data.json") return jsonResponse(CARDS);
   if (source === "/scryfall-printings.json") return jsonResponse(PRINTINGS);
+  if (source.startsWith("https://svgs.scryfall.io/card-symbols/")) {
+    if (holdLaterImages && imageRequests().length > 1) await heldImages;
+    return failImages ? new Response("", { status: 503 }) : svgResponse(source);
+  }
   if (source.startsWith("https://cards.scryfall.io/") || source.startsWith("https://backs.scryfall.io/")) {
     if (holdLaterImages && imageRequests().length > 1) await heldImages;
     return failImages ? new Response("", { status: 503 }) : imageResponse(source);
@@ -205,10 +215,10 @@ async function operationRecords(): Promise<unknown[]> {
   return records;
 }
 
-async function settle(backend: ScryfallBrowserVisualPackBackend, operation: OperationId): Promise<void> {
+async function settle(backend: ScryfallBrowserVisualPackBackend, operation: OperationId, timeout = 5000): Promise<void> {
   await vi.waitFor(async () => {
     expect((await backend.operationStatus(operation)).state).toBe("completed");
-  }, { timeout: 5000 });
+  }, { timeout });
 }
 
 async function installCurated(backend: ScryfallBrowserVisualPackBackend): Promise<{
@@ -572,17 +582,21 @@ describe("curated install selector", () => {
 
   it("keeps a non-curated pack on the bulk catalog root", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
-    const response = await backend.start({ kind: "install", selector: { kind: "core" }, objectEstimate: 1 });
+    const objectEstimate = 1 + MANA_SYMBOL_SHARDS.length;
+    const response = await backend.start({ kind: "install", selector: { kind: "core" }, objectEstimate });
     if (response.status !== "started") throw new Error("core install did not start");
-    await settle(backend, response.operationId);
+    // The card back plus every finite mana-symbol SVG — an order of magnitude
+    // more objects than the 5s default budgets for, so this settle gets its
+    // own allowance rather than raising the shared default other callers rely on.
+    await settle(backend, response.operationId, 20000);
 
     const summary = await backend.catalogSummary();
     expect(summary.installedPacks).toEqual([{ packId: packId("core"), catalogRoot: summary.catalogRoot }]);
     expect(response.catalogRoot).toBe(summary.catalogRoot);
     // The restructured installed-filter must still short-circuit a re-install.
-    expect(await backend.start({ kind: "install", selector: { kind: "core" }, objectEstimate: 1 }))
+    expect(await backend.start({ kind: "install", selector: { kind: "core" }, objectEstimate }))
       .toEqual({ status: "healthy" });
-  });
+  }, 10000);
 
   it("replaces the membership wholesale when the art chain changes the digest", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
