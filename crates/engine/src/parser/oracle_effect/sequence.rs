@@ -3616,7 +3616,395 @@ pub(super) fn push_clause_chunk(
     chunks.push(ClauseChunk {
         text: text.to_string(),
         boundary_after,
+        // Sole construction site: a chunk's leading duration is never known here.
+        // `expand_leading_duration_chunks` is the only writer of `Some(..)`.
+        leading_duration: None,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Leading-duration conjunct expansion (issue #7923)
+// ---------------------------------------------------------------------------
+
+/// CR 608.2c (:2797) — "read the whole text and apply the rules of English".
+///
+/// True when this conjunct's LEADING TOKEN IS A CONJUGATED THIRD-PERSON FORM of a
+/// recognized clause-starting verb — the exact shape `starts_clause_text_or_conjugated`
+/// exists to recognize, and whose own doc states "the subject carries over from the
+/// prior clause" ("gains trample if it's red").
+///
+/// READ THE NAME LITERALLY. This is NOT a general "has no subject" test, and it must
+/// not be described as one: `starts_clause_text` accepts IMPERATIVES as well as subject
+/// tokens, and `starts_clause_text_or_conjugated` short-circuits on it. An imperative
+/// conjunct ("put a -1/-1 counter on that creature") also carries no subject, scores
+/// `starts_clause_text == true`, and is ADMITTED here. Giant Oyster is admitted by this
+/// guard and declined by `head_ends_with_dangling_phase_trigger`.
+///
+/// Why a conjugated continuation cannot be re-parented as a sibling chunk: with no
+/// subject in its own text there is nothing for chain anaphor state to bind, and it
+/// falls through to the chain default. Measured: recovering Aurelia's "gains trample if
+/// it's red" as a sibling binds `affected: SelfRef` — AURELIA gains trample when the
+/// TARGET is red.
+///
+/// MEASURED REACH, AND WHY IT STAYS THOUGH ITS MARGINAL EFFECT TODAY IS ZERO.
+/// It declines 19 boundaries across 12 cards, every one a
+/// `<subject> <verb1>, <verb2>, and <verb3>` continuous-modification merge. Removing
+/// it ALONE moves zero cards: at 17 of those 19, `same_consumption` declines the
+/// boundary anyway; at the other 2 (both Aurelia) `same_consumption` ACCEPTS, and it is
+/// `recovered_conjunct_is_unparsed` that declines them in the shipped order. Remove
+/// BOTH and Aurelia re-admits the boundary with `affected: SelfRef` — measured on a
+/// full corpus run. So this guard is NOT load-bearing at the shipped configuration, and
+/// it is NOT a performance pre-filter either (19 avoided parses over 35,798 cards is
+/// noise).
+///
+/// It stays because the two guards state DIFFERENT facts that merely coincide on
+/// Aurelia today: this one is a fact about ENGLISH GRAMMAR (CR 608.2c — a conjugated
+/// conjunct inherits its subject), while `recovered_conjunct_is_unparsed` is a fact
+/// about CURRENT PARSER COVERAGE whose own doc names the follow-up that shrinks its
+/// population. When the generic detector learns to read a subject-inheriting conjunct,
+/// that verdict flips and this guard becomes the only remaining defense. Deleting it
+/// would make a CR 608.2c property depend on an accident of parser coverage.
+///
+/// The discriminator is the DIFFERENCE of two existing splitter authorities, not a new
+/// table: accepted by `starts_clause_text_or_conjugated` and not by `starts_clause_text`
+/// ⟺ conjugated verb, subject inherited.
+fn recovered_conjunct_continues_prior_subject(text: &str) -> bool {
+    let t = super::lower::strip_leading_sequence_connector(text).trim();
+    !starts_clause_text(t) && starts_clause_text_or_conjugated(t)
+}
+
+/// CR 603.1 (:2559) + CR 603.7 (:2614): a boundary that severs a mid-sentence
+/// delayed-trigger head from its body does not divide two independent instructions —
+/// it divides one printed "[At] [event], [effect]" in half. Splitting there emits the
+/// trigger's body as a one-shot the card never authorizes (measured: Giant Oyster gains
+/// a top-level `PutCounter{ForAsLongAs SourceIsTapped}`).
+fn head_ends_with_dangling_phase_trigger(head: &str) -> bool {
+    let lower = head.to_ascii_lowercase();
+    nom_primitives::scan_at_word_boundaries(
+        &lower,
+        crate::parser::oracle_trigger::parse_dangling_phase_trigger_head,
+    )
+    .is_some()
+}
+
+/// NO CR ANNOTATION, deliberately. This states what the PARSER'S OWN OUTPUT is not
+/// evidence for; it implements no game rule. It is the second application point of
+/// the single rule `severed_prefix_end` already states three lines above the
+/// `find_map`:
+///
+/// > `Effect::Unimplemented` IS NOT EVIDENCE.
+///
+/// `severed_prefix_end`'s verdict is "everything after this prefix was read by the
+/// parser and discarded". The existing G5 statement refuses that verdict when the
+/// WHOLE-BODY parse is `Unimplemented` ("the parser did not understand the body" is
+/// not evidence of prefix consumption). This is the same refusal on the RECOVERED
+/// CONJUNCT side: the parser not understanding a conjunct is not evidence that the
+/// conjunct is a recoverable instruction, and restructuring the chain around an
+/// admission of ignorance is not recovery. (The HEAD side needs no third statement:
+/// if `pre` is `Unimplemented` and `whole` is not, `same_consumption` already
+/// rejects; if both are, G5 has already returned.)
+///
+/// EFFECT-SHAPED, NEVER TEXT-SHAPED. It must never inspect `Unimplemented`'s `name`
+/// or `description`. A guard keyed on "play lands" would be a single-card carve-out;
+/// this one is keyed on the variant and admits every future card of the same class.
+///
+/// SCOPE OF THE PROBE — IT IS A LOWER BOUND, AND THAT IS DELIBERATE.
+/// `strip_leading_sequence_connector(..).trim()` reproduces the LOOP-HEAD
+/// `normalized_text` of `parse_effect_chain_ir`'s chunk loop, and `parse_effect_clause`
+/// is that loop's GENERIC clause detector. It is NOT byte-for-byte "the text
+/// production parses" and NOT "the same detector": the loop REBINDS `normalized_text`
+/// downstream (the `starting with you, ` strip) and reaches the generic detector only
+/// after a long `try_parse_*` cascade of special-case recognizers. So this guard asks
+/// "would the GENERIC detector understand this conjunct?", which is weaker than "would
+/// production understand it?". The error is one-directional and safe: the guard can
+/// over-decline a boundary a special-case recognizer would have handled, and can never
+/// wrongly accept one. Measured today that divergent set is EMPTY.
+///
+/// Measured corpus reach: exactly ONE decline, on The Belligerent
+/// ("Until end of turn, you may look at the top card of your library any time, and
+/// you may play lands and cast spells from the top of your library") — whose
+/// recovered conjunct "and you may play lands" parses to a bare
+/// `Unimplemented{play, "play lands"}` with `sub_ability: None`. Declining leaves that
+/// card byte-identical to BASE_SHA. It declines no card that should split. NAMED
+/// FOLLOW-UP: build the `play lands` permission grammar, which retires this decline
+/// and the 13-card deferred class together.
+fn recovered_conjunct_is_unparsed(text: &str, ctx: &ParseContext) -> bool {
+    let t = super::lower::strip_leading_sequence_connector(text).trim();
+    matches!(
+        super::parse_effect_clause(t, &mut ctx.clone()).effect,
+        Effect::Unimplemented { .. }
+    )
+}
+
+/// Structural equality over a `StaticDefinition` with exactly ONE field relaxed:
+/// `description`, which is pure PROVENANCE (its only non-test consumers are the
+/// coverage report and the frontend display — no resolver, layer pass, targeting or
+/// expiry code reads it).
+///
+/// Written as an EXHAUSTIVE DESTRUCTURE WITH NO `..` on purpose: adding a field to
+/// `StaticDefinition` must be a COMPILE ERROR here, not a silent narrowing of the
+/// relaxation set. Do not "fix" a build break by adding `..`.
+fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
+    let StaticDefinition {
+        mode: a_mode,
+        affected: a_affected,
+        modifications: a_modifications,
+        condition: a_condition,
+        per_player_condition: a_per_player_condition,
+        affected_zone: a_affected_zone,
+        effect_zone: a_effect_zone,
+        active_zones: a_active_zones,
+        characteristic_defining: a_characteristic_defining,
+        // RELAXED — provenance only. See the doc comment.
+        description: _,
+        attack_defended: a_attack_defended,
+        source_controller: a_source_controller,
+        source_object: a_source_object,
+        bypass_beneficiary: a_bypass_beneficiary,
+        protection_does_not_remove: a_protection_does_not_remove,
+        room_door: a_room_door,
+    } = a;
+    let StaticDefinition {
+        mode: b_mode,
+        affected: b_affected,
+        modifications: b_modifications,
+        condition: b_condition,
+        per_player_condition: b_per_player_condition,
+        affected_zone: b_affected_zone,
+        effect_zone: b_effect_zone,
+        active_zones: b_active_zones,
+        characteristic_defining: b_characteristic_defining,
+        description: _,
+        attack_defended: b_attack_defended,
+        source_controller: b_source_controller,
+        source_object: b_source_object,
+        bypass_beneficiary: b_bypass_beneficiary,
+        protection_does_not_remove: b_protection_does_not_remove,
+        room_door: b_room_door,
+    } = b;
+    a_mode == b_mode
+        && a_affected == b_affected
+        && a_modifications == b_modifications
+        && a_condition == b_condition
+        && a_per_player_condition == b_per_player_condition
+        && a_affected_zone == b_affected_zone
+        && a_effect_zone == b_effect_zone
+        && a_active_zones == b_active_zones
+        && a_characteristic_defining == b_characteristic_defining
+        && a_attack_defended == b_attack_defended
+        && a_source_controller == b_source_controller
+        && a_source_object == b_source_object
+        && a_bypass_beneficiary == b_bypass_beneficiary
+        && a_protection_does_not_remove == b_protection_does_not_remove
+        && a_room_door == b_room_door
+}
+
+/// Do two parses CONSUME the same thing? Compares everything the ENGINE READS and
+/// relaxes exactly one field in exactly one effect kind: `Effect::GenericEffect`'s
+/// `StaticDefinition::description`.
+///
+/// Every OTHER effect kind is compared by FULL structural equality including any text
+/// it carries — deliberately. `Effect::Unimplemented { description }` carries the
+/// coverage-honest source fragment (SEMANTIC, not provenance), and an embedded
+/// `AbilityDefinition`'s own `description` is evidence that a recognizer CONSUMED the
+/// tail into a chain — the opposite of the verdict this function exists to reach.
+fn same_consumption(a: &ParsedEffectClause, b: &ParsedEffectClause) -> bool {
+    if a.duration != b.duration
+        || a.sub_ability != b.sub_ability
+        || a.distribute != b.distribute
+        || a.multi_target != b.multi_target
+        || a.condition != b.condition
+        || a.optional != b.optional
+        || a.unless_pay != b.unless_pay
+    {
+        return false;
+    }
+    match (&a.effect, &b.effect) {
+        (
+            Effect::GenericEffect {
+                static_abilities: a_statics,
+                duration: a_dur,
+                target: a_target,
+                end_cost: a_cost,
+            },
+            Effect::GenericEffect {
+                static_abilities: b_statics,
+                duration: b_dur,
+                target: b_target,
+                end_cost: b_cost,
+            },
+        ) => {
+            a_dur == b_dur
+                && a_target == b_target
+                && a_cost == b_cost
+                && a_statics.len() == b_statics.len()
+                && a_statics
+                    .iter()
+                    .zip(b_statics.iter())
+                    .all(|(x, y)| static_same_consumption(x, y))
+        }
+        (x, y) => x == y,
+    }
+}
+
+/// Locate the end byte offset, WITHIN `body`, of sub-chunk `k`.
+///
+// allow-noncombinator: monotonic forward byte-offset location of an
+// already-chunked fragment (mirrors ClauseIrBuilder::locate) — provenance
+// bookkeeping, not parsing dispatch against any literal phrase.
+/// `split_clause_sequence` trims only whitespace and `.`/`,` from each chunk, so every
+/// chunk text is a contiguous substring of `body` and a monotonic forward scan locates
+/// it. `None` (fragment not locatable) FAILS CLOSED at the call site — measured zero
+/// occurrences over the corpus.
+fn chunk_end_offset(body: &str, sub: &[ClauseChunk], k: usize) -> Option<usize> {
+    let mut cursor = 0usize;
+    for chunk in sub.iter().take(k + 1) {
+        let found = body.get(cursor..)?.find(&chunk.text)?;
+        cursor += found + chunk.text.len();
+    }
+    Some(cursor)
+}
+
+/// CR 608.2c + CR 611.2a (:2797, :2908): a leading duration states the lifetime of
+/// the WHOLE instruction it prefixes, not only of its first conjunct.
+///
+/// `starts_prefix_clause` latches `"until "` / `"for as long as "` (as it also latches
+/// `"if "`), so the whole sentence arrives as one chunk. A leading CONDITIONAL is then
+/// re-chunked by the chunk-loop splitter; a leading DURATION has no such splitter and
+/// instead reaches `parse_effect_clause`, which parses ONE clause from the body and
+/// drops whatever the recognizer did not consume.
+///
+/// PARSER-AS-DETECTOR. Returns the end offset of the SHORTEST chunk prefix whose parse
+/// is indistinguishable — per `same_consumption`'s DECLARED reach — from the parse of
+/// the WHOLE body: everything after it was read by the parser and discarded. `None`
+/// means the recognizer legitimately merged the entire body (Jump Scare, Stolen
+/// Strategy, Titanic Ultimatum), represented the tail as its own chain (Xanathar,
+/// Abeyance — U1's case), or a GUARD declined the boundary.
+fn severed_prefix_end(body: &str, sub: &[ClauseChunk], ctx: &ParseContext) -> Option<usize> {
+    if sub.len() < 2 {
+        return None;
+    }
+    let whole = super::parse_effect_clause(body, &mut ctx.clone());
+    // G5 — `Effect::Unimplemented` IS NOT EVIDENCE, whole-body side.
+    // `placeholder_parsed_clause` yields `Effect::Unimplemented { description: None }`,
+    // so two different bodies reaching it compare EQUAL. "The parser did not understand
+    // the body" is not evidence of prefix consumption — decline.
+    if matches!(whole.effect, Effect::Unimplemented { .. }) {
+        return None;
+    }
+    (0..sub.len() - 1).find_map(|k| {
+        let end = chunk_end_offset(body, sub, k)?;
+        let head = body.get(..end)?;
+        if head_ends_with_dangling_phase_trigger(head) {
+            return None; // CR 603.7
+        }
+        if sub[k + 1..]
+            .iter()
+            .any(|c| recovered_conjunct_continues_prior_subject(&c.text))
+        {
+            return None; // CR 608.2c
+        }
+        let pre = super::parse_effect_clause(head, &mut ctx.clone());
+        if !same_consumption(&pre, &whole) {
+            return None;
+        }
+        // G5 — same rule, recovered-conjunct side. LAST because it is the only guard
+        // that costs a parse per conjunct: reached only where the boundary would
+        // otherwise be accepted, which is what makes its decline counter mean
+        // "boundaries this guard removed" (measured: exactly 1, The Belligerent).
+        // Corpus cost, measured: 6 parses across 5 such boundaries — Opportunistic
+        // Dragon contributes two recovered conjuncts, the other four one each.
+        if sub[k + 1..]
+            .iter()
+            .any(|c| recovered_conjunct_is_unparsed(&c.text, ctx))
+        {
+            return None;
+        }
+        Some(end)
+    })
+}
+
+/// CR 611.2a + CR 608.2c: expand any chunk whose LEADING duration governs conjuncts
+/// that the single-clause parse of its body discarded.
+///
+/// The head chunk keeps the printed duration PHRASE in its own text (so it still
+/// reaches the leading-duration arm in `parse_effect_clause_inner` and U1's
+/// `with_clause_chain_duration`); each recovered conjunct is emitted VERBATIM with the
+/// duration carried as a TYPED `leading_duration`, never re-synthesized as prose —
+/// that is what keeps every chunk a contiguous substring of the printed text and
+/// `ClauseIrBuilder::locate`'s spans honest.
+pub(super) fn expand_leading_duration_chunks(
+    chunks: Vec<ClauseChunk>,
+    ctx: &ParseContext,
+) -> Vec<ClauseChunk> {
+    let mut out: Vec<ClauseChunk> = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let Some((duration, body)) = super::lower::strip_leading_duration(&chunk.text) else {
+            out.push(chunk);
+            continue;
+        };
+        // `strip_leading_duration` returns a SUFFIX SUBSLICE of its input; every byte
+        // offset below rests on that invariant, so check it rather than assume it.
+        // Measured: zero firings over the whole corpus under `debug_assertions`.
+        //
+        // allow-noncombinator: byte-offset INVARIANT CHECK on a slice this function
+        // did not produce (mirrors ClauseIrBuilder::locate's provenance
+        // bookkeeping) — it dispatches on nothing and matches no literal phrase.
+        // `body` is `strip_leading_duration`'s own return value, not a tag.
+        debug_assert!(
+            chunk.text.ends_with(body),
+            "strip_leading_duration returned a non-suffix body: {body:?} from {:?}",
+            chunk.text
+        );
+        // allow-noncombinator: the release-build FAIL-CLOSED half of the same
+        // invariant check — same reasoning as the `debug_assert!` above.
+        if !chunk.text.ends_with(body) {
+            out.push(chunk);
+            continue;
+        }
+        let prefix_len = chunk.text.len() - body.len();
+        let sub = split_clause_sequence(body);
+        let Some(end) = severed_prefix_end(body, &sub, ctx) else {
+            out.push(chunk);
+            continue;
+        };
+        // `severed_prefix_end` returns an offset produced by `chunk_end_offset`, so the
+        // matching `k` always exists.
+        //
+        // allow-noncombinator: `Iterator::find` over chunk INDICES comparing two
+        // `usize` byte offsets — not `str::find`, and not parsing dispatch against
+        // any literal phrase.
+        let Some(k) = (0..sub.len()).find(|&i| chunk_end_offset(body, &sub, i) == Some(end)) else {
+            out.push(chunk);
+            continue;
+        };
+        let head_text = chunk.text[..prefix_len + end]
+            .trim()
+            .trim_end_matches(['.', ','])
+            .trim();
+        if head_text.is_empty() {
+            out.push(chunk);
+            continue;
+        }
+        out.push(ClauseChunk {
+            text: head_text.to_string(),
+            boundary_after: sub[k].boundary_after,
+            leading_duration: None,
+        });
+        let last = sub.len() - 1;
+        for (i, tail) in sub.iter().enumerate().skip(k + 1) {
+            out.push(ClauseChunk {
+                text: tail.text.clone(),
+                boundary_after: if i == last {
+                    chunk.boundary_after
+                } else {
+                    tail.boundary_after
+                },
+                leading_duration: Some(duration.clone()),
+            });
+        }
+    }
+    out
 }
 
 /// CR 707.10c: A `CopySpell` may be the chain's effect directly (activated /
@@ -4786,7 +5174,9 @@ pub(super) fn apply_clause_continuation(
                     additional_zones: Vec::new(),
                     zone_owner: crate::types::ability::ZoneOwner::Controller,
                     filter: None,
-                    chooser,
+                    chooser: chooser.into(),
+                    candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                    reciprocal_role: None,
                     up_to: false,
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     constraint: None,
@@ -8593,7 +8983,7 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{QuantityExpr, SearchSelectionConstraint};
+    use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
 
     #[test]
     fn face_down_pile_is_dig_lookback_transparent() {
@@ -11841,7 +12231,7 @@ mod tests {
         );
         assert_eq!(
             *chooser,
-            Chooser::Controller,
+            ZoneChoiceChooser::Controller,
             "the spell's controller chooses"
         );
         let filter = filter
@@ -12271,7 +12661,9 @@ mod tests {
             additional_zones: Vec::new(),
             zone_owner: crate::types::ability::ZoneOwner::Controller,
             filter: None,
-            chooser: Chooser::Opponent,
+            chooser: Chooser::Opponent.into(),
+            candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+            reciprocal_role: None,
             up_to: false,
             constraint: None,
             selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -12298,7 +12690,9 @@ mod tests {
             additional_zones: Vec::new(),
             zone_owner: crate::types::ability::ZoneOwner::Controller,
             filter: None,
-            chooser: Chooser::Opponent,
+            chooser: Chooser::Opponent.into(),
+            candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+            reciprocal_role: None,
             up_to: false,
             constraint: None,
             selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -14054,5 +14448,155 @@ mod tests {
             result.is_none(),
             "reflexive attach gate must not re-patch the Dig, got {result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod leading_duration_guard_tests_7923 {
+    use super::*;
+
+    /// **V-U2d unit half — `[NEW-UNIT]`.** CR 608.2c (`docs/MagicCompRules.txt:2797`).
+    ///
+    /// Anchored against MISCLASSIFICATION of a new helper, not against BASE_SHA
+    /// (the helper does not exist there). It pins guard 1's ACTUAL property —
+    /// "leading token is a conjugated third-person form of a recognized
+    /// clause-starting verb" — and, crucially, pins that IMPERATIVES ARE ADMITTED,
+    /// so the doc comment cannot drift into claiming a general "has no subject" test.
+    #[test]
+    fn recovered_conjunct_continuation_guard() {
+        // TRUE — conjugated continuations. Both are Aurelia's, the card the guard
+        // exists for ("that creature gets +2/+0, gains trample if it's red, and
+        // gains vigilance if it's white").
+        let declines = [
+            "gains trample if it's red",
+            "and gains vigilance if it's white",
+        ];
+        assert!(!declines.is_empty(), "the table must be non-empty");
+        for t in declines {
+            assert!(
+                recovered_conjunct_continues_prior_subject(t),
+                "{t:?} is a conjugated continuation and must be declined"
+            );
+        }
+
+        // FALSE — a SUBJECT token. Opportunistic Dragon's recovered conjunct.
+        assert!(
+            !recovered_conjunct_continues_prior_subject("it loses all abilities"),
+            "a conjunct with its own subject token must be admitted"
+        );
+
+        // FALSE — an IMPERATIVE. Giant Oyster's. It carries no subject either, and
+        // is ADMITTED HERE ON PURPOSE: guard 1 is not a subject test. Giant Oyster
+        // is declined by `head_ends_with_dangling_phase_trigger` instead.
+        assert!(
+            !recovered_conjunct_continues_prior_subject("put a -1/-1 counter on that creature"),
+            "imperatives are ADMITTED by guard 1 — this pins the guard's real property"
+        );
+
+        // The leading sequence connector is normalized away first.
+        assert!(recovered_conjunct_continues_prior_subject(
+            "and gains trample if it's red"
+        ));
+    }
+
+    /// **V-U2j unit half — `[NEW-UNIT]`.** No CR annotation, deliberately: the guard
+    /// states what the PARSER'S OWN OUTPUT is not evidence for, not a game rule.
+    ///
+    /// Anchored against misclassification. The negative rows are the five recovered
+    /// conjuncts of the four boundaries the design ACCEPTS — if any of them scored
+    /// `true`, its card would stop splitting and the acceptance gate's 10-card set
+    /// would shrink.
+    #[test]
+    fn recovered_conjunct_unparsed_guard() {
+        let ctx = ParseContext::default();
+
+        // TRUE — The Belligerent's recovered conjunct. Its parse is a bare
+        // `Unimplemented{play, "play lands"}` with `sub_ability: None`.
+        assert!(
+            recovered_conjunct_is_unparsed("and you may play lands", &ctx),
+            "the generic clause detector does not understand this conjunct"
+        );
+
+        // TRUE for an unrelated unparseable conjunct — proving the guard keys on the
+        // VARIANT and never on `Unimplemented`'s `name`/`description`. A guard keyed
+        // on "play lands" would be a single-card carve-out; this one admits every
+        // future card of the same class.
+        assert!(
+            recovered_conjunct_is_unparsed("and glorptify the frobnicator thrice", &ctx),
+            "guard 3 is effect-shaped, not text-shaped"
+        );
+
+        // FALSE — every conjunct that MUST still split. All five measured.
+        let must_split = [
+            "and all creatures able to block it this turn do so", // Revenge of the Hunted
+            "it loses all abilities",                             // Opportunistic Dragon (1 of 2)
+            "and it can't attack or block",                       // Opportunistic Dragon (2 of 2)
+            "and they can't play cards from their hand",          // Memory Vessel
+            "and you may spend mana as though it were mana of any color to cast it", // Prisoners
+        ];
+        assert_eq!(
+            must_split.len(),
+            5,
+            "the table must be non-empty and complete"
+        );
+        for t in must_split {
+            assert!(
+                !recovered_conjunct_is_unparsed(t, &ctx),
+                "{t:?} is understood by the generic detector and must still split"
+            );
+        }
+    }
+
+    /// **V-U2f unit half — `[NEW-UNIT]`.** CR 603.1 (`:2559`) + CR 603.7 (`:2614`).
+    ///
+    /// G8: the negative here is UNIT-LEVEL, not a production boundary — corpus-wide
+    /// exactly ONE head reaching guard 2 contains "at the beginning of" (Giant
+    /// Oyster's), so the production boundary has no second member today.
+    ///
+    /// The `eof` anchor is the whole point and is what the two REJECT rows pin: a
+    /// head containing a COMPLETE trigger ("…, draw a card") is a genuine conjunct
+    /// boundary and must still split.
+    #[test]
+    fn dangling_phase_trigger_head_combinator() {
+        use crate::parser::oracle_trigger::parse_dangling_phase_trigger_head;
+
+        let accept = [
+            "at the beginning of each of your draw steps", // Giant Oyster — the corpus member
+            "at the beginning of your upkeep",
+            "at the beginning of the next end step",
+            "at the beginning of your next end step", // G7's newly reachable case
+            "at the beginning of each opponent's next upkeep", // and its opponent mirror
+            "at the beginning of each opponent's upkeep",
+            "at the beginning of combat on your turn",
+            "at the beginning of each end step",
+        ];
+        assert_eq!(accept.len(), 8, "the table must be non-empty");
+        for t in accept {
+            assert!(
+                parse_dangling_phase_trigger_head(t).is_ok(),
+                "{t:?} is a dangling phase-trigger head and must be consumed WHOLE"
+            );
+        }
+
+        let reject = [
+            "at the beginning of your upkeep, draw a card",
+            "at the beginning of your end step, you lose 1 life",
+        ];
+        for t in reject {
+            assert!(
+                parse_dangling_phase_trigger_head(t).is_err(),
+                "{t:?} contains a COMPLETE trigger — the eof anchor must reject it"
+            );
+        }
+
+        // The production guard scans at word boundaries, so a head that ENDS with a
+        // dangling head fires even with a long prefix (Giant Oyster's real head).
+        assert!(head_ends_with_dangling_phase_trigger(
+            "target tapped creature doesn't untap during its controller's untap step, \
+             and at the beginning of each of your draw steps"
+        ));
+        assert!(!head_ends_with_dangling_phase_trigger(
+            "target tapped creature doesn't untap during its controller's untap step"
+        ));
     }
 }

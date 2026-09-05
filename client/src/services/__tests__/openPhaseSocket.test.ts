@@ -16,8 +16,9 @@ class MockWebSocket extends EventTarget {
   static OPEN = 1;
   static instances: MockWebSocket[] = [];
   readyState = MockWebSocket.OPEN;
+  binaryType: BinaryType = "blob";
   onopen: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: (() => void) | null = null;
   onclose: (() => void) | null = null;
   send = vi.fn();
@@ -29,7 +30,7 @@ class MockWebSocket extends EventTarget {
     super();
     MockWebSocket.instances.push(this);
   }
-  deliverMessage(data: string) {
+  deliverMessage(data: unknown) {
     this.onmessage?.({ data });
   }
   fireError() {
@@ -44,6 +45,7 @@ function helloFrame(
     protocol_version: number;
     mode: "Full" | "LobbyOnly";
     lobby_protocol_version: number;
+    wire_formats: string[];
   }> = {},
 ): string {
   return JSON.stringify({
@@ -84,6 +86,53 @@ describe("openPhaseSocket", () => {
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"ClientHello"'),
     );
+  });
+
+  it("negotiates the gzip envelope and queues binary sends in order", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(helloFrame({ wire_formats: ["GzipEnvelopeV1"] }));
+
+    const socket = await promise;
+    expect(socket.serverInfo.wireFormats).toEqual(["GzipEnvelopeV1"]);
+    expect(raw.send).toHaveBeenCalledWith(
+      expect.stringContaining('"wire_formats":["GzipEnvelopeV1"]'),
+    );
+
+    socket.ws.send(JSON.stringify({ type: "Ping", data: { timestamp: 7 } }));
+    await vi.waitFor(() => {
+      expect(raw.send).toHaveBeenCalledWith(expect.any(Uint8Array));
+    });
+    const binary = raw.send.mock.calls.find(([value]) => value instanceof Uint8Array)?.[0];
+    expect(binary?.[0]).toBe(0x00);
+
+    const order: string[] = [];
+    const received = vi.fn((_event: MessageEvent<string>) => order.push("message"));
+    socket.ws.onmessage = received;
+    socket.ws.addEventListener("close", () => order.push("close"));
+    const response = new TextEncoder().encode(JSON.stringify({ type: "Pong" }));
+    raw.deliverMessage(new Uint8Array([0x00, ...response]).buffer);
+    raw.close();
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+    expect(received).toHaveBeenCalledWith(expect.objectContaining({ data: '{"type":"Pong"}' }));
+    expect(order).toEqual(["message", "close"]);
+  });
+
+  it("reports a queued binary send failure before closing", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const raw = MockWebSocket.instances[0];
+    raw.deliverMessage(helloFrame({ wire_formats: ["GzipEnvelopeV1"] }));
+
+    const socket = await promise;
+    const onerror = vi.fn();
+    socket.ws.onerror = onerror;
+    raw.send.mockImplementationOnce(() => {
+      throw new Error("socket closed before queued send");
+    });
+    socket.ws.send('{"type":"Ping"}');
+
+    await vi.waitFor(() => expect(onerror).toHaveBeenCalledOnce());
+    expect(raw.close).toHaveBeenCalled();
   });
 
   it("rejects with protocol_mismatch when versions diverge and closes the socket", async () => {

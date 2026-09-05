@@ -17,7 +17,11 @@ import {
   createDraftPeerSession,
   type DraftPeerSession,
 } from "../network/draftPeerSession";
-import { parseRoomCode } from "../network/connection";
+import {
+  PEER_CONNECT_OPTIONS,
+  RECONNECT_DIAL_TIMEOUT_MS,
+  parseRoomCode,
+} from "../network/connection";
 import {
   deckSubmissionFingerprint,
   DRAFT_PROTOCOL_VERSION,
@@ -102,6 +106,13 @@ type DraftGuestEventListener = (event: DraftGuestEvent) => void;
 
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
+/**
+ * Budget for the *post-open* application handshake — the wait for the host's
+ * `draft_welcome` / `draft_reconnect_ack` after `attachSession` on an already
+ * open, ordered channel. Its cost is one application round trip, so it is not
+ * ICE-sensitive and stays at 10s. The reconnect *dial* budget is a different
+ * quantity and lives in `RECONNECT_DIAL_TIMEOUT_MS`.
+ */
 const FIRST_CONTACT_TIMEOUT_MS = 10_000;
 const LEAVE_ACK_TIMEOUT_MS = 10_000;
 
@@ -149,7 +160,12 @@ export class P2PDraftGuest {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private deckSubmissionWaiters = new Map<
     string,
-    { acknowledgement: Promise<void>; resolve: () => void; reject: (error: Error) => void }
+    {
+      acknowledgement: Promise<void>;
+      resolve: () => void;
+      reject: (error: Error) => void;
+      activeAttempts: number;
+    }
   >();
   /** Set synchronously so two UI clicks share one outbox command. */
   private pendingDeckSubmission: Promise<void> | null = null;
@@ -224,7 +240,7 @@ export class P2PDraftGuest {
     session.onMessage((msg) => {
       // A timed-out or superseded connection must never promote a later
       // reconnect attempt with its delayed acknowledgement.
-      if (this.session === session) void this.handleHostMessage(msg, session);
+      if (this.session === session) return this.handleHostMessage(msg, session);
     });
     return session;
   }
@@ -383,14 +399,20 @@ export class P2PDraftGuest {
         resolve = resolvePromise;
         reject = rejectPromise;
       });
-      waiter = { acknowledgement, resolve, reject };
+      waiter = { acknowledgement, resolve, reject, activeAttempts: 0 };
       this.deckSubmissionWaiters.set(submissionId, waiter);
     }
+    waiter.activeAttempts += 1;
     try {
-      await this.session.send({ type: "draft_submit_deck", submissionId, mainDeck, commanders });
-      await waiter.acknowledgement;
+      // Observe the receipt even if the session closes while encoding the send.
+      await Promise.all([
+        this.session.send({ type: "draft_submit_deck", submissionId, mainDeck, commanders }),
+        waiter.acknowledgement,
+      ]);
     } finally {
-      if (this.deckSubmissionWaiters.get(submissionId) === waiter) {
+      // A failed replay must not remove the receipt route used by other attempts.
+      waiter.activeAttempts -= 1;
+      if (waiter.activeAttempts === 0 && this.deckSubmissionWaiters.get(submissionId) === waiter) {
         this.deckSubmissionWaiters.delete(submissionId);
       }
     }
@@ -495,6 +517,8 @@ export class P2PDraftGuest {
           break;
         }
 
+        // Persistence can outlive a disconnected or retired handshake.
+        if (this.session !== session) return;
         this.resolveHandshake(session);
         this.emit({ type: "workspaceRestored", workspaceState: msg.workspaceState });
         this.emit({ type: "joined", seatIndex: msg.seatIndex, draftCode: msg.draftCode });
@@ -522,6 +546,7 @@ export class P2PDraftGuest {
           }
         }
 
+        if (this.session !== session) return;
         this.resolveHandshake(session);
         this.emit({ type: "workspaceRestored", workspaceState: msg.workspaceState });
         this.emit({ type: "reconnected", seatIndex: msg.seatIndex });
@@ -568,6 +593,9 @@ export class P2PDraftGuest {
         this.currentView = msg.view;
         await clearDraftDeckSubmission(this.hostPeerId, msg.submissionId);
         this.deckSubmissionWaiters.get(msg.submissionId)?.resolve();
+        // The durable receipt settles its caller even if the session closed,
+        // but its old view must not be published into a reconnect attempt.
+        if (this.session !== session) return;
         this.emit({ type: "deckSubmissionAcknowledged", submissionId: msg.submissionId, view: msg.view });
         this.emit({ type: "viewUpdated", view: msg.view });
         break;
@@ -794,12 +822,15 @@ export class P2PDraftGuest {
     }, LEAVE_ACK_TIMEOUT_MS);
 
     try {
-      await session.send({
-        type: "draft_leave",
-        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
-        draftToken,
-      });
-      await acknowledgement;
+      // Disconnect can reject the acknowledgement before encoding completes.
+      await Promise.all([
+        session.send({
+          type: "draft_leave",
+          draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+          draftToken,
+        }),
+        acknowledgement,
+      ]);
     } finally {
       clearTimeout(timeout);
       if (this.leaveAcknowledgement?.session === session) this.leaveAcknowledgement = null;
@@ -888,9 +919,15 @@ export class P2PDraftGuest {
 
   private openReconnectConnection(signal?: AbortSignal): Promise<DataConnection> {
     if (signal?.aborted) return Promise.reject(abortError());
-    const conn = this.guestPeer.connect(this.hostPeerId);
+    // Ordered delivery is not the default: without `reliable: true` PeerJS
+    // builds this channel with `ordered: false`, which a TURN relay will
+    // actually exercise.
+    const conn = this.guestPeer.connect(this.hostPeerId, PEER_CONNECT_OPTIONS);
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => finish(() => reject(new Error("connect timed out"))), FIRST_CONTACT_TIMEOUT_MS);
+      const timeout = setTimeout(
+        () => finish(() => reject(new Error("connect timed out"))),
+        RECONNECT_DIAL_TIMEOUT_MS,
+      );
       const onAbort = () => finish(() => reject(abortError()));
       const onOpen = () => finish(() => resolve(conn));
       const onError = (err: Error) => finish(() => reject(err));

@@ -79,15 +79,15 @@
 // resource, locally, on engine-source edits. It is NOT checked in GitHub CI, and CI
 // enrollment is policy-blocked (`.agents/pr-review-policy.toml` `[hard_stops]` lists
 // `.github/workflows/**`). A green block in a merged commit is not a CI-verified block.
-// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:38836c2e1f2fddb8
+// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:d4d228a11ec1379c
 // instrument rustc = rustc 1.97.0-nightly (0febdbab2 2026-04-18)
 // | probe | mutation | expect | verdict | firing assertion (anchor) | provenance |
 // |---|---|---|---|---|---|
 // | P0_control | (none) | pass | pass | (control; no mounts) | — |
-// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (21, 21) / right: (22, 21) / THE TEST HALF HAS BEEN ADJUDICATED FIVE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (22, 20) / right: (22, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (23, 21) / right: (22, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (24, 21) / right: (22, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (22, 21) / right: (23, 21) / THE TEST HALF HAS BEEN ADJUDICATED FIVE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (23, 20) / right: (23, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (24, 21) / right: (23, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (25, 21) / right: (23, 21) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P5_relocation_preserves_the_count | scenario.rs ×1, interaction.rs ×1 | fail | fail | the COUNT can be preserved by a move that relocates a writer / ("engine/src/game/interaction.rs", 6) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P6_second_validate_pins_consumer | scenario.rs ×1 | fail | fail | expected `validate_pins(` to appear in production exactly twice | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P7_coverage_half_unpaired | decision_template.rs ×1 | fail | fail | validating pin VALUES without also running | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
@@ -302,6 +302,14 @@ fn census(needle: &str) -> Vec<Hit> {
 /// — and so is the per-file multiset below, which is the half §10 ruling condition
 /// (2) is about. Its VALUE is the assert's, not this comment's.
 ///
+/// ⚠ THE PRODUCTION HALF HAS BEEN ADJUDICATED TOO — `game/derived_views.rs`'s
+/// `derive_views` arm, on the ground the failure message already excludes
+/// `filter_state_for_viewer` on: a match PATTERN on `state.waiting_for` inside a
+/// projection taking `&GameState`, minting no offer, unreachable unless a window
+/// is already open, in a file holding no declare-time authority call. A benign
+/// READ, so the assert is adjudicated and not relaxed. The assert below is where
+/// the pair is authoritative.
+///
 /// R8 CONJUNCT 2, same test — pin VALUE-legality has exactly ONE production
 /// consumer (`analysis::decision_template::declaration_conforms`), that consumer
 /// also runs `predictability_gate`'s COVERAGE half, and every production site
@@ -333,7 +341,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (22, 21),
+        (23, 21),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The three CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
@@ -341,7 +349,11 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
          `try_offer_bounded_cycle_shortcut` (bounded arm), all in `engine/src/game/engine.rs`. \
          `game/visibility.rs`'s `filter_state_for_viewer` writer is EXCLUDED by name and not \
          silently: it re-emits an ALREADY-minted offer into a per-viewer projection and cannot \
-         run unless `state.waiting_for` is already a `LoopShortcut`.\n\
+         run unless `state.waiting_for` is already a `LoopShortcut`. `game/derived_views.rs`'s \
+         `derive_views` arm is excluded on the same ground, and is what moved the production \
+         half: it is a match PATTERN on `state.waiting_for` inside a projection taking \
+         `&GameState`, so it mints no offer and cannot run unless a `LoopShortcut` is already \
+         open. That file holds no declare-time authority call.\n\
          A new PRODUCTION site in a certification-path file means the period machinery may \
          certify without declaring or driving — §10 ruling condition (2), i.e. \
          answer-legality-at-certification becomes OWED WORK and the U-series stops. A new READ \
@@ -393,6 +405,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
         multiset,
         vec![
             ("engine/src/ai_support/candidates.rs".to_string(), 1),
+            ("engine/src/game/derived_views.rs".to_string(), 1),
             ("engine/src/game/engine.rs".to_string(), 5),
             ("engine/src/game/interaction.rs".to_string(), 5),
             ("engine/src/game/scenario.rs".to_string(), 1),

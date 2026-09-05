@@ -1,5 +1,7 @@
 //! **Row R2-b — the PROVENANCE census.** CR 601.2c vs CR 115.10a: a seat pin's SPELLING is its
-//! provenance, so no TARGET-class producer may construct a `TargetPin::Player`.
+//! provenance, so the walked source's `TargetPin::Player` occurrences are pinned per file and
+//! each is classified — a TARGET-class producer constructing one is the violation that
+//! classification catches.
 //!
 //! # Why a census and not a validator narrowing
 //!
@@ -16,7 +18,9 @@
 //!
 //! # What it asserts, in three conjuncts
 //!
-//! 1. **Neither TARGET-class producer constructs a `TargetPin::Player`.** The two producers are
+//! 1. **The `TargetPin::Player` occurrences the walk finds are pinned per file, by identity
+//!    and multiplicity.** The instrument counts constructions and match arms alike, so what
+//!    separates them is the disposition each site carries below. The two producers are
 //!    named individually — `game::engine::record_trigger_target_answer` (the engine's own
 //!    CR 601.2c announcement journal) and
 //!    `game::interaction::materialize_loop_shortcut_response` (the human ingress of the same
@@ -26,9 +30,9 @@
 //! 2. **The CHOICE-class and pass-through sites are still PRESENT and classified.** A census
 //!    that counts zero of everything is vacuous, so every surviving production site is
 //!    enumerated with its disposition and the list is pinned exactly.
-//! 3. **Both producers do construct the ranked spelling**, keyed to the same instrument — one
-//!    census returning a non-zero answer for one needle and a zero for another, on the same
-//!    files, is what makes conjunct 1's zero a measurement rather than a broken grep.
+//! 3. **Both producers do construct the ranked spelling**, keyed to the same instrument — the
+//!    two needles returning DIFFERENT per-file answers over the same walk, on the same files,
+//!    is what makes conjunct 1's answer a measurement rather than a broken grep.
 //!
 //! # Anti-vacuity: the instrument is validated before it is trusted
 //!
@@ -180,7 +184,7 @@ fn production_sites(needle: &str) -> Vec<Site> {
 ///   `TargetPin::Player` construction ⇒ the pinned site list below FAILS with its file:line;
 /// * restore `game::interaction::materialize_loop_shortcut_response`'s
 ///   `Target(TargetRef::Player(player))` arm to `Ok(TargetPin::Player(*player))` ⇒
-///   `engine/src/game/interaction.rs` re-appears in the list ⇒ FAILS.
+///   `engine/src/game/interaction.rs` gains a further entry in the list ⇒ FAILS.
 ///
 /// A census asserting only a TOTAL would catch NEITHER: each revert swaps one ranked
 /// construction for one `TargetPin::Player` construction and leaves the sum where it was.
@@ -205,47 +209,52 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
     // Multiplicity carries the load instead — a new construction anywhere THE WALK VISITS in
     // production scope changes the compared value, and multiplicity is counted per OCCURRENCE,
     // not per line, so a construction co-located with an existing one on the same line still
-    // moves the compared value. That includes a THIRD `engine.rs` hit from
-    // reverting `record_trigger_target_answer`, and `interaction.rs` is pinned by ABSENCE,
-    // which no rearrangement inside that file can satisfy. The walk visits three roots only
+    // moves the compared value. That includes a further `engine.rs` hit from reverting
+    // `record_trigger_target_answer`, and a further `interaction.rs` hit from reverting
+    // `materialize_loop_shortcut_response`. The walk visits three roots only
     // (`engine/src`, `server-core/src`, `phase-ai/src`), so a construction added in a crate
     // outside them — `engine-wasm`, `seat-reducer` and `phase-server` all depend on the engine —
     // is invisible here. That gap is latent, not live: today `TargetPin` appears in no crate
     // other than `engine` and `server-core`, and both of their `src` roots are walked.
     //
-    // The doubled `engine.rs` entry is guarded by MULTIPLICITY, not by the text pins below: a
-    // third construction in that file fails THIS assertion, before the text pins are reached —
+    // The repeated `engine.rs` entry is guarded by MULTIPLICITY, not by the text pins below: a
+    // further construction in that file fails THIS assertion, before the text pins are reached —
     // including one written onto a line that already carries a construction, since the count is
     // per OCCURRENCE.
     // Do NOT relax `files` to a de-duplicated set on the theory that the text pins cover the
     // doubling — they are a different layer, and layer 3 below exists because a change can pass
     // both of them. Three measured layers, in the order they fire:
-    //   1. this multiset — a THIRD `engine.rs` construction, and, via ABSENCE, either producer
-    //      reverted;
-    //   2. the text pins below — a SUBSTITUTION at either arm that holds the count at 2, and a
-    //      change in the two arms' relative ORDER (relocating arm 0 below arm 1 fails the first
-    //      text pin with the count and both texts otherwise unchanged);
+    //   1. this multiset — an occurrence added to or removed from any walked file, including
+    //      either producer reverting to the choice-class spelling;
+    //   2. the text pins below, on `engine.rs` and on `interaction.rs` — a SUBSTITUTION at a
+    //      pinned arm that holds its file's count, and, in `engine.rs`, a change in the two
+    //      arms' relative ORDER (relocating arm 0 below arm 1 fails the first text pin with the
+    //      count and both texts otherwise unchanged);
     //   3. conjunct 3's per-file `AnnouncementSubject::Seat` count — a substitution that ALSO
     //      preserves both texts (producer reverted AND the positive control dropped) passes both
     //      text pins and is caught only there.
     //
-    // LIMITATION: the three singly-listed files (`decision_template.rs`, `visibility.rs`,
-    // `server-core/...`) are pinned by file identity and count alone. Swapping one of their
-    // constructions for a DIFFERENT one in the same file leaves this census green. Those are
-    // not the producers this row is about, and none of them is text-pinned.
+    // LIMITATION, stated as a property rather than a list: every file NOT text-pinned below is
+    // pinned by identity and count alone, so swapping one of its occurrences for a DIFFERENT
+    // one in the same file leaves this census green. The producer files ARE text-pinned, and
+    // even there a RELOCATION passes, because this census pins no `file:line` anywhere, by
+    // design. The text pins read TEXT and not grammar, so an occurrence whose text is a pinned
+    // arm head's is admitted. A further limit belongs to the needle itself, which no pin
+    // reaches: a spelling behind an import alias is matched by neither the count nor the text.
     assert_eq!(
         files,
         vec![
             "engine/src/analysis/decision_template.rs",
             "engine/src/game/engine.rs",
             "engine/src/game/engine.rs",
+            "engine/src/game/interaction.rs",
             "engine/src/game/visibility.rs",
             "engine/src/types/actions.rs",
             "server-core/src/game_action_payload_guard.rs",
         ],
         "CR 601.2c / CR 115.10a PROVENANCE SPLIT VIOLATED, or a new unclassified \
          `TargetPin::Player` production site appeared.\n\
-         The SIX surviving production sites and their dispositions:\n\
+         The surviving production sites and their dispositions:\n\
          1. `analysis/decision_template.rs` — `resolve_target`'s CHOICE authority arm \
             (CR 115.10a existence-only). This IS the class's authority; do not narrow it, \
             `a_shrouded_player_pin_is_still_published_by_the_offer_builder` is the shipped \
@@ -255,15 +264,19 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
          3. `game/engine.rs` — `apply_action`'s CR 701.34a proliferate arm feeding \
             `record_loop_pin`. A proliferate choice is NOT a target, so this construction is \
             correct and is this census's positive control.\n\
-         4. `game/visibility.rs` — `pins_name_hidden_source`'s redaction arm (`false`: seat \
+         4. `game/interaction.rs` — `declared_targets_statement`'s read arm, which maps a \
+            pinned seat onto the announcement vocabulary and mints no pin.\n\
+         5. `game/visibility.rs` — `pins_name_hidden_source`'s redaction arm (`false`: seat \
             identity is public in this engine), kept for wire-sourced pins.\n\
-         5. `types/actions.rs` — `GameAction::related_object_ids`' nested-pin read arm; a \
+         6. `types/actions.rs` — `GameAction::related_object_ids`' nested-pin read arm; a \
             player pin has no object identity, so it deliberately contributes nothing.\n\
-         6. `server-core/src/game_action_payload_guard.rs` — the wire pass-through arm.\n\
-         A hit in `game/interaction.rs` means the HUMAN ingress reverted to the choice-class \
-         spelling; a THIRD hit in `game/engine.rs` means the announcement journal did. Either \
+         7. `server-core/src/game_action_payload_guard.rs` — the wire pass-through arm.\n\
+         A further hit in either producer file is a site this list does not classify, and what \
+         it is must be adjudicated here: a producer CONSTRUCTING the choice-class spelling \
          re-creates two authorities selected by WHO SUBMITTED an answer rather than by WHAT IT \
-         IS. got {sites:?}"
+         IS, while a further READ arm mints no pin. `interaction.rs`'s site is pinned by text \
+         below, so a substitution there fails even where this count does not move. \
+         got {sites:?}"
     );
 
     // The `engine.rs` pair is pinned to its two ARMS by text: a SUBSTITUTION at either arm that
@@ -295,9 +308,44 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
         engine_texts[1]
     );
 
+    // `interaction.rs` was pinned by ABSENCE until the declared-sequence decode put a read arm
+    // in it. Presence at a count admits what absence refused — a construction substituted for
+    // that arm holds the count — so the text layer is extended to this file too.
+    //
+    // What the pin READS is this site's own text and no more: the choice spelling, then a
+    // binding containing no parenthesis, then `) =>` immediately after it. That is a property
+    // of THIS arm head's text, NOT a fact about Rust grammar — a pattern may contain
+    // parentheses, so a future binding nested through `PlayerId` would red this pin.
+    //
+    // The failure direction, as a property: ANY edit breaking that adjacency reds the pin with
+    // no behavioural change. A spurious red is adjudicated by a human at the failure and is
+    // never a missed site, which is the only direction this pin may fail in. Renaming the bound
+    // seat does not red it, which is deliberate — the shape is pinned, not the binding.
+    let interaction_texts: Vec<&str> = sites
+        .iter()
+        .filter(|s| s.file == "engine/src/game/interaction.rs")
+        .map(|s| s.text.as_str())
+        .collect();
+    assert_eq!(
+        interaction_texts.len(),
+        1,
+        "the file-level list above pins a single `interaction.rs` site; if that changes the \
+         text pin below is measuring the wrong thing. got {interaction_texts:?}"
+    );
+    assert!(
+        interaction_texts[0]
+            .strip_prefix("TargetPin::Player(")
+            .and_then(|bound| bound.split_once(") =>"))
+            .is_some_and(|(bound, _)| !bound.contains(['(', ')'])),
+        "site 4 must remain the decode's MATCH arm: the choice spelling, a binding carrying no \
+         parenthesis, then `) =>` immediately after it. A construction substituted for this arm \
+         holds the file count and is caught only here. got {:?}",
+        interaction_texts[0]
+    );
+
     // CONJUNCT 3, keyed to the SAME instrument: both TARGET-class producers construct the
-    // ranked spelling. One needle returning six sites and the other returning the two
-    // producers, over the same walk, is what makes conjunct 1's absence a measurement.
+    // ranked spelling. The two needles returning DIFFERENT per-file answers over the same
+    // walk is what makes conjunct 1's answer a measurement.
     let ranked = production_sites(&target_needle());
     let mut ranked_per_file: BTreeMap<&str, usize> = BTreeMap::new();
     for s in &ranked {
@@ -309,23 +357,25 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
         vec![
             ("engine/src/analysis/decision_template.rs", 1),
             ("engine/src/game/engine.rs", 1),
-            ("engine/src/game/interaction.rs", 1),
+            ("engine/src/game/interaction.rs", 3),
             ("engine/src/game/visibility.rs", 1),
             ("engine/src/types/actions.rs", 1),
         ],
         "the TARGET-class spelling must be CONSTRUCTED by BOTH producers — `game/engine.rs` \
          (`record_trigger_target_answer`) and `game/interaction.rs` \
-         (`materialize_loop_shortcut_response`) — beside its three READ sites: \
+         (`materialize_loop_shortcut_response`) — beside its READ sites: \
          `evaluate_schedule`'s CR 601.2c resolver arm in `analysis/decision_template.rs` and \
          the wildcard-free redaction arm in `game/visibility.rs`, and `GameAction`'s object-id \
-         collection arm in `types/actions.rs`. A MISSING producer is the \
-         revert this row exists to catch; an EXTRA file is a new producer that must be \
-         classified rather than absorbed. got {ranked:?}"
+         collection arm in `types/actions.rs`. `game/interaction.rs`'s occurrences are the \
+         human ingress's mint in `shortcut_announcement_subject`, and \
+         `declared_targets_statement`'s declared-subject mint beside its subject-to-candidate \
+         read arm. A MISSING producer is the revert this row exists to catch; an EXTRA file is \
+         a new producer that must be classified rather than absorbed. got {ranked:?}"
     );
     assert!(
         !sites.is_empty(),
-        "keying control: the choice-class needle must return a NON-EMPTY set, or its \
-         per-producer absence above would be the answer a dead instrument gives"
+        "keying control: the choice-class needle must return a NON-EMPTY set, or the \
+         multiset above would be the answer a dead instrument gives"
     );
 }
 
@@ -341,9 +391,8 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
 ///   `(2, 2)` ⇒ FAILS;
 /// * delete the comment filter ⇒ the prose plants count ⇒ `(1, 1)` becomes `(2, 2)` ⇒ FAILS.
 ///
-/// It is measured on the real tree too, in the row above: the same classifier returns six
-/// sites for one needle and four files for the other, so it is not constant in either
-/// direction.
+/// It is measured on the real tree too, in the row above: the same classifier returns
+/// DIFFERENT per-file answers for the two needles, so it is not constant in either direction.
 #[test]
 fn the_seat_pin_census_instrument_reports_both_answers_on_planted_input() {
     let choice = choice_needle();

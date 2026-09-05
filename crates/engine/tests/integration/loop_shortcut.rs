@@ -2027,6 +2027,32 @@ fn probe_drain_delta() -> i32 {
     delta
 }
 
+/// The one decision slot a single-source template addresses: sub-index 0 of its source.
+fn pin_slot(source: YieldTarget) -> DecisionSlot {
+    DecisionSlot { source, index: 0 }
+}
+
+/// Stage the live offer to PUBLISH the one CR 601.2c point a pinned declaration answers.
+///
+/// CR 732.2a: a declaration may pin only choices the offer published, so a synthetic `Targets`
+/// pin needs a point beside it — and `validate_pins` then holds that pin to `legal` at every
+/// index the declared count drives, which is what leaves the DRIVE's per-iteration CR 608.2b
+/// re-check as the only thing a post-declare board change can trip.
+fn publish_targets_point(runner: &mut GameRunner, slot: DecisionSlot, legal: Vec<TargetRef>) {
+    let WaitingFor::LoopShortcut { schema, .. } = &mut runner.state_mut().waiting_for else {
+        panic!("staged from the live offer, never from thin air");
+    };
+    schema.points = vec![DecisionPoint {
+        slot,
+        kind: DecisionPointKind::Targets {
+            legal_targets: legal,
+            min_targets: 1,
+            max_targets: 1,
+            ordered: true,
+        },
+    }];
+}
+
 /// A `Fixed(count)` template pinning `object` by `ThisObject{incarnation}` — CR 400.7's
 /// per-iteration incarnation re-bind (BLOCKER #4 real teeth).
 fn incarnation_pin_template(
@@ -2040,10 +2066,7 @@ fn incarnation_pin_template(
         incarnation: Some(incarnation),
         trigger_description: None,
     };
-    let slot = DecisionSlot {
-        source: source.clone(),
-        index: 0,
-    };
+    let slot = pin_slot(source.clone());
     DecisionTemplate {
         owner,
         decisions: vec![PinnedDecision::Targets {
@@ -2076,10 +2099,7 @@ fn piecewise_cleric_template(
         incarnation: None,
         trigger_description: None,
     };
-    let slot = DecisionSlot {
-        source: valid.clone(),
-        index: 0,
-    };
+    let slot = pin_slot(valid.clone());
     let mut schedule = vec![(0u32, obj_rank(valid.clone()))];
     if let Some(at) = switch_to_bogus_at {
         schedule.push((at, obj_rank(bogus)));
@@ -2279,6 +2299,15 @@ fn b3_firewall_abort_incarnation_guard() {
         .expect("cleric on battlefield")
         .incarnation;
     let template = incarnation_pin_template(P0, cleric, inc, IterationCount::Fixed(n));
+    publish_targets_point(
+        &mut runner,
+        pin_slot(YieldTarget::ThisObject {
+            source_id: cleric,
+            incarnation: Some(inc),
+            trigger_description: None,
+        }),
+        vec![TargetRef::Object(cleric)],
+    );
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(n),
@@ -2308,6 +2337,15 @@ fn b3_firewall_abort_incarnation_guard() {
         .expect("cleric on battlefield")
         .incarnation;
     let template2 = incarnation_pin_template(P0, cleric2, inc2, IterationCount::Fixed(n));
+    publish_targets_point(
+        &mut runner2,
+        pin_slot(YieldTarget::ThisObject {
+            source_id: cleric2,
+            incarnation: Some(inc2),
+            trigger_description: None,
+        }),
+        vec![TargetRef::Object(cleric2)],
+    );
     runner2
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(n),
@@ -2340,27 +2378,45 @@ fn b3_firewall_abort_incarnation_guard() {
     assert!(runner2.state().loop_detect_ring.is_empty());
 }
 
-/// B3-abort-rollback-live (CR 608.2b + atomicity): a PRE-DECLARED `Piecewise` schedule
-/// pins DRAIN_CLERIC for cycles `[0, k)` then switches to a never-resolvable object at
-/// cycle `k` — simulating "the enabler leaves the game" exactly at the k-th iteration,
-/// entirely from the schedule (no mid-drive test backdoor). Asserts the drained life is
-/// an EXACT multiple `k*delta` — no partial-cycle leak: the aborting iteration k's `ev`
-/// must have been dropped, not merged. Negative pair: the SAME schedule shape with the
-/// switch point placed past N materializes all N cycles untouched.
+/// B3-declare-refuses-a-schedule-that-breaks-inside-the-count (CR 732.2a + CR 608.2b): a
+/// `Piecewise` schedule pins DRAIN_CLERIC for cycles `[0, k)` then switches to a
+/// never-resolvable object at cycle `k` — "the enabler leaves the game" stated entirely from
+/// the schedule. `validate_pins` re-resolves every `Targets` pin at every index the DECLARED
+/// COUNT will drive, so a break at `k < N` is a choice that cannot legally be taken and the
+/// declaration is refused into a priority handback. This board seats a LIVING opponent, so
+/// declare opens APNAP rather than driving on either verdict — life is unmoved whichever way
+/// this goes and only `waiting_for` discriminates. (`handle_declare_shortcut`'s
+/// no-living-opponents branch takes the shortcut immediately; declare IS the drive there,
+/// and that is not this fixture.)
+///
+/// The pair is one axis apart — WHERE the switch point sits relative to the driven range. With
+/// it past N the same schedule shape resolves at every driven index, so the declaration is
+/// ingested and all N cycles materialize; that arm is what makes the refusal attributable to
+/// the switch point rather than to the fixture refusing every pinned declaration.
 #[test]
-fn b3_abort_rollback_live_atomicity() {
+fn b3_declare_refuses_a_schedule_breaking_inside_the_declared_count() {
     let delta = probe_drain_delta();
     let n: u32 = 8;
     let k: u32 = 3;
     assert!(
         k < n,
-        "test setup: abort must land strictly before N completes"
+        "test setup: the switch point must sit strictly inside the declared count, else \
+         `validate_pins` never reaches it and the two arms collapse into one"
     );
 
     // Negative pair: switch point past N ⇒ no removal ⇒ all N cycles commit.
     let (mut clean_runner, l0_clean, cleric_clean) = reach_2p_optional_drain_offer();
     let clean_template =
         piecewise_cleric_template(P0, cleric_clean, Some(n + 100), IterationCount::Fixed(n));
+    publish_targets_point(
+        &mut clean_runner,
+        pin_slot(YieldTarget::ThisObject {
+            source_id: cleric_clean,
+            incarnation: None,
+            trigger_description: None,
+        }),
+        vec![TargetRef::Object(cleric_clean)],
+    );
     clean_runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(n),
@@ -2378,33 +2434,38 @@ fn b3_abort_rollback_live_atomicity() {
         "no removal ⇒ all N cycles commit"
     );
 
-    // Positive (hostile): switch point AT k ⇒ cycles [0,k) commit, cycle k aborts.
+    // Positive (hostile): switch point AT k, inside the declared count ⇒ refused at declare.
     let (mut runner, l0, cleric) = reach_2p_optional_drain_offer();
     let template = piecewise_cleric_template(P0, cleric, Some(k), IterationCount::Fixed(n));
+    publish_targets_point(
+        &mut runner,
+        pin_slot(YieldTarget::ThisObject {
+            source_id: cleric,
+            incarnation: None,
+            trigger_description: None,
+        }),
+        vec![TargetRef::Object(cleric)],
+    );
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(n),
             template: Some(template),
         })
-        .expect("declare");
-    runner
-        .act(GameAction::RespondToShortcut {
-            response: ShortcutResponse::Accept,
-        })
-        .expect("accept");
+        .expect("dispatched — a refusal is a HANDBACK, not an error");
 
     assert_eq!(
         life(&runner, P1),
-        l0 - (k as i32) * delta,
-        "rollback must land at EXACTLY k complete cycles — no partial (aborting) cycle leaked"
+        l0,
+        "with a living opponent seated, declare opens APNAP rather than driving on either \
+         verdict: nothing may commit before the handback"
     );
     assert!(!is_eliminated(&runner, P1));
     assert_eq!(
         runner.state().waiting_for,
         WaitingFor::Priority { player: P0 },
-        "abort hands priority back to living_priority_seat (P0)"
+        "CR 732.2a: an unresolvable choice inside the declared count hands priority back to \
+         living_priority_seat (P0) — no APNAP window opens"
     );
-    assert!(runner.state().loop_detect_ring.is_empty());
 }
 
 // ═══════════════════ PR-7 Phase 4c — B5 revocable-∞ + LOW-2 ═══════════════════
@@ -6506,6 +6567,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
             frames_per_period: frames,
             delta: Default::default(),
             victim_slot: vec![],
+            declarable_victims: vec![],
         };
         v["waiting_for"]["data"]["certificate"]["per_cycle"] =
             serde_json::to_value(&period).expect("a PeriodicDelta serializes");
@@ -6559,6 +6621,7 @@ fn a_wire_zero_frames_per_period_fails_the_load_and_a_wire_two_does_not() {
                     frames_per_period: frames,
                     delta: Default::default(),
                     victim_slot: vec![],
+                    declarable_victims: vec![],
                 }),
             },
         };
@@ -7410,9 +7473,10 @@ fn dump_c_still_crowns_at_one_living_opponent_after_pause_retention() {
     assert_eq!(schema.iteration_count, IterationCount::UntilLethal);
 }
 
-/// Seam D (CR 732.2a): a `template: None` declaration against a NON-EMPTY schema BYPASSES the
-/// declare-time pin firewall entirely — `predictability_gate` and `validate_pins` are simply not
-/// run, because there is no template to run them against. That bypass is legitimate for exactly
+/// Seam D (CR 732.2a): against a NON-EMPTY schema on an offer that published no declaration of
+/// its own, a `template: None` declaration BYPASSES the declare-time pin firewall entirely —
+/// `predictability_gate` and `validate_pins` are not run, because nothing resolves to a template
+/// to run them against. That bypass is legitimate for exactly
 /// one drive shape: the object-growth route, which re-derives its template from
 /// `state.last_loop_action_sequence` and never reads `proposal.template`. With an EMPTY sequence
 /// there is nothing to re-derive from, so a pin-consuming drive would run with no pins at all.
@@ -7425,9 +7489,9 @@ fn dump_c_still_crowns_at_one_living_opponent_after_pause_retention() {
 ///   blanket "reject every `template: None`", which would break every shipped object-growth
 ///   declaration.
 ///
-/// REVERT-PROBE: delete the `None if state.last_loop_action_sequence.is_empty()` arm ⇒ the first
-/// half opens `RespondToShortcut` and FAILS. Drop the sequence conjunct instead (reject on
-/// `template.is_none()` alone) ⇒ the second half FAILS.
+/// REVERT-PROBE: delete the guarded `None` arm ⇒ the first half opens `RespondToShortcut` and
+/// FAILS. Drop its period conjunct instead (reject on `template.is_none()` against a published
+/// point set alone) ⇒ the second half FAILS.
 #[test]
 fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
     use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
@@ -9595,7 +9659,9 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
     // per-selected-count question, deliberately not answered here.
     //
     // REVERT-PROBE, RUN: mint this offer's count through `shortcut_iteration_count` (i.e.
-    // `UntilLethal` for a lethal drain) ⇒ `preview` is `None` ⇒ the expect below FAILS.
+    // `UntilLethal` for a lethal drain) ⇒ the offer publishes no `Fixed` window ⇒ this row
+    // dies at the `InteractionShortcutCountSpec::Fixed` destructure below, and `preview` is
+    // empty at every count.
     let suggested = i64::from(schema.max_iterations);
     let life_deltas: Vec<(PlayerId, i64)> = per_cycle
         .delta
@@ -9619,22 +9685,75 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
     let filtered = engine::game::visibility::filter_state_for_viewer(&state, proposer);
     let view = engine::game::interaction::derive_viewer_interaction(&state, &filtered, proposer);
     let engine::types::interaction::InteractionOpportunityResponse::Schema {
-        spec: engine::types::interaction::InteractionResponseSpec::Shortcut { preview, .. },
+        spec:
+            engine::types::interaction::InteractionResponseSpec::Shortcut {
+                count,
+                points,
+                preview,
+                ..
+            },
         ..
     } = &view.opportunities[0].response
     else {
         panic!("the bounded offer publishes a shortcut schema to its proposer");
     };
-    let preview = preview.as_ref().expect(
-        "CR 732.2a: the offer the engine raised on a REAL 4p drain must publish what its \
-         declared count does. A `None` here means every preview has vanished from every real \
-         game while the hand-built projection rows stayed green.",
+    let engine::types::interaction::InteractionShortcutCountSpec::Fixed { min, max, .. } = count
+    else {
+        panic!("a bounded offer publishes a Fixed count window, got {count:?}");
+    };
+    let published: Vec<u32> = preview.iter().map(|element| element.count).collect();
+    for endpoint in [*min, *max] {
+        assert!(
+            published.contains(&endpoint),
+            "CR 732.2a: the window's own {endpoint} must be published; got {published:?}"
+        );
+    }
+
+    // This board announces NO decision point at all, so there is nothing to allocate a count
+    // over — the negative half of the emptiness rule, on a real game rather than a synthetic.
+    assert!(
+        points.is_empty(),
+        "reach-guard: this drain announces no decision point, which is what makes the empty \
+         allocations below a property of the offer rather than of the producer; got {points:?}"
     );
-    assert_eq!(
-        i64::from(preview.count),
-        suggested,
-        "the magnitudes are stated for the offer's own suggested count and no other"
+    assert!(
+        preview.iter().all(|element| element.allocation.is_empty()),
+        "an offer announcing no target publishes no split"
     );
+
+    // Every published element states ITS OWN count's product, so the per-seat fold is checked
+    // across the whole sample and not only at the suggested count.
+    for element in preview {
+        let mut expected: Vec<(Option<u8>, i32)> = life_deltas
+            .iter()
+            .map(|(seat, delta)| (Some(seat.0), (delta * i64::from(element.count)) as i32))
+            .collect();
+        let mut stated: Vec<(Option<u8>, i32)> = element
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.family == engine::types::interaction::InteractionShortcutPreviewFamily::Life
+            })
+            .map(|entry| (entry.player, entry.amount))
+            .collect();
+        expected.sort_unstable();
+        stated.sort_unstable();
+        assert_eq!(
+            stated, expected,
+            "CR 119.3: with no announced slot to charge, every life seat keeps the seat \
+             `payload_seat` gave it at the raw product of its own count {}",
+            element.count
+        );
+    }
+
+    let preview = preview
+        .iter()
+        .find(|element| i64::from(element.count) == suggested)
+        .expect(
+            "CR 732.2a: the offer the engine raised on a REAL 4p drain must publish what its \
+             suggested count does. An absent element means every preview has vanished from \
+             every real game while the hand-built projection rows stayed green.",
+        );
 
     let mut expected: Vec<(Option<u8>, i32)> = life_deltas
         .iter()
@@ -9658,7 +9777,7 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
     for (seat, _, loss) in losses.iter().filter(|(id, _, _)| *id != proposer) {
         assert!(
             published.contains(&(Some(seat.0), (-loss * suggested) as i32)),
-            "CR 704.5a: victim seat {seat:?} loses {loss} per cycle, so its previewed life \
+            "CR 119.3: victim seat {seat:?} loses {loss} per cycle, so its previewed life \
              entry must be the NEGATIVE finished magnitude on that seat's own key — a \
              proposer-keyed subject map publishes it on the wrong HUD; got {published:?}"
         );
@@ -11148,10 +11267,10 @@ fn bounded_fixed_count_commits_exactly_n_periods() {
 /// lands on.
 ///
 /// **SITE F IS NOT ON THIS PATH, and that is asserted rather than assumed** — dina's bounded offer
-/// publishes an EMPTY point set, so `handle_declare_shortcut`'s
-/// `if !offer.schema.points.is_empty()` block is skipped whole and the `template: None`
-/// declaration this row makes never reaches the declare-seam arm. Site F's own row lives on the
-/// F4 fixture for exactly the complementary reason.
+/// publishes an EMPTY point set, which falsifies site F's own leading conjunct, so the
+/// `template: None` declaration this row makes falls to the admitting `None` arm and never
+/// reaches the declare-seam period test. Site F's own row lives on the F4 fixture for exactly
+/// the complementary reason.
 ///
 /// **THE PROPERTY**: the committed life delta is exactly `n ×` the published per-period delta —
 /// i.e. the drain materializer ran. Positive control on the same fixture and same helper:
@@ -12139,7 +12258,7 @@ fn bounded_fixed_drive_rolls_back_a_partial_crossing_cycle() {
 /// zero-delta observation would be indistinguishable from "the offer never fired" or "the drive
 /// aborts on this fixture anyway" — which is precisely the shape the HEAD defect had.
 ///
-/// REVERT-PROBE: delete the `if actual != pd.delta { break 'cycles; }` block in
+/// REVERT-PROBE: delete the `if !pd.conforms(..) { break 'cycles; }` block in
 /// `materialize_fixed_shortcut` ⇒ ⓑ commits `n × (real δ)` like ⓐ ⇒ ⓑ's zero-delta assertion
 /// FAILS while ⓐ stays green.
 #[test]
@@ -12620,6 +12739,16 @@ fn r5_pin_template(slot: DecisionSlot, seat: PlayerId, count: u32) -> DecisionTe
     }
 }
 
+/// [`r5_pin_template`] with its pins removed and `owner` supplied — the declaration a
+/// POINTS-EMPTY offer admits on the PIN axis. CR 732.2a: a declaration may pin only choices the
+/// offer published, so a SLOT-ADDRESSING pin naming an unexposed slot is refused.
+fn r28_pinless_template(slot: DecisionSlot, owner: PlayerId) -> DecisionTemplate {
+    let mut template = r5_pin_template(slot, P1, 1);
+    template.decisions.clear();
+    template.owner = owner;
+    template
+}
+
 /// Reach the R5 board's own bounded `LoopShortcut` offer and return the runner parked on it
 /// plus every seat's life at that instant.
 ///
@@ -12772,7 +12901,7 @@ fn r5_probe_delta() -> i32 {
 ///   `pinned_submit_ok=false` ⇒ `RecastAbort` ⇒ `CycleOutcome::Abort` ⇒ `break 'cycles` at
 ///   `i=0`. This is the layer this row claims to exercise, and it is provably reached.
 /// * **GUARD 2 — the CR 732.2a per-cycle conformance check** in `materialize_fixed_shortcut`
-///   (`actual != per_cycle.delta` ⇒ `break 'cycles`).
+///   (`!per_cycle.conforms(..)` ⇒ `break 'cycles`).
 /// * **GUARD 3 — `inject_pinned_answer`'s fail-closed catch-all** (CR 732.2a "no conditional
 ///   actions": any prompt kind with no Stage-2 pin producer ⇒ `RecastAbort` ⇒
 ///   `CycleOutcome::Abort`).
@@ -13076,8 +13205,8 @@ fn a_recorded_loop_detect_sample_keeps_a_live_half_normalization_would_have_eras
 
 // ─────────── 5d U2 / R28 — the declared template's `owner` is ENGINE-BOUND ───────────
 
-/// CR 732.2a: stage the live offer with an EMPTY point set, so arm (a″) can reach the
-/// `!offer.schema.points.is_empty()` block's SKIPPED path. Counterpart to
+/// CR 732.2a: stage the live offer with an EMPTY point set, so arm (a″) runs the declare gates
+/// on an offer that exposed no slot for them to decide. Counterpart to
 /// [`r28_nonempty_schema_offer`]; `offer.proposer` still comes from the live
 /// `WaitingFor::LoopShortcut`, which is the firewall's engine-issued comparand.
 fn r28_empty_schema_offer(runner: &mut GameRunner) {
@@ -13248,13 +13377,18 @@ fn r28_a_declared_template_owning_another_seat_is_refused_at_declare() {
     }
 }
 
-/// R28 arm (a″) — **the firewall's PLACEMENT, which no other arm can see.**
+/// R28 arm (a″) — **an empty-schema offer is NOT short-circuited past the declare gates.**
 ///
-/// The firewall sits OUTSIDE `if !offer.schema.points.is_empty()`. On an EMPTY-schema offer
-/// that block is skipped entirely, so a `Some(template)` declaration would otherwise reach the
-/// proposal without passing any template validation at all — `predictability_gate` and
-/// `validate_pins` both live inside it. Arms (a)/(a′) run on a non-empty schema and therefore
-/// pass whether the firewall is inside the block or outside it.
+/// The gates run on every declaration the handler resolves, whatever the schema published, so
+/// an offer exposing no decision point is still gated. Arms (a)/(a′) run on a non-empty schema
+/// and so cannot see a short-circuit keyed to an empty one. The firewall's PLACEMENT is NOT
+/// this row's subject and no arm here measures it: `declaration_conforms` reads no `owner`, so
+/// the firewall refuses the same declarations anywhere between the `or_else` that resolves the
+/// template and the end of the match.
+///
+/// Both declarations here are PIN-FREE. CR 732.2a lets a declaration pin only choices the offer
+/// published, so a SLOT-ADDRESSING pin naming an unexposed slot is refused on the PIN axis and
+/// the owner axis this row varies would not be the operative one.
 ///
 /// ⚠ **DISCLOSED REACHABILITY DOWNGRADE.** This arm used to run on the R5 offer's OWN empty
 /// schema — the empty-schema path was reached NATURALLY. It no longer is: the answer-beat
@@ -13268,17 +13402,19 @@ fn r28_a_declared_template_owning_another_seat_is_refused_at_declare() {
 /// this path on its own. Treat that as unproven here until a fixture whose live offer publishes
 /// nothing is added.
 ///
-/// REVERT-PROBE: move the firewall INSIDE the `!offer.schema.points.is_empty()` block ⇒ the
-/// wrong-owner declaration is accepted here ⇒ **(a″) FLIPS TO FAIL** while (a)/(a′) stay green.
+/// REVERT-PROBE: short-circuit the handler on an exposed-nothing offer — build the proposal
+/// directly when `offer.schema.points.is_empty()`, skipping both the owner firewall and the
+/// `match &template` ⇒ the wrong-owner declaration opens APNAP ⇒ **(a″) FLIPS TO FAIL** while
+/// (a)/(a′), which run on a non-empty schema, stay green.
 #[test]
-fn r28_a_the_owner_firewall_is_reached_on_an_empty_schema_offer_too() {
+fn r28_a_an_empty_schema_offer_is_not_short_circuited_past_the_declare_gates() {
     // matched positive first: the empty-schema path DOES accept an honest declaration.
     let (mut runner, slot, _bond, _h, _l) = r5_reach_offer();
     r28_empty_schema_offer(&mut runner);
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(1),
-            template: Some(r5_pin_template(slot.clone(), P1, 1)),
+            template: Some(r28_pinless_template(slot, P0)),
         })
         .expect("declare");
     assert!(
@@ -13292,18 +13428,16 @@ fn r28_a_the_owner_firewall_is_reached_on_an_empty_schema_offer_too() {
 
     let (mut runner, slot, _bond, _h, _l) = r5_reach_offer();
     r28_empty_schema_offer(&mut runner);
-    let mut template = r5_pin_template(slot.clone(), P1, 1);
-    template.owner = P1;
     let result = runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(1),
-            template: Some(template),
+            template: Some(r28_pinless_template(slot, P1)),
         })
         .expect("dispatched");
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "(a″) the firewall runs BEFORE the `!points.is_empty()` guard, so an empty-schema \
-         offer is covered too, got {:?}",
+        "(a″) an offer publishing no point still runs the declare gates, so the foreign owner \
+         is refused here too, got {:?}",
         runner.state().waiting_for
     );
     assert!(result.events.is_empty(), "(a″) no events on the handback");
@@ -13966,6 +14100,7 @@ fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact
         frames_per_period,
         delta,
         victim_slot,
+        declarable_victims,
     }) = per_cycle
     else {
         panic!(
@@ -13979,9 +14114,10 @@ fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact
          resolution and the lose-life one"
     );
     assert!(
-        victim_slot.is_empty(),
-        "no decision slot is attributed a per-period life swing on this untargeted drain; \
-         got {victim_slot:?}"
+        victim_slot.is_empty() && declarable_victims.is_empty(),
+        "an untargeted drain announces no CR 601.2c target, so it attributes no per-period \
+         life swing to a decision slot and reserves no CR 704.5a victim domain; got \
+         {victim_slot:?} / {declarable_victims:?}"
     );
     let mut expected_delta = ResourceVector::default();
     expected_delta.life.insert(P0, 1);

@@ -61,6 +61,7 @@ function compatibility(legal: boolean): DeckCompatibilityResult {
     selected_format_compatible: legal,
     selected_format_reasons: legal ? [] : ["Illegal"],
     color_identity: [],
+    color_distribution: [],
     coverage: { total_unique: 10, supported_unique: 9, unsupported_cards: [] },
   };
 }

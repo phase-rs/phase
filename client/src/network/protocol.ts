@@ -1,4 +1,5 @@
 import type {
+  AbilityBlockEntry,
   EndContinuousEffectOffer,
   GameAction,
   GameEvent,
@@ -10,10 +11,16 @@ import type {
   ObjectAction,
   ActionRejection,
 } from "../adapter/types";
-import type { InteractionSubmission, ViewerInteraction } from "../adapter/generated/interaction";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+  ViewerInteraction,
+} from "../adapter/generated/interaction";
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 import type { P2PAuthorityStamp, P2PSessionKey } from "../services/p2pSession";
 import type { P2PTerminalResult } from "../services/p2pTerminalResult";
+import { decodeJsonEnvelope, encodeJsonEnvelope } from "./wireEnvelope";
 
 /**
  * The stable session identity is carried on reconnect so a resumed host can
@@ -43,6 +50,8 @@ export interface LegalActionsWire {
   manaPaymentShortcutActions?: GameAction[];
   legalActionsByObject?: Record<string, ObjectAction[]>;
   spellCosts?: Record<string, ManaCost>;
+  /** CR 118.3: acting-player-scoped "can't pay this cost right now" read-out. */
+  activationBlockReasons?: Record<string, AbilityBlockEntry[]>;
   viewerInteraction?: ViewerInteraction;
 }
 
@@ -55,6 +64,7 @@ export function legalActionsToWire(result: LegalActionsResult): LegalActionsWire
     manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     legalActionsByObject: result.legalActionsByObject,
     spellCosts: result.spellCosts,
+    activationBlockReasons: result.activationBlockReasons,
     viewerInteraction: result.viewerInteraction,
   };
 }
@@ -68,6 +78,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
     manaPaymentShortcutActions: wire.manaPaymentShortcutActions ?? [],
     legalActionsByObject: wire.legalActionsByObject,
     spellCosts: wire.spellCosts,
+    activationBlockReasons: wire.activationBlockReasons,
     viewerInteraction: wire.viewerInteraction,
   };
 }
@@ -95,6 +106,72 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  45 — Effect.ChooseCounterKind gained domain and chooser, carried inside
+ *       GameObject.abilities and trigger definitions on every GameState frame
+ *       (CR 608.2d). Additive behind serde defaults; a v44 peer has no field to
+ *       receive the printed list or the random chooser into and silently reads
+ *       both as an on-target prompt, placing no counter. Since game_setup and
+ *       reconnect_ack carry GameState, first contact rejects the version skew.
+ *       Bumped in lockstep with PROTOCOL_VERSION 61.
+ *  44 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
+ *       may cast whose player chooses a spell face at cast time (a split card
+ *       such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the live
+ *       cost of the OTHER face; spellCosts reports the live face only. The
+ *       cost badge renders both faces from this map. Additive behind a serde
+ *       default, but this client renders the map directly; a v43 host would
+ *       silently show a Room's single-face badge again, on top of the second
+ *       half's printed cost. Since game_setup and reconnect_ack carry
+ *       GameState, first contact rejects the version skew. Bumped in lockstep
+ *       with PROTOCOL_VERSION 60.
+ *  43 — LegalActionsWire.viewerInteraction's shortcut preview changed from a
+ *       single optional InteractionShortcutPreview to an
+ *       Array<InteractionShortcutPreview>, one element per offerable count,
+ *       each element also carrying an allocation list for the declaration's
+ *       shape over that count. Both peers on this track are browsers, so
+ *       neither validates the shape: a v42 guest paired with a v43 host would
+ *       read a list where its type says object and render the offer wrong, with
+ *       no decode error anywhere. First-contact version equality is the only
+ *       place the skew is refusable, and no shim ships. Bumped in lockstep with
+ *       PROTOCOL_VERSION 59 in crates/lobby-broker/src/protocol.rs, which the
+ *       same retype breaks in the declared Rust types — but no production Rust
+ *       code deserializes ServerMessage, so that track fails silently at the
+ *       browser too, and the handshake is the only refusal point on both.
+ *  42 — New guest → host `state_ack` frame, carrying the highest state
+ *       revision the guest has actually APPLIED — the fact a host ledger that
+ *       records TRANSMISSION cannot observe, since a send resolving true only
+ *       means the bytes reached the channel. On the stale-drop branch of
+ *       `state_update` it reports the NEWER revision the guest already holds,
+ *       not the stale one it just discarded. The guest emits it and the host
+ *       ADVANCES each seat's redelivery entry off it (the entry is still
+ *       CREATED on an accepted handshake send, so a lost ack cannot disarm
+ *       the sweep). A v41 peer would not carry `state_ack` in
+ *       VALID_TYPES, so `validateMessage` would throw, the throw would
+ *       propagate out of `decodeWireMessage` into `peer.ts`'s catch, and
+ *       every ack would be dropped with a console warning — a capability
+ *       loss, not a parse break of the surrounding session, though unlike 24
+ *       it is a whole frame rejected rather than an accepted frame missing an
+ *       additive field. Since
+ *       game_setup and reconnect_ack carry the version, first contact rejects
+ *       the skew rather than allowing that loss, so the drop path above is
+ *       unreachable in practice; it is stated because it is what the
+ *       handshake exists to prevent. That check lives in
+ *       `P2PGuestAdapter.handleHostMessage`, not in `validateMessage` — see
+ *       the paragraph above.
+ *  40 — DerivedViews.room_half_identities publishes both halves of every
+ *       battlefield Room in printed order, resolved through the COPIED halves
+ *       for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+ *       special action's offer names the half it would unlock and shows that
+ *       half's cost (CR 709.5e) from this map: an enter-as-copy recipient
+ *       carries neither on its own printed card (its `back_face` is empty and
+ *       its printed name is its own), and printed order is engine work
+ *       besides — `room::live_face_door` reads `modal_back_face`, the
+ *       CR 709.5d mapping. Face-down permanents are absent (CR 708.2a). The
+ *       field is additive behind a serde default, but this client renders the
+ *       map directly rather than deriving halves from raw state; a v39 host
+ *       would silently label every offered door "Tap for Mana" again, which is
+ *       the defect this bump exists to fix. Since game_setup and reconnect_ack
+ *       carry GameState, first contact rejects the version skew rather than
+ *       allowing that capability loss.
  *  39 — DerivedViews.storm_count publishes the engine-owned number of copies a
  *       current Storm trigger will create, or a newly cast Storm spell would
  *       create. The field is additive, but this client renders the scalar
@@ -239,7 +316,18 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 39 as const;
+/**
+ * Exactly one answer per `preview_interaction` request. `failed` is the
+ * host-lifecycle channel — every engine-level refusal already rides inside
+ * `InteractionPreview.status`, so this union has two arms rather than the mana
+ * lane's three. A nested union rather than a third top-level type keeps
+ * `VALID_TYPES` at exactly the two entries the round-trip row asserts.
+ */
+export type P2PInteractionPreviewAnswer =
+  | { type: "preview"; preview: InteractionPreview }
+  | { type: "failed"; message: string };
+
+export const WIRE_PROTOCOL_VERSION = 46 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
@@ -262,6 +350,11 @@ export type P2PMessage = P2PAuthorityWire & (
   | { type: "action"; senderPlayerId: number; action: GameAction }
   | { type: "interaction"; senderPlayerId: number; submission: InteractionSubmission }
   | { type: "preview_mana_payment"; requestId: number; action: GameAction }
+  /** Carries the request VERBATIM. No `senderPlayerId`: the host reads the
+   *  seat from the authenticated connection, exactly as `preview_mana_payment`
+   *  does, so there is no mismatch branch that could leave a live channel
+   *  without an answer. */
+  | { type: "preview_interaction"; request: InteractionPreviewRequest }
   | ({
       type: "state_update";
       revision?: number;
@@ -269,12 +362,19 @@ export type P2PMessage = P2PAuthorityWire & (
       events: GameEvent[];
       logEntries?: GameLogEntry[];
     } & LegalActionsWire)
+  /** Guest → host: the highest state revision the guest has APPLIED, which a
+   * host ledger recording transmission cannot otherwise observe. Sent from
+   * every arm that accepts a state-bearing frame, and from the stale-drop
+   * branch of `state_update` — where it reports the newer revision the guest
+   * already holds, not the stale one it discarded. */
+  | { type: "state_ack"; revision: number }
   | { type: "action_rejected"; rejection: ActionRejection }
   | { type: "action_failed"; message: string }
   | { type: "action_noop" }
   | { type: "mana_payment_preview"; requestId: number; sourceIds: ObjectId[] }
   | { type: "mana_payment_preview_rejected"; requestId: number; rejection: ActionRejection }
   | { type: "mana_payment_preview_failed"; requestId: number; message: string }
+  | { type: "interaction_preview"; requestId: string; answer: P2PInteractionPreviewAnswer }
   | { type: "ping"; timestamp: number }
   | { type: "pong"; timestamp: number }
   | { type: "disconnect"; reason: string }
@@ -346,13 +446,16 @@ const VALID_TYPES = new Set([
   "action",
   "interaction",
   "preview_mana_payment",
+  "preview_interaction",
   "state_update",
+  "state_ack",
   "action_rejected",
   "action_failed",
   "action_noop",
   "mana_payment_preview",
   "mana_payment_preview_rejected",
   "mana_payment_preview_failed",
+  "interaction_preview",
   "ping",
   "pong",
   "disconnect",
@@ -397,39 +500,11 @@ export function validateMessage(raw: unknown): P2PMessage {
 // ~20-byte header would inflate sub-100-byte payloads. Ping/pong and small
 // control messages take the raw path; state broadcasts take the gzip path.
 
-const FORMAT_RAW = 0x00;
-const FORMAT_GZIP = 0x01;
-const COMPRESSION_THRESHOLD = 256;
-
 export async function encodeWireMessage(msg: P2PMessage): Promise<Uint8Array> {
-  const json = JSON.stringify(msg);
-  const jsonBytes = new TextEncoder().encode(json);
-  if (jsonBytes.length < COMPRESSION_THRESHOLD) {
-    const out = new Uint8Array(1 + jsonBytes.length);
-    out[0] = FORMAT_RAW;
-    out.set(jsonBytes, 1);
-    return out;
-  }
-  const stream = new Blob([jsonBytes]).stream().pipeThrough(new CompressionStream("gzip"));
-  const gzipped = new Uint8Array(await new Response(stream).arrayBuffer());
-  const out = new Uint8Array(1 + gzipped.length);
-  out[0] = FORMAT_GZIP;
-  out.set(gzipped, 1);
-  return out;
+  return encodeJsonEnvelope(JSON.stringify(msg));
 }
 
 export async function decodeWireMessage(bytes: Uint8Array): Promise<P2PMessage> {
-  if (bytes.length < 1) throw new Error("empty wire message");
-  const version = bytes[0];
-  const payload = bytes.subarray(1);
-  let json: string;
-  if (version === FORMAT_RAW) {
-    json = new TextDecoder().decode(payload);
-  } else if (version === FORMAT_GZIP) {
-    const stream = new Blob([payload]).stream().pipeThrough(new DecompressionStream("gzip"));
-    json = await new Response(stream).text();
-  } else {
-    throw new Error(`unknown wire format version: 0x${version.toString(16)}`);
-  }
+  const json = await decodeJsonEnvelope(bytes);
   return validateMessage(JSON.parse(json));
 }

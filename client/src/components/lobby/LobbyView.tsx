@@ -1,10 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { FormatGroup, GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { flagForServer, parseJoinCode } from "../../services/serverDetection";
-import { FORMAT_DEFAULTS, isLobbyEntryCompatible, useMultiplayerStore } from "../../stores/multiplayerStore";
+import { healthHint, refreshServerDirectory } from "../../services/serverDirectory";
+import {
+  FORMAT_DEFAULTS,
+  adHocLobbySource,
+  compareLobbyGameEntries,
+  findLobbyGameByCode,
+  hostingLobbySource,
+  isLobbyEntryCompatible,
+  lobbySources,
+  useMultiplayerStore,
+  type LobbyGameEntry,
+  type LobbySource,
+} from "../../stores/multiplayerStore";
+import { assertNever } from "../../utils/assertNever";
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { GameListItem } from "./GameListItem";
@@ -18,19 +31,23 @@ interface LobbyViewProps {
   onHostP2P: () => void;
   onHostDraft?: () => void;
   /**
-   * Called when the user elects to join a game. `context` is the full
-   * `LobbyGame` row when the join originates from the lobby list, so
-   * downstream views (e.g. the deck picker) can render "Joining Alice's
-   * Commander game — 2/4". It is absent for typed-code joins.
+   * Called when the user elects to join a game. `origin` is the authority
+   * the join must open on — the source that listed the row, the host named
+   * in a `CODE@host` code, or the hosting server for a bare typed code;
+   * `null` only for a direct P2P code, which has no lobby authority at all.
+   * `context` is the full `LobbyGame` row when the join originates from the
+   * lobby list, so downstream views (e.g. the deck picker) can render
+   * "Joining Alice's Commander game — 2/4". It is absent for typed-code joins.
    */
   onJoinGame: (
     code: string,
+    origin: LobbySource | null,
     password?: string,
     format?: GameFormat,
     context?: LobbyGame,
   ) => void;
   /** Watch a live server game or draft without joining as a player. */
-  onSpectate?: (code: string, context?: LobbyGame) => void;
+  onSpectate?: (code: string, origin: LobbySource | null, context?: LobbyGame) => void;
   connectionMode?: "server" | "p2p";
   onServerOffline?: () => void;
 }
@@ -75,15 +92,51 @@ export function LobbyView({
   const { t } = useTranslation("multiplayer");
   const isServer = connectionMode !== "p2p";
   const isP2P = connectionMode === "p2p";
-  const serverAddress = useMultiplayerStore((s) => s.serverAddress);
+  const hostingServer = useMultiplayerStore((s) => s.hostingServer);
+  const userLobbySources = useMultiplayerStore((s) => s.userLobbySources);
+  const sourceStatus = useMultiplayerStore((s) => s.sourceStatus);
+  const showToast = useMultiplayerStore((s) => s.showToast);
   // Flag for the connected region, or null for self-hosted/custom servers.
-  const serverFlag = flagForServer(serverAddress);
-  const [games, setGames] = useState<LobbyGame[]>([]);
-  const gamesRef = useRef<LobbyGame[]>([]);
-  const [playerCount, setPlayerCount] = useState(0);
+  const serverFlag = flagForServer(hostingServer ?? "");
+  const directorySources = useMultiplayerStore((s) => s.directorySources);
+  const disabledDirectorySources = useMultiplayerStore(
+    (s) => s.disabledDirectorySources,
+  );
+  const sources = useMemo(
+    () =>
+      lobbySources({
+        userLobbySources,
+        sourceStatus,
+        directorySources,
+        disabledDirectorySources,
+      }),
+    [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
+  );
+  /**
+   * Membership, not decoration. A directory refresh that only moves a score
+   * must not tear down and re-attach every channel's listener — which sends
+   * `UnsubscribeLobby`/`SubscribeLobby` on every socket and blanks each cached
+   * snapshot. Same rule that keeps `sourceStatus` out of the subscription
+   * effect's dependency list, and a strict improvement on depending on
+   * `userLobbySources`: a no-op replacement of that array no longer churns
+   * subscriptions either.
+   */
+  const dialedSourceKey = useMemo(
+    () => sources.map((s) => s.url).join("|"),
+    [sources],
+  );
+  /** Latest snapshot per source URL, carrying the source it was delivered
+   * with. Kept per-source rather than merged so a silent or degraded
+   * authority never blanks the others' rows. */
+  const [listings, setListings] = useState<
+    Map<string, { source: LobbySource; games: LobbyGame[] }>
+  >(new Map());
   const [joinCode, setJoinCode] = useState("");
   const [passwordModal, setPasswordModal] = useState<{
     gameCode: string;
+    /** The authority this game is listed on — the password retry must go to
+     * the same server the row came from. */
+    origin: LobbySource | null;
     format?: GameFormat;
     /** Full lobby row when click came from the list — propagates into
      * the join handler as deck-picker context. */
@@ -94,8 +147,8 @@ export function LobbyView({
   const [roomTypeFilter, setRoomTypeFilter] = useState<RoomTypeFilter>("all");
   const [serverPickerOpen, setServerPickerOpen] = useState(false);
   const subscribeLobby = useMultiplayerStore((s) => s.subscribeLobby);
-  const ensureSubscriptionSocket = useMultiplayerStore(
-    (s) => s.ensureSubscriptionSocket,
+  const subscribeAmbientLobby = useMultiplayerStore(
+    (s) => s.subscribeAmbientLobby,
   );
   const setFormatConfig = useMultiplayerStore((s) => s.setFormatConfig);
   const hostGameCode = useMultiplayerStore((s) => s.hostGameCode);
@@ -117,124 +170,215 @@ export function LobbyView({
     if (isP2P) return;
 
     let cancelled = false;
-    let ambientDetach: (() => void) | null = null;
     let lobbyDetach: (() => void) | null = null;
 
-    // Delegate lobby traffic to the shared subscription socket owned by
-    // `multiplayerStore`. The store re-handshakes on drops, re-sends
-    // `SubscribeLobby` on reconnect, and fans out `LobbyUpdate` snapshots
-    // to every subscriber — removing the duplicate handshake this
-    // component previously maintained.
+    // `PlayerCount` and reactive `PasswordRequired` are ambient on each
+    // source's subscription socket, beside the `LobbyUpdate` family. The
+    // store owns those sockets and re-attaches its listener to the new one
+    // every reconnect produces, so subscribing to its fan-out — rather than
+    // binding to a `ws` here — is what keeps this view live across a flap:
+    // a listener bound to one socket goes permanently deaf the first time
+    // its source drops. Registered synchronously, before the dial below, so
+    // a fast source's first frame is never missed.
+    const detachAmbient = subscribeAmbientLobby((frame, source) => {
+      switch (frame.kind) {
+        case "playerCount":
+          // Recorded by the store on this source's status row; the chip
+          // reads it from there, where it cannot outlive its socket.
+          return;
+        case "passwordRequired": {
+          // Reactive fallback: the proactive path in `handleJoinFromList`
+          // opens the modal before any server round-trip, so this only
+          // fires for stale rows where the client thought the room was
+          // open and the server said otherwise. Every field comes from the
+          // authority the frame arrived on: `game_code` is unique per
+          // authority, not across the merged list, so an unscoped rescan
+          // could name a server that never asked for a password, and its
+          // row would then route the join (a `draft_metadata` row sends
+          // `MultiplayerPage` down the draft flow) on the wrong authority.
+          const listed = findLobbyGameByCode(frame.gameCode, source.url);
+          setPasswordModal({
+            gameCode: frame.gameCode,
+            origin: source,
+            format: listed?.game.format,
+            context: listed?.game,
+          });
+          setPasswordInput("");
+          return;
+        }
+        default:
+          // The site that makes `AmbientLobbyFrame`'s exhaustiveness promise
+          // real. This is the union's only consumer, and a `void` callback
+          // swallows an unhandled `kind` silently, so without this arm a new
+          // broker frame would type-check and then be dropped by the view.
+          return assertNever(frame);
+      }
+    });
+
+    // Delegate lobby traffic to the shared per-source subscription sockets
+    // owned by `multiplayerStore`. The store re-handshakes on drops, re-sends
+    // `SubscribeLobby` on reconnect, and fans out each source's `LobbyUpdate`
+    // snapshots tagged with the source that listed them — removing the
+    // duplicate handshake this component previously maintained.
     (async () => {
-      const detach = await subscribeLobby((next) => {
+      const detach = await subscribeLobby((games, source) => {
         if (cancelled) return;
-        gamesRef.current = next;
-        setGames(next);
+        setListings((prev) => new Map(prev).set(source.url, { source, games }));
       });
       if (cancelled) {
         detach?.();
         return;
       }
+      // `null` means every source failed; a single degraded authority leaves
+      // the rest browsable and never raises the offline prompt.
       if (detach === null) {
         onServerOffline?.();
         return;
       }
       lobbyDetach = detach;
-
-      // The store's `subscribeLobby` exposes only `LobbyUpdate`-family
-      // frames; `PlayerCount` and reactive `PasswordRequired` frames are
-      // ambient on the same socket. Attach a thin listener to catch them
-      // without opening a second WS — `ensureSubscriptionSocket` is
-      // idempotent here since `subscribeLobby` has already opened it.
-      const socket = await ensureSubscriptionSocket();
-      if (cancelled || !socket) {
-        if (!socket) onServerOffline?.();
-        return;
-      }
-      const ambientListener = (event: MessageEvent) => {
-        let msg: { type: string; data?: unknown };
-        try {
-          msg = JSON.parse(event.data as string) as {
-            type: string;
-            data?: unknown;
-          };
-        } catch {
-          return;
-        }
-        if (msg.type === "PlayerCount") {
-          const data = msg.data as { count: number };
-          setPlayerCount(data.count);
-        } else if (msg.type === "PasswordRequired") {
-          // Reactive fallback: the proactive path in `handleJoinFromList`
-          // opens the modal before any server round-trip, so this only
-          // fires for stale rows where the client thought the room was
-          // open and the server said otherwise.
-          const data = msg.data as { game_code: string };
-          const game = gamesRef.current.find(
-            (g) => g.game_code === data.game_code,
-          );
-          setPasswordModal({ gameCode: data.game_code, format: game?.format });
-          setPasswordInput("");
-        }
-      };
-      socket.ws.addEventListener("message", ambientListener);
-      ambientDetach = () => {
-        socket.ws.removeEventListener("message", ambientListener);
-      };
     })();
 
     return () => {
       cancelled = true;
-      ambientDetach?.();
+      detachAmbient();
       lobbyDetach?.();
     };
-  }, [isP2P, subscribeLobby, ensureSubscriptionSocket, onServerOffline]);
+    // Depends on the dialed set's MEMBERSHIP (`dialedSourceKey`), never on
+    // `sourceStatus` — a status flap must not churn subscriptions.
+  }, [isP2P, dialedSourceKey, subscribeLobby, subscribeAmbientLobby, onServerOffline]);
+
+  useEffect(() => {
+    // Not at app boot, for the same reason the subscription sockets are not: a
+    // player who never opens multiplayer pays for nothing. Failures are silent
+    // by contract — the lobby simply lists presets and hand-added sources. The
+    // TTL in `serverDirectory.ts` is what makes a remount cheap.
+    if (isP2P) return;
+    void refreshServerDirectory();
+  }, [isP2P]);
+
+  useEffect(() => {
+    // A lobby left open in a background tab goes stale: the listing and each
+    // row's stored verdict otherwise refresh only on a remount. Returning to
+    // the tab is the cheapest correct trigger — and it cannot storm the
+    // endpoint, because `refreshServerDirectory` self-guards on both its TTL
+    // and its in-flight promise. A timer would fire in a backgrounded tab and
+    // buy nothing this does not.
+    if (isP2P) return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refreshServerDirectory();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [isP2P]);
+
+  /**
+   * Each browsed source's raw score components, keyed by the CLIENT url a row
+   * carries — the join `GameListItem` cannot make for itself, since a
+   * `LobbyGameEntry` holds the collapsed `LobbySource.score` number and never
+   * the `WireScore` a hint has to read.
+   *
+   * Built here because this component already owns the merged list and already
+   * subscribes to `directorySources`; a selector in the leaf would re-render
+   * every row on any directory change and put a data join in a presentational
+   * component.
+   */
+  const hintByUrl = useMemo(
+    () =>
+      new Map(
+        directorySources.map((entry) => [entry.source.url, healthHint(entry.row.score)]),
+      ),
+    [directorySources],
+  );
 
   const handleJoinFromList = useCallback(
-    (code: string, format?: GameFormat) => {
-      const game = gamesRef.current.find((g) => g.game_code === code);
+    (entry: LobbyGameEntry) => {
+      const { game, source } = entry;
       // Proactive password prompt: if the lobby row advertises a password,
       // open the modal before any server round-trip. The reactive
       // `PasswordRequired` handler above remains as a fallback for stale
       // rows (server says yes when the client thought no).
-      if (game?.has_password) {
-        setPasswordModal({ gameCode: code, format, context: game });
+      if (game.has_password) {
+        setPasswordModal({
+          gameCode: game.game_code,
+          origin: source,
+          format: game.format,
+          context: game,
+        });
         setPasswordInput("");
         return;
       }
-      onJoinGame(code, undefined, format, game);
+      onJoinGame(game.game_code, source, undefined, game.format, game);
     },
     [onJoinGame],
   );
 
+  /**
+   * The authority a typed code belongs to. `CODE@host` names its own — a
+   * one-off origin that is browsed by nobody and changes no stored setting.
+   * A bare code belongs to whichever source listed it, else to the hosting
+   * server. `{ ok: false }` means the typed address is malformed.
+   */
+  const resolveTypedOrigin = useCallback(
+    (
+      code: string,
+      address?: string,
+    ): { ok: true; origin: LobbySource | null } | { ok: false } => {
+      if (address !== undefined) {
+        const origin = adHocLobbySource(address);
+        return origin ? { ok: true, origin } : { ok: false };
+      }
+      return {
+        ok: true,
+        origin:
+          findLobbyGameByCode(code)?.source
+          ?? hostingLobbySource(useMultiplayerStore.getState()),
+      };
+    },
+    [],
+  );
+
   const handleJoinByCode = useCallback(() => {
-    const raw = joinCode.trim().toUpperCase();
+    const raw = joinCode.trim();
     if (!raw) return;
 
+    // Uppercase the CODE segment only: the address half carries a scheme and
+    // host whose meaning is case-sensitive (`ws://`, `localhost`), and
+    // uppercasing the whole string destroys both.
     const parsed = parseJoinCode(raw);
-    if (parsed.serverAddress) {
-      // CODE@IP:PORT format -- update server address and join
-      useMultiplayerStore.getState().setServerAddress(parsed.serverAddress);
+    const code = parsed.code.toUpperCase();
+    const resolved = resolveTypedOrigin(code, parsed.serverAddress);
+    if (!resolved.ok) {
+      showToast(t("lobbyView.invalidJoinServer"));
+      return;
     }
-    onJoinGame(parsed.code);
-  }, [joinCode, onJoinGame]);
+    onJoinGame(code, resolved.origin);
+  }, [joinCode, onJoinGame, resolveTypedOrigin, showToast, t]);
 
   const handleSpectateByCode = useCallback(() => {
-    const raw = joinCode.trim().toUpperCase();
+    const raw = joinCode.trim();
     if (!raw || !onSpectate) return;
     const parsed = parseJoinCode(raw);
-    if (parsed.serverAddress) {
-      useMultiplayerStore.getState().setServerAddress(parsed.serverAddress);
+    const code = parsed.code.toUpperCase();
+    const resolved = resolveTypedOrigin(code, parsed.serverAddress);
+    if (!resolved.ok) {
+      showToast(t("lobbyView.invalidJoinServer"));
+      return;
     }
-    const context = gamesRef.current.find((g) => g.game_code === parsed.code);
-    onSpectate(parsed.code, context);
-  }, [joinCode, onSpectate]);
+    // Context scoped to the resolved authority: the row that decides the
+    // draft-vs-game route must come from the server being watched, not from
+    // a colliding code on another source. A `null` origin (hosting "None")
+    // is refused by `onSpectate` before the context is ever read.
+    onSpectate(code, resolved.origin, findLobbyGameByCode(code, resolved.origin?.url)?.game);
+  }, [joinCode, onSpectate, resolveTypedOrigin, showToast, t]);
 
   const handlePasswordSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (passwordModal && passwordInput) {
       onJoinGame(
         passwordModal.gameCode,
+        passwordModal.origin,
         passwordInput,
         passwordModal.format,
         passwordModal.context,
@@ -252,17 +396,55 @@ export function LobbyView({
   // Show the room-type filter (All / Draft / P2P / Server) whenever any tables
   // are listed — matching the design's persistent filter row. Still hidden on a
   // genuinely empty lobby, where it would filter nothing.
-  const showRoomTypeFilter = games.length > 0;
+  // One merged, ordered list across every source: official rows first, then
+  // by source score, then longest-waiting table. A snapshot from a source the
+  // user has since removed is dropped rather than rendered without an origin.
+  const entries = useMemo(
+    () =>
+      [...listings.values()]
+        .filter(({ source }) => sources.some((s) => s.url === source.url))
+        .flatMap(({ source, games }) => games.map((game) => ({ game, source })))
+        .sort(compareLobbyGameEntries),
+    [listings, sources],
+  );
 
-  const filteredGames = useMemo(() => {
-    return games.filter((g) => {
+  const showRoomTypeFilter = entries.length > 0;
+
+  const filteredEntries = useMemo(() => {
+    return entries.filter(({ game: g }) => {
       if (formatFilter && (g.format ?? "Standard") !== formatFilter) return false;
       if (roomTypeFilter === "draft" && g.draft_metadata == null) return false;
       if (roomTypeFilter === "p2p" && g.is_p2p !== true) return false;
       if (roomTypeFilter === "server" && g.is_p2p === true) return false;
       return true;
     });
-  }, [games, formatFilter, roomTypeFilter]);
+  }, [entries, formatFilter, roomTypeFilter]);
+
+  // Every enabled source reports its own online count; the chip shows the
+  // total reach of the lobby the user is browsing. Two rules, both
+  // structural:
+  //   membership — summed over the CURRENT sources (as in `entries`), so a
+  //     source the user has removed leaves the total immediately;
+  //   liveness   — the count is read from that source's status row, which
+  //     the store rewrites on every connection state change and refills
+  //     only from a frame on the socket that is live now. A source that is
+  //     reconnecting, offline, or freshly re-opened without having reported
+  //     since therefore contributes nothing; there is no cached number here
+  //     that could outlive the socket that sent it.
+  const playerCount = useMemo(
+    () =>
+      sources.reduce(
+        (sum, source) => sum + (sourceStatus.get(source.url)?.playerCount ?? 0),
+        0,
+      ),
+    [sources, sourceStatus],
+  );
+
+  // Count-free by design: the picker lists each source with its own status,
+  // which is where a number would be actionable.
+  const anyDegraded = sources.some(
+    (source) => sourceStatus.get(source.url)?.state === "offline",
+  );
 
   const formatMenuGroups = useMemo(
     () =>
@@ -277,7 +459,7 @@ export function LobbyView({
     ? (FORMAT_REGISTRY.find((m) => m.format === formatFilter)?.label ?? formatFilter)
     : t("lobbyView.allFormats");
 
-  const serverHost = serverAddress.replace(/^wss?:\/\//, "").split("/")[0];
+  const serverHost = (hostingServer ?? "").replace(/^wss?:\/\//, "").split("/")[0];
 
   return (
     <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col gap-6 px-5 py-6">
@@ -290,7 +472,7 @@ export function LobbyView({
             <button
               type="button"
               onClick={() => setServerPickerOpen(true)}
-              title={serverAddress}
+              title={hostingServer ?? ""}
               className="flex min-w-0 max-w-full items-center gap-1.5 rounded-[7px] border border-white/10 bg-black/25 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 backdrop-blur-sm transition-colors hover:border-white/20 hover:bg-white/5"
             >
               {serverFlag && (
@@ -320,6 +502,15 @@ export function LobbyView({
             <span className="rounded-[7px] border border-emerald-300/20 bg-emerald-500/15 px-2.5 py-0.5 text-xs font-medium text-emerald-200">
               {t("lobbyView.online", { count: playerCount })}
             </span>
+          )}
+          {isServer && anyDegraded && (
+            <button
+              type="button"
+              onClick={() => setServerPickerOpen(true)}
+              className="rounded-[7px] border border-amber-300/20 bg-amber-500/15 px-2.5 py-0.5 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/25"
+            >
+              {t("lobbyView.sourcesDegraded")}
+            </button>
           )}
         </div>
       </div>
@@ -371,7 +562,7 @@ export function LobbyView({
       {isServer && (
         <div className="w-full space-y-3">
           <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("lobbyView.openTables")}</div>
-          {filteredGames.length === 0 ? (
+          {filteredEntries.length === 0 ? (
             <div className="flex flex-col items-center gap-3 rounded-[10px] border border-dashed border-white/10 bg-black/12 px-4 py-6 text-center backdrop-blur-sm">
               <p className="text-sm text-gray-400">
                 {formatFilter
@@ -390,13 +581,16 @@ export function LobbyView({
             </div>
           ) : (
             <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
-              {filteredGames.map((game) => (
+              {filteredEntries.map((entry) => (
                 <GameListItem
-                  key={game.game_code}
-                  game={game}
+                  // Keyed by source too: `game_code` is unique per authority,
+                  // not across the merged multi-source list.
+                  key={`${entry.source.url}:${entry.game.game_code}`}
+                  entry={entry}
                   onJoin={handleJoinFromList}
-                  compatible={isLobbyEntryCompatible(game.host_build_commit)}
+                  compatible={isLobbyEntryCompatible(entry.game.host_build_commit)}
                   hostGameCode={hostGameCode}
+                  healthHint={hintByUrl.get(entry.source.url) ?? null}
                 />
               ))}
             </div>
@@ -492,12 +686,7 @@ export function LobbyView({
       </div>
 
       {serverPickerOpen && (
-        <ServerPicker
-          onClose={() => setServerPickerOpen(false)}
-          onApply={(url) => {
-            useMultiplayerStore.getState().setServerAddress(url);
-          }}
-        />
+        <ServerPicker onClose={() => setServerPickerOpen(false)} />
       )}
 
       {/* Password modal */}

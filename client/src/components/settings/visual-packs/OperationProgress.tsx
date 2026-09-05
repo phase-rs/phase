@@ -7,11 +7,12 @@ interface OperationProgressProps {
   operation: OperationStatus;
   progressPhase: ProgressEvent["phase"] | null;
   pendingActions: ReadonlySet<string>;
+  networkActionsDisabled: boolean;
   onCancel(): void;
   onResume(): void;
 }
 
-export function OperationProgress({ operation, progressPhase, pendingActions, onCancel, onResume }: OperationProgressProps) {
+export function OperationProgress({ operation, progressPhase, pendingActions, networkActionsDisabled, onCancel, onResume }: OperationProgressProps) {
   const { t } = useTranslation("settings");
   const imageTotal = operation.objectEstimate
     ?? (operation.state === "finalizing" || operation.state === "completed" ? operation.objectTotal : null);
@@ -92,7 +93,7 @@ export function OperationProgress({ operation, progressPhase, pendingActions, on
           </button>
         )}
         {canResume && (
-          <button type="button" disabled={startPending} onClick={onResume} className="min-h-11 rounded-[12px] border border-sky-400/50 px-4 text-sm text-sky-100 disabled:opacity-40">
+          <button type="button" disabled={networkActionsDisabled || startPending} onClick={onResume} className="min-h-11 rounded-[12px] border border-sky-400/50 px-4 text-sm text-sky-100 disabled:opacity-40">
             {t("visualPacks.actions.resume")}
           </button>
         )}

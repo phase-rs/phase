@@ -3,7 +3,8 @@
     "badge": "Blocked",
     "cantBeActivated": "This ability can't be activated",
     "cantActivateDuring": "Can't be activated right now",
-    "prohibited": "Activating this ability is prohibited"
+    "prohibited": "Activating this ability is prohibited",
+    "costNotPayableNow": "You can't pay this cost right now"
   },
   "manaSourceSelection": {
     "title": "Choose a mana source",
@@ -27,10 +28,27 @@
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
     "countAria": "Number of iterations",
+    "countDecreaseAria": "Decrease the number of iterations",
+    "countIncreaseAria": "Increase the number of iterations",
     "previewTitle_one": "Repeating once produces:",
     "previewTitle_other": "Repeating {{count}} times produces:",
     "previewEntry": "{{amount}} {{resource}}",
     "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
+    "allocationTitle": "Split the repetitions across targets:",
+    "allocationAria": "Repetitions for {{subject}}",
+    "allocationDecreaseAria": "Decrease repetitions for {{subject}}",
+    "allocationIncreaseAria": "Increase repetitions for {{subject}}",
+    "allocationSum": "{{allocated}} of {{total}} repetitions allocated.",
+    "evenSplit": "Reset to the even split",
+    "customDistribution": "Custom distribution — the engine has not previewed this split.",
+    "announceTitle": "Choose the target every repetition announces:",
+    "announce": "Announce",
+    "announceAria": "Announce {{subject}}",
+    "mayTitle": "Optional ability {{group}} — repeat this choice each iteration?",
+    "mayTake": "Take it",
+    "mayDecline": "Decline it",
+    "mayTakeAria": "Take optional ability {{group}}",
+    "mayDeclineAria": "Decline optional ability {{group}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -38,6 +56,13 @@
       "ImmediateWin": "This loop wins the game.",
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
+    },
+    "respondDeclaredTitle": "Proposed declaration:",
+    "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
+    "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondDecision": {
+      "take": "{{subject}} — taken each iteration",
+      "decline": "{{subject}} — declined each iteration"
     }
   },
   "precastShortcut": {
@@ -566,6 +591,8 @@
     "unboundedConditionalYouTooltip": "Unbounded {{resource}} (∞) — collapse pending; this may stay unbounded, and you'll name the count if it doesn't",
     "unboundedMixedTooltip": "Unbounded {{resource}} (∞) — part of this group has a pending collapse; part remains unbounded",
     "unboundedConditionalGlyph": "∞→?",
+    "boundedLoopGlyph": "≤{{bound}}×",
+    "boundedLoopTooltip": "{{resource}} from a detected loop, bounded at {{bound}} repetitions",
     "unboundedManaPoolMarker": "Unbounded mana (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "life",
@@ -1163,7 +1190,10 @@
       "subtitlePreparedCopy": "Cast the prepared spell?",
       "subtitleActivate": "Activate this ability?",
       "subtitlePlay": "Choose how to play this card",
-      "subtitleChoose": "Choose an ability to activate"
+      "subtitleChoose": "Choose an ability to activate",
+      "unlockThisDoor": "Unlock this door",
+      "unlockHalf": "Unlock {{name}}",
+      "unlockHalfWithCost": "Unlock {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Tap for mana",

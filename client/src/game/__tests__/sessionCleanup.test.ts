@@ -1,8 +1,11 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { EngineAdapter, GameAction, SubmitResult } from "../../adapter/types";
+import { abandonPendingDispatches, dispatchAction, isDispatchIdle } from "../dispatch";
 import { clearPromptOverlayState } from "../sessionCleanup";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
+import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import { buildGameState, buildManaPaymentWaitingFor } from "../../test/factories/gameStateFactory";
 
 describe("clearPromptOverlayState", () => {
@@ -114,5 +117,90 @@ describe("clearPromptOverlayState", () => {
     clearPromptOverlayState();
 
     expect(useUiStore.getState().scryOutcome).toBeNull();
+  });
+});
+
+/**
+ * The dispatch mutex (`isAnimating` in dispatch.ts) is module-level and shared
+ * by local dispatches and inbound remote updates. A submit promise that never
+ * settles holds it forever, so before this wiring one wedged dispatch froze the
+ * whole page session — including the NEXT game, from its first click.
+ */
+describe("clearPromptOverlayState dispatch-pipeline recovery", () => {
+  const passPriority = { type: "PassPriority", data: {} } as unknown as GameAction;
+  const concede = { type: "Concede", data: { player_id: 0 } } as unknown as GameAction;
+
+  beforeEach(() => {
+    useGameStore.getState().reset();
+  });
+
+  afterEach(() => {
+    // These tests deliberately leave an unsettled submit holding the mutex.
+    // Release it so the wedge cannot leak into a later test in this file.
+    abandonPendingDispatches();
+  });
+
+  it("releases a dispatch mutex wedged by an unsettled submit, so the next session's first action runs", () => {
+    // A submit that never settles: `dispatchActionInternal`'s `finally` never
+    // runs, so `isAnimating` stays held with nothing to release it.
+    const submitAction = vi.fn<EngineAdapter["submitAction"]>(
+      () => new Promise<SubmitResult>(() => {}),
+    );
+    const state = buildGameState({ stack: [], players: [] });
+    useGameStore.setState({
+      adapter: buildEngineAdapterMock(state, { submitAction }),
+      gameState: state,
+      gameMode: "ai",
+    });
+
+    void dispatchAction(passPriority, 0);
+    expect(submitAction).toHaveBeenCalledTimes(1);
+    expect(isDispatchIdle()).toBe(false);
+
+    clearPromptOverlayState();
+
+    expect(isDispatchIdle()).toBe(true);
+
+    // Discriminating: with the mutex still held, a distinct action is pushed
+    // onto `pendingQueue` and `submitAction` is never reached a second time.
+    void dispatchAction(concede, 0);
+    expect(submitAction).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops a commit that was in flight when the boundary fired, so it cannot re-populate prompts", async () => {
+    let releaseSubmit!: (result: SubmitResult) => void;
+    const submitAction = vi.fn<EngineAdapter["submitAction"]>(
+      () => new Promise<SubmitResult>((resolve) => {
+        releaseSubmit = resolve;
+      }),
+    );
+    const state = buildGameState({ stack: [], players: [] });
+    useGameStore.setState({
+      adapter: buildEngineAdapterMock(state, { submitAction }),
+      gameState: state,
+      gameMode: "ai",
+    });
+
+    const inFlight = dispatchAction(passPriority, 0);
+    expect(submitAction).toHaveBeenCalledTimes(1);
+
+    // The session boundary lands while the engine round-trip is outstanding.
+    clearPromptOverlayState();
+    expect(useGameStore.getState().waitingFor).toBeNull();
+
+    releaseSubmit({ events: [] });
+    await inFlight;
+
+    // The commit's generation is now stale, so `isDispatchContextCurrent`
+    // declines it rather than writing the prompt back over the cleared state.
+    expect(useGameStore.getState().waitingFor).toBeNull();
+
+    // Control: the same harness DOES commit a prompt when no boundary
+    // intervenes, so the assertions above are not vacuously green.
+    const uninterrupted = dispatchAction(concede, 0);
+    releaseSubmit({ events: [] });
+    await uninterrupted;
+
+    expect(useGameStore.getState().waitingFor).toEqual(state.waiting_for);
   });
 });

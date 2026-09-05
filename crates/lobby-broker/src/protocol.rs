@@ -38,6 +38,86 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 62 — `ServerMessage::{GameStarted, StateUpdate}` gained
+///      `activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>` —
+///      the CR 118.3 "you can't pay this cost right now" read-out, scoped to the
+///      acting player and empty for everyone else. It carries
+///      `#[serde(default, skip_serializing_if = "HashMap::is_empty")]`, so a v61
+///      payload reads as the absent/empty map it always meant. The break is the
+///      other direction, and it is over-determined: `AbilityBlockKind` is
+///      `#[serde(tag = "type")]`, so the new `CostNotPayableNow` arm emits a TAG
+///      VALUE no v61 peer has a case for — a v61 Rust peer fails to deserialize
+///      the entry, and a v61 client indexes its reason-key record with an
+///      unknown member and renders `t(undefined)`. New tag, not merely a new
+///      field, so the bump does not rest on the serde attributes above.
+///
+/// 61 — `Effect::ChooseCounterKind` gained `domain: CounterKindDomain` and
+///      `chooser: CounterKindChooser` — the population a counter-kind choice
+///      draws its legal kinds from, and whether the GAME draws one at random
+///      instead of prompting the controller (CR 608.2d). Both carry
+///      `#[serde(default)]`, so a v60 payload reads as the on-target/controller
+///      form it always meant. The break is the other direction: a v60 peer has
+///      no field to receive `Printed`/`Random` into and sets no
+///      `deny_unknown_fields` to reject them, so it reads Crystalline Giant's
+///      printed-list random draw as an on-target choice, finds no counters on a
+///      fresh Giant, and places nothing — the exact defect this bump ships the
+///      fix for (#7796). Abilities and trigger definitions ride inside
+///      `GameObject`, so every full-GameState frame carries the shape. Full-game
+///      floors are exact-match on both sides, so the pairing is refused at the
+///      handshake. Lobby messages are unchanged.
+/// 60 — `DerivedViews::back_face_spell_costs` publishes, for each card the
+///      viewer may cast whose player chooses a spell face at cast time (a split
+///      card such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the
+///      live cost of the OTHER face; `spell_costs` reports the live face only.
+///      The cost badge renders both faces from this map. Serde-additive, but
+///      the client renders the map directly; a v59 host would silently show a
+///      Room's single-face badge again, on top of the second half's printed
+///      cost. Full-game handshakes must refuse that capability mismatch. Lobby
+///      messages are unchanged.
+/// 59 — `InteractionResponseSpec::Shortcut::preview` changed from
+///      `Option<InteractionShortcutPreview>` to `Vec<InteractionShortcutPreview>`,
+///      one element per offerable count, and each element gained
+///      `allocation: Vec<AmountAssignment>`, the declaration's shape over that
+///      element's count. The retype is the break; `allocation` is not — it carries
+///      `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, neither type
+///      sets `deny_unknown_fields`, and it parses in both directions. A PARSE bump
+///      like 23, 36 and 42, not a capability bump like 24 — and an ASYMMETRIC one,
+///      so both directions are stated. v58 → v59 fails on EVERY shortcut offer: the
+///      old field carried no `skip_serializing_if`, so a v58 peer always emits the
+///      key, and neither `null` nor an object deserializes into a sequence.
+///      v59 → v58 fails only on an offer that actually carries a preview, because
+///      an empty list omits the key and a v58 peer's `Option` field reads that as
+///      `None`. The retype breaks the declared Rust types, but no production Rust
+///      code deserializes `ServerMessage` — the browser half is what decodes those
+///      frames, with `JSON.parse` and no validation, which is why the handshake is
+///      the only place the pairing is refusable. No shim ships
+///      — no `deserialize_with`, no dual-parse path, no version-conditional branch —
+///      and full-game floors are exact-match on both sides
+///      (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`, and
+///      `MIN_SUPPORTED_SERVER_PROTOCOL` in `client/src/adapter/ws-adapter.ts`), so
+///      the pair is refused before it sends the frame. Lobby messages are unchanged.
+/// 58 — `DraftPlayerView::commanders_required` publishes the procedure-owned
+///      commander designation count. The client renders designation controls
+///      from this required field rather than inferring them from `DraftKind`;
+///      older full servers omit it. Lobby messages are unchanged.
+/// 57 — `GameAction::BeginResolveAll` gained `scope: ResolveAllScope` (`Own`
+///      binds only the requester and resolves immediately; `Shared` opens the
+///      table-wide consent protocol), and `PriorityPassingMode` gained
+///      `FullControl`, which is now engine-authoritative rather than a
+///      frontend-only toggle.
+/// 56 — Host-only authoritative-state export request/response variants. Native
+///      P2P host diagnostics must use a trusted server envelope rather than a
+///      redacted player view. Lobby messages are unchanged.
+/// 55 — `DerivedViews::room_half_identities` publishes both halves of every
+///      battlefield Room in printed order, resolved through the COPIED halves
+///      for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+///      special action's offer names the half and shows its unlock cost
+///      (CR 709.5e) from this map; an enter-as-copy recipient carries neither
+///      on its own printed card, and printed order is engine work. The field
+///      is serde-additive, but the client renders the map directly rather than
+///      deriving halves from raw state; a v54 host would silently label every
+///      offered door "Tap for Mana" again. Full-game handshakes must refuse
+///      that capability mismatch. Lobby messages are unchanged.
 /// 54 — `CreateDraftWithSettings` now carries a tagged `DraftSourceIntent`.
 ///      A Chaos client sends only candidate set codes; the Full server resolves
 ///      and persists the private seat-by-round assignment matrix. This changes
@@ -250,7 +330,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 54;
+pub const PROTOCOL_VERSION: u32 = 62;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -996,12 +1076,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 54);
+        assert_eq!(PROTOCOL_VERSION, 62);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 53);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 61);
     }
 
     #[test]

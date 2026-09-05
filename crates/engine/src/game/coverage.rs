@@ -19,15 +19,16 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     CoinFlipResult, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-    CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
-    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
-    ObjectScope, ParsedCondition, PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope,
-    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
-    SpeedDelta, SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement,
-    StackAbilityKind, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
+    CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
+    DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LibraryPosition,
+    ManaProduction, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
+    ObjectSelectionEligibility, ParsedCondition, PerpetualModification, PlayerFilter,
+    PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
+    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -183,6 +184,11 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
             | StaticMode::CantCauseSacrificeOrExile { .. }
+            // CR 701.9a + CR 701.21a: CantCauseForcedAction carries `cause` +
+            // `actions`. Runtime enforcement is in
+            // game/static_abilities.rs::forced_action_muzzled, consulted from
+            // effects/sacrifice.rs and effects/discard.rs.
+            | StaticMode::CantCauseForcedAction { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
             | StaticMode::SuppressTriggers { .. }
             // CR 603.2d: DoubleTriggers carries the `TriggerCause` predicate.
@@ -3577,6 +3583,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             filter,
             min,
             max,
+            cardinality,
+            eligibility,
         } => {
             d.push(("chooser".into(), fmt_target(chooser)));
             d.push(("filter".into(), fmt_target(filter)));
@@ -3585,9 +3593,64 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 "max".into(),
                 max.map_or_else(|| "any".to_string(), |m| m.to_string()),
             ));
+            if let Some(ObjectSelectionCardinality::Exactly { count }) = cardinality {
+                d.push(("cardinality".into(), format!("exactly {count}")));
+            }
+            if let Some(ObjectSelectionEligibility::RemovableCounter { counter_type }) = eligibility
+            {
+                d.push((
+                    "eligibility".into(),
+                    counter_type.as_ref().map_or_else(
+                        || "removable counter".to_string(),
+                        |counter_type| format!("removable {} counter", counter_type.as_str()),
+                    ),
+                ));
+            }
         }
-        Effect::ChooseCounterKind { target } => {
+        Effect::ChooseCounterKind {
+            target,
+            domain,
+            chooser,
+        } => {
             d.push(("target".into(), fmt_target(target)));
+            // Both axes belong in the signature: the parse-diff report is what
+            // tells a reviewer which cards a parser change moved, and a domain
+            // or chooser that flipped without the target moving would otherwise
+            // be invisible there.
+            match domain {
+                CounterKindDomain::OnTarget => {
+                    d.push(("kinds".into(), "on target".into()));
+                }
+                CounterKindDomain::Printed {
+                    kinds,
+                    excluding_kinds_on_target,
+                } => {
+                    d.push((
+                        "kinds".into(),
+                        format!(
+                            "printed {}{}",
+                            kinds
+                                .iter()
+                                .map(|kind| kind.as_str().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/"),
+                            if *excluding_kinds_on_target {
+                                ", excluding kinds on target"
+                            } else {
+                                ""
+                            }
+                        ),
+                    ));
+                }
+            }
+            d.push((
+                "chooser".into(),
+                match chooser {
+                    CounterKindChooser::Controller => "controller",
+                    CounterKindChooser::Random => "at random",
+                }
+                .into(),
+            ));
         }
         Effect::PutChosenCounter {
             target,
@@ -3731,9 +3794,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
             d.push(("chooser".into(), fmt_target(chooser)));
         }
-        Effect::Amass { subtype, count } => {
+        Effect::Amass {
+            subtype,
+            count,
+            player,
+        } => {
             d.push(("subtype".into(), subtype.clone()));
             d.push(("count".into(), fmt_quantity(count)));
+            d.push(("player".into(), fmt_target(player)));
         }
         Effect::Monstrosity { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
@@ -12183,6 +12251,60 @@ mod tests {
             labels.len(),
             8,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
+        );
+    }
+
+    /// Exact cardinality and counter-removal eligibility are semantic parser
+    /// axes. Defaults deliberately render nothing, preserving existing
+    /// signatures, while non-default selections remain distinguishable.
+    #[test]
+    fn object_selection_cardinality_and_eligibility_reach_parse_details() {
+        let selection = |cardinality, eligibility| Effect::ChooseObjectsIntoTrackedSet {
+            chooser: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            min: 0,
+            max: None,
+            cardinality,
+            eligibility,
+        };
+        let default = effect_details(&selection(None, None));
+        assert!(
+            !default
+                .iter()
+                .any(|(key, _)| key == "cardinality" || key == "eligibility"),
+            "the legacy selection shape must not gain signature keys"
+        );
+
+        let exact = effect_details(&selection(
+            Some(ObjectSelectionCardinality::Exactly { count: 2 }),
+            None,
+        ));
+        assert!(
+            exact
+                .iter()
+                .any(|(key, value)| key == "cardinality" && value == "exactly 2"),
+            "an exact selection cardinality must be visible to parse coverage: {exact:?}"
+        );
+        assert_ne!(
+            default, exact,
+            "exact and legacy selections must not collapse"
+        );
+
+        let removable = effect_details(&selection(
+            Some(ObjectSelectionCardinality::Exactly { count: 2 }),
+            Some(ObjectSelectionEligibility::RemovableCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+            }),
+        ));
+        assert!(
+            removable
+                .iter()
+                .any(|(key, value)| { key == "eligibility" && value == "removable P1P1 counter" }),
+            "counter-removal eligibility must be visible to parse coverage: {removable:?}"
+        );
+        assert_ne!(
+            exact, removable,
+            "counter-eligible and unconstrained exact selections must not collapse"
         );
     }
 

@@ -14,21 +14,25 @@ use serde_json::{Map, Value};
 pub use frame_vec::ChildStackDepth;
 use frame_vec::{FrameSlot, FrameVec};
 
-use crate::types::ability::{AbilityDefinition, DiscardedCardResult, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    AbilityDefinition, DiscardedCardResult, EffectKind, ResolvedAbility, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CostResume, DrainStatus, DrawSequenceStack, GameState, GameStateDecode, GameStateDecodeMode,
     PayCostKind, PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf,
     PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
-    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
-    PendingDebugCardEntries, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
-    PendingMultiDraw, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
-    PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
-    PostReplacementDrain, PostReplacementDrainDispatch, PostReplacementDrainStack,
-    PostReplacementFrameId, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemoval,
+    PendingCounterRemovalInFlight, PendingCounterRemovalQueue, PendingDebugCardEntries,
+    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
+    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
+    PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
+    ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
 
 /// The complete shipped draw authority carried by one `MultiDraw` frame.
 ///
@@ -3863,6 +3867,7 @@ impl ResolutionStateWire {
                 if let Some(frame) = legacy_counter_removals.into_frame() {
                     legacy.push_counter_removals(frame);
                 }
+                migrate_legacy_counter_removal_replacement_pause(&mut legacy);
                 // A per-player copy walk parks beneath its inner token-copy
                 // work, and CopyToken in turn parks beneath an ETB-counter
                 // child. Rebuild that exact outer-to-inner order from the v1
@@ -4024,6 +4029,104 @@ fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
         state.resolving_trigger_firing = None;
         state.resolution_source_relatch = None;
     }
+}
+
+/// CR 122.1 + CR 614.1: v1 counter-removal queues removed the current tuple
+/// before a replacement choice but did not serialize it separately. Rebuild
+/// that unsettled removal from the parked proposed event so its actual result
+/// contributes to the resumed queue's `applied_total`. v1 only retained the
+/// queue's original requested total and unconsumed tail, so it cannot recover
+/// a replacement-modified actual count for a fully settled prefix. Preserve
+/// that format's requested-count semantics by seeding the prefix as
+/// `total - remaining requested - current requested`; the reconstructed current
+/// removal still contributes its measured actual result after it resumes.
+fn migrate_legacy_counter_removal_replacement_pause(state: &mut GameState) {
+    let Some((object_id, counter_type, count)) =
+        state
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| match &pending.proposed {
+                ProposedEvent::RemoveCounter {
+                    object_id,
+                    counter_type,
+                    count,
+                    ..
+                } => Some((*object_id, counter_type.clone(), *count)),
+                ProposedEvent::ZoneChange { .. }
+                | ProposedEvent::Damage { .. }
+                | ProposedEvent::Draw { .. }
+                | ProposedEvent::SearchFound { .. }
+                | ProposedEvent::Scry { .. }
+                | ProposedEvent::Mill { .. }
+                | ProposedEvent::CoinFlip { .. }
+                | ProposedEvent::Explore { .. }
+                | ProposedEvent::Connive { .. }
+                | ProposedEvent::Proliferate { .. }
+                | ProposedEvent::LifeGain { .. }
+                | ProposedEvent::LifeLoss { .. }
+                | ProposedEvent::AddCounter { .. }
+                | ProposedEvent::MoveCounter { .. }
+                | ProposedEvent::CreateToken { .. }
+                | ProposedEvent::TokenEntry { .. }
+                | ProposedEvent::Discard { .. }
+                | ProposedEvent::Tap { .. }
+                | ProposedEvent::Untap { .. }
+                | ProposedEvent::TurnFaceUp { .. }
+                | ProposedEvent::Destroy { .. }
+                | ProposedEvent::Sacrifice { .. }
+                | ProposedEvent::BeginTurn { .. }
+                | ProposedEvent::BeginPhase { .. }
+                | ProposedEvent::ProduceMana { .. }
+                | ProposedEvent::EmptyManaPool { .. }
+                | ProposedEvent::Planeswalk { .. }
+                | ProposedEvent::Attach { .. } => None,
+            })
+    else {
+        return;
+    };
+    if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+        return;
+    }
+
+    let counter_count_before = state
+        .objects
+        .get(&object_id)
+        .and_then(|object| object.counters.get(&counter_type))
+        .copied()
+        .unwrap_or(0);
+    let Some(queue) = state.active_counter_removals_mut() else {
+        return;
+    };
+    if queue.effect_kind != EffectKind::RemoveCounter
+        || queue.in_flight.is_some()
+        || !queue
+            .remaining
+            .iter()
+            .all(|removal| removal.object_id == object_id)
+    {
+        return;
+    }
+
+    let remaining_requested = queue
+        .remaining
+        .iter()
+        .map(|removal| removal.count)
+        .sum::<u32>();
+    // v1 removed the current tuple from `remaining` before it surfaced the
+    // replacement choice. Its settled prefix has no actual-count record, so
+    // retain the legacy requested-count accounting for that unrecoverable
+    // prefix while the in-flight tuple below remains actual-count based.
+    queue.applied_total = queue
+        .total
+        .saturating_sub(remaining_requested.saturating_add(count));
+    queue.in_flight = Some(PendingCounterRemovalInFlight {
+        removal: PendingCounterRemoval {
+            object_id,
+            counter_type,
+            count,
+        },
+        counter_count_before,
+    });
 }
 
 impl Serialize for ResolutionStateWire {
@@ -6608,10 +6711,11 @@ mod tests {
             counter_removals,
             PendingCounterRemovalQueue {
                 remaining: Vec::new(),
-                source_id: ObjectId(115),
                 effect_kind: EffectKind::RemoveCounter,
                 source_ability_id: ObjectId(115),
                 total: 0,
+                applied_total: 0,
+                in_flight: None,
             },
         ));
         assert!(counter_removals.active_counter_removals().is_none());
@@ -6830,7 +6934,9 @@ mod tests {
                 additional_zones: Vec::new(),
                 zone_owner: ZoneOwner::Each(PerPlayerScope::AllPlayers),
                 filter: None,
-                chooser: Chooser::Controller,
+                chooser: Chooser::Controller.into(),
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,

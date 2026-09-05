@@ -25,6 +25,29 @@ pub fn parse_number(input: &str) -> OracleResult<'_, u32> {
     alt((parse_digit_number, parse_english_number)).parse(input)
 }
 
+/// CR 702.8a: Flash is a static ability that functions in every zone from
+/// which its card could be played.
+///
+/// Parse the shared self-spell flash prefix, preserving the remaining condition
+/// text for the caller. The boundary guard keeps `flashback` on its own parser
+/// path rather than treating its `flash` prefix as a flash grant.
+pub(crate) fn parse_self_spell_has_flash_prefix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((tag::<_, _, OracleError<'_>>("~"), tag("this spell"))),
+            terminated(
+                tag(" has flash"),
+                peek(alt((
+                    value((), eof),
+                    value((), satisfy(|c: char| !c.is_alphanumeric())),
+                ))),
+            ),
+        ),
+    )
+    .parse(input)
+}
+
 /// Parse one or more ASCII digits into a u32, accepting English
 /// thousands-separator commas ("1,000", "1,000,000").
 ///

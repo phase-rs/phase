@@ -344,6 +344,8 @@
     "moreNeeded": "{{count}} more needed",
     "commanderRequired": "Designate a commander from your pool to submit.",
     "commanderUnavailable": "Commander designation is unavailable right now — the card database could not be loaded.",
+    "compatibilityPending": "Checking deck compatibility...",
+    "compatibilityUnavailable": "Deck compatibility is unavailable right now — try again before submitting.",
     "grantedFiller": "Your pool also includes up to {{maximum}} × {{name}}, usable only as your commander."
   },
   "landing": {
@@ -392,6 +394,12 @@
     "viewResults": "View Results",
     "setIconAlt": "{{code}} icon"
   },
+  "offline": {
+    "unavailableTitle": "Multiplayer Draft is unavailable while offline.",
+    "unavailableDescription": "Reconnect or turn off Offline Mode to host, join, start, or watch a multiplayer draft.",
+    "startUnavailable": "Starting a multiplayer draft is unavailable while offline. Reconnect or turn off Offline Mode to continue.",
+    "watchUnavailable": "Watching a multiplayer draft is unavailable while offline. Reconnect or turn off Offline Mode to continue."
+  },
   "podPhase": {
     "lobby": "Lobby",
     "drafting": "Drafting",
@@ -426,6 +434,7 @@
     "exportUrl": "CubeCobra Export URL",
     "exportUrlPlaceholder": "Paste a raw export URL, or paste the list below",
     "loadUrl": "Load URL",
+    "offlineUrlUnavailable": "Loading cube lists from URLs is unavailable offline.",
     "deckAddables": "Deck Addables",
     "addablesStandardBasics": "Standard basics",
     "addablesBasicsPlusCustom": "Basics plus custom",

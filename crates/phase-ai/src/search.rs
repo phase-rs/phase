@@ -16,15 +16,16 @@ use engine::ai_support::{
 };
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility, StaticDefinition,
-    TargetFilter,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastOfferKind, CompanionDeclaration, CostResume, GameState, ManaChoice, ManaChoiceContext,
-    ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
+    CastOfferKind, CompanionDeclaration, CostResume, DistributionUnit, GameState, ManaChoice,
+    ManaChoiceContext, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
+use engine::types::keywords::Keyword;
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -827,7 +828,7 @@ fn target_filter_interacts_with_stack(filter: &TargetFilter) -> bool {
     ) || filter.extract_zones().contains(&Zone::Stack)
 }
 
-fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
+pub(crate) fn ability_is_temporary_combat_modifier(ability: &AbilityDefinition) -> bool {
     ability_effect_is_temporary_combat_modifier(ability)
         && ability
             .sub_ability
@@ -914,16 +915,38 @@ fn low_value_priority_pass_from_actions(
         && actions
             .iter()
             .all(|action| priority_action_is_safe_to_defer_on_own_stack(state, action));
+    let only_pass_or_mana = actions
+        .iter()
+        .all(|action| priority_action_is_pass_or_mana(state, action));
     let empty_stack_pass = state.stack.is_empty()
         && actions
             .iter()
             .all(|action| priority_action_is_safe_to_defer_empty_stack(state, action))
-        && (low_value_empty_stack_phase(state.phase)
-            || actions
-                .iter()
-                .all(|action| priority_action_is_pass_or_mana(state, action)));
+        && (low_value_empty_stack_phase(state.phase) || only_pass_or_mana);
 
-    if own_stack_pass || empty_stack_pass {
+    // `only_pass_or_mana` is stack-agnostic on purpose: when every legal
+    // candidate is `PassPriority` or a mana ability, there is nothing to search
+    // for no matter who controls the stack. A MIXED own+foreign stack passes too
+    // — still nothing to respond with.
+    //
+    // CR 605.3b: an activated mana ability doesn't go on the stack, so it can't
+    // be targeted, countered, or otherwise responded to; it resolves immediately
+    // after activation. Producing mana therefore does not interact with a
+    // foreign stack entry at all.
+    //
+    // CR 106.4: each player's mana pool empties at the end of each step and
+    // phase, so mana floated in this window is lost unspent when no candidate
+    // here is castable.
+    //
+    // Two lines are deliberately forgone, exactly as the `own_stack_pass` and
+    // `empty_stack_pass` arms above already forgo them:
+    //   * Float mana in response and cast after the foreign entry resolves
+    //     (Armageddon-style). CR 106.4 bounds how long such a float survives.
+    //   * `is_mana_ability` also admits sacrifice-cost mana abilities (Ashnod's
+    //     Altar / Phyrexian Altar shape). Activating one in response to foreign
+    //     removal is a real pseudo-response: it denies an exile effect its
+    //     object and fires dies triggers.
+    if own_stack_pass || empty_stack_pass || only_pass_or_mana {
         Some(GameAction::PassPriority)
     } else {
         None
@@ -2274,15 +2297,21 @@ pub fn fallback_action(
             Some(GameAction::ChooseKeptPermanents { kept })
         }
 
-        // CR 700.3: Pile-separation fallbacks — empty pile-A partition (every
-        // object goes to derived pile B) is the simplest legal partition, and
-        // pile A is the default choice for the chooser. Tactical AI override
-        // happens through legal_actions; this is the safety net.
+        // CR 700.3 + CR 700.3a: Pile-separation fallbacks. The partition is the
+        // same weight-balanced split `balanced_pile_partition` emits into the
+        // candidate set, so the fallback answer is always a contract member —
+        // and, because the subject and the chooser are adversaries, the
+        // balanced split is also the safest one to hand over blind. Pile A is
+        // the default choice for the chooser. Tactical AI override happens
+        // through legal_actions; this is the safety net.
         WaitingFor::SeparatePilesChooseOpponent { candidates, .. } => candidates
             .first()
             .map(|&opp| GameAction::ChoosePileOpponent { opponent: opp }),
-        WaitingFor::SeparatePilesPartition { .. } => {
-            Some(GameAction::SubmitPilePartition { pile_a: Vec::new() })
+        WaitingFor::SeparatePilesPartition { eligible, .. } => {
+            let eligible: Vec<ObjectId> = eligible.iter().copied().collect();
+            Some(GameAction::SubmitPilePartition {
+                pile_a: engine::ai_support::balanced_pile_partition(state, &eligible),
+            })
         }
         WaitingFor::SeparatePilesChoice { .. } => Some(GameAction::ChoosePile {
             pile: engine::types::game_state::PileSide::A,
@@ -3529,6 +3558,20 @@ pub(crate) fn deterministic_choice(
         return Some(action);
     }
 
+    // CR 601.2d + CR 704.5g: divided-damage split. `WaitingFor::DistributeAmong`
+    // is the tail of a target-selection sequence the AI has already committed
+    // to, and the engine offers at most two shapes for it (the even split and
+    // `ai_support`'s lethal-first split). Deciding it here on kill count keeps
+    // `quiesce` — which calls `deterministic_choice` with `context: None` —
+    // seeing through the trigger to the board that results, instead of stalling
+    // the rollout on two near-identical distribution vectors. This is the same
+    // call that decides the ROOT prompt (the pre-search early return in
+    // `score_candidates_with_session`), so the arm is context-free by
+    // construction: it reads only `state` and `actions`.
+    if let Some(action) = most_lethal_distribution(state, actions) {
+        return Some(action);
+    }
+
     // CR 103.5 + CR 103.6: Mulligan decisions — defer to the sibling
     // `MulliganRegistry` for structured, feature-aware hand evaluation. All
     // registered `MulliganPolicy` implementations contribute; search can't
@@ -4178,6 +4221,79 @@ fn validated_declare_attackers(
     engine::game::combat::complete_attacker_proposal(state, &attacks, &[])
 }
 
+/// CR 704.5g: does `share` of a divided damage pool destroy this target?
+///
+/// CR 702.12b: an indestructible creature ignores the lethal-damage
+/// state-based action, so no share kills it. A body already at 0 or less
+/// toughness is dying to CR 704.5f regardless, and a player or planeswalker is
+/// not a kill at all.
+fn share_is_lethal(state: &GameState, target: &TargetRef, share: u32) -> bool {
+    let TargetRef::Object(id) = target else {
+        return false;
+    };
+    state.objects.get(id).is_some_and(|object| {
+        object.card_types.core_types.contains(&CoreType::Creature)
+            && object.toughness.unwrap_or(0) > 0
+            && !object.has_keyword(&Keyword::Indestructible)
+            // The threshold comes from `combat_damage::lethal_damage_needed`,
+            // the documented single authority for how much a body absorbs; it
+            // already accounts for damage already marked.
+            && share >= engine::game::combat_damage::lethal_damage_needed(state, *id, false)
+    })
+}
+
+/// CR 601.2d: pick the offered damage division that destroys the most creature
+/// targets, keeping the engine's emission order on a tie so the even split —
+/// emitted first by `ai_support::candidate_actions` — stands when no split
+/// kills more.
+///
+/// Only `DistributionUnit::Damage` has a lethality notion; counter and life
+/// divisions fall through to the ordinary scoring path. Deathtouch is not
+/// modelled: `WaitingFor::DistributeAmong` carries no source id, and with a
+/// deathtouch source every share of one or more is lethal (CR 702.2b), so both
+/// offered splits tie and the even split stands anyway.
+fn most_lethal_distribution(state: &GameState, actions: &[GameAction]) -> Option<GameAction> {
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::DistributeAmong {
+            unit: DistributionUnit::Damage,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let divisions: Vec<&GameAction> = actions
+        .iter()
+        .filter(|action| matches!(action, GameAction::DistributeAmong { .. }))
+        .collect();
+    // Strictly additive: this arm exists to break the tie between the engine's
+    // OFFERED divisions. With a single division on the table the candidate set
+    // is whatever it was before the lethal-first split was added, so leave it to
+    // the ordinary pipeline (which may prefer `CancelCast` when a pending cast
+    // makes that an option).
+    if divisions.len() < 2 {
+        return None;
+    }
+    let mut best: Option<(usize, &GameAction)> = None;
+    for action in divisions {
+        let GameAction::DistributeAmong { distribution } = action else {
+            continue;
+        };
+        let kills = distribution
+            .iter()
+            .filter(|(target, share)| share_is_lethal(state, target, *share))
+            .count();
+        let is_better = match best {
+            Some((most, _)) => kills > most,
+            None => true,
+        };
+        if is_better {
+            best = Some((kills, action));
+        }
+    }
+    best.map(|(_, action)| action.clone())
+}
+
 fn prefer_land_drop(
     state: &GameState,
     ai_player: PlayerId,
@@ -4401,6 +4517,7 @@ fn softmax_select_index(
 
 #[cfg(test)]
 mod tests {
+    use engine::types::actions::ResolveAllScope;
     use std::path::Path;
 
     use super::*;
@@ -5620,7 +5737,10 @@ mod tests {
         engine::game::engine::apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions: 5 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 5,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("the priority holder may propose Resolve All");
 
@@ -5645,7 +5765,10 @@ mod tests {
         engine::game::engine::apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions: 5 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 5,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("the priority holder may propose Resolve All");
 
@@ -5683,7 +5806,10 @@ mod tests {
         engine::game::engine::apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions: 5 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 5,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("the priority holder may propose Resolve All");
 
@@ -7035,6 +7161,77 @@ mod tests {
         assert_eq!(
             low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
             None
+        );
+    }
+
+    /// A foreign entry is on the stack and the AI's only candidates are
+    /// `PassPriority` plus a mana ability, so there is nothing to respond with
+    /// and the full search is skipped. Fails on revert of the stack-agnostic
+    /// `only_pass_or_mana` arm: `owns_entire_stack` is false here and the stack
+    /// is non-empty, so both pre-existing arms return `None`.
+    #[test]
+    fn foreign_stack_pass_or_mana_only_passes_without_search() {
+        let mut state = make_state();
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        push_mana_ability(&mut state, source_id);
+        let ability_index = state.objects.get(&source_id).unwrap().abilities.len() - 1;
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(1)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::PassPriority)
+        );
+    }
+
+    /// The same foreign stack, but a castable spell is available: the AI has a
+    /// real decision to make, so the fast path must decline and let the search
+    /// run.
+    #[test]
+    fn foreign_stack_with_castable_candidate_does_not_fast_pass() {
+        let mut state = make_state();
+        let source_id = add_creature(&mut state, PlayerId(0), 1, 1);
+        push_mana_ability(&mut state, source_id);
+        let ability_index = state.objects.get(&source_id).unwrap().abilities.len() - 1;
+        let spell = add_spell_to_hand(&mut state, PlayerId(0), "Castable Spell", 1);
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(1)));
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+            },
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(spell.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            None
+        );
+    }
+
+    /// The degenerate case of the same arm: a foreign entry on the stack and
+    /// `PassPriority` as the only candidate. Also revert-failing.
+    #[test]
+    fn foreign_stack_pass_only_passes() {
+        let mut state = make_state();
+        state.stack.push_back(no_op_stack_entry(10, PlayerId(1)));
+        let actions = vec![GameAction::PassPriority];
+
+        assert_eq!(
+            low_value_priority_pass_from_actions(&state, PlayerId(0), &actions),
+            Some(GameAction::PassPriority)
         );
     }
 
@@ -12289,6 +12486,113 @@ mod tests {
         );
     }
 
+    /// CR 700.3 + CR 700.3a: the subject partitions and the *chooser* picks, and
+    /// the two are adversaries by construction — so the empty pile-A vector the
+    /// fallback used to hand over is the worst legal answer, not the simplest.
+    /// The fallback now answers with the same weight-balanced split
+    /// `ai_support::balanced_pile_partition` puts in the candidate set, which is
+    /// also what keeps the answer a contract member.
+    #[test]
+    fn fallback_partition_is_balanced() {
+        let mut state = GameState::new_two_player(42);
+        let eligible: Vec<ObjectId> = [5u32, 4, 3, 2, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mana_value)| {
+                let id = create_object(
+                    &mut state,
+                    CardId(600 + index as u64),
+                    PlayerId(0),
+                    format!("Pile Card {index}"),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+                    shards: Vec::new(),
+                    generic: mana_value,
+                };
+                id
+            })
+            .collect();
+        state.waiting_for = WaitingFor::SeparatePilesPartition {
+            player: PlayerId(0),
+            eligible: eligible.iter().copied().collect(),
+            remaining_subjects: engine::im::Vector::new(),
+            completed: engine::im::Vector::new(),
+            chooser: PlayerId(1),
+            chosen_pile_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Proliferate,
+            )),
+            unchosen_pile_effect: None,
+            source_id: eligible[0],
+            pile_source: engine::types::ability::PileSource::Battlefield,
+        };
+
+        assert_eq!(
+            fallback_action_default(&state),
+            Some(GameAction::SubmitPilePartition {
+                pile_a: vec![eligible[0], eligible[3], eligible[4]],
+            }),
+            "MVs 5,4,3,2,1 balance as 5+2+1 against 4+3"
+        );
+    }
+
+    /// CR 601.2d + CR 704.5g: `WaitingFor::DistributeAmong` is settled
+    /// deterministically on kill count, so `quiesce` (which calls
+    /// `deterministic_choice` with `context: None`) sees the board the division
+    /// actually produces instead of stalling the rollout on two near-identical
+    /// distribution vectors. The 2/3 even split leaves the 3-toughness body
+    /// alive; the 4/1 lethal-first split destroys both.
+    ///
+    /// Second half: when both offered splits kill the same number of targets the
+    /// engine's emission order decides, so the even split (emitted first) wins.
+    #[test]
+    fn distribute_among_deterministic_choice_prefers_lethal_split() {
+        let mut state = GameState::new_two_player(42);
+        let tough = add_creature(&mut state, PlayerId(1), 1, 3);
+        let frail = add_creature(&mut state, PlayerId(1), 1, 1);
+        let targets = vec![TargetRef::Object(tough), TargetRef::Object(frail)];
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: P0,
+            total: 5,
+            targets: targets.clone(),
+            unit: DistributionUnit::Damage,
+        };
+
+        let even = GameAction::DistributeAmong {
+            distribution: vec![(targets[0].clone(), 2), (targets[1].clone(), 3)],
+        };
+        let lethal_first = GameAction::DistributeAmong {
+            distribution: vec![(targets[0].clone(), 4), (targets[1].clone(), 1)],
+        };
+        let config = AiConfig::default();
+        assert_eq!(
+            deterministic_choice(
+                &state,
+                P0,
+                &config,
+                &[even.clone(), lethal_first.clone()],
+                None
+            ),
+            Some(lethal_first),
+            "the split that destroys both targets must win"
+        );
+
+        // Both splits kill only the 1-toughness body — a tie, so emission order
+        // holds and the even split stands.
+        let tie_a = GameAction::DistributeAmong {
+            distribution: vec![(targets[0].clone(), 2), (targets[1].clone(), 3)],
+        };
+        let tie_b = GameAction::DistributeAmong {
+            distribution: vec![(targets[0].clone(), 1), (targets[1].clone(), 4)],
+        };
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &[tie_a.clone(), tie_b], None),
+            Some(tie_a),
+            "an equal kill count must keep the engine's emission order"
+        );
+    }
+
     /// A 13-permanent, mandatory 4-of-N sacrifice. Candidate generation emits
     /// only the first 64 of C(12, 4) selections; every one includes cards[0],
     /// while the greedy ideal deliberately does not.
@@ -12627,6 +12931,7 @@ mod tests {
                 up_to: false,
                 constraint: None,
                 source_id: source,
+                reciprocal_role: None,
             }
         });
         push("DiscardChoice", &|state| {
@@ -13090,6 +13395,7 @@ mod tests {
             up_to: true,
             constraint: None,
             source_id: source,
+            reciprocal_role: None,
         };
 
         assert_eq!(

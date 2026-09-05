@@ -59,6 +59,7 @@ interface PackSelectorProps {
   estimateProgress: CatalogScanProgress | null;
   pendingActions: ReadonlySet<string>;
   durableMutationActive: boolean;
+  networkActionsDisabled: boolean;
   onSelectCurated(): void;
   onSelectDeckLibrary(): void;
   onEstimate(selector: InstallSelector): void;
@@ -172,7 +173,7 @@ function sameSelector(left: InstallSelector, right: InstallSelector): boolean {
   }
 }
 
-export function PackSelector({ summary, curatedSelector, deckLibrarySelector, curatedDrift, deckLibraryDrift, estimate, estimateProgress, pendingActions, durableMutationActive, onSelectCurated, onSelectDeckLibrary, onEstimate, onInstall }: PackSelectorProps) {
+export function PackSelector({ summary, curatedSelector, deckLibrarySelector, curatedDrift, deckLibraryDrift, estimate, estimateProgress, pendingActions, durableMutationActive, networkActionsDisabled, onSelectCurated, onSelectDeckLibrary, onEstimate, onInstall }: PackSelectorProps) {
   const { t, i18n } = useTranslation("settings");
   const { catalog } = useSetCatalog();
   const artChain = usePreferencesStore((state) => state.artChain);
@@ -233,11 +234,11 @@ export function PackSelector({ summary, curatedSelector, deckLibrarySelector, cu
   // Curated request completing is not an instruction to retry a failed Deck
   // library request, even though both selectors live in this component.
   useEffect(() => {
-    if (curated && !curatedSelector) onSelectCurated();
-  }, [curated, curatedSelector, onSelectCurated]);
+    if (!networkActionsDisabled && curated && !curatedSelector) onSelectCurated();
+  }, [curated, curatedSelector, networkActionsDisabled, onSelectCurated]);
   useEffect(() => {
-    if (deckLibrary && !deckLibrarySelector) onSelectDeckLibrary();
-  }, [deckLibrary, deckLibrarySelector, onSelectDeckLibrary]);
+    if (!networkActionsDisabled && deckLibrary && !deckLibrarySelector) onSelectDeckLibrary();
+  }, [deckLibrary, deckLibrarySelector, networkActionsDisabled, onSelectDeckLibrary]);
 
   // A rejected estimate is deliberately not retried while this exact option
   // remains selected. Moving through another local option is an intentional
@@ -260,7 +261,7 @@ export function PackSelector({ summary, curatedSelector, deckLibrarySelector, cu
   // because the hook discards an estimate taken against a superseded one — so
   // a summary change has to be able to ask again, while a re-render must not.
   useEffect(() => {
-    if (!localMembership || !localSelector) return;
+    if (networkActionsDisabled || !localMembership || !localSelector) return;
     // Already on screen: nothing to ask for. The key is deliberately NOT
     // cleared here — leaving the option does that, and doing it in both places
     // was measured to be redundant (no probe could kill this line).
@@ -281,7 +282,7 @@ export function PackSelector({ summary, curatedSelector, deckLibrarySelector, cu
       onEstimate(localSelector);
     }, CURATED_ESTIMATE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [estimatePending, localMembership, localSelector, matchingEstimate, onEstimate, summary]);
+  }, [estimatePending, localMembership, localSelector, matchingEstimate, networkActionsDisabled, onEstimate, summary]);
 
   return (
     <fieldset className="flex flex-col gap-4 rounded-[16px] border border-white/10 bg-slate-950/20 p-3 sm:p-4">
@@ -431,7 +432,7 @@ export function PackSelector({ summary, curatedSelector, deckLibrarySelector, cu
           // buttons would be disabled and the only undiscoverable way out is
           // to pick another option and come back. Here it retries the thing
           // that failed.
-          disabled={(!selector && !localUnresolved) || estimatePending || (localMembership && pendingActions.has(curated ? "curated" : "deck_library"))}
+          disabled={networkActionsDisabled || (!selector && !localUnresolved) || estimatePending || (localMembership && pendingActions.has(curated ? "curated" : "deck_library"))}
           onClick={() => {
             if (localUnresolved) {
               if (curated) onSelectCurated(); else onSelectDeckLibrary();
@@ -449,7 +450,7 @@ export function PackSelector({ summary, curatedSelector, deckLibrarySelector, cu
         </button>
         <button
           type="button"
-          disabled={!selector || !matchingEstimate || durableMutationActive || [...pendingActions].some((entry) => MUTATION_ACTIONS.has(entry))}
+          disabled={networkActionsDisabled || !selector || !matchingEstimate || durableMutationActive || [...pendingActions].some((entry) => MUTATION_ACTIONS.has(entry))}
           onClick={() => selector && onInstall(selector)}
           className="min-h-11 rounded-[12px] border border-emerald-400/50 bg-emerald-400/10 px-4 py-2 text-sm font-medium text-emerald-50 transition-colors hover:bg-emerald-400/18 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-emerald-300"
         >

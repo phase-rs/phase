@@ -329,14 +329,15 @@ pub struct PolicyPenalties {
     /// combo line that is reachable next turn. Consumed by `ComboLinePolicy`.
     #[serde(default = "default_combo_progress_next_turn_bonus")]
     pub combo_progress_next_turn_bonus: f64,
-    /// CR 701.6a: Penalty for casting a spell whose mana value matches the
-    /// charge-counter count on a Chalice-of-the-Void-class permanent the AI
-    /// controls — the spell is countered for free, pure tempo and card loss.
-    /// Consumed by `ChaliceAvoidancePolicy`.
+    /// CR 701.6a: Penalty for casting a spell that a Chalice-class cast trap
+    /// the AI controls would counter — mana value equal to the charge-counter
+    /// count (Chalice of the Void) or no mana spent (Vexing Bauble). The spell
+    /// is countered for free, pure tempo and card loss. Consumed by
+    /// `ChaliceAvoidancePolicy`.
     #[serde(default = "default_own_chalice_counter_penalty")]
     pub own_chalice_counter_penalty: f64,
     /// CR 701.6a: Penalty for casting a spell that an opponent's Chalice-class
-    /// permanent would counter. Lighter than the own-Chalice penalty: the AI
+    /// cast trap (counter-count or no-mana-spent gate) would counter. Lighter than the own-Chalice penalty: the AI
     /// may still want the spell on the stack (e.g. to bait, or when the spell's
     /// value clears the loss), so this demotes rather than vetoes.
     #[serde(default = "default_opponent_chalice_counter_penalty")]
@@ -553,6 +554,46 @@ pub struct PolicyPenalties {
     /// you discard" engine (preference band, per engine).
     #[serde(default = "default_discard_payoff_bonus")]
     pub discard_payoff_bonus: f64,
+    /// CR 205.3m: card-equivalent value of ONE creature-type member the AI
+    /// already has on its battlefield, in its command zone, or in hand when the
+    /// engine asks it to choose a creature type. Half a card per member — a
+    /// lord/anthem creature-type choice pays off once per body it applies to.
+    /// Consumed by `CreatureTypeChoicePolicy`, which caps the counted members.
+    #[serde(default = "default_creature_type_presence_unit")]
+    pub creature_type_presence_unit: f64,
+    /// CR 205.3m: tiebreak toward the deck's detected dominant tribe when a
+    /// creature type is chosen. Deliberately STRICTLY less than
+    /// `creature_type_presence_unit`, so a type with one live member always
+    /// outranks the deck's nominal tribe — the dominant tribe only separates
+    /// options with equal presence. Consumed by `CreatureTypeChoicePolicy`.
+    #[serde(default = "default_creature_type_tribe_bonus")]
+    pub creature_type_tribe_bonus: f64,
+    /// Card-equivalent value of ONE colored pip the AI's near-term
+    /// hand demands, that its battlefield lands cannot yet produce, and that the
+    /// land being played does produce. Counted per unmet color and capped by the
+    /// policy, so a dual covering two open colors is worth twice a basic that
+    /// covers one. Consumed by `LandSequencingPolicy`.
+    #[serde(default = "default_land_color_demand_unit")]
+    pub land_color_demand_unit: f64,
+    /// Card-equivalent cost of ONE tempo rider on the
+    /// land being played — an unconditional "enters tapped" replacement, or an
+    /// ETB "sacrifice it unless you pay" trigger — charged only while an
+    /// alternative land with neither rider is also playable this turn. A land
+    /// carrying both riders (Gateway Plaza) is charged twice. Consumed by
+    /// `LandSequencingPolicy`, which subtracts this magnitude.
+    #[serde(default = "default_land_tempo_rider_penalty")]
+    pub land_tempo_rider_penalty: f64,
+    /// Pay-life COUNT at or above which a self-cost activation whose payoff is
+    /// certified trivial is vetoed outright, whatever the priced cost works out
+    /// to. Consumed by `SelfCostValuePolicy`.
+    ///
+    /// A count, not a rate, and deliberately not expressed in the same units as
+    /// `self_cost_pay_life_per_point`: that scalar prices life for the
+    /// *comparison* against a payoff, while this one bounds a branch that has no
+    /// payoff to compare against. See `self_cost_value.rs`'s module docs for why
+    /// the bound has to be stated in the resource the player actually spends.
+    #[serde(default = "default_self_cost_material_life")]
+    pub self_cost_material_life: i32,
 }
 
 impl Default for PolicyPenalties {
@@ -633,6 +674,11 @@ impl Default for PolicyPenalties {
             cost_reduction_deploy_bonus: default_cost_reduction_deploy_bonus(),
             cost_reduction_defer_penalty: default_cost_reduction_defer_penalty(),
             discard_payoff_bonus: default_discard_payoff_bonus(),
+            creature_type_presence_unit: default_creature_type_presence_unit(),
+            creature_type_tribe_bonus: default_creature_type_tribe_bonus(),
+            land_color_demand_unit: default_land_color_demand_unit(),
+            land_tempo_rider_penalty: default_land_tempo_rider_penalty(),
+            self_cost_material_life: default_self_cost_material_life(),
         }
     }
 }
@@ -642,6 +688,56 @@ impl Default for PolicyPenalties {
 /// `policy_penalties` section directly into this struct).
 fn default_graveyard_types_progress() -> f64 {
     2.5
+}
+
+/// CR 205.3m. Half a card per creature-type member. Shared by `Default` and
+/// `#[serde(default)]` so a tuning artifact written before this field existed
+/// still deserializes (`ai_tune` reads `policy_penalties` directly into this
+/// struct).
+fn default_creature_type_presence_unit() -> f64 {
+    0.5
+}
+
+/// CR 205.3m. Strictly below `default_creature_type_presence_unit`, which is
+/// what makes the dominant tribe a tiebreak rather than an override. Shared by
+/// `Default` and `#[serde(default)]` for the same artifact-compatibility reason.
+fn default_creature_type_tribe_bonus() -> f64 {
+    0.25
+}
+
+/// Half a card per unmet color the land covers, so the capped
+/// two-color maximum (1.0) stays inside the preference band and never outranks
+/// the tempo riders it competes with. Shared by `Default` and
+/// `#[serde(default)]` so a tuning artifact written before this field existed
+/// still deserializes (`ai_tune` reads `policy_penalties` directly into this
+/// struct).
+fn default_land_color_demand_unit() -> f64 {
+    0.5
+}
+
+/// A positive MAGNITUDE the policy subtracts, matching
+/// the module's `BOUNCE_DEPRIORITIZE` convention. Seeded at one card: entering
+/// tapped costs a whole turn of that land's mana, which is worth at least the
+/// capped color-fixing bonus above (so a tapped dual never out-scores an
+/// untapped basic on fixing alone — at the two-color cap the two cancel and the
+/// other terms decide) and strictly less than the bounce-land deprioritization
+/// (1.5), whose downside is a whole land drop. The ordering is pinned by
+/// `land_sequencing::tests::land_play_magnitudes_keep_their_documented_ordering`.
+/// Shared by `Default` and `#[serde(default)]` for the same
+/// artifact-compatibility reason.
+fn default_land_tempo_rider_penalty() -> f64 {
+    1.0
+}
+
+/// Two life. One life is inside the noise a repeatable ability may legitimately
+/// be worth exploring — `cheap_pay_life_trivial_is_marginal` keeps that on the
+/// graduated branch — while two life for a payoff this module has certified
+/// trivial is never right, and Adanto Vanguard's 4 is well clear of it. Shared
+/// by `Default` and `#[serde(default)]` so a tuning artifact written before this
+/// field existed still deserializes (`ai_tune` reads `policy_penalties` directly
+/// into this struct).
+fn default_self_cost_material_life() -> i32 {
+    2
 }
 
 fn default_wasted_cast_penalty() -> f64 {
@@ -1076,6 +1172,26 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "loop_shortcut_winning_declare_bonus",
         "LoopShortcutPolicy band selector for a game-deciding CR 104.2a crown; deliberately kept OUT of the CMA-ES penalties vector — win-rate gradients from games that never reach a WaitingFor::LoopShortcut node would tune a win-detector into noise",
+    ),
+    (
+        "creature_type_presence_unit",
+        "CreatureTypeChoicePolicy per-member census weight; no paired-seed calibration — the duel suite never raises a creature-type prompt, so ai-gate carries no gradient for it",
+    ),
+    (
+        "creature_type_tribe_bonus",
+        "CreatureTypeChoicePolicy dominant-tribe tiebreak; must stay strictly below creature_type_presence_unit, and no paired-seed calibration exists — the duel suite never raises a creature-type prompt",
+    ),
+    (
+        "land_color_demand_unit",
+        "LandSequencingPolicy per-unmet-color fixing weight; land sequencing moves duel trajectories, so promotion needs a paired-seed ai-gate run read for land-count curves rather than a win-rate delta alone",
+    ),
+    (
+        "land_tempo_rider_penalty",
+        "LandSequencingPolicy enters-tapped / unless-pay rider cost; must stay strictly above land_color_demand_unit's capped maximum and strictly below the module's BOUNCE_DEPRIORITIZE, and no paired-seed ai-gate calibration exists for it yet",
+    ),
+    (
+        "self_cost_material_life",
+        "veto threshold, not a rate — SelfCostValuePolicy's trivial-payoff materiality bound is a life COUNT in i32, so the continuous [-15.0, 15.0] penalties vector CMA-ES optimizes cannot carry it at all; promotion would need a discrete search, not a paired-seed rerun",
     ),
 ];
 
@@ -1871,6 +1987,32 @@ mod tests {
         assert_eq!(
             PolicyPenalties::default().devotion_pip_progress,
             default_devotion_pip_progress(),
+            "Default and serde must share one source of truth"
+        );
+    }
+
+    #[test]
+    fn policy_penalties_load_pre_self_cost_material_life_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("self_cost_material_life")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-self_cost_material_life artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.self_cost_material_life,
+            default_self_cost_material_life(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().self_cost_material_life,
+            default_self_cost_material_life(),
             "Default and serde must share one source of truth"
         );
     }

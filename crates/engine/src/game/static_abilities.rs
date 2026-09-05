@@ -9,7 +9,8 @@ use crate::game::functioning_abilities::{
 use crate::game::game_object::GameObject;
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
+    ContinuousModification, ControllerRef, CostCategory, StaticDefinition, TargetFilter,
+    TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -91,6 +92,10 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // runtime enforcement is in effects/sacrifice.rs and effects/change_zone.rs via
     // triggered_cause_sacrifice_or_exile_muzzled(). Coverage support is via
     // is_data_carrying_static().
+    //
+    // CR 701.9a + CR 701.21a + CR 609.3: CantCauseForcedAction is a data-carrying
+    // variant — runtime enforcement is in effects/sacrifice.rs and effects/discard.rs
+    // via forced_action_muzzled(). Coverage support is via is_data_carrying_static().
     //
     // CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers is a data-carrying variant —
     // runtime enforcement is in triggers.rs via event_is_suppressed_by_static_triggers().
@@ -490,6 +495,60 @@ pub(crate) fn triggered_cause_sacrifice_or_exile_muzzled(
         };
         let ctx = crate::game::filter::FilterContext::from_source(state, bf_obj.id);
         if crate::game::filter::matches_target_filter(state, object_id, affected, &ctx) {
+            return true;
+        }
+    }
+    false
+}
+
+/// CR 701.9a (discard) + CR 701.21a (sacrifice) + CR 609.3 + CR 109.5: True
+/// when `acting_player` is protected from being forced to perform `action` by
+/// the spell or ability controlled by `cause_controller`, per an active
+/// `CantCauseForcedAction` static whose `cause` scope matches
+/// `cause_controller` relative to the static's own controller (CR 109.5: the
+/// "you"/"your" a static ability protects is its own controller). If muzzled,
+/// `action` is treated as an impossible action for `acting_player` and
+/// produces no game-state change for them (CR 609.3: an effect that can't do
+/// something does only as much as possible) — other players a multi-player
+/// instruction also affects are untouched.
+///
+/// E.g., Sigarda, Host of Herons / Tajuru Preserver: "Spells and abilities
+/// your opponents control can't cause you to sacrifice permanents." Tamiyo,
+/// Collector of Tales additionally lists `Discards`.
+///
+/// Unlike `triggered_cause_sacrifice_or_exile_muzzled` (The Master, Multiplied
+/// — triggered abilities ONLY, filtered to a specific affected-object
+/// subset), this protects the player wholesale against ANY spell or ability
+/// (not just triggered abilities), and is not filtered by which
+/// permanent/card would be affected — there is no `affected` filter to
+/// consult.
+pub(crate) fn forced_action_muzzled(
+    state: &GameState,
+    cause_controller: PlayerId,
+    acting_player: PlayerId,
+    action: CostCategory,
+) -> bool {
+    // CR 604.1: O(1) presence gate — no CantCauseForcedAction static means no muzzle.
+    if !static_kind_present(state, StaticModeKind::CantCauseForcedAction) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    for (bf_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
+        let StaticMode::CantCauseForcedAction {
+            ref cause,
+            ref actions,
+        } = def.mode
+        else {
+            continue;
+        };
+        // CR 109.5: "you" binds to the static's own controller — only THEY are protected.
+        if bf_obj.controller != acting_player {
+            continue;
+        }
+        if !actions.contains(&action) {
+            continue;
+        }
+        if prohibition_scope_matches_player(cause, cause_controller, bf_obj.id, state) {
             return true;
         }
     }

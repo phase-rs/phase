@@ -4,6 +4,7 @@ import type {
   GameObject,
   ManaCost,
   ObjectId,
+  RoomHalvesView,
   SerializedAbility,
   SerializedAbilityCost,
 } from "../adapter/types.ts";
@@ -408,6 +409,7 @@ export function abilityChoiceLabel(
   object: GameObject,
   objects?: Record<ObjectId, GameObject>,
   webSlingingCosts?: Record<string, ManaCost>,
+  roomHalfIdentities?: Record<string, RoomHalvesView>,
 ): { label: string; description?: string } {
   // CR 702.190a: Sneak — label identifies which unblocked attacker is
   // returned to pay the Sneak cost. Include the Sneak mana cost from the
@@ -611,6 +613,37 @@ export function abilityChoiceLabel(
       description: "Attach this Equipment to target creature you control.",
     };
   }
+  // CR 709.5e: unlocking pays the mana cost of a LOCKED half, so the offer has
+  // to say WHICH half and what it costs — with two locked doors the two entries
+  // are otherwise indistinguishable. CR 709.5b + CR 707.2: the half identities
+  // are engine-published (`DerivedViews::room_half_identities`) and already
+  // resolved through the COPIED halves for a permanent that copies a Room; its
+  // own printed card carries neither the name nor the cost, and printed order
+  // is not the frontend's to derive.
+  if (action.type === "UnlockRoomDoor") {
+    const halves = roomHalfIdentities?.[String(action.data.object_id)];
+    const half = action.data.door === "Right" ? halves?.right : halves?.left;
+    if (half == null) {
+      // No published halves (face-down, CR 708.2a, or an older host): stay
+      // honest rather than name a half we were not told about.
+      return { label: i18n.t("game:gamePage.abilityChoice.unlockThisDoor") };
+    }
+    // No description: the label already carries the only two things the player
+    // chooses between, and CR 709.5e's timing ("as a sorcery, main phase, empty
+    // stack") is a legality the ENGINE enforces — the offer does not appear
+    // otherwise. Restating an enforced rule in the menu is noise, not clarity.
+    const costSymbols = manaCostToShards(half.mana_cost)
+      .map((shard) => `{${shard}}`)
+      .join("");
+    return {
+      label: costSymbols
+        ? i18n.t("game:gamePage.abilityChoice.unlockHalfWithCost", {
+          name: half.name,
+          cost: costSymbols,
+        })
+        : i18n.t("game:gamePage.abilityChoice.unlockHalf", { name: half.name }),
+    };
+  }
   return { label: "Tap for Mana" };
 }
 
@@ -744,7 +777,7 @@ export function additionalCostChoices(
 }
 
 /** Strip the leading cost prefix from Oracle text (e.g. "[+2]: Draw a card." → "Draw a card.") */
-function stripCostPrefix(text: string): string {
+export function stripCostPrefix(text: string): string {
   // Bracket format: [+2]: ..., [−1]: ..., [0]: ...
   const bracketMatch = text.match(/^\[.*?\]:\s*/);
   if (bracketMatch) return text.slice(bracketMatch[0].length);

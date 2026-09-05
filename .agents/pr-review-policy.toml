@@ -47,6 +47,11 @@ patterns = [
   ".claude/skills/**",
   ".claude/agents/**",
   ".github/workflows/**",
+  # The pin gate and its tests decide whether a privileged workflow's actions
+  # are pinned. A change to them carries the same authority as a change to the
+  # workflows themselves.
+  "scripts/check_action_pins.py",
+  "scripts/check_action_pins_tests.py",
   "AGENTS.md",
   "CLAUDE.md",
   "GEMINI.md",

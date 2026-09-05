@@ -1,11 +1,11 @@
 use std::cell::OnceCell;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::game::casting;
 use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
 use crate::game::effects::prepare;
-use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::types::ability::{
@@ -1791,11 +1791,13 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
-        // CR 700.3 + CR 700.3a: AI partition candidates. Full powerset is
-        // exponential, so we cap at three heuristics: all-in-A (chooser
-        // sees an empty pile B), all-in-B (chooser sees a full pile A),
-        // and an even split. These exercise the runtime path; deeper
-        // tactical partitioning is a deferred AI-improvement axis.
+        // CR 700.3 + CR 700.3a: AI partition candidates. The full powerset is
+        // exponential, so the set is four heuristics: all-in-A (chooser sees an
+        // empty pile B), all-in-B (chooser sees a full pile A), a
+        // count-balanced half split, and the value-balanced split from
+        // [`balanced_pile_partition`]. The tactical layer re-prices these with
+        // real card values (`phase-ai`'s `policies::pile_partition`), which is
+        // what actually separates a 5-0 from a 3-2.
         WaitingFor::SeparatePilesPartition {
             player, eligible, ..
         } => {
@@ -1807,6 +1809,12 @@ pub fn candidate_actions_broad_with_probe(
                 let mid = elig.len() / 2;
                 variants.push(elig[..mid].to_vec());
             }
+            variants.push(balanced_pile_partition(state, &elig));
+            // The decision contract matches `SubmitPilePartition` by exact
+            // vector equality, so two equal vectors would be two identical
+            // contract entries. Dedupe by value, keeping emission order.
+            let mut seen: HashSet<Vec<ObjectId>> = HashSet::new();
+            variants.retain(|variant| seen.insert(variant.clone()));
             variants
                 .into_iter()
                 .map(|pile_a| {
@@ -3139,7 +3147,12 @@ pub fn candidate_actions_broad_with_probe(
                 Some(*player),
             )]
         }
-        // CR 601.2d: Distribute — even split as default.
+        // CR 601.2d: Distribute — the even split as default, plus a lethal-first
+        // split so a division that actually kills its targets exists in the
+        // candidate set. The even split whiffs whenever the pool spreads below
+        // each body's lethal requirement (5 damage split 2/3 across a 1- and a
+        // 3-toughness creature kills neither, where 2/3 the other way round
+        // kills both). The tactical layer re-prices the emitted candidates.
         WaitingFor::DistributeAmong {
             player,
             total,
@@ -3164,11 +3177,28 @@ pub fn candidate_actions_broad_with_probe(
                         last.1 += *total - assigned;
                     }
                 }
-                vec![candidate(
-                    GameAction::DistributeAmong { distribution: dist },
+                let mut candidates = vec![candidate(
+                    GameAction::DistributeAmong {
+                        distribution: dist.clone(),
+                    },
                     TacticalClass::Selection,
                     Some(*player),
-                )]
+                )];
+                // The decision contract matches `DistributeAmong` by exact
+                // vector equality, so an identical lethal-first split would be
+                // a duplicate contract entry — emit it only when it differs.
+                if let Some(lethal_first) = lethal_first_distribution(state, *total, targets) {
+                    if lethal_first != dist {
+                        candidates.push(candidate(
+                            GameAction::DistributeAmong {
+                                distribution: lethal_first,
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        ));
+                    }
+                }
+                candidates
             }
         }
         // CR 115.7a: propose every legal alternative. The previous arm proposed
@@ -4126,30 +4156,30 @@ pub(crate) fn priority_actions_with_probe(
         }
 
         if is_main_phase && stack_empty && is_active {
+            // CR 709.5e: the unlockable doors come from `room::eligible_doors`,
+            // the same authority the human offer reads
+            // (`room::priority_unlock_room_door_announcements`). Enumerating
+            // them here by hand answered differently for a permanent that is a
+            // COPY of a Room: its own `back_face` is empty, so the right door —
+            // which `room::effective_room_halves` reads off the COPIED halves
+            // (CR 709.5b + CR 707.2) — never appeared, and a bot could never
+            // unlock it.
             for &obj_id in &state.battlefield {
                 let Some(obj) = state.objects.get(&obj_id) else {
                     continue;
                 };
-                if obj.controller != player || !obj.card_types.subtypes.iter().any(|s| s == "Room")
-                {
+                if obj.controller != player {
                     continue;
                 }
-                let unlocks = obj.room_unlocks.unwrap_or_default();
-                if !unlocks.left_unlocked {
+                for (_, door) in crate::game::room::eligible_doors(
+                    state,
+                    obj_id,
+                    crate::types::ability::DoorLockOp::Unlock,
+                ) {
                     actions.push(candidate(
                         GameAction::UnlockRoomDoor {
                             object_id: obj_id,
-                            door: RoomDoor::Left,
-                        },
-                        TacticalClass::Ability,
-                        Some(player),
-                    ));
-                }
-                if obj.back_face.is_some() && !unlocks.right_unlocked {
-                    actions.push(candidate(
-                        GameAction::UnlockRoomDoor {
-                            object_id: obj_id,
-                            door: RoomDoor::Right,
+                            door,
                         },
                         TacticalClass::Ability,
                         Some(player),
@@ -5807,8 +5837,156 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
     result
 }
 
+/// CR 700.3 + CR 700.3a: a weight-balanced two-pile partition of `eligible`,
+/// returned as pile A (pile B is derived by the handler as `eligible \ pile_a`,
+/// and CR 700.3a puts every eligible object in exactly one pile).
+///
+/// The greedy longest-processing-time heuristic: walk the objects heaviest
+/// first and put each into the pile that is currently lighter. Ties: equal pile
+/// weight goes to the pile with FEWER objects, and a still-equal tie goes to A.
+/// The count tiebreak is load-bearing, not cosmetic — an all-zero-weight pool
+/// (a board of tokens) would otherwise pile everything into A.
+///
+/// Weight is mana value. `ai_support` lives in the engine and cannot reach
+/// `phase-ai`'s card evaluation, so this is the engine-local proxy; it only has
+/// to make a *balanced* vector exist in the candidate set. `PilePartitionPolicy`
+/// re-prices the emitted candidates with real card values and picks between
+/// them.
+///
+/// Pile A comes back in `eligible` order rather than in weight order, so the
+/// vector is canonical: the decision contract matches
+/// `GameAction::SubmitPilePartition` by exact vector equality, and a partition
+/// that coincides with another heuristic's must compare equal to it.
+pub fn balanced_pile_partition(state: &GameState, eligible: &[ObjectId]) -> Vec<ObjectId> {
+    let weight = |id: &ObjectId| -> u32 {
+        state
+            .objects
+            .get(id)
+            .map_or(0, |obj| obj.mana_cost.mana_value())
+    };
+
+    let mut heaviest_first: Vec<ObjectId> = eligible.to_vec();
+    heaviest_first.sort_by_key(|id| Reverse(weight(id)));
+
+    let mut pile_a: HashSet<ObjectId> = HashSet::new();
+    let (mut weight_a, mut weight_b) = (0u32, 0u32);
+    let (mut count_a, mut count_b) = (0usize, 0usize);
+    for id in heaviest_first {
+        let object_weight = weight(&id);
+        let to_pile_a = match weight_a.cmp(&weight_b) {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => count_a <= count_b,
+        };
+        if to_pile_a {
+            pile_a.insert(id);
+            weight_a += object_weight;
+            count_a += 1;
+        } else {
+            weight_b += object_weight;
+            count_b += 1;
+        }
+    }
+
+    eligible
+        .iter()
+        .copied()
+        .filter(|id| pile_a.contains(id))
+        .collect()
+}
+
+/// CR 704.5g: how much more damage the creature `target` names needs before it
+/// is destroyed, given it already has one point of the divided pool. `None` for
+/// a player, a planeswalker, a non-creature, or a body already at or past
+/// lethal — none of those can absorb a lethal top-up.
+///
+/// The lethal requirement itself comes from `combat_damage::lethal_damage_needed`
+/// — the documented single authority for "how much does this body absorb",
+/// which already subtracts damage already marked.
+fn lethal_top_up(state: &GameState, target: &TargetRef) -> Option<u32> {
+    let TargetRef::Object(id) = target else {
+        return None;
+    };
+    let object = state.objects.get(id)?;
+    if !object.card_types.core_types.contains(&CoreType::Creature) {
+        return None;
+    }
+    // CR 702.2b is not modelled here: `WaitingFor::DistributeAmong` carries no
+    // source id, so the divider's deathtouch is unknowable at this seam.
+    let needed = crate::game::combat_damage::lethal_damage_needed(state, *id, false);
+    // Subtract the one point every target already holds under CR 601.2d.
+    Some(needed.saturating_sub(1))
+}
+
+/// CR 601.2d: a lethal-first division of `total` among `targets`, returned in
+/// `targets` order so it compares directly against the even split.
+///
+/// Every target starts at the CR 601.2d minimum of one, then the creature
+/// targets are topped up to lethal (CR 704.5g) in descending mana value while
+/// the remainder allows; whatever is left over goes to the most valuable
+/// creature target, or to the last target when there is no creature among them.
+/// The result therefore always sums to `total` with every share at least one.
+///
+/// `None` when there are no targets, or when `total` is smaller than the
+/// number of targets: that prompt is already degenerate (the engine's even
+/// split is the only shape that gives everyone their minimum), so the even
+/// split stands alone.
+///
+/// Mana value is the ordering proxy for "which body is worth killing first".
+/// `ai_support` lives in the engine and cannot reach `phase-ai`'s creature
+/// evaluation, the same constraint `balanced_pile_partition` works under; the
+/// candidate only has to EXIST for the tactical layer to pick it.
+fn lethal_first_distribution(
+    state: &GameState,
+    total: u32,
+    targets: &[TargetRef],
+) -> Option<Vec<(TargetRef, u32)>> {
+    let count = u32::try_from(targets.len()).ok()?;
+    if targets.is_empty() || total < count {
+        return None;
+    }
+    let mut shares = vec![1u32; targets.len()];
+    let mut remainder = total - count;
+
+    let mana_value = |target: &TargetRef| -> u32 {
+        match target {
+            TargetRef::Object(id) => state
+                .objects
+                .get(id)
+                .map_or(0, |object| object.mana_cost.mana_value()),
+            _ => 0,
+        }
+    };
+    // `sort_by_key` is stable, so equal mana values keep `targets` order.
+    let mut by_value: Vec<usize> = (0..targets.len()).collect();
+    by_value.sort_by_key(|&index| Reverse(mana_value(&targets[index])));
+
+    for &index in &by_value {
+        if remainder == 0 {
+            break;
+        }
+        let Some(top_up) = lethal_top_up(state, &targets[index]) else {
+            continue;
+        };
+        let assigned = top_up.min(remainder);
+        shares[index] += assigned;
+        remainder -= assigned;
+    }
+    if remainder > 0 {
+        let index = by_value
+            .iter()
+            .copied()
+            .find(|&index| lethal_top_up(state, &targets[index]).is_some())
+            .unwrap_or(targets.len() - 1);
+        shares[index] += remainder;
+    }
+
+    Some(targets.iter().cloned().zip(shares).collect())
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::game::game_object::RoomDoor;
     use crate::types::game_state::TargetEffectDetail;
     use std::sync::Arc;
 
@@ -5826,6 +6004,215 @@ mod tests {
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
+
+    /// A pile card whose mana value is `generic` — the weight
+    /// [`balanced_pile_partition`] reads.
+    fn pile_card(state: &mut GameState, index: u64, generic: u32) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(600 + index),
+            PlayerId(0),
+            format!("Pile Card {index}"),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().mana_cost = match generic {
+            0 => ManaCost::NoCost,
+            generic => ManaCost::Cost {
+                shards: Vec::new(),
+                generic,
+            },
+        };
+        id
+    }
+
+    /// Prompt `state` with a partition over `eligible` and collect every
+    /// `pile_a` vector the candidate set offers.
+    fn partition_candidates(state: &mut GameState, eligible: &[ObjectId]) -> Vec<Vec<ObjectId>> {
+        state.waiting_for = WaitingFor::SeparatePilesPartition {
+            player: PlayerId(0),
+            eligible: eligible.iter().copied().collect(),
+            remaining_subjects: im::Vector::new(),
+            completed: im::Vector::new(),
+            chooser: PlayerId(1),
+            chosen_pile_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Proliferate,
+            )),
+            unchosen_pile_effect: None,
+            source_id: ObjectId(1),
+            pile_source: crate::types::ability::PileSource::Battlefield,
+        };
+        candidate_actions(state)
+            .into_iter()
+            .filter_map(|candidate| match candidate.action {
+                GameAction::SubmitPilePartition { pile_a } => Some(pile_a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 700.3a: the candidate set must offer a weight-balanced partition
+    /// alongside the three legacy shapes, deterministically, and never the same
+    /// vector twice (the decision contract matches these by exact equality).
+    #[test]
+    fn balanced_partition_candidate_present_and_deterministic() {
+        let mut state = GameState::new_two_player(42);
+        // MVs 5,4,3,2,1. LPT deals 5→A, 4→B, 3→B, 2→A; the last card meets a
+        // 7/7 weight tie on equal counts and goes to A. A = 8, B = 7.
+        let skewed: Vec<ObjectId> = [5, 4, 3, 2, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mana_value)| pile_card(&mut state, index as u64, mana_value))
+            .collect();
+        let balanced = balanced_pile_partition(&state, &skewed);
+        assert_eq!(balanced, vec![skewed[0], skewed[3], skewed[4]]);
+
+        let vectors = partition_candidates(&mut state, &skewed);
+        assert!(vectors.contains(&balanced), "balanced split emitted");
+        assert!(vectors.contains(&Vec::new()), "all-in-B still emitted");
+        assert!(vectors.contains(&skewed), "all-in-A still emitted");
+        assert!(
+            vectors.contains(&skewed[..2].to_vec()),
+            "count-balanced half split still emitted"
+        );
+        assert!(
+            vectors
+                .iter()
+                .enumerate()
+                .all(|(index, pile_a)| !vectors[..index].contains(pile_a)),
+            "no duplicate partition vectors"
+        );
+
+        // One card outweighs every other combined: it is pile A by itself.
+        let mut state = GameState::new_two_player(42);
+        let lopsided: Vec<ObjectId> = [6, 1, 1, 1, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mana_value)| pile_card(&mut state, index as u64, mana_value))
+            .collect();
+        assert_eq!(
+            balanced_pile_partition(&state, &lopsided),
+            vec![lopsided[0]]
+        );
+
+        // Five zero-cost tokens: every weight comparison ties, so the
+        // object-count tiebreak alternates strictly by list order.
+        let mut state = GameState::new_two_player(42);
+        let tokens: Vec<ObjectId> = (0..5)
+            .map(|index| pile_card(&mut state, index, 0))
+            .collect();
+        assert_eq!(
+            balanced_pile_partition(&state, &tokens),
+            vec![tokens[0], tokens[2], tokens[4]]
+        );
+    }
+
+    /// A creature target for a divided-damage prompt: `toughness` toughness and
+    /// `generic` mana value (the ordering proxy `lethal_first_distribution`
+    /// reads).
+    fn distribution_creature(
+        state: &mut GameState,
+        index: u64,
+        toughness: i32,
+        generic: u32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(700 + index),
+            PlayerId(1),
+            format!("Damage Target {index}"),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.power = Some(1);
+        object.toughness = Some(toughness);
+        object.mana_cost = match generic {
+            0 => ManaCost::NoCost,
+            generic => ManaCost::Cost {
+                shards: Vec::new(),
+                generic,
+            },
+        };
+        id
+    }
+
+    /// Prompt `state` with a `total`-point damage division over `targets` and
+    /// collect every distribution the candidate set offers.
+    fn distribution_candidates(
+        state: &mut GameState,
+        total: u32,
+        targets: &[TargetRef],
+    ) -> Vec<Vec<(TargetRef, u32)>> {
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total,
+            targets: targets.to_vec(),
+            unit: crate::types::game_state::DistributionUnit::Damage,
+        };
+        candidate_actions(state)
+            .into_iter()
+            .filter_map(|candidate| match candidate.action {
+                GameAction::DistributeAmong { distribution } => Some(distribution),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 601.2d + CR 704.5g: 5 damage across a 3-toughness and a 1-toughness
+    /// creature. The even split hands out 2 then 3 — the 3-toughness body
+    /// survives on 2, so only one target dies. The lethal-first split starts
+    /// both at the CR 601.2d minimum of one, tops the higher-mana-value body up
+    /// to lethal, and drops the leftover on it: 4/1, and BOTH die.
+    ///
+    /// REVERT-FAILING: pre-fix the even split is the arm's only candidate, so
+    /// no policy and no search node can reach the division that kills both.
+    #[test]
+    fn lethal_first_distribution_candidate_present() {
+        let mut state = GameState::new_two_player(42);
+        let tough = distribution_creature(&mut state, 0, 3, 3);
+        let frail = distribution_creature(&mut state, 1, 1, 1);
+        let targets = vec![TargetRef::Object(tough), TargetRef::Object(frail)];
+
+        let distributions = distribution_candidates(&mut state, 5, &targets);
+        assert!(
+            distributions.contains(&vec![
+                (TargetRef::Object(tough), 2),
+                (TargetRef::Object(frail), 3),
+            ]),
+            "the even split must still be offered, got {distributions:?}"
+        );
+        assert!(
+            distributions.contains(&vec![
+                (TargetRef::Object(tough), 4),
+                (TargetRef::Object(frail), 1),
+            ]),
+            "a lethal-first split killing both bodies must be offered, got {distributions:?}"
+        );
+        assert!(
+            distributions.iter().all(
+                |dist| dist.iter().map(|(_, share)| *share).sum::<u32>() == 5
+                    && dist.iter().all(|(_, share)| *share >= 1)
+            ),
+            "CR 601.2d: every division must sum to the pool with each target at \
+             one or more, got {distributions:?}"
+        );
+
+        // CR 601.2d degenerate prompt: fewer points than targets means no legal
+        // division gives everyone their minimum, so the helper stands down and
+        // the even split is the arm's only candidate. The engine never opens
+        // this prompt — `cap_distribution_target_slots` truncates the slots to
+        // the pool on the casting and the triggered path alike — so the arm is
+        // not asked to answer it.
+        assert!(
+            lethal_first_distribution(&state, 1, &targets).is_none(),
+            "a pool smaller than the target count has no lethal-first split"
+        );
+        assert!(
+            lethal_first_distribution(&state, 1, &[]).is_none(),
+            "an empty target list has no lethal-first split"
+        );
+    }
 
     #[test]
     fn choose_objects_candidates_respect_bounds_and_distinctness() {
@@ -7027,6 +7414,7 @@ mod tests {
             up_to: true,
             constraint: None,
             source_id: ObjectId(100),
+            reciprocal_role: None,
         };
 
         let actions = candidate_actions_broad(&state);

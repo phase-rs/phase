@@ -53,6 +53,19 @@ function commandersNotInDeck(
   }
 }
 
+function hasCommanderCopyAvailable(
+  composition: CommanderDeckComposition,
+  entry: DeckEntry,
+  selectedCount: number,
+): boolean {
+  switch (composition) {
+    case "commanders-inside":
+      return selectedCount < entry.count;
+    case "commanders-outside":
+      return selectedCount === 0;
+  }
+}
+
 /**
  * CR 903.13f(1) / CR 903.5: is `totalCards` a legal size under this rule?
  * Exhaustive with no `default`, so a third `DeckSizeRule` variant is a compile
@@ -134,7 +147,10 @@ export function CommanderPanel({
   const eligibleCommanders = deck
     .filter((entry) => {
       if (!isCommanderEligible(entry.name)) return false;
-      return !commanders.includes(entry.name);
+      // CR 903.13f(2): Commander Draft may use any number of same-name cards
+      // from the pool, so inside-deck designations consume copies, not names.
+      const selectedCount = commanders.filter((name) => name === entry.name).length;
+      return hasCommanderCopyAvailable(deckComposition, entry, selectedCount);
     })
     .map((e) => e.name);
 
@@ -151,10 +167,12 @@ export function CommanderPanel({
             {t("commanderPanel.noCommander")}
           </div>
         )}
-        {commanders.map((name) => {
+        {commanders.map((name, index) => {
+          const occurrence = commanders.slice(0, index + 1)
+            .filter((commander) => commander === name).length;
           return (
             <div
-              key={name}
+              key={`${name}-${occurrence}`}
               {...mouseHoverPreview(onCardHover, hoverInfo(name))}
               className="flex items-center justify-between rounded bg-purple-900/30 px-2 py-1.5"
             >

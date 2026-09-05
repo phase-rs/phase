@@ -8,14 +8,14 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
     DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
-    TriggerOrderTemplateOp,
+    ResolveAllScope, TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
+    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError, PriorityPassingMode,
     ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
     StackEntry, StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
     StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, WaitingFor,
@@ -2830,7 +2830,6 @@ fn certified_bounded_cycle_offer<'a>(
         certified_period_touch, PeriodCertification, PeriodTouch, PeriodicDelta, ResourceVector,
     };
 
-    let cur = ResourceVector::snapshot(state);
     // Written as an explicit newest-first walk rather than `find_map` because the candidate
     // body now threads `&mut verdicts` and carries an owned per-candidate `PeriodTouch` out.
     let mut basis_a: Option<(
@@ -2853,7 +2852,10 @@ fn certified_bounded_cycle_offer<'a>(
         // over the CERTIFIED PERIOD's announced pairs rather than over the offer-beat stack.
         let points = bounded_cycle_pin_slots_for_window(&touch_cover, proposer);
         let slots: Vec<DecisionSlot> = points.iter().map(|p| p.slot.clone()).collect();
-        let delta = ResourceVector::delta(&ResourceVector::snapshot(prior), &cur);
+        // `period` re-snapshots `state` once per candidate — accepted: the walk is bounded by
+        // the ring's length, and a hoisted snapshot cannot be handed to the single authority
+        // without splitting it back into the two-snapshot form it exists to remove.
+        let delta = ResourceVector::period(prior, state);
         // The existing disjunction, written as an `if / else if` that RECORDS the matching
         // disjunct instead of discarding it. Semantics are byte-for-byte the `||` it
         // replaces: the equality arm is still evaluated first and `_pinned` still runs only
@@ -2906,6 +2908,7 @@ fn certified_bounded_cycle_offer<'a>(
                 frames_per_period: span,
                 delta,
                 victim_slot: Vec::new(),
+                declarable_victims: Vec::new(),
             },
         ));
         break;
@@ -2993,6 +2996,7 @@ fn certified_bounded_cycle_offer<'a>(
                     frames_per_period: k,
                     delta,
                     victim_slot: Vec::new(),
+                    declarable_victims: Vec::new(),
                 },
             )
         }
@@ -3094,6 +3098,10 @@ fn certified_bounded_cycle_offer<'a>(
         .iter()
         .map(|(slot, _)| (slot.clone(), worst_seat_life_loss))
         .collect();
+    // CR 704.5a: the SAME seat set `elimination_bounds` is handed two statements below,
+    // carried on the certificate so the per-cycle conformance check confines its lift to what
+    // the bound actually reserved instead of re-deriving a domain from the driven board.
+    periodic.declarable_victims = declarable_victims.clone();
     // `.cloned()`, not `.copied()`: `(DecisionSlot, i64)` is not `Copy`.
     let slot_magnitude: std::collections::BTreeMap<DecisionSlot, i64> =
         periodic.victim_slot.iter().cloned().collect();
@@ -3191,10 +3199,10 @@ fn certified_bounded_cycle_offer<'a>(
 ///
 /// FAIL-CLOSED on every uncertainty, because a wrong pin is worse than no offer:
 ///
-/// * an empty point set publishes no declaration at all — a declaration against an empty
-///   schema would be the one shape `handle_declare_shortcut` validates neither
-///   `predictability_gate` nor `validate_pins` against (both live inside its
-///   `if !offer.schema.points.is_empty()` block);
+/// * an empty point set publishes no declaration at all — `handle_declare_shortcut` validates
+///   every declaration it resolves, whatever the schema published, so one minted against an
+///   exposed-nothing schema is refused on any slot-addressing pin it carries and states nothing
+///   without one; either way `declaration.is_some()` would stop meaning "the handler takes this";
 /// * `None` (that seat never answered this slot) and [`LoopAnswer::Conflicted`] (it answered
 ///   two ways — see that type: an engine-capability refusal, NOT a CR 732.2a mandate) are the
 ///   SAME disposition here, because neither names a single answer to pin;
@@ -3836,9 +3844,9 @@ fn entry_announces(
     // `WaitingFor::TriggerTargetSelection` is ever raised, so `record_trigger_target_answer`
     // — whose only two call sites are that prompt's reducer arms — never runs. A point
     // published here would demand a `predictability_gate` answer no writer can produce, and
-    // one unanswerable point makes the WHOLE offer undeclarable (the gate's `required` set is
-    // every published point). Journalling the auto-selection instead would model a decision
-    // the player never made.
+    // since the gate's `required` set is every published point, one such point leaves the
+    // offer with no declaration the engine can publish. Journalling the auto-selection instead
+    // would model a decision the player never made.
     //
     // THE SAME AUTHORITY AS THE RELIEF, exported rather than re-derived: gate (3)'s
     // `stack_entry_has_no_ordering_input` asks `forced_unique_targeting` about this same
@@ -4538,29 +4546,22 @@ fn until_lethal_fallback(
 /// is a `Ranking`, which lives INSIDE the step and never changes the count — this seam is
 /// type-only across that parameterization.
 ///
-/// DORMANT for every Stage-2 crownable loop (Ruling B) — and the REASON has now been restated
-/// TWICE, because each restatement was falsified by the next commit and the history is the
-/// useful part. (i) It was "`TargetSchedule` rotates DecisionSource objects, not players";
-/// parameterizing a step's subject admitted `AnnouncementSubject::Seat` and killed that.
-/// (ii) It was then "no in-tree producer emits a `Seat` into a schedule", which is FALSE as of
-/// the provenance split: `record_trigger_target_answer` and
-/// `game::interaction::materialize_loop_shortcut_response` both mint
-/// `Scheduled(TargetSchedule::Constant(Ranking::one(AnnouncementSubject::Seat(..))))` for a
-/// CR 601.2c announced seat.
-///
-/// (iii) The property that actually holds, and the one this function's return value depends on,
-/// is about ROTATION rather than about subjects: **no in-tree producer emits a multi-STEP
-/// schedule** (`RoundRobin` / `Piecewise`) **or a multi-entry `Ranking`**. Every seat-carrying
-/// schedule the engine mints is a one-step `Constant`, which lands on the `1` arm of the match
-/// below — the same `1` a `TargetPin::Player` lands on, so the split moved the spelling and not
-/// the period. `live_mandatory_loop_winner` crowns on PLAYER fallers, and a loop whose targets
-/// do not rotate produces no NEW player faller per cycle to aggregate. The only crownable >2p
-/// player drain pins ALL opponents every cycle (constant, period 1 — via the
-/// `Scheduled(Constant(_))` arm below since the split, via `TargetPin::Player(_)` before it,
-/// and those two arms return the same `1`). The seam is built for generality and a multi-cycle
-/// aggregation is fail-safe either way (a loop reaching the arm measures 1 cycle, finds no
-/// faller, does not crown), so a future ROTATING producer changes what must be re-argued here,
-/// not what this function returns.
+/// DORMANT for every Stage-2 crownable loop (Ruling B). The producer
+/// `game::interaction::materialize_loop_shortcut_response` emits a ONE-entry `Constant` on an
+/// `UntilLethal` offer and a `Piecewise` on a `Fixed` one, and NEITHER MOVES THIS FUNCTION'S
+/// ANSWER OFF 1 — the reason is which consumer sees which. This function's two consumers are
+/// [`shortcut_validated_range`]'s `UntilLethal` arm and `apply_until_lethal_shortcut`, both
+/// UNTIL-LETHAL paths, and the multi-STEP shape is minted only under a FIXED count, which reads
+/// its range off the count and never consults a schedule. A MULTI-entry `Constant` can still
+/// reach here from a decoded save — `declaration_conforms` refuses one at DECLARE, not at load —
+/// and it lands on the same `Constant(_)` arm and returns 1, correctly, since
+/// `evaluate_schedule` resolves `head()` only. The argument therefore rests on the schedule's
+/// SHAPE rather than on any producer's arity. `live_mandatory_loop_winner` crowns on PLAYER
+/// fallers, and a loop whose targets do not rotate produces no NEW player faller per cycle to
+/// aggregate. The seam is built for generality and a multi-cycle aggregation is fail-safe either
+/// way (a loop reaching the arm measures 1 cycle, finds no faller, does not crown), so a future
+/// ROTATING producer on an until-lethal path changes what must be re-argued here, not what this
+/// function returns.
 ///
 /// CR 732.2a SAFETY LIMIT: the returned period is clamped to `MAX_SHORTCUT_CYCLES`. Both
 /// consumers derive their `0..period` range from this one helper (`validate_pins` and
@@ -4619,14 +4620,17 @@ fn shortcut_drive_period(
 /// and at a count of 1 over a length-2 rotation `Ok` is the CORRECT answer. Do not re-derive
 /// and re-add that term.
 ///
-/// PRECONDITION, discharged at its call site: the count is already cap-checked, because
-/// `handle_declare_shortcut` runs the `MAX_SHORTCUT_CYCLES` / `max_iterations` match ABOVE
-/// the pin-validation block. Without that ordering a hostile `Fixed(4e9)` would become a
-/// four-billion-iteration validation loop. Exactly ONE call site consumes this helper.
+/// PRECONDITION, DISCHARGED BY EACH CALLER: the count handed in is already bounded. A caller
+/// that has not bounded it must not call this — an unchecked `Fixed(4e9)` becomes a
+/// four-billion-iteration validation loop. `handle_declare_shortcut` discharges it by running
+/// the `MAX_SHORTCUT_CYCLES` / `max_iterations` match above its pin-validation block;
+/// `build_bounded_declaration` by passing the schema's own `iteration_count`; the interaction
+/// decoder by the count-spec projection, which computes
+/// `max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES)` and admits only that window.
 ///
 /// Exhaustive over `IterationCount` with no wildcard, so a future variant build-breaks here
 /// and forces a range decision instead of silently inheriting one.
-fn shortcut_validated_range(
+pub(crate) fn shortcut_validated_range(
     count: &crate::analysis::decision_template::IterationCount,
     template: Option<&crate::analysis::decision_template::DecisionTemplate>,
 ) -> crate::analysis::decision_template::IterationIndex {
@@ -5151,13 +5155,18 @@ fn materialize_fixed_shortcut(
                 // remaining repetitions could carry a seat past a threshold inside the
                 // proposal. Measured before commit, on the same axes the bound reads, and
                 // fail-closed: a divergent cycle is dropped whole and the drive hands back
-                // to manual play with the last conforming cycle intact.
+                // to manual play with the last conforming cycle intact. The comparison is
+                // victim-INVARIANT rather than exact: CR 601.2c lets one declaration aim an
+                // announced slot at a different seat each iteration, and `conforms` states
+                // both what that licenses and what it still refuses.
                 if let Some(pd) = per_cycle {
-                    let actual = crate::analysis::resource::ResourceVector::delta(
-                        &crate::analysis::resource::ResourceVector::snapshot(&committed),
-                        &crate::analysis::resource::ResourceVector::snapshot(&s),
-                    );
-                    if actual != pd.delta {
+                    let pins = template
+                        .as_ref()
+                        .map_or(&[][..], |t| t.decisions.as_slice());
+                    if !pd.conforms(
+                        &crate::analysis::resource::ResourceVector::period(&committed, &s),
+                        pins,
+                    ) {
                         break 'cycles;
                     }
                 }
@@ -5213,12 +5222,6 @@ fn materialize_fixed_shortcut(
     // priority, though it need not be the player proposing the shortcut." THIS BLOCK IS
     // THAT ENDING POINT, and it is the ending point for BOTH entry paths above — `n`
     // cycles done with no cross-lethal, and `break 'cycles`.
-    //
-    // What the boundary means for a declared `Ranking`: within one accepted drive only its
-    // HEAD is ever resolved (`evaluate_schedule`), so this seam is where the NEXT episode
-    // may legitimately re-evaluate the tail. The reasoning is not restated here — it lives
-    // on `analysis::decision_template::Ranking` ("CONSUMED AT AN EPISODE BOUNDARY, NEVER
-    // MID-DRIVE"), and a second copy is the drift the R1 doc sweep exists to prevent.
     //
     // PROBE-PINNED (probe arm `MUT_SEAM`): the window clear here is load-bearing, not a
     // backstop. MEASURED — skipping it on the f4 accepted drive leaves `loop_detect_ring`
@@ -5941,7 +5944,7 @@ fn normalize_recast_frame(
 ///
 /// ONE test, TWO readers: the class derivation and the producer's token-axis feed, which must
 /// publish the count the boundary mint will reproduce.
-fn minted_battlefield_ids(before: &GameState, after: &GameState) -> Vec<ObjectId> {
+pub(crate) fn minted_battlefield_ids(before: &GameState, after: &GameState) -> Vec<ObjectId> {
     after
         .battlefield
         .iter()
@@ -6965,11 +6968,15 @@ fn handle_declare_shortcut(
     // once at declare suffices: the board is frozen through Accept (apply_confirmed_shortcut
     // doc), and the drive's per-iteration `resolve` (CR 608.2b) is the runtime backstop.
     //
-    // A CHOICE-FREE offer (empty schema — a non-targeted drain) exposes no decisions to
-    // validate: its win derivation is pin-independent (the E1 measure is the authority), and
-    // any template the caller supplies is inert for the drive (the loop raises no target
-    // prompt). This preserves the established `Fixed(N)` drain behavior (the resolve-firewall
-    // materialize tests drive a synthetic pin against the empty drain schema).
+    // A CHOICE-FREE offer (empty schema — a non-targeted drain) exposes no decision to pin, so
+    // a declaration against it may carry no SLOT-ADDRESSING pin: its win derivation is
+    // pin-independent (the E1 measure is the authority), and a template that pinned a choice
+    // would fix one this offer never stated. That refusal needs no test of its own here —
+    // `declaration_conforms` already rejects a SLOT-ADDRESSING pin naming a slot no published
+    // point matches, whatever the schema's size — and for those kinds it is what keeps a
+    // client-supplied pin out of `proposal.template`, which the drive's per-cycle conformance
+    // check reads. The established `Fixed(N)` drain behavior is untouched: its declaration
+    // carries no pins.
     // ⚠ ORDER IS LOAD-BEARING: the count cap runs BEFORE the pin validation below, because
     // `shortcut_validated_range` derives the validated range FROM the declared count and so
     // must not be handed an unchecked one — a `Fixed(4_000_000_000)` would otherwise become
@@ -7071,11 +7078,10 @@ fn handle_declare_shortcut(
     // compares an attacker-chosen value against itself. `offer.proposer` is engine state,
     // copied from `WaitingFor::LoopShortcut { proposer }`.
     //
-    // PLACEMENT IS LOAD-BEARING: this sits OUTSIDE the `!offer.schema.points.is_empty()`
-    // block below, so it is reached for every declaration regardless of schema emptiness —
-    // an empty-schema offer skips `predictability_gate` / `validate_pins` entirely and would
-    // otherwise reach the proposal with an unvalidated owner. It is the SIXTH sibling of the
-    // five refusal arms and lands on their single authority (`reject_shortcut_declaration`),
+    // Runs on EVERY resolved declaration, whatever the schema published, and it is the SOLE
+    // refuser of a foreign owner: `declaration_conforms` below reads no `owner` at all, so no
+    // arm of the match can catch one. It is the SIXTH sibling of the five refusal arms and
+    // lands on their single authority (`reject_shortcut_declaration`),
     // so no row can observe which refusal fired first — the "sixth reject path added later"
     // that authority's doc anticipates. Defence in depth for the RESTORE ingress (a persisted
     // `WaitingFor::RespondToShortcut` never runs this handler) lives on
@@ -7084,54 +7090,74 @@ fn handle_declare_shortcut(
         reject_shortcut_declaration(state, &mut result);
         return Ok(result);
     }
-    if !offer.schema.points.is_empty() {
-        match &template {
-            Some(t) => {
-                // CR 732.2a: validate over the range the ACCEPTED COUNT will drive, not
-                // over the schedule's own period. `shortcut_drive_period` answers a
-                // different question (how many cycles one measurement must aggregate), and
-                // using it here both ACCEPTED a pin whose driven image leaves the published
-                // set at an index the count reaches, and REFUSED conforming declarations
-                // whose count is shorter than the schedule.
-                let validated_range = shortcut_validated_range(&count, Some(t));
-                // Coverage + value legality via the shared authority, so the predicate this
-                // handler ACCEPTS under is the same one `build_bounded_declaration` PUBLISHES
-                // under and the human ingress EMITS under. The range is this site's own.
-                if !crate::analysis::decision_template::declaration_conforms(
-                    offer.schema,
-                    t,
-                    validated_range,
-                    state,
-                ) {
-                    reject_shortcut_declaration(state, &mut result);
-                    return Ok(result);
-                }
-            }
-            // CR 732.2a: a `template: None` declaration against a NON-EMPTY schema skips the
-            // validation above entirely — the pins the offer published are never checked. That
-            // is legitimate for exactly one drive shape: the object-growth route, which
-            // re-derives its template from `state.last_loop_action_sequence` (the same routing
-            // discriminant `materialize` dispatches on) and never reads `proposal.template`.
-            // With nothing this proposer can re-derive from, a pin-consuming drive would run with
-            // no pins at all — fail closed into the same manual-play handback the validation
-            // failure above uses. Both conjuncts are required: keying on `template.is_none()`
-            // alone breaks the shipped object-growth declarations.
-            //
-            // SITE F (CR 732.2a) — THE STRICTEST LOCKSTEP CONSTRAINT ON SITE B, because it is the
-            // one direction in which relaxing (1b) would make the engine LESS safe than before.
-            // "Re-derivable" means the period is THIS offer's proposer's own — the same test
-            // `materialize` dispatches on. A merely non-empty test would let a FOREIGN period take
-            // the sibling `None => {}` arm, which performs ZERO pin validation, and open the APNAP
-            // window on a client-supplied declaration against a schema with published points. So
-            // this arm must reject unless the period is the proposer's, not merely unless one
-            // exists. `None` from a heterogeneous run also rejects, which is the fail-closed
-            // direction: nothing can be re-derived from a period that is nobody's.
-            None if state.loop_period_controller() != Some(offer.proposer) => {
+    // CR 732.2a: a declaration cannot pin choices the offer published none of. Every
+    // `Some(t)` meets `declaration_conforms` whatever the schema published — its
+    // `PinValidation::UnexposedSlot` arm is that refusal for every SLOT-ADDRESSING pin, so a
+    // points-empty offer needs no second predicate for those.
+    //
+    // SLOT-ADDRESSING is this path's term throughout, in `pin_slot`'s own sense: a pin that
+    // CARRIES an explicit `DecisionSlot` (`Targets` / `Mode` / `MayChoice` / `UnlessBreak` /
+    // `ManaColor` / `ConvokeTaps`) and is therefore looked up against `schema.points`.
+    // `pin_slot` synthesizes no slot for `Order`, so the term is exact rather than approximate.
+    //
+    // CLOSED FOR `PinnedDecision::Order`, ON EVERY SCHEMA SIZE. `pin_slot` returns `None` for
+    // an ordering pin, so it covers no published point — coverage is kind-aware via
+    // `pin_answers_point` — and `validate_pins` refuses it outright as `NotALoopDecision`
+    // (CR 603.3b: trigger ordering is a different decision kind from the CR 732.2a
+    // per-iteration choices a loop declaration answers). `PinnedDecision` derives
+    // `Deserialize` and rides `GameAction::DeclareShortcut` verbatim, so that refusal is what
+    // stands between the wire and `proposal.template`.
+    //
+    // Only the `None` arm's re-derivation test is conditioned on the schema having points: an
+    // offer publishing none exposes nothing to re-derive.
+    match &template {
+        Some(t) => {
+            // CR 732.2a: validate over the range the ACCEPTED COUNT will drive, not
+            // over the schedule's own period. `shortcut_drive_period` answers a
+            // different question (how many cycles one measurement must aggregate), and
+            // using it here both ACCEPTED a pin whose driven image leaves the published
+            // set at an index the count reaches, and REFUSED conforming declarations
+            // whose count is shorter than the schedule.
+            let validated_range = shortcut_validated_range(&count, Some(t));
+            // Coverage + value legality via the shared authority, so the predicate this
+            // handler ACCEPTS under is the same one `build_bounded_declaration` PUBLISHES
+            // under and the human ingress EMITS under. The range is this site's own.
+            if !crate::analysis::decision_template::declaration_conforms(
+                offer.schema,
+                t,
+                validated_range,
+                state,
+            ) {
                 reject_shortcut_declaration(state, &mut result);
                 return Ok(result);
             }
-            None => {}
         }
+        // CR 732.2a: a `template: None` declaration against a NON-EMPTY schema skips the
+        // validation above entirely — the pins the offer published are never checked. That
+        // is legitimate for exactly one drive shape: the object-growth route, which
+        // re-derives its template from `state.last_loop_action_sequence` (the same routing
+        // discriminant `materialize` dispatches on) and never reads `proposal.template`.
+        // With nothing this proposer can re-derive from, a pin-consuming drive would run with
+        // no pins at all — fail closed into the same manual-play handback the validation
+        // failure above uses. Every conjunct is required: keying on `template.is_none()`
+        // alone breaks the shipped object-growth declarations.
+        //
+        // SITE F (CR 732.2a) — THE STRICTEST LOCKSTEP CONSTRAINT ON SITE B, because it is the
+        // one direction in which relaxing (1b) would make the engine LESS safe than before.
+        // "Re-derivable" means the period is THIS offer's proposer's own — the same test
+        // `materialize` dispatches on. A merely non-empty test would let a FOREIGN period take
+        // the sibling `None => {}` arm, which performs ZERO pin validation, and open the APNAP
+        // window on a client-supplied declaration against a schema with published points. So
+        // this arm must reject unless the period is the proposer's, not merely unless one
+        // exists. `None` from a heterogeneous run also rejects, which is the fail-closed
+        // direction: nothing can be re-derived from a period that is nobody's.
+        None if !offer.schema.points.is_empty()
+            && state.loop_period_controller() != Some(offer.proposer) =>
+        {
+            reject_shortcut_declaration(state, &mut result);
+            return Ok(result);
+        }
+        None => {}
     }
     let proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
@@ -7973,6 +7999,24 @@ enum AutoPassDecision {
 /// interrupt logic is boundary-agnostic — both `EndOfCurrentTurn` and
 /// `MyNextTurnStart` behave identically within a priority window.
 fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassDecision {
+    // CR 117.1 + CR 723.5: Full Control is the player's standing refusal to have
+    // any window taken from them, and it outranks every auto-pass session —
+    // including one another player installed, which is what reaches this loop
+    // without ever consulting the frontend. Checked BEFORE the no-session `Exit`
+    // arm because `Exit` itself falls through to a pass when someone else holds
+    // a live `UntilStackEmpty` session. Preference ownership follows the
+    // authorized submitter, as it does in `auto_pass_recommended`.
+    if state.priority_passing_mode(turn_control::authorized_submitter_for_player(state, player))
+        == PriorityPassingMode::FullControl
+    {
+        // `Finish` also drops a stale session this player owns; both variants
+        // break the loop, so either way the window is theirs.
+        return if state.auto_pass.contains_key(&player) {
+            AutoPassDecision::Finish
+        } else {
+            AutoPassDecision::Break
+        };
+    }
     let Some(mode) = state.auto_pass.get(&player) else {
         return AutoPassDecision::Exit;
     };
@@ -8315,6 +8359,20 @@ fn stack_resolution_session_priority_decision(
         let Some(session) = state.stack_resolution_session.as_ref() else {
             return StackResolutionSessionPriorityDecision::NotActive;
         };
+        // CR 117.1: a Full Control holder is never auto-passed by a session —
+        // theirs or anyone else's. Scoped to `Automatic`: an EXPLICIT
+        // PassPriority is that player's own deliberate decision and still drives
+        // the session. This is the only gate covering a session REPRESENTATIVE,
+        // whose windows are otherwise passed without even the meaningful-action
+        // check below. (The no-session case is handled one layer out, by
+        // `priority_auto_pass_decision`.)
+        if matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
+            && state
+                .priority_passing_mode(turn_control::authorized_submitter_for_player(state, holder))
+                == PriorityPassingMode::FullControl
+        {
+            return StackResolutionSessionPriorityDecision::Pause;
+        }
 
         let current_representatives = super::topology::canonical_priority_representatives(
             state,
@@ -8862,6 +8920,7 @@ fn begin_resolve_all_consent(
     state: &mut GameState,
     priority_player: PlayerId,
     max_resolutions: u32,
+    scope: ResolveAllScope,
 ) -> Result<WaitingFor, EngineError> {
     match state
         .stack_resolution_session
@@ -8870,8 +8929,8 @@ fn begin_resolve_all_consent(
     {
         // An AI-issued recheck is an internal, provisional shortcut. An
         // explicit Resolve All proposal is the priority holder's replacement
-        // shortcut, so restore the saved preferences before asking every
-        // representative for the new proposal's consent.
+        // shortcut, so restore the saved preferences before installing the
+        // requester's own session below.
         Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction) => {
             take_and_restore_stack_resolution_session(state);
         }
@@ -8885,6 +8944,10 @@ fn begin_resolve_all_consent(
     super::priority::pass_priority_legality(state, priority_player)?;
     let current_representative =
         super::topology::priority_pass_representative(state, priority_player);
+    // CR 117.3d: `Own` binds the requester alone (no consent to ask,
+    // so nobody can block it); `Shared` opens the table-wide compression
+    // proposal, rotated so the requester is first and self-granted. See
+    // `ResolveAllScope`.
     let mut representatives = super::topology::priority_pass_participants(state);
     let Some(current_index) = representatives
         .iter()
@@ -8894,7 +8957,10 @@ fn begin_resolve_all_consent(
             "Resolve All requires a live priority representative".to_string(),
         ));
     };
-    representatives.rotate_left(current_index);
+    match scope {
+        ResolveAllScope::Own => representatives = vec![current_representative],
+        ResolveAllScope::Shared => representatives.rotate_left(current_index),
+    }
 
     let epoch = state.next_resolve_all_consent_epoch;
     let next_epoch = epoch.checked_add(1).ok_or_else(|| {
@@ -8907,6 +8973,7 @@ fn begin_resolve_all_consent(
     state.resolve_all_consent_run = Some(ResolveAllConsentRun {
         epoch,
         max_resolutions: StackResolutionBudget::from_legacy_max_resolutions(max_resolutions),
+        scope,
         priority_snapshot: ResolveAllPrioritySnapshot {
             waiting_player: priority_player,
             priority_player: state.priority_player,
@@ -8933,6 +9000,9 @@ fn begin_resolve_all_consent(
         ),
     });
 
+    // An `Own` run is single-participant and self-granted, so it materializes on
+    // the spot and never raises a consent prompt. A `Shared` run queues the
+    // remaining representatives for the table-wide compression proposal.
     if state
         .resolve_all_consent_run
         .as_ref()
@@ -9831,9 +9901,13 @@ fn apply_action(
             }
             return pass_installed_auto_pass_priority(state, *player, &mut events);
         }
-        (WaitingFor::Priority { player }, GameAction::BeginResolveAll { max_resolutions }) => {
-            begin_resolve_all_consent(state, *player, max_resolutions)?
-        }
+        (
+            WaitingFor::Priority { player },
+            GameAction::BeginResolveAll {
+                max_resolutions,
+                scope,
+            },
+        ) => begin_resolve_all_consent(state, *player, max_resolutions, scope)?,
         (
             WaitingFor::ResolveAllConsent {
                 epoch,
@@ -16662,6 +16736,14 @@ pub fn start_game_with_starting_player(
     state.active_player = starting_player;
     state.priority_player = starting_player;
     state.current_starting_player = starting_player;
+    // CR 103.8 + CR 500: the starting player takes their first turn HERE — turn 1
+    // is established inline rather than through `turns::start_next_turn`, which is
+    // where every later turn's per-player count is incremented. Without this the
+    // starting player's `turns_taken` stays one behind every other seat for the
+    // whole game, so `QuantityRef::TurnsTaken` ("the number of turns you've taken
+    // this game") and every "your Nth turn" condition read low for exactly the
+    // player who has taken the MOST turns.
+    state.players[starting_player.0 as usize].turns_taken += 1;
     // First-game default chooser is the starting player; BO3 restarts can pre-set this.
     if state.next_game_chooser.is_none() {
         state.next_game_chooser = Some(starting_player);
@@ -16718,6 +16800,10 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     state.active_player = starting_player;
     state.priority_player = starting_player;
     state.current_starting_player = starting_player;
+    // CR 103.8 + CR 500: see the matching increment in
+    // `start_game_with_starting_player` — turn 1 bypasses `turns::start_next_turn`,
+    // so the starting player's own first turn must be counted here.
+    state.players[starting_player.0 as usize].turns_taken += 1;
     state.phase = Phase::Untap;
 
     events.push(GameEvent::TurnStarted {
@@ -17138,7 +17224,7 @@ mod resolve_all_consent_session_tests {
         let mut state = GameState::new(FormatConfig::free_for_all(), 1, 0x51_1E);
         state.stack.push_back(no_op_entry(1, P0));
 
-        let waiting = begin_resolve_all_consent(&mut state, P0, 1)
+        let waiting = begin_resolve_all_consent(&mut state, P0, 1, ResolveAllScope::Shared)
             .expect("the sole representative is already unanimous");
 
         assert!(matches!(waiting, WaitingFor::Priority { player: P0 }));
@@ -17155,7 +17241,7 @@ mod resolve_all_consent_session_tests {
     fn two_headed_giant_final_grant_overlays_only_canonical_team_representatives() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0x2A6);
         state.stack.push_back(no_op_entry(1, P0));
-        let waiting = begin_resolve_all_consent(&mut state, P0, 7)
+        let waiting = begin_resolve_all_consent(&mut state, P0, 7, ResolveAllScope::Shared)
             .expect("the active team representative begins consent");
         let WaitingFor::ResolveAllConsent {
             epoch,
@@ -18121,9 +18207,11 @@ mod bounded_declaration_tests {
 
     /// **Row D4 — an empty schema publishes NO declaration.**
     ///
-    /// LOAD-BEARING, not tidiness: `predictability_gate` and `validate_pins` both live inside
-    /// `handle_declare_shortcut`'s `if !offer.schema.points.is_empty()` block, so a declaration
-    /// minted against an empty schema would travel the one declare path that runs NEITHER gate.
+    /// LOAD-BEARING, not tidiness: an empty schema exposes no slot, so a declaration minted
+    /// against one that pinned a SLOT-ADDRESSING choice would be refused by the handler that
+    /// has to accept it — `validate_pins` matches those pins to a published point. Publishing
+    /// one would make `declaration.is_some()`, the predicate `ai_support::candidates` gates
+    /// its declare candidate on, mean the opposite of what it says.
     /// The invariant is also staged at fixture level by
     /// `tests/integration/loop_shortcut.rs::r28_empty_schema_offer`, which passes
     /// `declaration: None` for this reason.
@@ -18264,9 +18352,8 @@ mod bounded_declaration_tests {
                     DecisionKind::LoopChoice,
                 ),
             };
-            let required: Vec<_> = schema.points.iter().map(|p| p.slot.clone()).collect();
             assert!(
-                predictability_gate(&as_published, &required).is_ok(),
+                predictability_gate(&as_published, &schema.points).is_ok(),
                 "[{label}] reach-guard: COVERAGE passes on this template — every published slot \
                  is pinned — so the handler's verdict below is the VALUE half's"
             );
@@ -20025,9 +20112,9 @@ mod stage2_injector_tests {
     /// # What this does NOT measure
     ///
     /// ACCEPTANCE. Whether `mixed_no_order` is *submittable* is `declaration_conforms`'
-    /// question; no row here asks it, and the answer is not always yes (an `Order` pin can be
-    /// the sole cover of a required point, in which case dropping it fails
-    /// `predictability_gate` — pre-existing and zone-independent).
+    /// question, and no row here asks it. `mixed` itself is not submittable — `validate_pins`
+    /// refuses its `Order` element as `NotALoopDecision` (CR 603.3b) — which is why these rows
+    /// drive `resolve` directly.
     ///
     /// REVERT-PROBES: reverting the `Order` arm to `resolve_source` ⇒ rows **R** and **P**
     /// fail; **N**, **N2** and **P-minus** are deliberately revert-insensitive.
@@ -20470,7 +20557,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            44,
+            46,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -20478,9 +20565,12 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 9, 30),
+            (5, 9, 32),
             "the partition, not just the total: five PRODUCTION producers, nine PRODUCTION \
-             readers (they read `state.waiting_for` and never write it), 30 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+             readers (they read `state.waiting_for` and never write it), 32 `#[cfg(test)]` lines \
+             (the 31st is `sba.rs`'s paused-resolution fixture for the CR 704.4 safety-net guard; \
+             the 32nd is `triggers.rs`'s positive reach-guard row for \
+             `resolution_frame_is_live_off_priority`).\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(
@@ -21234,9 +21324,16 @@ mod stage2_injector_tests {
         }
     }
 
-    /// A live `LoopShortcut` offer with an EMPTY schema, proposed by P0 on `state`.
-    fn u4_park_on_offer(state: &mut GameState) {
-        use crate::analysis::decision_template::ShortcutDecisionSchema;
+    /// A live `LoopShortcut` offer proposed by P0 on `state`, publishing the one CR 603.5
+    /// `MayChoice` point [`u4_may_template`] pins.
+    ///
+    /// CR 732.2a: a declaration may pin only choices the offer published, so an offer exposing
+    /// no point refuses a template carrying any SLOT-ADDRESSING pin — which would take the
+    /// `owner` axis out of the measurement below rather than isolate it.
+    fn u4_park_on_offer(state: &mut GameState, src: ObjectId) {
+        use crate::analysis::decision_template::{
+            DecisionPoint, DecisionPointKind, ShortcutDecisionSchema,
+        };
         use crate::analysis::loop_check::{LoopCertificate, WinKind};
         use crate::analysis::resource::BoardDelta;
         state.waiting_for = WaitingFor::LoopShortcut {
@@ -21249,7 +21346,16 @@ mod stage2_injector_tests {
                 residual_board_delta: BoardDelta::default(),
                 per_cycle: None,
             },
-            schema: ShortcutDecisionSchema::default(),
+            schema: ShortcutDecisionSchema {
+                points: vec![DecisionPoint {
+                    slot: DecisionSlot {
+                        source: this_object(src),
+                        index: 1,
+                    },
+                    kind: DecisionPointKind::MayChoice,
+                }],
+                ..ShortcutDecisionSchema::default()
+            },
             declaration: None,
         };
     }
@@ -21314,7 +21420,7 @@ mod stage2_injector_tests {
         for owner in [P1, P0] {
             let (mut state, offer_src) = u4_may_board(P0);
             assert_eq!(offer_src, src, "one fixture feeds both halves");
-            u4_park_on_offer(&mut state);
+            u4_park_on_offer(&mut state, offer_src);
             apply_action(
                 &mut state,
                 P0,

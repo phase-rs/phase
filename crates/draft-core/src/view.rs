@@ -358,6 +358,10 @@ pub struct DraftPlayerView {
     /// capability, not a client inference from the draft-kind label: a
     /// completed pod only offers a game when the procedure says it can.
     pub launch_capability: DraftLaunchCapability,
+    /// CR 903.3 / CR 903.13f: number of commanders the deck must designate
+    /// under this draft procedure. This is a count, not a boolean, because
+    /// Commander deck construction can require multiple designated cards.
+    pub commanders_required: u8,
     /// Which pack round (0, 1, 2)
     pub current_pack_number: u8,
     /// Which pick within the current pack
@@ -930,6 +934,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         kind: session.kind,
         source: source_view_for_player(session, seat_index),
         launch_capability: session.kind.procedure().launch_capability(),
+        commanders_required: session.kind.procedure().commanders_required,
         current_pack_number: session.current_pack_number,
         pick_number: session.pick_number,
         pass_direction: session.pass_direction,
@@ -3245,6 +3250,26 @@ mod tests {
             filter_for_player(&session, 0).launch_capability,
             DraftLaunchCapability::None,
             "in-session tournament pairings must not expose an external game launch"
+        );
+    }
+
+    #[test]
+    fn player_view_publishes_the_procedure_owned_commander_count() {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::Quick;
+        assert_eq!(
+            filter_for_player(&session, 0).commanders_required,
+            1,
+            "the projection follows the active procedure, not unrelated config identity"
+        );
+
+        session.kind = DraftKind::Premier;
+        session.config.kind = DraftKind::CommanderDraft;
+        assert_eq!(
+            filter_for_player(&session, 0).commanders_required,
+            0,
+            "a CommanderDraft config label must not leak designation into a Premier view"
         );
     }
 

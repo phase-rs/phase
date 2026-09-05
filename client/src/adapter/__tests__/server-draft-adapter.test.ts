@@ -5,6 +5,12 @@ import { ServerDraftAdapter } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import type { DraftPlayerView } from "../draft-adapter";
 import type { GameLogEntry, GameState, LegalActionsResult, ObjectAction } from "../types";
+import type {
+  InteractionChoiceId,
+  InteractionId,
+  InteractionPreviewRequest,
+  PreviewRequestId,
+} from "../generated/interaction";
 
 // ── MockWebSocket (copied from ws-adapter.test.ts) ─────────────────────
 
@@ -58,11 +64,41 @@ async function completeHandshake(): Promise<MockWebSocket> {
   return ws;
 }
 
+/**
+ * Starts observing `promise` immediately and returns a reader that yields the
+ * rejection reason — or the string `"never settled"` if the promise is still
+ * pending.
+ *
+ * Observation has to start before the first `await` so an already-rejected
+ * promise is handled in the same tick, and the drain is what turns an orphaned
+ * promise — the exact defect these settlement fixes prevent — into a readable
+ * assertion failure instead of a suite timeout.
+ *
+ * The reader yields a MACROTASK turn (`setTimeout(…, 0)`), not a microtask
+ * drain: that is strictly more generous than the settlement paths need, since
+ * both `dispose()` and `onclose` reject synchronously. The cost is that it
+ * couples the reader to real timers — a caller running it under
+ * `vi.useFakeTimers()` would hang. No current caller does; the only fake-timer
+ * scope in these suites is closed by a `finally { vi.useRealTimers(); }`.
+ */
+function trackRejection(promise: Promise<unknown>): () => Promise<unknown> {
+  let outcome: unknown = "never settled";
+  void promise.then(
+    (value) => { outcome = { resolvedWith: value }; },
+    (error) => { outcome = error; },
+  );
+  return async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return outcome;
+  };
+}
+
 function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
   return {
     status: "Drafting",
     kind: "Premier",
     launch_capability: "None",
+    commanders_required: 0,
     current_pack_number: 0,
     pick_number: 0,
     pass_direction: "Left",
@@ -660,6 +696,40 @@ describe("ServerDraftAdapter", () => {
     expect(adapter.currentMatchId).toBeNull();
   });
 
+  // `dispose()` used to null all three handle pairs instead of rejecting them,
+  // so every caller awaiting a server reply was orphaned — and a gameplay
+  // caller holds the module-level dispatch mutex while it waits.
+  it("dispose rejects the in-flight submit, draft and init promises", async () => {
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "DraftMatchStart",
+        data: {
+          match_id: "r1-t0",
+          round: 1,
+          game_code: "GAME01",
+          player_token: "gametok",
+          your_player: 0,
+          opponent_name: "Bob",
+        },
+      }),
+    );
+
+    const submit = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    const pick = trackRejection(adapter.submitPick("card-1"));
+    const reconnect = trackRejection(adapter.reconnectDraft());
+
+    adapter.dispose();
+
+    // Asserted as one tuple rather than three statements: a per-leg assertion
+    // would abort on the first orphan and leave the other two unprobeable.
+    expect([await submit(), await pick(), await reconnect()]).toMatchObject([
+      { code: "WS_CLOSED", message: "Adapter disposed during action", recoverable: true },
+      { code: "WS_CLOSED", message: "Adapter disposed during draft operation", recoverable: true },
+      { code: "WS_CLOSED", message: "Adapter disposed before draft started", recoverable: true },
+    ]);
+  });
+
   it("DraftOver sets phase to complete", () => {
     ws.dispatchSynthetic(
       "message",
@@ -823,6 +893,126 @@ describe("ServerDraftAdapter", () => {
         message: "preview lookup failed",
         recoverable: false,
       });
+    });
+
+    /**
+     * An allocation whose segments are UNEQUAL and whose `choiceId` order is
+     * NOT the candidate publication order, so a sort or a canonicalisation in
+     * the adapter layer is caught rather than coinciding.
+     */
+    const cid = (id: string) => id as InteractionChoiceId;
+    const previewRequest = {
+      requestId: "preview-req-1" as PreviewRequestId,
+      interactionId: "interaction-1" as InteractionId,
+      response: {
+        type: "shortcut",
+        data: {
+          decision: { type: "fixed", data: { iterations: 6 } },
+          pins: [{
+            group: 0,
+            choiceIds: [cid("choice-c"), cid("choice-a"), cid("choice-b")],
+            amounts: [
+              { choiceId: cid("choice-c"), amount: 3 },
+              { choiceId: cid("choice-a"), amount: 1 },
+              { choiceId: cid("choice-b"), amount: 2 },
+            ],
+          }],
+        },
+      },
+    } satisfies InteractionPreviewRequest;
+
+    const previewAnswer = (requestId: string) => ({
+      requestId,
+      interactionId: "interaction-1",
+      status: { type: "confirmable" },
+      progress: { selected: 3, minimum: 1, maximum: 3, aggregate: 6, confirmable: true },
+      outcome: "advanced",
+      summaries: ["confirmAvailable", "progress"],
+    });
+
+    function sentPreviewFrame() {
+      const calls = ws.send.mock.calls;
+      for (let i = calls.length - 1; i >= 0; i--) {
+        const parsed = JSON.parse(calls[i][0] as string);
+        if (parsed.type === "PreviewInteraction") return parsed;
+      }
+      throw new Error("no PreviewInteraction frame was sent");
+    }
+
+    // Row 8, draft-adapter leg.
+    it("sends the authored request verbatim and resolves its own answer", async () => {
+      ws.send.mockClear();
+      const pending = adapter.previewInteraction(previewRequest, 0);
+
+      const frame = sentPreviewFrame();
+      expect(frame.type).toBe("PreviewInteraction");
+      expect(frame.data.request).toEqual(previewRequest);
+      const pin = frame.data.request.response.data.pins[0];
+      // Reach guard: more than one segment, so dropping all but the first fails.
+      expect(pin.amounts.length).toBeGreaterThan(1);
+      expect(pin.amounts).toEqual([
+        { choiceId: "choice-c", amount: 3 },
+        { choiceId: "choice-a", amount: 1 },
+        { choiceId: "choice-b", amount: 2 },
+      ]);
+      expect(pin.amounts.map((a: { choiceId: string }) => a.choiceId)).toEqual(pin.choiceIds);
+
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "InteractionPreview",
+          data: { preview: previewAnswer("preview-req-1") },
+        }),
+      );
+      await expect(pending).resolves.toMatchObject({ requestId: "preview-req-1" });
+    });
+
+    // Row 12, close-site leg on this adapter.
+    it("rejects in-flight previews on socket close, keeping answered ones", async () => {
+      const answered = adapter.previewInteraction(previewRequest, 0);
+      const unanswered = adapter.previewInteraction(
+        { ...previewRequest, requestId: "preview-req-2" as PreviewRequestId },
+        0,
+      );
+
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "InteractionPreview",
+          data: { preview: previewAnswer("preview-req-1") },
+        }),
+      );
+      await expect(answered).resolves.toMatchObject({ requestId: "preview-req-1" });
+
+      ws.dispatchSynthetic("close");
+      await expect(answered).resolves.toMatchObject({ requestId: "preview-req-1" });
+      await expect(unanswered).rejects.toMatchObject({
+        code: "WS_CLOSED",
+        message: "Connection closed during interaction preview",
+      });
+    });
+
+    // Row 12, dispose-site leg. THIS is the site a single-site wiring drops —
+    // measured on the mana twin, deleting only the `dispose` call leaves this
+    // promise never settling while the close-site leg above still passes.
+    it("rejects in-flight previews when the adapter is disposed", async () => {
+      const pending = adapter.previewInteraction(previewRequest, 0);
+      adapter.dispose();
+      await expect(pending).rejects.toMatchObject({
+        code: "WS_CLOSED",
+        message: "Adapter disposed during interaction preview",
+      });
+    });
+
+    // The draft adapter's own precondition, which its WS twin does not carry.
+    it("refuses a preview outside the match phase", async () => {
+      const lobbyAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+      await expect(lobbyAdapter.previewInteraction(previewRequest, 0)).rejects.toMatchObject({
+        code: "PHASE_ERROR",
+      });
+      // Reach guard: the adapter under test IS in the match phase, so the
+      // refusal above is the precondition and not a universally-throwing method.
+      expect(adapter.currentPhase).toBe("match");
     });
   });
 });

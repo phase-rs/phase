@@ -87,19 +87,91 @@ export type InteractionShortcutPreviewFamily = "mana" | "life" | "damage" | "mil
 
 export type InteractionShortcutPreviewEntry = { family: InteractionShortcutPreviewFamily, player: number | null, amount: number, };
 
-export type InteractionShortcutPreview = { count: number, entries: Array<InteractionShortcutPreviewEntry>, };
+export type InteractionShortcutPreview = { count: number, entries: Array<InteractionShortcutPreviewEntry>, 
+/**
+ * CR 732.2a + CR 601.2c: the DECLARATION's shape over this element's `count` — which
+ * announced choices the count is spread across, and how many repetitions each takes.
+ * It is not a magnitude claim about any axis.
+ *
+ * The `choice_id`s are the offer's own published candidate ids, taken from the first
+ * `Targets` point in published order. A later `Targets` point holding candidates does not
+ * fill that domain: it is the first point or nothing, because silently moving it to a
+ * second point would state the split over choices the reader cannot identify.
+ *
+ * The amounts come from whichever producer minted the element. In the offer's published list
+ * (`loop_shortcut_preview`) they are the canonical even split of `count`, remainder on the
+ * earliest ids, empty exactly when that first point holds no candidate. In a preview of a
+ * player's own declaration (`declared_shortcut_preview`) they are the amounts that player
+ * authored — positive parts summing to `count` over a duplicate-free subset of those ids,
+ * enforced by the declaration ingress rather than by this type — and never empty: that
+ * producer states no element at all rather than one carrying an empty split. In the
+ * responder's view of a declaration (`declared_sequence_preview`) they are the segment
+ * LENGTHS the declared count partitions into over the iterations that decision's
+ * announcements start at: successive differences summing to `count`, one per published id,
+ * never empty — and NOT necessarily positive, since a step starting exactly at the count
+ * takes a zero-length segment.
+ *
+ * CR 119.3: `entries` follow this allocation ONLY when the period's life map names
+ * exactly one losing seat that this allocation itself announces and the slot's announced
+ * magnitude is the whole of that seat's per-period loss, which is what makes it positive —
+ * per-seat life magnitudes are then this split multiplied by that rate, and they still
+ * total the period. On every other offer a non-empty allocation still ships beside entries
+ * folded from the raw period, because the allocation states the declaration and the
+ * entries state what the engine can attribute. On the RESPOND side that separation goes one
+ * step further: a declaration whose partition is stated and whose magnitudes are not ships
+ * this allocation beside an EMPTY `entries`, rather than withholding the whole element
+ * (`game::interaction::declared_sequence_preview`).
+ *
+ * The magnitudes are this declaration's arithmetic. On a drive whose first cycle resolves
+ * a target announced before the drive begins, the realized split is shifted one cycle at
+ * each boundary while the total stays exact.
+ */
+allocation?: Array<AmountAssignment>, };
 
 export type InteractionShortcutPointKind = "targets" | "convokeTaps" | "mode" | "mayChoice" | "unlessBreak" | "manaColor";
 
 export type InteractionShortcutPoint = { group: number, kind: InteractionShortcutPointKind, min: number, max: number, unique: boolean, ordered: boolean, readOnly: boolean, candidateIds: Array<InteractionChoiceId>, };
 
-export type InteractionShortcutPin = { group: number, choiceIds: Array<InteractionChoiceId>, };
+export type InteractionShortcutPin = { group: number, choiceIds: Array<InteractionChoiceId>, 
+/**
+ * CR 732.2a + CR 601.2c: the SEGMENT LENGTHS of the announcement sequence
+ * `choice_ids` names, positionally and one-for-one — how many repetitions each
+ * announced subject takes. Empty on every pin that answers its point per
+ * position.
+ *
+ * The lengths are a DECLARATION of how the count is spread, not a claim about what
+ * each subject realizes. On a drive whose first cycle resolves a target announced
+ * before the drive begins, the realized split is shifted one cycle late at each
+ * boundary while the total stays exact — so a segment starting at the last index is
+ * admitted and stays announced, yet realizes no repetition at all.
+ *
+ * CR 732.2a + CR 732.2c: a proposal describes the choices acceptance then takes,
+ * so a sequence is admissible only where the count it partitions is already known.
+ * A pin is SEQUENCED on either limb — it carries `amounts`, or its `choice_ids`
+ * outnumber the point's published `max` — and both limbs bind the same partition,
+ * which only an `IterationCount::Fixed` can fill. Under a fixed count that
+ * partition is `amounts`: one part per announced subject, in the sequence's own
+ * order, every part at least 1, summing to the DECLARED count. An until-lethal
+ * count has nothing to partition and refuses BOTH limbs — an empty `amounts` does
+ * not rescue a longer `choice_ids` list — so no announcement order past the head
+ * is declarable through this ingress.
+ *
+ * A sequenced pin is admissible only on a `Targets` point whose published `max`
+ * is 1: a multi-position slot needs a per-position carrier a flat list cannot
+ * express, so it is refused rather than mis-read.
+ *
+ * `#[serde(default)]` keeps the field additive on the wire; `skip_serializing_if`
+ * keeps a pin carrying none byte-identical to the pre-field shape. Neither makes
+ * it additive at CONSTRUCTION — every struct literal must still name it, and
+ * nothing here uses `..Default::default()`.
+ */
+amounts?: Array<AmountAssignment>, };
 
 export type InteractionShortcutDecision = { "type": "decline" } | { "type": "acceptSuggested" } | { "type": "fixed", "data": { iterations: number, } };
 
 export type InteractionShortcutReply = { "type": "accept" } | { "type": "shorten", "data": { atIteration: number, } };
 
-export type InteractionResponseSpec = { "type": "select", "data": { constraint: SelectionConstraint, confirm: ConfirmSemantics, } } | { "type": "assignAmounts", "data": { minTotal: number, maxTotal: number, exactTotal: number | null, } } | { "type": "assignDamage", "data": { total: number, modes: Array<InteractionDamageAssignmentMode>, confirm: ConfirmSemantics, } } | { "type": "sequence", "data": { min: number, max: number, unique: boolean, includeAll: boolean, engineValidated: boolean, escape: InteractionChoiceId | null, confirm: ConfirmSemantics, } } | { "type": "groupedSequence", "data": { groups: Array<InteractionGroupConstraint>, unique: boolean, confirm: ConfirmSemantics, } } | { "type": "manaGroups", "data": { groups: Array<InteractionGroupConstraint>, maxBatch: number, escape: InteractionChoiceId | null, confirm: ConfirmSemantics, } } | { "type": "text", "data": { allowArbitrary: boolean, maxLen: number, confirm: ConfirmSemantics, } } | { "type": "deckPartition", "data": { minMainTotal: number, maxMainTotal: number, confirm: ConfirmSemantics, } } | { "type": "relations", "data": { edges: Array<InteractionRelationConstraint>, min: number, max: number, sourceConstraint: InteractionRelationSourceConstraint, allowGroups: boolean, confirm: ConfirmSemantics, } } | { "type": "number", "data": { min: number, max: number, confirm: ConfirmSemantics, } } | { "type": "shortcut", "data": { count: InteractionShortcutCountSpec, points: Array<InteractionShortcutPoint>, allowDecline: boolean, preview: InteractionShortcutPreview | null, confirm: ConfirmSemantics, } } | { "type": "shortcutReply", "data": { minIteration: number, maxIteration: number, confirm: ConfirmSemantics, } };
+export type InteractionResponseSpec = { "type": "select", "data": { constraint: SelectionConstraint, confirm: ConfirmSemantics, } } | { "type": "assignAmounts", "data": { minTotal: number, maxTotal: number, exactTotal: number | null, } } | { "type": "assignDamage", "data": { total: number, modes: Array<InteractionDamageAssignmentMode>, confirm: ConfirmSemantics, } } | { "type": "sequence", "data": { min: number, max: number, unique: boolean, includeAll: boolean, engineValidated: boolean, escape: InteractionChoiceId | null, confirm: ConfirmSemantics, } } | { "type": "groupedSequence", "data": { groups: Array<InteractionGroupConstraint>, unique: boolean, confirm: ConfirmSemantics, } } | { "type": "manaGroups", "data": { groups: Array<InteractionGroupConstraint>, maxBatch: number, escape: InteractionChoiceId | null, confirm: ConfirmSemantics, } } | { "type": "text", "data": { allowArbitrary: boolean, maxLen: number, confirm: ConfirmSemantics, } } | { "type": "deckPartition", "data": { minMainTotal: number, maxMainTotal: number, confirm: ConfirmSemantics, } } | { "type": "relations", "data": { edges: Array<InteractionRelationConstraint>, min: number, max: number, sourceConstraint: InteractionRelationSourceConstraint, allowGroups: boolean, confirm: ConfirmSemantics, } } | { "type": "number", "data": { min: number, max: number, confirm: ConfirmSemantics, } } | { "type": "shortcut", "data": { count: InteractionShortcutCountSpec, points: Array<InteractionShortcutPoint>, allowDecline: boolean, preview?: Array<InteractionShortcutPreview>, confirm: ConfirmSemantics, } } | { "type": "shortcutReply", "data": { minIteration: number, maxIteration: number, points?: Array<InteractionShortcutPoint>, declared?: InteractionShortcutPreview | null, allocationGroup?: number | null, confirm: ConfirmSemantics, } };
 
 export type InteractionOpportunityResponse = { "type": "exactChoices", "data": { choices: Array<InteractionChoice>, } } | { "type": "schema", "data": { spec: InteractionResponseSpec, candidates: Array<InteractionChoice>, } };
 
@@ -136,4 +208,10 @@ export type InteractionPreviewRequest = { requestId: PreviewRequestId, interacti
 
 export type InteractionPreviewStatus = { "type": "confirmable" } | { "type": "rejected", "data": { reason: InteractionReasonCode, } };
 
-export type InteractionPreview = { requestId: PreviewRequestId, interactionId: InteractionId, status: InteractionPreviewStatus, progress: InteractionProgress, outcome: InteractionOutcomeCode, summaries: Array<InteractionSummaryCode>, };
+export type InteractionPreview = { requestId: PreviewRequestId, interactionId: InteractionId, status: InteractionPreviewStatus, progress: InteractionProgress, outcome: InteractionOutcomeCode, summaries: Array<InteractionSummaryCode>, 
+/**
+ * CR 732.2a: the engine-computed consequence of the DECLARATION this request carries — one
+ * previewed element in the same shape and vocabulary as an element of the offer's published
+ * list, minted by the same producer. Absent unless the request declares a shortcut split.
+ */
+shortcutPreview?: InteractionShortcutPreview | null, };

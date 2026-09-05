@@ -1,8 +1,10 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CommanderPanel } from "../CommanderPanel";
 import type { ScryfallCard } from "../../../services/scryfall";
+
+afterEach(cleanup);
 
 function makeLegendaryCreature(name: string): ScryfallCard {
   return {
@@ -16,6 +18,73 @@ function makeLegendaryCreature(name: string): ScryfallCard {
 }
 
 describe("CommanderPanel", () => {
+  it("keeps a backed duplicate candidate available only for commanders-inside composition", () => {
+    const name = "The Prismatic Piper";
+    const sharedProps = {
+      deck: [{ name, count: 2 }],
+      cardDataCache: new Map([[name, makeLegendaryCreature(name)]]),
+      deckSizeRule: { type: "Minimum" as const, data: 60 },
+      isCommanderEligible: () => true,
+      onSetCommander: vi.fn(),
+      onRemoveCommander: vi.fn(),
+    };
+
+    const inside = render(
+      <CommanderPanel
+        {...sharedProps}
+        commanders={[name]}
+        deckComposition="commanders-inside"
+      />,
+    );
+    expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    inside.unmount();
+
+    const fullyDesignated = render(
+      <CommanderPanel
+        {...sharedProps}
+        commanders={[name, name]}
+        deckComposition="commanders-inside"
+      />,
+    );
+    expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    fullyDesignated.unmount();
+
+    render(
+      <CommanderPanel
+        {...sharedProps}
+        commanders={[name]}
+        deckComposition="commanders-outside"
+      />,
+    );
+    expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+  });
+
+  it("renders two same-name commander slots without duplicate keys", () => {
+    const name = "The Prismatic Piper";
+    const onRemoveCommander = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(
+      <CommanderPanel
+        commanders={[name, name]}
+        deck={[{ name, count: 2 }]}
+        deckComposition="commanders-inside"
+        cardDataCache={new Map([[name, makeLegendaryCreature(name)]])}
+        deckSizeRule={{ type: "Minimum", data: 60 }}
+        isCommanderEligible={() => true}
+        onSetCommander={vi.fn()}
+        onRemoveCommander={onRemoveCommander}
+      />,
+    );
+
+    const removeButtons = screen.getAllByRole("button", { name: "Remove" });
+    expect(removeButtons).toHaveLength(2);
+    fireEvent.click(removeButtons[1]);
+    expect(onRemoveCommander).toHaveBeenCalledWith(name);
+    expect(consoleError.mock.calls.flat().join(" ")).not.toMatch(/same key|unique.*key/i);
+    consoleError.mockRestore();
+  });
+
   it("shows all eligible commanders instead of truncating to five", () => {
     const names = [
       "Commander One",

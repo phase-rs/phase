@@ -112,6 +112,109 @@ fn nested_triggering_batch_aggregate_is_rebound_through_the_source_visitor() {
     assert_eq!((batch, chain, objects, graveyard, leaves), (0, 1, 1, 1, 3));
 }
 
+/// Dawnbreak Reclaimer's entire sequential instruction must lower as one
+/// reciprocal chain: the owner of the first selected creature supplies the
+/// second choice, and only those two selections reach the optional return.
+#[test]
+fn dawnbreak_reclaimer_lowers_to_a_reciprocal_graveyard_choice_chain() {
+    let def = parse_effect_chain(
+        "Choose a creature card in an opponent's graveyard, then that player chooses a creature card in your graveyard. You may return those cards to the battlefield under their owners' control.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChooseFromZone {
+        zone: Zone::Graveyard,
+        chooser: ZoneChoiceChooser::Controller,
+        candidate_source: ZoneChoiceCandidateSource::Direct,
+        reciprocal_role: Some(ReciprocalZoneChoiceRole::Produce),
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected reciprocal producer, got {:?}", def.effect);
+    };
+    let consume = def.sub_ability.expect("reciprocal consumer");
+    let Effect::ChooseFromZone {
+        chooser: ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { player: None },
+        candidate_source: ZoneChoiceCandidateSource::Direct,
+        reciprocal_role: Some(ReciprocalZoneChoiceRole::Consume),
+        ..
+    } = consume.effect.as_ref()
+    else {
+        panic!("expected reciprocal consumer, got {:?}", consume.effect);
+    };
+    assert!(consume.sub_ability.expect("optional return").optional);
+}
+
+/// The reciprocal grammar composes card descriptors independently of the
+/// opponent/your graveyard and owner-controlled return structure.
+#[test]
+fn reciprocal_graveyard_choice_accepts_descriptor_matrix() {
+    for text in [
+        "Choose an artifact card in an opponent's graveyard, then that player chooses an enchantment card in your graveyard. You may return those cards to the battlefield under their owners' control.",
+        "Choose an enchantment card in an opponent's graveyard, then that player chooses an artifact card in your graveyard. You may return those cards to the battlefield under their owners' control.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::ChooseFromZone {
+                    reciprocal_role: Some(ReciprocalZoneChoiceRole::Produce),
+                    candidate_source: ZoneChoiceCandidateSource::Direct,
+                    filter: Some(_),
+                    ..
+                }
+            ),
+            "descriptor matrix entry must reach reciprocal lowering: {text}; got {:?}",
+            def.effect
+        );
+        assert!(
+            matches!(
+                def.sub_ability.as_deref().map(|ability| ability.effect.as_ref()),
+                Some(Effect::ChooseFromZone {
+                    reciprocal_role: Some(ReciprocalZoneChoiceRole::Consume),
+                    candidate_source: ZoneChoiceCandidateSource::Direct,
+                    filter: Some(_),
+                    ..
+                })
+            ),
+            "descriptor matrix entry must retain a reciprocal consumer: {text}"
+        );
+    }
+}
+
+/// A different optional-return component is not silently lowered as the
+/// battlefield-under-owner reciprocal class.
+#[test]
+fn reciprocal_graveyard_choice_near_miss_falls_through_honestly() {
+    let text = "Choose a creature card in an opponent's graveyard, then that player chooses a creature card in your graveyard. You may return those cards to your hand.";
+    assert!(
+        parse_reciprocal_graveyard_choice_ir(text, AbilityKind::Spell).is_none(),
+        "a non-owner-controlled return destination must not enter reciprocal lowering"
+    );
+
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let mut cursor = Some(&def);
+    let mut has_unimplemented = false;
+    while let Some(ability) = cursor {
+        has_unimplemented |= matches!(ability.effect.as_ref(), Effect::Unimplemented { .. });
+        assert!(
+            !matches!(
+                ability.effect.as_ref(),
+                Effect::ChooseFromZone {
+                    reciprocal_role: Some(_),
+                    ..
+                }
+            ),
+            "near miss must not claim reciprocal semantics: {:?}",
+            ability.effect
+        );
+        cursor = ability.sub_ability.as_deref();
+    }
+    assert!(
+        has_unimplemented,
+        "the unrecognized return component must remain visible, not be swallowed"
+    );
+}
+
 #[test]
 fn nested_triggering_batch_in_non_trigger_chain_is_demoted_honestly() {
     let mut def = AbilityDefinition::new(
@@ -10455,6 +10558,453 @@ fn same_chain_put_exiled_card_keeps_tracked_set() {
     );
 }
 
+// ── Singular battlefield-recall anaphor ──
+//
+// "Exile <self>, then return it to the battlefield" binds the recall leg to
+// `TargetFilter::SelfRef` (CR 608.2c English anaphora + CR 400.7j public-zone
+// findability) instead of the chain tracked set, whose membership picks up
+// unrelated riders (Shiva's Cold Snap tap leg). Plural / chosen-target /
+// delayed / first-clause recalls keep the sentinel binding.
+
+/// B1 — positive: Shiva's chapter III (verbatim FIN back-face Oracle) lowers
+/// to [broadcast tap of opponents' lands, self-exile, self-return front face
+/// up]. Every hostile test below (B4–B8) asserts its full positive chain shape
+/// first, so a parse failure cannot satisfy its negative vacuously.
+#[test]
+fn singular_battlefield_recall_shiva_chapter_iii_binds_self() {
+    let parsed = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter.)\n\
+         I, II — Mesmerize — Target creature can't be blocked this turn.\n\
+         III — Cold Snap — Tap all lands your opponents control. Exile Shiva, then return it to the battlefield (front face up).",
+        "Shiva, Warden of Ice",
+        &[],
+        &["Enchantment".to_string(), "Creature".to_string()],
+        &["Saga".to_string(), "Elemental".to_string()],
+    );
+    let chapter_iii = parsed
+        .triggers
+        .iter()
+        .find(|t| t.saga_chapter == Some(3))
+        .expect("Cold Snap must parse as the chapter III trigger");
+    let execute = chapter_iii
+        .execute
+        .as_deref()
+        .expect("chapter III trigger executes");
+    let legs = chain_effects(execute);
+    assert_eq!(legs.len(), 3, "tap/exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "leg[0] must be the broadcast tap of opponents' lands: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[1] must be the self-exile: {:?}",
+        legs[1]
+    );
+    assert!(
+        matches!(
+            &legs[2],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                enter_transformed: false,
+                ..
+            }
+        ),
+        "leg[2] must return the source itself front face up: {:?}",
+        legs[2]
+    );
+    assert!(!tree_has_unimplemented(execute));
+}
+
+/// B2 — positive contrast case: Jill's activated ability (verbatim FIN
+/// front-face Oracle) binds the transformed return to SelfRef. This is the
+/// shape the runtime repro exercises end-to-end.
+#[test]
+fn singular_battlefield_recall_jill_activation_binds_self_transformed() {
+    let parsed = parse_oracle_text(
+        "When Jill enters, return up to one other target nonland permanent to its owner's hand.\n\
+         {3}{U}{U}, {T}: Exile Jill, then return it to the battlefield transformed under its owner's control. Activate only as a sorcery.",
+        "Jill, Shiva's Dominant",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string(), "Noble".to_string(), "Warrior".to_string()],
+    );
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|a| a.kind == AbilityKind::Activated)
+        .expect("Jill's exile-and-return must parse as an activated ability");
+    let legs = chain_effects(activated);
+    assert_eq!(legs.len(), 2, "exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[0] must be the self-exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                enter_transformed: true,
+                ..
+            }
+        ),
+        "leg[1] must return Jill transformed: {:?}",
+        legs[1]
+    );
+    assert!(!tree_has_unimplemented(activated));
+}
+
+/// B3 — positive: Fable of the Mirror-Breaker's chapter III (verbatim Oracle)
+/// "Exile this Saga, then return it to the battlefield transformed" binds
+/// SelfRef + enter_transformed.
+#[test]
+fn singular_battlefield_recall_fable_chapter_iii_binds_self_transformed() {
+    let parsed = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter.)\n\
+         I — Create a 2/2 red Goblin Shaman creature token with \"Whenever this token attacks, create a Treasure token.\"\n\
+         II — You may discard up to two cards. If you do, draw that many cards.\n\
+         III — Exile this Saga, then return it to the battlefield transformed under your control.",
+        "Fable of the Mirror-Breaker",
+        &[],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    let chapter_iii = parsed
+        .triggers
+        .iter()
+        .find(|t| t.saga_chapter == Some(3))
+        .expect("Fable chapter III must parse as a trigger");
+    let execute = chapter_iii
+        .execute
+        .as_deref()
+        .expect("chapter III trigger executes");
+    let legs = chain_effects(execute);
+    assert_eq!(legs.len(), 2, "exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[0] must be the self-exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                enter_transformed: true,
+                ..
+            }
+        ),
+        "leg[1] must return the Saga transformed: {:?}",
+        legs[1]
+    );
+    assert!(!tree_has_unimplemented(execute));
+}
+
+/// B4 — hostile, plural: "return them" after a mass publisher keeps the
+/// chain-set binding on the recall leg. The "Exile them" clause keeps its
+/// ParentTarget (no pronoun detector fires for it; the gate never touches it).
+#[test]
+fn singular_battlefield_recall_plural_after_mass_exile_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile all creatures you control. Exile them, then return them to the battlefield.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&def);
+    assert_eq!(
+        legs.len(),
+        3,
+        "mass-exile/their-exile/return legs: {legs:?}"
+    );
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "leg[0] must be the mass exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "leg[1] must re-exile the exiled set: {:?}",
+        legs[1]
+    );
+    assert!(
+        matches!(
+            &legs[2],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "plural recall must keep TrackedSet(0): {:?}",
+        legs[2]
+    );
+}
+
+/// B5 — hostile, chosen antecedent: after "Exile target creature" (a
+/// chosen-target publisher, not a self-move) the singular recall keeps the
+/// chain tracked set.
+#[test]
+fn singular_battlefield_recall_after_chosen_target_exile_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile target creature, then return it to the battlefield.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&def);
+    assert_eq!(legs.len(), 2, "exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "leg[0] must be the chosen-target exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "recall after a chosen-target publisher must keep TrackedSet(0): {:?}",
+        legs[1]
+    );
+}
+
+/// B6 — hostile, delayed: the rewriter never descends into
+/// CreateDelayedTrigger, so the payload keeps its CR 603.7c ParentTarget
+/// referent with origin pinned to Exile at delayed-trigger creation
+/// (CR 603.7a; Aetherling / Otherworldly Journey shapes).
+#[test]
+fn singular_battlefield_recall_delayed_keeps_parent_target_payload() {
+    let def = parse_effect_chain(
+        "Exile ~, then return it to the battlefield at the beginning of the next end step.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&def);
+    assert_eq!(legs.len(), 2, "exile/delayed-return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[0] must be the self-exile: {:?}",
+        legs[0]
+    );
+    let Effect::CreateDelayedTrigger {
+        effect,
+        uses_tracked_set,
+        ..
+    } = &legs[1]
+    else {
+        panic!("expected CreateDelayedTrigger, got {:?}", legs[1]);
+    };
+    let Effect::ChangeZone {
+        origin: Some(Zone::Exile),
+        destination: Zone::Battlefield,
+        target: TargetFilter::ParentTarget,
+        ..
+    } = &*effect.effect
+    else {
+        panic!(
+            "delayed payload must keep ParentTarget with origin Exile, got {:?}",
+            effect.effect
+        );
+    };
+    assert!(*uses_tracked_set);
+}
+
+/// B7 — positive, nearest-publisher axis: The Great Work's chapter III
+/// (verbatim) has an earlier targeted exile, but the NEAREST publisher before
+/// the recall is the self-exile, so the recall binds SelfRef.
+#[test]
+fn singular_battlefield_recall_nearest_publisher_self_move_binds_self() {
+    let parsed = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter.)\n\
+         I — This Saga deals 3 damage to target opponent and each creature they control.\n\
+         II — Create three Treasure tokens.\n\
+         III — Until end of turn, you may cast instant and sorcery spells from any graveyard. If a spell cast this way would be put into a graveyard, exile it instead. Exile this Saga, then return it to the battlefield (front face up).",
+        "The Great Work",
+        &[],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    let chapter_iii = parsed
+        .triggers
+        .iter()
+        .find(|t| t.saga_chapter == Some(3))
+        .expect("The Great Work chapter III must parse as a trigger");
+    let execute = chapter_iii
+        .execute
+        .as_deref()
+        .expect("chapter III trigger executes");
+    let legs = chain_effects(execute);
+    assert_eq!(legs.len(), 4, "cast/exile/self-exile/return legs: {legs:?}");
+    assert!(
+        matches!(
+            &legs[2],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[2] must be the self-exile publisher: {:?}",
+        legs[2]
+    );
+    assert!(
+        matches!(
+            &legs[3],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "nearest publisher is the self-exile, so the recall binds SelfRef: {:?}",
+        legs[3]
+    );
+    assert!(!tree_has_unimplemented(execute));
+}
+
+/// B7-negative — with a typed-target leg as the NEAREST publisher, the
+/// singular recall keeps the chain tracked set (nearest-first scan does not
+/// see the earlier self-exile).
+#[test]
+fn singular_battlefield_recall_nearest_publisher_typed_target_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile ~. Exile target creature, then return it to the battlefield.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&def);
+    assert_eq!(
+        legs.len(),
+        3,
+        "self-exile/typed-exile/return legs: {legs:?}"
+    );
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "leg[0] must be the self-exile: {:?}",
+        legs[0]
+    );
+    assert!(
+        matches!(
+            &legs[1],
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "leg[1] must be the chosen-target exile: {:?}",
+        legs[1]
+    );
+    assert!(
+        matches!(
+            &legs[2],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "nearest publisher is the typed exile, so recall keeps TrackedSet(0): {:?}",
+        legs[2]
+    );
+}
+
+/// B8 — hostile, first clause: with no prior publisher the gate never fires
+/// and the recall keeps its unbound ParentTarget.
+#[test]
+fn singular_battlefield_recall_first_clause_without_publisher_stays_parent_target() {
+    let def = parse_effect_chain("Return it to the battlefield.", AbilityKind::Spell);
+    let legs = chain_effects(&def);
+    assert_eq!(legs.len(), 1, "single leg: {legs:?}");
+    assert!(
+        matches!(
+            &legs[0],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "unbound first-clause recall must stay ParentTarget: {:?}",
+        legs[0]
+    );
+}
+
 #[test]
 fn effect_draw() {
     let e = parse_effect("Draw two cards");
@@ -10600,6 +11150,7 @@ fn effect_chain_lose_life_and_amass_keeps_both_clauses() {
         Effect::Amass {
             ref subtype,
             ref count,
+            ..
         } => {
             assert_eq!(subtype, "Zombie");
             assert!(
@@ -10609,6 +11160,20 @@ fn effect_chain_lose_life_and_amass_keeps_both_clauses() {
         }
         other => panic!("expected chained Amass{{Zombie, 1}}, got {other:?}"),
     }
+}
+
+#[test]
+fn effect_target_player_amasses_surfaces_the_player_target() {
+    let effect = parse_effect("target player amasses Goblins 2");
+    assert_eq!(
+        effect,
+        Effect::Amass {
+            subtype: "Goblin".to_string(),
+            count: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Player,
+        }
+    );
+    assert_eq!(effect.target_filter(), Some(&TargetFilter::Player));
 }
 
 // CR 701.63: Endure — every printed card prefixes a self-referential
@@ -12528,7 +13093,9 @@ fn kozilek_target_players_each_manifest_two_from_their_hands_parses() {
                 count: 2,
                 zone: Zone::Hand,
                 zone_owner: ZoneOwner::Each(PerPlayerScope::TargetedPlayers),
-                chooser: Chooser::OwningPlayer,
+                chooser: ZoneChoiceChooser::OwningPlayer,
+                candidate_source: ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
                 up_to: false,
                 // CR 608.2d: each player CHOOSES — a regression to a random
                 // or non-choice selection mode must fail here.
@@ -22540,7 +23107,18 @@ fn cant_be_activated_effect_standalone_targets_creature() {
             duration,
             end_cost: _,
         } => {
-            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            // CR 611.2a (`docs/MagicCompRules.txt:2908`): this sentence states NO
+            // window of its own, so the AST must say so. The recognizer used to
+            // inject `Some(UntilEndOfTurn)` here, indistinguishable from a printed
+            // window, which blocked an enclosing sentence's duration from reaching
+            // the clause — Dovin Baan, Edifice of Authority and Mythos of Vadrok each
+            // print "until your next turn" and had this prohibition end a turn early.
+            //
+            // RUNTIME IS UNCHANGED for this standalone form: both carriers are now
+            // `None`, and `game/effects/effect.rs` resolves
+            // `ability.duration.or(embedded).unwrap_or(UntilEndOfTurn)` to the same
+            // window the injection hard-coded.
+            assert_eq!(*duration, None);
             assert_eq!(static_abilities.len(), 1);
             let sd = &static_abilities[0];
             assert!(
@@ -25594,7 +26172,7 @@ fn return_opponents_choice_from_your_graveyard_uses_zone_choice_chain() {
     assert_eq!(*count, 1);
     assert_eq!(*zone, Zone::Graveyard);
     assert_eq!(*zone_owner, ZoneOwner::Controller);
-    assert_eq!(*chooser, Chooser::Opponent);
+    assert_eq!(*chooser, ZoneChoiceChooser::Opponent);
     assert!(!up_to);
     let TargetFilter::Typed(typed) = filter else {
         panic!("expected typed graveyard-card filter, got {filter:?}");
@@ -25651,7 +26229,9 @@ fn parse_impulse_draw_chain() {
             Effect::ChooseFromZone {
                 count: 1,
                 zone: crate::types::zones::Zone::Exile,
-                chooser: crate::types::ability::Chooser::Controller,
+                chooser: ZoneChoiceChooser::Controller,
+                candidate_source: ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
                 up_to: false,
                 constraint: None,
                 ..
@@ -45538,7 +46118,7 @@ fn plargg_and_nassari_full_trigger_chain_choose_then_cast_others() {
     );
     assert_eq!(
         *chooser,
-        Chooser::Opponent,
+        ZoneChoiceChooser::Opponent,
         "CR 608.2d: the \"an opponent\" subject must rebind the chooser"
     );
     let Some(TargetFilter::And { ref filters }) = *filter else {
@@ -45632,7 +46212,7 @@ fn search_for_survivors_opponent_chooses_at_random_in_your_graveyard() {
     );
     assert_eq!(
         *chooser,
-        Chooser::Opponent,
+        ZoneChoiceChooser::Opponent,
         "CR 608.2d: the untargeted \"an opponent\" subject must rebind the chooser"
     );
     assert_eq!(
@@ -54149,6 +54729,7 @@ fn expose_the_culprit_mode2_lowers_to_choose_shuffle_cloak_chain() {
         filter,
         min,
         max,
+        ..
     } = &*head.effect
     else {
         panic!(
@@ -54217,6 +54798,7 @@ fn duneblast_lowers_choose_survivor_then_destroy_rest() {
         filter,
         min,
         max,
+        ..
     } = def.effect.as_ref()
     else {
         panic!("expected tracked-set survivor choice, got {:?}", def.effect);
@@ -54258,6 +54840,7 @@ fn mount_doom_lowers_choose_two_then_destroy_rest() {
         filter,
         min,
         max,
+        ..
     } = def.effect.as_ref()
     else {
         panic!("expected tracked-set survivor choice, got {:?}", def.effect);

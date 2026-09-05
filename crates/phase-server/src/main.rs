@@ -4,6 +4,7 @@ mod draft_pools;
 mod logging;
 mod metrics;
 mod persistence;
+mod wire;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -17,9 +18,10 @@ use axum::extract::{Request, State, WebSocketUpgrade};
 use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use clap::Parser;
 use engine::ai_support::{
+    activation_block_reasons_for_viewer as engine_activation_block_reasons_for_viewer,
     auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
     end_continuous_effect_offers as engine_end_continuous_effect_offers,
     legal_actions_full as engine_legal_actions_full,
@@ -32,14 +34,15 @@ use engine::game::validate_name_deck_for_format_full;
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::GameState;
-use engine::types::interaction::InteractionSubmission;
+use engine::types::game_state::{GameState, TrustedGameStateEnvelope};
+use engine::types::interaction::{InteractionPreviewRequest, InteractionSubmission};
 use engine::types::player::PlayerId;
 use engine::types::GameLogEntry;
 use http::{HeaderMap, HeaderValue};
 use lobby_broker::{
-    check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
-    Outbound, NOT_OWNED_RESERVATION,
+    check_build_commit, conn_holds_reservation, validate_announcement, Broker, BrokerEnv,
+    BuildCommitCheck, ConnState, Outbound, RawAnnouncement, ServerAnnouncement, ServerInfoDocument,
+    DIRECTORY_VERSION, INFO_PATH, MAX_SERVER_NAME_LEN, NOT_OWNED_RESERVATION,
 };
 use rand::{Rng, TryRngCore};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
@@ -67,14 +70,14 @@ use server_core::lobby::RegisterGameRequest;
 use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
     build_commit, resolve_draft_source_intent, ClientMessage, RankedPlayerResult, ServerMessage,
-    ServerMode, LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL,
-    MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
+    ServerMode, WireFormat, LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION,
+    MIN_SUPPORTED_LOBBY_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{
-    ActionResult, FullRuntime, GameSession, RevisionedActionResult, SessionActionError,
-    SessionManager,
+    ActionResult, FullRuntime, GameSession, HostingMode, PreviewRefusal, RevisionedActionResult,
+    SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
@@ -484,6 +487,16 @@ fn build_game_started_message(
         });
     let derived = derive_transport_views(&session.state, &filtered, Some(player));
     let viewer_interaction = derive_viewer_interaction(&session.state, &filtered, player);
+    // CR 118.3 + CR 117.1: derived per recipient from the same raw pre-filter
+    // state binding its sibling `spell_costs` came from. No `if is_actor`
+    // wrapper: the entry point self-gates on `turn_control::is_authorized_submitter`,
+    // which is the SAME function `server_core::is_acting` delegates to.
+    let activation_block_reasons =
+        engine_activation_block_reasons_for_viewer(&session.state, player);
+    debug_assert!(
+        activation_block_reasons.is_empty() || is_actor,
+        "a non-empty CR 118.3 read-out implies an authorized viewer"
+    );
 
     ServerMessage::GameStarted {
         state_revision: session.state_revision,
@@ -505,6 +518,7 @@ fn build_game_started_message(
         } else {
             HashMap::new()
         },
+        activation_block_reasons,
         derived,
         viewer_interaction,
         player_token,
@@ -582,6 +596,13 @@ fn build_state_update_message(
     } else {
         Vec::new()
     };
+    // CR 118.3 + CR 117.1: same raw state binding the sibling `spell_costs`
+    // came from (both destructured from this `ActionResult`).
+    let activation_block_reasons = engine_activation_block_reasons_for_viewer(raw_state, player);
+    debug_assert!(
+        activation_block_reasons.is_empty() || is_actor,
+        "a non-empty CR 118.3 read-out implies an authorized viewer"
+    );
 
     Ok(ServerMessage::StateUpdate {
         state_revision,
@@ -607,6 +628,7 @@ fn build_state_update_message(
         } else {
             HashMap::new()
         },
+        activation_block_reasons,
         derived,
         viewer_interaction,
         rewind_targets,
@@ -636,6 +658,10 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
         mana_payment_shortcut_actions: Vec::new(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
+        // CR 117.1: a spectator is a non-seat viewer with no action authority,
+        // so the read-out is empty by the same existing design as the two
+        // siblings above.
+        activation_block_reasons: HashMap::new(),
         derived,
         viewer_interaction,
         player_token: None,
@@ -682,6 +708,9 @@ fn build_spectator_state_update_message(
         log_entries: log_entries.to_vec(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
+        // CR 117.1: spectators have no action authority — empty by the same
+        // existing design as the two siblings above.
+        activation_block_reasons: HashMap::new(),
         derived,
         viewer_interaction,
         // Empty for the same reason as the spectator `GameStarted` builder
@@ -896,6 +925,13 @@ struct Cli {
     /// `NGROK_AUTHTOKEN` is set, the live tunnel URL is used when this is unset.
     #[arg(long, env = "PUBLIC_URL")]
     public_url: Option<String>,
+
+    /// Directory endpoint to announce this server to, e.g.
+    /// `https://lobby.phase-rs.dev/servers/announce`. Requires --public-url,
+    /// which must be an `https://` URL — the directory lists `wss://`
+    /// addresses only. Off by default.
+    #[arg(long, env = "PHASE_ANNOUNCE_TO", requires = "public_url")]
+    announce_to: Option<Url>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -995,7 +1031,10 @@ struct SocketIdentity {
 struct ClientHelloInfo {
     client_version: String,
     build_commit: String,
+    wire_format: Option<WireFormat>,
 }
+
+const MAX_ADVERTISED_WIRE_FORMATS: usize = 8;
 
 /// Outcome of evaluating the handshake gate against an incoming message.
 /// Extracted into a pure function so the gate's invariants can be unit-tested
@@ -1084,6 +1123,7 @@ fn classify_hello_gate(
                 build_commit,
                 protocol_version,
                 lobby_protocol_version,
+                wire_formats,
             },
         ) => {
             // The `server` field on RejectProtocol surfaces the version this
@@ -1093,12 +1133,19 @@ fn classify_hello_gate(
                 acceptance.reject(*protocol_version, *lobby_protocol_version)
             {
                 HelloGateOutcome::RejectProtocol { client, server }
+            } else if wire_formats.len() > MAX_ADVERTISED_WIRE_FORMATS {
+                HelloGateOutcome::RejectInvalidHello(
+                    "ClientHello advertises too many wire formats".to_string(),
+                )
             } else if let Err(reason) = guard_client_hello(client_version, build_commit) {
                 HelloGateOutcome::RejectInvalidHello(reason)
             } else {
                 HelloGateOutcome::Accept(ClientHelloInfo {
                     client_version: client_version.clone(),
                     build_commit: build_commit.clone(),
+                    wire_format: wire_formats
+                        .contains(&WireFormat::GzipEnvelopeV1)
+                        .then_some(WireFormat::GzipEnvelopeV1),
                 })
             }
         }
@@ -1145,7 +1192,9 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
+        | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
@@ -1404,7 +1453,9 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
 
         ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
+        | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
@@ -2375,6 +2426,39 @@ async fn serve() {
         cli.port
     );
 
+    // Both fallible announce-setup steps happen once, here, and share one
+    // `error!` arm: a bad configuration is a single startup error the operator
+    // is watching for, rather than a warning every 60 s forever — and, for the
+    // HTTP client, rather than a panic inside a detached task whose handle
+    // nothing holds. `requires = "public_url"` guarantees the flag was
+    // supplied; it guarantees nothing about the value surviving
+    // `validate_public_url`.
+    if let Some(endpoint) = cli.announce_to.clone() {
+        let announce_setup = announcement_from_state(&app_state).and_then(|base| {
+            reqwest::Client::builder()
+                .timeout(ANNOUNCE_REQUEST_TIMEOUT)
+                .build()
+                .map(|client| (base, client))
+                .map_err(|error| format!("could not build the announce HTTP client: {error}"))
+        });
+        match announce_setup {
+            Ok((base, client)) => {
+                // The handle is discarded as a bare statement, matching the
+                // expiry task above: `JoinHandle` is not `#[must_use]`.
+                spawn_announce_task(
+                    endpoint,
+                    client,
+                    base,
+                    app_state.player_count.clone(),
+                    ANNOUNCE_INTERVAL,
+                );
+            }
+            Err(error) => {
+                error!(%error, "--announce-to is set but this server cannot announce itself")
+            }
+        }
+    }
+
     let listener = tokio::net::TcpListener::bind((cli.bind, cli.port))
         .await
         .expect("failed to bind");
@@ -2525,6 +2609,32 @@ async fn health() -> &'static str {
     "ok"
 }
 
+/// `lobby_broker::ServerMode` mirrors `server_core::protocol::ServerMode`
+/// variant-for-variant and serde-shape-for-serde-shape (its own doc comment
+/// says so), so this is a total translation with no fallback. Same shape as
+/// `to_server_message`'s conversion in the other direction.
+fn directory_mode(mode: Mode) -> lobby_broker::ServerMode {
+    match mode {
+        ServerMode::Full => lobby_broker::ServerMode::Full,
+        ServerMode::LobbyOnly => lobby_broker::ServerMode::LobbyOnly,
+    }
+}
+
+/// Public identity document — the same values `ServerHello` advertises
+/// (`handle_socket`), served over plain HTTP so a directory can verify an
+/// announcement without opening a WebSocket. `lobby_broker::directory` owns the
+/// shape; the Cloudflare Durable Object serves the same document.
+async fn server_info(State(app_state): State<AppState>) -> Json<ServerInfoDocument> {
+    Json(ServerInfoDocument {
+        mode: directory_mode(app_state.mode),
+        protocol_version: PROTOCOL_VERSION,
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_commit: Some(build_commit().to_string()),
+        public_url: app_state.public_url,
+    })
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use std::collections::HashMap;
@@ -2537,9 +2647,123 @@ mod lifecycle_tests {
     use url::Url;
 
     use super::{
-        bootstrap_required, origin_is_allowed, prune_game_connections, select_card_data_source,
-        validate_public_url, CardDataSource, Cli, SharedConnections,
+        bootstrap_required, build_state_update_message, origin_is_allowed, prune_game_connections,
+        select_card_data_source, validate_public_url, CardDataSource, Cli, ServerMessage,
+        SharedConnections,
     };
+
+    /// CR 118.3 + CR 117.1 — matrix row 21 (actor axis), at a REAL
+    /// `ServerMessage` construction site rather than at the engine entry point.
+    ///
+    /// `build_state_update_message` is the sync builder behind `phase-server`'s
+    /// `StateUpdate` fan-out. It derives `activation_block_reasons` from the
+    /// SAME `raw_state` binding its sibling `spell_costs` is destructured from,
+    /// and passes no `if is_actor` wrapper — the engine entry point self-gates
+    /// on `turn_control::is_authorized_submitter`, which is exactly what
+    /// `server_core::is_acting` delegates to.
+    ///
+    /// Both halves asserted in one test so neither is vacuous: the acting seat
+    /// receives a NON-EMPTY read-out, and the non-acting seat receives an empty
+    /// one from the SAME `ActionResult`.
+    ///
+    /// RUNNER: CI. Tilt's test resources are scoped `-p phase-engine -p phase-ai`
+    /// and never compile `phase-server`, so a green `test-engine` is no evidence
+    /// for this test.
+    #[test]
+    fn state_update_publishes_the_cost_block_readout_only_to_the_acting_seat() {
+        // DB-free by construction: `GameState::new_two_player` + `create_object`
+        // only, mirroring `mana_display_self_sacrifice_clone_gate.rs`. `phase-server`
+        // does not enable the engine's `test-support` feature, so `GameScenario`
+        // is not available here.
+        use engine::game::game_object::GameObject;
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+        };
+        use engine::types::game_state::{GameState, WaitingFor};
+        use engine::types::identifiers::CardId;
+        use engine::types::phase::Phase;
+        use engine::types::player::PlayerId;
+        use engine::types::zones::Zone;
+        use std::sync::Arc as StdArc;
+
+        const P0: PlayerId = PlayerId(0);
+        const P1: PlayerId = PlayerId(1);
+
+        let mut raw_state = GameState::new_two_player(42);
+        raw_state.phase = Phase::PreCombatMain;
+        raw_state.waiting_for = WaitingFor::Priority { player: P0 };
+        raw_state.priority_player = P0;
+        raw_state.players[0].life = 1;
+
+        // `game::zones` is `pub(crate)`, so the object is placed directly:
+        // insert into `objects` and push onto the battlefield, which is exactly
+        // what `create_object` does for a pre-existing permanent.
+        let obj = engine::types::identifiers::ObjectId(raw_state.next_object_id);
+        raw_state.next_object_id += 1;
+        raw_state.objects.insert(
+            obj,
+            GameObject::new(
+                obj,
+                CardId(1),
+                P0,
+                "Costly Engine".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        raw_state.battlefield.push_back(obj);
+        // One unaffordable, resource-verdict ability: `Pay 5 life: draw` at 1 life.
+        {
+            let o = raw_state.objects.get_mut(&obj).expect("object exists");
+            StdArc::make_mut(&mut o.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                }),
+            );
+        }
+
+        let (legal_actions, spell_costs, by_object) =
+            engine::ai_support::legal_actions_full(&raw_state);
+        let result: server_core::session::ActionResult = (
+            raw_state,
+            Vec::new(),
+            legal_actions,
+            Vec::new(),
+            false,
+            spell_costs,
+            by_object,
+        );
+
+        let readout_for = |player| match build_state_update_message(&result, 1, player, Vec::new())
+            .expect("the snapshot guard admits this small board")
+        {
+            ServerMessage::StateUpdate {
+                activation_block_reasons,
+                ..
+            } => activation_block_reasons,
+            other => panic!("expected a StateUpdate, got {other:?}"),
+        };
+
+        let acting = readout_for(P0);
+        let other = readout_for(P1);
+
+        // PAIRED POSITIVE, mandatory: without it, a builder that dropped the
+        // field entirely would satisfy the negative below.
+        assert!(
+            acting.get(&obj).is_some_and(|entries| entries.len() == 1),
+            "the acting seat's StateUpdate carries the CR 118.3 read-out; got {acting:?}"
+        );
+        assert!(
+            other.is_empty(),
+            "a non-acting recipient of the SAME ActionResult gets an empty map; got {other:?}"
+        );
+    }
 
     #[test]
     fn bind_flag_defaults_to_lan_and_accepts_loopback() {
@@ -2628,6 +2852,48 @@ mod lifecycle_tests {
         assert_eq!(validate_public_url("mailto:someone@example.com"), None);
         assert!(Url::parse("file:///var/lib/phase-server").is_ok());
         assert_eq!(validate_public_url("file:///var/lib/phase-server"), None);
+    }
+
+    /// V13. The flag pair is a coupling clap enforces, not a runtime check:
+    /// a directory row is an address, and there is no address to announce
+    /// without `--public-url`.
+    #[test]
+    fn announce_to_requires_a_public_url() {
+        // `Cli` is not `Debug`, so `expect_err` is not available here.
+        let alone = match Cli::try_parse_from([
+            "phase-server",
+            "--announce-to",
+            "https://d.example/servers/announce",
+        ]) {
+            Ok(_) => panic!("--announce-to alone must not parse"),
+            Err(error) => error,
+        };
+        // The `kind`, not merely that it errored: a typo'd flag name would
+        // otherwise pass this as `UnknownArgument`.
+        assert_eq!(
+            alone.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        // Paired positive: the same invocation WITH --public-url parses, and
+        // both fields are populated.
+        let both = Cli::try_parse_from([
+            "phase-server",
+            "--announce-to",
+            "https://d.example/servers/announce",
+            "--public-url",
+            "https://play.example.com",
+        ])
+        .expect("--announce-to with --public-url parses");
+        assert_eq!(
+            both.announce_to.as_ref().map(Url::to_string),
+            Some("https://d.example/servers/announce".to_string())
+        );
+        assert_eq!(both.public_url.as_deref(), Some("https://play.example.com"));
+
+        // Absent by default: announcing is opt-in.
+        let default = Cli::try_parse_from(["phase-server"]).expect("default CLI parses");
+        assert!(default.announce_to.is_none());
     }
 
     #[tokio::test]
@@ -2994,15 +3260,19 @@ fn admin_token_from_env() -> Option<String> {
 /// rather than through the response body a compressing layer would wrap —
 /// keeping the layer off that route entirely removes any dependence on that
 /// implementation detail continuing to hold across axum/tower-http upgrades.
-/// Every other route (health check, the P2P draft backup API, and — when
-/// `admin_token` is set — the bearer-guarded `/admin/*` routes) is served
-/// through gzip `CompressionLayer` so JSON/text responses shrink whenever the
-/// client advertises `Accept-Encoding: gzip`.
+/// Every other route (health check, the `lobby_broker::directory::INFO_PATH`
+/// identity document, the P2P draft backup API, and — when `admin_token` is
+/// set — the bearer-guarded `/admin/*` routes) is served through gzip
+/// `CompressionLayer` so JSON/text responses shrink whenever the client
+/// advertises `Accept-Encoding: gzip`.
 fn build_router(app_state: AppState, cors: CorsLayer, admin_token: Option<&str>) -> Router {
     let ws_router: Router<AppState> = Router::new().route("/ws", get(ws_handler));
 
     let mut http_router: Router<AppState> = Router::new()
         .route("/health", get(health))
+        // The constant, never a `"/info"` literal: every server kind must
+        // answer its info document on the same path a directory probes.
+        .route(INFO_PATH, get(server_info))
         .route("/p2p-draft-backup", post(admin::p2p_backup_store))
         .route(
             "/p2p-draft-backup/{code}",
@@ -3087,6 +3357,159 @@ fn validate_public_url(raw: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// How often a server re-asserts its directory listing. The directory expires
+/// rows that stop being re-asserted, so this is a heartbeat, not a one-shot
+/// registration.
+const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(60);
+/// Ceiling on one announce POST. A directory that hangs must never accumulate
+/// in-flight requests behind a 60 s heartbeat.
+const ANNOUNCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Build this server's directory announcement from live state. `Err` when the
+/// server has no announceable address: no `--public-url` (a malformed value is
+/// dropped by [`validate_public_url`], so the flag being present guarantees
+/// nothing about the value), a non-`https` one (the directory lists `wss://`
+/// only, and an `http://` public URL would announce an address this server does
+/// not serve), or one whose host the directory contract refuses.
+///
+/// Assembly only, with one deliberate exception: every rule it could have
+/// inlined — scheme, host shape, normalisation — lives in
+/// `lobby_broker::directory` and is applied by the same
+/// [`validate_announcement`] the directory itself runs. The exception is the
+/// name cap: `name` is the host truncated to [`MAX_SERVER_NAME_LEN`], while
+/// `url` keeps the full host, so a host too long to be a display name still
+/// yields an announceable address rather than no announcement at all.
+fn announcement_from_state(state: &AppState) -> Result<ServerAnnouncement, String> {
+    let public_url = state.public_url.as_deref().ok_or_else(|| {
+        "no public URL to announce (--public-url is unset, or was dropped as malformed)".to_string()
+    })?;
+    let parsed =
+        Url::parse(public_url).map_err(|error| format!("unparseable --public-url: {error}"))?;
+    if parsed.scheme() != "https" {
+        return Err(format!(
+            "--public-url scheme is `{}`; a directory listing must be wss://, which requires an \
+             https:// public URL",
+            parsed.scheme()
+        ));
+    }
+    // `host_str()` + `port()`, never `authority()` — the latter carries
+    // userinfo through into the announced address.
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "--public-url has no host".to_string())?;
+    let port_suffix = parsed
+        .port()
+        .map_or(String::new(), |port| format!(":{port}"));
+    // A host longer than the NAME cap must not disable announcing outright:
+    // `MAX_SERVER_URL_LEN` is 256 while `MAX_SERVER_NAME_LEN` is 64, so a host
+    // between those bounds yields an address the directory contract accepts and
+    // a display name it rejects. Truncate the name rather than fail the whole
+    // announcement — `url()` keeps the full host, and that is the field
+    // identity turns on.
+    //
+    // Truncating by CHARACTERS, which is the unit `validate_required_label`
+    // itself bounds (`value.chars().count()`), so this is the exact inverse of
+    // the check it has to satisfy and cannot split a codepoint. Characters and
+    // bytes also coincide here, but the guarantee for that is `Url::host_str()`
+    // having already applied IDNA ToASCII on a special scheme — and the scheme
+    // was checked to be `https` above (measured: `https://bücher.example`
+    // parses to host `xn--bcher-kva.example`). That guarantee is UPSTREAM of
+    // this line. The directory contract's own ASCII rule is not: it runs inside
+    // `validate_announcement` below, so nothing here may lean on it.
+    let name: String = host.chars().take(MAX_SERVER_NAME_LEN).collect();
+    // `/ws` by construction: this server is describing its own route, and
+    // `build_router` registers exactly that path.
+    let raw = RawAnnouncement {
+        directory_version: DIRECTORY_VERSION,
+        url: format!("wss://{host}{port_suffix}/ws"),
+        name,
+        mode: directory_mode(state.mode),
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: PROTOCOL_VERSION,
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+        current_players: state.player_count.load(Ordering::Relaxed),
+    };
+    validate_announcement(&raw)
+}
+
+/// Heartbeat POSTing `base` every `period`, refreshing only the live player
+/// count. Warn-and-retry: a directory that is down, slow or rejecting must
+/// never affect the game server. Detached like the expiry task in `serve` — it
+/// ends with the runtime at process exit.
+///
+/// `base` is already validated (built once by [`announcement_from_state`] at
+/// startup) and `client` is already built (by the caller, carrying
+/// [`ANNOUNCE_REQUEST_TIMEOUT`]), so the task has no *fallible* setup — it
+/// cannot fail to build an announcement and it cannot fail to build a client.
+/// Both of those failures are the caller's single startup `error!`; building
+/// the client in here instead would put either a fourth outcome or a silent
+/// panic inside a task that is required never to die and whose handle
+/// production discards. Three per-tick failure classes remain, each logged at
+/// warn with the tick skipped and the loop continuing: a transport error, a
+/// non-success status, and a serialization error from `serde_json::to_vec`.
+/// `period` is a parameter so the test drives the real loop without a
+/// wall-clock minute; production passes [`ANNOUNCE_INTERVAL`]. The handle is
+/// returned only so that test can assert the task is still alive.
+///
+/// # Panics
+///
+/// `period` must be non-zero. `tokio::time::interval` panics on a zero period,
+/// and it would do so at the first poll *inside* the spawned task — precisely
+/// the unobservable failure mode the caller-built `client` exists to avoid,
+/// since production discards the handle. The `debug_assert!` below moves that
+/// failure onto the caller's thread instead.
+fn spawn_announce_task(
+    endpoint: Url,
+    client: reqwest::Client,
+    base: ServerAnnouncement,
+    player_count: SharedPlayerCount,
+    period: Duration,
+) -> tokio::task::JoinHandle<()> {
+    // Deliberately in the synchronous body rather than beside the `interval`
+    // call it guards: a panic raised inside the spawned task is exactly the
+    // unobservable failure this assertion exists to catch, so it has to fire on
+    // the caller's thread to be worth anything. No runtime branch — the loop
+    // keeps exactly its three per-tick failure classes.
+    debug_assert!(!period.is_zero(), "announce period must be non-zero");
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(period);
+        // A stalled process must not fire a burst of announcements on catch-up.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            // `interval`'s first tick completes immediately, so the server
+            // announces at startup and then every `period`.
+            interval.tick().await;
+            let announcement = base.with_current_players(player_count.load(Ordering::Relaxed));
+            let body = match serde_json::to_vec(&announcement) {
+                Ok(body) => body,
+                Err(error) => {
+                    warn!(%error, "could not serialize the directory announcement; skipping this tick");
+                    continue;
+                }
+            };
+            let sent = client
+                .post(endpoint.clone())
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .send()
+                .await;
+            match sent {
+                Ok(response) if response.status().is_success() => {}
+                Ok(response) => warn!(
+                    status = %response.status(),
+                    endpoint = %endpoint,
+                    "directory refused this announcement; retrying next tick"
+                ),
+                Err(error) => warn!(
+                    %error,
+                    endpoint = %endpoint,
+                    "could not reach the directory; retrying next tick"
+                ),
+            }
+        }
+    })
 }
 
 /// Open an embedded ngrok HTTP tunnel that forwards public traffic to the local
@@ -3248,6 +3671,47 @@ struct ConnectionSlot {
     armed: bool,
 }
 
+/// Per-connection WebSocket writer. Once the text handshake negotiates a wire
+/// format, every later JSON text send passes through the same envelope path —
+/// including direct errors as well as queued broadcasts.
+struct NegotiatedSocket {
+    inner: WebSocket,
+    wire_format: Option<WireFormat>,
+}
+
+impl NegotiatedSocket {
+    fn new(inner: WebSocket) -> Self {
+        Self {
+            inner,
+            wire_format: None,
+        }
+    }
+
+    fn set_wire_format(&mut self, wire_format: Option<WireFormat>) {
+        self.wire_format = wire_format;
+    }
+
+    fn uses_gzip_envelope(&self) -> bool {
+        self.wire_format == Some(WireFormat::GzipEnvelopeV1)
+    }
+
+    async fn send(&mut self, message: Message) -> Result<(), axum::Error> {
+        let message = match message {
+            Message::Text(json) => {
+                wire::encode_json_message(json.to_string(), self.uses_gzip_envelope())
+                    .await
+                    .map_err(axum::Error::new)?
+            }
+            other => other,
+        };
+        self.inner.send(message).await
+    }
+
+    async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
+        self.inner.recv().await
+    }
+}
+
 impl ConnectionSlot {
     fn new(player_count: SharedPlayerCount) -> Self {
         Self {
@@ -3271,7 +3735,7 @@ impl Drop for ConnectionSlot {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_socket(
-    mut socket: WebSocket,
+    socket: WebSocket,
     state: SharedState,
     draft_state: SharedDraftState,
     draft_pools: SharedDraftPools,
@@ -3289,6 +3753,7 @@ async fn handle_socket(
     online_count: u32,
     slot: ConnectionSlot,
 ) {
+    let mut socket = NegotiatedSocket::new(socket);
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
     // The slot was reserved before the upgrade; from here the two `fetch_sub`
@@ -3331,6 +3796,7 @@ async fn handle_socket(
         mode,
         lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
         public_url,
+        wire_formats: vec![WireFormat::GzipEnvelopeV1],
     };
     if let Ok(json) = serde_json::to_string(&hello) {
         if socket.send(Message::text(json)).await.is_err() {
@@ -3345,25 +3811,32 @@ async fn handle_socket(
             biased;
             Some(msg) = rx.recv() => {
                 if let Ok(json) = serde_json::to_string(&msg) {
-                    if socket.send(Message::text(json)).await.is_err() {
-                        break;
-                    }
+                    if socket.send(Message::text(json)).await.is_err() { break; }
                 }
             }
 
             result = socket.recv() => {
                 match result {
                     Some(Ok(msg)) => {
-                        let text = match msg {
-                            Message::Text(t) => t.to_string(),
-                            Message::Close(_) => break,
-                            _ => continue,
-                        };
-
                         if !rate_limiter.check() {
                             debug!("rate limit exceeded, dropping message");
                             continue;
                         }
+
+                        let text = match msg {
+                            Message::Text(t) => t.to_string(),
+                            Message::Binary(bytes) if socket.uses_gzip_envelope() => {
+                                match wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES).await {
+                                    Ok(text) => text,
+                                    Err(error) => {
+                                        warn!(%error, "failed to decode client binary envelope");
+                                        continue;
+                                    }
+                                }
+                            }
+                            Message::Close(_) => break,
+                            _ => continue,
+                        };
 
                         let client_msg: ClientMessage = match serde_json::from_str(&text) {
                             Ok(m) => m,
@@ -3544,6 +4017,9 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             // LobbyOnly brokers run no server-side game, so there is no
             // game-server URL to advertise for a `<code>@<host>` share string.
             public_url: None,
+            // Socket negotiation uses the canonical ServerHello sent directly
+            // by handle_socket; broker-originated hellos are only projections.
+            wire_formats: Vec::new(),
         },
         L::GameCreated {
             game_code,
@@ -3639,6 +4115,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             build_commit,
             protocol_version,
             lobby_protocol_version,
+            wire_formats: _,
         } => L::ClientHello {
             client_version: client_version.clone(),
             build_commit: build_commit.clone(),
@@ -4827,7 +5304,7 @@ async fn broadcast_game_started(
     broadcast_ai_failure(connections, game_code, ai_failure).await;
 }
 
-async fn require_host(identity: &SocketIdentity, socket: &mut WebSocket) -> Result<(), ()> {
+async fn require_host(identity: &SocketIdentity, socket: &mut NegotiatedSocket) -> Result<(), ()> {
     if identity.player_id != Some(PlayerId(0)) {
         let msg = ServerMessage::error("Only the host can modify seats.".to_string());
         if let Ok(json) = serde_json::to_string(&msg) {
@@ -4852,7 +5329,7 @@ fn is_joining_current_game(identity: &SocketIdentity, target_game_code: &str) ->
 async fn reject_joining_current_game(
     identity: &SocketIdentity,
     target_game_code: &str,
-    socket: &mut WebSocket,
+    socket: &mut NegotiatedSocket,
 ) -> Result<(), ()> {
     if !is_joining_current_game(identity, target_game_code) {
         return Ok(());
@@ -4996,6 +5473,22 @@ async fn broadcast_ai_results(
                     } else {
                         HashMap::new()
                     };
+                    // CR 118.3: the STALENESS axis is the one part of disclosure
+                    // the engine cannot self-gate — "is this the final transition
+                    // of the fan-out" is a property of the transport's batch, not
+                    // of any `GameState`. An intermediate transition advertises no
+                    // actions, so it must advertise no read-out either. The
+                    // `is_actor` half is redundant with the entry point's own gate
+                    // and is kept only to mirror its `p_spell_costs` sibling above.
+                    let p_activation_block_reasons = if is_last && is_actor {
+                        engine_activation_block_reasons_for_viewer(ai_raw_state, *pid)
+                    } else {
+                        HashMap::new()
+                    };
+                    debug_assert!(
+                        p_activation_block_reasons.is_empty() || is_actor,
+                        "a non-empty CR 118.3 read-out implies an authorized viewer"
+                    );
                     let _ = s.send(ServerMessage::StateUpdate {
                         state_revision: *ai_revision,
                         state: pstate.clone(),
@@ -5012,6 +5505,7 @@ async fn broadcast_ai_results(
                         log_entries: ai_log_entries.clone(),
                         spell_costs: p_spell_costs,
                         legal_actions_by_object: object_action_payloads(&p_by_object),
+                        activation_block_reasons: p_activation_block_reasons,
                         derived: derive_transport_views(ai_raw_state, pstate, Some(*pid)),
                         viewer_interaction: derive_viewer_interaction(ai_raw_state, pstate, *pid),
                         rewind_targets: rewind_targets.to_vec(),
@@ -5111,6 +5605,17 @@ async fn broadcast_takeback_approved(
                 } else {
                     HashMap::new()
                 };
+                // CR 118.3 + CR 117.1: derived from `raw_state` (`snapshot.0`) —
+                // the SAME binding the sibling `spell_costs` (`snapshot.3`) came
+                // from. This path has no `session` in scope, and reading a
+                // different state here is precisely the freshness hazard the
+                // per-site state-binding rule exists to prevent.
+                let p_activation_block_reasons =
+                    engine_activation_block_reasons_for_viewer(&raw_state, *pid);
+                debug_assert!(
+                    p_activation_block_reasons.is_empty() || is_actor,
+                    "a non-empty CR 118.3 read-out implies an authorized viewer"
+                );
                 let _ = s.send(ServerMessage::StateUpdate {
                     state_revision,
                     state: pstate.clone(),
@@ -5123,6 +5628,7 @@ async fn broadcast_takeback_approved(
                     log_entries: vec![],
                     spell_costs: p_spell_costs,
                     legal_actions_by_object: object_action_payloads(&p_by_object),
+                    activation_block_reasons: p_activation_block_reasons,
                     derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
                     viewer_interaction: derive_viewer_interaction(&raw_state, pstate, *pid),
                     // Captured by the caller under the same lock as the
@@ -5203,6 +5709,15 @@ fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<Serv
         ClientMessage::PreviewManaPayment { request_id, .. } => {
             Some(ServerMessage::ManaPaymentPreviewFailed {
                 request_id: *request_id,
+                message,
+            })
+        }
+        ClientMessage::ExportAuthoritativeState => {
+            Some(ServerMessage::AuthoritativeStateExportFailed { message })
+        }
+        ClientMessage::PreviewInteraction { request } => {
+            Some(ServerMessage::InteractionPreviewFailed {
+                request_id: request.request_id.clone(),
                 message,
             })
         }
@@ -5319,6 +5834,66 @@ impl GameSubmission {
     }
 }
 
+/// Answer one interaction preview to its requester alone.
+///
+/// Takes NO socket: the reply rides the connection's own `tx`, which shares the
+/// one `biased` `tokio::select!` loop with `socket.recv()` on a single task, so
+/// it reaches exactly this socket with no interleaving hazard. That is also why
+/// this is a free function rather than an inline dispatch arm — `axum`'s
+/// `WebSocket` has no test constructor, so a socket-taking handler could not be
+/// driven from a test at all.
+///
+/// `connections` is read only through the socket-currency check; nothing is
+/// broadcast, and no lock is held across the send.
+async fn handle_preview_interaction(
+    request: InteractionPreviewRequest,
+    state: &SharedState,
+    connections: &SharedConnections,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+    identity: &SocketIdentity,
+) {
+    let request_id = request.request_id.clone();
+    let response = match (identity.game_code.clone(), identity.player_token.clone()) {
+        (Some(game_code), Some(player_token)) => {
+            let mgr = state.lock().await;
+            if !full_socket_is_current_while_state_locked(&mgr, connections, identity, tx).await {
+                ServerMessage::InteractionPreviewFailed {
+                    request_id,
+                    message: FULL_SOCKET_AUTHORITY_REJECTION.to_string(),
+                }
+            } else {
+                // No handler-level payload re-guard, deliberately:
+                // `guard_client_message_before_dispatch` already charged this
+                // frame at the wire, and `preview_interaction` re-charges every
+                // member and answers its own `PayloadTooLarge` INSIDE the
+                // preview — a correlated, non-tearing answer on this request's
+                // own channel, identical to what the local WASM seat gets.
+                match mgr.preview_interaction_with_rejection(&game_code, &player_token, &request) {
+                    Ok(preview) => ServerMessage::InteractionPreview { preview },
+                    Err(PreviewRefusal::Rejected(rejection)) => {
+                        ServerMessage::InteractionPreviewFailed {
+                            request_id,
+                            message: rejection.message,
+                        }
+                    }
+                    Err(PreviewRefusal::Operational(error)) => {
+                        ServerMessage::InteractionPreviewFailed {
+                            request_id,
+                            message: error,
+                        }
+                    }
+                }
+            }
+        }
+        _ => ServerMessage::InteractionPreviewFailed {
+            request_id,
+            message: "Not in a game".to_string(),
+        },
+    };
+
+    let _ = tx.send(response);
+}
+
 /// Apply one authenticated game submission from a Full-mode game socket, then
 /// broadcast the resulting state to every participant and spectator.
 ///
@@ -5329,7 +5904,7 @@ impl GameSubmission {
 #[allow(clippy::too_many_arguments)]
 async fn handle_full_game_submission(
     submission: GameSubmission,
-    socket: &mut WebSocket,
+    socket: &mut NegotiatedSocket,
     state: &SharedState,
     db: &SharedDb,
     draft_state: &SharedDraftState,
@@ -5583,6 +6158,22 @@ async fn handle_full_game_submission(
                             } else {
                                 HashMap::new()
                             };
+                            // CR 118.3: the STALENESS axis again — a human action
+                            // followed by AI play must not advertise the pre-AI
+                            // action set, so it must not advertise a read-out
+                            // describing a board the player is not being offered
+                            // actions on. `is_actor` mirrors the `p_spell_costs`
+                            // sibling above and is redundant with the entry
+                            // point's own gate.
+                            let p_activation_block_reasons = if ai_results.is_empty() && is_actor {
+                                engine_activation_block_reasons_for_viewer(&raw_state, *pid)
+                            } else {
+                                HashMap::new()
+                            };
+                            debug_assert!(
+                                p_activation_block_reasons.is_empty() || is_actor,
+                                "a non-empty CR 118.3 read-out implies an authorized viewer"
+                            );
                             let _ = s.send(ServerMessage::StateUpdate {
                                 state_revision: human_revision,
                                 state: pstate.clone(),
@@ -5597,6 +6188,7 @@ async fn handle_full_game_submission(
                                 log_entries: log_entries.clone(),
                                 spell_costs: p_spell_costs,
                                 legal_actions_by_object: object_action_payloads(&p_by_object),
+                                activation_block_reasons: p_activation_block_reasons,
                                 derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
                                 viewer_interaction: derive_viewer_interaction(
                                     &raw_state, pstate, *pid,
@@ -5960,7 +6552,7 @@ async fn handle_resolve_all(
 #[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     client_msg: ClientMessage,
-    socket: &mut WebSocket,
+    socket: &mut NegotiatedSocket,
     state: &SharedState,
     draft_state: &SharedDraftState,
     draft_pools: &SharedDraftPools,
@@ -5990,6 +6582,7 @@ async fn handle_client_message(
                 commit = %info.build_commit,
                 "ClientHello accepted"
             );
+            socket.set_wire_format(info.wire_format);
             identity.client_hello = Some(info);
             return;
         }
@@ -6394,16 +6987,13 @@ async fn handle_client_message(
                                     request_id,
                                     source_ids,
                                 },
-                                Err(SessionActionError::Rejected(rejection)) => {
+                                Err(PreviewRefusal::Rejected(rejection)) => {
                                     ServerMessage::ManaPaymentPreviewRejected {
                                         request_id,
                                         rejection,
                                     }
                                 }
-                                Err(SessionActionError::RequestRejected(reason)) => {
-                                    ServerMessage::RequestRejected { reason }
-                                }
-                                Err(SessionActionError::Operational(error)) => {
+                                Err(PreviewRefusal::Operational(error)) => {
                                     ServerMessage::ManaPaymentPreviewFailed {
                                         request_id,
                                         message: error,
@@ -6422,6 +7012,58 @@ async fn handle_client_message(
             if let Ok(json) = serde_json::to_string(&response) {
                 let _ = socket.send(Message::text(json)).await;
             }
+        }
+
+        ClientMessage::ExportAuthoritativeState => {
+            // The native P2P host is always Player 1 (seat zero). Its local
+            // server deliberately redacts normal broadcast snapshots per
+            // viewer, but the host needs an unredacted snapshot to report an
+            // engine stall. The export is a trusted engine envelope, not a
+            // PersistedSession, so reconnect tokens and server metadata never
+            // leave the server.
+            let response = match (identity.game_code.as_deref(), identity.player_id) {
+                (Some(game_code), Some(PlayerId(0))) => {
+                    let mut manager = state.lock().await;
+                    match manager.sessions.get_mut(game_code) {
+                        Some(session) if session.hosting == HostingMode::SingleUser => {
+                            let mut snapshot = session.state.clone();
+                            snapshot.capture_rng_word_pos();
+                            match serde_json::to_string(&TrustedGameStateEnvelope::capture(
+                                snapshot,
+                            )) {
+                                Ok(state) => ServerMessage::AuthoritativeStateExport { state },
+                                Err(error) => ServerMessage::AuthoritativeStateExportFailed {
+                                    message: format!(
+                                        "Failed to serialize authoritative game state: {error}"
+                                    ),
+                                },
+                            }
+                        }
+                        Some(_) => ServerMessage::AuthoritativeStateExportFailed {
+                            message:
+                                "Authoritative state export is available only from a local host"
+                                    .to_string(),
+                        },
+                        None => ServerMessage::AuthoritativeStateExportFailed {
+                            message: "Game session is no longer available".to_string(),
+                        },
+                    }
+                }
+                (Some(_), Some(_)) => ServerMessage::AuthoritativeStateExportFailed {
+                    message: "Only the game host can export authoritative state".to_string(),
+                },
+                _ => ServerMessage::AuthoritativeStateExportFailed {
+                    message: "Not in a game".to_string(),
+                },
+            };
+
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+        }
+
+        ClientMessage::PreviewInteraction { request } => {
+            handle_preview_interaction(request, state, connections, tx, identity).await;
         }
 
         ClientMessage::Action { action } => {
@@ -7868,6 +8510,11 @@ async fn handle_client_message(
                         log_entries: vec![],
                         spell_costs: HashMap::new(),
                         legal_actions_by_object: HashMap::new(),
+                        // CR 117.1b: the game has not started, so no player has
+                        // priority and no activated ability can be activated —
+                        // the read-out has nothing to describe. Empty by the
+                        // same existing design as its two siblings above.
+                        activation_block_reasons: HashMap::new(),
                         derived,
                         viewer_interaction,
                         // `JoinOutcome::Waiting` — the game has not started, so
@@ -9900,7 +10547,10 @@ mod state_transport_derived_tests {
             apply(
                 &mut session.state,
                 PlayerId(0),
-                GameAction::BeginResolveAll { max_resolutions: 1 },
+                GameAction::BeginResolveAll {
+                    max_resolutions: 1,
+                    scope: ResolveAllScope::Shared,
+                },
             )
             .expect("priority holder may start Resolve All consent");
             let epoch = match session.state.waiting_for {
@@ -10205,6 +10855,412 @@ mod ranked_tests {
         assert!(ranked_duel_players_for_room(false, 2, false, &display_names).is_none());
         assert!(ranked_duel_players_for_room(true, 3, false, &display_names).is_none());
         assert!(ranked_duel_players_for_room(true, 2, true, &display_names).is_none());
+    }
+}
+
+#[cfg(test)]
+mod interaction_preview_route_tests {
+    use super::*;
+    use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::types::interaction::{
+        InteractionAvailability, InteractionPreview, InteractionPreviewRequest,
+        InteractionPreviewStatus, InteractionSubmission, PreviewRequestId,
+    };
+    use server_core::filter_state_for_player;
+    use server_core::{AiDriverFailure, AiDriverFault};
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    fn empty_identity() -> SocketIdentity {
+        SocketIdentity {
+            game_code: None,
+            player_id: None,
+            player_token: None,
+            lobby_subscribed: false,
+            session_span: None,
+            client_hello: None,
+            lobby_host_game: None,
+            seat_reservations: Vec::new(),
+            lobby_reservations: Vec::new(),
+            lobby_organized_tournaments: Vec::new(),
+            lobby_joined_tournaments: Vec::new(),
+            draft_code: None,
+            draft_seat: None,
+            draft_token: None,
+            spectator_draft_code: None,
+            spectator_visibility: None,
+            spectator_game_code: None,
+        }
+    }
+
+    /// The witness is minted by `derive_viewer_interaction`, never hand-built:
+    /// a fabricated id would be indistinguishable from a stale one.
+    fn live_witness(
+        manager: &SessionManager,
+        game_code: &str,
+        token0: &str,
+        token1: &str,
+    ) -> (String, String, InteractionSubmission) {
+        let state = &manager.sessions.get(game_code).expect("session").state;
+        for (player, token, other) in [(PlayerId(0), token0, token1), (PlayerId(1), token1, token0)]
+        {
+            let filtered = filter_state_for_player(state, player);
+            let view = derive_viewer_interaction(state, &filtered, player);
+            if let InteractionAvailability::ProgressAvailable { witness } = view.availability {
+                return (token.to_string(), other.to_string(), witness);
+            }
+        }
+        panic!("a started session must publish a progress witness for some seat");
+    }
+
+    /// Two seats, both senders installed through the production
+    /// `attach_full_seat`, plus a live engine-minted preview request for
+    /// whichever seat holds the capability.
+    async fn two_seat_table() -> (
+        SharedState,
+        SharedConnections,
+        String,
+        InteractionPreviewRequest,
+        (
+            SocketIdentity,
+            mpsc::UnboundedSender<ServerMessage>,
+            mpsc::UnboundedReceiver<ServerMessage>,
+        ),
+        (
+            SocketIdentity,
+            mpsc::UnboundedSender<ServerMessage>,
+            mpsc::UnboundedReceiver<ServerMessage>,
+        ),
+    ) {
+        let mut manager = SessionManager::new();
+        let (game_code, token0) = manager.create_game(PlayerDeckPayload::default());
+        let (token1, _) = manager
+            .join_game(&game_code, PlayerDeckPayload::default())
+            .expect("the second seat joins and starts the game");
+        let (acting_token, other_token, witness) =
+            live_witness(&manager, &game_code, &token0, &token1);
+
+        let request = InteractionPreviewRequest {
+            request_id: PreviewRequestId("req-1".to_string()),
+            interaction_id: witness.interaction_id.clone(),
+            response: witness.response.clone(),
+        };
+
+        let state: SharedState = Arc::new(Mutex::new(manager));
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+
+        let (requester_tx, requester_rx) = mpsc::unbounded_channel();
+        let mut requester_identity = empty_identity();
+        attach_full_seat(
+            &state,
+            &connections,
+            &mut requester_identity,
+            game_code.clone(),
+            acting_token,
+            &requester_tx,
+        )
+        .await
+        .expect("the requesting seat attaches");
+
+        let (other_tx, other_rx) = mpsc::unbounded_channel();
+        let mut other_identity = empty_identity();
+        attach_full_seat(
+            &state,
+            &connections,
+            &mut other_identity,
+            game_code.clone(),
+            other_token,
+            &other_tx,
+        )
+        .await
+        .expect("the second seat attaches");
+
+        (
+            state,
+            connections,
+            game_code,
+            request,
+            (requester_identity, requester_tx, requester_rx),
+            (other_identity, other_tx, other_rx),
+        )
+    }
+
+    fn fault() -> AiDriverFault {
+        AiDriverFault {
+            id: 1,
+            after_state_revision: 0,
+            cause: AiDriverFailure::ActionSafetyCapReached { limit: 1 },
+        }
+    }
+
+    /// Row 1. Fan the answer out through `connections` and the negative below
+    /// fails: the other seat's `rx` yields a frame.
+    #[tokio::test]
+    async fn preview_answers_the_requester_and_no_other_seat() {
+        let (
+            state,
+            connections,
+            game_code,
+            request,
+            (requester_identity, requester_tx, mut requester_rx),
+            (_other_identity, _other_tx, mut other_rx),
+        ) = two_seat_table().await;
+
+        handle_preview_interaction(
+            request.clone(),
+            &state,
+            &connections,
+            &requester_tx,
+            &requester_identity,
+        )
+        .await;
+
+        // Positive (i): the route ran. An unreached route yields an empty channel,
+        // which would also satisfy the negative below.
+        let preview: InteractionPreview = match requester_rx
+            .try_recv()
+            .expect("the requesting seat is answered")
+        {
+            ServerMessage::InteractionPreview { preview } => preview,
+            other => panic!("the requester must receive a preview, got {other:?}"),
+        };
+        assert!(
+            matches!(preview.status, InteractionPreviewStatus::Confirmable),
+            "the answer must reach the reducer simulation: {:?}",
+            preview.status
+        );
+        assert_eq!(preview.request_id, request.request_id);
+        assert_eq!(preview.interaction_id, request.interaction_id);
+        assert!(matches!(requester_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // The negative.
+        assert!(
+            matches!(other_rx.try_recv(), Err(TryRecvError::Empty)),
+            "a preview must reach no seat but the requester"
+        );
+
+        // Positive (ii): the instrument is alive. The landed production fan-out
+        // over the SAME `connections` map fills the SAME receiver, so a dead
+        // channel cannot pass both legs of this row.
+        broadcast_ai_failure(&connections, &game_code, Some(fault())).await;
+        assert!(
+            matches!(other_rx.try_recv(), Ok(ServerMessage::AiDriverFault { .. })),
+            "the second seat's channel is reachable by a real fan-out"
+        );
+    }
+
+    /// Row 1's sibling: the socket-currency check refuses a sender that is not
+    /// the one registered for this seat, and answers on the correlated channel.
+    #[tokio::test]
+    async fn preview_from_a_superseded_socket_is_refused() {
+        let (
+            state,
+            connections,
+            _game_code,
+            request,
+            (requester_identity, _requester_tx, mut requester_rx),
+            (_other_identity, _other_tx, _other_rx),
+        ) = two_seat_table().await;
+
+        let (stale_tx, mut stale_rx) = mpsc::unbounded_channel();
+        handle_preview_interaction(
+            request.clone(),
+            &state,
+            &connections,
+            &stale_tx,
+            &requester_identity,
+        )
+        .await;
+
+        match stale_rx.try_recv().expect("the stale socket is answered") {
+            ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, request.request_id);
+                assert_eq!(message, FULL_SOCKET_AUTHORITY_REJECTION);
+            }
+            other => panic!("expected a correlated authority refusal, got {other:?}"),
+        }
+        assert!(
+            matches!(requester_rx.try_recv(), Err(TryRecvError::Empty)),
+            "a refused stale socket must not leak an answer to the live seat"
+        );
+    }
+
+    /// A socket with no attached seat never reaches the session at all, and is
+    /// still answered on the correlated channel rather than left hanging.
+    #[tokio::test]
+    async fn preview_before_joining_is_refused_on_the_correlated_channel() {
+        let (state, connections, _game_code, request, _requester, _other) = two_seat_table().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        handle_preview_interaction(
+            request.clone(),
+            &state,
+            &connections,
+            &tx,
+            &empty_identity(),
+        )
+        .await;
+
+        match rx.try_recv().expect("a pre-join preview is answered") {
+            ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, request.request_id);
+                assert_eq!(message, "Not in a game");
+            }
+            other => panic!("expected a correlated refusal, got {other:?}"),
+        }
+    }
+
+    /// Row 11's transport half: a session-level refusal reaches the client as a
+    /// correlated failure carrying the session's own reason, not as an `Error`
+    /// (which the native client treats as a session teardown).
+    #[tokio::test]
+    async fn an_interlocked_session_answers_a_correlated_failure_not_an_error() {
+        let (
+            state,
+            connections,
+            game_code,
+            request,
+            (requester_identity, requester_tx, mut requester_rx),
+            (_other_identity, _other_tx, _other_rx),
+        ) = two_seat_table().await;
+
+        {
+            let mut manager = state.lock().await;
+            let session = manager.sessions.get_mut(&game_code).expect("session");
+            session.ai_driver_fault = Some(fault());
+        }
+
+        handle_preview_interaction(
+            request.clone(),
+            &state,
+            &connections,
+            &requester_tx,
+            &requester_identity,
+        )
+        .await;
+
+        match requester_rx.try_recv().expect("the requester is answered") {
+            ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, request.request_id);
+                assert!(
+                    message.contains("Native AI driver fault"),
+                    "the session's own reason must ride the correlated channel: {message}"
+                );
+            }
+            other => panic!("an interlock must not tear the session down: {other:?}"),
+        }
+
+        // Reach guard: with the interlock cleared the identical request is
+        // answered, so the failure above is the interlock and not a broken table.
+        {
+            let mut manager = state.lock().await;
+            manager
+                .sessions
+                .get_mut(&game_code)
+                .expect("session")
+                .ai_driver_fault = None;
+        }
+        handle_preview_interaction(
+            request,
+            &state,
+            &connections,
+            &requester_tx,
+            &requester_identity,
+        )
+        .await;
+        assert!(matches!(
+            requester_rx.try_recv(),
+            Ok(ServerMessage::InteractionPreview { .. })
+        ));
+    }
+
+    /// Row 5's non-compiler-enforced leg. `to_lobby_client_message` carries
+    /// `_ => return None`, so no compile error would catch a preview leaking
+    /// into a broker clone. `SubscribeLobby` is the in-test positive: without
+    /// it a wholesale-`None` regression would satisfy this.
+    #[test]
+    fn preview_is_never_projected_into_the_lobby_broker() {
+        let frame = ClientMessage::PreviewInteraction {
+            request: InteractionPreviewRequest {
+                request_id: PreviewRequestId("req-1".to_string()),
+                interaction_id: engine::types::interaction::InteractionId("i-1".to_string()),
+                response: engine::types::interaction::InteractionResponse::Choose {
+                    choice_id: engine::types::interaction::InteractionChoiceId("a".to_string()),
+                },
+            },
+        };
+        assert!(to_lobby_client_message(&frame).is_none());
+        assert!(to_lobby_client_message(&ClientMessage::SubscribeLobby).is_some());
+    }
+
+    /// Row 5's three compiler-enforced legs, asserted by value rather than by
+    /// "it compiled": the preview is classified exactly as `Interaction` is at
+    /// each, and its operational failure is CORRELATED where `Interaction`'s is
+    /// not — an uncorrelated `ActionFailed` would leave the pending promise
+    /// hanging. Move it to `reject_if_disabled`'s always-allowed group and the
+    /// LobbyOnly leg fails; give it `Independent` and the authority leg fails.
+    #[test]
+    fn preview_is_classified_exactly_as_its_submission_sibling() {
+        let request = InteractionPreviewRequest {
+            request_id: PreviewRequestId("req-1".to_string()),
+            interaction_id: engine::types::interaction::InteractionId("i-1".to_string()),
+            response: engine::types::interaction::InteractionResponse::Choose {
+                choice_id: engine::types::interaction::InteractionChoiceId("a".to_string()),
+            },
+        };
+        let preview = ClientMessage::PreviewInteraction {
+            request: request.clone(),
+        };
+        let interaction = ClientMessage::Interaction {
+            submission: InteractionSubmission {
+                interaction_id: request.interaction_id.clone(),
+                response: request.response.clone(),
+            },
+        };
+
+        assert!(reject_if_disabled(&preview, ServerMode::Full).is_none());
+        assert!(reject_if_disabled(&preview, ServerMode::LobbyOnly).is_some());
+        assert_eq!(
+            reject_if_disabled(&preview, ServerMode::LobbyOnly),
+            reject_if_disabled(&interaction, ServerMode::LobbyOnly)
+        );
+
+        assert_eq!(
+            full_socket_authority(&preview),
+            FullSocketAuthority::CurrentSeat
+        );
+        assert_eq!(
+            full_socket_authority(&preview),
+            full_socket_authority(&interaction)
+        );
+        // Non-vacuity for the equality above: not every variant is CurrentSeat.
+        assert_eq!(
+            full_socket_authority(&ClientMessage::Ping { timestamp: 1 }),
+            FullSocketAuthority::Independent
+        );
+
+        match operation_failed_message(&preview, "disabled".to_string()) {
+            Some(ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            }) => {
+                assert_eq!(request_id, request.request_id);
+                assert_eq!(message, "disabled");
+            }
+            other => panic!("a preview failure must stay correlated, got {other:?}"),
+        }
+        assert!(matches!(
+            operation_failed_message(&interaction, "disabled".to_string()),
+            Some(ServerMessage::ActionFailed { .. })
+        ));
     }
 }
 
@@ -11518,6 +12574,50 @@ mod issue_4548_full_create_tests {
         }
     }
 
+    async fn recv_enveloped_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let frame = socket
+            .next()
+            .await
+            .expect("websocket message")
+            .expect("websocket frame");
+        let WsMessage::Binary(bytes) = frame else {
+            panic!("expected binary server message, got {frame:?}");
+        };
+        let json = wire::decode_client_envelope(bytes.to_vec(), MAX_WS_MESSAGE_BYTES)
+            .await
+            .expect("decode server envelope");
+        serde_json::from_str(&json).expect("server message")
+    }
+
+    fn test_client_hello(wire_formats: Vec<WireFormat>) -> ClientMessage {
+        ClientMessage::ClientHello {
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_commit: build_commit().to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats,
+        }
+    }
+
+    async fn send_test_message<S>(
+        socket: &mut WebSocketStream<S>,
+        message: &ClientMessage,
+        enveloped: bool,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let json = serde_json::to_vec(message).expect("client message json");
+        let frame = if enveloped {
+            WsMessage::Binary([vec![0x00], json].concat().into())
+        } else {
+            WsMessage::Text(String::from_utf8(json).expect("client message utf8").into())
+        };
+        socket.send(frame).await.expect("send client message");
+    }
+
     #[tokio::test]
     async fn full_mode_create_sends_slots_after_game_created() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
@@ -11536,6 +12636,7 @@ mod issue_4548_full_create_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11595,6 +12696,104 @@ mod issue_4548_full_create_tests {
     }
 
     #[tokio::test]
+    async fn negotiated_gzip_envelope_accepts_and_returns_binary_frames() {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+
+            let server_hello = recv_server_message(&mut socket).await;
+            assert!(matches!(
+                server_hello,
+                ServerMessage::ServerHello { wire_formats, .. }
+                    if wire_formats.contains(&WireFormat::GzipEnvelopeV1)
+            ));
+
+            send_test_message(
+                &mut socket,
+                &test_client_hello(vec![WireFormat::GzipEnvelopeV1]),
+                false,
+            )
+            .await;
+            send_test_message(&mut socket, &ClientMessage::SubscribeLobby, true).await;
+            assert!(matches!(
+                recv_enveloped_server_message(&mut socket).await,
+                ServerMessage::LobbyUpdate { .. }
+            ));
+            for _ in 0..RATE_LIMIT_MESSAGES {
+                socket
+                    .send(WsMessage::Binary(vec![0x01, 1, 2, 3].into()))
+                    .await
+                    .expect("send malformed gzip");
+            }
+            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 7 }, true).await;
+            let pong = tokio::time::timeout(Duration::from_millis(100), async {
+                loop {
+                    if matches!(
+                        recv_enveloped_server_message(&mut socket).await,
+                        ServerMessage::Pong { .. }
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(pong.is_err());
+        })
+        .await;
+        server.abort();
+
+        assert!(result.is_ok(), "binary envelope roundtrip timed out");
+    }
+
+    #[tokio::test]
+    async fn lobby_broadcast_uses_each_clients_negotiated_frame_format() {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut compressed, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("connect compressed client");
+            recv_server_message(&mut compressed).await;
+            let (mut legacy, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("connect legacy client");
+            recv_server_message(&mut legacy).await;
+
+            send_test_message(
+                &mut compressed,
+                &test_client_hello(vec![WireFormat::GzipEnvelopeV1]),
+                false,
+            )
+            .await;
+            send_test_message(&mut legacy, &test_client_hello(Vec::new()), false).await;
+            send_test_message(&mut compressed, &ClientMessage::SubscribeLobby, true).await;
+            send_test_message(&mut legacy, &ClientMessage::SubscribeLobby, false).await;
+
+            for _ in 0..2 {
+                recv_enveloped_server_message(&mut compressed).await;
+                recv_server_message(&mut legacy).await;
+            }
+
+            let (_trigger, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .expect("connect broadcast trigger");
+            while !matches!(
+                recv_enveloped_server_message(&mut compressed).await,
+                ServerMessage::PlayerCount { count: 3 }
+            ) {}
+            while !matches!(
+                recv_server_message(&mut legacy).await,
+                ServerMessage::PlayerCount { count: 3 }
+            ) {}
+        })
+        .await;
+        server.abort();
+
+        assert!(result.is_ok(), "mixed-version lobby broadcast timed out");
+    }
+
+    #[tokio::test]
     async fn full_mode_create_rejects_format_invalid_host_deck() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(2), async {
@@ -11612,6 +12811,7 @@ mod issue_4548_full_create_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11678,6 +12878,7 @@ mod issue_4548_full_create_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -11810,6 +13011,7 @@ mod game_submission_tests {
             build_commit: build_commit().to_string(),
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: Vec::new(),
         };
         socket
             .send(WsMessage::Text(
@@ -12344,6 +13546,7 @@ mod game_submission_tests {
                 build_commit: build_commit().to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -12407,6 +13610,7 @@ mod mode_gate_tests {
                 request_id: 1,
                 action: GameAction::PassPriority,
             },
+            ClientMessage::ExportAuthoritativeState,
             ClientMessage::Reconnect {
                 game_code: "X".into(),
                 player_token: "t".into(),
@@ -12494,6 +13698,13 @@ mod mode_gate_tests {
             ),
             Some(ServerMessage::ManaPaymentPreviewFailed { request_id: 5, message }) if message == "disabled"
         ));
+        assert!(matches!(
+            operation_failed_message(
+                &ClientMessage::ExportAuthoritativeState,
+                "disabled".to_string(),
+            ),
+            Some(ServerMessage::AuthoritativeStateExportFailed { message }) if message == "disabled"
+        ));
         assert!(
             operation_failed_message(&ClientMessage::ConcedeMatch, "disabled".to_string(),)
                 .is_none()
@@ -12508,6 +13719,7 @@ mod mode_gate_tests {
                 build_commit: "abc".into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             },
             ClientMessage::SubscribeLobby,
             ClientMessage::UnsubscribeLobby,
@@ -12562,6 +13774,7 @@ mod mode_gate_tests {
                 request_id: 1,
                 action: GameAction::PassPriority,
             },
+            ClientMessage::ExportAuthoritativeState,
             ClientMessage::AbandonGame,
             ClientMessage::Concede,
             ClientMessage::ConcedeMatch,
@@ -12903,6 +14116,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12911,6 +14125,30 @@ mod handshake_tests {
             HelloGateOutcome::Accept(ClientHelloInfo {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
+                wire_format: None,
+            })
+        );
+    }
+
+    #[test]
+    fn negotiates_gzip_envelope_from_client_hello_capability() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            },
+            hello_acceptance(ServerMode::Full),
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::Accept(ClientHelloInfo {
+                client_version: "0.1.11".into(),
+                build_commit: "abc1234".into(),
+                wire_format: Some(WireFormat::GzipEnvelopeV1),
             })
         );
     }
@@ -12931,6 +14169,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -12955,6 +14194,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12975,6 +14215,7 @@ mod handshake_tests {
                 // Far outside LOBBY_MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION.
                 protocol_version: PROTOCOL_VERSION.saturating_sub(9),
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -12995,6 +14236,7 @@ mod handshake_tests {
                 build_commit: "future12".into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION + 5),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -13016,6 +14258,7 @@ mod handshake_tests {
                 build_commit: "ancient1".into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(below),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -13041,6 +14284,7 @@ mod handshake_tests {
                 build_commit: "old1234".into(),
                 protocol_version: previous,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -13065,6 +14309,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -13088,6 +14333,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -13111,6 +14357,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -13128,6 +14375,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -13178,6 +14426,7 @@ mod handshake_tests {
                 // Legacy client: predates the lobby-owned version, so the
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
+                wire_formats: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -13774,8 +15023,10 @@ mod admin_auth_tests {
 
 #[cfg(test)]
 mod compression_tests {
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+
+    use axum::http::StatusCode;
 
     use lobby_broker::Broker;
     use server_core::draft_session::DraftSessionManager;
@@ -13785,9 +15036,14 @@ mod compression_tests {
     use tower_http::cors::CorsLayer;
     use url::Url;
 
-    use super::{build_router, draft_pools, persistence, AppState, ServerContext, ServerMode};
+    use super::{
+        announcement_from_state, build_commit, build_router, draft_pools, persistence,
+        spawn_announce_task, validate_announcement, AppState, RawAnnouncement, ServerContext,
+        ServerInfoDocument, ServerMode, ANNOUNCE_REQUEST_TIMEOUT, DIRECTORY_VERSION, INFO_PATH,
+        LOBBY_PROTOCOL_VERSION, MAX_SERVER_NAME_LEN, PROTOCOL_VERSION,
+    };
 
-    fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
+    fn test_app_state(temp_dir: &tempfile::TempDir, mode: ServerMode) -> AppState {
         let game_db_path = temp_dir.path().join("games.db");
         let game_db = Arc::new(
             persistence::GameDb::open(&game_db_path, persistence::SessionRetention::Multiplayer)
@@ -13805,7 +15061,7 @@ mod compression_tests {
             game_db,
             draft_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
             game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            mode: ServerMode::Full,
+            mode,
             context: ServerContext::default(),
             public_url: None,
             allowed_origin: None,
@@ -13814,8 +15070,9 @@ mod compression_tests {
 
     async fn spawn_compressed_test_server(
         temp_dir: &tempfile::TempDir,
+        mode: ServerMode,
     ) -> (String, tokio::task::JoinHandle<()>) {
-        let app_state = test_app_state(temp_dir);
+        let app_state = test_app_state(temp_dir, mode);
         let app = build_router(app_state, CorsLayer::permissive(), None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -13895,7 +15152,7 @@ mod compression_tests {
     #[tokio::test]
     async fn health_response_is_uncompressed_regardless_of_accept_encoding() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let (addr, server) = spawn_compressed_test_server(&temp_dir).await;
+        let (addr, server) = spawn_compressed_test_server(&temp_dir, ServerMode::Full).await;
 
         let (headers, body) = raw_http_get(&addr, "/health", &[("Accept-Encoding", "gzip")]).await;
 
@@ -13918,7 +15175,7 @@ mod compression_tests {
         const HOST_PEER: &str = "peer-compression-test";
 
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let app_state = test_app_state(&temp_dir);
+        let app_state = test_app_state(&temp_dir, ServerMode::Full);
         // A highly compressible payload comfortably over the predicate's
         // minimum size, matching the redactor's "JSON object" requirement.
         let padding = "a".repeat(4096);
@@ -13973,7 +15230,7 @@ mod compression_tests {
     #[tokio::test]
     async fn ws_upgrade_still_succeeds_through_the_compressed_router() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let (addr, server) = spawn_compressed_test_server(&temp_dir).await;
+        let (addr, server) = spawn_compressed_test_server(&temp_dir, ServerMode::Full).await;
 
         let connected = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await;
         assert!(
@@ -13983,6 +15240,282 @@ mod compression_tests {
         );
 
         server.abort();
+    }
+
+    /// Recorded announce requests: the header map and the raw body bytes of
+    /// every POST the directory stub received.
+    type AnnounceLog = Arc<std::sync::Mutex<Vec<(axum::http::HeaderMap, Vec<u8>)>>>;
+
+    /// A directory stub on an ephemeral port that records every announce POST
+    /// and answers `status`. Inlines the listener+spawn shape
+    /// `large_json_response_is_gzip_compressed_when_accepted` uses.
+    async fn spawn_recording_directory(
+        status: axum::http::StatusCode,
+    ) -> (Url, AnnounceLog, tokio::task::JoinHandle<()>) {
+        let log: AnnounceLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler_log = log.clone();
+        let app = axum::Router::new().route(
+            "/servers/announce",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let log = handler_log.clone();
+                    async move {
+                        log.lock()
+                            .expect("announce log")
+                            .push((headers, body.to_vec()));
+                        status
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind directory stub");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("directory stub");
+        });
+        let endpoint =
+            Url::parse(&format!("http://{addr}/servers/announce")).expect("directory endpoint");
+        (endpoint, log, server)
+    }
+
+    /// Polls to a deadline rather than sleeping a fixed interval, so a slow
+    /// machine does not turn a passing case into a flake.
+    async fn wait_for_requests(log: &AnnounceLog, want: usize) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = log.lock().expect("announce log").len();
+            if count >= want {
+                return count;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {count} of {want} announce requests arrived within 2s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Every recorded request must carry the JSON content type and a body the
+    /// directory's OWN validator accepts — not merely well-shaped bytes.
+    /// Returns each request's announced player count, in arrival order.
+    fn recorded_player_counts(log: &AnnounceLog) -> Vec<u32> {
+        let records = log.lock().expect("announce log");
+        assert!(!records.is_empty(), "no announce request was recorded");
+        records
+            .iter()
+            .map(|(headers, body)| {
+                assert_eq!(
+                    headers
+                        .get(axum::http::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("application/json")
+                );
+                let raw: RawAnnouncement =
+                    serde_json::from_slice(body).expect("wire body is a RawAnnouncement");
+                validate_announcement(&raw)
+                    .expect("the directory's own validator accepts the wire body")
+                    .current_players()
+            })
+            .collect()
+    }
+
+    /// V11. The info route serves exactly the identity `ServerHello`
+    /// advertises, on the shared constant path.
+    #[tokio::test]
+    async fn info_route_serves_the_server_hello_identity() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (addr, server) = spawn_compressed_test_server(&temp_dir, ServerMode::Full).await;
+
+        let (headers, body) = raw_http_get(&addr, INFO_PATH, &[]).await;
+        // Reach-guard: without this a 404 body would be "tested" as a serde
+        // failure instead of failing here.
+        assert!(
+            headers.starts_with("http/1.1 200"),
+            "expected 200 on {INFO_PATH}, got:\n{headers}"
+        );
+        let document: ServerInfoDocument =
+            serde_json::from_slice(&body).expect("info document parses");
+        assert_eq!(document.mode, lobby_broker::ServerMode::Full);
+        assert_eq!(document.server_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(document.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(document.lobby_protocol_version, LOBBY_PROTOCOL_VERSION);
+        assert_eq!(document.build_commit.as_deref(), Some(build_commit()));
+        server.abort();
+
+        // The sibling: `mode` tracks this server's actual role, so a hard-coded
+        // "Full" fails here.
+        let (addr, server) = spawn_compressed_test_server(&temp_dir, ServerMode::LobbyOnly).await;
+        let (headers, body) = raw_http_get(&addr, INFO_PATH, &[]).await;
+        assert!(
+            headers.starts_with("http/1.1 200"),
+            "expected 200 on {INFO_PATH}, got:\n{headers}"
+        );
+        let document: ServerInfoDocument =
+            serde_json::from_slice(&body).expect("info document parses");
+        assert_eq!(document.mode, lobby_broker::ServerMode::LobbyOnly);
+        server.abort();
+    }
+
+    /// V14. The announcement is assembled from live `AppState`, and only from
+    /// an `https://` public URL.
+    #[test]
+    fn announcement_from_state_carries_url_mode_and_live_player_count() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        // LobbyOnly rather than Full, so a hard-coded mode fails here.
+        let mut state = test_app_state(&temp_dir, ServerMode::LobbyOnly);
+        state.public_url = Some("https://play.example.com".to_string());
+        // Non-zero, so a stubbed-zero implementation fails.
+        state.player_count.store(7, Ordering::Relaxed);
+
+        let announcement = announcement_from_state(&state).expect("state is announceable");
+        assert_eq!(announcement.url().as_str(), "wss://play.example.com/ws");
+        assert_eq!(announcement.name(), "play.example.com");
+        assert_eq!(announcement.mode(), lobby_broker::ServerMode::LobbyOnly);
+        assert_eq!(announcement.current_players(), 7);
+        assert_eq!(announcement.directory_version(), DIRECTORY_VERSION);
+
+        // A non-default port survives; the scheme default does not.
+        state.public_url = Some("https://play.example.com:8443".to_string());
+        assert_eq!(
+            announcement_from_state(&state)
+                .expect("state is announceable")
+                .url()
+                .as_str(),
+            "wss://play.example.com:8443/ws"
+        );
+        state.public_url = Some("https://play.example.com:443".to_string());
+        assert_eq!(
+            announcement_from_state(&state)
+                .expect("state is announceable")
+                .url()
+                .as_str(),
+            "wss://play.example.com/ws"
+        );
+
+        // (a) Reachable whenever a malformed `--public-url` was dropped by
+        // `validate_public_url`, not only via the ngrok fallback.
+        state.public_url = None;
+        assert!(announcement_from_state(&state).is_err());
+        // (b) Without this the server would announce an address it does not
+        // serve, and warn every 60 s forever.
+        state.public_url = Some("http://myserver.example:9374".to_string());
+        let error =
+            announcement_from_state(&state).expect_err("an http:// public URL is not announceable");
+        assert!(
+            error.contains("http"),
+            "the scheme found must be named: {error}"
+        );
+        // (c) The silent-default-port case: `Url::port()` is `None` at :80, so
+        // this would otherwise become wss://host.example/ws, claiming 443.
+        state.public_url = Some("http://host.example:80".to_string());
+        assert!(announcement_from_state(&state).is_err());
+
+        // A host longer than the NAME cap but well inside the URL cap must
+        // still announce: the name is truncated, the ADDRESS is not. Without
+        // the truncation this returns `Err` and the server never announces at
+        // all. Every label is 60 bytes (inside rule 8's 63) and the whole host
+        // is 121 characters — a valid DNS name that exceeds
+        // MAX_SERVER_NAME_LEN.
+        let long_label = "a".repeat(60);
+        let long_host = format!("{long_label}.{long_label}");
+        assert!(long_host.chars().count() > MAX_SERVER_NAME_LEN);
+        state.public_url = Some(format!("https://{long_host}"));
+        let announcement =
+            announcement_from_state(&state).expect("a long but legal host is still announceable");
+        assert_eq!(announcement.name().len(), MAX_SERVER_NAME_LEN);
+        assert!(long_host.starts_with(announcement.name()));
+        assert_eq!(
+            announcement.url().as_str(),
+            format!("wss://{long_host}/ws"),
+            "the address must keep the FULL host; only the display name is truncated"
+        );
+    }
+
+    /// V16. The heartbeat actually POSTs: right shape, right cadence, and a
+    /// directory that rejects forever does not kill it.
+    #[tokio::test]
+    async fn announce_task_posts_json_repeatedly_and_survives_failures() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_app_state(&temp_dir, ServerMode::Full);
+        // `test_app_state` leaves `public_url: None`, which would make the base
+        // unbuildable and leave this test recording ZERO requests while every
+        // ">= 2"-shaped assertion below passed unreached.
+        state.public_url = Some("https://play.example.com".to_string());
+        state.player_count.store(3, Ordering::Relaxed);
+        let base = announcement_from_state(&state).expect("fixture must be announceable");
+        // Built the way `serve()` builds it, so the test drives the real
+        // parameterised loop rather than a differently-configured client.
+        // `reqwest::Client` is a cheap `Arc` handle, so cloning it per case is
+        // what sharing one configured client looks like.
+        let client = reqwest::Client::builder()
+            .timeout(ANNOUNCE_REQUEST_TIMEOUT)
+            .build()
+            .expect("announce client builds");
+
+        // (A) `interval`'s first tick is immediate, so a 30 s period still
+        // announces at startup — pinned without a 30 s wait.
+        let (endpoint, log, recorder) = spawn_recording_directory(StatusCode::OK).await;
+        let handle = spawn_announce_task(
+            endpoint,
+            client.clone(),
+            base.clone(),
+            state.player_count.clone(),
+            std::time::Duration::from_secs(30),
+        );
+        wait_for_requests(&log, 1).await;
+        assert_eq!(recorded_player_counts(&log), vec![3]);
+        handle.abort();
+        recorder.abort();
+
+        // (B) A directory returning 500 forever: the loop keeps announcing and
+        // the task stays alive. A `?` or an early return on the error path
+        // fails this.
+        let (endpoint, log, recorder) =
+            spawn_recording_directory(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let handle = spawn_announce_task(
+            endpoint,
+            client.clone(),
+            base.clone(),
+            state.player_count.clone(),
+            std::time::Duration::from_millis(25),
+        );
+        let seen = wait_for_requests(&log, 2).await;
+        assert!(seen >= 2, "expected a repeating heartbeat, saw {seen}");
+        assert!(
+            !handle.is_finished(),
+            "a directory rejecting every announcement must not end the heartbeat"
+        );
+        // The live count is re-read per tick rather than replayed from the
+        // frozen base.
+        state.player_count.store(9, Ordering::Relaxed);
+        wait_for_requests(&log, seen + 2).await;
+        assert_eq!(
+            recorded_player_counts(&log).last().copied(),
+            Some(9),
+            "the loop must refresh the player count, not replay the base"
+        );
+        handle.abort();
+        recorder.abort();
+
+        // (C) Paired positive: (B) is not an artifact of the error path — the
+        // success path loops too.
+        state.player_count.store(3, Ordering::Relaxed);
+        let (endpoint, log, recorder) = spawn_recording_directory(StatusCode::OK).await;
+        let handle = spawn_announce_task(
+            endpoint,
+            client.clone(),
+            base,
+            state.player_count.clone(),
+            std::time::Duration::from_millis(25),
+        );
+        let seen = wait_for_requests(&log, 2).await;
+        assert!(seen >= 2, "expected a repeating heartbeat, saw {seen}");
+        assert!(!handle.is_finished());
+        assert!(recorded_player_counts(&log).iter().all(|count| *count == 3));
+        handle.abort();
+        recorder.abort();
     }
 }
 
@@ -14623,6 +16156,7 @@ mod metrics_tests {
             build_commit: build_commit().to_string(),
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: Vec::new(),
         };
         socket
             .send(WsMessage::Text(

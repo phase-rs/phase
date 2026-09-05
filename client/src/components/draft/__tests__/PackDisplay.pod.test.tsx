@@ -32,6 +32,7 @@ const view: DraftPlayerView = {
   status: "Drafting",
   kind: "Premier",
   launch_capability: "None",
+  commanders_required: 0,
   current_pack_number: 0,
   pick_number: 0,
   pass_direction: "Left",
@@ -129,10 +130,10 @@ describe("PackDisplay pod controller", () => {
       "transition-transform",
       "duration-150",
       "ring-2",
-      "ring-[rgb(3,139,6)]",
-      "shadow-[0_0_7px_3px_rgb(3,139,6)]",
-      "motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]",
+      "ring-arcane",
+      "shadow-[0_0_7px_3px_#38bdf8]",
     );
+    expect(selected).not.toHaveClass("motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]");
     expect(selected).not.toHaveClass("!duration-0", "transition-all", "scale-105");
     expect(screen.queryByRole("button", { name: "Confirm Pick" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Auto-pick" })).not.toBeInTheDocument();

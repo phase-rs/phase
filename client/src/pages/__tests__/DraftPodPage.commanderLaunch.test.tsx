@@ -96,6 +96,7 @@ function commanderView(seatCount: number): DraftPlayerView {
     status: "Complete",
     kind: "CommanderDraft",
     launch_capability: "CommanderMultiplayer",
+    commanders_required: 1,
     current_pack_number: 3,
     pick_number: 1,
     pass_direction: "Left",

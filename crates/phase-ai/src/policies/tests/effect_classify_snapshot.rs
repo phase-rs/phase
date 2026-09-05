@@ -172,6 +172,7 @@ fn contextual_classifications_unchanged() {
         effect_polarity(&Effect::Amass {
             subtype: "Zombie".to_string(),
             count: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
         }),
         EffectPolarity::Contextual
     );

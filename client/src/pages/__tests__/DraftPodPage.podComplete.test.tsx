@@ -71,6 +71,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
 
 import { DraftPodPage } from "../DraftPodPage";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
@@ -159,6 +160,7 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
         launch_capability: stubConfig.postDraftPlay === "CompleteImmediately"
           ? "CommanderMultiplayer"
           : "None",
+        commanders_required: stubConfig.postDraftPlay === "CompleteImmediately" ? 1 : 0,
         seat_index: seat,
         current_round: 1,
         pairings: [],
@@ -195,7 +197,7 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
 
       return {
         loadCardDatabase: vi.fn(async () => 0),
-        draftProcedure: vi.fn(async () => ({
+        draftProcedure: vi.fn(async () => draftProcedureFixture({
           post_draft_play: stubConfig.postDraftPlay,
           launch_capability: stubConfig.postDraftPlay === "CompleteImmediately"
             ? "CommanderMultiplayer"

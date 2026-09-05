@@ -20,6 +20,7 @@ import {
   signatureSpellSelectionPolicy,
 } from "../../services/engineRuntime";
 import { useAppNotificationStore } from "../../stores/appToastStore";
+import { useEffectiveOffline } from "../../stores/connectivityStore";
 
 // Frontend-authored error messages from deckUrlImport.ts arrive as translation
 // keys prefixed `importDeck.`. Worker-authored messages flow through as-is
@@ -82,6 +83,7 @@ function initialSignatureSpell(deck: ParsedDeck, candidates: string[]): string {
 
 export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalProps) {
   const { t } = useTranslation("menu");
+  const effectiveOffline = useEffectiveOffline();
   const showNotification = useAppNotificationStore((s) => s.showNotification);
   const [tab, setTab] = useState<ImportTab>("paste");
   const [pasteText, setPasteText] = useState("");
@@ -461,6 +463,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                 <input
                   type="url"
                   value={urlText}
+                  disabled={effectiveOffline}
                   onChange={(e) => {
                     setUrlText(e.target.value);
                     if (urlError) setUrlError(null);
@@ -474,14 +477,19 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                 <p className="text-xs text-white/40">
                   {t("importDeck.urlHint")}
                 </p>
+                {effectiveOffline && (
+                  <p className="text-xs text-amber-200/80">
+                    {t("importDeck.errorOffline")}
+                  </p>
+                )}
                 {urlError && <p className="text-xs text-red-400">{urlError}</p>}
                 <button
                   onClick={handleUrlImport}
-                  disabled={!urlText.trim() || urlLoading}
+                  disabled={effectiveOffline || !urlText.trim() || urlLoading}
                   className={menuButtonClass({
                     tone: "amber",
                     size: "md",
-                    disabled: !urlText.trim() || urlLoading,
+                    disabled: effectiveOffline || !urlText.trim() || urlLoading,
                     className: "w-full font-bold",
                   })}
                 >

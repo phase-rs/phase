@@ -1,6 +1,8 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   InteractionActionId,
+  InteractionPreview,
+  InteractionPreviewRequest,
   InteractionSubmission,
   ViewerInteraction,
 } from "./generated/interaction";
@@ -613,7 +615,13 @@ export interface PhaseStop {
 }
 
 /** Standing engine preference for ordinary priority recommendations. */
-export type PriorityPassingMode = "Standard" | "SkipLowUseWindows";
+export type PriorityPassingMode = "Standard" | "SkipLowUseWindows" | "FullControl";
+
+/** CR 117.3d: which priority representatives a Resolve All request binds.
+ *  `Own` is the player-facing button — it pre-commits only the requester and so
+ *  can never be blocked by another seat. `Shared` opens the table-wide consent
+ *  protocol the engine uses for stack compression. */
+export type ResolveAllScope = { type: "Own" } | { type: "Shared" };
 
 export type Zone =
   | "Library"
@@ -721,6 +729,22 @@ export type CoreType =
 
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
 export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise" | "Delve";
+/** CR 709.5b: one printed Room half's identity — the name and mana cost it
+ *  contributes while unlocked (CR 709.5), and the cost its door demands to
+ *  unlock (CR 709.5e). Mirrors `engine::types::ability::RoomHalfIdentity`. */
+export interface RoomHalfIdentityView {
+  name: string;
+  mana_cost: ManaCost;
+}
+
+/** CR 709.5b: a Room's two halves in PRINTED order. `right` is absent on a Room
+ *  printed without a second half. Mirrors
+ *  `engine::types::ability::RoomCopiableHalves`. */
+export interface RoomHalvesView {
+  left: RoomHalfIdentityView;
+  right?: RoomHalfIdentityView | null;
+}
+
 export type RoomDoor = "Left" | "Right";
 
 // CR 709.5f-g: Operation a lock/unlock-door effect performs on a Room door
@@ -1271,14 +1295,22 @@ export type PhaseStatus =
   | { status: "PhasedOut"; cause: "Directly" | "Indirectly" };
 
 /**
- * CR 602.5: Why one of an object's activated abilities is blocked from
- * activation. Mirrors the Rust `AbilityBlockKind` (serde `tag = "type"`).
+ * CR 602.5 + CR 118.3: Why one of an object's activated abilities is blocked
+ * from activation. Mirrors the Rust `AbilityBlockKind` (serde `tag = "type"`).
  * Display only.
+ *
+ * **Two channels, one union.** The first three members arrive on
+ * `GameObject.blocked_abilities` (the CR 602.5 prohibition sweep).
+ * `"CostNotPayableNow"` arrives ONLY on the legal-actions payload
+ * (`LegalActionsResult.activationBlockReasons`), is scoped to the acting
+ * player, and never appears on `blocked_abilities`. A consumer of one channel
+ * will never observe the other's members.
  */
 export type AbilityBlockKind =
   | "CantBeActivated"
   | "CantActivateDuring"
-  | "Prohibited";
+  | "Prohibited"
+  | "CostNotPayableNow";
 
 /**
  * CR 602.5: A single blocked-ability read-out entry. `ability_index` indexes the
@@ -2160,7 +2192,7 @@ export type WaitingFor =
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
   | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; pending_effect: unknown } }
-  | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId } }
+  | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId; reciprocal_role?: "Produce" | "Consume" | null } }
   | { type: "BeholdChoice"; data: { player: PlayerId; choices: ObjectId[] } }
   | { type: "EffectZoneChoice"; data: {
       player: PlayerId;
@@ -2196,7 +2228,7 @@ export type WaitingFor =
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
   // CR 608.2d: "an opponent chooses" from a zone (multiplayer) — the controller
   // picks WHICH opponent makes the choice before the zone choice is presented.
-  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
+  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
@@ -2558,7 +2590,7 @@ export type PrecastCopyShortcutResponse =
 
 export type GameAction =
   | { type: "PassPriority" }
-  | { type: "BeginResolveAll"; data: { max_resolutions: number } }
+  | { type: "BeginResolveAll"; data: { max_resolutions: number; scope: ResolveAllScope } }
   | {
       type: "RespondResolveAllConsent";
       data: { epoch: number; decision: { type: "Grant" } | { type: "Decline" } };
@@ -3430,6 +3462,23 @@ export interface DerivedViews {
    *  own hand (incl. granted). Keyed by hand ObjectId (string). Mirrors
    *  engine::game::derived_views::DerivedViews::web_slinging_costs. */
   web_slinging_costs?: Record<string, ManaCost>;
+  /** CR 709.3 + CR 712.11b: for each card the viewing player may cast whose
+   *  player chooses a spell face at cast time (a split card such as a Room, a
+   *  spell//spell MDFC), the live cost of the OTHER face — `spellCosts` reports
+   *  the live face only. Keyed by ObjectId (string). Presence is the engine's
+   *  statement that the card has two payable spell faces. Mirrors
+   *  `engine::game::derived_views::DerivedViews::back_face_spell_costs`. */
+  back_face_spell_costs?: Record<string, ManaCost>;
+  /**
+   * CR 709.5b + CR 709.5e + CR 707.2: both halves of each battlefield Room, in
+   * printed order, resolved by the engine — a permanent that is a COPY of a
+   * Room reports the halves it COPIED. Keyed by battlefield ObjectId (string).
+   * The unlock special action names a half and costs that half's mana cost,
+   * and for a copy neither is on the recipient's own printed card. Face-down
+   * permanents are absent (CR 708.2a). Mirrors
+   * `engine::game::derived_views::DerivedViews::room_half_identities`.
+   */
+  room_half_identities?: Record<string, RoomHalvesView>;
   /**
    * Player-affecting continuous conditions (can't gain life, can't cast, etc.)
    * the HUD renders as status icons. Engine-aggregated from static abilities +
@@ -3498,6 +3547,12 @@ export interface DerivedViews {
    * Mirrors `engine::game::derived_views::DerivedViews::unbounded_pile`.
    */
   unbounded_pile?: ObjectId[];
+  /**
+   * CR 732.2a: the open loop-shortcut window's repetition ceiling. Absent when no window is
+   * open, or when the engine never narrowed the bound. Render it; never re-derive it.
+   * Mirrors `engine::game::derived_views::DerivedViews::bounded_loop_max_repetitions`.
+   */
+  bounded_loop_max_repetitions?: number;
   /**
    * CR 122.1 + CR 732.2a: the COMPLETE per-object counter-display projection, keyed by
    * ObjectId-as-string — every counter row every display surface renders, for every
@@ -4190,6 +4245,13 @@ export interface LegalActionsResult {
    * availability from objects.
    */
   legalActionsByObject?: Record<string, ObjectAction[]>;
+  /**
+   * CR 118.3: per-object read-out of activated abilities the ACTING player is
+   * not being offered solely because they can't pay the cost right now, keyed by
+   * object_id string. Empty for any viewer without action authority. Display
+   * only — these entries are deliberately NOT dispatchable.
+   */
+  activationBlockReasons?: Record<string, AbilityBlockEntry[]>;
   /** Engine progress-wedge diagnostic: present only when the current decision is wedged. */
   stuckDiagnostic?: StuckDecisionDiagnostic;
   /** Engine-authored, viewer-scoped interaction opportunities for this snapshot. */
@@ -4212,6 +4274,8 @@ export interface ViewerSnapshot {
   manaPaymentShortcutActions?: GameAction[];
   spellCosts?: Record<string, ManaCost>;
   legalActionsByObject?: Record<string, ObjectAction[]>;
+  /** CR 118.3: mirrored from `LegalActionsResult` — see the doc there. */
+  activationBlockReasons?: Record<string, AbilityBlockEntry[]>;
   /**
    * Engine progress-wedge diagnostic, mirrored from `LegalActionsResult` for
    * shape parity. Currently inert on this path: the store's `stuckDiagnostic`
@@ -4376,6 +4440,14 @@ export interface EngineAdapter {
    * offered by the engine. Unsupported transports omit this capability.
    */
   previewManaPayment?(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
+  /**
+   * Read-only preview of an interaction response the engine has not committed.
+   * Unsupported transports omit this capability.
+   */
+  previewInteraction?(
+    request: InteractionPreviewRequest,
+    actor: PlayerId,
+  ): Promise<InteractionPreview>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
   /**

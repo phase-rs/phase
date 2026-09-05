@@ -82,7 +82,8 @@
     "clickModeButton": "Click Mode Button",
     "shown": "Shown",
     "hidden": "Hidden",
-    "resume": "Resume",
+    "openGameLog": "Open Game Log",
+    "closeGameLog": "Close Game Log",
     "settings": "Settings",
     "boardLayoutSplit": "Split",
     "boardLayoutLegacy": "Legacy",
@@ -106,6 +107,7 @@
   },
   "volume": {
     "deviceBlocked": "Audio unavailable — system audio server is not responding. Restart the app to retry.",
+    "mediaUnavailable": "Audio unavailable — this system is missing the media components needed to play sound. Install your distribution's GStreamer plugin packages, then restart the app.",
     "mute": "Mute",
     "unmute": "Unmute",
     "volume": "Volume"

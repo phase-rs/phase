@@ -146,8 +146,11 @@ import type {
  *       post-draft multiplayer launch. A v24 peer lacks this procedure-owned
  *       capability and would otherwise infer from `DraftKind` or hide the
  *       launch entirely, so the exact first-contact gate refuses the pairing.
+ *  26 — player views carry required `commanders_required`, the exact
+ *       procedure-owned designation count. A v25 peer lacks it and would
+ *       otherwise infer designation capability from `DraftKind`.
  */
-export const DRAFT_PROTOCOL_VERSION = 25 as const;
+export const DRAFT_PROTOCOL_VERSION = 26 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -903,6 +906,14 @@ function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
     && view.launch_capability !== "CommanderMultiplayer"
   ) {
     throw new Error("Invalid draft message: launch_capability must be a known capability");
+  }
+  if (
+    typeof view.commanders_required !== "number"
+    || !Number.isInteger(view.commanders_required)
+    || view.commanders_required < 0
+    || view.commanders_required > 255
+  ) {
+    throw new Error("Invalid draft message: commanders_required must be a u8 count");
   }
   const pool_groups = normalizePoolGroups(view.pool_groups);
   const source = normalizeDraftSourceView(view.source);

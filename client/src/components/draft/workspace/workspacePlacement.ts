@@ -223,6 +223,12 @@ export interface WorkspaceMoveTarget {
   beforeInstanceId: string | null;
 }
 
+export interface ResolvedWorkspaceDestination {
+  zone: DraftZone;
+  column: number;
+  row: number;
+}
+
 export interface WorkspaceDropState {
   zoneActive: boolean;
   column: number | null;
@@ -672,41 +678,33 @@ function writeNormalizedStack(
   });
 }
 
-export function moveWorkspaceInstance(
+/**
+ * Moves one known workspace identity into an already-resolved board stack and
+ * normalizes the affected source and destination stacks. Board geometry and
+ * sort selection are deliberately outside this primitive: callers that have
+ * already resolved a destination must retain that exact target.
+ */
+function orderWorkspaceInstanceAtResolvedDestination(
   state: DraftWorkspaceState,
   pool: readonly DraftCardInstance[],
-  poolGroups: DraftPoolGroups,
-  preferences: Readonly<Record<DraftZone, DraftBoardPreferences>>,
   instanceId: string,
-  target: WorkspaceMoveTarget,
+  target: ResolvedWorkspaceDestination & Pick<WorkspaceMoveTarget, "beforeInstanceId">,
 ): DraftWorkspaceState {
   if (target.zone !== "deck" && target.zone !== "sideboard") return state;
+  if (
+    !Number.isInteger(target.column)
+    || target.column < 0
+    || !Number.isInteger(target.row)
+    || target.row < 0
+  ) {
+    return state;
+  }
+
   const isKnown = pool.some((card) => card.instance_id === instanceId)
     || state.virtualBasics.some((basic) => basic.instanceId === instanceId);
   const source = state.placements[instanceId];
   if (!isKnown || source === undefined) return state;
 
-  const destinationPreferences = clampedPreferences(
-    preferences[target.zone],
-    poolGroups.workspace_capabilities,
-  );
-  if (
-    !Number.isInteger(target.column)
-    || target.column < 0
-    || target.column >= destinationPreferences.columnCount
-  ) {
-    return state;
-  }
-
-  const destinationRow = target.row ?? resolvedRow(instanceId, destinationPreferences, poolGroups);
-  const destinationRowCount = destinationPreferences.rows === "two" ? 2 : 1;
-  if (
-    !Number.isInteger(destinationRow)
-    || destinationRow < 0
-    || destinationRow >= destinationRowCount
-  ) {
-    return state;
-  }
   const ranks = fallbackRanks(state, pool);
   const liveIds = new Set([
     ...pool.map((card) => card.instance_id),
@@ -716,7 +714,7 @@ export function moveWorkspaceInstance(
     state,
     target.zone,
     target.column,
-    destinationRow,
+    target.row,
     ranks,
     liveIds,
   );
@@ -732,7 +730,7 @@ export function moveWorkspaceInstance(
 
   const sameStack = source.zone === target.zone
     && source.column === target.column
-    && source.row === destinationRow;
+    && source.row === target.row;
   const sourceStack = sameStack
     ? destinationStack
     : sortedStackIds(state, source.zone, source.column, source.row, ranks, liveIds);
@@ -760,9 +758,67 @@ export function moveWorkspaceInstance(
     nextDestinationStack,
     target.zone,
     target.column,
-    destinationRow,
+    target.row,
   );
   return { ...state, placements };
+}
+
+/**
+ * Appends a known, reconciled workspace identity to the end of an exact
+ * destination stack. This does not recalculate the destination or its sort.
+ */
+export function appendWorkspaceInstanceToResolvedDestination(
+  state: DraftWorkspaceState,
+  pool: readonly DraftCardInstance[],
+  instanceId: string,
+  destination: ResolvedWorkspaceDestination,
+): DraftWorkspaceState {
+  return orderWorkspaceInstanceAtResolvedDestination(state, pool, instanceId, {
+    ...destination,
+    beforeInstanceId: null,
+  });
+}
+
+export function moveWorkspaceInstance(
+  state: DraftWorkspaceState,
+  pool: readonly DraftCardInstance[],
+  poolGroups: DraftPoolGroups,
+  preferences: Readonly<Record<DraftZone, DraftBoardPreferences>>,
+  instanceId: string,
+  target: WorkspaceMoveTarget,
+): DraftWorkspaceState {
+  if (target.zone !== "deck" && target.zone !== "sideboard") return state;
+  const isKnown = pool.some((card) => card.instance_id === instanceId)
+    || state.virtualBasics.some((basic) => basic.instanceId === instanceId);
+  if (!isKnown || state.placements[instanceId] === undefined) return state;
+
+  const destinationPreferences = clampedPreferences(
+    preferences[target.zone],
+    poolGroups.workspace_capabilities,
+  );
+  if (
+    !Number.isInteger(target.column)
+    || target.column < 0
+    || target.column >= destinationPreferences.columnCount
+  ) {
+    return state;
+  }
+
+  const destinationRow = target.row ?? resolvedRow(instanceId, destinationPreferences, poolGroups);
+  const destinationRowCount = destinationPreferences.rows === "two" ? 2 : 1;
+  if (
+    !Number.isInteger(destinationRow)
+    || destinationRow < 0
+    || destinationRow >= destinationRowCount
+  ) {
+    return state;
+  }
+  return orderWorkspaceInstanceAtResolvedDestination(state, pool, instanceId, {
+    zone: target.zone,
+    column: target.column,
+    row: destinationRow,
+    beforeInstanceId: target.beforeInstanceId,
+  });
 }
 
 export function activateWorkspaceInstance(

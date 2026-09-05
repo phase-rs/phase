@@ -2540,6 +2540,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- "Spells and abilities <scope> can't cause you to <action list>" ---
+    // CR 701.9a + CR 701.21a + CR 609.3: Sigarda, Host of Herons / Tajuru
+    // Preserver (sacrifice permanents) / Tamiyo, Collector of Tales (discard
+    // cards or sacrifice permanents) class. Player-level protection — unlike
+    // the triggered-only, object-filtered form above, this covers ANY spell
+    // or ability and is not filtered by which permanent/card is affected.
+    if let Some(def) = parse_cant_cause_forced_action(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Creatures entering [the battlefield] [and dying] don't cause abilities to trigger" ---
     // CR 603.2g + CR 603.6a + CR 700.4: Torpor Orb (ETB only), Hushbringer (ETB + Dies).
     if let Some(def) = parse_suppress_triggers(&tp, &text) {

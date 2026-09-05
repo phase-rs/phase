@@ -6,6 +6,7 @@ export type CandidateKind =
   | "localized_printing" | "localized_alias"
   | "english_printing" | "english_alias"
   | "oracle" | "oracle_alias"
+  | "oracle_face" | "source_printing" | "name_face"
   | "token_reference" | "token_alias"
   | "card_back" | "mana_symbol" | "set_icon";
 export type PackId = Brand<string, "PackId">;
@@ -18,7 +19,7 @@ const LOWER_HEX_32 = /^[0-9a-f]{32}$/;
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
 const PACK_ID = /^(complete|core|curated|deck_library|printing:[a-z0-9]{3,6}|locale:(de|es|fr|it|pt):[a-z0-9]{3,6})$/;
 const ASSET_KEY = /^asset:v1:(canonical_card|exact_printing|localized_printing|token|card_back|mana_symbol|set_icon):[A-Za-z0-9_-]+$/;
-const CANDIDATE_KEY = /^candidate:v1:(localized_printing|localized_alias|english_printing|english_alias|oracle|oracle_alias|token_reference|token_alias|card_back|mana_symbol|set_icon):([A-Za-z0-9_-]+)$/;
+const CANDIDATE_KEY = /^candidate:v1:(localized_printing|localized_alias|english_printing|english_alias|oracle|oracle_alias|oracle_face|source_printing|name_face|token_reference|token_alias|card_back|mana_symbol|set_icon):([A-Za-z0-9_-]+)$/;
 const CANDIDATE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CANDIDATE_SET = /^[a-z0-9]{3,6}$/;
 const CANDIDATE_LOCALE = /^(de|es|fr|it|pt)$/;
@@ -82,6 +83,10 @@ function validateCandidateVisual(
   if (!Number.isSafeInteger(faceIndex) || (faceIndex as number) < 0) {
     throw new Error("invalid face index");
   }
+  validateCandidateVariant(variant, rung, token);
+}
+
+function validateCandidateVariant(variant: unknown, rung: unknown, token = false): void {
   if (variant === "full_card") {
     if (rung !== "small" && rung !== "normal") throw new Error("invalid visual variant/rung");
   } else if (variant === "art_crop") {
@@ -89,6 +94,12 @@ function validateCandidateVisual(
   } else {
     throw new Error("invalid visual variant/rung");
   }
+}
+
+function validateSemanticCandidateVisual(tuple: readonly unknown[], identityCount: number): void {
+  if (tuple.length !== identityCount + 2) throw new Error("candidate tuple has wrong axis count");
+  const [variant, rung] = tuple.slice(identityCount);
+  validateCandidateVariant(variant, rung);
 }
 
 function validateCandidateTuple(kind: CandidateKind, tuple: readonly unknown[]): void {
@@ -112,6 +123,22 @@ function validateCandidateTuple(kind: CandidateKind, tuple: readonly unknown[]):
     case "oracle_alias":
       validateCandidateText(tuple[0]);
       validateCandidateVisual(tuple, 1);
+      break;
+    case "oracle_face":
+      validateCandidateIdentity(tuple[0]);
+      validateCandidateText(tuple[1]);
+      validateSemanticCandidateVisual(tuple, 2);
+      break;
+    case "source_printing":
+      if (typeof tuple[0] !== "string" || !CANDIDATE_SET.test(tuple[0])) throw new Error("invalid set code");
+      validateCandidateText(tuple[1]);
+      validateCandidateText(tuple[2]);
+      validateSemanticCandidateVisual(tuple, 3);
+      break;
+    case "name_face":
+      validateCandidateText(tuple[0]);
+      validateCandidateText(tuple[1]);
+      validateSemanticCandidateVisual(tuple, 2);
       break;
     case "token_alias":
       validateCandidateText(tuple[0]);
@@ -298,9 +325,17 @@ const CHEAPEST_IMAGE_BYTES = Math.min(...RUNG_MEDIANS);
  * which is NOT measured here; a set of records skewed entirely onto one rung
  * would be overstated ~3.8x (all `small`) or understated ~1.6x (all `normal`).
  *
- * `core` and `printing` also contribute a card back and a set icon, which are
- * not card art at all. One and one per pack against tens of thousands of card
- * images, so they are counted at the same weight rather than modelled.
+ * `printing` also contributes a set icon, which is not card art at all. One per
+ * pack against tens of thousands of card images, so it is counted at the same
+ * weight rather than modelled.
+ *
+ * `core` no longer fits that reasoning and is OVERSTATED here by roughly 20x:
+ * it is a card back plus every finite mana-symbol SVG (~77 records), of which
+ * none are card art and nearly all are 1-2 KB vectors — so a real ~230 KB
+ * download is quoted at ~4.9 MB. Nothing refuses on this figure
+ * (`reserveStorage` gates on `minimumImageBytes`), so the cost is a misleading
+ * label rather than a blocked install. Modelling it needs a per-media weight,
+ * which this signature — a bare record COUNT — cannot express.
  */
 export function estimatedImageBytes(imageRecords: number): number {
   return Math.round(imageRecords * MEAN_IMAGE_BYTES);

@@ -336,6 +336,8 @@
     "moreNeeded": "{{count}} más necesarias",
     "commanderRequired": "Designa un comandante de tu reserva para enviar.",
     "commanderUnavailable": "La designación de comandante no está disponible ahora mismo: no se pudo cargar la base de datos de cartas.",
+    "compatibilityPending": "Comprobando la compatibilidad del mazo...",
+    "compatibilityUnavailable": "La compatibilidad del mazo no está disponible ahora mismo; inténtalo de nuevo antes de enviarlo.",
     "grantedFiller": "Tu reserva también incluye hasta {{maximum}} × {{name}}, utilizable solo como tu comandante."
   },
   "landing": {
@@ -384,6 +386,12 @@
     "viewResults": "Ver resultados",
     "setIconAlt": "Icono de {{code}}"
   },
+  "offline": {
+    "unavailableTitle": "El draft multijugador no está disponible sin conexión.",
+    "unavailableDescription": "Vuelve a conectarte o desactiva el modo sin conexión para crear, unirte, iniciar o ver un draft multijugador.",
+    "startUnavailable": "No se puede iniciar un draft multijugador sin conexión. Vuelve a conectarte o desactiva el modo sin conexión para continuar.",
+    "watchUnavailable": "No se puede ver un draft multijugador sin conexión. Vuelve a conectarte o desactiva el modo sin conexión para continuar."
+  },
   "podPhase": {
     "lobby": "Sala de espera",
     "drafting": "Drafteando",
@@ -418,6 +426,7 @@
     "exportUrl": "URL de exportación de CubeCobra",
     "exportUrlPlaceholder": "Pega una URL de exportación sin procesar, o pega la lista a continuación",
     "loadUrl": "Cargar URL",
+    "offlineUrlUnavailable": "La carga de listas de cubos desde URL no está disponible sin conexión.",
     "deckAddables": "Añadibles al mazo",
     "addablesStandardBasics": "Básicas estándar",
     "addablesBasicsPlusCustom": "Básicas más personalizadas",

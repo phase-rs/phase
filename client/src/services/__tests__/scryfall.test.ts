@@ -70,6 +70,128 @@ async function loadScryfallModule() {
   return import("../scryfall.ts");
 }
 
+function jsonResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), { status });
+}
+
+function rejectedJsonResponse(): Response {
+  return Object.assign(new Response("", { status: 200 }), {
+    json: vi.fn().mockRejectedValue(new Error("invalid JSON")),
+  });
+}
+
+function validCardEntry() {
+  return {
+    oracle_id: "lightning-bolt",
+    name: "Lightning Bolt",
+    face_names: ["lightning bolt"],
+    mana_cost: "{R}",
+    cmc: 1,
+    type_line: "Instant",
+    colors: ["R"],
+    color_identity: ["R"],
+    keywords: [],
+    faces: [{ small: null, normal: null, art_crop: null }],
+  };
+}
+
+function validPrintingEntry() {
+  return {
+    id: "lightning-bolt-printing",
+    set: "lea",
+    set_name: "Limited Edition Alpha",
+    collector_number: "161",
+    released_at: "1993-08-05",
+    border_color: "black",
+    frame_effects: [],
+    full_art: false,
+    faces: [{ small: null, normal: null, art_crop: null }],
+  };
+}
+
+describe("local Scryfall data authorities", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("rejects malformed primary payloads, coalesces a valid retry, and preserves text fallback without URLs", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(rejectedJsonResponse())
+      .mockResolvedValueOnce(jsonResponse({}, 503))
+      .mockResolvedValueOnce(jsonResponse(null))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse({ bolt: { ...validCardEntry(), cmc: "1" } }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning bolt": validCardEntry() }));
+    global.fetch = fetchMock;
+    const { buildLocalSearchCard, loadScryfallData, resolveOracleIdSync } = await loadScryfallModule();
+
+    for (let attempt = 0; attempt < 7; attempt++) {
+      await expect(loadScryfallData()).resolves.toBeNull();
+    }
+    expect(resolveOracleIdSync("Lightning Bolt")).toBeNull();
+
+    const first = loadScryfallData();
+    const second = loadScryfallData();
+    expect(second).toBe(first);
+    await expect(first).resolves.toEqual({ "lightning bolt": validCardEntry() });
+    await expect(loadScryfallData()).resolves.toEqual({ "lightning bolt": validCardEntry() });
+    expect(resolveOracleIdSync("Lightning Bolt")).toBe("lightning-bolt");
+    expect(buildLocalSearchCard({
+      name: "Lightning Bolt",
+      cmc: 1,
+      colorIdentity: ["R"],
+      legalities: {},
+    }).image_uris).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+  });
+
+  it("accepts omitted primary image URLs without publishing image data", async () => {
+    global.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      "lightning bolt": { ...validCardEntry(), faces: [{}] },
+    }));
+    const { buildLocalSearchCard, loadScryfallData } = await loadScryfallModule();
+
+    await expect(loadScryfallData()).resolves.not.toBeNull();
+    expect(buildLocalSearchCard({
+      name: "Lightning Bolt",
+      cmc: 1,
+      colorIdentity: ["R"],
+      legalities: {},
+    }).image_uris).toBeUndefined();
+  });
+
+  it("rejects malformed printings payloads and keeps a valid retry cached", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(rejectedJsonResponse())
+      .mockResolvedValueOnce(jsonResponse({}, 503))
+      .mockResolvedValueOnce(jsonResponse(null))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        "lightning-bolt": [{ ...validPrintingEntry(), full_art: "false" }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({ "lightning-bolt": [validPrintingEntry()] }));
+    global.fetch = fetchMock;
+    const { loadPrintingsData, resolvePrintingImageUrl } = await loadScryfallModule();
+
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await expect(loadPrintingsData()).resolves.toBeNull();
+    }
+
+    const first = loadPrintingsData();
+    const second = loadPrintingsData();
+    expect(second).toBe(first);
+    await expect(first).resolves.toEqual({ "lightning-bolt": [validPrintingEntry()] });
+    expect(resolvePrintingImageUrl(validPrintingEntry(), 0, "normal")).toBeNull();
+    await expect(loadPrintingsData()).resolves.toEqual({ "lightning-bolt": [validPrintingEntry()] });
+    expect(fetchMock).toHaveBeenCalledTimes(9);
+  });
+});
+
 describe("normalizeCardName", () => {
   it("strips set code brackets", async () => {
     const { normalizeCardName } = await loadScryfallModule();

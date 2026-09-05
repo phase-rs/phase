@@ -152,6 +152,39 @@ fn default_cube_min_deck_size() -> usize {
     40
 }
 
+fn enforce_procedure_minimum_deck_size(mut config: DraftConfig) -> DraftConfig {
+    config.min_deck_size = config
+        .kind
+        .procedure()
+        .effective_cube_min_deck_size(config.min_deck_size);
+    config
+}
+
+fn build_quick_cube_config(
+    cube_name: &str,
+    settings: &CubeDraftSettings,
+    addable_cards: DeckAddableCards,
+    seed: u64,
+) -> DraftConfig {
+    enforce_procedure_minimum_deck_size(DraftConfig {
+        source: DraftSource::Cube {
+            id: "custom-cube".to_string(),
+            name: cube_name.to_string(),
+        },
+        set_code: "custom-cube".to_string(),
+        kind: DraftKind::Quick,
+        pod_size: settings.pod_size,
+        cards_per_pack: settings.cards_per_pack,
+        pack_count: settings.pack_count,
+        min_deck_size: settings.min_deck_size,
+        addable_cards,
+        rng_seed: seed,
+        tournament_format: TournamentFormat::Swiss,
+        pod_policy: PodPolicy::Competitive,
+        spectator_visibility: SpectatorVisibility::default(),
+    })
+}
+
 /// Derive the session pack size from the selected MTGJSON booster product.
 /// Every supported set currently has uniformly sized variants; rejecting mixed
 /// data keeps UI progress and sealed-pool validation aligned with actual pulls.
@@ -394,7 +427,7 @@ pub fn start_quick_draft(
 
     let ai_difficulty = map_difficulty(difficulty);
 
-    let config = DraftConfig {
+    let config = enforce_procedure_minimum_deck_size(DraftConfig {
         set_code: selection.source.set_code(),
         source: selection.source,
         kind: DraftKind::Quick,
@@ -407,7 +440,7 @@ pub fn start_quick_draft(
         tournament_format: TournamentFormat::Swiss,
         pod_policy: PodPolicy::Competitive,
         spectator_visibility: SpectatorVisibility::default(),
-    };
+    });
 
     let mut seats = vec![DraftSeat::Human {
         player_id: engine::types::player::PlayerId(0),
@@ -545,23 +578,7 @@ pub fn start_quick_cube_draft(
 
     let ai_difficulty = map_difficulty(difficulty);
     let pod_size = settings.pod_size;
-    let config = DraftConfig {
-        source: DraftSource::Cube {
-            id: "custom-cube".to_string(),
-            name: cube_name.to_string(),
-        },
-        set_code: "custom-cube".to_string(),
-        kind: DraftKind::Quick,
-        pod_size,
-        cards_per_pack: settings.cards_per_pack,
-        pack_count: settings.pack_count,
-        min_deck_size: settings.min_deck_size,
-        addable_cards,
-        rng_seed: seed as u64,
-        tournament_format: TournamentFormat::Swiss,
-        pod_policy: PodPolicy::Competitive,
-        spectator_visibility: SpectatorVisibility::default(),
-    };
+    let config = build_quick_cube_config(cube_name, &settings, addable_cards, seed as u64);
 
     let mut seats = vec![DraftSeat::Human {
         player_id: engine::types::player::PlayerId(0),
@@ -1059,8 +1076,9 @@ pub fn export_draft_session() -> Result<String, JsValue> {
 /// layout: the persisted snapshot remains host-local, while all ordinary views
 /// expose only `DraftSourceView`'s redacted metadata.
 fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String> {
-    let session: DraftSession = serde_json::from_str(json)
+    let mut session: DraftSession = serde_json::from_str(json)
         .map_err(|error| format!("Failed to deserialize draft session: {error}"))?;
+    session.config = enforce_procedure_minimum_deck_size(session.config);
     session
         .validate_persisted_snapshot()
         .map_err(|error| format!("Invalid draft snapshot: {error}"))?;
@@ -1160,20 +1178,9 @@ fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
             );
 
             // CR 903.13f(1): "A player's deck must contain at least 60 cards".
-            // This check enforces THIS SESSION'S configured floor,
-            // `min_deck_size`, not that literal 60 -- and on the only pod shape
-            // that can reach it, the two are not the same number.
-            // `DeckAddableCardPolicy::CustomOnly` is written only by
-            // `create_multiplayer_draft_inner`'s Cube arm, which also takes
-            // `min_deck_size` from the host's cube settings, where the Set arm
-            // takes it from the procedure table and hardcodes
-            // `standard_basics()`. The host's control is
-            // `client/src/components/draft/CubeSetupPanel.tsx`, range 1..=100,
-            // default 40. So on a cube-hosted Commander pod this refuses a deck
-            // short of the SESSION's floor; a 40..=59-card deck at the default
-            // floor is still short of CR 903.13f(1) and is NOT caught here.
-            // Making the floor itself CR-correct is a separate, pre-existing gap
-            // and is deliberately out of this phase's scope.
+            // New and restored Commander Cube sessions clamp configured
+            // `min_deck_size` to the engine-published Cube floor, so this guard
+            // enforces at least 60 for every session.
             //
             // `min_deck_size` is also the same value `apply_submit_deck` hands
             // `validate_limited_deck` for the human on this pod
@@ -1296,6 +1303,7 @@ struct DraftProcedureDto {
     pick_selection_mode: draft_core::types::PickSelectionMode,
     distribution: draft_core::types::PackDistribution,
     min_deck_size: usize,
+    cube_min_deck_size: usize,
     commanders_required: u8,
     post_draft_play: draft_core::types::PostDraftPlay,
     launch_capability: draft_core::types::DraftLaunchCapability,
@@ -1338,6 +1346,7 @@ fn draft_procedure_dto(
         pick_selection_mode: procedure.pick_selection_mode,
         distribution: procedure.distribution,
         min_deck_size: procedure.min_deck_size,
+        cube_min_deck_size: procedure.cube_min_deck_size,
         commanders_required: procedure.commanders_required,
         post_draft_play: procedure.post_draft_play,
         launch_capability: procedure.launch_capability(),
@@ -1611,7 +1620,7 @@ fn create_multiplayer_draft_inner(
             })?;
 
             // pod_size from settings is overridden by seats.len() — MP authoritative source
-            let config = DraftConfig {
+            let config = enforce_procedure_minimum_deck_size(DraftConfig {
                 source: DraftSource::Cube {
                     id: "custom-cube".to_string(),
                     name: cube_name.clone(),
@@ -1627,7 +1636,7 @@ fn create_multiplayer_draft_inner(
                 tournament_format,
                 pod_policy,
                 spectator_visibility: SpectatorVisibility::default(),
-            };
+            });
 
             let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
             let pack_source = CubePackSource::new(cards);
@@ -2150,6 +2159,42 @@ mod create_multiplayer_draft_tests {
             .expect_err("a public redaction is not a restorable Chaos snapshot");
         assert!(error.contains("Failed to deserialize draft session"));
         DRAFT_SESSION.with(|cell| assert!(cell.take().is_none()));
+    }
+
+    #[test]
+    fn import_normalizes_legacy_commander_deck_floors_for_human_and_bot_decks() {
+        clear_state();
+        install_commander_fixture_db();
+        start_commander_pod(4);
+        seat_into_deckbuilding(0, 60);
+
+        let mut snapshot = with_installed_session(|session| {
+            serde_json::to_value(session).expect("serialize Commander snapshot")
+        });
+        snapshot["config"]["min_deck_size"] = serde_json::json!(59);
+        let restored = restorable_draft_session_from_json(&snapshot.to_string())
+            .expect("a legacy Commander snapshot restores");
+        assert_eq!(restored.config.min_deck_size, 60);
+        DRAFT_SESSION.with(|cell| cell.set(Some(restored)));
+
+        let human_deck = seat_deck(0, 59);
+        let error = submit_deck_inner(&json(&human_deck), &json(&["Seat 0 Card 0".to_string()]))
+            .expect_err("a restored 59-card Commander deck is illegal");
+        assert!(
+            error.contains("59") && error.contains("60"),
+            "error = {error}"
+        );
+
+        let bot_deck = get_bot_deck_inner(1).expect("a restored Commander bot deck builds");
+        let bot_total = bot_deck.main_deck.len()
+            + bot_deck
+                .lands
+                .values()
+                .map(|&count| count as usize)
+                .sum::<usize>();
+        assert!(bot_total >= 60, "bot deck has {bot_total} cards");
+
+        clear_state();
     }
 
     #[test]
@@ -2864,6 +2909,10 @@ mod create_multiplayer_draft_tests {
                 "min_deck_size ({kind:?})"
             );
             assert_eq!(
+                dto.cube_min_deck_size, procedure.cube_min_deck_size,
+                "cube_min_deck_size ({kind:?})"
+            );
+            assert_eq!(
                 dto.commanders_required, procedure.commanders_required,
                 "commanders_required ({kind:?})"
             );
@@ -3416,6 +3465,71 @@ mod create_multiplayer_draft_tests {
     fn install_commander_fixture_db() {
         let db = CardDatabase::from_json_str(&commander_fixture_db_json()).unwrap();
         CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+    }
+
+    #[test]
+    fn quick_cube_config_raises_zero_to_one_without_lowering_higher_requests() {
+        let settings = |min_deck_size| CubeDraftSettings {
+            pod_size: 8,
+            pack_count: 3,
+            cards_per_pack: 15,
+            min_deck_size,
+            addable_cards: DeckAddableCards::standard_basics(),
+        };
+        let config = |min_deck_size| {
+            build_quick_cube_config(
+                "Test Cube",
+                &settings(min_deck_size),
+                DeckAddableCards::standard_basics(),
+                42,
+            )
+        };
+
+        assert_eq!(config(0).min_deck_size, 1);
+        assert_eq!(config(4).min_deck_size, 4);
+    }
+
+    #[test]
+    fn multiplayer_commander_cube_stores_and_publishes_the_procedure_floor() {
+        clear_state();
+        install_commander_fixture_db();
+        let pool_input = serde_json::json!({
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "200 Alpha",
+                "cube_name": "Commander Cube",
+                "cube_draft_settings": {
+                    "pod_size": 4,
+                    "pack_count": 3,
+                    "cards_per_pack": 15,
+                    "min_deck_size": 1,
+                    "addable_cards": {
+                        "policy": "StandardBasics",
+                        "custom": []
+                    }
+                }
+            }
+        })
+        .to_string();
+
+        let view = create_multiplayer_draft_inner(
+            &pool_input,
+            COMMANDER_SEATS_JSON,
+            4,
+            42,
+            "commander-cube",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("Commander cube should start");
+
+        assert_eq!(view.min_deck_size, 60);
+        DRAFT_SESSION.with(|cell| {
+            let session = cell.take().expect("Commander cube session is stored");
+            assert_eq!(session.config.min_deck_size, 60);
+            cell.set(Some(session));
+        });
+        clear_state();
     }
 
     /// `DraftSession.pools` is `pub`, and seeding a bot seat's pool directly is

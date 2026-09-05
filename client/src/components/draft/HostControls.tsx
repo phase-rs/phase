@@ -32,18 +32,24 @@ export function useHostDraftTopActions({
   const requestResume = useMultiplayerDraftStore((state) => state.requestResume);
 
   return useMemo(() => {
-    if (!enabled || role !== "host" || phase !== "drafting") {
+    if (!enabled || role !== "host") {
       return EMPTY_HOST_DRAFT_TOP_ACTIONS;
     }
-    return [
-      {
-        id: "pause-resume",
-        label: paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft"),
-        tone: paused ? "emerald" : "neutral",
-        onClick: paused ? requestResume : requestPause,
-      },
-      endDraftAction,
-    ];
+    if (phase === "drafting") {
+      return [
+        {
+          id: "pause-resume",
+          label: paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft"),
+          tone: paused ? "emerald" : "neutral",
+          onClick: paused ? requestResume : requestPause,
+        },
+        endDraftAction,
+      ];
+    }
+    if (phase === "deckbuilding") {
+      return [endDraftAction];
+    }
+    return EMPTY_HOST_DRAFT_TOP_ACTIONS;
   }, [enabled, endDraftAction, paused, phase, requestPause, requestResume, role, t]);
 }
 
@@ -95,6 +101,9 @@ export function HostControls({
     "kicked",
     "hostLeft",
   ].includes(phase);
+  const hasDraftEndAction = draftTopActions.some(
+    (action) => action.id === "end-draft",
+  );
 
   if (
     draftTopActions.length === 0 &&
@@ -198,7 +207,7 @@ export function HostControls({
         </div>
       )}
 
-      {phase !== "drafting" && showEndDraft && (
+      {phase !== "drafting" && showEndDraft && !hasDraftEndAction && (
         <button
           onClick={endDraftAction.onClick}
           disabled={endDraftAction.disabled}

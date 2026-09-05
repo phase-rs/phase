@@ -1050,6 +1050,32 @@ pub enum StaticMode {
     CantCauseSacrificeOrExile {
         cause: ProhibitionScope,
     },
+    /// CR 701.9a (discard) + CR 701.21a (sacrifice) + CR 609.3 + CR 109.5:
+    /// "Spells and abilities <cause> can't cause you to <action list>." Sigarda,
+    /// Host of Herons / Tajuru Preserver ("... sacrifice permanents") and
+    /// Tamiyo, Collector of Tales ("... discard cards or sacrifice
+    /// permanents"). Unlike `CantCauseSacrificeOrExile` (triggered abilities
+    /// ONLY, and filtered to a specific `StaticDefinition::affected` object
+    /// subset), this protects the player wholesale against ANY spell or
+    /// ability controlled by a player matching `cause` — not just triggered
+    /// abilities — and is not filtered by which permanent/card would be
+    /// affected. When a muzzled spell/ability would force the protected
+    /// player to perform a listed action, that action is treated as
+    /// impossible for them and produces no game-state change for that player
+    /// (CR 609.3: an effect that can't do something does only as much as
+    /// possible) — a scoped multi-player instruction (e.g. "each player
+    /// sacrifices/discards") still affects every OTHER player normally.
+    ///
+    /// `actions` reuses [`CostCategory`] — already the single-authority
+    /// classifier over "what kind of action is this" for ability costs (see
+    /// its doc comment) — rather than a parallel enum for the same set of
+    /// keyword actions (CR 701.9 discard, CR 701.21 sacrifice). A future
+    /// forced action (e.g. "can't cause you to pay life") slots in as an
+    /// additional `CostCategory` variant rather than a new architecture.
+    CantCauseForcedAction {
+        cause: ProhibitionScope,
+        actions: Vec<CostCategory>,
+    },
     CastWithFlash,
     /// CR 701.38d: While voting, the controller of this permanent may vote an
     /// additional time. Each active source grants +1 to the controller's
@@ -2194,6 +2220,7 @@ pub enum StaticModeKind {
     RestrictLibrarySearchToTop,
     ControlPlayersDuringOwnLibrarySearch,
     CantCauseSacrificeOrExile,
+    CantCauseForcedAction,
     CastWithFlash,
     GrantsExtraVote,
     GrantsExtraVillainousChoice,
@@ -2332,6 +2359,7 @@ impl StaticMode {
             StaticMode::CantCauseSacrificeOrExile { .. } => {
                 StaticModeKind::CantCauseSacrificeOrExile
             }
+            StaticMode::CantCauseForcedAction { .. } => StaticModeKind::CantCauseForcedAction,
             StaticMode::CastWithFlash => StaticModeKind::CastWithFlash,
             StaticMode::GrantsExtraVote => StaticModeKind::GrantsExtraVote,
             StaticMode::GrantsExtraVillainousChoice => StaticModeKind::GrantsExtraVillainousChoice,
@@ -2671,6 +2699,11 @@ impl Hash for StaticMode {
             | StaticMode::CantSearchLibrary { .. }
             | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             | StaticMode::CantCauseSacrificeOrExile { .. }
+            // CR 701.9a + CR 701.21a: data-carrying (`actions: Vec<CostCategory>`
+            // is not Hash-collision-safe to enumerate); consumed by direct match
+            // in game/static_abilities.rs::forced_action_muzzled, never used as a
+            // HashMap key.
+            | StaticMode::CantCauseForcedAction { .. }
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
             | StaticMode::EntersWithAdditionalCounters { .. }
@@ -2720,6 +2753,7 @@ impl StaticMode {
             | StaticMode::RestrictLibrarySearchToTop { .. }
             | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             | StaticMode::CantCauseSacrificeOrExile { .. }
+            | StaticMode::CantCauseForcedAction { .. }
             | StaticMode::CastWithFlash
             | StaticMode::GrantsExtraVote
             | StaticMode::GrantsExtraVillainousChoice
@@ -2854,6 +2888,10 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CantCauseSacrificeOrExile { cause } => {
                 write!(f, "CantCauseSacrificeOrExile({cause})")
+            }
+            StaticMode::CantCauseForcedAction { cause, actions } => {
+                let parts: Vec<String> = actions.iter().map(|a| format!("{a:?}")).collect();
+                write!(f, "CantCauseForcedAction({cause},{})", parts.join("+"))
             }
             StaticMode::SuppressTriggers { events, .. } => {
                 let parts: Vec<String> = events.iter().map(|e| e.to_string()).collect();
@@ -3778,6 +3816,11 @@ impl FromStr for StaticMode {
                     if let Ok(cause) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantCauseSacrificeOrExile { cause });
                     }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if other.starts_with("CantCauseForcedAction(") {
+                    // CR 701.9a + CR 701.21a: Data-carrying — `actions` has no
+                    // `CostCategory` FromStr inverse, so round-trip preserves the
+                    // discriminant only. Mirrors SuppressTriggers.
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if other.starts_with("SuppressTriggers(") {
                     // CR 603.2g: Data-carrying — round-trip preserves discriminant only.

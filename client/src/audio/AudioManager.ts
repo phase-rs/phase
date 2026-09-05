@@ -23,6 +23,18 @@ function shuffle<T>(arr: T[]): T[] {
 
 const DEFAULT_PHASE_BREAKPOINTS = { mid: 5, late: 10 };
 
+/**
+ * How much of the active theme's SFX is playable — what the buffer map holds,
+ * which is the same thing `playSfx` reads.
+ *
+ * - `skipped` — nothing to say: audio is off, there is no context, or the theme
+ *   declares no SFX. Not a statement about whether the host can play sound.
+ * - `none` — nothing decoded. On a host with a working media pipeline that does
+ *   not happen, so it is the pipeline reporting itself broken.
+ * - `partial` / `loaded` — some or all decoded; sound works either way.
+ */
+export type SfxPreloadResult = "skipped" | "none" | "partial" | "loaded";
+
 class AudioManager {
   private ctx: AudioContext | null = null;
   private sfxBuffers = new Map<string, AudioBuffer>();
@@ -48,11 +60,41 @@ class AudioManager {
   /**
    * Permanently skip audio for this session: `warmUp()` becomes a no-op so no
    * device-open path can run (every other device touch already guards on a
-   * null `ctx`). Set at boot when the shell reports the OS audio server
-   * wedged — WebKitGTK opens the device synchronously on the page main
-   * thread, so opening it then would freeze the page. Invariant: while
-   * disabled, `ctx` stays null across `dispose()`/`restart()` cycles; an
+   * null `ctx`). Boot sets this for either fault it can detect — the shell
+   * reporting the OS audio server wedged (WebKitGTK opens the device
+   * synchronously on the page main thread, so opening it then would freeze
+   * the page), or the platform's media pipeline failing to decode any sound
+   * within the boot deadline, which leaves every later pipeline just as dead.
+   * The second case latches after `warmUp()` has already built a context, so
+   * `disable()` does not itself imply a null `ctx`; the invariant is that once
+   * disabled, `ctx` stays null after any `dispose()`/`restart()` cycle, and an
    * `isWarmedUp`-based fast path must never bypass the `disabled` check.
+   *
+   * Because the context can outlive the latch — and can outlive it with
+   * buffers already decoded — the flag guards every method that OPENS a media
+   * pipeline, FEEDS one, or RESUMES one: `warmUp()` (the device),
+   * `preloadSfx()` (a decode), `playTrack()`/`playStinger()` (a media element
+   * source), `playSfx()` (a buffer source), `startMusic()` (the rotation entry
+   * point), and `ensurePlayback()` (a direct `ctx.resume()`). A new method in any of those categories must join the
+   * set. Pure parameter automation on nodes that already exist — gain ramps,
+   * `dispose()`'s teardown — is inert on a dead context and stays unguarded.
+   *
+   * `setContext()` is deliberately NOT guarded: it is the teardown path as well
+   * as the start path, so an early return would strand music that was already
+   * playing when the latch fired, leaving a "disabled" manager audible. It
+   * reaches playback only through `startMusic()`/`playTrack()`, both of which
+   * check, so the pipeline stays shut while its `stopMusic()` half keeps
+   * working.
+   *
+   * Asynchronous continuations RECHECK rather than inheriting their caller's
+   * guard: an entry check is stale by the time a callback runs, so
+   * `playTrack()`'s `ended` handler and its `play()`-rejection path each latch
+   * on `disabled` and the generation before touching the context again, and
+   * `loadBuffer()` rechecks `disabled` plus the captured context and theme
+   * across both of its awaits. Every `await` and every callback in this file
+   * that afterwards touches the context is covered by that rule; a new one
+   * must recheck too, choosing the invalidation signal that matches what it
+   * produces (generation for music rotation, theme identity for SFX buffers).
    */
   disable(): void {
     this.disabled = true;
@@ -110,26 +152,66 @@ class AudioManager {
   // SFX
   // ---------------------------------------------------------------------------
 
-  /** Preload all unique SFX files into AudioBuffers (background, non-blocking). */
-  async preloadSfx(): Promise<void> {
-    if (!this.ctx) return;
-    const urls = [...new Set(Object.values(this.activeTheme.sfxMap))];
+  /**
+   * How much of the active theme is playable right now.
+   *
+   * Reads the buffer map rather than the outcome of a preload pass, because
+   * the map is what `playSfx` reads and because a caller may need an answer
+   * while a pass is still in flight: `preloadSfx` cannot resolve until every
+   * file settles, but the files that already decoded are playable the moment
+   * they land. The boot deadline depends on that distinction — one file that
+   * never settles must not cost the user every other sound (issue #6744).
+   *
+   * Sharing one classifier with `preloadSfx` is what keeps "what boot decided"
+   * and "what is actually playable" from drifting apart.
+   */
+  sfxAvailability(): SfxPreloadResult {
+    if (this.disabled || !this.ctx) return "skipped";
     const entries = Object.entries(this.activeTheme.sfxMap);
+    const urls = [...new Set(entries.map(([, url]) => url))];
+    if (urls.length === 0) return "skipped";
+
+    const loaded = urls.filter((url) =>
+      entries.some(([eventType, u]) => u === url && this.sfxBuffers.has(eventType)),
+    ).length;
+    if (loaded === 0) return "none";
+    return loaded === urls.length ? "loaded" : "partial";
+  }
+
+  /**
+   * Preload all unique SFX files into AudioBuffers (background, non-blocking).
+   *
+   * `loadBuffer` swallows per-file failures on purpose — one unreachable sound
+   * must not take the rest down — so the result is read off the buffer map
+   * afterwards. A pass where *nothing* decoded is not a partial failure; it is
+   * the platform telling us it cannot play sound at all, and the boot gate has
+   * to be able to tell those apart.
+   */
+  async preloadSfx(): Promise<SfxPreloadResult> {
+    if (this.disabled || !this.ctx) return "skipped";
+    const entries = Object.entries(this.activeTheme.sfxMap);
+    const urls = [...new Set(entries.map(([, url]) => url))];
+    if (urls.length === 0) return "skipped";
 
     await Promise.all(
-      urls.map(async (url) => {
+      urls.map((url) => {
         // Find the eventType(s) that map to this URL
         const eventTypes = entries
           .filter(([_, u]) => u === url)
           .map(([et]) => et);
-        await this.loadBuffer(url, eventTypes);
+        return this.loadBuffer(url, eventTypes);
       }),
     );
+
+    return this.sfxAvailability();
   }
 
   /** Play a single SFX by GameEvent type. */
   playSfx(eventType: string, volume = 1.0): void {
-    if (!this.ctx || !this.sfxGain) return;
+    // `disabled` can latch after warm-up with buffers already decoded, so the
+    // ctx/gain guards below do not cover it: starting a source node on a
+    // latched-off host would push audio at a stack we just declared dead.
+    if (this.disabled || !this.ctx || !this.sfxGain) return;
 
     const buffer = this.sfxBuffers.get(eventType);
     if (!buffer) {
@@ -283,7 +365,7 @@ class AudioManager {
     // Stop current music immediately
     this.stopMusic(0);
 
-    if (!this.ctx || !this.musicGain) return;
+    if (this.disabled || !this.ctx || !this.musicGain) return;
 
     // Reset music gain — cancelScheduledValues first so .value assignment
     // takes effect (WebAudio spec: automation overrides direct .value writes)
@@ -321,7 +403,7 @@ class AudioManager {
 
   /** Start music playback with shuffled track rotation for the active context. */
   startMusic(): void {
-    if (!this.ctx || !this.musicGain) return;
+    if (this.disabled || !this.ctx || !this.musicGain) return;
 
     const prefs = usePreferencesStore.getState();
     if (prefs.musicMuted || prefs.masterMuted) return;
@@ -388,8 +470,14 @@ class AudioManager {
    * Resume audio playback after a user gesture (e.g. unmute button click).
    * Warms up the AudioContext if needed, resumes it if suspended,
    * and ensures music is playing for the current context.
+   *
+   * Returns early while disabled rather than relying on its callees' guards:
+   * `resume()` below acts on `ctx` directly, and the boot deadline can latch
+   * with that context still live, so a gesture handler would otherwise walk
+   * straight back into the media path boot just declared dead.
    */
   ensurePlayback(): void {
+    if (this.disabled) return;
     this.warmUp();
     this.preloadSfx();
 
@@ -493,8 +581,31 @@ class AudioManager {
     return event.type;
   }
 
+  /** Decode one file into the buffer map. Failures are logged, not thrown —
+   *  `sfxAvailability()` reads the map to find out what survived.
+   *
+   *  Bytes are in flight across two awaits, so the entry guard is stale twice
+   *  over: `disable()` can latch, `dispose()`/`restart()` can swap the context,
+   *  and `loadTheme()` can clear the buffer map for a different theme, all
+   *  while this load is waiting. The context and theme are captured up front
+   *  and rechecked before opening the decode and again before committing, so a
+   *  slow fetch cannot reopen a pipeline boot declared unusable, decode against
+   *  a replaced context, or repopulate a map that was cleared for another
+   *  theme.
+   *
+   *  Deliberately NOT gated on `generation`: that tracks music-rotation
+   *  identity and is bumped by `setContext`/`playStinger`/`setBattlefieldPhase`,
+   *  so gating SFX on it would throw away good buffers every time the player
+   *  moves between menu and battlefield. `loadTheme()` conversely may not bump
+   *  it at all, so it does not even capture the invalidation that matters here.
+   */
   private async loadBuffer(url: string, eventTypes: string[]): Promise<void> {
-    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const theme = this.activeTheme;
+    if (this.disabled || !ctx) return;
+    /** Whether this load still belongs to the audio stack it started on. */
+    const stillCurrent = () =>
+      !this.disabled && this.ctx === ctx && this.activeTheme === theme;
     try {
       const isLocal = url.startsWith("/");
       let arrayBuffer: ArrayBuffer;
@@ -513,7 +624,10 @@ class AudioManager {
         );
       }
 
-      const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+      if (!stillCurrent()) return;
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+      // The decode is itself a wait, so recheck before publishing the buffer.
+      if (!stillCurrent()) return;
       // Key by every eventType that maps to this URL
       for (const et of eventTypes) {
         this.sfxBuffers.set(et, audioBuffer);
@@ -525,7 +639,7 @@ class AudioManager {
   }
 
   private playTrack(): void {
-    if (!this.ctx || !this.musicGain) return;
+    if (this.disabled || !this.ctx || !this.musicGain) return;
 
     const track = this.trackOrder[this.trackIndex];
     if (!track) return;
@@ -537,18 +651,26 @@ class AudioManager {
 
     this.currentAudio = audio;
 
-    // Capture generation so the ended handler becomes a no-op if a context
+    // Capture generation so the continuations below become no-ops if a context
     // change or stopMusic has occurred since this track started.
     const gen = this.generation;
     audio.addEventListener("ended", () => {
-      if (this.generation !== gen) return;
+      if (this.disabled || this.generation !== gen) return;
       this.crossfadeTo(this.nextTrackIndex());
     });
 
+    // The guard at the top of this method is synchronous and stale by the time
+    // a rejection arrives: `disabled` can latch, and the generation can move,
+    // between initiating playback and hearing back. Neither `resume()` nor the
+    // retry reaches a guarded entry point, so each async step rechecks both.
     audio.play().catch((err) => {
       console.warn("[music] play() rejected:", err);
+      if (this.disabled || this.generation !== gen) return;
       if (this.ctx?.state === "suspended") {
-        this.ctx.resume().then(() => audio.play().catch(() => {}));
+        this.ctx.resume().then(() => {
+          if (this.disabled || this.generation !== gen) return;
+          audio.play().catch(() => {});
+        });
       }
     });
   }

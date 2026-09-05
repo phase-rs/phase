@@ -33,6 +33,8 @@ interface GameMenuProps {
   isOnlineMode: boolean;
   showAiHand: boolean;
   onToggleAiHand: () => void;
+  logPanelOpen: boolean;
+  onToggleGameLog: () => void;
   /** The currently displayed layout, already resolved from the raw preference. */
   multiplayerBoardLayout?: ResolvedMultiplayerBoardLayout;
   onToggleMultiplayerBoardLayout?: () => void;
@@ -69,6 +71,8 @@ export function GameMenu({
   isOnlineMode,
   showAiHand,
   onToggleAiHand,
+  logPanelOpen,
+  onToggleGameLog,
   multiplayerBoardLayout,
   onToggleMultiplayerBoardLayout,
   showMultiplayerSplitLayoutNudge = false,
@@ -140,7 +144,10 @@ export function GameMenu({
          container's left edge and is unaffected by the row's flow. */
       className="fixed z-40 flex items-center gap-2"
       style={{
-        left: "calc(env(safe-area-inset-left) + 0.5rem)",
+        // Fixed, so the board grid's rail padding does not apply — the
+        // left-dock log offset has to be added here, mirroring how the action
+        // rail consumes `--game-right-rail-offset`.
+        left: "calc(env(safe-area-inset-left) + 0.5rem + var(--game-left-rail-offset, 0px))",
         top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.75rem)",
       }}
     >
@@ -262,7 +269,13 @@ export function GameMenu({
           )}
           <div className="my-1 border-t border-gray-700/70" />
           <MenuSectionLabel label={t("gameMenu.sections.game")} />
-          <MenuButton label={t("gameMenu.resume")} onClick={() => setOpen(false)} />
+          <MenuButton
+            label={logPanelOpen ? t("gameMenu.closeGameLog") : t("gameMenu.openGameLog")}
+            onClick={() => {
+              onToggleGameLog();
+              setOpen(false);
+            }}
+          />
           <MenuButton
             label={t("gameMenu.settings")}
             onClick={() => openSurfaceFromMenu(onSettingsClick)}

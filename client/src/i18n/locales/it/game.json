@@ -3,7 +3,8 @@
     "badge": "Bloccata",
     "cantBeActivated": "Questa abilità non può essere attivata",
     "cantActivateDuring": "Non può essere attivata ora",
-    "prohibited": "L'attivazione di questa abilità è proibita"
+    "prohibited": "L'attivazione di questa abilità è proibita",
+    "costNotPayableNow": "Non puoi pagare questo costo in questo momento"
   },
   "manaSourceSelection": { "title": "Scegli una fonte di mana", "description": "Questa abilità di mana richiede di sacrificare un permanente.", "sacrifice": "Sacrifica", "back": "Torna al pagamento del mana", "unknownSource": "Fonte di mana" },
   "comboShortcut": {
@@ -21,10 +22,27 @@
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
     "countAria": "Number of iterations",
+    "countDecreaseAria": "Diminuisci il numero di ripetizioni",
+    "countIncreaseAria": "Aumenta il numero di ripetizioni",
     "previewTitle_one": "Repeating once produces:",
     "previewTitle_other": "Repeating {{count}} times produces:",
     "previewEntry": "{{amount}} {{resource}}",
     "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
+    "allocationTitle": "Distribuisci le ripetizioni tra i bersagli:",
+    "allocationAria": "Ripetizioni per {{subject}}",
+    "allocationDecreaseAria": "Diminuisci le ripetizioni per {{subject}}",
+    "allocationIncreaseAria": "Aumenta le ripetizioni per {{subject}}",
+    "allocationSum": "{{allocated}} di {{total}} ripetizioni assegnate.",
+    "evenSplit": "Ripristina la divisione equa",
+    "customDistribution": "Distribuzione personalizzata — il motore non ha previsualizzato questa divisione.",
+    "announceTitle": "Scegli il bersaglio che ogni ripetizione annuncia:",
+    "announce": "Annuncia",
+    "announceAria": "Annuncia {{subject}}",
+    "mayTitle": "Abilità opzionale {{group}} — ripetere questa scelta a ogni iterazione?",
+    "mayTake": "Usala",
+    "mayDecline": "Rifiutala",
+    "mayTakeAria": "Usa l'abilità opzionale {{group}}",
+    "mayDeclineAria": "Rifiuta l'abilità opzionale {{group}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -32,6 +50,13 @@
       "ImmediateWin": "This loop wins the game.",
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
+    },
+    "respondDeclaredTitle": "Dichiarazione proposta:",
+    "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
+    "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondDecision": {
+      "take": "{{subject}} — si usa a ogni iterazione",
+      "decline": "{{subject}} — si rifiuta a ogni iterazione"
     }
   },
   "precastShortcut": {
@@ -513,6 +538,8 @@
     "unboundedConditionalYouTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; questo può restare illimitato e, in caso contrario, indicherai tu la quantità",
     "unboundedMixedTooltip": "{{resource}} illimitato (∞) — parte di questo gruppo ha un collasso in sospeso; parte resta illimitata",
     "unboundedConditionalGlyph": "∞→?",
+    "boundedLoopGlyph": "≤{{bound}}×",
+    "boundedLoopTooltip": "{{resource}} da un ciclo rilevato, con un massimo di {{bound}} ripetizioni",
     "unboundedManaPoolMarker": "Mana illimitato (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "punti vita",
@@ -1110,7 +1137,10 @@
       "subtitlePreparedCopy": "Lanciare la magia preparata?",
       "subtitleActivate": "Attivare questa abilità?",
       "subtitlePlay": "Scegli come giocare questa carta",
-      "subtitleChoose": "Scegli un'abilità da attivare"
+      "subtitleChoose": "Scegli un'abilità da attivare",
+      "unlockThisDoor": "Sblocca questa porta",
+      "unlockHalf": "Sblocca {{name}}",
+      "unlockHalfWithCost": "Sblocca {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Tappa per mana",

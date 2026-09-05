@@ -3,7 +3,8 @@
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidad no puede activarse",
     "cantActivateDuring": "No puede activarse ahora",
-    "prohibited": "Activar esta habilidad está prohibido"
+    "prohibited": "Activar esta habilidad está prohibido",
+    "costNotPayableNow": "No puedes pagar este coste ahora mismo"
   },
   "manaSourceSelection": { "title": "Elige una fuente de maná", "description": "Esta habilidad de maná requiere sacrificar un permanente.", "sacrifice": "Sacrificar", "back": "Volver al pago de maná", "unknownSource": "Fuente de maná" },
   "comboShortcut": {
@@ -21,10 +22,27 @@
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
     "countAria": "Number of iterations",
+    "countDecreaseAria": "Disminuir el número de repeticiones",
+    "countIncreaseAria": "Aumentar el número de repeticiones",
     "previewTitle_one": "Repeating once produces:",
     "previewTitle_other": "Repeating {{count}} times produces:",
     "previewEntry": "{{amount}} {{resource}}",
     "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
+    "allocationTitle": "Reparte las repeticiones entre los objetivos:",
+    "allocationAria": "Repeticiones para {{subject}}",
+    "allocationDecreaseAria": "Disminuir las repeticiones para {{subject}}",
+    "allocationIncreaseAria": "Aumentar las repeticiones para {{subject}}",
+    "allocationSum": "{{allocated}} de {{total}} repeticiones asignadas.",
+    "evenSplit": "Restablecer el reparto equitativo",
+    "customDistribution": "Distribución personalizada: el motor no ha previsualizado este reparto.",
+    "announceTitle": "Elige el objetivo que se anuncia en cada repetición:",
+    "announce": "Anunciar",
+    "announceAria": "Anunciar {{subject}}",
+    "mayTitle": "Habilidad opcional {{group}}: ¿repetir esta elección en cada iteración?",
+    "mayTake": "Aceptarla",
+    "mayDecline": "Rechazarla",
+    "mayTakeAria": "Aceptar la habilidad opcional {{group}}",
+    "mayDeclineAria": "Rechazar la habilidad opcional {{group}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -32,6 +50,13 @@
       "ImmediateWin": "This loop wins the game.",
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
+    },
+    "respondDeclaredTitle": "Declaración propuesta:",
+    "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
+    "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondDecision": {
+      "take": "{{subject}} — se acepta en cada iteración",
+      "decline": "{{subject}} — se rechaza en cada iteración"
     }
   },
   "precastShortcut": {
@@ -513,6 +538,8 @@
     "unboundedConditionalYouTooltip": "{{resource}} ilimitado (∞) — colapso pendiente; esto puede seguir siendo ilimitado y, si no, tú indicarás la cantidad",
     "unboundedMixedTooltip": "{{resource}} ilimitado (∞) — parte de este grupo tiene un colapso pendiente; parte sigue siendo ilimitada",
     "unboundedConditionalGlyph": "∞→?",
+    "boundedLoopGlyph": "≤{{bound}}×",
+    "boundedLoopTooltip": "{{resource}} de un bucle detectado, con un máximo de {{bound}} repeticiones",
     "unboundedManaPoolMarker": "Maná ilimitado (∞)",
     "unboundedMana": "maná",
     "unboundedLife": "vidas",
@@ -1110,7 +1137,10 @@
       "subtitlePreparedCopy": "¿Lanzar el hechizo preparado?",
       "subtitleActivate": "¿Activar esta habilidad?",
       "subtitlePlay": "Elige cómo jugar esta carta",
-      "subtitleChoose": "Elige una habilidad para activar"
+      "subtitleChoose": "Elige una habilidad para activar",
+      "unlockThisDoor": "Desbloquear esta puerta",
+      "unlockHalf": "Desbloquear {{name}}",
+      "unlockHalfWithCost": "Desbloquear {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Girar para obtener maná",

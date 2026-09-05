@@ -14,6 +14,25 @@ spec:
     burst: {{ $mw.rateLimit.burst }}
     sourceCriterion:
       {{- $source | nindent 6 }}
+{{- if and .Values.web.enabled .Values.web.rateLimit.enabled }}
+---
+{{- /* The SPA route's own limiter. Separate from the API one because a cold
+     page load is tens of asset requests at once, which the API's average is not
+     sized for, and because sharing that bucket would let asset traffic throttle
+     /ws upgrades. */}}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $fullname }}-web-ratelimit
+  labels:
+    {{- include "phase-server.labels" . | nindent 4 }}
+spec:
+  rateLimit:
+    average: {{ .Values.web.rateLimit.average }}
+    burst: {{ .Values.web.rateLimit.burst }}
+    sourceCriterion:
+      {{- $source | nindent 6 }}
+{{- end }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware

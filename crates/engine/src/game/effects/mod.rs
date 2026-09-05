@@ -11,13 +11,15 @@ use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CardTypeSetSource,
     CastFromZoneDriver, ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, DetachedRemainder, EachDamageRecipient, Effect, EffectError,
-    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
-    ForEachCategoryAction, ForwardedResultContext, ManaProduction, OpponentMayScope, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
-    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
-    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause,
+    CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder, EachDamageRecipient, Effect,
+    EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
+    ForEachCategoryAction, ForwardedResultContext, ManaProduction, ObjectSelectionCardinality,
+    OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
+    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, ZoneChoiceCandidateSource,
+    ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -28,7 +30,7 @@ use crate::types::game_state::{
     PendingContinuation, PendingCostMoveResume, PendingDiscardBatchCompletion,
     PendingPlayerScopeLinkedExile, PendingPlayerScopeSacrificeChoice,
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    ResolutionOptionalPaymentOption, WaitingFor, ZoneChangeRecord,
+    ResolutionOptionalPaymentOption, WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -2425,6 +2427,7 @@ fn try_begin_deferred_else_branch_target_selection(
                 up_to: false,
                 constraint: None,
                 source_id: else_resolved.source_id,
+                reciprocal_role: None,
             };
             return Ok(true);
         }
@@ -6995,6 +6998,313 @@ pub(crate) fn publish_fresh_tracked_set(
     set_id
 }
 
+/// CR 608.2c + CR 608.2d: An immutable capability for one reciprocal producer
+/// → consumer transition preserves the ordered instruction and the player who
+/// must announce the later resolution-time choice.
+/// The prompt is public state; its continuation is not. Snapshotting the exact
+/// active frame prevents a stale or buried continuation from being consumed.
+#[derive(Clone)]
+pub(super) struct ReciprocalTransitionPlan {
+    frame: AbilityContinuationFrame,
+    actor: Option<PlayerId>,
+    requires_tracked_set: bool,
+    tracked_set_id: Option<TrackedSetId>,
+    tracked_members: Option<Vec<ObjectId>>,
+}
+
+fn reciprocal_transition_plan(
+    state: &GameState,
+    actor: Option<PlayerId>,
+    require_tracked_set: bool,
+    require_unbound: bool,
+) -> Result<ReciprocalTransitionPlan, EffectError> {
+    let frame = state
+        .active_ability_continuation_frame()
+        .cloned()
+        .ok_or_else(|| {
+            EffectError::MissingParam(
+                "reciprocal consumer is not the active continuation".to_string(),
+            )
+        })?;
+    let Effect::ChooseFromZone {
+        chooser,
+        candidate_source,
+        reciprocal_role,
+        ..
+    } = &frame.pending.chain.effect
+    else {
+        return Err(EffectError::MissingParam(
+            "reciprocal continuation head is not ChooseFromZone".to_string(),
+        ));
+    };
+    if *reciprocal_role != Some(ReciprocalZoneChoiceRole::Consume)
+        || *candidate_source != ZoneChoiceCandidateSource::Direct
+    {
+        return Err(EffectError::MissingParam(
+            "reciprocal continuation head has wrong role or candidate provenance".to_string(),
+        ));
+    }
+    let ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { player } = chooser else {
+        return Err(EffectError::MissingParam(
+            "reciprocal continuation head has an invalid chooser".to_string(),
+        ));
+    };
+    if require_unbound {
+        if player.is_some() {
+            return Err(EffectError::MissingParam(
+                "reciprocal consumer was already bound".to_string(),
+            ));
+        }
+    } else if *player != actor {
+        return Err(EffectError::MissingParam(
+            "reciprocal consumer is not bound to the acting player".to_string(),
+        ));
+    }
+    let (tracked_set_id, tracked_members) = if require_tracked_set {
+        let id = state.chain_tracked_set_id.ok_or_else(|| {
+            EffectError::MissingParam("reciprocal consumer has no fresh tracked set".to_string())
+        })?;
+        let members = state.tracked_object_sets.get(&id).cloned().ok_or_else(|| {
+            EffectError::MissingParam("reciprocal consumer tracked set is missing".to_string())
+        })?;
+        (Some(id), Some(members))
+    } else {
+        (state.chain_tracked_set_id, None)
+    };
+    Ok(ReciprocalTransitionPlan {
+        frame,
+        actor,
+        requires_tracked_set: require_tracked_set,
+        tracked_set_id,
+        tracked_members,
+    })
+}
+
+fn validate_reciprocal_transition(
+    state: &GameState,
+    plan: &ReciprocalTransitionPlan,
+    require_unbound: bool,
+) -> Result<(), EffectError> {
+    if state.active_ability_continuation_frame() != Some(&plan.frame) {
+        return Err(EffectError::MissingParam(
+            "reciprocal continuation frame or immediate tail changed".to_string(),
+        ));
+    }
+    let fresh = reciprocal_transition_plan(
+        state,
+        plan.actor,
+        plan.requires_tracked_set,
+        require_unbound,
+    )?;
+    if fresh.tracked_set_id != plan.tracked_set_id || fresh.tracked_members != plan.tracked_members
+    {
+        return Err(EffectError::MissingParam(
+            "reciprocal tracked set changed before completion".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_bound_reciprocal_consumer(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    actor: PlayerId,
+) -> Result<(), EffectError> {
+    let plan = reciprocal_transition_plan(state, Some(actor), true, false)?;
+    if plan.frame.pending.chain.as_ref() != ability {
+        return Err(EffectError::MissingParam(
+            "reciprocal presenter was given a stale consumer head".to_string(),
+        ));
+    }
+    validate_reciprocal_transition(state, &plan, false)
+}
+
+fn take_validated_reciprocal_frame(
+    state: &mut GameState,
+    plan: &ReciprocalTransitionPlan,
+    require_unbound: bool,
+) -> Result<AbilityContinuationFrame, EffectError> {
+    validate_reciprocal_transition(state, plan, require_unbound)?;
+    state
+        .take_active_ability_continuation()
+        .map_err(|error| {
+            EffectError::MissingParam(format!("reciprocal continuation take failed: {error:?}"))
+        })?
+        .ok_or_else(|| EffectError::MissingParam("reciprocal continuation disappeared".to_string()))
+}
+
+fn bind_taken_reciprocal_consumer(
+    frame: &mut AbilityContinuationFrame,
+    chooser: PlayerId,
+) -> Result<(), EffectError> {
+    let Effect::ChooseFromZone {
+        chooser: ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { player },
+        ..
+    } = &mut frame.pending.chain.effect
+    else {
+        return Err(EffectError::MissingParam(
+            "validated reciprocal consumer lost its chooser".to_string(),
+        ));
+    };
+    *player = Some(chooser);
+    Ok(())
+}
+
+pub(super) fn bind_reciprocal_consumer_from_producer(
+    state: &mut GameState,
+    chooser: PlayerId,
+    first: ObjectId,
+) -> Result<(), EffectError> {
+    let plan = reciprocal_transition_plan(state, None, false, true)?;
+    let mut frame = take_validated_reciprocal_frame(state, &plan, true)?;
+    bind_taken_reciprocal_consumer(&mut frame, chooser)?;
+    publish_fresh_tracked_set(state, vec![first]);
+    state.push_ability_continuation(frame);
+    Ok(())
+}
+
+pub(super) fn bind_reciprocal_consumer_from_picker(
+    state: &mut GameState,
+    chooser: PlayerId,
+) -> Result<(), EffectError> {
+    let plan = reciprocal_transition_plan(state, None, true, true)?;
+    if plan.tracked_members.as_deref() != Some(&[]) {
+        return Err(EffectError::MissingParam(
+            "reciprocal picker requires the fresh empty tracked set".to_string(),
+        ));
+    }
+    let mut frame = take_validated_reciprocal_frame(state, &plan, true)?;
+    bind_taken_reciprocal_consumer(&mut frame, chooser)?;
+    state.push_ability_continuation(frame);
+    Ok(())
+}
+
+pub(super) fn complete_reciprocal_consume_selection(
+    state: &mut GameState,
+    actor: PlayerId,
+    selected: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let plan = reciprocal_transition_plan(state, Some(actor), true, false)?;
+    let mut frame = take_validated_reciprocal_frame(state, &plan, false)?;
+    let id = plan.tracked_set_id.ok_or_else(|| {
+        EffectError::MissingParam("validated reciprocal set id disappeared".to_string())
+    })?;
+    state
+        .tracked_object_sets
+        .get_mut(&id)
+        .ok_or_else(|| {
+            EffectError::MissingParam("validated reciprocal tracked set disappeared".to_string())
+        })?
+        .extend(selected);
+    if let Some(tail) = frame.pending.chain.sub_ability.take() {
+        resolve_ability_chain(state, &tail, events, 1)?;
+    } else {
+        state.waiting_for = WaitingFor::Priority {
+            player: frame.pending.chain.controller,
+        };
+    }
+    Ok(())
+}
+
+pub(super) fn reciprocal_no_candidate_ticket(
+    state: &GameState,
+    actor: PlayerId,
+) -> Result<ReciprocalTransitionPlan, EffectError> {
+    reciprocal_transition_plan(state, Some(actor), true, false)
+}
+
+pub(super) fn complete_reciprocal_consume_no_candidates(
+    state: &mut GameState,
+    ticket: ReciprocalTransitionPlan,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut frame = take_validated_reciprocal_frame(state, &ticket, false)?;
+    let tail = frame.pending.chain.sub_ability.take();
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::ChooseFromZone,
+        source_id: frame.pending.chain.source_id,
+        subject: None,
+    });
+    if let Some(tail) = tail {
+        resolve_ability_chain(state, &tail, events, 1)?;
+    } else {
+        state.waiting_for = WaitingFor::Priority {
+            player: frame.pending.chain.controller,
+        };
+    }
+    Ok(())
+}
+
+/// Drive the no-first-candidate branch of a reciprocal sequential choice.
+/// There is no selected-card owner to bind "that player", so the actual
+/// opponent population supplies the only legal continuation topology. Dawnbreak
+/// Reclaimer's official ruling specifically requires this continuation: even
+/// with no creature card in an opponent's graveyard, its controller chooses an
+/// opponent to choose a creature card from the controller's graveyard.
+fn drive_empty_reciprocal_producer(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<bool, EffectError> {
+    if !matches!(
+        ability.effect,
+        Effect::ChooseFromZone {
+            reciprocal_role: Some(ReciprocalZoneChoiceRole::Produce),
+            ..
+        }
+    ) || matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. })
+    {
+        return Ok(false);
+    }
+    let consumer = ability.sub_ability.as_deref().ok_or_else(|| {
+        EffectError::MissingParam("reciprocal producer has no immediate consumer".to_string())
+    })?;
+    if !matches!(
+        consumer.effect,
+        Effect::ChooseFromZone {
+            reciprocal_role: Some(ReciprocalZoneChoiceRole::Consume),
+            ..
+        }
+    ) {
+        return Err(EffectError::MissingParam(
+            "reciprocal producer's immediate successor is not its consumer".to_string(),
+        ));
+    }
+    let opponents = crate::game::players::choosable_opponents(state, ability.controller);
+    match opponents.as_slice() {
+        [] => {
+            if let Some(tail) = consumer.sub_ability.as_deref() {
+                resolve_ability_chain(state, tail, events, depth + 1)?;
+            }
+        }
+        [opponent] => {
+            prepend_to_pending_continuation(state, consumer.clone());
+            bind_reciprocal_consumer_from_picker(state, *opponent)?;
+            let bound = state
+                .active_ability_continuation()
+                .ok_or_else(|| {
+                    EffectError::MissingParam("bound reciprocal consumer disappeared".to_string())
+                })?
+                .chain
+                .as_ref()
+                .clone();
+            choose_from_zone::resolve_with_choosing_player(state, &bound, *opponent, events)?;
+        }
+        _ => {
+            prepend_to_pending_continuation(state, consumer.clone());
+            state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+                player: ability.controller,
+                candidates: opponents,
+                ability: Box::new(consumer.clone()),
+                purpose: ZoneOpponentChooserPurpose::BindReciprocalConsume,
+            };
+        }
+    }
+    Ok(true)
+}
+
 /// CR 608.2c + CR 701.62a (#7467): publish `object_id` as the chain's fresh
 /// tracked set iff the parked continuation actually reads one and the object
 /// really sits on the battlefield — mirroring the resolver harvest's
@@ -7415,6 +7725,11 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // `OptionalEffectPerformed` rider) must be suppressed (Sun Droplet #4776).
         Effect::RemoveCounter { .. } => {
             counters::remove_counter_optional_is_infeasible(state, ability)
+        }
+        // CR 608.2d + CR 122.1: an optional exact counter-removal selection
+        // cannot be accepted unless every required permanent is selectable.
+        Effect::ChooseObjectsIntoTrackedSet { .. } => {
+            choose_objects_into_tracked_set::optional_exact_selection_is_infeasible(state, ability)
         }
         // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
         // least one complete forage mode is currently available.
@@ -11624,6 +11939,7 @@ fn resolve_chain_body(
                                     up_to: false,
                                     constraint: None,
                                     source_id: ability.source_id,
+                                    reciprocal_role: None,
                                 };
                                 return Ok(());
                             }
@@ -11773,18 +12089,27 @@ fn resolve_chain_body(
 
     let optional_is_infeasible = ability.optional && optional_effect_is_infeasible(state, ability);
 
-    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction does
-    // not happen. Route every such CastFromZone outcome through the existing
+    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction or
+    // exact object selection does not happen. Route either outcome through the existing
     // decline authority instead of merely suppressing the prompt and falling
     // through to `resolve_effect`: a missing exact parent could consume an
     // unrelated inherited target, while another current-legality failure (such
     // as trying to cast a land) could mutate casting permissions before the
-    // cast authority rejects it. The decline path also preserves the printed
+    // cast authority rejects it. An impossible exact selection must likewise
+    // decline instead of surfacing an unsatisfiable waiting state. The decline path preserves the printed
     // tail semantics: dependent "if you do" riders stay gated while independent
     // sequential siblings and explicit decline branches continue. Other
     // infeasible optional effects (PutChosenCounter/RemoveCounter) retain their
     // established resolver no-op.
-    if optional_is_infeasible && matches!(ability.effect, Effect::CastFromZone { .. }) {
+    let auto_decline_infeasible_optional = matches!(
+        &ability.effect,
+        Effect::CastFromZone { .. }
+            | Effect::ChooseObjectsIntoTrackedSet {
+                cardinality: Some(ObjectSelectionCardinality::Exactly { .. }),
+                ..
+            }
+    );
+    if optional_is_infeasible && auto_decline_infeasible_optional {
         return resolve_optional_effect_decision(
             state,
             ability.clone(),
@@ -12273,7 +12598,7 @@ fn resolve_chain_body(
     // here would be wrong (and untested against that resolver's semantics).
     let needs_resolution_object_choice = match &ability.effect {
         Effect::PutCounter { .. } => ability.targets.is_empty(),
-        Effect::ChooseCounterKind { target } => {
+        Effect::ChooseCounterKind { target, .. } => {
             !matches!(target, TargetFilter::SpecificObject { .. })
         }
         _ => false,
@@ -12282,7 +12607,7 @@ fn resolve_chain_body(
         && needs_resolution_object_choice
         && ability.distribution.is_none()
     {
-        if let Effect::PutCounter { target, .. } | Effect::ChooseCounterKind { target } =
+        if let Effect::PutCounter { target, .. } | Effect::ChooseCounterKind { target, .. } =
             &ability.effect
         {
             if !target.contains_source_attachment_host() {
@@ -12295,17 +12620,33 @@ fn resolve_chain_body(
                         filter::matches_target_filter(state, *id, &effective_filter, &filter_ctx)
                     })
                     .filter(|id| {
-                        !matches!(ability.effect, Effect::ChooseCounterKind { .. })
-                            || state.objects.get(id).is_some_and(|object| {
-                                object.counters.values().any(|count| *count > 0)
-                            })
+                        // CR 608.2d: "a player can't choose an impossible
+                        // option" — an object with no counters offers nothing
+                        // to an ON-TARGET choice, so it is not a legal subject.
+                        // A PRINTED list carries its own options and this test
+                        // does not apply to it. No printed-list card reaches
+                        // here today: the only one parses to `SelfRef`, a
+                        // context reference, which `target_choice_timing_for_clause`
+                        // never gives `Resolution` timing. The predicate names
+                        // the domain rather than the effect so that it stays
+                        // true if one ever does.
+                        !matches!(
+                            ability.effect,
+                            Effect::ChooseCounterKind {
+                                domain: CounterKindDomain::OnTarget,
+                                ..
+                            }
+                        ) || state
+                            .objects
+                            .get(id)
+                            .is_some_and(|object| object.counters.values().any(|count| *count > 0))
                     })
                     .collect();
                 match legal.len() {
                     0 => {}
                     1 => {
                         let mut bound = ability.clone();
-                        if let Effect::ChooseCounterKind { target } = &mut bound.effect {
+                        if let Effect::ChooseCounterKind { target, .. } = &mut bound.effect {
                             *target = TargetFilter::SpecificObject { id: legal[0] };
                             if let Some(object) = state.objects.get(&legal[0]) {
                                 bound.set_effect_context_object_recursive(
@@ -12336,6 +12677,7 @@ fn resolve_chain_body(
                             up_to: false,
                             constraint: None,
                             source_id: ability.source_id,
+                            reciprocal_role: None,
                         };
                         return Ok(());
                     }
@@ -12877,6 +13219,13 @@ fn resolve_chain_body(
         let affected_with_causes =
             affected_objects_with_causes(state, ability, &ability.effect, &events[events_before..]);
         publish_tracked_set_with_causes(state, affected_with_causes);
+    }
+
+    // CR 608.2c + CR 608.2d: after a resolved producer has no legal candidate,
+    // continue the printed reciprocal instruction and present any required
+    // resolution-time choice before evaluating its optional return.
+    if drive_empty_reciprocal_producer(state, ability, events, depth)? {
+        return Ok(());
     }
 
     // ExileFromTopUntil handles its own sub_ability chain internally for both
@@ -19447,7 +19796,9 @@ mod tests {
                 additional_zones: Vec::new(),
                 zone_owner: ZoneOwner::Controller,
                 filter: None,
-                chooser: Chooser::Controller,
+                chooser: Chooser::Controller.into(),
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,

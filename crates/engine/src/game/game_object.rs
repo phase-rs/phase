@@ -492,7 +492,11 @@ pub struct GameObject {
     /// CR 702.16p: Per [`StaticGateKey::def_index`] on this source and enchanted
     /// host, the controlled attachments matching that effect's resolved protection
     /// quality when it first started applying to that host.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        with = "crate::types::deterministic_serde::hash_map_entries"
+    )]
     pub protection_start_exempt_attachments:
         HashMap<ProtectionEffectHostKey, ProtectionStartSnapshot>,
     /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:

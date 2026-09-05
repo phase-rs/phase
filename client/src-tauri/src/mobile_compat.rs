@@ -3,17 +3,24 @@
 use tauri::ipc::Channel;
 
 use crate::native_engine_contract::{
-    BridgeEvent, NativeEngineBridgeError, NativeEngineError, NativeEngineKey, NativeEngineProgress,
-    NativeEngineReady, NATIVE_ENGINE_UNSUPPORTED_PLATFORM_DETAIL,
+    BridgeEvent, NativeEngineBridgeError, NativeEngineCapabilities, NativeEngineError,
+    NativeEngineIntent, NativeEngineKey, NativeEngineProgress, NativeEngineReady,
+    NATIVE_ENGINE_UNSUPPORTED_PLATFORM_DETAIL,
 };
 
 #[cfg_attr(mobile, tauri::command)]
 pub async fn ensure_native_engine(
     _key: NativeEngineKey,
+    _intent: Option<NativeEngineIntent>,
 ) -> Result<NativeEngineReady, NativeEngineError> {
     Err(NativeEngineError::UnsupportedPlatform {
         detail: NATIVE_ENGINE_UNSUPPORTED_PLATFORM_DETAIL.to_owned(),
     })
+}
+
+#[cfg_attr(mobile, tauri::command)]
+pub fn native_engine_capabilities() -> NativeEngineCapabilities {
+    NativeEngineCapabilities { intent_contract: 1 }
 }
 #[cfg_attr(mobile, tauri::command)]
 pub fn native_engine_progress() -> Option<NativeEngineProgress> {
@@ -62,19 +69,47 @@ mod tests {
     }
 
     #[test]
-    fn ensure_native_engine_returns_exact_unsupported_platform_json_for_release_and_preview() {
-        let release =
-            tauri::async_runtime::block_on(ensure_native_engine(NativeEngineKey::Release {
+    fn ensure_native_engine_returns_exact_unsupported_platform_json_for_every_intent() {
+        let release = tauri::async_runtime::block_on(ensure_native_engine(
+            NativeEngineKey::Release {
                 version: "0.60.0".to_owned(),
-            }))
-            .unwrap_err();
-        let preview =
-            tauri::async_runtime::block_on(ensure_native_engine(NativeEngineKey::Preview {
+            },
+            None,
+        ))
+        .unwrap_err();
+        let online = tauri::async_runtime::block_on(ensure_native_engine(
+            NativeEngineKey::Preview {
                 fingerprint: "\"\\\n\u{0000}hostile".to_owned(),
-            }))
-            .unwrap_err();
+            },
+            Some(NativeEngineIntent::StartOnline),
+        ))
+        .unwrap_err();
+        let offline = tauri::async_runtime::block_on(ensure_native_engine(
+            NativeEngineKey::Preview {
+                fingerprint: "0123456789abcdef".to_owned(),
+            },
+            Some(NativeEngineIntent::StartOffline),
+        ))
+        .unwrap_err();
+        let preparation = tauri::async_runtime::block_on(ensure_native_engine(
+            NativeEngineKey::Preview {
+                fingerprint: "0123456789abcdef".to_owned(),
+            },
+            Some(NativeEngineIntent::PrepareForOffline),
+        ))
+        .unwrap_err();
         assert_eq!(exact_json(&release), EXACT_ENGINE_ERROR);
-        assert_eq!(exact_json(&preview), EXACT_ENGINE_ERROR);
+        assert_eq!(exact_json(&online), EXACT_ENGINE_ERROR);
+        assert_eq!(exact_json(&offline), EXACT_ENGINE_ERROR);
+        assert_eq!(exact_json(&preparation), EXACT_ENGINE_ERROR);
+    }
+
+    #[test]
+    fn native_engine_capabilities_preserves_the_desktop_contract() {
+        assert_eq!(
+            exact_json(&native_engine_capabilities()),
+            r#"{"intent_contract":1}"#
+        );
     }
 
     #[test]

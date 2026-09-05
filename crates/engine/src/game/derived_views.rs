@@ -761,6 +761,47 @@ pub struct DerivedViews {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub web_slinging_costs: HashMap<ObjectId, ManaCost>,
 
+    /// CR 709.3 + CR 712.11b: for each card the VIEWER may cast whose player
+    /// chooses a spell face at cast time (a split card such as a Room, or a
+    /// spell//spell MDFC), the live cost of the OTHER face — the one the
+    /// single-cost `spell_costs` sweep never reports, because that sweep
+    /// prepares the live face only. Resolved by
+    /// `casting::display_back_face_spell_cost`, so every cost-modifying static
+    /// that shapes the live face's badge shapes this one too. Keyed by ObjectId.
+    /// The cost badge renders both faces from this map; presence here is the
+    /// engine's statement that the card has two payable spell faces, so the
+    /// frontend never inspects layouts to decide.
+    ///
+    /// Viewer-scoped by the cast pipeline itself, the way `spell_costs` is:
+    /// `display_spell_cost`'s eligibility admits another player's card only
+    /// under a permission naming the viewer (CR 109.5), so no owner pre-filter
+    /// sits here — the same warning `spell_costs` carries against one. (On
+    /// the served path the viewer projection has already redacted a hidden
+    /// foreign card's back face, so that permission matters for the public
+    /// zones.) A face-down card is excluded (CR 406.3a: a card exiled face
+    /// down has no characteristics). Computed only while the viewer holds priority, which
+    /// is stricter than `spell_costs`'s binding to the priority holder; the
+    /// frontend pairs a back cost only with a live front. Which zones offer the
+    /// choice is the gate's question, not this map's. Cost: a state clone per
+    /// card that passes the gate, plus the display preparation's own. Empty
+    /// when no viewer or no such card.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub back_face_spell_costs: HashMap<ObjectId, ManaCost>,
+
+    /// CR 709.5b + CR 709.5e + CR 707.2: both halves of each battlefield Room,
+    /// resolved through `room::effective_room_halves` so a permanent that is a
+    /// COPY of a Room reports the halves it COPIED. The unlock special action
+    /// names a half and costs that half's mana cost, and for a copy neither is
+    /// on the recipient's own printed card — its `back_face` is empty and its
+    /// printed name is its own. Deriving printed order is engine work besides
+    /// (`room::live_face_door` reads `modal_back_face`, the CR 709.5d mapping),
+    /// so the frontend is handed the resolved pair and only formats it.
+    ///
+    /// Face-down permanents are excluded: CR 708.2a gives them no name or mana
+    /// cost to publish.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub room_half_identities: HashMap<ObjectId, crate::types::ability::RoomCopiableHalves>,
+
     /// Player-affecting continuous conditions (CR 104.2b / 119.7 / 119.8 /
     /// 118.3 / 101.2 / 702.50b) the HUD renders as status icons. Aggregates
     /// the statics-scanned `player_has_*` authorities and the stored
@@ -848,6 +889,13 @@ pub struct DerivedViews {
     /// viewer filtering. Empty (and omitted) when no object-growth loop is active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unbounded_pile: Vec<ObjectId>,
+
+    /// CR 732.2a: the open loop-shortcut window's own repetition ceiling — the largest number of
+    /// repetitions the proposal may specify. Absent whenever no such window is open, and absent for
+    /// a window whose producer never narrowed the bound. Display surfaces state it; nothing
+    /// re-derives or clamps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounded_loop_max_repetitions: Option<u32>,
 
     /// CR 122.1 + CR 732.2a: the COMPLETE per-object counter-display projection — every counter
     /// row every display surface renders, for EVERY object that has one, in ANY zone. The single
@@ -1447,6 +1495,14 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
             views.temporary_cant_be_blocked.insert(obj_id, source_id);
         }
+        // CR 709.5b + CR 708.2a: publish a Room's two halves for the unlock
+        // offer. Room-ness is this caller's gate — `effective_room_halves` is a
+        // pure projection and does not check it (see its doc).
+        if !obj.face_down && obj.card_types.subtypes.iter().any(|s| s == "Room") {
+            views
+                .room_half_identities
+                .insert(obj_id, crate::game::room::effective_room_halves(obj));
+        }
         if obj.card_types.core_types.contains(&CoreType::Creature)
             && crate::game::combat::has_cant_be_blocked_static_from_precomputed(
                 state,
@@ -1586,6 +1642,34 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                     {
                         views.web_slinging_costs.insert(hand_id, cost);
                     }
+                }
+            }
+        }
+
+        // CR 709.3 + CR 712.11b: second-face costs, only while the viewer
+        // holds priority. No owner or zone filter here: eligibility is the
+        // cast pipeline's (`spell_costs` carries the same warning against an
+        // owner pre-filter — a `CastFromZone`-style grant may admit another
+        // player's card), and which zones offer a cast-time face choice is the
+        // gate's inside `display_back_face_spell_cost`. Only a face-down card
+        // is skipped outright (CR 406.3a).
+        if matches!(state.waiting_for, WaitingFor::Priority { player } if player == viewer) {
+            for obj in state.objects.values() {
+                // Zone pre-filter is performance-only, as in the `spell_costs`
+                // sweep in `ai_support`: a superset of the gate's zones, skipping the
+                // battlefield/stack/library walk that cannot yield a face
+                // choice. Eligibility stays the gate's.
+                if !matches!(
+                    obj.zone,
+                    Zone::Hand | Zone::Command | Zone::Exile | Zone::Graveyard
+                ) || obj.face_down
+                {
+                    continue;
+                }
+                if let Some(cost) =
+                    crate::game::casting::display_back_face_spell_cost(state, viewer, obj.id)
+                {
+                    views.back_face_spell_costs.insert(obj.id, cost);
                 }
             }
         }
@@ -1846,6 +1930,18 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     //
     // Unconditional while a collapse is merely scheduled — see the CR 732 timing block above.
     views.counter_display = counter_display_views(state);
+
+    // CR 732.2a: an open shortcut window states the largest number of repetitions its proposal may
+    // specify. Publish that count; nothing downstream may re-derive it. The `is_bounded()` guard is
+    // the single authority for "the producer narrowed the bound"; an unnarrowed offer publishes
+    // nothing. Emitted HERE, above the Commander short-circuit below, for the same reason the
+    // channels above are.
+    views.bounded_loop_max_repetitions = match &state.waiting_for {
+        WaitingFor::LoopShortcut { schema, .. } if schema.is_bounded() => {
+            Some(schema.max_iterations)
+        }
+        _ => None,
+    };
 
     if state.format_config.commander_damage_threshold.is_none() {
         return views;
@@ -5502,6 +5598,98 @@ mod tests {
         );
     }
 
+    /// CR 709.5b + CR 707.2 + CR 708.2a: the published halves come from the
+    /// EFFECTIVE form. A permanent that copies a Room has no `back_face` of its
+    /// own, so a projection off its printed shape would report a single half
+    /// named after the recipient — the copied pair is the only correct answer.
+    /// A face-down permanent publishes nothing, and a non-Room is absent.
+    ///
+    /// Revert-failing assertions: the copy's two halves (drop
+    /// `effective_room_halves` for `own_room_halves` and both names are wrong)
+    /// and the face-down absence (drop the `face_down` guard and it appears).
+    #[test]
+    fn room_half_identities_report_the_copied_halves_and_skip_face_down() {
+        use crate::types::ability::{RoomCopiableHalves, RoomHalfIdentity};
+        use crate::types::mana::ManaCost;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 7);
+
+        let halves = RoomCopiableHalves {
+            left: RoomHalfIdentity {
+                name: "Greenhouse".to_string(),
+                mana_cost: ManaCost::default(),
+            },
+            right: Some(RoomHalfIdentity {
+                name: "Rickety Gazebo".to_string(),
+                mana_cost: ManaCost::default(),
+            }),
+        };
+
+        // A Copy Enchantment that entered as a copy of a two-halved Room: its
+        // OWN printed shape is a single-faced enchantment.
+        let copy = create_object(
+            &mut state,
+            CardId(9100),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&copy).unwrap();
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.back_face = None;
+            obj.copied_room_halves = Some(halves.clone());
+        }
+
+        // Same shape, but face down (CR 708.2a).
+        let hidden = create_object(
+            &mut state,
+            CardId(9101),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&hidden).unwrap();
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.back_face = None;
+            obj.copied_room_halves = Some(halves);
+            obj.face_down = true;
+        }
+
+        // An ordinary permanent that is not a Room at all.
+        let bear = create_object(
+            &mut state,
+            CardId(9102),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+
+        let published = views
+            .room_half_identities
+            .get(&copy)
+            .expect("a battlefield Room publishes its halves");
+        assert_eq!(published.left.name, "Greenhouse");
+        assert_eq!(
+            published.right.as_ref().map(|half| half.name.as_str()),
+            Some("Rickety Gazebo"),
+            "the right door exists through the COPIED halves, not through the \
+             recipient's own (absent) back face"
+        );
+
+        assert!(
+            !views.room_half_identities.contains_key(&hidden),
+            "CR 708.2a: a face-down permanent has no name or mana cost to publish"
+        );
+        assert!(
+            !views.room_half_identities.contains_key(&bear),
+            "a non-Room permanent has no halves"
+        );
+    }
+
     /// CR 702.188a + CR 604.1: web-slinging costs are VIEWER-scoped. P0 controls
     /// the grantor; both P0 and P1 hold a qualifying spell. `derive_views` for P0
     /// must surface ONLY P0's card (never P1's, even though the grant is symmetric
@@ -5584,6 +5772,281 @@ mod tests {
         assert!(
             none_views.web_slinging_costs.is_empty(),
             "derive_views(_, None) must not populate web-slinging costs"
+        );
+    }
+
+    /// CR 709.3 + CR 712.11b: a card whose player chooses a spell face at cast
+    /// time has a second payable cost the single-cost sweep never reports.
+    /// `back_face_spell_costs` publishes the OTHER face's live cost for both
+    /// members of the class — a split card (Room) and a spell//spell MDFC —
+    /// VIEWER-scoped by the cast pipeline: P0 sees its own hand, never P1's
+    /// hand or graveyard without a permission naming P0; P0's own face-down
+    /// exiled card is excluded outright (CR 406.3a) even though its impulse
+    /// permission would admit it to the pipeline;
+    /// a single-faced card has no entry; no viewer surfaces nothing.
+    ///
+    /// Revert-failing assertions: the {3}{G} value (drop the back-face
+    /// simulation in `display_back_face_spell_cost` and the live face's {2}{G}
+    /// comes back), the face-down absence
+    /// (drop the `face_down` guard), the bear's absence (drop the face-choice
+    /// gate), and the MDFC entry (narrow the gate to `Split`).
+    #[test]
+    fn back_face_spell_costs_publish_the_other_face_viewer_scoped() {
+        use crate::game::game_object::BackFaceData;
+        use crate::types::ability::{
+            CardPlayMode, CastingPermission, Duration, PlayFromExileProvenance,
+        };
+        use crate::types::card::LayoutKind;
+        use crate::types::card_type::CardType;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::statics::CastFrequency;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 7);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let room_types = || CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Enchantment],
+            subtypes: vec!["Room".to_string()],
+        };
+        let green = |generic: u32| ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic,
+        };
+
+        // Greenhouse {2}{G} // Rickety Gazebo {3}{G}: the live face is the left
+        // half, the right half sits in the stored slot as a Split face.
+        let add_room = |state: &mut GameState, card: CardId, owner: PlayerId, zone: Zone| {
+            let id = create_object(state, card, owner, "Greenhouse".to_string(), zone);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types = room_types();
+            obj.base_card_types = room_types();
+            obj.mana_cost = green(2);
+            obj.base_mana_cost = green(2);
+            obj.back_face = Some(BackFaceData {
+                name: "Rickety Gazebo".to_string(),
+                card_types: room_types(),
+                mana_cost: green(3),
+                layout_kind: Some(LayoutKind::Split),
+                ..BackFaceData::default()
+            });
+            id
+        };
+        let p0_room = add_room(&mut state, CardId(9200), PlayerId(0), Zone::Hand);
+        let p1_room = add_room(&mut state, CardId(9201), PlayerId(1), Zone::Hand);
+        let p1_graveyard_room = add_room(&mut state, CardId(9203), PlayerId(1), Zone::Graveyard);
+        // P0's own Room, exiled face down with an impulse-draw permission: the
+        // cast pipeline WOULD admit it, so only the face-down guard keeps it out.
+        let p0_hidden_room = add_room(&mut state, CardId(9204), PlayerId(0), Zone::Exile);
+        {
+            let obj = state.objects.get_mut(&p0_hidden_room).unwrap();
+            obj.face_down = true;
+            obj.casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    provenance: PlayFromExileProvenance::Impulse,
+                    mode: CardPlayMode::Play,
+                    duration: Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    frequency: CastFrequency::Unlimited,
+                    source_id: None,
+                    invalidation: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: None,
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
+                    cast_cost_raise: None,
+                    alt_ability_cost: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                });
+        }
+
+        // Esika, God of the Tree {1}{G}{G} // The Prismatic Bridge {W}{U}{B}{R}{G}:
+        // the spell//spell MDFC member of the class.
+        let p0_mdfc = create_object(
+            &mut state,
+            CardId(9205),
+            PlayerId(0),
+            "Esika, God of the Tree".to_string(),
+            Zone::Hand,
+        );
+        let bridge_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Green,
+            ],
+            generic: 0,
+        };
+        {
+            let obj = state.objects.get_mut(&p0_mdfc).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 1,
+            };
+            obj.back_face = Some(BackFaceData {
+                name: "The Prismatic Bridge".to_string(),
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Enchantment],
+                    subtypes: vec![],
+                },
+                mana_cost: bridge_cost.clone(),
+                layout_kind: Some(LayoutKind::Modal),
+                ..BackFaceData::default()
+            });
+        }
+        let bear = create_object(
+            &mut state,
+            CardId(9202),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+
+        let p0_views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(
+            p0_views.back_face_spell_costs.get(&p0_room),
+            Some(&green(3)),
+            "P0's Room publishes its RIGHT half's cost, not the live face's {{2}}{{G}}"
+        );
+        assert_eq!(
+            p0_views.back_face_spell_costs.get(&p0_mdfc),
+            Some(&bridge_cost),
+            "a spell//spell MDFC publishes its back face's cost"
+        );
+        assert!(
+            !p0_views
+                .back_face_spell_costs
+                .contains_key(&p1_graveyard_room),
+            "P1's graveyard is public, but P0 holds no permission to cast from it"
+        );
+        assert!(
+            !p0_views.back_face_spell_costs.contains_key(&p1_room),
+            "P1's hand card must NOT reach P0: the cast pipeline admits another \
+             player's card only under a permission naming P0"
+        );
+        assert!(
+            !p0_views.back_face_spell_costs.contains_key(&p0_hidden_room),
+            "CR 406.3a: a face-down exiled card has no characteristics to publish, \
+             even one the pipeline would admit through its impulse permission"
+        );
+        assert!(
+            !p0_views.back_face_spell_costs.contains_key(&bear),
+            "a single-faced card offers no face choice and has no entry"
+        );
+
+        let none_views = derive_views(&state, None);
+        assert!(
+            none_views.back_face_spell_costs.is_empty(),
+            "derive_views(_, None) must not populate second-face costs"
+        );
+    }
+
+    /// The published cost is the LIVE one: the same statics that shape the
+    /// live face's `spell_costs` entry shape the back face's. Omniscience
+    /// (CR 118.9: cast without paying its mana cost) turns a Room's {3}{G}
+    /// right half into `NoCost`, and the map goes quiet once the viewer no
+    /// longer holds priority — the authority `spell_costs` is reported under.
+    ///
+    /// Revert-failing assertions: `NoCost` (return `back_face.mana_cost`
+    /// verbatim instead of preparing the swapped face and {3}{G} comes back),
+    /// and the off-priority emptiness (drop the `WaitingFor::Priority` guard).
+    #[test]
+    fn back_face_spell_costs_are_live_and_priority_bound() {
+        use crate::game::game_object::BackFaceData;
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::card::LayoutKind;
+        use crate::types::card_type::CardType;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 7);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let room_types = || CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Enchantment],
+            subtypes: vec!["Room".to_string()],
+        };
+        let green = |generic: u32| ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic,
+        };
+        let room = create_object(
+            &mut state,
+            CardId(9300),
+            PlayerId(0),
+            "Greenhouse".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.card_types = room_types();
+            obj.base_card_types = room_types();
+            obj.mana_cost = green(2);
+            obj.base_mana_cost = green(2);
+            obj.back_face = Some(BackFaceData {
+                name: "Rickety Gazebo".to_string(),
+                card_types: room_types(),
+                mana_cost: green(3),
+                layout_kind: Some(LayoutKind::Split),
+                ..BackFaceData::default()
+            });
+        }
+        let omniscience = create_object(
+            &mut state,
+            CardId(9301),
+            PlayerId(0),
+            "Omniscience".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&omniscience).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.static_definitions = vec![StaticDefinition {
+                mode: StaticMode::CastFromHandFree {
+                    frequency: CastFrequency::Unlimited,
+                    origin: CastFreeOrigin::Hand,
+                },
+                affected: Some(TargetFilter::Any),
+                modifications: vec![],
+                condition: None,
+                per_player_condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: None,
+                attack_defended: None,
+                source_controller: None,
+                source_object: None,
+                bypass_beneficiary: None,
+                protection_does_not_remove: None,
+                room_door: None,
+            }]
+            .into();
+        }
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(
+            views.back_face_spell_costs.get(&room),
+            Some(&ManaCost::NoCost),
+            "Omniscience zeroes the right half too — the published cost is live, not printed"
+        );
+
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert!(
+            views.back_face_spell_costs.is_empty(),
+            "off priority the map is empty, exactly as spell_costs is"
         );
     }
 

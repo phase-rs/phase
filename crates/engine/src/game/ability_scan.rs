@@ -96,9 +96,10 @@ use crate::types::ability::{
     ControllerRef, CountScope, DelayedTriggerCondition, Duration, EachDamageRecipient, Effect,
     EffectScope, FilterProp, ForEachCategoryAction, GuessSubject, KeeperConstraint, ManaProduction,
     ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition,
-    TargetFilter, TrackedAnaphorSource, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementCondition,
+    ResolvedAbility, StaticCondition, TargetFilter, TrackedAnaphorSource, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    ZoneChoiceCandidateSource,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::{DisguiseCost, Keyword};
@@ -429,6 +430,45 @@ fn scan_target_selection_constraint(c: &TargetSelectionConstraint, mode: ScanMod
     }
 }
 
+/// Classify the candidate provenance of a zone choice on the read axes.
+///
+/// `Direct` reads only the named zone, so only a battlefield population can
+/// grow with the loop class. `Tracked` and `Legacy` can instead consume the
+/// current resolution-chain set, whose producer is not visible at this local
+/// effect node; classify both fail-closed. This is intentionally separate from
+/// the choice filter, which is scanned by the caller.
+fn scan_zone_choice_candidate_source(
+    candidate_source: ZoneChoiceCandidateSource,
+    zone: crate::types::zones::Zone,
+) -> Axes {
+    match candidate_source {
+        ZoneChoiceCandidateSource::Direct => {
+            if zone == crate::types::zones::Zone::Battlefield {
+                Axes {
+                    event: true,
+                    sibling: true,
+                    projected: false,
+                }
+            } else {
+                Axes::NONE
+            }
+        }
+        ZoneChoiceCandidateSource::Tracked | ZoneChoiceCandidateSource::Legacy => {
+            Axes::CONSERVATIVE
+        }
+    }
+}
+
+/// A reciprocal consumer reads the fresh set published by its producer. The
+/// producer writes that continuation-local set but performs no corresponding
+/// read, so it is read-free on this walk's three axes.
+fn scan_reciprocal_zone_choice_role(role: Option<ReciprocalZoneChoiceRole>) -> Axes {
+    match role {
+        None | Some(ReciprocalZoneChoiceRole::Produce) => Axes::NONE,
+        Some(ReciprocalZoneChoiceRole::Consume) => Axes::CONSERVATIVE,
+    }
+}
+
 fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
     // The census discipline for THIS effect's target reads, derived ONCE
     // (depends only on the effect variant + mode). Passed to every effect-TARGET
@@ -693,7 +733,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::ChooseCounterKind { target } => {
+        Effect::ChooseCounterKind { target, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
@@ -1524,20 +1564,18 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::ProcessRadCounters => Axes::NONE,
         Effect::GrantCastingPermission { .. } => Axes::CONSERVATIVE,
         Effect::ChooseFromZone {
+            zone,
             filter,
-            count: _,
-            zone: _,
-            additional_zones: _,
-            zone_owner: _,
-            chooser: _,
-            up_to: _,
-            selection: _,
-            constraint: _,
+            candidate_source,
+            reciprocal_role,
+            ..
         } => {
             let mut acc = Axes::NONE;
             if let Some(x) = filter {
                 acc = acc.or(scan_target_filter(x, target_ctx, mode));
             }
+            acc = acc.or(scan_zone_choice_candidate_source(*candidate_source, *zone));
+            acc = acc.or(scan_reciprocal_zone_choice_role(*reciprocal_role));
             acc
         }
         // CR 608.2c: `target` is a SINGLE-OBJECT slot — the one recorded card
@@ -1579,10 +1617,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             ForEachCategoryAction::ExileFromPool { .. } => Axes::NONE,
         },
         Effect::ChooseObjectsIntoTrackedSet {
-            chooser,
-            filter,
-            min: _,
-            max: _,
+            chooser, filter, ..
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(chooser, target_ctx, mode));
@@ -1843,9 +1878,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
-        Effect::Amass { count, subtype: _ } => {
+        Effect::Amass {
+            count,
+            subtype: _,
+            player,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
+            acc = acc.or(scan_target_filter(player, target_ctx, mode));
             acc
         }
         Effect::Monstrosity { count } => {
@@ -6876,8 +6916,9 @@ mod tests {
     use crate::types::ability::{
         AbilityKind, AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator,
         CostDerivation, DamageKindFilter, DelayedTriggerLifetime, DestinationConstraint,
-        ManaContribution, OriginConstraint, ReplacementDefinition, StaticDefinition, TurnGate,
-        WheneverEventExpiry, ZoneChangeClause,
+        ManaContribution, OriginConstraint, ReciprocalZoneChoiceRole, ReplacementDefinition,
+        StaticDefinition, TurnGate, WheneverEventExpiry, ZoneChangeClause,
+        ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
     };
     use crate::types::counter::CounterType;
     use crate::types::identifiers::ObjectId;
@@ -6888,6 +6929,94 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    fn zone_choice_for_scan(
+        zone: Zone,
+        candidate_source: ZoneChoiceCandidateSource,
+        reciprocal_role: Option<ReciprocalZoneChoiceRole>,
+    ) -> Effect {
+        Effect::ChooseFromZone {
+            count: 1,
+            zone,
+            additional_zones: vec![],
+            zone_owner: ZoneOwner::Controller,
+            filter: None,
+            chooser: ZoneChoiceChooser::Controller,
+            candidate_source,
+            reciprocal_role,
+            up_to: false,
+            selection: Default::default(),
+            constraint: None,
+        }
+    }
+
+    /// Candidate provenance and reciprocal role carry resolution-chain reads
+    /// even though their direct graveyard/filter payloads are inert.
+    #[test]
+    fn zone_choice_provenance_and_reciprocal_reads_are_classified() {
+        let axes = |effect| scan_effect(&effect, ScanMode::LoopFirewall);
+        assert_eq!(
+            {
+                let x = axes(zone_choice_for_scan(
+                    Zone::Graveyard,
+                    ZoneChoiceCandidateSource::Direct,
+                    None,
+                ));
+                (x.event, x.sibling, x.projected)
+            },
+            (false, false, false),
+            "a direct graveyard scan has no growing-class read"
+        );
+        for (label, effect) in [
+            (
+                "tracked provenance",
+                zone_choice_for_scan(Zone::Graveyard, ZoneChoiceCandidateSource::Tracked, None),
+            ),
+            (
+                "legacy provenance",
+                zone_choice_for_scan(Zone::Graveyard, ZoneChoiceCandidateSource::Legacy, None),
+            ),
+            (
+                "reciprocal consumer",
+                zone_choice_for_scan(
+                    Zone::Graveyard,
+                    ZoneChoiceCandidateSource::Direct,
+                    Some(ReciprocalZoneChoiceRole::Consume),
+                ),
+            ),
+        ] {
+            let x = axes(effect);
+            assert_eq!(
+                (x.event, x.sibling, x.projected),
+                (true, true, true),
+                "{label} must fail closed because it consumes a resolution-chain set"
+            );
+        }
+        let producer = axes(zone_choice_for_scan(
+            Zone::Graveyard,
+            ZoneChoiceCandidateSource::Direct,
+            Some(ReciprocalZoneChoiceRole::Produce),
+        ));
+        assert_eq!(
+            (producer.event, producer.sibling, producer.projected),
+            (false, false, false),
+            "a reciprocal producer publishes, but does not read, its fresh tracked set"
+        );
+        let battlefield = axes(zone_choice_for_scan(
+            Zone::Battlefield,
+            ZoneChoiceCandidateSource::Direct,
+            None,
+        ));
+        assert_eq!(
+            (
+                battlefield.event,
+                battlefield.sibling,
+                battlefield.projected
+            ),
+            (true, true, false),
+            "a direct battlefield candidate pool is a live board census"
+        );
+    }
 
     #[test]
     fn property_aggregate_source_scan_axes_are_exhaustive() {
@@ -8326,7 +8455,14 @@ mod tests {
         census(&settap, false);
         census(&Effect::HeistExile, false);
         census(&Effect::NoOp, false);
-        census(&Effect::ChooseCounterKind { target: f() }, true);
+        census(
+            &Effect::ChooseCounterKind {
+                target: f(),
+                domain: Default::default(),
+                chooser: Default::default(),
+            },
+            true,
+        );
         // CR 701.27a + CR 115.10a: mass Transform is a battlefield census in BOTH oracles
         // (scope:All), and a bounded single-target read (scope:Single) that relaxes. It is
         // a true Census, NOT the SetTapState relax exception (ObjectPt/ability write).

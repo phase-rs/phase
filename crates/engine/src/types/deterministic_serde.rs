@@ -146,6 +146,89 @@ fn cautious_map_capacity<K, V>(hint: Option<usize>) -> usize {
     hint.unwrap_or(0).min(max_entries)
 }
 
+/// Serde adapter for hash maps whose typed keys cannot be represented as JSON
+/// object keys. The wire form is a key-sorted sequence of `[key, value]` pairs.
+pub(crate) mod hash_map_entries {
+    use std::collections::{hash_map::Entry, HashMap};
+    use std::fmt;
+    use std::hash::{BuildHasher, Hash};
+    use std::marker::PhantomData;
+
+    use serde::de::{Error as _, SeqAccess, Visitor};
+    use serde::ser::SerializeSeq;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(crate) fn serialize<K, V, H, S>(
+        values: &HashMap<K, V, H>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        K: Ord + Serialize,
+        V: Serialize,
+        S: Serializer,
+    {
+        let mut entries: Vec<_> = values.iter().collect();
+        entries.sort_unstable_by_key(|(key, _)| *key);
+
+        let mut sequence = serializer.serialize_seq(Some(entries.len()))?;
+        for (key, value) in entries {
+            sequence.serialize_element(&(key, value))?;
+        }
+        sequence.end()
+    }
+
+    struct HashMapEntriesVisitor<K, V, H>(PhantomData<(K, V, H)>);
+
+    impl<'de, K, V, H> Visitor<'de> for HashMapEntriesVisitor<K, V, H>
+    where
+        K: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+        H: BuildHasher + Default,
+    {
+        type Value = HashMap<K, V, H>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a sequence of unique typed key-value pairs")
+        }
+
+        fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            // A wire-provided size hint is only an optimization. Cap it like
+            // Serde's cautious collection allocation; the map grows normally
+            // past this cap.
+            let capacity = super::cautious_map_capacity::<K, V>(access.size_hint());
+            let mut values = HashMap::with_capacity_and_hasher(capacity, H::default());
+            while let Some((key, value)) = access.next_element()? {
+                match values.entry(key) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(value);
+                    }
+                    Entry::Occupied(_) => {
+                        return Err(A::Error::custom(
+                            "duplicate key in typed hash-map entry sequence",
+                        ));
+                    }
+                }
+            }
+            Ok(values)
+        }
+    }
+
+    pub(crate) fn deserialize<'de, K, V, H, D>(
+        deserializer: D,
+    ) -> Result<HashMap<K, V, H>, D::Error>
+    where
+        K: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+        H: BuildHasher + Default,
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(HashMapEntriesVisitor(PhantomData))
+    }
+}
+
 impl<'de, K, V> Visitor<'de> for NumericHashMapVisitor<K, V>
 where
     K: Eq + Hash + NumericMapKey,
@@ -463,8 +546,8 @@ pub(crate) mod test_support {
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use serde::de::value::{Error as ValueError, MapAccessDeserializer};
-    use serde::de::{DeserializeSeed, IntoDeserializer, MapAccess};
+    use serde::de::value::{Error as ValueError, MapAccessDeserializer, SeqAccessDeserializer};
+    use serde::de::{DeserializeSeed, IntoDeserializer, MapAccess, SeqAccess};
     use serde::{Deserialize, Serialize};
 
     use super::test_support::ReverseBuildHasher;
@@ -473,6 +556,7 @@ mod tests {
 
     type Set = HashSet<u64, ReverseBuildHasher>;
     type Map<V> = HashMap<u64, V, ReverseBuildHasher>;
+    type StructuredEntryMap = HashMap<(u64, u64), String, ReverseBuildHasher>;
 
     #[derive(Serialize)]
     struct StandardFixture<'a> {
@@ -578,6 +662,118 @@ mod tests {
             })
             .expect("fixture should serialize"),
             r#"{"empty_set":[],"singleton_set":[7],"empty_map":{},"singleton_map":{"7":"seven"},"no_set":null,"no_map":null}"#
+        );
+    }
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct HashMapEntriesFixture {
+        #[serde(with = "super::hash_map_entries")]
+        values: StructuredEntryMap,
+    }
+
+    #[test]
+    fn hash_map_entries_sorts_typed_keys_and_round_trips_the_exact_pair_shape() {
+        let ascending_insertion = HashMapEntriesFixture {
+            values: StructuredEntryMap::from_iter([
+                ((1, 1), "one".to_string()),
+                ((2, 2), "two".to_string()),
+                ((3, 3), "three".to_string()),
+            ]),
+        };
+        assert_eq!(
+            ascending_insertion
+                .values
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![(3, 3), (2, 2), (1, 1)],
+            "hostile hashing must expose descending native iteration"
+        );
+
+        let reverse_insertion = HashMapEntriesFixture {
+            values: StructuredEntryMap::from_iter([
+                ((3, 3), "three".to_string()),
+                ((2, 2), "two".to_string()),
+                ((1, 1), "one".to_string()),
+            ]),
+        };
+        let expected = r#"{"values":[[[1,1],"one"],[[2,2],"two"],[[3,3],"three"]]}"#;
+        let ascending_bytes = serde_json::to_string(&ascending_insertion).unwrap();
+        let reverse_bytes = serde_json::to_string(&reverse_insertion).unwrap();
+        assert_eq!(ascending_bytes, expected);
+        assert_eq!(
+            reverse_bytes, expected,
+            "insertion order must not affect bytes"
+        );
+
+        let restored: HashMapEntriesFixture = serde_json::from_str(expected).unwrap();
+        assert_eq!(restored, ascending_insertion);
+        assert_eq!(serde_json::to_string(&restored).unwrap(), expected);
+    }
+
+    #[test]
+    fn hash_map_entries_rejects_duplicates_and_malformed_wire_shapes() {
+        let duplicate = serde_json::from_str::<HashMapEntriesFixture>(
+            r#"{"values":[[[1,1],"first"],[[1,1],"second"]]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            duplicate
+                .to_string()
+                .contains("duplicate key in typed hash-map entry sequence"),
+            "duplicate typed keys with different values must be rejected: {duplicate}"
+        );
+
+        for (description, malformed) in [
+            ("object-shaped map", r#"{"values":{"[1,1]":"one"}}"#),
+            ("one-element entry tuple", r#"{"values":[[[1,1]]]}"#),
+            (
+                "wrong typed-key component",
+                r#"{"values":[[[1,"one"],"value"]]}"#,
+            ),
+        ] {
+            assert!(
+                serde_json::from_str::<HashMapEntriesFixture>(malformed).is_err(),
+                "{description} must be rejected"
+            );
+        }
+    }
+
+    struct EnormousHintSeqAccess {
+        entry: Option<serde_json::Value>,
+    }
+
+    impl<'de> SeqAccess<'de> for EnormousHintSeqAccess {
+        type Error = serde_json::Error;
+
+        fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+        where
+            T: DeserializeSeed<'de>,
+        {
+            self.entry
+                .take()
+                .map(|entry| seed.deserialize(entry.into_deserializer()))
+                .transpose()
+        }
+
+        fn size_hint(&self) -> Option<usize> {
+            Some(usize::MAX)
+        }
+    }
+
+    #[test]
+    fn hash_map_entries_caps_untrusted_sequence_size_hints() {
+        let access = EnormousHintSeqAccess {
+            entry: Some(serde_json::json!([[7, 8], "seven-eight"])),
+        };
+
+        let values: StructuredEntryMap =
+            super::hash_map_entries::deserialize(SeqAccessDeserializer::new(access)).unwrap();
+
+        assert_eq!(values.get(&(7, 8)).map(String::as_str), Some("seven-eight"));
+        assert_eq!(
+            super::cautious_map_capacity::<(u64, u64), String>(Some(usize::MAX)),
+            1024 * 1024 / std::mem::size_of::<((u64, u64), String)>()
         );
     }
 

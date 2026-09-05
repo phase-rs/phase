@@ -1223,6 +1223,7 @@ fn kilo_reported_capture_interaction_picker_suggests_the_full_ceiling() {
                 .take(point.min as usize)
                 .cloned()
                 .collect(),
+            amounts: Vec::new(),
         })
         .collect();
     let action = resolve_interaction_response(

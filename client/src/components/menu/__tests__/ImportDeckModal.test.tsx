@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { STORAGE_KEY_PREFIX } from "../../../constants/storage";
@@ -9,12 +9,21 @@ import {
   signatureSpellSelectionPolicy,
 } from "../../../services/engineRuntime";
 import { useAppNotificationStore } from "../../../stores/appToastStore";
+import { useConnectivityStore } from "../../../stores/connectivityStore";
 import { ImportDeckModal } from "../ImportDeckModal";
+
+const mocks = vi.hoisted(() => ({
+  fetchDeckFromUrl: vi.fn(),
+}));
 
 vi.mock("../../../services/engineRuntime", () => ({
   isCardCommanderEligible: vi.fn(),
   isCardCommanderEligibleForFormat: vi.fn(),
   signatureSpellSelectionPolicy: vi.fn(),
+}));
+
+vi.mock("../../../services/deckUrlImport", () => ({
+  fetchDeckFromUrl: mocks.fetchDeckFromUrl,
 }));
 
 describe("ImportDeckModal", () => {
@@ -24,10 +33,79 @@ describe("ImportDeckModal", () => {
     vi.mocked(isCardCommanderEligible).mockResolvedValue(false);
     vi.mocked(isCardCommanderEligibleForFormat).mockReset();
     vi.mocked(signatureSpellSelectionPolicy).mockReset();
+    mocks.fetchDeckFromUrl.mockReset();
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
   });
 
   afterEach(() => {
     cleanup();
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps URL import visible but unavailable offline without calling the service", async () => {
+    const user = userEvent.setup();
+    render(<ImportDeckModal open onClose={vi.fn()} onImported={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "From URL" }));
+    const urlInput = screen.getByPlaceholderText(/moxfield\.com\/decks/i);
+    const importButton = screen.getByRole("button", { name: "Import" });
+    await user.type(urlInput, "https://moxfield.com/decks/abc");
+    expect(importButton).toBeEnabled();
+
+    act(() => useConnectivityStore.getState().setForcedOffline(true));
+
+    expect(urlInput).toBeDisabled();
+    expect(screen.getByText(/URL imports are unavailable offline/i)).toBeInTheDocument();
+    expect(importButton).toBeDisabled();
+    await user.click(importButton);
+    expect(mocks.fetchDeckFromUrl).not.toHaveBeenCalled();
+  });
+
+  it("imports canonical deck text from a URL online", async () => {
+    const user = userEvent.setup();
+    const onImported = vi.fn();
+    mocks.fetchDeckFromUrl.mockResolvedValue(
+      "Name: URL Deck\n[Main]\n1 Sol Ring\n",
+    );
+    render(<ImportDeckModal open onClose={vi.fn()} onImported={onImported} />);
+
+    await user.click(screen.getByRole("button", { name: "From URL" }));
+    await user.type(screen.getByPlaceholderText(/moxfield\.com\/decks/i), "https://moxfield.com/decks/abc");
+    await user.click(screen.getByRole("button", { name: "Import" }));
+
+    await waitFor(() => expect(onImported).toHaveBeenCalledWith("URL Deck", ["URL Deck"]));
+    expect(mocks.fetchDeckFromUrl).toHaveBeenCalledWith("https://moxfield.com/decks/abc");
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "URL Deck")).not.toBeNull();
+  });
+
+  it("keeps pasted and file deck imports local while offline", async () => {
+    const user = userEvent.setup();
+    const onImported = vi.fn();
+    class OfflineFileReader {
+      result = "Name: File Deck\n[Main]\n1 Sol Ring\n";
+      onload: (() => void) | null = null;
+
+      readAsText() {
+        this.onload?.();
+      }
+    }
+    vi.stubGlobal("FileReader", OfflineFileReader);
+    useConnectivityStore.getState().setForcedOffline(true);
+    render(<ImportDeckModal open onClose={vi.fn()} onImported={onImported} />);
+
+    await user.type(screen.getByPlaceholderText(/Paste deck list here/i), "Name: Paste Deck\n[Main]\n1 Sol Ring");
+    await user.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(onImported).toHaveBeenCalledWith("Paste Deck", ["Paste Deck"]));
+
+    cleanup();
+    render(<ImportDeckModal open onClose={vi.fn()} onImported={onImported} />);
+    await user.click(screen.getByRole("button", { name: "From File" }));
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, new File([""], "file-deck.txt", { type: "text/plain" }));
+
+    await waitFor(() => expect(onImported).toHaveBeenCalledWith("File Deck", ["File Deck", "Paste Deck"]));
+    expect(mocks.fetchDeckFromUrl).not.toHaveBeenCalled();
   });
 
   it("derives the saved deck name from pasted metadata when the name field is empty", async () => {

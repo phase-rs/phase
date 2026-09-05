@@ -349,6 +349,65 @@ describe("abilityChoiceLabel", () => {
     ).toBe("Tap for {1}");
   });
 
+  // CR 709.5e + CR 709.5b: the unlock special action pays the mana cost of a
+  // LOCKED half, so the offer must name that half and show its cost. For a
+  // permanent that is a COPY of a Room both come from the COPIED halves the
+  // engine publishes — the recipient's own printed card has neither.
+  //
+  // Revert-failing assertion: both labels. Without an `UnlockRoomDoor` arm the
+  // chain falls through to its `"Tap for Mana"` catch-all and the two offers
+  // are indistinguishable.
+  it("labels a Room door unlock with the half's name and its unlock cost", () => {
+    const copy = makeGameObject({
+      id: 7,
+      name: "",
+      zone: "Battlefield",
+      card_types: { supertypes: [], core_types: ["Enchantment"], subtypes: ["Room"] },
+      back_face: undefined,
+    });
+    const halves = {
+      "7": {
+        left: { name: "Greenhouse", mana_cost: { type: "Cost", shards: ["Green"], generic: 2 } },
+        right: {
+          name: "Rickety Gazebo",
+          mana_cost: { type: "Cost", shards: ["Green"], generic: 3 },
+        },
+      },
+    } as const;
+
+    expect(
+      abilityChoiceLabel(
+        { type: "UnlockRoomDoor", data: { object_id: 7, door: "Left" } },
+        copy,
+        undefined,
+        undefined,
+        halves as never,
+      ).label,
+    ).toBe("Unlock Greenhouse ({2}{G})");
+
+    expect(
+      abilityChoiceLabel(
+        { type: "UnlockRoomDoor", data: { object_id: 7, door: "Right" } },
+        copy,
+        undefined,
+        undefined,
+        halves as never,
+      ).label,
+    ).toBe("Unlock Rickety Gazebo ({3}{G})");
+  });
+
+  // CR 708.2a: a face-down permanent publishes no halves, so the engine sends
+  // none and the label must stay honest rather than invent a name.
+  it("falls back without inventing a name when no halves are published", () => {
+    const copy = makeGameObject({ id: 7, name: "", zone: "Battlefield" });
+    expect(
+      abilityChoiceLabel(
+        { type: "UnlockRoomDoor", data: { object_id: 7, door: "Left" } },
+        copy,
+      ).label,
+    ).toBe("Unlock this door");
+  });
+
   it("labels TapLandForMana with the engine-selected mana", () => {
     const object = makeGameObject({
       name: "Emergence Zone",

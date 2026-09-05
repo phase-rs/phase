@@ -1,4 +1,5 @@
 import type {
+  AbilityBlockEntry,
   EngineAdapter,
   EngineSnapshot,
   GameAction,
@@ -12,13 +13,18 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
-import type { InteractionSubmission } from "./generated/interaction";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
 import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, isActionRejection, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
   type PhaseSocket,
+  type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import type {
@@ -133,13 +139,17 @@ export class ServerDraftAdapter implements EngineAdapter {
   private _gameCode: string | null = null;
 
   // ── Infrastructure ─────────────────────────────────────────────────
-  private ws: WebSocket | null = null;
+  private ws: PhaseSocketTransport | null = null;
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
     { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+  >();
+  private pendingInteractionPreviews = new Map<
+    string,
+    { resolve: (preview: InteractionPreview) => void; reject: (error: Error) => void }
   >();
   private draftResolve: ((view: DraftPlayerView) => void) | null = null;
   private draftReject: ((error: Error) => void) | null = null;
@@ -264,6 +274,27 @@ export class ServerDraftAdapter implements EngineAdapter {
       if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
         this.pendingManaPaymentPreviews.delete(requestId);
         reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
+      }
+    });
+  }
+
+  async previewInteraction(
+    request: InteractionPreviewRequest,
+    _actor: PlayerId,
+  ): Promise<InteractionPreview> {
+    if (this.phase !== "match") {
+      throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    return new Promise<InteractionPreview>((resolve, reject) => {
+      this.pendingInteractionPreviews.set(request.requestId, { resolve, reject });
+      // `request` is forwarded VERBATIM — no field is read, reshaped or rebuilt.
+      if (!this.send({ type: "PreviewInteraction", data: { request } })) {
+        this.pendingInteractionPreviews.delete(request.requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to send interaction preview", true));
       }
     });
   }
@@ -509,6 +540,9 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.rejectPendingManaPaymentPreviews(
         new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
       );
+      this.rejectPendingInteractionPreviews(
+        new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
+      );
       if (this.draftReject) {
         this.draftReject(
           new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
@@ -659,6 +693,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
           legal_actions_by_object?: Record<string, ObjectAction[]>;
+          activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
           viewer_interaction?: LegalActionsResult["viewerInteraction"];
           derived?: GameState["derived"];
         };
@@ -671,6 +706,7 @@ export class ServerDraftAdapter implements EngineAdapter {
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            activationBlockReasons: data.activation_block_reasons,
             viewerInteraction: data.viewer_interaction,
           },
         );
@@ -694,6 +730,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           mana_payment_shortcut_actions?: GameAction[];
           spell_costs?: Record<string, ManaCost>;
           legal_actions_by_object?: Record<string, ObjectAction[]>;
+          activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
           viewer_interaction?: LegalActionsResult["viewerInteraction"];
           log_entries?: GameLogEntry[];
           derived?: GameState["derived"];
@@ -707,6 +744,7 @@ export class ServerDraftAdapter implements EngineAdapter {
             manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
+            activationBlockReasons: data.activation_block_reasons,
             viewerInteraction: data.viewer_interaction,
           },
         );
@@ -802,6 +840,26 @@ export class ServerDraftAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+        }
+        break;
+      }
+
+      case "InteractionPreview": {
+        const data = msg.data as { preview: InteractionPreview };
+        const pending = this.pendingInteractionPreviews.get(data.preview.requestId);
+        if (pending) {
+          this.pendingInteractionPreviews.delete(data.preview.requestId);
+          pending.resolve(data.preview);
+        }
+        break;
+      }
+
+      case "InteractionPreviewFailed": {
+        const data = msg.data as { request_id: string; message: string };
+        const pending = this.pendingInteractionPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingInteractionPreviews.delete(data.request_id);
           pending.reject(new AdapterError("WS_ERROR", data.message, false));
         }
         break;
@@ -935,6 +993,13 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.pendingManaPaymentPreviews.clear();
   }
 
+  private rejectPendingInteractionPreviews(error: Error): void {
+    for (const { reject } of this.pendingInteractionPreviews.values()) {
+      reject(error);
+    }
+    this.pendingInteractionPreviews.clear();
+  }
+
   dispose(): void {
     this.disposed = true;
     if (this.pingInterval) {
@@ -953,15 +1018,33 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.draftView = null;
     this.seatIndex = null;
     this.activeMatchId = null;
-    this.pendingResolve = null;
-    this.pendingReject = null;
+    if (this.pendingReject) {
+      this.pendingReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed during action", true),
+      );
+      this.pendingResolve = null;
+      this.pendingReject = null;
+    }
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
     );
-    this.draftResolve = null;
-    this.draftReject = null;
-    this.initResolve = null;
-    this.initReject = null;
+    this.rejectPendingInteractionPreviews(
+      new AdapterError("WS_CLOSED", "Adapter disposed during interaction preview", true),
+    );
+    if (this.draftReject) {
+      this.draftReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed during draft operation", true),
+      );
+      this.draftResolve = null;
+      this.draftReject = null;
+    }
+    if (this.initReject) {
+      this.initReject(
+        new AdapterError("WS_CLOSED", "Adapter disposed before draft started", true),
+      );
+      this.initResolve = null;
+      this.initReject = null;
+    }
     this._serverInfo = null;
     this.emit({ type: "actionPendingChanged", pending: false });
     this.listeners = [];

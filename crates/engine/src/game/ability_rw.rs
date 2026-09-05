@@ -104,9 +104,10 @@ use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, CardTypeSetSource, ContinuousModification, ControllerRef,
     Duration, Effect, GuessSubject, ModalChoice, MultiTargetSpec, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
-    ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    RepeatContinuation, ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
+    ZoneChoiceCandidateSource, ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -3128,13 +3129,18 @@ fn legacy_effect(x: &Effect) -> bool {
 
         // ---- `count`-only (QuantityExpr) ----
         Effect::Monstrosity { count }
-        | Effect::Incubate { count }
-        | Effect::Amass { count, .. }
         | Effect::Renown { count }
         | Effect::Bolster { count }
         | Effect::Adapt { count }
         | Effect::AssembleContraptions { count }
         | Effect::AddPendingETBCounters { count, .. } => legacy_quantity_expr(count),
+        // CR 701.53a: Incubate's count carries no player-scope axis.
+        Effect::Incubate { count } => legacy_quantity_expr(count),
+        // CR 701.47a: Amass also carries a `player` `TargetFilter` (Azog,
+        // Moria's Ruin's "its controller amasses" — mirrors `Manifest.target`).
+        Effect::Amass { count, player, .. } => {
+            legacy_target_filter(player) || legacy_quantity_expr(count)
+        }
         // Deferred continuous-modification carrier — no `count`; descend the mods
         // for a nested frozen tag (AddType/AddSubtype return `false`).
         Effect::AddPendingEntersModifications { modifications } => {
@@ -3176,7 +3182,7 @@ fn legacy_effect(x: &Effect) -> bool {
                     } => source_filters.iter().any(|filter| legacy_target_filter(filter)),
                 }
         }
-        Effect::ChooseCounterKind { target } => legacy_target_filter(target),
+        Effect::ChooseCounterKind { target, .. } => legacy_target_filter(target),
         Effect::PutChosenCounter {
             target,
             count,
@@ -3733,6 +3739,34 @@ fn member_bound_read() -> RwProfile {
     p.reads_member_bound = true;
     p
 }
+
+/// Profile where a zone-choice candidate pool comes from.
+///
+/// A direct pool reads live zone membership. `Tracked` reads a set bound to
+/// this resolution, while `Legacy` may take either that chain set or its
+/// direct-zone fallback; both are member-bound and include the conservative
+/// zone-membership read for their fallback/producer population.
+fn zone_choice_candidate_source_read(source: ZoneChoiceCandidateSource) -> RwProfile {
+    match source {
+        ZoneChoiceCandidateSource::Direct => reads_zone_membership(),
+        ZoneChoiceCandidateSource::Tracked | ZoneChoiceCandidateSource::Legacy => {
+            let mut p = reads_zone_membership();
+            p.merge(member_bound_read());
+            p
+        }
+    }
+}
+
+/// A reciprocal consumer reads its producer's fresh tracked set. A producer
+/// only publishes that continuation-local set; its normal zone-choice write is
+/// already recorded by the enclosing effect arm.
+fn reciprocal_zone_choice_role_read(role: Option<ReciprocalZoneChoiceRole>) -> RwProfile {
+    match role {
+        None | Some(ReciprocalZoneChoiceRole::Produce) => RwProfile::empty(),
+        Some(ReciprocalZoneChoiceRole::Consume) => member_bound_read(),
+    }
+}
+
 fn writes_pool_profile() -> RwProfile {
     let mut p = RwProfile::empty();
     p.writes_pool = true;
@@ -4518,7 +4552,7 @@ fn rw_effect(
         // resolution-local, per-iteration binding consumed by a later
         // PutChosenCounter. No board WRITE: placement is the separate
         // PutChosenCounter.
-        Effect::ChooseCounterKind { target } => {
+        Effect::ChooseCounterKind { target, .. } => {
             let mut p = if target.is_context_ref() {
                 reads_board_of(StateKind::ObjectCounters)
             } else {
@@ -4818,7 +4852,11 @@ fn rw_effect(
             p.writes_external_counter_census.merge(Census::Any);
             (p, Some(WriteScope::External))
         }
-        Effect::Amass { count, subtype: _ } => {
+        Effect::Amass {
+            count,
+            subtype: _,
+            player: _,
+        } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_external.set(StateKind::ObjectCounters);
             p.writes_external_counter_census.merge(Census::Any);
@@ -5082,20 +5120,20 @@ fn rw_effect(
             (p, None)
         }
         Effect::ChooseFromZone {
-            filter: _,
-            count: _,
-            zone: _,
-            additional_zones: _,
-            zone_owner: _,
-            chooser: _,
-            up_to: _,
-            selection: _,
-            constraint: _,
+            filter,
+            candidate_source,
+            reciprocal_role,
+            ..
         } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_external.set(StateKind::HandLibrary);
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            if let Some(filter) = filter {
+                p.merge(rw_target_filter(filter));
+            }
+            p.merge(zone_choice_candidate_source_read(*candidate_source));
+            p.merge(reciprocal_zone_choice_role_read(*reciprocal_role));
             (p, None)
         }
         Effect::Explore => {
@@ -5806,12 +5844,7 @@ fn rw_effect(
             player: _,
             count: _,
         }
-        | Effect::ChooseObjectsIntoTrackedSet {
-            chooser: _,
-            filter: _,
-            min: _,
-            max: _,
-        }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::RingTemptsYou
         | Effect::TimeTravel
         | Effect::Planeswalk
@@ -7125,7 +7158,8 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         AbilityKind, AggregateFunction, ChoiceType, Comparator, CountScope, PropertyAggregate,
-        PtValue, TargetSelectionMode,
+        PtValue, ReciprocalZoneChoiceRole, TargetSelectionMode, ZoneChoiceCandidateSource,
+        ZoneChoiceChooser, ZoneOwner,
     };
 
     use crate::game::test_fixtures::mana_fixture_roles;
@@ -7403,6 +7437,66 @@ mod tests {
     // ---- builders ----
     fn ra(effect: Effect) -> ResolvedAbility {
         ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0))
+    }
+
+    fn zone_choice_for_rw(
+        candidate_source: ZoneChoiceCandidateSource,
+        reciprocal_role: Option<ReciprocalZoneChoiceRole>,
+    ) -> ResolvedAbility {
+        ra(Effect::ChooseFromZone {
+            count: 1,
+            zone: Zone::Graveyard,
+            additional_zones: vec![],
+            zone_owner: ZoneOwner::Controller,
+            filter: None,
+            chooser: ZoneChoiceChooser::Controller,
+            candidate_source,
+            reciprocal_role,
+            up_to: false,
+            selection: Default::default(),
+            constraint: None,
+        })
+    }
+
+    /// Candidate provenance and reciprocal role must reach the same-event
+    /// member-bound discriminator rather than disappearing behind `..`.
+    #[test]
+    fn zone_choice_provenance_and_reciprocal_reads_are_member_bound() {
+        assert!(
+            !ability_rw_profile(&zone_choice_for_rw(ZoneChoiceCandidateSource::Direct, None))
+                .reads_member_bound(),
+            "a direct zone pool has no per-source tracked binding"
+        );
+        for (label, ability) in [
+            (
+                "tracked provenance",
+                zone_choice_for_rw(ZoneChoiceCandidateSource::Tracked, None),
+            ),
+            (
+                "legacy tracked fallback",
+                zone_choice_for_rw(ZoneChoiceCandidateSource::Legacy, None),
+            ),
+            (
+                "reciprocal consumer",
+                zone_choice_for_rw(
+                    ZoneChoiceCandidateSource::Direct,
+                    Some(ReciprocalZoneChoiceRole::Consume),
+                ),
+            ),
+        ] {
+            assert!(
+                ability_rw_profile(&ability).reads_member_bound(),
+                "{label} reads a per-resolution candidate binding"
+            );
+        }
+        assert!(
+            !ability_rw_profile(&zone_choice_for_rw(
+                ZoneChoiceCandidateSource::Direct,
+                Some(ReciprocalZoneChoiceRole::Produce),
+            ))
+            .reads_member_bound(),
+            "a reciprocal producer publishes its fresh set but does not consume it"
+        );
     }
 
     #[test]

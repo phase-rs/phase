@@ -15,7 +15,7 @@ vi.mock("../cloudSync/sessionKey", () => ({
   getSupabaseSessionKey: () => "sb-project-auth-token",
 }));
 
-import { importLegacyStorage } from "../legacyMigration";
+import { importLegacyStorage, markRemoteLoadOk } from "../legacyMigration";
 import { STORAGE_KEY_PREFIX } from "../../constants/storage";
 
 const backup = {
@@ -83,5 +83,47 @@ describe("importLegacyStorage", () => {
 
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(invokeMock).toHaveBeenCalledWith("take_legacy_storage");
+  });
+});
+
+describe("markRemoteLoadOk", () => {
+  it("waits for remote IPC and does not reuse a sequential success", async () => {
+    let resolveFirst!: () => void;
+    invokeMock
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { resolveFirst = resolve; }))
+      .mockRejectedValueOnce(new Error("write failed"));
+
+    const first = markRemoteLoadOk();
+    expect(invokeMock).toHaveBeenCalledWith("mark_remote_load_ok");
+    resolveFirst();
+    await expect(first).resolves.toBe(true);
+    await expect(markRemoteLoadOk()).resolves.toBe(false);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces concurrent writes, resolves synchronous throws, and retries failures", async () => {
+    let resolve!: () => void;
+    invokeMock.mockImplementationOnce(() => new Promise<void>((done) => { resolve = done; }));
+
+    const first = markRemoteLoadOk();
+    const concurrent = markRemoteLoadOk();
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    resolve();
+    await expect(Promise.all([first, concurrent])).resolves.toEqual([true, true]);
+
+    invokeMock.mockImplementationOnce(() => { throw new Error("sync failure"); });
+    await expect(markRemoteLoadOk()).resolves.toBe(false);
+    invokeMock.mockResolvedValueOnce(undefined);
+    await expect(markRemoteLoadOk()).resolves.toBe(true);
+  });
+
+  it("does not invoke IPC outside a remote Tauri shell", async () => {
+    isTauriMock.mockReturnValue(false);
+    await expect(markRemoteLoadOk()).resolves.toBe(true);
+
+    isTauriMock.mockReturnValue(true);
+    isBundledTauriOriginMock.mockReturnValue(true);
+    await expect(markRemoteLoadOk()).resolves.toBe(true);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

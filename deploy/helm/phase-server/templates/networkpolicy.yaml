@@ -18,6 +18,12 @@ spec:
       ports:
         - port: http
           protocol: TCP
+        {{- if .Values.web.enabled }}
+        # Same ingress source as http: the SPA is served to the public through
+        # the same Traefik namespace that reaches /ws.
+        - port: web
+          protocol: TCP
+        {{- end }}
     {{- if .Values.metrics.enabled }}
     - from:
         - namespaceSelector:
@@ -37,8 +43,11 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    {{- if .Values.networkPolicy.allowBootstrapEgress }}
-    # Card-data bootstrap (https://data.phase-rs.dev); nothing on the LAN.
+    {{- if or .Values.networkPolicy.allowBootstrapEgress .Values.server.announceTo }}
+    # Card-data bootstrap (https://data.phase-rs.dev) and, when server.announceTo
+    # is set, the directory announce POST; nothing on the LAN. Announcing opens
+    # this rule on its own so turning allowBootstrapEgress off once the PVC is
+    # warm does not silently stop the heartbeat.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0

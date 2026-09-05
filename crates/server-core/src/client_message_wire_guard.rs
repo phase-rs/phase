@@ -43,7 +43,9 @@ use crate::legacy_join_guard::guard_legacy_join_game;
 use crate::protocol::{resolve_draft_source_intent_ref, ClientMessage, ServerMessage, ServerMode};
 use crate::seat_mutation_wire_guard::guard_seat_mutation;
 use crate::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
+use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
+use engine::types::interaction::{InteractionPreviewRequest, InteractionSubmission};
 
 /// Validate wire fields for any inbound `ClientMessage` before handler work.
 ///
@@ -67,6 +69,9 @@ pub fn guard_client_message_before_dispatch(
         ClientMessage::Interaction { submission } => {
             guard_interaction_submission_payload(submission)
         }
+        ClientMessage::PreviewInteraction { request } => {
+            guard_interaction_preview_request_payload(request)
+        }
         ClientMessage::Reconnect {
             game_code,
             player_token,
@@ -85,6 +90,7 @@ pub fn guard_client_message_before_dispatch(
         | ClientMessage::Concede
         | ClientMessage::ConcedeMatch
         | ClientMessage::AbandonGame
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => Ok(()),
@@ -297,6 +303,14 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
                 rejection: ActionRejection::new(ActionRejectionCode::InvalidAction),
             }
         }
+        // Benign like `Interaction`'s arm — a preview carries the same
+        // free-form response an ordinary paste can oversize — and correlated
+        // like `PreviewManaPayment`'s, so the client's pending promise settles
+        // instead of hanging.
+        ClientMessage::PreviewInteraction { request } => ServerMessage::InteractionPreviewFailed {
+            request_id: request.request_id.clone(),
+            message: reason,
+        },
 
         // Every remaining variant keeps the operational-error behavior: a
         // bounds failure on these is a malformed frame, not a rejected game
@@ -306,6 +320,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
         | ClientMessage::CreateGameWithSettings { .. }
@@ -469,7 +484,9 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
+        | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::Concede
@@ -491,16 +508,52 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
     }
 }
 
+/// Wire bounds for an inbound `InteractionPreviewRequest`.
+///
+/// `InteractionPreviewRequest` differs from `InteractionSubmission` only by its
+/// correlation key, so the two shared members are charged through the same
+/// engine validator the submission path uses — the same cumulative budget, not
+/// a restatement of it — and the key is charged against the engine's own
+/// per-string ceiling. The rejection string is therefore byte-identical to the
+/// submission's at every layer.
+///
+/// Private: the preview route has no second caller. The handler deliberately
+/// re-guards nothing, because `preview_interaction` re-charges every member and
+/// answers its own `PayloadTooLarge` on the preview's own correlated channel —
+/// a third charge would buy a strictly worse frame.
+///
+/// ponytail: clones the two shared members to present them as a submission,
+/// because `bound_interaction_submission` takes a borrowed `InteractionSubmission`
+/// and no borrowed-view constructor exists. The clone is of an already-materialized
+/// frame and is dropped at the end of this function, so it never enters a
+/// long-lived structure. Upgrade path: a borrowed submission view in the engine.
+fn guard_interaction_preview_request_payload(
+    request: &InteractionPreviewRequest,
+) -> Result<(), String> {
+    if request.request_id.as_str().len() > MAX_INTERACTION_STRING_LEN {
+        return Err(format!(
+            "Engine error: {:?}",
+            engine::types::interaction::InteractionReasonCode::PayloadTooLarge
+        ));
+    }
+    guard_interaction_submission_payload(&InteractionSubmission {
+        interaction_id: request.interaction_id.clone(),
+        response: request.response.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game_action_payload_guard::MAX_ACTION_LIST_LEN;
+    use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
     use engine::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use engine::types::game_state::ProductionOverride;
     use engine::types::identifiers::ObjectIncarnationRef;
     use engine::types::interaction::{
-        InteractionChoiceId, InteractionId, InteractionResponse, InteractionSubmission,
-        MAX_INTERACTION_LIST_LEN,
+        AmountAssignment, InteractionChoiceId, InteractionId, InteractionResponse,
+        InteractionShortcutDecision, InteractionShortcutPin, InteractionSubmission,
+        PreviewRequestId, MAX_INTERACTION_LIST_LEN,
     };
     use engine::types::mana::{
         ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
@@ -920,5 +973,169 @@ mod tests {
                 other => panic!("a tournament frame must not answer as {other:?}"),
             }
         }
+    }
+
+    // ── Row 4: the payload ceiling on the preview path ────────────────────
+
+    fn preview_frame(request_id: &str, response: InteractionResponse) -> ClientMessage {
+        ClientMessage::PreviewInteraction {
+            request: engine::types::interaction::InteractionPreviewRequest {
+                request_id: PreviewRequestId(request_id.to_string()),
+                interaction_id: InteractionId("interaction-1".to_string()),
+                response,
+            },
+        }
+    }
+
+    /// Pins whose `amounts` are each individually under the list ceiling and
+    /// whose sum is not — the cumulative branch a naive per-field guard misses.
+    fn cumulative_shortcut(pin_count: u32) -> InteractionResponse {
+        let per_pin = MAX_INTERACTION_LIST_LEN / 2;
+        InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::AcceptSuggested,
+            pins: (0..pin_count)
+                .map(|group| InteractionShortcutPin {
+                    group,
+                    choice_ids: vec![InteractionChoiceId("a".to_string())],
+                    amounts: vec![
+                        AmountAssignment {
+                            choice_id: InteractionChoiceId("a".to_string()),
+                            amount: 1,
+                        };
+                        per_pin
+                    ],
+                })
+                .collect(),
+        }
+    }
+
+    /// Row 4. Sited at the WIRE GUARD, not at the engine: the engine charges the
+    /// same triple independently before its `state.clone()`, so an engine-sited
+    /// assertion would still pass with this arm reverted to `Ok(())` — vacuous.
+    /// Replace the `PreviewInteraction` arm with `Ok(())` and the first
+    /// assertion below accepts an oversized frame.
+    #[test]
+    fn dispatch_guard_rejects_an_oversized_preview_before_handler_work() {
+        let three_pins = preview_frame("req-1", cumulative_shortcut(3));
+        // Reach guard on the fixture itself: every pin is individually legal,
+        // so the refusal below is attributable to the cumulative charge.
+        match &three_pins {
+            ClientMessage::PreviewInteraction { request } => {
+                let InteractionResponse::Shortcut { pins, .. } = &request.response else {
+                    panic!("fixture must carry a shortcut response");
+                };
+                assert!(pins.len() > 1, "the cumulative branch needs several pins");
+                for pin in pins {
+                    assert!(pin.amounts.len() <= MAX_INTERACTION_LIST_LEN);
+                    assert!(pin.choice_ids.len() <= MAX_INTERACTION_LIST_LEN);
+                }
+            }
+            other => panic!("wrong fixture: {other:?}"),
+        }
+
+        let err = guard_client_message_before_dispatch(&three_pins, ServerMode::Full)
+            .expect_err("the cumulative budget is charged at the wire");
+        assert!(err.contains("PayloadTooLarge"), "unexpected reason: {err}");
+
+        // Discriminating positive: ONE pin of the identical shape passes the
+        // bound, so the refusal above is the cumulative charge and not the pin
+        // shape.
+        assert_eq!(
+            guard_client_message_before_dispatch(
+                &preview_frame("req-1", cumulative_shortcut(1)),
+                ServerMode::Full
+            ),
+            Ok(())
+        );
+
+        // The second member this helper charges: the correlation key, against
+        // the engine's own per-string ceiling.
+        let long_key = "x".repeat(MAX_INTERACTION_STRING_LEN + 1);
+        let key_err = guard_client_message_before_dispatch(
+            &preview_frame(
+                &long_key,
+                InteractionResponse::Choose {
+                    choice_id: InteractionChoiceId("a".to_string()),
+                },
+            ),
+            ServerMode::Full,
+        )
+        .expect_err("an oversized request_id is refused");
+        assert!(key_err.contains("PayloadTooLarge"), "unexpected: {key_err}");
+
+        // The bound sits at the constant, not at "any long key".
+        assert_eq!(
+            guard_client_message_before_dispatch(
+                &preview_frame(
+                    &"x".repeat(MAX_INTERACTION_STRING_LEN),
+                    InteractionResponse::Choose {
+                        choice_id: InteractionChoiceId("a".to_string()),
+                    },
+                ),
+                ServerMode::Full
+            ),
+            Ok(())
+        );
+
+        // And the interaction_id half still reaches the shared engine validator.
+        let long_id = ClientMessage::PreviewInteraction {
+            request: engine::types::interaction::InteractionPreviewRequest {
+                request_id: PreviewRequestId("req-1".to_string()),
+                interaction_id: InteractionId("x".repeat(MAX_INTERACTION_STRING_LEN + 1)),
+                response: InteractionResponse::Choose {
+                    choice_id: InteractionChoiceId("a".to_string()),
+                },
+            },
+        };
+        assert!(guard_client_message_before_dispatch(&long_id, ServerMode::Full).is_err());
+    }
+
+    /// The refusal string is byte-identical to the submission's, because both
+    /// charge the same engine validator rather than restating its bounds.
+    #[test]
+    fn preview_and_submission_refuse_the_same_payload_identically() {
+        let response = cumulative_shortcut(3);
+        assert_eq!(
+            guard_client_message_before_dispatch(
+                &preview_frame("req-1", response.clone()),
+                ServerMode::Full
+            ),
+            guard_client_message_before_dispatch(
+                &interaction_frame(response.clone()),
+                ServerMode::Full
+            )
+        );
+        // Non-vacuity: both sides are `Err`, not both `Ok`.
+        assert!(guard_client_message_before_dispatch(
+            &interaction_frame(response),
+            ServerMode::Full
+        )
+        .is_err());
+    }
+
+    /// Row 5's wire-guard legs. The preview is classified exactly as
+    /// `Interaction` is at the projection boundary, and its rejection travels
+    /// on a CORRELATED channel where `Interaction`'s does not — an uncorrelated
+    /// answer would leave the client's pending promise hanging forever.
+    #[test]
+    fn preview_wire_rejection_is_benign_and_correlated() {
+        let frame = preview_frame("req-1", cumulative_shortcut(3));
+        let reason = guard_client_message_before_dispatch(&frame, ServerMode::Full).unwrap_err();
+
+        match wire_rejection_message(&frame, reason.clone()) {
+            ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, PreviewRequestId("req-1".to_string()));
+                assert_eq!(message, reason);
+            }
+            other => panic!("a preview rejection must not tear the session down: {other:?}"),
+        }
+
+        // Same projection policy as its sibling: accepted without bounding,
+        // safe only because `to_lobby_client_message` never clones it (the
+        // paired half lives in `phase-server`).
+        assert!(guard_broker_projection_inbound(&frame).is_ok());
     }
 }

@@ -47,6 +47,15 @@ fn static_tiered_enters_with_additional_counters() {
     insta::assert_json_snapshot!("static_tiered_enters_with_additional_counters", &defs);
 }
 
+#[test]
+fn havi_historic_graveyard_gate() {
+    let def = parse_static_line(
+        "Havi has indestructible as long as there are four or more historic cards in your graveyard. (Artifacts, legendaries, and Sagas are historic.)",
+    )
+    .expect("Havi's historic threshold static must parse");
+    insta::assert_json_snapshot!("havi_historic_graveyard_gate", &def);
+}
+
 /// Issue #327: "of that color" anaphor (post-Choose) is the equivalent of
 /// "of the chosen color" and must lower to a filter with IsChosenColor.
 #[test]

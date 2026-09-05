@@ -77,7 +77,11 @@ describe("DraftAdapter engine coordinator", () => {
     wasm.submit_pick_for_seat.mockReturnValue({ status: "Drafting" });
     wasm.submit_deck.mockReturnValue({ status: "Deckbuilding" });
     wasm.submit_deck_for_seat.mockReturnValue({ status: "Deckbuilding" });
-    wasm.draft_procedure.mockReturnValue({ commanders_required: 1, pick_selection_mode: "Ordered" });
+    wasm.draft_procedure.mockReturnValue({
+      commanders_required: 1,
+      cube_min_deck_size: 73,
+      pick_selection_mode: "Ordered",
+    });
     const adapter = new DraftAdapter();
 
     await adapter.createMultiplayerDraft(
@@ -108,6 +112,7 @@ describe("DraftAdapter engine coordinator", () => {
     expect(wasm.submit_deck).toHaveBeenCalledWith('["Island"]', '["Commander"]');
     expect(wasm.submit_deck_for_seat).toHaveBeenCalledWith(2, '["Island"]', '["Commander"]');
     expect(procedure.pick_selection_mode).toBe("Ordered");
+    expect(procedure.cube_min_deck_size).toBe(73);
   });
 
   it("passes an explicit empty commander designation for local limited submissions", async () => {

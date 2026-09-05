@@ -3,7 +3,8 @@
     "badge": "Zablokowana",
     "cantBeActivated": "Tej zdolności nie można aktywować",
     "cantActivateDuring": "Nie można teraz aktywować",
-    "prohibited": "Aktywacja tej zdolności jest zabroniona"
+    "prohibited": "Aktywacja tej zdolności jest zabroniona",
+    "costNotPayableNow": "Nie możesz teraz zapłacić tego kosztu"
   },
   "manaSourceSelection": { "title": "Wybierz źródło many", "description": "Ta zdolność many wymaga poświęcenia permanenta.", "sacrifice": "Poświęć", "back": "Wróć do płatności many", "unknownSource": "Źródło many" },
   "comboShortcut": {
@@ -21,10 +22,27 @@
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
     "countAria": "Number of iterations",
+    "countDecreaseAria": "Zmniejsz liczbę powtórzeń",
+    "countIncreaseAria": "Zwiększ liczbę powtórzeń",
     "previewTitle_one": "Repeating once produces:",
     "previewTitle_other": "Repeating {{count}} times produces:",
     "previewEntry": "{{amount}} {{resource}}",
     "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
+    "allocationTitle": "Rozdziel powtórzenia pomiędzy cele:",
+    "allocationAria": "Powtórzenia dla {{subject}}",
+    "allocationDecreaseAria": "Zmniejsz powtórzenia dla {{subject}}",
+    "allocationIncreaseAria": "Zwiększ powtórzenia dla {{subject}}",
+    "allocationSum": "Przydzielono {{allocated}} z {{total}} powtórzeń.",
+    "evenSplit": "Przywróć równy podział",
+    "customDistribution": "Własny podział — silnik nie przygotował podglądu tego podziału.",
+    "announceTitle": "Wybierz cel ogłaszany w każdym powtórzeniu:",
+    "announce": "Ogłoś",
+    "announceAria": "Ogłoś {{subject}}",
+    "mayTitle": "Zdolność opcjonalna {{group}} — powtórzyć ten wybór w każdej iteracji?",
+    "mayTake": "Skorzystaj",
+    "mayDecline": "Odrzuć",
+    "mayTakeAria": "Skorzystaj ze zdolności opcjonalnej {{group}}",
+    "mayDeclineAria": "Odrzuć zdolność opcjonalną {{group}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -32,6 +50,13 @@
       "ImmediateWin": "This loop wins the game.",
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
+    },
+    "respondDeclaredTitle": "Proponowana deklaracja:",
+    "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
+    "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondDecision": {
+      "take": "{{subject}} — wykorzystanie w każdej iteracji",
+      "decline": "{{subject}} — odrzucenie w każdej iteracji"
     }
   },
   "precastShortcut": {
@@ -513,6 +538,8 @@
     "unboundedConditionalYouTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; może pozostać nieograniczone, a jeśli nie — podasz liczbę",
     "unboundedMixedTooltip": "Nieograniczone: {{resource}} (∞) — część tej grupy ma oczekujące zwinięcie; część pozostaje nieograniczona",
     "unboundedConditionalGlyph": "∞→?",
+    "boundedLoopGlyph": "≤{{bound}}×",
+    "boundedLoopTooltip": "{{resource}} z wykrytej pętli, maksymalnie {{bound}} powtórzeń",
     "unboundedManaPoolMarker": "Nieograniczona mana (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "życie",
@@ -1110,7 +1137,10 @@
       "subtitlePreparedCopy": "Rzucić przygotowany czar?",
       "subtitleActivate": "Aktywować tę zdolność?",
       "subtitlePlay": "Wybierz, jak zagrać tę kartę",
-      "subtitleChoose": "Wybierz zdolność do aktywowania"
+      "subtitleChoose": "Wybierz zdolność do aktywowania",
+      "unlockThisDoor": "Odblokuj te drzwi",
+      "unlockHalf": "Odblokuj {{name}}",
+      "unlockHalfWithCost": "Odblokuj {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Przekręć, aby dodać manę",

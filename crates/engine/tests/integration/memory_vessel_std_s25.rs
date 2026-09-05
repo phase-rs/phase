@@ -31,7 +31,8 @@ use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ActivationRestriction, CardPlayMode, CastingPermission,
     Duration, Effect, GameRestriction, PermissionGrantee, PlayerFilter, PlayerScope,
-    ProhibitedActivity, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, TargetFilter,
+    ProhibitedActivity, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, SubAbilityLink,
+    TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -461,6 +462,48 @@ fn memory_vessel_oracle_text_lowers_fully() {
         "chain must carry a per-owner PlayFromExile grant on TrackedSet(0): {chain:#?}"
     );
 
+    // ISSUE #7923 / V-U2e3 — `[BASE]`. THIS ASSERTION CARRIES THE REVERT-FAILING
+    // CONTENT OF DELETING `try_parse_exile_play_grant_with_play_prohibition`.
+    //
+    // CR 608.2c (docs/MagicCompRules.txt:2797): the printed text is ONE sentence
+    // whose conjuncts are comma-joined steps of a single instruction, so the link
+    // between the grant and the prohibition is a `ContinuationStep`;
+    // `SubAbilityLink::SequentialSibling` is reserved for the NEXT printed
+    // instruction (a `Sentence` boundary). The deleted one-off HAND-SET
+    // `SequentialSibling`; the general path now derives the link from
+    // `sub[0].boundary_after` through the single authority
+    // `oracle_ir::ast::sub_link_after_boundary` (`Comma -> ContinuationStep`).
+    //
+    // FAILS AT BASE_SHA, where the one-off is still dispatched. Measured on the
+    // whole-corpus export, this field is Memory Vessel's ONLY change.
+    let prohibition_link = {
+        let mut cursor: Option<&AbilityDefinition> = Some(head);
+        let mut found = None;
+        while let Some(def) = cursor {
+            if matches!(
+                &*def.effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        activity: ProhibitedActivity::ProhibitPlayFromZone { .. },
+                        ..
+                    },
+                }
+            ) {
+                found = Some(def.sub_link);
+                break;
+            }
+            cursor = def.sub_ability.as_deref();
+        }
+        found.expect("the play-from-hand prohibition link must exist")
+    };
+    assert_eq!(
+        prohibition_link,
+        SubAbilityLink::ContinuationStep,
+        "CR 608.2c: the prohibition is a comma-joined continuation step of the same \
+         printed instruction, derived by `sub_link_after_boundary`; at BASE_SHA the \
+         deleted one-off hand-set SequentialSibling"
+    );
+
     // Play-from-hand prohibition for all players, whose owning def carries the
     // shared UntilNextTurnOf{Controller} duration (→ activator-keyed expiry at
     // AddRestriction resolution).
@@ -481,5 +524,134 @@ fn memory_vessel_oracle_text_lowers_fully() {
             })
         )),
         "chain must carry ProhibitPlayFromZone{{Hand}} for AllPlayers with UntilNextTurnOf duration: {chain:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #7923 / V-U2e1 — the PARSED chain, driven through the real activation
+// pipeline. The three hand-built runtime tests above are explicitly NOT offered
+// as evidence for the deletion: they never call `parse_oracle_text`, and
+// `SubAbilityLink::ContinuationStep` is the `#[default]`, so they would look
+// identical either way. They remain regression cover for the engine primitives.
+// ---------------------------------------------------------------------------
+
+const MEMORY_VESSEL_ORACLE: &str = "{T}, Exile this artifact: Each player exiles the top seven cards of their library. Until your next turn, players may play cards they exiled this way, and they can't play cards from their hand. Activate only as a sorcery.";
+
+/// Run Memory Vessel's PARSED activated ability through `runner.activate(..)`
+/// with an EXPLICIT optional policy (§G1 rule 2), and report the observable
+/// outcome: (cards each player has in exile, exile-play grants, hand prohibition).
+fn run_parsed_memory_vessel(accept: bool) -> (Vec<usize>, Vec<usize>, bool) {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    for &p in &[P0, P1, P2] {
+        for i in 0..10 {
+            scenario.add_card_to_library_top(p, &format!("Lib-{}-{}", p.0, i));
+        }
+    }
+    let vessel = scenario
+        .add_artifact_from_oracle(P0, "Memory Vessel", MEMORY_VESSEL_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P0;
+
+    let activation = runner.activate(vessel, 0);
+    let outcome = if accept {
+        activation.accept_optional().resolve()
+    } else {
+        activation.decline_optional().resolve()
+    };
+
+    // Exclude the Vessel itself — "Exile this artifact" is part of the printed
+    // ACTIVATION COST, not of the exile-seven effect under test.
+    let exiled: Vec<usize> = [P0, P1, P2]
+        .iter()
+        .map(|&p| {
+            outcome
+                .state()
+                .objects
+                .values()
+                .filter(|o| o.owner == p && o.zone == Zone::Exile && o.id != vessel)
+                .count()
+        })
+        .collect();
+    let grants: Vec<usize> = [P0, P1, P2]
+        .iter()
+        .map(|&p| {
+            outcome
+                .state()
+                .objects
+                .values()
+                .filter(|o| {
+                    o.owner == p && o.zone == Zone::Exile && o.id != vessel && play_grant_for(o, p)
+                })
+                .count()
+        })
+        .collect();
+    let prohibited = outcome.state().restrictions.iter().any(|r| {
+        matches!(
+            r,
+            GameRestriction::ProhibitActivity {
+                activity: ProhibitedActivity::ProhibitPlayFromZone { zone: Zone::Hand },
+                ..
+            }
+        )
+    });
+    (exiled, grants, prohibited)
+}
+
+/// **V-U2e1 — `[COVER]`, RUNTIME.** CR 608.2c (`docs/MagicCompRules.txt:2797`).
+///
+/// **NOT REVERT-FAILING AGAINST BASE_SHA — stated plainly.** §5.9's argument is
+/// that none of `sub_link`'s plausibly-reachable runtime readers is entered for
+/// this chain (`optional_decline_branch` needs an optional parent, and the parent
+/// here — `GrantCastingPermission{PlayFromExile}` — is not optional;
+/// `detach_after_multi_target_player_local_chain` needs `multi_target`, which this
+/// chain lacks; the condition-false sibling walk needs a sibling AFTER the gated
+/// sub, and the `AddRestriction` is the chain leaf). The measured whole-corpus
+/// change on this card is the `sub_link` FIELD ALONE, so the deleted one-off and
+/// the general path produce IDENTICAL runtime behaviour and these assertions pass
+/// at BASE unchanged.
+///
+/// This row is BEHAVIOUR-PRESERVATION COVER for the `ContinuationStep` migration:
+/// the empirical backstop that §5.9's reader enumeration is not merely trusted.
+/// **The revert-failing content of the deletion lives in
+/// `memory_vessel_oracle_text_lowers_fully`'s `sub_link` assertion.**
+///
+/// §G2: non-optionality is demonstrated BEHAVIOURALLY — resolve the ability twice,
+/// once `.accept_optional()` and once `.decline_optional()`, and assert the two
+/// outcomes are IDENTICAL. `/card-test` foot-gun 5 (asserting the AST `optional`
+/// flag) stays withdrawn. The paired positive control below is what stops that
+/// equality being vacuous.
+#[test]
+fn memory_vessel_parsed_chain_grants_and_prohibits() {
+    // ACCEPT branch first — the row's own positive control (§G1 rule 3).
+    let (accept_exiled, accept_grants, accept_prohibited) = run_parsed_memory_vessel(true);
+
+    // POSITIVE CONTROL: the ExileTop head actually fired for every player, and the
+    // per-owner grant landed on those cards. Without this the equality below would
+    // be "nothing happened == nothing happened".
+    assert_eq!(
+        accept_exiled,
+        vec![7, 7, 7],
+        "each player exiles the top seven cards of their library"
+    );
+    assert_eq!(
+        accept_grants,
+        vec![7, 7, 7],
+        "each player may play the cards THEY exiled this way (per-owner grant)"
+    );
+    assert!(
+        accept_prohibited,
+        "and no player may play cards from their hand"
+    );
+
+    // The DECLINE branch is identical — the parent is non-optional, demonstrated
+    // behaviourally rather than by asserting an AST flag.
+    let declined = run_parsed_memory_vessel(false);
+    assert_eq!(
+        declined,
+        (accept_exiled, accept_grants, accept_prohibited),
+        "CR 608.2c: Memory Vessel's chain has no optional parent, so the optional \
+         policy cannot change its outcome — `optional_decline_branch` is never entered"
     );
 }

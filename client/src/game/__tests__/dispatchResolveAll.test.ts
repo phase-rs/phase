@@ -34,7 +34,7 @@ describe("dispatchResolveAll", () => {
     await dispatchResolveAll(0);
 
     expect(submitAction).toHaveBeenCalledWith(
-      { type: "BeginResolveAll", data: { max_resolutions: 0 } },
+      { type: "BeginResolveAll", data: { max_resolutions: 0, scope: { type: "Own" } } },
       0,
     );
     expect(resolveAll).not.toHaveBeenCalled();

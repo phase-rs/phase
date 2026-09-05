@@ -336,6 +336,8 @@
     "moreNeeded": "{{count}} a mais necessárias",
     "commanderRequired": "Designe um comandante da sua reserva para enviar.",
     "commanderUnavailable": "A designação de comandante está indisponível no momento — não foi possível carregar a base de dados de cartas.",
+    "compatibilityPending": "Verificando a compatibilidade do deck...",
+    "compatibilityUnavailable": "A compatibilidade do deck está indisponível no momento — tente novamente antes de enviar.",
     "grantedFiller": "Sua reserva também inclui até {{maximum}} × {{name}}, utilizável apenas como seu comandante."
   },
   "landing": {
@@ -384,6 +386,12 @@
     "viewResults": "Ver Resultados",
     "setIconAlt": "Ícone {{code}}"
   },
+  "offline": {
+    "unavailableTitle": "O draft multijogador não está disponível offline.",
+    "unavailableDescription": "Reconecte-se ou desative o Modo Offline para hospedar, entrar, iniciar ou assistir a um draft multijogador.",
+    "startUnavailable": "Não é possível iniciar um draft multijogador offline. Reconecte-se ou desative o Modo Offline para continuar.",
+    "watchUnavailable": "Não é possível assistir a um draft multijogador offline. Reconecte-se ou desative o Modo Offline para continuar."
+  },
   "podPhase": {
     "lobby": "Lobby",
     "drafting": "Draftando",
@@ -418,6 +426,7 @@
     "exportUrl": "URL de Exportação do CubeCobra",
     "exportUrlPlaceholder": "Cole uma URL de exportação bruta ou cole a lista abaixo",
     "loadUrl": "Carregar URL",
+    "offlineUrlUnavailable": "O carregamento de listas de cube por URL não está disponível offline.",
     "deckAddables": "Adicionáveis ao Deck",
     "addablesStandardBasics": "Básicos padrão",
     "addablesBasicsPlusCustom": "Básicos mais personalizados",

@@ -155,6 +155,7 @@ const {
   const multiplayerState = {
     displayName: "Player",
     setActionPending: vi.fn(),
+    setActivePlayerId: vi.fn(),
     setConnectionStatus: vi.fn(),
     setIsSpectator: vi.fn(),
     setLatency: vi.fn(),
@@ -749,6 +750,27 @@ describe("GameProvider native AI routing", () => {
     view.unmount();
 
     expect(clearPromptOverlayState).toHaveBeenCalledOnce();
+  });
+
+  // `activePlayerId` is written only from a wire and had no clear, so it
+  // outlived the game that assigned it and the NEXT wire-assigned game read the
+  // previous game's seat until its own assignment landed. `SeatSource` does not
+  // cover this: it is keyed on mode, not on session.
+  it("drops the wire-assigned seat when a draft match unmounts", () => {
+    gameStoreState.gameId = "draft-match";
+    gameStoreState.adapter = {} as never;
+    gameStoreState.gameState = {} as never;
+
+    const view = render(
+      <GameProvider gameId="draft-match" mode="draft-match">
+        <div />
+      </GameProvider>,
+    );
+
+    multiplayerState.setActivePlayerId.mockClear();
+    view.unmount();
+
+    expect(multiplayerState.setActivePlayerId).toHaveBeenCalledWith(null);
   });
 });
 

@@ -3,7 +3,8 @@
     "badge": "Blockiert",
     "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
     "cantActivateDuring": "Kann derzeit nicht aktiviert werden",
-    "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten"
+    "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten",
+    "costNotPayableNow": "Du kannst diese Kosten gerade nicht bezahlen"
   },
   "manaSourceSelection": { "title": "Manaquelle wählen", "description": "Diese Manafähigkeit erfordert das Opfern einer bleibenden Karte.", "sacrifice": "Opfern", "back": "Zurück zur Manabezahlung", "unknownSource": "Manaquelle" },
   "comboShortcut": {
@@ -21,10 +22,27 @@
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
     "countAria": "Number of iterations",
+    "countDecreaseAria": "Anzahl der Wiederholungen verringern",
+    "countIncreaseAria": "Anzahl der Wiederholungen erhöhen",
     "previewTitle_one": "Repeating once produces:",
     "previewTitle_other": "Repeating {{count}} times produces:",
     "previewEntry": "{{amount}} {{resource}}",
     "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
+    "allocationTitle": "Verteile die Wiederholungen auf die Ziele:",
+    "allocationAria": "Wiederholungen für {{subject}}",
+    "allocationDecreaseAria": "Wiederholungen für {{subject}} verringern",
+    "allocationIncreaseAria": "Wiederholungen für {{subject}} erhöhen",
+    "allocationSum": "{{allocated}} von {{total}} Wiederholungen verteilt.",
+    "evenSplit": "Auf die gleichmäßige Verteilung zurücksetzen",
+    "customDistribution": "Eigene Verteilung — die Engine hat für diese Aufteilung keine Vorschau berechnet.",
+    "announceTitle": "Wähle das Ziel, das jede Wiederholung ansagt:",
+    "announce": "Ansagen",
+    "announceAria": "{{subject}} ansagen",
+    "mayTitle": "Optionale Fähigkeit {{group}} — diese Wahl in jeder Iteration wiederholen?",
+    "mayTake": "Nutzen",
+    "mayDecline": "Ablehnen",
+    "mayTakeAria": "Optionale Fähigkeit {{group}} nutzen",
+    "mayDeclineAria": "Optionale Fähigkeit {{group}} ablehnen",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -32,6 +50,13 @@
       "ImmediateWin": "This loop wins the game.",
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
+    },
+    "respondDeclaredTitle": "Vorgeschlagene Deklaration:",
+    "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
+    "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondDecision": {
+      "take": "{{subject}} — in jeder Iteration genutzt",
+      "decline": "{{subject}} — in jeder Iteration abgelehnt"
     }
   },
   "precastShortcut": {
@@ -513,6 +538,8 @@
     "unboundedConditionalYouTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; dies kann unbegrenzt bleiben, und andernfalls nennst du die Anzahl",
     "unboundedMixedTooltip": "Unbegrenzt: {{resource}} (∞) — ein Teil dieser Gruppe hat eine ausstehende Auflösung; ein Teil bleibt unbegrenzt",
     "unboundedConditionalGlyph": "∞→?",
+    "boundedLoopGlyph": "≤{{bound}}×",
+    "boundedLoopTooltip": "{{resource}} aus einer erkannten Schleife, mit höchstens {{bound}} Wiederholungen",
     "unboundedManaPoolMarker": "Unbegrenztes Mana (∞)",
     "unboundedMana": "Mana",
     "unboundedLife": "Leben",
@@ -1110,7 +1137,10 @@
       "subtitlePreparedCopy": "Den vorbereiteten Zauberspruch wirken?",
       "subtitleActivate": "Diese Fähigkeit aktivieren?",
       "subtitlePlay": "Wähle, wie du diese Karte spielst",
-      "subtitleChoose": "Wähle eine zu aktivierende Fähigkeit"
+      "subtitleChoose": "Wähle eine zu aktivierende Fähigkeit",
+      "unlockThisDoor": "Diese Tür entriegeln",
+      "unlockHalf": "{{name}} entriegeln",
+      "unlockHalfWithCost": "{{name}} ({{cost}}) entriegeln"
     },
     "manaRestrictions": {
       "tapForMana": "Für Mana tappen",

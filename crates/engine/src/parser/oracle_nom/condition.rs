@@ -9,7 +9,7 @@ use nom::bytes::complete::take_until;
 use nom::character::complete::multispace1;
 use nom::combinator::{cut, eof, map, opt, peek, value, verify};
 use nom::multi::many0;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::bridge::nom_on_lower;
@@ -276,9 +276,98 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_quantity_quantity_comparison,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
+        // CR 105.2 + CR 611.3a: "<color> is the most common color among all
+        // permanents [or is tied for most common]" (Invasion Djinn cycle).
+        parse_color_is_most_common_among_permanents_condition,
         parse_remaining_state_presence_conditions_tail,
     ))
     .parse(input)
+}
+
+/// CR 105.2 + CR 611.3a: "<color> is the most common color among all
+/// permanents[ or is tied for most common]" — the Invasion Djinn cycle (Sulam
+/// Djinn, Goham Djinn, Ruham Djinn, Zanam Djinn, Halam Djinn): "This creature
+/// gets -2/-2 as long as [color] is the most common color among all
+/// permanents or is tied for most common."
+///
+/// Maps to a `StaticCondition::And` of two `QuantityComparison`s over the
+/// battlefield-wide count of permanents with the named color
+/// (`QuantityRef::ObjectCount`) and the largest per-color count across every
+/// color (`QuantityRef::ObjectCountBySharedQuality` grouped by
+/// `SharedQuality::Color`). `Comparator::GE` already admits ties, so the
+/// optional "or is tied for most common" tail is redundant text discarded
+/// here — both phrasings collapse to the same comparison, mirroring how
+/// `parse_shares_most_common_color_condition` treats Heroic Defiance's
+/// analogous "or a color tied for most common" tail.
+///
+/// The second conjunct (`max_bucket >= 1`) is required for correctness, not
+/// stylistic symmetry: when every battlefield permanent is colorless, no
+/// color bucket exists and `ObjectCountBySharedQuality`'s `Max` aggregate
+/// (CR 109.3 defines color as a characteristic, but does not itself define
+/// this grouped aggregate or its empty-population behavior) returns `0` for
+/// an empty bucket set — coinciding with the named color's own `0` count and
+/// making a bare `named_count >= max_bucket` comparison vacuously true. That
+/// would wrongly treat "no color exists" as "this color is most common".
+/// Requiring `max_bucket >= 1` alongside `named_count >= max_bucket` forces
+/// `named_count >= 1` too, so the pair is only satisfiable when a real
+/// colored population exists and the named color is (tied for) its largest
+/// bucket — matching how `eval_shares_color_with_most_common_color`
+/// (`game::conditions`) explicitly returns `false` when there is no colored
+/// permanent for the analogous Heroic Defiance condition.
+/// Deliberately composed from existing generic `QuantityRef` building blocks
+/// rather than a new `StaticCondition` variant — the named-color population
+/// and the "most common among all colors" aggregate are both already-typed
+/// axes, so no new leaf is needed.
+fn parse_color_is_most_common_among_permanents_condition(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, color) = parse_color(input)?;
+    let (rest, _) = tag(" is the most common color among all permanents").parse(rest)?;
+    let (rest, _) = opt(tag(" or is tied for most common")).parse(rest)?;
+
+    let all_permanents = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Permanent],
+        controller: None,
+        properties: Vec::new(),
+    });
+    let colored_permanents = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Permanent],
+        controller: None,
+        properties: vec![FilterProp::HasColor { color }],
+    });
+    let max_color_bucket = || QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCountBySharedQuality {
+            filter: all_permanents.clone(),
+            quality: SharedQuality::Color,
+            aggregate: AggregateFunction::Max,
+        },
+    };
+
+    Ok((
+        rest,
+        StaticCondition::And {
+            conditions: vec![
+                // A most-common-color bucket must actually exist — false when
+                // every permanent is colorless (no bucket reaches size 1).
+                StaticCondition::QuantityComparison {
+                    lhs: max_color_bucket(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                // The named color's count must be at least as large as the
+                // largest bucket — i.e. it leads or ties for most common.
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: colored_permanents,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: max_color_bucket(),
+                },
+            ],
+        },
+    ))
 }
 
 /// Keeps the remaining state-presence grammar below nom's tuple-arity limit
@@ -6839,19 +6928,79 @@ fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, 
     ))
 }
 
-/// CR 601.2h + CR 603.4: Intervening-if comparing mana spent on the triggering
-/// spell against this creature's power and/or toughness.
+/// CR 601.2h + CR 603.4: Intervening-if comparing the mana spent on a cast
+/// spell against the source's own power and/or toughness. Which spell that is
+/// comes from the subject's anaphora, not from a default.
 ///
-/// Recognizes "the amount of mana you spent is [comparator] this creature's
-/// power or toughness" (SOS Increment reminder text). The natural-language
+/// Two surface forms of the same sentence:
+///   * "the amount of mana you spent is …" — the SOS Increment reminder text,
+///     whose subject is always the triggering spell.
+///   * "the amount of mana spent to cast <anaphora> is …" — the printed
+///     wording that predates the keyword (Liberator, Urza's Battlethopter).
+///     Which spell that names is read through the shared
+///     `parse_mana_spent_self_subject` authority every mana-spent sibling in
+///     this module already consults, so "that spell" is not re-decided here.
+///     CR 400.7d is what
+///     licenses the self-anaphora arm of that authority: a permanent's ability
+///     may reference "what mana was spent to pay" the costs of the spell it
+///     was.
+///
+/// The object is "[comparator] <subject>'s power or toughness". The natural-language
 /// "or" means *either* threshold — `A > (P or T)` is satisfied when `A > P`
-/// **or** `A > T`. The "this creature's" subject, including the normalized
-/// "~'s" self-reference form, carries Increment's implicit source-is-creature
-/// intervening-if; "this permanent's" stays as a plain P/T comparison for
-/// non-Increment siblings.
+/// **or** `A > T`.
+///
+/// Whether a source-is-creature conjunct is added is decided by the SUBJECT,
+/// because the object phrase cannot decide it. `oracle_util::normalize_card_name_refs`
+/// rewrites BOTH a card's own printed name and "this creature" to `~` — the
+/// name via `replace_all_words`, the phrase via `SELF_REF_TYPE_PHRASES` — so
+/// `~'s` arrives from Increment's reminder and from Liberator, Urza's
+/// Battlethopter alike. The subject keeps them apart:
+///
+///   * "the amount of mana you spent" is the printed REMINDER of Increment. The
+///     reminder drops the clause CR 702.191a's rules text carries ("'Increment'
+///     means 'Whenever you cast a spell, IF THIS PERMANENT IS A CREATURE AND the
+///     amount of mana spent to cast that spell is greater than this creature's
+///     power …'"), so reinstating it here is that keyword clause. It gates.
+///   * "the amount of mana spent to cast &lt;anaphora&gt;" is a card spelling the
+///     sentence out itself. Liberator prints no creature clause and must not be
+///     given one. CR 208.3 ("A noncreature permanent has no power or
+///     toughness…") with CR 107.2 ("If anything needs to use a number that can't
+///     be determined … it uses 0 instead") says such a permanent compares
+///     against 0 — the ability still triggers. This engine reports a
+///     noncreature's power as its printed value instead, an engine-level CR
+///     208.3 gap tracked separately, not a parser one.
+///
+/// The explicit "this creature's" / "this permanent's" object arms are kept and
+/// stay pinned, but no production path was found that reaches this parser with
+/// either phrase intact — normalization rewrites both unconditionally.
+///
+/// One divergence, deliberate and unreachable today: the subject anaphora is
+/// read by `parse_mana_spent_self_subject`, which maps "this spell"/"it" to
+/// `SelfObject`, while `try_extract_mana_spent_comparison_condition`
+/// (`oracle_trigger.rs`) states the opposite for its own sentence in the same
+/// position. Neither ever ACCEPTS the other's input — that one requires a
+/// `" its mana value"` tail this one cannot produce, and it already sees and
+/// rejects Liberator's clause — and no corpus face writes this sentence with a
+/// self-anaphora. Consulting the shared authority is still the right call:
+/// re-deciding the mapping here is exactly the hand-typed list this parser
+/// avoids elsewhere.
 fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticCondition> {
-    // Subject: "the amount of mana you spent is "
-    let (rest, _) = tag("the amount of mana you spent is ").parse(input)?;
+    // Subject, and with it the spell whose payment is measured.
+    let (rest, (scope, is_increment_reminder)) = alt((
+        value(
+            (CastManaObjectScope::TriggeringSpell, true),
+            tag("the amount of mana you spent is "),
+        ),
+        map(
+            delimited(
+                tag("the amount of mana spent to cast "),
+                nom_quantity::parse_mana_spent_self_subject,
+                tag(" is "),
+            ),
+            |scope| (scope, false),
+        ),
+    ))
+    .parse(input)?;
     // Comparator: "greater than " / "less than " / "equal to "
     let (rest, comparator) = alt((
         value(Comparator::GT, tag("greater than ")),
@@ -6863,7 +7012,13 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
     let (rest, requires_creature_source) = alt((
         value(true, tag("this creature's ")),
         value(false, tag("this permanent's ")),
-        value(true, tag("~'s ")),
+        // `oracle_util::normalize_card_name_refs` collapses BOTH "this creature"
+        // and the card's own printed name to `~`, so this arm alone cannot tell
+        // Increment's reminder from a card that writes its own name. The subject
+        // can: the reminder's subject reaches a card only from the Increment
+        // keyword, a spelled-out subject is the card writing its own sentence,
+        // and only the keyword carries CR 702.191a's creature clause.
+        value(is_increment_reminder, tag("~'s ")),
     ))
     .parse(rest)?;
     let (rest, first) = alt((
@@ -6903,9 +7058,10 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
 
     let lhs = QuantityExpr::Ref {
         qty: QuantityRef::ManaSpentToCast {
-            // "the amount of mana you spent" is the triggering-spell intervening-if
-            // (SOS Increment); the trigger event is in scope at evaluation time.
-            scope: CastManaObjectScope::TriggeringSpell,
+            // The subject above already decided this: the reminder text's
+            // "you spent" is the triggering spell, the printed form's anaphora
+            // says so itself. The trigger event is in scope at evaluation time.
+            scope,
             metric: crate::types::ability::CastManaSpentMetric::Total,
         },
     };
@@ -8379,6 +8535,11 @@ fn parse_there_are_conditions_with_quantity(
         (None, Some(_)) => Comparator::GE,
         (None, None) => Comparator::EQ,
     };
+    match parse_filtered_zone_card_count(rest) {
+        Ok((rest, qty)) => return Ok((rest, make_quantity_comparison(qty, comparator, n))),
+        Err(nom::Err::Error(_)) => {}
+        Err(error @ (nom::Err::Failure(_) | nom::Err::Incomplete(_))) => return Err(error),
+    }
     if let Ok((rest_after_type, type_text)) =
         take_until::<_, _, OracleError<'_>>(" cards total in ").parse(rest)
     {
@@ -8407,6 +8568,101 @@ fn parse_there_are_conditions_with_quantity(
             n,
         ),
     ))
+}
+
+/// CR 109.2a + CR 400.1: A card description with a named zone counts matching
+/// cards in that zone, so this preserves the parsed filter rather than flattening
+/// it into a lexical noun or a card-type list.
+///
+/// The type phrase and locative zone are deliberately parsed by their separate
+/// authorities. `parse_type_phrase` owns the complete noun phrase, while
+/// `parse_scoped_zone_count_ref` owns the player/zone scope after `in `.
+fn parse_filtered_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest_after_noun, noun) = take_until(" in ").parse(input)?;
+    let (after_cards, _) = terminated(take_until("cards"), tag("cards")).parse(noun)?;
+    if !after_cards.is_empty() {
+        return Err(oracle_err(input));
+    }
+    let (filter, remainder) = parse_type_phrase(noun);
+    if !remainder.trim().is_empty() || !is_admissible_zone_card_count_filter(&filter) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = tag(" in ").parse(rest_after_noun)?;
+    let (rest, (zone, scope)) = cut(preceded(
+        peek(alt((tag("your "), tag("all graveyards")))),
+        parse_scoped_zone_count_ref,
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ZoneCardCount {
+            zone,
+            card_types: Vec::new(),
+            filter: Some(filter),
+            scope,
+        },
+    ))
+}
+
+/// Limits the filtered zone-count bridge to card descriptions whose semantics
+/// remain valid in every counted zone. All other filter forms deliberately fall
+/// through to the legacy quantity grammar instead of being partially accepted.
+fn is_admissible_zone_card_count_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) => {
+            controller.is_none()
+                && !type_filters.is_empty()
+                && !type_filters.iter().any(type_filter_contains_any)
+                && !properties.is_empty()
+                && properties
+                    .iter()
+                    .all(is_admissible_zone_card_count_property)
+        }
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(is_admissible_zone_card_count_filter)
+        }
+        _ => false,
+    }
+}
+
+/// `TypeFilter::Any` would make this bridge a broad unfiltered count. Descend
+/// through its recursive variants so nested `Any` filters cannot bypass that
+/// boundary.
+fn type_filter_contains_any(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Any => true,
+        TypeFilter::Non(filter) => type_filter_contains_any(filter),
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_filter_contains_any),
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Subtype(_) => false,
+    }
+}
+
+/// Only static card-description properties can be evaluated meaningfully in a
+/// named card zone. The default is intentionally reject-by-default so a future
+/// property cannot widen this parser without an explicit admissibility decision.
+fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
+    matches!(
+        property,
+        FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::NotSupertype { .. }
+    )
 }
 
 /// Self-referential source alternatives shared by the "exiled with [source]"
@@ -9862,6 +10118,47 @@ pub fn parse_you_put_onto_battlefield_this_way_clause(
     Ok((rest, (filter, false)))
 }
 
+/// CR 608.2c + CR 701.25a: Parse "you put [quantifier] [type] into your
+/// graveyard this way" — the active-voice reflexive gate created by a
+/// preceding "surveil N" instruction (Chandra, Chill of Compliance prints
+/// "Surveil 1." followed by "If you put a noncreature, nonland card into
+/// your graveyard this way, put that card into your hand."; Enlightened
+/// Confidant shares the shape).
+///
+/// CR 701.25a: to surveil, each looked-at card is EITHER put into the
+/// graveyard OR left on top of the library — a genuine choice, unlike
+/// discard/sacrifice/exile, whose destination is inherent to the verb. So
+/// (like the `parse_you_put_onto_battlefield_this_way_clause` sibling right
+/// above) this clause is DESTINATION-BOUND: a redirect that sends the card
+/// elsewhere as it moves (Rest in Peace / Leyline of the Void: "would be put
+/// into a graveyard from anywhere → exile instead") defeats it — the caller
+/// must pair the returned filter with `destination: Some(Zone::Graveyard)`,
+/// not `None`. The surveil choice's library → graveyard move publishes the
+/// moved card into `state.last_zone_changed_ids`, mirroring the
+/// `parse_you_discard_this_way_clause` / `parse_you_sacrifice_this_way_clause`
+/// siblings below; only the verb and destination differ.
+pub fn parse_you_put_into_graveyard_this_way_clause(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("you put ").parse(input)?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        parse_article,
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let after_filter = after_filter.trim_start();
+    let (rest, _) = tag("into your graveyard this way").parse(after_filter)?;
+    Ok((rest, (filter, false)))
+}
+
 /// CR 701.9a: Parse "you discard [quantifier] [type] card[s] this way" — the
 /// active-voice condition following a preceding "discard a card" instruction
 /// in the same ability (Talion's Messenger: "draw a card,
@@ -10379,8 +10676,8 @@ pub(crate) fn match_when_you_do(i: &str) -> OracleResult<'_, ()> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, CountScope, PtStat, PtValueScope, RoundingMode, TriggerCondition,
-        TypeFilter, TypedFilter, ZoneRef,
+        CardTypeSetSource, ControllerRef, CountScope, PtStat, PtValueScope, RoundingMode,
+        TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -14504,25 +14801,276 @@ mod tests {
             parse_inner_condition("there are fewer than six creature cards in your graveyard")
                 .unwrap();
         assert_eq!(rest, "");
-        match c {
+        assert_eq!(
+            c,
             StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty:
-                            QuantityRef::ZoneCardCount {
-                                zone: ZoneRef::Graveyard,
-                                card_types,
-                                filter: None,
-                                scope: CountScope::Controller,
-                            },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature],
+                        filter: None,
+                        scope: CountScope::Controller,
                     },
+                },
                 comparator: Comparator::LT,
                 rhs: QuantityExpr::Fixed { value: 6 },
-            } => {
-                assert_eq!(card_types, vec![TypeFilter::Creature]);
             }
-            other => panic!("expected ZoneCardCount Creature LT 6, got {other:?}"),
+        );
+    }
+
+    #[test]
+    fn filtered_zone_card_counts_preserve_filter_scope_and_comparator_axes() {
+        let typed = |type_filters, properties| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: None,
+                properties,
+            })
+        };
+        let cases = [
+            (
+                "there are four or more historic cards in your graveyard",
+                Comparator::GE,
+                4,
+                typed(vec![TypeFilter::Card], vec![FilterProp::Historic]),
+                CountScope::Controller,
+            ),
+            (
+                "there are two nonhistoric cards in all graveyards",
+                Comparator::EQ,
+                2,
+                typed(vec![TypeFilter::Card], vec![FilterProp::NotHistoric]),
+                CountScope::All,
+            ),
+            (
+                "there are three legendary creature cards in your graveyard",
+                Comparator::EQ,
+                3,
+                typed(
+                    vec![TypeFilter::Creature],
+                    vec![FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    }],
+                ),
+                CountScope::Controller,
+            ),
+            (
+                "there are two nonbasic land cards in all graveyards",
+                Comparator::EQ,
+                2,
+                typed(
+                    vec![TypeFilter::Land],
+                    vec![FilterProp::NotSupertype {
+                        value: Supertype::Basic,
+                    }],
+                ),
+                CountScope::All,
+            ),
+            (
+                "there are three or more legendary creature or nonbasic land cards in all graveyards",
+                Comparator::GE,
+                3,
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(
+                            vec![TypeFilter::Creature],
+                            vec![FilterProp::HasSupertype {
+                                value: Supertype::Legendary,
+                            }],
+                        ),
+                        typed(
+                            vec![TypeFilter::Land],
+                            vec![
+                                FilterProp::NotSupertype {
+                                    value: Supertype::Basic,
+                                },
+                                FilterProp::HasSupertype {
+                                    value: Supertype::Legendary,
+                                },
+                            ],
+                        ),
+                    ],
+                },
+                CountScope::All,
+            ),
+        ];
+
+        for (text, comparator, threshold, filter, scope) in cases {
+            let (rest, condition) = parse_inner_condition(text)
+                .unwrap_or_else(|error| panic!("must parse {text:?}: {error:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            card_types: Vec::new(),
+                            filter: Some(filter),
+                            scope,
+                        },
+                    },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value: threshold },
+                },
+                "exact AST for {text:?}",
+            );
         }
+    }
+
+    #[test]
+    fn filtered_zone_card_count_reach_guards_preserve_legacy_and_boundaries() {
+        let (rest, cards_total) =
+            parse_inner_condition("there are three creature cards total in your graveyard")
+                .expect("cards-total legacy path must remain reachable");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cards_total,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+
+        let (rest, instant_or_sorcery) = parse_inner_condition(
+            "there are three or more instant or sorcery cards in your graveyard",
+        )
+        .expect("property-free type disjunction must retain its legacy count path");
+        assert_eq!(rest, "");
+        assert_eq!(
+            instant_or_sorcery,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+
+        let (rest, card_types_among) = parse_inner_condition(
+            "there are four or more card types among cards in your graveyard",
+        )
+        .expect("card-types-among legacy path must remain reachable");
+        assert_eq!(rest, "");
+        assert_eq!(
+            card_types_among,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone {
+                            zone: ZoneRef::Graveyard,
+                            scope: CountScope::Controller,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+
+        let (rest, bare_cards) = parse_inner_condition("there are four cards in your graveyard")
+            .expect("bare cards must retain their canonical quantity path");
+        assert_eq!(rest, "");
+        assert_eq!(
+            bare_cards,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::GraveyardSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+
+        let (rest, battlefield_count) =
+            parse_inner_condition("there are seven or more lands on the battlefield")
+                .expect("battlefield count fallback must remain reachable");
+        assert_eq!(rest, "");
+        assert_eq!(
+            battlefield_count,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Land],
+                            controller: None,
+                            properties: vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }],
+                        }),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            }
+        );
+
+        let (_, plural_historic) =
+            parse_filtered_zone_card_count("historic cards in your graveyard")
+                .expect("positive reach guard for rejected filtered-count forms");
+        assert!(matches!(plural_historic, QuantityRef::ZoneCardCount { .. }));
+        assert!(matches!(
+            parse_filtered_zone_card_count("historic card in your graveyard"),
+            Err(nom::Err::Error(_))
+        ));
+        for text in [
+            "creature cards in your graveyard",
+            "Lesson cards in your graveyard",
+            "instant or sorcery cards in your graveyard",
+        ] {
+            assert!(
+                matches!(
+                    parse_filtered_zone_card_count(text),
+                    Err(nom::Err::Error(_))
+                ),
+                "property-free filter must fall through to the legacy count parser for {text:?}"
+            );
+        }
+        assert!(matches!(
+            parse_filtered_zone_card_count("artifact cards you control in your graveyard"),
+            Err(nom::Err::Error(_))
+        ));
+        assert!(matches!(
+            parse_filtered_zone_card_count("tapped creature cards in your graveyard"),
+            Err(nom::Err::Error(_))
+        ));
+
+        for text in [
+            "there are five historic cards in an opponent's graveyard",
+            "there are five historic cards in each player's graveyard",
+            "there are five historic cards in graveyard",
+        ] {
+            assert!(
+                matches!(parse_inner_condition(text), Err(nom::Err::Failure(_))),
+                "unsupported filtered-count scope must commit as Failure for {text:?}"
+            );
+        }
+
+        let (rest, _) =
+            parse_inner_condition("there are four or more historic cards in your graveyard total")
+                .expect("unconsumed tail must remain visible to the caller");
+        assert_eq!(rest, " total");
+        let (rest, _) = parse_inner_condition(
+            "there are four or more historic cards in your graveyard, draw a card",
+        )
+        .expect("comma boundary must remain visible to the caller");
+        assert_eq!(rest, ", draw a card");
     }
 
     /// CR 107.1 + CR 611.3a: "there are fewer than N cards ..." with the plain
@@ -14558,17 +15106,21 @@ mod tests {
             parse_inner_condition("there are more than two creature cards in your graveyard")
                 .unwrap();
         assert_eq!(rest, "");
-        match c {
+        assert_eq!(
+            c,
             StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::ZoneCardCount { .. },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature],
+                        filter: None,
+                        scope: CountScope::Controller,
                     },
+                },
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Fixed { value: 2 },
-            } => {}
-            other => panic!("expected ZoneCardCount GT 2, got {other:?}"),
-        }
+            }
+        );
     }
 
     /// CR 107.1: suffix regression — the "or more" (GE) suffix axis still parses
@@ -14659,6 +15211,38 @@ mod tests {
         }
     }
 
+    /// CR 202.3 + CR 611.3a: the mana-value-diversity sibling of Delirium — SNC's
+    /// "there are five or more mana values among cards in your graveyard" (Aven
+    /// Heartstabber, Snooping Newsie, Syndicate Infiltrator, Graveyard Shift, and
+    /// their Alchemy variants). Unlike Delirium's `DistinctCardTypes`, this counts
+    /// distinct mana VALUES via the generic `ObjectCountDistinct` axis.
+    #[test]
+    fn test_there_are_mana_values_graveyard_diversity() {
+        let (rest, c) = parse_inner_condition(
+            "there are five or more mana values among cards in your graveyard",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountDistinct { filter, qualities },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => {
+                assert_eq!(qualities, vec![SharedQuality::ManaValue]);
+                assert_eq!(filter.extract_in_zone(), Some(Zone::Graveyard));
+                let TargetFilter::Typed(filter) = filter else {
+                    panic!("expected Typed graveyard filter");
+                };
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected ObjectCountDistinct[ManaValue] GE 5, got {other:?}"),
+        }
+    }
+
     #[test]
     fn there_are_zone_threshold_stops_before_counter_effect_clause() {
         let (rest, c) = parse_inner_condition(
@@ -14740,25 +15324,21 @@ mod tests {
             parse_inner_condition("there are three or more Lesson cards in your graveyard")
                 .unwrap();
         assert_eq!(rest, "");
-        match c {
+        assert_eq!(
+            c,
             StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty:
-                            QuantityRef::ZoneCardCount {
-                                zone: crate::types::ability::ZoneRef::Graveyard,
-                                card_types,
-                                scope: crate::types::ability::CountScope::Controller,
-                                filter: None,
-                            },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Subtype("Lesson".to_string())],
+                        filter: None,
+                        scope: CountScope::Controller,
                     },
+                },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
-            } => {
-                assert_eq!(card_types, vec![TypeFilter::Subtype("Lesson".to_string())]);
             }
-            other => panic!("expected Lesson graveyard count GE 3, got {other:?}"),
-        }
+        );
     }
 
     #[test]
@@ -18293,6 +18873,70 @@ mod tests {
         }
     }
 
+    /// CR 601.2h + CR 603.4: the PRINTED wording of the same sentence, which
+    /// predates the Increment keyword (Liberator, Urza's Battlethopter:
+    /// "Whenever you cast a spell, if the amount of mana spent to cast that
+    /// spell is greater than Liberator's power, ..."). Before the subject was
+    /// widened this fell through and the whole intervening-if was dropped, so
+    /// every spell cast added a counter regardless of what was paid.
+    #[test]
+    fn test_parse_condition_printed_mana_spent_vs_self_power() {
+        let (rest, c) = parse_condition(
+            "if the amount of mana spent to cast that spell is greater than ~'s power",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        // A bare comparison: single property, so no `Or`; and no
+        // source-is-creature conjunct, because the SUBJECT is not Increment's
+        // reminder wording. Its twin
+        // `test_parse_condition_mana_spent_vs_normalized_self_pt_has_creature_gate`
+        // feeds the SAME object phrase, `~'s power`, and does get the conjunct —
+        // which is the proof that the object cannot be what decides it. The
+        // scope likewise comes from "that spell", not from a default.
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                        metric: crate::types::ability::CastManaSpentMetric::Total,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    },
+                },
+            }
+        );
+    }
+
+    /// CR 400.7d: the printed form reads its scope from the anaphora — "this
+    /// spell" resolves to `CastManaObjectScope::SelfObject`, the ability's own
+    /// source object, not to the triggering spell. Pins that the shared subject
+    /// authority is consulted rather than re-decided here.
+    #[test]
+    fn test_printed_mana_spent_subject_selects_scope() {
+        let (rest, c) = parse_condition(
+            "if the amount of mana spent to cast this spell is greater than ~'s toughness",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison { lhs, .. } = &c else {
+            panic!("expected a bare comparison, got {c:?}");
+        };
+        assert_eq!(
+            *lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                    metric: crate::types::ability::CastManaSpentMetric::Total,
+                },
+            }
+        );
+    }
+
     /// Single-property form ("greater than this creature's power") parses as
     /// a single `QuantityComparison`, not an `Or`.
     #[test]
@@ -18851,6 +19495,14 @@ mod tests {
         ));
     }
 
+    /// CR 702.191a: the reminder-text subject identifies the Increment keyword,
+    /// whose rules text prints "if this permanent is a creature and".
+    /// Normalization has already turned "this creature's" into "~'s" by the time
+    /// the parser sees it, so the gate has to survive that rewrite.
+    /// `test_parse_condition_printed_mana_spent_vs_self_power` is its twin: the
+    /// spelled-out subject gets no gate. CR 702.191a's own rules text words the
+    /// subject exactly that way — what separates the two is that no oracle face
+    /// gives that keyword any subject but its reminder's.
     #[test]
     fn test_parse_condition_mana_spent_vs_normalized_self_pt_has_creature_gate() {
         let (rest, c) =

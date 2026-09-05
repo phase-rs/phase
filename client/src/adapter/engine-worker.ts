@@ -47,13 +47,17 @@ import init, {
   replay_seek_js,
   clear_replay_playback,
   preview_mana_payment_js,
+  preview_interaction_js,
   get_card_face_data,
   get_card_parse_details,
   get_card_rulings,
 } from "@wasm/engine";
 
 import { isActionOutcome, type ActionRejection, type AiActionProposal, type GameAction } from "./types";
-import type { InteractionSubmission } from "./generated/interaction";
+import type {
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
 
@@ -85,6 +89,7 @@ type EngineRequest =
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
+  | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
   | { type: "getLegalActions"; id: number }
@@ -396,6 +401,24 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "previewManaPayment": {
         const outcome = preview_mana_payment_js(msg.actor, msg.action);
+        if (typeof outcome === "string") {
+          error(msg.id, outcome);
+          break;
+        }
+        if (!isActionOutcome(outcome)) {
+          malformedOutcomeError(msg.id);
+          break;
+        }
+        if (outcome.status === "rejected") {
+          rejectionError(msg.id, outcome.rejection);
+          break;
+        }
+        result(msg.id, outcome.result);
+        break;
+      }
+
+      case "previewInteraction": {
+        const outcome = preview_interaction_js(msg.actor, msg.request);
         if (typeof outcome === "string") {
           error(msg.id, outcome);
           break;

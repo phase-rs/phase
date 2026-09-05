@@ -40,8 +40,10 @@ scenario-benches = ["engine/test-support"]
 
 [[bin]]
 name = "ai-duel"
+# No `test = false`: that key suppresses a bin's unittest target entirely, so it belongs only on a
+# bin with no `#[cfg(test)]` code. This one carries unit tests over the CLI option parser, the
+# per-game budget, the elimination ledger, the paired seed schedule and the outcome classifier.
 path = "src/bin/ai_duel.rs"
-test = false
 
 [[bin]]
 name = "ai-tune"

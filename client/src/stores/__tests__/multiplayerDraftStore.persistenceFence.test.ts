@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
 
 const {
   clearDraftHostSession,
@@ -20,7 +21,7 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
     ...actual,
     DraftAdapter: vi.fn().mockImplementation(function () {
       return {
-        draftProcedure: vi.fn(async () => ({
+        draftProcedure: vi.fn(async () => draftProcedureFixture({
           pod_size: 8,
           human_seats: 8,
           min_pod_size: 2,

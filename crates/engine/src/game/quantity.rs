@@ -3602,7 +3602,21 @@ fn resolve_ref(
             let mut signatures: std::collections::HashSet<Vec<Vec<String>>> =
                 std::collections::HashSet::new();
             for id in crate::game::targeting::zone_object_ids(state, zone) {
-                if !matches_target_filter(state, id, filter, &filter_ctx) {
+                // CR 400.3 + CR 109.5 + CR 108.4a: graveyard/hand/library
+                // membership is owner-scoped, not controller-scoped, so a
+                // stale `obj.controller` left by a control-change effect
+                // (e.g. a stolen creature that dies into its owner's
+                // graveyard) must not exclude the object from its owner's
+                // "your graveyard" query. Route through the zone-aware
+                // authority rather than the plain controller-scoped
+                // `matches_target_filter`.
+                if !crate::game::filter::matches_target_filter_for_zone(
+                    state,
+                    id,
+                    zone,
+                    filter,
+                    &filter_ctx,
+                ) {
                     continue;
                 }
                 let Some(obj) = state.objects.get(&id) else {
@@ -3970,7 +3984,13 @@ fn resolve_ref(
             crate::game::targeting::zone_object_ids(state, zone)
                 .iter()
                 .filter_map(|&id| {
-                    if matches_target_filter(state, id, filter, &filter_ctx) {
+                    if crate::game::filter::matches_target_filter_for_zone(
+                        state,
+                        id,
+                        zone,
+                        filter,
+                        &filter_ctx,
+                    ) {
                         state.objects.get(&id).map(|obj| match counter_type {
                             Some(ct) => {
                                 u32_to_i32_saturating(obj.counters.get(ct).copied().unwrap_or(0))
@@ -6481,9 +6501,16 @@ where
         // chosen-target anaphor ("that creature's power" on a targeted grant —
         // Xenagos, God of Revels) is rebound to `ObjectScope::Target` at the
         // parser/lowering seam (`apply_where_x_continuous_modification`), so it
-        // never reaches this arm. `CostPaidObject` stays the specific
-        // cost/trigger/effect-context object (Greater Good, sacrifice-cost and
-        // trigger-event power refs depend on this).
+        // never reaches this arm. Likewise, "that creature's power" anaphoring
+        // a PARENT effect's own object target rather than a cost/trigger
+        // referent (Azog, Moria's Ruin's "its controller amasses Goblins X,
+        // where X is that creature's power" — "that creature" is the "destroy
+        // up to one other target creature" clause's own target, which may
+        // still be alive if the destroy was replaced or prevented) is rebound
+        // the same way, via `try_parse_amass`'s
+        // `rebind_cost_paid_object_pt_to_target` call. `CostPaidObject` stays
+        // the specific cost/trigger/effect-context object (Greater Good,
+        // sacrifice-cost and trigger-event power refs depend on this).
         ObjectScope::CostPaidObject => ability
             .and_then(|a| a.cost_paid_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
@@ -9474,6 +9501,8 @@ mod tests {
             ResolvedAbility::new(
                 Effect::ChooseCounterKind {
                     target: TargetFilter::ParentTargetSlot { index },
+                    domain: Default::default(),
+                    chooser: Default::default(),
                 },
                 vec![TargetRef::Object(second)],
                 source,
@@ -12759,6 +12788,49 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
+    }
+
+    #[test]
+    fn counters_on_objects_uses_owner_scope_in_graveyard() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let counted = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Owned Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&counted).unwrap();
+            obj.controller = PlayerId(1);
+            obj.counters.insert(CounterType::Plus1Plus1, 2);
+        }
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOnObjects {
+                counter_type: Some(CounterType::Plus1Plus1),
+                filter: TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), source),
+            2,
+            "a P0-owned graveyard card must match P0's controller-scoped query even when its stale controller is P1"
+        );
     }
 
     #[test]

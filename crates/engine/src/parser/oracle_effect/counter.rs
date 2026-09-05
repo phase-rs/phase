@@ -473,9 +473,10 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
 /// on <recipient> [if it doesn't have a counter of that kind on it]" →
 /// `Effect::PutChosenCounter`. Anaphoric recipients bind to `ParentTarget` (The
 /// Caves of Androzani); declared typed recipients use the shared target parser
-/// (Aven Courier). A source-self recipient remains unsupported because its
-/// producer may be a random counter-kind choice that is not yet bound to
-/// resolution state (Crystalline Giant). The optional suffix becomes an
+/// (Aven Courier). A source-self recipient IS supported: its producer — the
+/// printed-population random choice — now binds a concrete kind into
+/// resolution state before this clause runs (Crystalline Giant), which is the
+/// binding the earlier strict gap was waiting for. The optional suffix becomes an
 /// explicit EQ-zero predicate over each resolved target's count of the chosen
 /// kind. Combinator-based and fully consuming; `input` has already had the
 /// leading "put " stripped.
@@ -498,7 +499,10 @@ pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
         (TargetFilter::ParentTarget, remainder)
     } else {
         let (target, remainder) = parse_target(recipient_text);
-        if matches!(target, TargetFilter::Any | TargetFilter::SelfRef) {
+        // `Any` is this parser's "no recipient recognized", not a legal
+        // recipient. `SelfRef` is a real one — "on ~" — and its kind is bound
+        // by the preceding choice like every other producer's.
+        if matches!(target, TargetFilter::Any) {
             return None;
         }
         (target, remainder)
@@ -1089,6 +1093,53 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     })
 }
 
+/// CR 115.1d + CR 122.1: Extract the fixed resolution-time selection in
+/// "remove … from each of two creatures you control". The surrounding remove
+/// parser remains the authority for the counter phrase and object filter; this
+/// nom-shaped probe preserves only the untargeted cardinality that `Effect`
+/// cannot represent by itself.
+pub(super) fn remove_counter_exact_selection_count(lower: &str) -> Option<u32> {
+    let descriptor = remove_counter_each_of_descriptor(lower)?;
+    parse_fixed_count_descriptor(descriptor).map(|(count, _)| count)
+}
+
+/// CR 601.2c: Recover the announced target cardinality in the targeted
+/// counterpart, "remove … from each of two target creatures". This stays
+/// distinct from the untargeted exact-selection descriptor above.
+pub(super) fn remove_counter_exact_target_multi_target(lower: &str) -> Option<MultiTargetSpec> {
+    let descriptor = remove_counter_each_of_descriptor(lower)?;
+    let (remainder, count) = super::parse_multi_target_count_expr(descriptor).ok()?;
+    nom_on_lower(remainder, remainder, |input| {
+        value((), preceded(space1, tag("target "))).parse(input)
+    })
+    .map(|_| MultiTargetSpec::exact(count))
+}
+
+/// Extract the descriptor following a remove-counter "from each of" phrase.
+/// Keeping the structural prefix parser shared prevents target and untargeted
+/// exact-count recognition from drifting.
+fn remove_counter_each_of_descriptor(lower: &str) -> Option<&str> {
+    let ((), descriptor) = nom_on_lower(lower, lower, |input| {
+        preceded(
+            take_until(" from each of "),
+            value((), tag(" from each of ")),
+        )
+        .parse(input)
+    })?;
+    Some(descriptor)
+}
+
+/// Parse the non-targeted descriptor after "each of". Targeted fixed-count
+/// wording remains in the ordinary target-selection pipeline (CR 601.2c).
+fn parse_fixed_count_descriptor(input: &str) -> Option<(u32, &str)> {
+    let (count, remainder) = nom_on_lower(input, input, nom_primitives::parse_number)?;
+    let is_targeted = nom_on_lower(remainder, remainder, |i| {
+        value((), preceded(space1, tag("target "))).parse(i)
+    })
+    .is_some();
+    (!is_targeted && count > 0).then_some((count, remainder.trim_start()))
+}
+
 /// Normalize oracle-text counter type strings to canonical engine names.
 ///
 /// - `+1/+1` / `-1/-1` map to the canonical `P1P1` / `M1M1` keys.
@@ -1115,6 +1166,14 @@ fn strip_remove_counter_each_of_any_number(input: &str) -> Option<&str> {
     .map(|((), rest)| rest.trim_start())
 }
 
+/// CR 115.1d + CR 122.1: Strip the fixed-count counterpart of the variable
+/// distribution prefix. The number is carried by the imperative AST; this
+/// helper leaves the object phrase for the normal typed-filter parser.
+fn strip_remove_counter_each_of_fixed_number(input: &str) -> Option<&str> {
+    let ((), after_each_of) = nom_on_lower(input, input, |i| value((), tag("each of ")).parse(i))?;
+    parse_fixed_count_descriptor(after_each_of).map(|(_, remainder)| remainder)
+}
+
 /// CR 122.1 + CR 115.1d: Resolve the "from <objects>" clause of a remove-counter
 /// effect. The optional "each of any number of" prefix denotes a variable-count
 /// non-target distribution — strip it and parse the remainder as a type phrase
@@ -1128,7 +1187,9 @@ fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> Tar
         // CR 608.2k: Bare pronoun — context-dependent
         return resolve_it_pronoun(ctx);
     }
-    if let Some(filter_text) = strip_remove_counter_each_of_any_number(text) {
+    if let Some(filter_text) = strip_remove_counter_each_of_any_number(text)
+        .or_else(|| strip_remove_counter_each_of_fixed_number(text))
+    {
         let (t, _rem) = parse_type_phrase_with_ctx(filter_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, filter_text);
@@ -1721,15 +1782,23 @@ mod tests {
         ));
     }
 
-    /// Crystalline Giant's random counter-kind producer is not represented by
-    /// `ChoiceType::CounterKind`, so its source-self consumer must stay outside
-    /// the supported `PutChosenCounter` grammar until that binding exists.
+    /// CR 608.2c: Crystalline Giant's source-self consumer. This was a
+    /// deliberate strict gap for as long as its producer — the printed-list
+    /// random choice — could not bind a kind into resolution state. That
+    /// binding now exists (`CounterKindDomain::Printed` +
+    /// `CounterKindChooser::Random`), so "on ~" is an ordinary recipient and
+    /// the gap is closed rather than merely widened.
     #[test]
-    fn put_chosen_counter_rejects_unbound_source_self_consumer() {
-        assert!(
-            try_parse_put_chosen_counter("a counter of that kind on ~.").is_none(),
-            "an unbound random counter kind must remain a strict parser gap"
-        );
+    fn put_chosen_counter_accepts_source_self_consumer() {
+        let effect = try_parse_put_chosen_counter("a counter of that kind on ~.")
+            .expect("source-self recipient is supported once the producer binds a kind");
+        assert!(matches!(
+            effect,
+            Effect::PutChosenCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
     }
 
     /// CR 115.1d + CR 608.2c + CR 608.2d: Full-card reach guard for Aven
@@ -1777,6 +1846,7 @@ mod tests {
             choose.effect.as_ref(),
             Effect::ChooseCounterKind {
                 target: TargetFilter::Typed(filter),
+                ..
             } if filter.type_filters == vec![crate::types::ability::TypeFilter::Permanent]
                 && filter.controller == Some(ControllerRef::You)
         ));
@@ -1860,6 +1930,7 @@ mod tests {
             choose.effect.as_ref(),
             Effect::ChooseCounterKind {
                 target: TargetFilter::Typed(filter),
+                ..
             } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
                 && filter.controller == Some(ControllerRef::You)
         ));
@@ -2208,6 +2279,21 @@ mod tests {
             panic!("expected RemoveCounter, got {:?}", clause.effect);
         };
         assert!(matches!(target, TargetFilter::Typed(_)));
+    }
+
+    /// CR 601.2c: Fixed-count wording with `target` still announces its
+    /// targets. It must not be reclassified as the untargeted tracked-set
+    /// selection used by "each of two creatures".
+    #[test]
+    fn remove_counter_each_of_two_target_creatures_keeps_multi_targeting() {
+        let text = "remove a +1/+1 counter from each of two target creatures";
+        assert_eq!(remove_counter_exact_selection_count(text), None);
+        let clause = super::super::parse_effect_clause(text, &mut default_ctx());
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
+        );
+        assert!(matches!(clause.effect, Effect::RemoveCounter { .. }));
     }
 
     #[test]

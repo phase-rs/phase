@@ -82,7 +82,8 @@
     "clickModeButton": "Przycisk trybu kliknięcia",
     "shown": "Widoczny",
     "hidden": "Ukryty",
-    "resume": "Wznów",
+    "openGameLog": "Otwórz dziennik gry",
+    "closeGameLog": "Zamknij dziennik gry",
     "settings": "Ustawienia",
     "boardLayoutSplit": "Podzielony",
     "boardLayoutLegacy": "Legacy",
@@ -106,6 +107,7 @@
   },
   "volume": {
     "deviceBlocked": "Dźwięk niedostępny — serwer audio systemu nie odpowiada. Uruchom aplikację ponownie, aby spróbować jeszcze raz.",
+    "mediaUnavailable": "Dźwięk niedostępny — w tym systemie brakuje komponentów multimedialnych potrzebnych do odtwarzania dźwięku. Zainstaluj pakiety wtyczek GStreamer swojej dystrybucji i uruchom aplikację ponownie.",
     "mute": "Wycisz",
     "unmute": "Wyłącz wyciszenie",
     "volume": "Głośność"

@@ -1,5 +1,9 @@
 import type { AiActionProposal, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, RewindOption, WaitingFor } from "../adapter/types";
-import type { InteractionSubmission } from "../adapter/generated/interaction";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "../adapter/generated/interaction";
 import { actionRejectionError, AdapterError, AdapterErrorCode } from "../adapter/types";
 import { reportStructuredActionRejection } from "./actionRejectionReporter";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
@@ -100,8 +104,10 @@ const pendingQueue: PendingWork[] = [];
 
 /**
  * Identifies the game state for which the current dispatch pipeline is valid.
- * Restoring a saved game replaces the engine state wholesale, so work queued
- * for the old state must neither run nor release a newer dispatch's mutex.
+ * Restoring a saved game replaces the engine state wholesale, and a game-session
+ * boundary abandons it outright, so work queued for the old state must neither
+ * run nor release a newer dispatch's mutex. Bumped only by
+ * `abandonPendingDispatches`.
  */
 let dispatchGeneration = 0;
 
@@ -149,8 +155,22 @@ function sameBoundGameSession(
   return a?.adapter === b?.adapter && a?.generation === b?.generation;
 }
 
-/** Discard dispatch work that belongs to the game state being replaced. */
-function abandonDispatchesForStateRestore(): void {
+/**
+ * Discard every queued and in-flight dispatch and release the mutex.
+ *
+ * Two callers, both of which abandon the game the pending work belongs to:
+ * `restoreGameState` (the engine state is replaced wholesale) and
+ * `clearPromptOverlayState` (a game-session boundary). Bumping
+ * `dispatchGeneration` makes every downstream `isDispatchContextCurrent` guard
+ * decline, so a `processAction` continuation still in flight can neither commit
+ * nor release a newer dispatch's mutex. That covers the dispatch pipeline only:
+ * `dispatchInteraction` and `restoreGameState` commit without capturing the
+ * generation, so they are unaffected by the bump and can still write.
+ * Queued work is *resolved*, not rejected: a caller
+ * awaiting an action in an abandoned game has nothing to recover from and
+ * must not see a spurious rejection.
+ */
+export function abandonPendingDispatches(): void {
   dispatchGeneration += 1;
   inFlightLocalAction = null;
   isAnimating = false;
@@ -795,15 +815,15 @@ export async function dispatchInteraction(
 ): Promise<void> {
   const { adapter, gameState, gameMode } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
-  if (!adapter.submitInteraction) {
-    throw new AdapterError(
-      AdapterErrorCode.UNSUPPORTED,
-      "This game connection does not support interaction responses",
-      false,
-    );
-  }
 
   try {
+    if (!adapter.submitInteraction) {
+      throw new AdapterError(
+        AdapterErrorCode.UNSUPPORTED,
+        "This game connection does not support interaction responses",
+        false,
+      );
+    }
     const result = await adapter.submitInteraction(submission, actor);
     const snapshot = await adapter.getSnapshot();
     useGameStore.getState().commitEngineSnapshot(snapshot, {
@@ -815,6 +835,26 @@ export async function dispatchInteraction(
     reportActionError(err);
     throw err;
   }
+}
+
+/**
+ * Ask the active adapter to preview an interaction response. Resolving `null` means this
+ * transport cannot preview, or the engine advanced while the request ran — in both cases the
+ * caller renders its own defined no-answer state rather than an error. An adapter or transport
+ * FAILURE rejects, exactly as the mana-payment preview does; the caller catches it.
+ */
+export async function previewInteractionResponse(
+  request: InteractionPreviewRequest,
+  actor: number = getPlayerId(),
+): Promise<InteractionPreview | null> {
+  const { adapter, gameState, gameMode } = useGameStore.getState();
+  if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return null;
+  }
+  if (!adapter.previewInteraction) return null;
+  const previewEpoch = useGameStore.getState().engineCommitEpoch;
+  const preview = await adapter.previewInteraction(request, actor);
+  return useGameStore.getState().engineCommitEpoch === previewEpoch ? preview : null;
 }
 
 /** Dispatch a standing preference only while its captured game lifecycle is
@@ -956,7 +996,7 @@ export async function restoreGameState(
   const { adapter, gameId } = useGameStore.getState();
   if (!adapter) return "No adapter available";
 
-  abandonDispatchesForStateRestore();
+  abandonPendingDispatches();
   try {
     await adapter.restoreState(state);
   } catch (err) {
@@ -994,7 +1034,14 @@ export async function restoreGameState(
  */
 export async function dispatchResolveAll(requester: number): Promise<void> {
   await dispatchAction(
-    { type: "BeginResolveAll", data: { max_resolutions: 0 } },
+    // CR 117.3d: the button is the requester's own pre-commitment. `Own` cannot
+    // be blocked by a seat that declines or an AI seat that never answers;
+    // `Shared` (the table-wide consent proposal the engine uses for stack
+    // compression) is deliberately not reachable from this control.
+    {
+      type: "BeginResolveAll",
+      data: { max_resolutions: 0, scope: { type: "Own" } },
+    },
     requester,
   );
 }

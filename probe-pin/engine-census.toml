@@ -3,7 +3,7 @@
 # Why this manifest exists: this census's module header carried "22 production + 14 test sites"
 # while its assert read `(22, 21)`. The prose was hand-corrected across five adjudications
 # (12 => 13 => 14 => 16 => 17 => 21) and drifted out of sync with its own live assert anyway.
-# Rows P1-P4 below anchor `right: (22, 21)`, and P1 anchors the adjudication sentence inside the
+# Rows P1-P4 below anchor the pinned pair, and P1 anchors the adjudication sentence inside the
 # assert, so moving either without regenerating this block turns `probe-pin check` red.
 #
 # mode = "runtime-read" is the ENABLING CONDITION, not a formality: `census()` reads its sources
@@ -113,8 +113,8 @@ claim = "the production half fails DOWNWARD, and the pinned tuple + adjudication
   count = 0
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (21, 21)",
-             "right: (22, 21)",
+  anchor  = ["left: (22, 21)",
+             "right: (23, 21)",
              "THE TEST HALF HAS BEEN ADJUDICATED FIVE TIMES"]
 
 [[probe]]
@@ -131,7 +131,7 @@ claim = "the cfg(test) half is pinned INDEPENDENTLY of the production half"
   count = 1
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (22, 20)", "right: (22, 21)"]
+  anchor  = ["left: (23, 20)", "right: (23, 21)"]
 
 [[probe]]
 id    = "P3_walk_reaches_phase_ai_and_skips_comments"
@@ -148,7 +148,7 @@ claim = "the phase-ai root is walked, zero-hit files are visited, and COMMENT li
   count = 4
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (23, 21)", "right: (22, 21)"]
+  anchor  = ["left: (24, 21)", "right: (23, 21)"]
 
 [[probe]]
 id    = "P4_counting_is_per_line"
@@ -164,7 +164,7 @@ claim = "the count sums LINES, not files -- two planted lines in one file move i
   count = 2
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (24, 21)", "right: (22, 21)"]
+  anchor  = ["left: (25, 21)", "right: (23, 21)"]
 
 [[probe]]
 id    = "P5_relocation_preserves_the_count"

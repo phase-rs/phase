@@ -38,16 +38,21 @@ vi.mock("../SocialBar", () => ({ SocialBar: () => <div data-testid="social-bar" 
 function DraftChromeProbe() {
   const [mode, setMode] = useState<DraftShellChromeMode>("phone-drafting");
   const [showProgress, setShowProgress] = useState(true);
+  const isDrafting = mode === "phone-drafting" || mode === "tablet-drafting";
   const phoneAction = useMemo(() => ({
     icon: <span data-testid="pod-icon" />,
     label: "Pod Draft in Progress",
     onClick: phoneActionClick,
   }), []);
-  const topActions = useMemo<readonly DraftShellTopAction[]>(() => [
-    { id: "pause-resume", label: "Pause Draft", tone: "neutral", onClick: pauseActionClick },
-    { id: "end-draft", label: "End Draft", tone: "danger", onClick: endActionClick },
-  ], []);
-  useDraftShellChrome(mode, phoneAction, "pod", showProgress, topActions);
+  const topActions = useMemo<readonly DraftShellTopAction[]>(() => isDrafting
+    ? [
+      { id: "pause-resume", label: "Pause Draft", tone: "neutral", onClick: pauseActionClick },
+      { id: "end-draft", label: "End Draft", tone: "danger", onClick: endActionClick },
+    ]
+    : [
+      { id: "end-draft", label: "End Draft", tone: "danger", onClick: endActionClick },
+    ], [isDrafting]);
+  useDraftShellChrome(mode, isDrafting ? phoneAction : undefined, "pod", showProgress, topActions);
   return (
     <div>
       <button type="button" onClick={() => setMode("phone-drafting")}>Phone draft mode</button>
@@ -117,6 +122,11 @@ describe("AppShell responsive draft chrome", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Phone builder mode" }));
     await waitFor(() => expect(screen.getByText("Build Deck")).toHaveAttribute("aria-current", "step"));
+    const phoneBuilderChromeRow = screen.getByRole("link", { name: "Home" }).parentElement!;
+    expect([...phoneBuilderChromeRow.children].flatMap((element) => element.getAttribute("aria-label") ?? []))
+      .toEqual(["Home", "End Draft"]);
+    expect(screen.queryByRole("button", { name: "Pod Draft in Progress" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pause Draft" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Hide progress" }));
     await waitFor(() => expect(document.querySelector("[data-shell-draft-steps]")).not.toBeInTheDocument());
@@ -156,8 +166,13 @@ describe("AppShell responsive draft chrome", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Tablet builder mode" }));
     await waitFor(() => expect(screen.getByText("Build Deck")).toHaveAttribute("aria-current", "step"));
-    expect(screen.queryByRole("link", { name: "Home" })).not.toBeInTheDocument();
+    const tabletBuilderChromeRow = screen.getByRole("link", { name: "Home" }).parentElement!;
+    expect([...tabletBuilderChromeRow.children].flatMap((element) => element.getAttribute("aria-label") ?? []))
+      .toEqual(["Home", "End Draft"]);
+    expect(screen.queryByRole("button", { name: "Pod Draft in Progress" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause Draft" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "End Draft" }));
+    expect(endActionClick).toHaveBeenCalledOnce();
 
     fireEvent.click(screen.getByRole("button", { name: "Default mode" }));
     await waitFor(() => expect(screen.getByTestId("social-bar")).toBeInTheDocument());

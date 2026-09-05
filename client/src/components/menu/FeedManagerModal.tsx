@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { menuButtonClass } from "./buttonStyles";
 import { FEED_REGISTRY } from "../../data/feedRegistry";
 import {
+  FEED_ERROR_KEYS,
   listSubscriptions,
   subscribe,
   unsubscribe,
@@ -13,6 +14,7 @@ import {
   refreshAllFeeds,
 } from "../../services/feedService";
 import type { FeedSubscription } from "../../types/feed";
+import { useEffectiveOffline } from "../../stores/connectivityStore";
 
 interface FeedManagerModalProps {
   open: boolean;
@@ -21,6 +23,7 @@ interface FeedManagerModalProps {
 
 export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
   const { t } = useTranslation("menu");
+  const effectiveOffline = useEffectiveOffline();
   const [subs, setSubs] = useState<FeedSubscription[]>(() => listSubscriptions());
   const [customUrl, setCustomUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -29,13 +32,15 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
   const subscribedIds = new Set(subs.map((s) => s.sourceId));
 
   const handleSubscribe = async (sourceId: string) => {
+    if (effectiveOffline) return;
     setLoading(sourceId);
     setError(null);
     try {
       await subscribe(sourceId);
       setSubs(listSubscriptions());
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message === FEED_ERROR_KEYS.offline ? t(message) : message);
     } finally {
       setLoading(null);
     }
@@ -47,19 +52,22 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
   };
 
   const handleRefresh = async (feedId: string) => {
+    if (effectiveOffline) return;
     setLoading(feedId);
     setError(null);
     try {
       await refreshFeed(feedId);
       setSubs(listSubscriptions());
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message === FEED_ERROR_KEYS.offline ? t(message) : message);
     } finally {
       setLoading(null);
     }
   };
 
   const handleRefreshAll = async () => {
+    if (effectiveOffline) return;
     setLoading("all");
     setError(null);
     try {
@@ -71,6 +79,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
   };
 
   const handleCustomSubscribe = async () => {
+    if (effectiveOffline) return;
     const url = customUrl.trim();
     if (!url) return;
     setLoading("custom");
@@ -80,7 +89,8 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
       setSubs(listSubscriptions());
       setCustomUrl("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message === FEED_ERROR_KEYS.offline ? t(message) : message);
     } finally {
       setLoading(null);
     }
@@ -107,7 +117,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
               <h2 className="text-lg font-semibold text-white">{t("feedManager.title")}</h2>
               <button
                 onClick={handleRefreshAll}
-                disabled={loading === "all" || subs.length === 0}
+                disabled={effectiveOffline || loading === "all" || subs.length === 0}
                 className="flex min-h-11 items-center justify-center self-start rounded px-3 py-1.5 text-xs text-slate-300 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white disabled:opacity-40 sm:min-h-0 sm:self-auto"
               >
                 {loading === "all" ? t("feedManager.refreshing") : t("feedManager.refreshAll")}
@@ -115,6 +125,11 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 sm:px-6">
+            {effectiveOffline && (
+              <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                {t("feedManager.offlineUnavailable")}
+              </div>
+            )}
             {error && (
               <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
                 {error}
@@ -158,7 +173,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                       {isSubscribed && (
                         <button
                           onClick={() => handleRefresh(source.id)}
-                          disabled={isLoading}
+                          disabled={effectiveOffline || isLoading}
                           className="min-h-11 flex-1 rounded px-3 py-1.5 text-xs text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white disabled:opacity-40 sm:min-h-0 sm:flex-none sm:px-2 sm:py-1"
                         >
                           {isLoading ? "…" : t("feedManager.refresh")}
@@ -166,7 +181,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                       )}
                       <button
                         onClick={() => isSubscribed ? handleUnsubscribe(source.id) : handleSubscribe(source.id)}
-                        disabled={isLoading}
+                        disabled={isLoading || (!isSubscribed && effectiveOffline)}
                         className={`min-h-11 flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 sm:min-h-0 sm:flex-none sm:py-1 ${
                           isSubscribed
                             ? "text-red-300 ring-1 ring-red-500/30 hover:bg-red-500/10"
@@ -195,7 +210,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                     <div className="flex shrink-0 gap-2 sm:ml-3">
                       <button
                         onClick={() => handleRefresh(sub.sourceId)}
-                        disabled={loading === sub.sourceId}
+                        disabled={effectiveOffline || loading === sub.sourceId}
                         className="min-h-11 flex-1 rounded px-3 py-1.5 text-xs text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white disabled:opacity-40 sm:min-h-0 sm:flex-none sm:px-2 sm:py-1"
                       >
                         {loading === sub.sourceId ? "…" : t("feedManager.refresh")}
@@ -224,8 +239,8 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                 />
                 <button
                   onClick={handleCustomSubscribe}
-                  disabled={!customUrl.trim() || loading === "custom"}
-                  className={`${menuButtonClass({ tone: "indigo", size: "sm", disabled: !customUrl.trim() || loading === "custom" })} w-full sm:w-auto`}
+                  disabled={effectiveOffline || !customUrl.trim() || loading === "custom"}
+                  className={`${menuButtonClass({ tone: "indigo", size: "sm", disabled: effectiveOffline || !customUrl.trim() || loading === "custom" })} w-full sm:w-auto`}
                 >
                   {loading === "custom" ? "…" : t("feedManager.add")}
                 </button>

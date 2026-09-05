@@ -61,16 +61,19 @@ import {
 } from "../components/draft/workspace/workspaceProjection";
 import { DialogShell } from "../components/modal/DialogShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
-import { MenuShell } from "../components/menu/MenuShell";
+import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import {
   draftPodScreen,
+  DRAFT_OFFLINE_ERROR,
   intergamePromptKey,
+  isMultiplayerDraftPodLive,
   useMultiplayerDraftStore,
   type DraftPodScreen,
   type GuestDraftResumeOutcome,
 } from "../stores/multiplayerDraftStore";
 import type { DraftPickDestination, DraftPickPlacementHint } from "../stores/draftStore";
 import { useDraftPodStore } from "../stores/draftPodStore";
+import { useEffectiveOffline } from "../stores/connectivityStore";
 
 // ── Setup Mode ────────────────────────────────────────────────────────
 
@@ -97,6 +100,7 @@ function subscribePickInteraction(listener: () => void): () => void {
 
 function PodSetup() {
   const { t } = useTranslation("draft");
+  const effectiveOffline = useEffectiveOffline();
   const [mode, setMode] = useState<SetupMode>("choose");
 
   const config = useDraftPodStore((s) => s.config);
@@ -124,6 +128,12 @@ function PodSetup() {
   );
   const packDistribution = useDraftPodStore((s) => s.packDistribution);
   const packsPerPlayer = useDraftPodStore((s) => s.packsPerPlayer);
+  const cubeMinDeckSize = useDraftPodStore((s) =>
+    s.procedureCacheKey?.kind === s.config.kind
+    && s.procedureCacheKey.tournamentFormat === s.config.tournamentFormat
+      ? s.cubeMinDeckSize
+      : null,
+  );
   const refreshProcedure = useDraftPodStore((s) => s.refreshProcedure);
 
   // The kind radios record intent (`setConfig`) but publish nothing, so the
@@ -132,8 +142,9 @@ function PodSetup() {
   // have no booster count to build a pack list against on the default entry,
   // which reaches this page with no `?kind=` deep link to load one.
   useEffect(() => {
+    if (effectiveOffline) return;
     void refreshProcedure();
-  }, [refreshProcedure, config.kind, config.tournamentFormat]);
+  }, [effectiveOffline, refreshProcedure, config.kind, config.tournamentFormat]);
   // Total over `DraftKind`: a future kind is a TS2741 at this literal rather than a
   // blank line under the radios. Values are already-resolved strings because
   // `react-i18next.d.ts` types `t`'s key against the `en` catalog, so a `t(variable)`
@@ -161,6 +172,32 @@ function PodSetup() {
   const podSizeLabel =
     podSizeItems.find((item) => item.value === String(config.podSize))?.label ??
     t("podSetup.playerCount", { count: config.podSize });
+  const configErrorMessage = configError === DRAFT_OFFLINE_ERROR
+    ? t("offline.startUnavailable")
+    : configError;
+
+  if (effectiveOffline) {
+    return (
+      <div className="mx-auto flex w-full max-w-2xl flex-col gap-6">
+        {mode !== "choose" && (
+          <button
+            onClick={() => setMode("choose")}
+            className="w-fit text-sm text-white/50 hover:text-white/80"
+          >
+            {t("podSetup.back")}
+          </button>
+        )}
+        <div className="rounded-card border border-amber-400/20 bg-amber-400/5 px-5 py-4 text-sm text-amber-100">
+          {t("offline.unavailableDescription")}
+        </div>
+        {configErrorMessage && (
+          <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
+            {configErrorMessage}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (mode === "choose") {
     return (
@@ -467,14 +504,15 @@ function PodSetup() {
               setCubeForm({ cubeName, cubeListText, settings });
               void createPod();
             }}
-            disabled={loadingPool}
+            minimumDeckSize={cubeMinDeckSize ?? undefined}
+            disabled={loadingPool || cubeMinDeckSize === null}
           />
         )}
 
         {/* Error */}
-        {configError && (
+        {configErrorMessage && (
           <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
-            {configError}
+            {configErrorMessage}
           </div>
         )}
 
@@ -526,9 +564,9 @@ function PodSetup() {
       </div>
 
       {/* Error */}
-      {configError && (
+      {configErrorMessage && (
         <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
-          {configError}
+          {configErrorMessage}
         </div>
       )}
 
@@ -789,7 +827,7 @@ function BetweenGamesView({
               capabilities: { kind: "fixed-pool" },
               onWorkspaceChange: setIntergameWorkspaceState,
               onPreferencesChange: handlePreferencesChange,
-              onSubmitDeck: () => {
+              onSubmitDeck: (_commanders) => {
                 const partition = projectWorkspacePartition(intergameWorkspace, view.pool);
                 submitSideboard(
                   sideboardPrompt.matchId,
@@ -1217,7 +1255,7 @@ function phaseContent(
 
 // ── Page ───────────────────────────────────────────────────────────────
 
-export function DraftPodPage() {
+function DraftPodPageContent() {
   const { t } = useTranslation("draft");
   const phase = useMultiplayerDraftStore((s) => s.phase);
   const screen = useMultiplayerDraftStore(draftPodScreen);
@@ -1290,7 +1328,7 @@ export function DraftPodPage() {
     onClick: handleEndDraft,
   }), [endingDraft, handleEndDraft, t]);
   const hostDraftTopActions = useHostDraftTopActions({
-    enabled: phase === "drafting",
+    enabled: phase === "drafting" || phase === "deckbuilding",
     endDraftAction,
   });
   const betweenGamesEditorActive = screen === "betweenGames"
@@ -1489,7 +1527,7 @@ export function DraftPodPage() {
         </DialogShell>
       )}
 
-      {!(phase === "drafting" && compactHostControlsLayout) && (
+      {!((phase === "drafting" || phase === "deckbuilding") && compactHostControlsLayout) && (
         <HostControls
           draftTopActions={hostDraftTopActions}
           endDraftAction={endDraftAction}
@@ -1497,4 +1535,37 @@ export function DraftPodPage() {
       )}
     </div>
   );
+}
+
+function DraftPodOfflineUnavailable() {
+  const { t } = useTranslation(["draft", "menu"]);
+  const navigate = useNavigate();
+
+  return (
+    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+      <MenuShell
+        title={t("offline.unavailableTitle", { ns: "draft" })}
+        description={t("offline.unavailableDescription", { ns: "draft" })}
+        layout="stacked"
+      >
+        <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col items-start gap-4 px-5 py-6">
+          <button
+            onClick={() => navigate("/")}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            {t("nav.home", { ns: "menu" })}
+          </button>
+        </MenuPanel>
+      </MenuShell>
+    </div>
+  );
+}
+
+export function DraftPodPage() {
+  const effectiveOffline = useEffectiveOffline();
+  const draftPodLive = useMultiplayerDraftStore(isMultiplayerDraftPodLive);
+
+  if (effectiveOffline && !draftPodLive) return <DraftPodOfflineUnavailable />;
+
+  return <DraftPodPageContent />;
 }

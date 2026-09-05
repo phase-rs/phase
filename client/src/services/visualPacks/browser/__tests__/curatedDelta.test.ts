@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { STORAGE_KEY_PREFIX } from "../../../../constants/storage.ts";
 import { usePreferencesStore, type ArtChainEntry, type CardArtOverride } from "../../../../stores/preferencesStore.ts";
 import type { DeckEntry } from "../../../deckParser.ts";
-import { CARD_BACK_URL, loadScryfallData, type PrintingEntry } from "../../../scryfall.ts";
+import { CARD_BACK_URL, MANA_SYMBOL_SHARDS, loadScryfallData, type PrintingEntry } from "../../../scryfall.ts";
 import { assetKey, packId } from "../../types.ts";
 import type { AssetKey, CatalogRoot, CuratedDrift, InstallSelector, OperationId, ProgressEvent, ResolutionResponse } from "../../types.ts";
 import type { ScryfallAssetDescriptor } from "../descriptors.ts";
@@ -69,7 +69,18 @@ const BOLT_MID = printing("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "mh1", "2019-0
 const BOLT_OLD = printing("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "lea", "1993-08-05");
 
 function cardEntry(oracleId: string, name: string, faceName: string) {
-  return { oracle_id: oracleId, name, face_names: [faceName], faces: [imageFace(oracleId)] };
+  return {
+    oracle_id: oracleId,
+    name,
+    face_names: [faceName],
+    faces: [imageFace(oracleId)],
+    mana_cost: "",
+    cmc: 0,
+    type_line: "",
+    colors: [],
+    color_identity: [],
+    keywords: [],
+  };
 }
 
 const BOLT_ENTRY = cardEntry(BOLT, "Lightning Bolt", "lightning bolt");
@@ -188,17 +199,28 @@ function imageResponse(source: string): Response {
   return new Response(new TextEncoder().encode(source), { status: 200, headers: { "Content-Type": "image/jpeg" } });
 }
 
-const fetchStub = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+/** `fetchImage` rejects a response whose Content-Type doesn't match the
+ *  descriptor's declared media, so mana-symbol SVGs need their own stub. */
+function svgResponse(source: string): Response {
+  return new Response(new TextEncoder().encode(source), { status: 200, headers: { "Content-Type": "image/svg+xml" } });
+}
+
+// `_init` is unread here but deliberately part of the signature: it is what
+// makes `mock.calls` record each request's init, which is how the cache-mode
+// contract below is asserted.
+const fetchStub = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
   const source = String(input);
   requested.push(source);
   if (source === BULK_INDEX_URL) return jsonResponse({ data: [BULK_RECORD] });
   if (source === "/scryfall-data.json") return jsonResponse(CARDS);
   if (source === "/scryfall-printings.json") return jsonResponse(PRINTINGS);
-  // The `core` pack's only image, served with the SAME bytes as Bolt's newest
-  // normal rung. Content addressing then gives both packs one cache entry, so
-  // "an image another pack still uses" is a real shared path rather than a
-  // claim about one.
+  // The card back, served with the SAME bytes as Bolt's newest normal rung.
+  // Content addressing then gives both packs one cache entry, so "an image
+  // another pack still uses" is a real shared path rather than a claim about
+  // one.
   if (source === CARD_BACK_URL) return imageResponse(url(BOLT_NEW.id, "normal"));
+  // The `core` pack's other constituent: every finite mana-symbol SVG.
+  if (source.startsWith("https://svgs.scryfall.io/card-symbols/")) return svgResponse(source);
   if (source.startsWith("https://cards.scryfall.io/")) {
     if (held?.matches(source)) await held.gate;
     if (failImages || imagesServed >= imageBudget) return new Response("", { status: 503 });
@@ -314,10 +336,10 @@ async function failures(backend: ScryfallBrowserVisualPackBackend): Promise<Prog
   return events;
 }
 
-async function settle(backend: ScryfallBrowserVisualPackBackend, operation: OperationId): Promise<void> {
+async function settle(backend: ScryfallBrowserVisualPackBackend, operation: OperationId, timeout = 5000): Promise<void> {
   await vi.waitFor(async () => {
     expect((await backend.operationStatus(operation)).state).toBe("completed");
-  }, { timeout: 5000 });
+  }, { timeout });
 }
 
 async function startCurated(backend: ScryfallBrowserVisualPackBackend): Promise<{
@@ -346,9 +368,13 @@ async function installCurated(backend: ScryfallBrowserVisualPackBackend): Promis
 }
 
 async function installCore(backend: ScryfallBrowserVisualPackBackend): Promise<void> {
-  const response = await backend.start({ kind: "install", selector: { kind: "core" }, objectEstimate: 1 });
+  const objectEstimate = 1 + MANA_SYMBOL_SHARDS.length;
+  const response = await backend.start({ kind: "install", selector: { kind: "core" }, objectEstimate });
   if (response.status !== "started") throw new Error("core install did not start");
-  await settle(backend, response.operationId);
+  // The card back plus every finite mana-symbol SVG — an order of magnitude
+  // more objects than the 5s default budgets for, so this settle gets its own
+  // allowance rather than raising the shared default other callers rely on.
+  await settle(backend, response.operationId, 10000);
 }
 
 /** Every installed object a render-time asset lookup can actually reach. */
@@ -582,7 +608,7 @@ describe("curated delta install", () => {
     expect(cache.entries.has(soloPath)).toBe(false);
     const back = await backend.resolve([{ kind: "asset", key: assetKey("asset:v1:card_back:default") }]);
     expect(back.entries[0].matches).toHaveLength(1);
-  });
+  }, 10000);
 
   it("sweeps identically when a pack is removed rather than replaced", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
@@ -607,7 +633,7 @@ describe("curated delta install", () => {
     expect(await resolvedAssets(backend, first.descriptors)).toHaveLength(0);
     const back = await backend.resolve([{ kind: "asset", key: assetKey("asset:v1:card_back:default") }]);
     expect(back.entries[0].matches).toHaveLength(1);
-  });
+  }, 10000);
 
   it("clears rows and images stranded at a cancelled install's digest", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
@@ -713,7 +739,7 @@ describe("curated delta install", () => {
     } finally {
       restore();
     }
-  });
+  }, 10000);
 
   it("adopts content from a pack that is not curated", async () => {
     const backend = await ScryfallBrowserVisualPackBackend.create();
@@ -1150,5 +1176,37 @@ describe("curated delta install", () => {
     await new Promise((resolve) => { setTimeout(resolve, 400); });
     const settledRecord = await backend.operationStatus(started.operation);
     expect(settledRecord.objectsPromoted).toBe(status.objectsPromoted);
+  });
+
+  /**
+   * Every image request must bypass the HTTP cache, or an install can be
+   * handed a response it is not allowed to read.
+   *
+   * Scryfall answers `access-control-allow-origin` only when the request
+   * carries an `Origin`, and the no-Origin response omits `vary: Origin`. So a
+   * plain no-cors `<img>` load stores the one cached variant for that URL
+   * WITHOUT the header, and this install's CORS fetch — CORS by necessity,
+   * since opaque bytes can be neither hashed nor verified — is then served
+   * that variant and fails the CORS check. The symptom is an install that
+   * dies only for users who looked at cards first.
+   *
+   * Asserted over `mock.calls` rather than through a stub that inspects the
+   * mode, because the stub ignores its init: the request the browser would
+   * make is exactly the argument recorded here.
+   */
+  it("re-requests every image from the network instead of the shared cache", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    await installCore(backend);
+
+    const imageCalls = fetchStub.mock.calls.filter(([input]) => {
+      const source = String(input);
+      return source === CARD_BACK_URL || source.startsWith("https://svgs.scryfall.io/card-symbols/");
+    });
+
+    // Guards the assertion below against passing on an empty set.
+    expect(imageCalls.length).toBeGreaterThanOrEqual(1 + MANA_SYMBOL_SHARDS.length);
+    for (const [input, init] of imageCalls) {
+      expect(init?.cache, String(input)).toBe("reload");
+    }
   });
 });

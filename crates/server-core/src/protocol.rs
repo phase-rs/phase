@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 
 use engine::game::interaction::ObjectActionPayload;
+use engine::types::ability::AbilityBlockEntry;
 use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
-use engine::types::interaction::InteractionSubmission;
+use engine::types::interaction::{
+    InteractionPreview, InteractionPreviewRequest, InteractionSubmission, PreviewRequestId,
+};
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
@@ -54,6 +57,18 @@ pub fn build_commit() -> &'static str {
 pub enum ServerMode {
     Full,
     LobbyOnly,
+}
+
+/// Optional binary JSON envelopes a WebSocket peer can encode and decode.
+/// Capabilities are negotiated independently of the semantic protocol version
+/// so old peers retain the plain-text JSON path during rolling deployments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireFormat {
+    GzipEnvelopeV1,
+    /// Future capability advertised by a newer peer. Unknown entries must not
+    /// make an otherwise compatible additive handshake fail.
+    #[serde(other)]
+    Unknown,
 }
 
 pub use engine::starter_decks::DeckData;
@@ -267,6 +282,8 @@ pub enum ClientMessage {
         /// versions its own message set separately from `PROTOCOL_VERSION`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lobby_protocol_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wire_formats: Vec<WireFormat>,
     },
     CreateGame {
         deck: DeckData,
@@ -284,6 +301,10 @@ pub enum ClientMessage {
         request_id: u64,
         action: GameAction,
     },
+    /// Requests an unredacted, trusted engine snapshot for diagnostics. The
+    /// server authorizes this capability from the authenticated host seat;
+    /// neither a player token nor a game code travels in the payload.
+    ExportAuthoritativeState,
     /// One opaque, engine-authored interaction response. The client echoes the
     /// submission the engine published in `ViewerInteraction`; it never derives
     /// a `GameAction` from the opportunity schema. Like `Action`, the
@@ -296,6 +317,17 @@ pub enum ClientMessage {
     /// See `client_message_wire_guard::wire_rejection_message`.
     Interaction {
         submission: InteractionSubmission,
+    },
+    /// Read-only preview of one engine-authored interaction response. The client
+    /// echoes the request it minted; the authenticated session — not the payload —
+    /// determines the acting seat.
+    ///
+    /// The answer never travels on `ServerMessage::Error`: like `Interaction`, a
+    /// preview is a routine client decision, and the native client tears the
+    /// session down on any `Error`. Both answer variants carry the request's
+    /// `PreviewRequestId` so the caller's pending promise settles.
+    PreviewInteraction {
+        request: InteractionPreviewRequest,
     },
     Reconnect {
         game_code: String,
@@ -566,6 +598,9 @@ pub enum ServerMessage {
         /// LobbyOnly brokers and for servers with no advertised address.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         public_url: Option<String>,
+        /// Binary envelopes this server can negotiate after the text hello.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wire_formats: Vec<WireFormat>,
     },
     GameCreated {
         game_code: String,
@@ -612,6 +647,12 @@ pub enum ServerMessage {
         /// introspecting `GameAction` variants client-side. Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
+        /// CR 118.3: per-object read-out of activated abilities the acting player
+        /// is not being offered solely because they can't pay the cost right now.
+        /// Acting-player-scoped and empty for non-actors, exactly like
+        /// `legal_actions_by_object` above. Display only — never dispatchable.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>,
         /// Engine-authored presentation projections computed alongside
         /// `state`. See `engine::game::derived_views::DerivedViews`.
         /// Required for Commander-format games so the CommanderDamage HUD
@@ -670,6 +711,11 @@ pub enum ServerMessage {
         /// Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
+        /// CR 118.3: per-object "can't pay this cost right now" read-out.
+        /// Acting-player-scoped and empty for non-actors, exactly like
+        /// `legal_actions_by_object` above. Display only — never dispatchable.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        activation_block_reasons: HashMap<ObjectId, Vec<AbilityBlockEntry>>,
         /// Engine-authored presentation projections for this state snapshot.
         /// See `engine::game::derived_views::DerivedViews`. Always populated
         /// by server construction sites — the `#[serde(default)]` exists
@@ -721,6 +767,30 @@ pub enum ServerMessage {
     /// Requester-only operational failure for a mana-payment preview.
     ManaPaymentPreviewFailed {
         request_id: u64,
+        message: String,
+    },
+    /// Host-only trusted engine persistence snapshot. This deliberately
+    /// contains no server-session metadata or player reconnect tokens.
+    AuthoritativeStateExport {
+        state: String,
+    },
+    /// Requester-only operational or authorization failure for an
+    /// authoritative-state export.
+    AuthoritativeStateExportFailed {
+        message: String,
+    },
+    /// Answer to a `PreviewInteraction` request, carrying the engine's own DTO —
+    /// including its `Rejected` status, so there is no `*Rejected` sibling. Sent
+    /// only to the requesting player.
+    InteractionPreview {
+        preview: InteractionPreview,
+    },
+    /// Correlated operational failure for an interaction preview: the session
+    /// could not be reached, was interlocked, or the socket is no longer
+    /// current. Never `Error`, which the native client treats as a session
+    /// teardown.
+    InteractionPreviewFailed {
+        request_id: PreviewRequestId,
         message: String,
     },
     OpponentDisconnected {
@@ -1065,6 +1135,25 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_state_export_messages_roundtrip() {
+        let request = ClientMessage::ExportAuthoritativeState;
+        let request_json = serde_json::to_string(&request).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&request_json).unwrap(),
+            ClientMessage::ExportAuthoritativeState
+        ));
+
+        let response = ServerMessage::AuthoritativeStateExport {
+            state: "{\"state\":{}}".to_string(),
+        };
+        let response_json = serde_json::to_string(&response).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ServerMessage>(&response_json).unwrap(),
+            ServerMessage::AuthoritativeStateExport { state } if state == "{\"state\":{}}"
+        ));
+    }
+
+    #[test]
     fn server_message_mana_payment_preview_roundtrips() {
         let msg = ServerMessage::ManaPaymentPreview {
             request_id: 7,
@@ -1081,6 +1170,109 @@ mod tests {
                 assert_eq!(source_ids, vec![ObjectId(12)]);
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    fn preview_request() -> InteractionPreviewRequest {
+        use engine::types::interaction::{InteractionChoiceId, InteractionId, InteractionResponse};
+        InteractionPreviewRequest {
+            request_id: PreviewRequestId("req-1".to_string()),
+            interaction_id: InteractionId("interaction-1".to_string()),
+            response: InteractionResponse::Choose {
+                choice_id: InteractionChoiceId("a".to_string()),
+            },
+        }
+    }
+
+    /// Row 7's full-game leg. The known tag is the positive control on the
+    /// identical decoder in the same test: without it, the `Err` below would
+    /// be indistinguishable from a decoder that rejects everything.
+    #[test]
+    fn client_message_interaction_preview_roundtrips_and_an_unknown_tag_is_a_benign_err() {
+        let request = preview_request();
+        let json = serde_json::to_string(&ClientMessage::PreviewInteraction {
+            request: request.clone(),
+        })
+        .unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::PreviewInteraction { request: restored } => {
+                assert_eq!(restored, request);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // The cross-language contract the three adapters send against:
+        // `ClientMessage` carries no `rename_all`, so `data` is snake_case
+        // while the engine DTO inside it is camelCase.
+        assert_eq!(
+            json,
+            r#"{"type":"PreviewInteraction","data":{"request":{"requestId":"req-1","interactionId":"interaction-1","response":{"type":"choose","data":{"choiceId":"a"}}}}}"#
+        );
+
+        // The decode loop answers this `Err` with `ServerMessage::error` and
+        // continues; a peer that does not know the new tag degrades to phase
+        // 7's rendering rather than losing its session.
+        assert!(serde_json::from_str::<ClientMessage>(
+            r#"{"type":"PreviewInteractionFromTheFuture","data":{}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn server_message_interaction_preview_roundtrips() {
+        use engine::types::interaction::{
+            InteractionOutcomeCode, InteractionPreviewStatus, InteractionProgress,
+            InteractionSummaryCode,
+        };
+        let request = preview_request();
+        let preview = InteractionPreview {
+            request_id: request.request_id.clone(),
+            interaction_id: request.interaction_id.clone(),
+            status: InteractionPreviewStatus::Confirmable,
+            progress: InteractionProgress {
+                confirmable: true,
+                ..InteractionProgress::default()
+            },
+            outcome: InteractionOutcomeCode::Advanced,
+            summaries: vec![InteractionSummaryCode::ConfirmAvailable],
+            shortcut_preview: None,
+        };
+
+        let json = serde_json::to_string(&ServerMessage::InteractionPreview {
+            preview: preview.clone(),
+        })
+        .unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::InteractionPreview { preview: restored } => {
+                assert_eq!(restored, preview);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // The failure frame is correlated: the adapter keys its pending map on
+        // this field, so an uncorrelated frame would leave a promise hanging.
+        // `ServerMessage` carries no `rename_all`, so this field is snake_case
+        // on the wire while the DTO inside `InteractionPreview` is camelCase.
+        let failed = serde_json::to_string(&ServerMessage::InteractionPreviewFailed {
+            request_id: request.request_id.clone(),
+            message: "preview lookup failed".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            failed,
+            r#"{"type":"InteractionPreviewFailed","data":{"request_id":"req-1","message":"preview lookup failed"}}"#
+        );
+        match serde_json::from_str::<ServerMessage>(&failed).unwrap() {
+            ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, request.request_id);
+                assert_eq!(message, "preview lookup failed");
+            }
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 
@@ -1505,6 +1697,7 @@ mod tests {
                     interaction_action_id: interaction_action_id.clone(),
                 }],
             )]),
+            activation_block_reasons: HashMap::new(),
             derived: Default::default(),
             viewer_interaction: viewer_interaction.clone(),
             player_token: None,
@@ -1556,6 +1749,7 @@ mod tests {
             mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
+            activation_block_reasons: HashMap::new(),
             derived: Default::default(),
             viewer_interaction: engine::game::interaction::derive_viewer_interaction(
                 &state,
@@ -1935,6 +2129,7 @@ mod tests {
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: vec![WireFormat::GzipEnvelopeV1],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1944,14 +2139,32 @@ mod tests {
                 build_commit,
                 protocol_version,
                 lobby_protocol_version,
+                wire_formats,
             } => {
                 assert_eq!(client_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
+                assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn client_hello_defaults_missing_and_future_wire_formats_safely() {
+        let legacy = r#"{"type":"ClientHello","data":{"client_version":"0.1.0","build_commit":"abc","protocol_version":1}}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(legacy).unwrap(),
+            ClientMessage::ClientHello { wire_formats, .. } if wire_formats.is_empty()
+        ));
+
+        let future = r#"{"type":"ClientHello","data":{"client_version":"0.1.0","build_commit":"abc","protocol_version":1,"wire_formats":["FutureEnvelopeV2"]}}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(future).unwrap(),
+            ClientMessage::ClientHello { wire_formats, .. }
+                if wire_formats == vec![WireFormat::Unknown]
+        ));
     }
 
     #[test]
@@ -1963,6 +2176,7 @@ mod tests {
             mode: ServerMode::Full,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             public_url: Some("https://x.ngrok-free.app".to_string()),
+            wire_formats: vec![WireFormat::GzipEnvelopeV1],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1974,6 +2188,7 @@ mod tests {
                 mode,
                 lobby_protocol_version,
                 public_url,
+                wire_formats,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
@@ -1981,6 +2196,7 @@ mod tests {
                 assert_eq!(mode, ServerMode::Full);
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
+                assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
             }
             _ => panic!("wrong variant"),
         }
@@ -1998,6 +2214,7 @@ mod tests {
             mode: ServerMode::LobbyOnly,
             lobby_protocol_version: None,
             public_url: None,
+            wire_formats: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
@@ -2006,6 +2223,10 @@ mod tests {
         assert!(
             !json.contains("lobby_protocol_version"),
             "None must be omitted: {json}"
+        );
+        assert!(
+            !json.contains("wire_formats"),
+            "empty list must be omitted: {json}"
         );
     }
 
@@ -2542,6 +2763,7 @@ mod tests {
                 },
             },
             launch_capability: DraftLaunchCapability::None,
+            commanders_required: 0,
             current_pack_number: 0,
             pick_number: 2,
             pass_direction: PassDirection::Left,
@@ -2584,6 +2806,7 @@ mod tests {
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.pick_selection_mode, PickSelectionMode::Direct);
                 assert_eq!(v.launch_capability, DraftLaunchCapability::None);
+                assert_eq!(v.commanders_required, 0);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
                 assert_eq!(v.pool_groups, view.pool_groups);
                 assert_eq!(
@@ -2876,8 +3099,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_54_for_draft_source_intent() {
-        assert_eq!(PROTOCOL_VERSION, 54);
+    fn protocol_version_is_62_for_activation_block_readout() {
+        assert_eq!(PROTOCOL_VERSION, 62);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2888,7 +3111,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_54_for_draft_source_intent` stays
+    /// `protocol_version_is_62_for_activation_block_readout` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -3044,6 +3267,7 @@ mod tests {
             log_entries: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
+            activation_block_reasons: HashMap::new(),
             derived: Default::default(),
             viewer_interaction: viewer_interaction.clone(),
             rewind_targets,

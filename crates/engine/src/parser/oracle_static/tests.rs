@@ -12830,6 +12830,43 @@ fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
 }
 
 #[test]
+fn static_cant_cause_forced_action_sacrifice_only() {
+    // CR 701.21a + CR 609.3 + CR 109.5: Sigarda, Host of Herons / Tajuru
+    // Preserver — protects the player wholesale against ANY opponent-
+    // controlled spell or ability forcing a sacrifice, with no affected-object
+    // filter (unlike CantCauseSacrificeOrExile).
+    let def = parse_static_line(
+        "Spells and abilities your opponents control can't cause you to sacrifice permanents.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCauseForcedAction {
+            cause: ProhibitionScope::Opponents,
+            actions: vec![CostCategory::SacrificesPermanent],
+        }
+    );
+    assert!(def.affected.is_none());
+}
+
+#[test]
+fn static_cant_cause_forced_action_discard_or_sacrifice() {
+    // CR 701.9a + CR 701.21a + CR 609.3: Tamiyo, Collector of Tales — the same
+    // static family, listing two forced actions in one clause.
+    let def = parse_static_line(
+        "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCauseForcedAction {
+            cause: ProhibitionScope::Opponents,
+            actions: vec![CostCategory::Discards, CostCategory::SacrificesPermanent],
+        }
+    );
+}
+
+#[test]
 fn static_legend_rule_defers_unparseable_scopes() {
     // CR 704.5j: scopes this parser cannot resolve precisely, and conditional
     // forms, must NOT be emitted as a LegendRuleDoesntApply static — they are
@@ -31386,6 +31423,87 @@ fn heroic_defiance_pt_grant_gated_on_most_common_color() {
     );
 }
 
+/// CR 105.2 + CR 611.3a (Invasion Djinn cycle — Sulam Djinn): "This creature
+/// gets -2/-2 as long as [color] is the most common color among all permanents
+/// or is tied for most common" must parse to a `StaticCondition::And` of two
+/// `QuantityComparison`s: (1) the largest per-color count across all
+/// permanents (`QuantityRef::ObjectCountBySharedQuality` grouped by
+/// `SharedQuality::Color`, `AggregateFunction::Max`) is at least 1 — a
+/// most-common-color bucket must actually exist — and (2) the named color's
+/// battlefield-wide permanent count (`QuantityRef::ObjectCount`) is at least
+/// that max. `Comparator::GE` already admits ties, matching the printed "or
+/// is tied for most common" tail. The first conjunct is required so an
+/// all-colorless battlefield (no bucket reaches size 1) can never vacuously
+/// satisfy `0 >= 0`.
+#[test]
+fn sulam_djinn_pt_penalty_gated_on_green_being_most_common_color() {
+    let defs = parse_static_line_multi(
+        "This creature gets -2/-2 as long as green is the most common color \
+         among all permanents or is tied for most common.",
+    );
+    let penalty = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("a continuous P/T penalty");
+    assert!(
+        penalty
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: -2 }),
+        "penalty must subtract 2 power, got {:?}",
+        penalty.modifications
+    );
+    assert!(
+        penalty
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: -2 }),
+        "penalty must subtract 2 toughness, got {:?}",
+        penalty.modifications
+    );
+
+    let all_permanents = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Permanent],
+        controller: None,
+        properties: Vec::new(),
+    });
+    let green_permanents = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Permanent],
+        controller: None,
+        properties: vec![FilterProp::HasColor {
+            color: ManaColor::Green,
+        }],
+    });
+    let max_color_bucket = || QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCountBySharedQuality {
+            filter: all_permanents.clone(),
+            quality: SharedQuality::Color,
+            aggregate: AggregateFunction::Max,
+        },
+    };
+    assert_eq!(
+        penalty.condition,
+        Some(StaticCondition::And {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: max_color_bucket(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: green_permanents,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: max_color_bucket(),
+                },
+            ],
+        }),
+        "the -2/-2 must be gated on (max per-color count >= 1) AND (green's count >= the max \
+         per-color count), so an all-colorless battlefield can never vacuously satisfy it"
+    );
+}
+
 /// CR 509.1b (#4590 review): a granted ability's OWN inner "unless" must stay
 /// inside the quoted ability — the attached-subject grant parser must not lift it
 /// onto the static grant as a condition. Coral Net grants a triggered ability
@@ -35011,5 +35129,41 @@ fn attached_conditional_grant_state_backed_gate_still_passes_through() {
             .is_some_and(|c| !c.contains_unrecognized()),
         "a board-state gate must survive the enforcement-point gate unchanged, got {:?}",
         def.condition
+    );
+}
+
+/// Havi's static condition is a live, controller-scoped historic-card graveyard
+/// count. The historic adjective remains on the typed zone filter.
+#[test]
+fn havi_historic_graveyard_gate_parses_with_reminder_text() {
+    let def = parse_static_line(
+        "Havi has indestructible as long as there are four or more historic cards in your graveyard. (Artifacts, legendaries, and Sagas are historic.)",
+    )
+    .expect("Havi's first Oracle line must parse as a static");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible,
+        }]
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![],
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Card],
+                        controller: None,
+                        properties: vec![FilterProp::Historic],
+                    })),
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        })
     );
 }

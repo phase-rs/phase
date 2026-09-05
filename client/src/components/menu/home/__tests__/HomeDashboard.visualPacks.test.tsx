@@ -31,7 +31,10 @@ vi.mock("../../../../stores/cardDataStore", () => ({
   useCardDataStore: (selector: (state: { status: string }) => unknown) => selector({ status: "ready" }),
 }));
 vi.mock("../../../../services/deckCompatibility", () => ({
-  evaluateDeckCompatibility: vi.fn().mockResolvedValue({ color_identity: ["U"] }),
+  evaluateDeckCompatibility: vi.fn().mockResolvedValue({
+    color_identity: ["U"],
+    color_distribution: [],
+  }),
 }));
 
 function renderDashboard() {

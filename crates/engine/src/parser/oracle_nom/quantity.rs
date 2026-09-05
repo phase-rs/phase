@@ -1065,6 +1065,13 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // colors among ..." path; registering it here makes it reachable in the
         // bare-suffix context too.
         parse_distinct_colors_among_tail,
+        // CR 202.3: bare "mana value[s] among <filter>" — reached
+        // after a parent has consumed "there are N [or more] " (Aven
+        // Heartstabber and the SNC graveyard-mana-value-diversity class:
+        // "there are five or more mana values among cards in your
+        // graveyard"). Mana-value sibling of `parse_distinct_colors_among_tail`
+        // immediately above.
+        parse_bare_mana_values_among_tail,
         // CR 122.1: bare "different kind[s] of counters {on|among} <filter>" —
         // reached after a parent has consumed "there are N [or more] " (Hundred-
         // Battle Veteran: "as long as there are three or more different kinds of
@@ -2044,6 +2051,44 @@ fn parse_distinct_colors_among_tail(input: &str) -> OracleResult<'_, QuantityRef
         return Err(oracle_err(input));
     }
     Ok(("", QuantityRef::DistinctColorsAmong { source }))
+}
+
+/// CR 202.3: Parse bare "mana value\[s\] among
+/// \<population\>" → `QuantityRef::ObjectCountDistinct { filter, qualities:
+/// [ManaValue] }`.
+///
+/// Reached from the bare-suffix context after a parent combinator (typically
+/// `parse_there_are_conditions`) has consumed "there are N \[or more\] " — the
+/// mana-value sibling of `parse_distinct_colors_among_tail` immediately above.
+/// No "different" qualifier precedes the plural noun: the plural itself
+/// supplies the distinct-value reading, exactly as "there are five colors
+/// among permanents you control" (Puca's Eye) does for colors. Covers the
+/// Streets of New Capenna "graveyard mana-value diversity" class: "there are
+/// five or more mana values among cards in your graveyard" (Aven Heartstabber,
+/// Snooping Newsie, Syndicate Infiltrator, Graveyard Shift, and their Alchemy
+/// variants). Uses the Legacy type-phrase grammar (a single zone/type
+/// population, not a union) to mirror `parse_distinct_quality_among_objects`'s
+/// "different \<quality\> among \<type-phrase\>" sibling, which already reads
+/// the singular "different mana value among …" form (Sudden Insight, Lunar
+/// Insight) — this bare arm is the plural, "different"-less counterpart.
+fn parse_bare_mana_values_among_tail(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("mana value").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        "",
+        QuantityRef::ObjectCountDistinct {
+            filter,
+            qualities: vec![SharedQuality::ManaValue],
+        },
+    ))
 }
 
 /// CR 122.1: Parse the iteration source "kind of counter on/among <filter>" →
@@ -10848,9 +10893,44 @@ mod tests {
                     Some(crate::types::zones::Zone::Graveyard),
                     "graveyard zone must survive into the filter: {filter:?}"
                 );
+                let TargetFilter::Typed(filter) = filter else {
+                    panic!("expected Typed graveyard filter");
+                };
+                assert_eq!(filter.controller, Some(ControllerRef::You));
             }
             other => panic!("expected ObjectCountDistinct, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bare_mana_values_among_graveyard_cards() {
+        // Aven Heartstabber / Syndicate Infiltrator / Snooping Newsie /
+        // Graveyard Shift (SNC): "there are five or more mana values among
+        // cards in your graveyard" — reached in the bare-suffix context after
+        // a parent has already stripped "there are five or more ". No
+        // "different" qualifier precedes the plural noun.
+        let (rest, q) = parse_quantity_ref("mana values among cards in your graveyard").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCountDistinct { filter, qualities } => {
+                assert_eq!(qualities, vec![SharedQuality::ManaValue]);
+                assert_eq!(
+                    filter.extract_in_zone(),
+                    Some(crate::types::zones::Zone::Graveyard),
+                    "graveyard zone must survive into the filter: {filter:?}"
+                );
+            }
+            other => panic!("expected ObjectCountDistinct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_mana_value_singular_among_graveyard_cards() {
+        // Singular "mana value" must also parse (grammatically only correct at
+        // N=1, but the combinator does not gate on the outer threshold).
+        let (rest, q) = parse_quantity_ref("mana value among cards in your graveyard").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(distinct_qualities(&q), vec![SharedQuality::ManaValue]);
     }
 
     #[test]

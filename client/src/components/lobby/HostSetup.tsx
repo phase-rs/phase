@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
@@ -12,11 +12,19 @@ import type {
 import { AI_DIFFICULTIES } from "../../constants/ai";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import {
+  directoryLobbySources,
   FORMAT_DEFAULTS,
   isKnownFormat,
+  lobbySources,
   useMultiplayerStore,
 } from "../../stores/multiplayerStore";
-import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStore";
+import type {
+  AiSeatConfig,
+  HostingSettings,
+  LobbySource,
+} from "../../stores/multiplayerStore";
+import type { DirectorySource } from "../../services/serverDirectory";
+import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
   deleteSavedCustomFormat,
@@ -35,7 +43,16 @@ export type { AiSeatConfig };
 export type HostSettings = HostingSettings;
 
 interface HostSetupProps {
-  onHost: (settings: HostSettings) => void | Promise<boolean>;
+  /**
+   * `serverUrl` is the server this submit chose to host on, and `null` means
+   * exactly one thing: this submit chose no server, which is the P2P case.
+   *
+   * The nullability stops at this boundary. It is deliberately NOT
+   * `hostingServer`: the parent runs the action later (deck-select can come
+   * between), so a value captured here would be a latch, whereas `null` lets
+   * the parent make the same live read it makes today.
+   */
+  onHost: (settings: HostSettings, serverUrl: string | null) => void | Promise<boolean>;
   onBack: () => void;
   connectionMode: "server" | "p2p";
   /** When true, the host-submit button is disabled (e.g. live deck check
@@ -67,6 +84,78 @@ const GROUP_ORDER: Record<FormatGroup, number> = {
 };
 
 const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
+
+/** One row of the host-target picker. The two listing fields answer different
+ *  questions and are keyed differently on purpose. */
+interface HostCandidate {
+  source: LobbySource;
+  /** The row announcing this URL, whoever owns the source. Supplies the `Full`
+   *  mode hint only. */
+  announced: DirectorySource | null;
+  /** The listing whose protocol verdict applies to this source, or `null` when
+   *  no directory listing owns it. */
+  listing: DirectorySource | null;
+}
+
+/**
+ * The servers this client may place a hosted game on, best-evidenced first.
+ *
+ * A candidate runs games: either its handshake reported `Full`, or its
+ * directory row announces `mode: "Full"`. A `LobbyOnly` broker only brokers
+ * peer ids — it cannot run a match however well it scores, which is why the
+ * filter is on the mode and never on the rank.
+ *
+ * A candidate this client cannot handshake with is KEPT and rendered with its
+ * reason, the way `ServerPicker` renders an incompatible listing, rather than
+ * dropped: a server missing from the list reads as "not announced", while a
+ * greyed one with its version reads as what it is. {@link hostRejection} is
+ * what keeps it out of the submission.
+ *
+ * Ordering matches `compareLobbyGameEntries`' convention (`?? -1`), so an
+ * unranked server sorts last rather than first.
+ */
+function fullHostCandidates(
+  state: Parameters<typeof lobbySources>[0] & { directorySources: DirectorySource[] },
+): HostCandidate[] {
+  // The mode hint reads the RAW projection: an announcement that a URL runs
+  // games is true whoever owns the source, and it only ever ADMITS a candidate.
+  const announced = new Map(
+    state.directorySources.map((entry) => [entry.source.url, entry]),
+  );
+  // The verdict reads the SHADOWING-AWARE list, because it EXCLUDES. A preset
+  // or hand-added URL the directory also lists is judged at its handshake —
+  // the same rule `ensureSubscriptionSocket`'s dial gate states, resolved
+  // through the same single shadowing predicate.
+  const owned = new Map(
+    directoryLobbySources(state).map(({ entry }) => [entry.source.url, entry]),
+  );
+  return lobbySources(state)
+    .map((source) => ({
+      source,
+      announced: announced.get(source.url) ?? null,
+      listing: owned.get(source.url) ?? null,
+    }))
+    .filter(
+      (candidate) =>
+        candidate.source.kind === "Full" || candidate.announced?.row.mode === "Full",
+    )
+    .sort((a, b) => (b.source.score ?? -1) - (a.source.score ?? -1));
+}
+
+/**
+ * Why this client cannot place a hosted game on `listing`, or `null` when it
+ * can.
+ *
+ * BOTH surfaces, because hosting uses both: the parent opens the browse socket
+ * (`ensureSubscriptionSocket`, LOBBY surface) before it hosts, and
+ * `openServerHostSocket` then dials the same server on the FULL surface.
+ * Neither verdict is computed here — both were produced by
+ * `serverProtocolRejection` in `projectDirectoryRow` and are only read.
+ */
+function hostRejection(listing: DirectorySource | null): string | null {
+  if (!listing) return null;
+  return listing.rejection ?? listing.fullRejection;
+}
 
 /** P2P uses a hub-and-spoke topology (see `p2p-adapter.ts` `P2PHostAdapter`):
  * the host holds one connection per guest and fans out filtered state, which
@@ -111,10 +200,14 @@ function Field({
 /** iOS-style toggle switch (mirrors the mockup's Host-setup `Toggle`). The
  *  on-state accent follows the connection mode (emerald server / cyan P2P). */
 function Toggle({
+  label,
+  describedBy,
   on,
   onChange,
   accent,
 }: {
+  label: string;
+  describedBy?: string;
   on: boolean;
   onChange: (next: boolean) => void;
   accent: "emerald" | "cyan";
@@ -125,11 +218,15 @@ function Toggle({
     <button
       type="button"
       role="switch"
+      aria-label={label}
+      aria-describedby={describedBy}
       aria-checked={on}
       onClick={() => onChange(!on)}
-      className={`flex h-6 w-[42px] shrink-0 items-center rounded-full p-0.5 transition-colors ${on ? onBg : "bg-white/12"}`}
+      className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full"
     >
-      <span className={`h-5 w-5 rounded-full transition-transform duration-150 ${knob} ${on ? "translate-x-[18px]" : ""}`} />
+      <span aria-hidden="true" className={`flex h-6 w-[42px] items-center rounded-full p-0.5 transition-colors ${on ? onBg : "bg-white/12"}`}>
+        <span className={`h-5 w-5 rounded-full transition-transform duration-150 ${knob} ${on ? "translate-x-[18px]" : ""}`} />
+      </span>
     </button>
   );
 }
@@ -149,13 +246,14 @@ function OptionRow({
   onChange: (next: boolean) => void;
   accent: "emerald" | "cyan";
 }) {
+  const descriptionId = useId();
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="min-w-0">
         <div className="text-sm text-fg-card-body">{label}</div>
-        {desc && <div className="mt-0.5 text-xs text-fg-meta">{desc}</div>}
+        {desc && <div id={descriptionId} className="mt-0.5 text-xs text-fg-meta">{desc}</div>}
       </div>
-      <Toggle on={on} onChange={onChange} accent={accent} />
+      <Toggle label={label} describedBy={desc ? descriptionId : undefined} on={on} onChange={onChange} accent={accent} />
     </div>
   );
 }
@@ -201,6 +299,13 @@ export function HostSetup({
     (s) => s.setCompatibilityPlayerCount,
   );
   const hostingStatus = useMultiplayerStore((s) => s.hostingStatus);
+  // The host-target picker's inputs. Read through selectors rather than
+  // `getState()` so a directory refresh re-renders the list.
+  const hostingServer = useMultiplayerStore((s) => s.hostingServer);
+  const userLobbySources = useMultiplayerStore((s) => s.userLobbySources);
+  const sourceStatus = useMultiplayerStore((s) => s.sourceStatus);
+  const directorySources = useMultiplayerStore((s) => s.directorySources);
+  const disabledDirectorySources = useMultiplayerStore((s) => s.disabledDirectorySources);
 
   // Seed the format picker from whatever the user last selected (persisted
   // in the store). This means navigating away and back to host-setup keeps
@@ -503,22 +608,29 @@ export function HostSetup({
       aiSeats: effectiveAiSeats,
     });
     try {
-      const ok = await onHost({
-        displayName,
-        public: isPublic,
-        password: showPassword ? password : "",
-        timerSeconds: null,
-        formatConfig: finalConfig,
-        matchType: effectiveMatchType,
-        loopDetection,
-        aiSeats: effectiveAiSeats.map((seat) => ({
-          ...seat,
-          ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
-        })),
-        startWhenFull,
-        ranked: false,
-        roomName: resolvedRoomName,
-      });
+      const ok = await onHost(
+        {
+          displayName,
+          public: isPublic,
+          password: showPassword ? password : "",
+          timerSeconds: null,
+          formatConfig: finalConfig,
+          matchType: effectiveMatchType,
+          loopDetection,
+          aiSeats: effectiveAiSeats.map((seat) => ({
+            ...seat,
+            ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
+          })),
+          startWhenFull,
+          ranked: false,
+          roomName: resolvedRoomName,
+        },
+        // `null` in P2P — this submit chose no server, and the parent then
+        // makes the same live `hostingServer` read it makes today. Passing the
+        // anchor here instead would latch it at submit time, which is wrong for
+        // a flow that can route through deck-select before it runs.
+        isP2P ? null : selected,
+      );
       if (ok !== false) return;
     } catch {
       // The parent surfaces the specific failure as a toast/dialog.
@@ -541,6 +653,63 @@ export function HostSetup({
         : FORMAT_OPTIONS,
     [isP2P],
   );
+
+  const hostCandidates = useMemo(
+    () =>
+      fullHostCandidates({
+        userLobbySources,
+        sourceStatus,
+        directorySources,
+        disabledDirectorySources,
+      }),
+    [userLobbySources, sourceStatus, directorySources, disabledDirectorySources],
+  );
+
+  /** The candidates this submit may actually use. A rejected row stays in
+   *  `hostCandidates` — it is still rendered, with its reason — but it is never
+   *  seeded, never selectable and never submitted. */
+  const selectableCandidates = hostCandidates.filter(
+    (candidate) => hostRejection(candidate.listing) === null,
+  );
+
+  /**
+   * The user's explicit pick, when they have made one. Session-local: choosing
+   * a game server for one match must not repoint `hostingServer`, which is the
+   * P2P broker target, the direct-codes sentinel and the browsing anchor all at
+   * once.
+   */
+  const [hostServerUrl, setHostServerUrl] = useState<string>(
+    () =>
+      selectableCandidates.find((candidate) => candidate.source.url === hostingServer)
+        ?.source.url
+      ?? selectableCandidates[0]?.source.url
+      ?? DEFAULT_MULTIPLAYER_SERVER_URL,
+  );
+
+  /**
+   * The server this submit will actually use — DERIVED every render, never a
+   * latch.
+   *
+   * The candidate list is asynchronous: `directorySources` and `sourceStatus`
+   * are not persisted, so on a cold session this form can mount before either
+   * has been populated. `fullHostCandidates` is then empty and the initial
+   * state above falls through to `DEFAULT_MULTIPLAYER_SERVER_URL` — the
+   * official broker, which carries no `kind` before its handshake and is not
+   * yet announced, so the picker's mode filter excludes it. A latched value
+   * would freeze there and submit a server the dropdown does not even offer,
+   * which the parent's mode probe would then route down the P2P branch while
+   * the user is looking at a list of Full servers.
+   *
+   * So: honour the explicit pick only while it is still a selectable
+   * candidate, and otherwise fall back to the best-evidenced selectable one
+   * that currently exists. This re-resolves as the directory lands, and it
+   * still terminates in a non-null constant, which is what makes the server
+   * leg's value a `string` by construction rather than by assumption.
+   */
+  const selected =
+    selectableCandidates.some((candidate) => candidate.source.url === hostServerUrl)
+      ? hostServerUrl
+      : (selectableCandidates[0]?.source.url ?? DEFAULT_MULTIPLAYER_SERVER_URL);
 
   // Shared field-input grammar (mockup Host-setup inputs).
   const inp =
@@ -860,6 +1029,57 @@ export function HostSetup({
           </div>
 
           <div className="border-t border-hairline-strong" />
+
+          {/* Host target — which server runs this match. Server mode only:
+              P2P has no server to place the game on, so there is no selection
+              to make and none is reported. */}
+          {!isP2P && (
+            <Field label={t("hostSetup.hostServer")} hint={t("hostSetup.hostServerHelp")}>
+              <MenuSelect
+                ariaLabel={t("hostSetup.hostServer")}
+                label={
+                  hostCandidates.find((candidate) => candidate.source.url === selected)
+                    ?.source.name
+                  ?? selected
+                }
+                selectedValue={selected}
+                items={hostCandidates.map((candidate) => ({
+                  value: candidate.source.url,
+                  // A rejected candidate reads as `ServerPicker` renders one —
+                  // the same `serverPicker.incompatibleVersion` line, off the
+                  // same announced version — in place of a rank it cannot be
+                  // chosen on. Otherwise the score is the directory's own
+                  // 0–100 rank, rendered rather than recomputed; `undefined` is
+                  // its "unranked".
+                  label: hostRejection(candidate.listing) !== null
+                    ? `${candidate.source.name} — ${t("serverPicker.incompatibleVersion", {
+                        version: candidate.listing?.row.server_version,
+                      })}`
+                    : candidate.source.score === undefined
+                      ? t("hostSetup.hostServerUnscored", { name: candidate.source.name })
+                      : t("hostSetup.hostServerScore", {
+                          name: candidate.source.name,
+                          score: candidate.source.score,
+                        }),
+                }))}
+                // A rejected row is inert rather than absent: it is listed so
+                // the user can see why, and selecting it does nothing, which is
+                // the same affordance `ServerPicker` gives by withholding the
+                // toggle.
+                onSelect={(url) => {
+                  const picked = hostCandidates.find(
+                    (candidate) => candidate.source.url === url,
+                  );
+                  if (picked && hostRejection(picked.listing) !== null) return;
+                  setHostServerUrl(url);
+                }}
+                menuLayout="dropdown"
+                fitContainer
+                wrapperClassName="w-full min-w-0"
+                className={`${inp} min-h-[44px] w-full cursor-pointer font-medium`}
+              />
+            </Field>
+          )}
 
           {/* Privacy / timing options — iOS-toggle rows (design mockup). */}
           {!isP2P && (

@@ -25,6 +25,7 @@ import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 import counterWire from "../../../test/fixtures/unbounded-counter-wire.json";
 import declinedWire from "../../../test/fixtures/unbounded-declined-wire.json";
 import tokenWire from "../../../test/fixtures/unbounded-token-wire.json";
+import { UnboundedBadge } from "../HudBadges.tsx";
 import { PlayerHud } from "../PlayerHud.tsx";
 
 const PLAIN_TOKENS = "Unbounded tokens (∞)";
@@ -70,6 +71,18 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     });
     render(<PlayerHud />);
   };
+
+  // The OFFER-TIME shape: an `UnboundedBadge` with no `state` prop, which is the modal's mount
+  // and has no HUD mount site, so it is rendered directly rather than through `seed`.
+  const seedOfferBadge = (derived: DerivedViews) => {
+    act(() => {
+      useGameStore.setState({ gameState: buildGameState({ derived }) });
+    });
+    render(<UnboundedBadge family="tokens" />);
+  };
+
+  const boundedTokens = (bound: number) =>
+    `tokens from a detected loop, bounded at ${bound} repetitions`;
 
   it("U1/M2-d: the token golden's CONDITIONAL collapse renders ∞→?, and the counter golden's COMMITTED one renders ∞→N", () => {
     // GOLDEN-DRIVEN, both halves — the family and its state are read out of regenerated engine
@@ -261,5 +274,56 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     } as DerivedViews);
     expect(screen.getByLabelText(COMMITTED_TOKENS)).toBeInTheDocument();
     expect(screen.queryByLabelText(COMMITTED_TOKENS_YOU)).toBeNull();
+  });
+
+  it("F1/F1b: a badge with no ∞ row behind it states the engine's published repetition bound, and states the one it was given", () => {
+    // MATCHED PAIR in one `it`: the only thing that changes between the halves is the published
+    // number. A badge that hard-coded a bound, or ignored the channel and kept `∞`, fails one
+    // half or the other.
+    seedOfferBadge({ bounded_loop_max_repetitions: 18 } as DerivedViews);
+    const at18 = screen.getByLabelText(boundedTokens(18));
+    expect(at18.textContent).toContain("≤18×");
+    expect(at18.textContent).not.toContain("∞");
+
+    cleanup();
+    seedOfferBadge({ bounded_loop_max_repetitions: 7 } as DerivedViews);
+    const at7 = screen.getByLabelText(boundedTokens(7));
+    expect(at7.textContent).toContain("≤7×");
+    expect(screen.queryByLabelText(boundedTokens(18))).toBeNull();
+  });
+
+  it("F2: no published bound ⇒ the same badge renders today's bare ∞", () => {
+    seedOfferBadge({} as DerivedViews);
+    const plain = screen.getByLabelText(PLAIN_TOKENS);
+    expect(plain.textContent).toContain("∞");
+    expect(plain.textContent).not.toContain("≤");
+
+    // MATCHED POSITIVE: the same mount with the channel present does render the bound, so the
+    // assertions above are the absent channel's work and not a badge that can never state one.
+    cleanup();
+    seedOfferBadge({ bounded_loop_max_repetitions: 7 } as DerivedViews);
+    expect(screen.getByLabelText(boundedTokens(7)).textContent).toContain("≤7×");
+  });
+
+  it("F3: a badge backed by a published ∞ row keeps ∞ even while a bound is published", () => {
+    // The HOSTILE co-existence: a live `∞` mark and an open bounded window on one board. The
+    // discriminator is the badge's own prop contract — a badge handed a published row is not the
+    // offer-time badge, whatever the channel says.
+    seed({
+      unbounded_families: [fam("tokens", { type: "Unscheduled" })],
+      bounded_loop_max_repetitions: 9,
+    } as DerivedViews);
+    const badge = screen.getByLabelText(PLAIN_TOKENS);
+    expect(badge.textContent).toContain("∞");
+    expect(badge.textContent).not.toContain("≤9×");
+    expect(screen.queryByLabelText(boundedTokens(9))).toBeNull();
+
+    // MATCHED POSITIVE: the same channel value on the same store, on the offer-time mount.
+    cleanup();
+    seedOfferBadge({
+      unbounded_families: [fam("tokens", { type: "Unscheduled" })],
+      bounded_loop_max_repetitions: 9,
+    } as DerivedViews);
+    expect(screen.getByLabelText(boundedTokens(9)).textContent).toContain("≤9×");
   });
 });

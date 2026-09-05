@@ -34,8 +34,9 @@ mod tests {
     use super::*;
     use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
     use engine::types::interaction::{
-        InteractionChoiceId, InteractionId, InteractionReasonCode, InteractionResponse,
-        InteractionShortcutDecision, InteractionShortcutPin, MAX_INTERACTION_LIST_LEN,
+        AmountAssignment, InteractionChoiceId, InteractionId, InteractionReasonCode,
+        InteractionResponse, InteractionShortcutDecision, InteractionShortcutPin,
+        MAX_INTERACTION_LIST_LEN,
     };
 
     fn choice(id: &str) -> InteractionChoiceId {
@@ -104,6 +105,14 @@ mod tests {
         };
 
         assert!(guard_interaction_submission_payload(&msg).is_err());
+
+        let at_limit = InteractionSubmission {
+            interaction_id: InteractionId("x".repeat(MAX_INTERACTION_STRING_LEN)),
+            response: InteractionResponse::Choose {
+                choice_id: choice("a"),
+            },
+        };
+        assert_eq!(guard_interaction_submission_payload(&at_limit), Ok(()));
     }
 
     /// The `OutboundBudget` cumulative path — the only nested branch in the
@@ -116,6 +125,7 @@ mod tests {
             .map(|group| InteractionShortcutPin {
                 group,
                 choice_ids: vec![choice("a"); per_pin],
+                amounts: Vec::new(),
             })
             .collect();
 
@@ -129,6 +139,78 @@ mod tests {
         });
 
         assert!(guard_interaction_submission_payload(&msg).is_err());
+
+        // Boundary sibling: the cumulative bound sits at the constant. The
+        // subtrahend is the pin list itself, charged before the per-pin lists.
+        let per_pin = (MAX_INTERACTION_LIST_LEN - 2) / 2;
+        let at_limit: Vec<InteractionShortcutPin> = (0..2)
+            .map(|group| InteractionShortcutPin {
+                group,
+                choice_ids: vec![choice("a"); per_pin],
+                amounts: Vec::new(),
+            })
+            .collect();
+        let at_limit = submission(InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::AcceptSuggested,
+            pins: at_limit,
+        });
+        assert_eq!(guard_interaction_submission_payload(&at_limit), Ok(()));
+    }
+
+    /// The same cumulative branch reached through `amounts` rather than
+    /// `choice_ids`: every pin's allocation list is individually legal and only
+    /// their sum crosses the ceiling. Drop the engine's `budget.list` /
+    /// `budget.string` charge for `amounts` and this row accepts.
+    #[test]
+    fn rejects_an_oversized_nested_shortcut_amount_budget() {
+        let per_pin = MAX_INTERACTION_LIST_LEN / 2;
+        let pins: Vec<InteractionShortcutPin> = (0..3)
+            .map(|group| InteractionShortcutPin {
+                group,
+                choice_ids: vec![choice("a")],
+                amounts: vec![
+                    AmountAssignment {
+                        choice_id: choice("a"),
+                        amount: 1,
+                    };
+                    per_pin
+                ],
+            })
+            .collect();
+
+        for pin in &pins {
+            assert!(pin.amounts.len() <= MAX_INTERACTION_LIST_LEN);
+            assert!(pin.choice_ids.len() <= MAX_INTERACTION_LIST_LEN);
+        }
+
+        let msg = submission(InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::AcceptSuggested,
+            pins,
+        });
+
+        assert!(guard_interaction_submission_payload(&msg).is_err());
+
+        // Boundary sibling: the subtrahend is the pin list plus each pin's
+        // single-element `choice_ids` list, both charged before the amounts.
+        let per_pin = (MAX_INTERACTION_LIST_LEN - 4) / 2;
+        let at_limit: Vec<InteractionShortcutPin> = (0..2)
+            .map(|group| InteractionShortcutPin {
+                group,
+                choice_ids: vec![choice("a")],
+                amounts: vec![
+                    AmountAssignment {
+                        choice_id: choice("a"),
+                        amount: 1,
+                    };
+                    per_pin
+                ],
+            })
+            .collect();
+        let at_limit = submission(InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::AcceptSuggested,
+            pins: at_limit,
+        });
+        assert_eq!(guard_interaction_submission_payload(&at_limit), Ok(()));
     }
 
     /// Pins the byte-identity claim at this layer so it cannot silently drift

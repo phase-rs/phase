@@ -39,6 +39,7 @@ function viewForRound(round: number): DraftPlayerView {
     status: "MatchInProgress",
     kind: "Premier",
     launch_capability: "None",
+    commanders_required: 0,
     current_pack_number: 3,
     pick_number: 14,
     pass_direction: "Left",

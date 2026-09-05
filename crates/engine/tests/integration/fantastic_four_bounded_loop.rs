@@ -58,6 +58,8 @@ use engine::types::replacements::ReplacementEvent;
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
+const P2: PlayerId = PlayerId(2);
+const P3: PlayerId = PlayerId(3);
 
 /// The four F4 permanents, by their **comma printings** — verified verbatim against the card
 /// faces in the dump itself (`objects[401..404].name`). The plain names ("Mister Fantastic",
@@ -2287,9 +2289,8 @@ fn d1_the_bounded_offer_publishes_a_conformant_declaration_on_every_tracked_dump
              proposer, `replay.count` == the offer's own suggestion"
         );
 
-        let required: Vec<_> = schema.points.iter().map(|p| p.slot.clone()).collect();
         assert!(
-            predictability_gate(&declaration, &required).is_ok(),
+            predictability_gate(&declaration, &schema.points).is_ok(),
             "[{label}] the published declaration covers every published slot — the coverage half \
              of the declare-time firewall"
         );
@@ -3013,8 +3014,10 @@ fn u6_the_generators_own_candidate_opens_the_window_and_the_accepted_shape_is_me
 /// scenario built to reach the guard. The matched pair differs in exactly one field.
 ///
 /// Reach-guards: the published pin set is non-empty, so `predictability_gate` and
-/// `validate_pins` really run and the accepting arm proves they PASS (a refusal on both arms
-/// would otherwise be reported as a firewall hit); and the hostile owner names a LIVING seat
+/// `validate_pins` have something to check and the accepting arm proves they PASS (against an
+/// exposed-nothing schema `predictability_gate` has no required slot, and `f4_pin_template`
+/// derives its pins FROM the schema, so `validate_pins` is handed none either — a refusal on
+/// both arms would then be reported as a firewall hit); and the hostile owner names a LIVING seat
 /// that is not the proposer, which is the only shape the guard can distinguish.
 ///
 /// REVERT-PROBE (shared with `r28_a`, and recorded as shared): delete
@@ -3029,8 +3032,9 @@ fn u6_the_declare_owner_firewall_holds_on_the_real_f4_offer() {
 
     assert!(
         !schema.points.is_empty(),
-        "reach-guard: a non-empty schema means `predictability_gate` / `validate_pins` really \
-         run, so the accepting arm below proves the pair is keyed to `owner`"
+        "reach-guard: a non-empty schema gives `predictability_gate` a required slot, and \
+         `f4_pin_template` derives its pins from that schema so `validate_pins` is handed one \
+         too — so the accepting arm below proves the pair is keyed to `owner`"
     );
     let hostile = state
         .players
@@ -3867,8 +3871,9 @@ fn declare_template_free(state: &GameState, proposer: PlayerId, k: u32) -> GameS
 ///
 /// # Reach-guards, asserted BEFORE the claim
 ///
-/// The schema publishes points (else the pin block is skipped and the row measures the empty
-/// path — that is [`c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone`]'s
+/// The schema publishes points (else `declaration_conforms` decides nothing about a pin-free
+/// declaration and the row measures the empty path — that is
+/// [`c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone`]'s
 /// subject), the schema is bounded, the offer really published a declaration (else the
 /// `or_else` has nothing to resolve against and every arm would be measuring site F), and the
 /// window is wide enough that `k = 5` is genuinely interior. The bound is read from the schema
@@ -3886,8 +3891,8 @@ fn c2_r1_the_browsers_template_free_declaration_reaches_the_accepted_declaration
 
     assert!(
         points > 0,
-        "REACH-GUARD: with an empty point set `handle_declare_shortcut` skips the pin block \
-         entirely and this row would measure the owner firewall instead of the repair"
+        "REACH-GUARD: with an empty point set `declaration_conforms` has no published slot to \
+         check and this row would measure the owner firewall instead of the repair"
     );
     assert!(
         bounded,
@@ -4037,10 +4042,9 @@ fn r3_placement_a_restored_foreign_owner_declaration_is_refused() {
 
 /// **Rows R4b + R5 — the points-EMPTY offer, where the owner firewall is the only gate.**
 ///
-/// `handle_declare_shortcut` runs the pin block only under `!offer.schema.points.is_empty()`, so
-/// on a point-free offer neither `declaration_conforms` nor site F ever runs and the resolved
-/// template meets the firewall alone. Three arms on one F4-derived fixture, `schema.points`
-/// emptied:
+/// On a point-free offer site F never runs and `declaration_conforms` is vacuous for a pin-free
+/// declaration, so the resolved template meets the firewall alone. Three arms on one F4-derived
+/// fixture, `schema.points` emptied and the declaration's pins stripped with them:
 ///
 /// | arm | offer `declaration` | expected |
 /// |---|---|---|
@@ -4065,11 +4069,11 @@ fn r3_placement_a_restored_foreign_owner_declaration_is_refused() {
 /// # The capability R4b/B does not create, recorded because it looks like one
 ///
 /// A points-empty offer carrying a restored declaration is reachable only through the restore
-/// ingress — no production mint emits that pair. The `or_else` is deliberately NOT guarded with
-/// `!points.is_empty()`: a live client can already send `template: Some(anything owned by the
-/// proposer)` against a points-empty offer today and reach `proposal.template` with the pin
-/// block skipped, so the firewall is the only gate on this shape both before and after. A guard
-/// for an unreachable case is a special case; the behaviour is pinned here instead.
+/// ingress — no production mint emits that pair. The `or_else` needs no `!points.is_empty()`
+/// guard of its own, because the RESOLVED template is validated either way: CR 732.2a lets a
+/// declaration pin only choices the offer published, so a SLOT-ADDRESSING pin naming an
+/// unexposed slot is refused on that axis whatever its owner, and a pin-free one leaves
+/// the owner as the single remaining gate — which is what these arms vary.
 #[test]
 fn c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone() {
     let mut state = load_f4();
@@ -4085,6 +4089,9 @@ fn c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone() {
         offer_declaration(&state).expect("the untampered offer publishes a declaration");
 
     // One F4 offer, `schema.points` emptied, `declaration` set per arm. Nothing else differs.
+    // The declaration is stripped of its pins with the points: CR 732.2a lets a declaration pin
+    // only choices the offer published, so a SLOT-ADDRESSING pin naming an unexposed slot is
+    // refused on the PIN axis and the owner axis this row varies would not be the operative one.
     let point_free_offer = |declaration: Option<PlayerId>| {
         let mut probe = state.clone();
         match &mut probe.waiting_for {
@@ -4096,6 +4103,7 @@ fn c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone() {
                 schema.points.clear();
                 *decl = declaration.map(|owner| {
                     let mut d = published.clone();
+                    d.decisions.clear();
                     d.owner = owner;
                     d
                 });
@@ -4104,11 +4112,21 @@ fn c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone() {
         }
         assert!(
             match &probe.waiting_for {
-                WaitingFor::LoopShortcut { schema, .. } => schema.points.is_empty(),
+                WaitingFor::LoopShortcut {
+                    schema,
+                    declaration: Some(d),
+                    ..
+                } => schema.points.is_empty() && d.decisions.is_empty(),
+                WaitingFor::LoopShortcut {
+                    schema,
+                    declaration: None,
+                    ..
+                } => schema.points.is_empty(),
                 _ => false,
             },
-            "REACH-GUARD: the row is about the SKIPPED pin block, so the point set must really \
-             be empty — otherwise `declaration_conforms` runs and the firewall is not alone"
+            "REACH-GUARD: an empty point set with a pin-free declaration is what leaves \
+             `declaration_conforms` vacuous, so the owner firewall is the only gate the arms \
+             below can be measuring"
         );
         probe
     };
@@ -4152,5 +4170,3753 @@ fn c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone() {
          because the firewall inspects an unresolved `None` and passes it. Post-repair the \
          resolved foreign-owner declaration meets the firewall and is refused. A row asserting \
          only R4b/A would miss that the repair WIDENS what the firewall inspects"
+    );
+}
+
+/// **A SLOT-ADDRESSING pin may name only choices the offer published — measured on the shape
+/// where the published set is EMPTY and the charged set is not.**
+///
+/// CR 732.2a: a shortcut proposal describes a sequence of choices that may legally be taken.
+/// An offer publishing no decision point states no such choice, so a template naming one is not
+/// a legal answer to it. The title says SLOT-ADDRESSING because the fourth arm below carries a
+/// pin that addresses no slot at all: a CR 603.3b ordering pin, refused by `validate_pins` as
+/// `NotALoopDecision` rather than as `UnexposedSlot`.
+///
+/// The two sets diverge by construction and legitimately so: `victim_slot` is derived from the
+/// period's ANNOUNCED targets, which CR 119.3 charges whoever announces them, while
+/// `schema.points` publishes only the proposer's own CR 601.2c choices. A period whose announced
+/// target is nobody's published choice therefore mints a charged slot with no point beside it,
+/// and a fabricated pin naming that slot is what the per-cycle conformance check would size its
+/// comparison by.
+///
+/// Four arms on one staged offer, one axis apart — the declaration's `decisions`:
+///
+/// | arm | `decisions` | expected |
+/// |---|---|---|
+/// | **matched positive** | empty | `RespondToShortcut` — the staged offer accepts |
+/// | **charged slot** | a `Targets` pin naming a `victim_slot` entry | `Priority` |
+/// | **unknown slot** | a `Targets` pin naming neither a point nor a charged slot | `Priority` |
+/// | **ordering pin** | an `Order` pin on the charged slot's source | `Priority` |
+///
+/// The positive is asserted FIRST and is what makes the two refusals attributable to the pin
+/// rather than to the staged offer refusing everything. The second refusal is the class end the
+/// first does not reach: the guard is keyed to what the offer PUBLISHED, not to what the
+/// certificate CHARGES, so a pin naming neither is refused by the same predicate. The fourth
+/// arm is the other end — the member the title's SLOT-ADDRESSING qualifier excludes, refused on
+/// its own axis so the qualifier stays a measurement rather than a hedge.
+///
+/// REVERT-PROBE: skip `declaration_conforms` when `offer.schema.points.is_empty()` ⇒ both
+/// refusals open APNAP and carry the fabricated pin into `proposal.template`.
+#[test]
+fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, DecisionGroupKey, DecisionSlot, DecisionTemplate, PinnedDecision,
+        Ranking, ReplayMode, TargetPin, TargetSchedule,
+    };
+
+    let mut state = load_f4();
+    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+    let (proposer, certificate, _schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .clone()
+        .expect("a bounded offer publishes its per-period signature");
+    let (charged_slot, magnitude) = per_cycle.victim_slot.first().cloned().expect(
+        "REACH-GUARD: the fabricated pin must name a slot the certificate really charges, else \
+         it would be inert at the per-cycle check and the refusal below would be about nothing",
+    );
+    assert!(
+        magnitude > 0,
+        "REACH-GUARD: the charged slot must carry a strictly positive CR 119.3 magnitude; \
+         got {magnitude} from {:?}",
+        per_cycle.victim_slot
+    );
+    let aimed = state
+        .players
+        .iter()
+        .find(|p| p.id != proposer && !p.is_eliminated)
+        .map(|p| p.id)
+        .expect("REACH-GUARD: a living seat other than the proposer must exist on a 4p board");
+
+    // The staged offer: the F4 offer with its published point set emptied. Nothing else moves —
+    // the certificate keeps the `victim_slot` entry the fabricated pin names.
+    let mut staged = state.clone();
+    match &mut staged.waiting_for {
+        WaitingFor::LoopShortcut {
+            schema,
+            declaration,
+            ..
+        } => {
+            schema.points.clear();
+            *declaration = None;
+        }
+        other => panic!("expected the CR 732.2a bounded offer, got {other:?}"),
+    }
+    let (staged_proposer, staged_certificate, staged_schema) = offer_parts(&staged);
+    assert!(
+        staged_schema.points.is_empty() && staged_proposer == proposer,
+        "REACH-GUARD: the staged offer must publish nothing while keeping the live proposer, \
+         else the arms below measure the owner firewall instead"
+    );
+    assert!(
+        staged_certificate
+            .per_cycle
+            .as_ref()
+            .is_some_and(|pc| pc.victim_slot.iter().any(|(s, _)| *s == charged_slot)),
+        "REACH-GUARD: emptying the published set must leave the CHARGED set intact — that \
+         divergence is the shape this row is about"
+    );
+
+    let declare = |decisions: Vec<PinnedDecision>| {
+        let mut probe = staged.clone();
+        apply(
+            &mut probe,
+            proposer,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(1),
+                template: Some(DecisionTemplate {
+                    owner: proposer,
+                    decisions,
+                    replay: ReplayMode::Scheduled {
+                        count: IterationCount::Fixed(1),
+                    },
+                    key: DecisionGroupKey::from_sources(
+                        std::slice::from_ref(&charged_slot.source),
+                        DecisionKind::LoopChoice,
+                    ),
+                }),
+            },
+        )
+        .expect("dispatched — a refusal is a HANDBACK, not an error");
+        probe
+    };
+    let aimed_at = |slot: DecisionSlot| {
+        vec![PinnedDecision::Targets {
+            slot,
+            targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                Ranking::one(AnnouncementSubject::Seat(aimed)),
+            ))],
+        }]
+    };
+
+    assert_eq!(
+        declare(vec![]).waiting_for.variant_name(),
+        "RespondToShortcut",
+        "MATCHED POSITIVE: a declaration that pins nothing is a legal answer to an offer that \
+         published nothing, so the refusals below are keyed to the PIN and not to the staged \
+         offer refusing every declaration"
+    );
+
+    assert_eq!(
+        declare(aimed_at(charged_slot.clone()))
+            .waiting_for
+            .variant_name(),
+        "Priority",
+        "CR 732.2a: a pin naming a slot the offer published no point for is not a legal answer \
+         — the declaration hands back to manual play and no `ShortcutProposal` is built, so \
+         nothing carries the fabricated pin into the drive"
+    );
+
+    let unknown = DecisionSlot {
+        source: charged_slot.source.clone(),
+        index: charged_slot.index.wrapping_add(1),
+    };
+    assert!(
+        !per_cycle.victim_slot.iter().any(|(s, _)| *s == unknown),
+        "REACH-GUARD: the second arm's slot must be absent from the charged set too, else it \
+         is the first arm again"
+    );
+    assert_eq!(
+        declare(aimed_at(unknown)).waiting_for.variant_name(),
+        "Priority",
+        "the refusal is keyed to what the offer PUBLISHED, so a pin the certificate does not \
+         charge either is refused by the same predicate"
+    );
+
+    assert_eq!(
+        declare(vec![PinnedDecision::Order {
+            source: charged_slot.source.clone(),
+            pos: 0,
+        }])
+        .waiting_for
+        .variant_name(),
+        "Priority",
+        "CR 603.3b: an ordering pin is a choice about the APNAP order triggered abilities are \
+         put on the stack in, not one of the CR 732.2a per-iteration choices a loop \
+         declaration answers, so `validate_pins` refuses it as `NotALoopDecision` — on an \
+         offer publishing nothing exactly as on one publishing a point"
+    );
+}
+
+/// **An `Order` pin is not an answer to the F4 offer's published choices — on the LIVE,
+/// NON-EMPTY schema.**
+///
+/// CR 732.2a: a shortcut proposal describes the sequence of choices that will be taken.
+/// CR 603.3b: an `Order` pin is a choice about the APNAP order simultaneously triggered
+/// abilities are put on the stack in — a different decision kind, which this offer publishes
+/// no point for and which the drive never reads.
+///
+/// Three arms on one live offer, one axis apart — the declaration's `decisions`:
+///
+/// | arm | `decisions` | expected |
+/// |---|---|---|
+/// | **paired positive** | the conformant [`f4_pin_template`] set | `RespondToShortcut` |
+/// | **swapped** | the same, `Targets` pin replaced by an `Order` pin on that source | `Priority` |
+/// | **extra** | the conformant set PLUS an `Order` pin on that source | `Priority` |
+///
+/// SWAPPED is the whole-defect member: before the repair the ordering pin COVERED the published
+/// `Targets` point — `pin_slot` synthesized `{source, index 0}` for it and the gate compared
+/// slots without kinds — while `validate_pins` checked nothing, so a declaration answering none
+/// of the offer's published choices was accepted. EXTRA is the VALUE half alone, and the
+/// multi-authority member coverage cannot reach: the conformant pins beside it already satisfy
+/// coverage, so only `validate_pins`' refusal can reject it.
+///
+/// REVERT-PROBE, MEASURED per half rather than assumed. SWAPPED opens APNAP only under the FULL
+/// pre-repair — `pin_slot` fabricating the `Order` slot AND `validate_pins`' `Order { .. } => {}`
+/// arm — because either half alone still refuses it. EXTRA opens APNAP under the value half
+/// alone. The coverage half alone is isolated in-crate, by
+/// `analysis::decision_template::tests::gate_coverage_is_kind_aware`.
+#[test]
+fn an_order_pin_is_not_an_answer_to_the_f4_offers_published_choices() {
+    use engine::analysis::decision_template::PinnedDecision;
+
+    let mut state = load_f4();
+    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+    let (proposer, _certificate, schema) = offer_parts(&state);
+    let schema = schema.clone();
+
+    let target_source = schema
+        .points
+        .iter()
+        .find(|p| matches!(p.kind, DecisionPointKind::Targets { .. }))
+        .map(|p| p.slot.source.clone())
+        .expect(
+            "REACH-GUARD: the live schema must publish a `Targets` point, else the swap below \
+             is a refusal on an EMPTY schema rather than on a published choice",
+        );
+
+    let conformant = f4_pin_template(&schema, proposer, 1);
+    let declare = |decisions: Vec<PinnedDecision>| {
+        let mut probe = state.clone();
+        let mut template = conformant.clone();
+        template.decisions = decisions;
+        apply(
+            &mut probe,
+            proposer,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(1),
+                template: Some(template),
+            },
+        )
+        .expect("dispatched — a refusal is a HANDBACK, not an error");
+        probe
+    };
+
+    assert_eq!(
+        declare(conformant.decisions.clone())
+            .waiting_for
+            .variant_name(),
+        "RespondToShortcut",
+        "PAIRED POSITIVE, same offer and same call: the conformant declaration still opens the \
+         CR 732.2b APNAP window, so the two refusals below are keyed to the ordering pin"
+    );
+
+    let ordering = PinnedDecision::Order {
+        source: target_source,
+        pos: 0,
+    };
+    let swapped: Vec<PinnedDecision> = conformant
+        .decisions
+        .iter()
+        .map(|pin| match pin {
+            PinnedDecision::Targets { .. } => ordering.clone(),
+            other => other.clone(),
+        })
+        .collect();
+    assert!(
+        swapped
+            .iter()
+            .any(|p| matches!(p, PinnedDecision::Order { .. }))
+            && !swapped
+                .iter()
+                .any(|p| matches!(p, PinnedDecision::Targets { .. })),
+        "REACH-GUARD: the swap must have replaced the `Targets` pin, else SWAPPED is the \
+         conformant arm again. got {swapped:?}"
+    );
+    assert_eq!(
+        declare(swapped).waiting_for.variant_name(),
+        "Priority",
+        "CR 732.2a: an ordering pin covers no published targeting point, so that choice is \
+         unpinned, the declaration hands back to manual play and no `ShortcutProposal` is \
+         built to carry the pin into the drive"
+    );
+
+    let mut extra = conformant.decisions.clone();
+    extra.push(ordering);
+    assert_eq!(
+        declare(extra).waiting_for.variant_name(),
+        "Priority",
+        "CR 603.3b: coverage is already satisfied by the conformant pins beside it, so only \
+         `validate_pins`' `NotALoopDecision` refusal can reject this declaration"
+    );
+}
+
+/// **The reserved victim domain the offer publishes GATES the committed drive — driven on the
+/// real 4-player dump.**
+///
+/// CR 704.5a: `elimination_bounds` reserved elimination headroom only for the seats in
+/// `declarable_victims`, and the per-cycle conformance check confines its lift to them. The two
+/// arms differ in EXACTLY that field — board, schema, declaration and count are identical.
+///
+/// | arm | `per_cycle.declarable_victims` | expected |
+/// |---|---|---|
+/// | **live** | what the mint published | the full declared count of `N` cycles commits |
+/// | **staged** | the proposer's own seat, which the live domain EXCLUDES | truncates at the first re-aimed cycle |
+///
+/// # Why the declaration RE-AIMS, and why that doubles as the reach-guard
+///
+/// MEASURED on this dump: with the conformant [`f4_pin_template`] the observed cycle is
+/// BYTE-IDENTICAL to the published period, so `conforms` decides on its leading equality and
+/// never consults the domain — the two arms would then be indistinguishable for a reason that
+/// has nothing to do with this check. A CR 601.2c re-aim onto another declarable victim is what
+/// makes the lift decide the verdict, and it is the shape
+/// [`t1_a_victim_changing_declaration_commits_its_whole_count_on_the_seats_it_declared`]
+/// already drives. The live arm asserts the re-aimed seat absorbs a STRICTLY POSITIVE share of
+/// the count — an outcome byte-equality cannot produce — so the lift is measured to have run
+/// rather than assumed. Only the first cycle charges the published seat: its Torch target was
+/// announced before the grant, so the schedule cannot re-aim it.
+///
+/// The staged value is read off the board rather than invented: the reach-guards assert the
+/// live domain is non-empty and EXCLUDES the proposer's own seat, so `[proposer]` is an
+/// out-of-domain singleton this offer itself makes constructible. Both arms are asserted
+/// ACCEPTED at declare, so what separates them is the DRIVE's per-cycle check.
+///
+/// REVERT-PROBE: drop `slot_charged_life`'s domain filter ⇒ the staged arm commits the same `N`
+/// cycles as the live one and the two arms stop being distinguishable. That the staged arm
+/// commits its ONE byte-identical cycle is also what proves the refusal is the domain's and not
+/// a blanket one.
+#[test]
+fn u2_the_published_victim_domain_gates_the_committed_drive() {
+    const N: u32 = 3;
+    let mut outcomes = vec![];
+    for stage_to_proposer in [false, true] {
+        let mut state = load_f4();
+        drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+        let (proposer, certificate, schema) = offer_parts(&state);
+        let schema = schema.clone();
+        let per_cycle = certificate
+            .per_cycle
+            .clone()
+            .expect("a bounded offer publishes its per-period signature");
+
+        assert!(
+            !per_cycle.declarable_victims.is_empty()
+                && !per_cycle.declarable_victims.contains(&proposer),
+            "REACH-GUARD: the LIVE domain must be non-empty and must EXCLUDE the proposer's own \
+             seat, else `[proposer]` below is not an out-of-domain value. got {:?}, proposer \
+             {proposer:?}",
+            per_cycle.declarable_victims
+        );
+        assert!(
+            per_cycle.victim_slot.iter().any(|(_, m)| *m > 0),
+            "REACH-GUARD: a charged slot with a strictly positive CR 119.3 magnitude, else the \
+             lift is the identity whatever the domain. got {:?}",
+            per_cycle.victim_slot
+        );
+
+        let (published_seat, life_rate) = per_cycle
+            .delta
+            .life
+            .iter()
+            .find(|(_, magnitude)| **magnitude < 0)
+            .map(|(seat, magnitude)| (*seat, -*magnitude))
+            .expect("REACH-GUARD: the published period must charge some seat a life LOSS");
+        let re_aimed = *per_cycle
+            .declarable_victims
+            .iter()
+            .find(|seat| **seat != published_seat)
+            .expect(
+                "REACH-GUARD: a SECOND declarable victim must exist, else the re-aim below \
+                 names the published seat again and the observed cycle stays byte-identical",
+            );
+
+        if stage_to_proposer {
+            match &mut state.waiting_for {
+                WaitingFor::LoopShortcut { certificate, .. } => {
+                    certificate
+                        .per_cycle
+                        .as_mut()
+                        .expect("the signature the reach-guards above just read")
+                        .declarable_victims = vec![proposer];
+                }
+                other => panic!("expected the CR 732.2a bounded offer, got {other:?}"),
+            }
+        }
+
+        let life_before = life_by_seat(&state);
+        apply(
+            &mut state,
+            proposer,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(N),
+                template: Some(f4_scheduled_template(
+                    &schema,
+                    proposer,
+                    N,
+                    &[(0, re_aimed)],
+                )),
+            },
+        )
+        .expect("the declaration is dispatched");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+            "staged={stage_to_proposer}: BOTH arms must be ACCEPTED at declare — the domain is \
+             read by the DRIVE's per-cycle check, never by the declare firewall — else the \
+             zero-commit below is a declare-time refusal. got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            accept_all_opponents(&mut state) > 0,
+            "the CR 732.2c window must actually take responses"
+        );
+
+        let life_after = life_by_seat(&state);
+        outcomes.push((
+            life_of(&life_before, published_seat) - life_of(&life_after, published_seat),
+            life_of(&life_before, re_aimed) - life_of(&life_after, re_aimed),
+            life_rate,
+        ));
+    }
+
+    let (live_published_loss, live_re_aimed_loss, life_rate) = outcomes[0];
+    assert!(
+        life_rate > 0,
+        "ANTI-VACUITY: the published per-cycle life LOSS must be strictly positive, else every \
+         relation below degenerates to `0 == 0 * {N}`"
+    );
+    assert!(
+        live_re_aimed_loss > 0,
+        "REACH-GUARD: the re-aim must actually MOVE the charge off the published seat, else \
+         every observed cycle stays byte-identical to the published period and `conforms` \
+         decides on its leading equality without ever consulting the domain. published seat \
+         lost {live_published_loss}, re-aimed seat lost {live_re_aimed_loss}"
+    );
+    assert_eq!(
+        live_published_loss + live_re_aimed_loss,
+        life_rate * i64::from(N),
+        "LIVE: with the domain the mint published, every cycle conforms — the cycle whose \
+         target was announced before the grant charges the published seat, the re-aimed \
+         remainder is admitted by the domain-confined lift, and the full declared count of {N} \
+         commits across the two"
+    );
+    let (staged_published_loss, staged_re_aimed_loss, _) = outcomes[1];
+    assert_eq!(
+        (staged_published_loss, staged_re_aimed_loss),
+        (life_rate, 0),
+        "CR 704.5a: with the domain staged to a seat this cycle's bound reserved nothing for, \
+         only the byte-identical first cycle survives — its leading equality needs no lift — \
+         and the first RE-AIMED cycle is refused, because neither side's loss is liftable so \
+         the residues differ. The drive truncates there and the re-aimed seat is never charged. \
+         live was ({live_published_loss}, {live_re_aimed_loss})"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// U1 / U2 — the per-cycle accounting is victim-invariant and carries the token axis
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
+/// [`f4_pin_template`] with its single announced `Targets` pin re-aimed by a SCHEDULE. Every
+/// other pin the board publishes is left exactly as the conformant template builds it, so the
+/// only axis these rows vary is WHICH SEAT the announced slot names at each iteration
+/// (CR 601.2c + CR 732.2a: the choice is fixed by the declaration, not made per iteration).
+fn f4_scheduled_template(
+    schema: &engine::analysis::decision_template::ShortcutDecisionSchema,
+    owner: PlayerId,
+    count: u32,
+    segments: &[(u32, PlayerId)],
+) -> engine::analysis::decision_template::DecisionTemplate {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
+    };
+    let mut template = f4_pin_template(schema, owner, count);
+    let mut aimed = 0;
+    for pin in &mut template.decisions {
+        if let PinnedDecision::Targets { targets, .. } = pin {
+            *targets = vec![TargetPin::Scheduled(TargetSchedule::Piecewise(
+                segments
+                    .iter()
+                    .map(|(start, seat)| (*start, Ranking::one(AnnouncementSubject::Seat(*seat))))
+                    .collect(),
+            ))];
+            aimed += 1;
+        }
+    }
+    assert_eq!(
+        aimed, 1,
+        "the schedule these rows vary belongs to the board's ONE announced target slot; \
+         re-aiming zero pins would leave the declaration identical to the conformant one and \
+         re-aiming several would make the seat attribution below ambiguous"
+    );
+    template
+}
+
+/// Per-seat life, read by SEAT ID rather than positionally — these rows declare seats by name
+/// and a positional read would silently follow a re-dump's player ordering instead.
+fn life_by_seat(state: &GameState) -> Vec<(PlayerId, i64)> {
+    state
+        .players
+        .iter()
+        .map(|p| (p.id, p.life as i64))
+        .collect()
+}
+
+fn life_of(snapshot: &[(PlayerId, i64)], seat: PlayerId) -> i64 {
+    snapshot
+        .iter()
+        .find(|(id, _)| *id == seat)
+        .map(|(_, life)| *life)
+        .unwrap_or_else(|| panic!("{seat:?} is not seated on this board"))
+}
+
+/// The board-side total of ONE published counter class, read through the very
+/// [`ResourceVector::snapshot`] projection the certificate's per-cycle counter entry is a rate
+/// for — so the growth measured below and the rate it is compared against cannot be different
+/// quantities.
+fn counter_class_total(
+    state: &GameState,
+    key: &(
+        engine::analysis::resource::CounterClass,
+        engine::analysis::resource::ObjectClass,
+    ),
+) -> i64 {
+    ResourceVector::snapshot(state)
+        .counters
+        .get(key)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// **T1** — a VICTIM-CHANGING declaration commits its whole count, charges only the seats it
+/// declared, and moves the board by the published per-cycle magnitude.
+///
+/// CR 732.2a lets one declaration specify a sequence of choices that aims an announced target
+/// slot at a different seat in different iterations. At BASE the drive compared each committed
+/// cycle against the published signature by exact equality, so the first cycle whose life
+/// landed on a different seat than the certified period's diverged and the drive truncated
+/// there. `PeriodicDelta::conforms` lifts the pinned slot's charge off both sides before
+/// comparing, so the re-aim conforms and the declared count commits in full.
+///
+/// # Discrimination
+///
+/// Revert `conforms` to `self.delta == *observed`: the drive truncates at the first segment
+/// boundary, so (a) fails, (b) fails on the two later seats, and (e) fails because the counter
+/// growth is the published rate times the TRUNCATED count.
+///
+/// Both magnitude relations are `rate * count` with the rate READ OFF the certificate, never
+/// pinned. The counter leg is the non-degenerate one and its guard demands a published rate
+/// STRICTLY ABOVE 1 — a rate-1 axis reduces `rate * n` to the bare committed count and could
+/// not tell a per-period magnitude from a degenerate one. A board that publishes rate 1 must
+/// RED this row rather than satisfy it.
+#[test]
+fn t1_a_victim_changing_declaration_commits_its_whole_count_on_the_seats_it_declared() {
+    let mut state = load_f4();
+    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+    let (proposer, certificate, schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .clone()
+        .expect("a bounded offer publishes its per-period signature");
+    let schema = schema.clone();
+    let n = schema.max_iterations;
+
+    let life_rate = -per_cycle.delta.life.values().copied().min().unwrap_or(0);
+    assert!(
+        life_rate > 0,
+        "ANTI-VACUITY: the published per-cycle life LOSS must be strictly positive, else the \
+         sum relation below degenerates to `0 == 0 * {n}`. published life={:?}",
+        per_cycle.delta.life
+    );
+    assert_eq!(
+        per_cycle.delta.counters.len(),
+        1,
+        "with more than one published counter class the board-side total is no longer that \
+         class's own projection, and this row must RED rather than guess which entry the \
+         growth belongs to. published counters={:?}",
+        per_cycle.delta.counters
+    );
+    let (counter_key, counter_rate) = per_cycle
+        .delta
+        .counters
+        .iter()
+        .map(|(key, rate)| (*key, *rate))
+        .next()
+        .expect("the length assertion above already established the single entry");
+    assert!(
+        counter_rate > 1,
+        "ANTI-DEGENERACY: this is the only axis whose published rate can separate a per-period \
+         MAGNITUDE from the bare committed count, so it must exceed 1. published \
+         {counter_key:?}={counter_rate}"
+    );
+
+    // Three segments, one declared seat each, with the boundaries derived from the published
+    // count — nothing here pins a figure.
+    let declared = [P1, P2, P3];
+    let segments: Vec<(u32, PlayerId)> = declared
+        .iter()
+        .enumerate()
+        .map(|(i, seat)| (i as u32 * n / 3, *seat))
+        .collect();
+    assert!(
+        segments.windows(2).all(|w| w[0].0 < w[1].0),
+        "the published count {n} must be large enough for three DISTINCT segment starts, else \
+         a declared seat absorbs no iteration and (b) below reds for a fixture reason. \
+         derived starts={:?}",
+        segments.iter().map(|(start, _)| *start).collect::<Vec<_>>()
+    );
+    let template = f4_scheduled_template(&schema, proposer, n, &segments);
+
+    let life_before = life_by_seat(&state);
+    let counters_before = counter_class_total(&state, &counter_key);
+
+    apply(
+        &mut state,
+        proposer,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(n),
+            template: Some(template),
+        },
+    )
+    .expect("the declaration is dispatched");
+    // THE DISCRIMINATOR between "declare refused it" and "the drive aborted": a refused
+    // declaration hands priority straight back and never opens the APNAP window.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+        "the victim-changing declaration must be ACCEPTED and open the CR 732.2b APNAP window \
+         — a `Priority` here would mean the shortfall below is a declare-time refusal rather \
+         than the drive's behaviour. got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the CR 732.2c window must actually take responses"
+    );
+
+    let life_after = life_by_seat(&state);
+    let counters_after = counter_class_total(&state, &counter_key);
+    let loss = |seat: PlayerId| life_of(&life_before, seat) - life_of(&life_after, seat);
+    let declared_losses: Vec<i64> = declared.iter().map(|seat| loss(*seat)).collect();
+
+    // (a) CR 732.2a: the whole declared count commits, spread across the declared seats.
+    assert_eq!(
+        declared_losses.iter().sum::<i64>(),
+        life_rate * i64::from(n),
+        "the declared seats {declared:?} must absorb the published per-cycle life rate \
+         {life_rate} times the full declared count {n}. per-seat losses={declared_losses:?}, \
+         life {life_before:?} -> {life_after:?}"
+    );
+    // (b) every declared seat is actually reached — a drive that truncated at the first
+    // boundary leaves the later seats untouched while (a) could still be met by one seat.
+    assert!(
+        declared_losses.iter().all(|l| *l > 0),
+        "every declared seat must strictly decrease; a zero belongs to a seat the drive never \
+         reached. losses={declared_losses:?} for {declared:?}"
+    );
+    // (c) the lift may not relocate a charge onto a seat the declaration never named.
+    for (seat, before) in &life_before {
+        if !declared.contains(seat) {
+            assert!(
+                life_of(&life_after, *seat) >= *before,
+                "{seat:?} was never declared and must not lose life: {before} -> {}",
+                life_of(&life_after, *seat)
+            );
+        }
+    }
+    // (d) the split is NOT uniform, and the cause is a fact of this board rather than a defect:
+    // the first driven cycle resolves the target announced BEFORE the drive begins, so every
+    // segment boundary lands one iteration late. Do not "correct" the split back into equal
+    // parts — that would make this assertion the thing being worked around.
+    assert!(
+        declared_losses.windows(2).any(|w| w[0] != w[1]),
+        "the segment boundaries land one iteration late because cycle 0 resolves the \
+         pre-announced target, so the declared seats CANNOT absorb equal shares. an equal \
+         split here means the index map moved. losses={declared_losses:?}"
+    );
+    // (e) THE COUNTER LEG — the drive moved the BOARD by the published magnitude, not merely
+    // the life axis. An implementation that commits the full count on life while the board
+    // stops advancing passes (a) and fails here.
+    assert_eq!(
+        counters_after - counters_before,
+        counter_rate * i64::from(n),
+        "{counter_key:?} must grow by the published per-cycle rate {counter_rate} times the \
+         declared count {n}: {counters_before} -> {counters_after}"
+    );
+}
+
+/// **T2** — the same-seat control: the SCHEDULE SHAPE is not what was broken.
+///
+/// A two-segment `Piecewise` naming ONE seat commits its whole count. This row PASSES AT BASE
+/// BY DESIGN and is a REACH-GUARD for [`t1_a_victim_changing_declaration_commits_its_whole_count_on_the_seats_it_declared`],
+/// not evidence for the phase: it holds the schedule shape fixed and varies only whether the
+/// declaration changes victim, so a T1 failure cannot be blamed on `Piecewise` itself. There is
+/// no revert that reds it, and the phase must not ACQUIRE its pass.
+#[test]
+fn t2_reach_guard_a_same_seat_schedule_shape_already_commits_its_whole_count() {
+    let mut state = load_f4();
+    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+    let (proposer, certificate, schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .clone()
+        .expect("a bounded offer publishes its per-period signature");
+    let schema = schema.clone();
+    let n = schema.max_iterations;
+
+    let life_rate = -per_cycle.delta.life.values().copied().min().unwrap_or(0);
+    assert!(
+        life_rate > 0,
+        "ANTI-VACUITY: the published per-cycle life LOSS must be strictly positive. published \
+         life={:?}",
+        per_cycle.delta.life
+    );
+
+    let segments = [(0, P1), (n / 3, P1)];
+    assert!(
+        segments[0].0 < segments[1].0,
+        "the two segment starts must differ, else this is a `Constant` schedule wearing a \
+         `Piecewise` name and controls nothing. derived={segments:?}"
+    );
+    let template = f4_scheduled_template(&schema, proposer, n, &segments);
+
+    let life_before = life_by_seat(&state);
+    apply(
+        &mut state,
+        proposer,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(n),
+            template: Some(template),
+        },
+    )
+    .expect("the declaration is dispatched");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+        "the same-seat declaration must be ACCEPTED and open the APNAP window, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the CR 732.2c window must actually take responses"
+    );
+
+    let life_after = life_by_seat(&state);
+    assert_eq!(
+        life_of(&life_before, P1) - life_of(&life_after, P1),
+        life_rate * i64::from(n),
+        "the one declared seat absorbs the whole count: life {life_before:?} -> {life_after:?}"
+    );
+    for (seat, before) in &life_before {
+        if *seat != P1 {
+            assert_eq!(
+                life_of(&life_after, *seat),
+                *before,
+                "{seat:?} is not declared by this schedule and must not move"
+            );
+        }
+    }
+}
+
+/// **The count-keyed preview on the real 4p board** — the published sample states this offer's
+/// own count window, splits each count over the three announced player candidates, and charges
+/// each candidate its own share of the drain.
+///
+/// This board is the one that gives the split cardinality: `delta.life` names ONE seat and the
+/// per-cycle rate is 1, but the announced `Targets` point publishes THREE player candidates, so
+/// a multi-seat allocation is real here and an implementation keyed on the life map alone
+/// cannot produce it. The candidate ids also sit on the THIRD published point, so an
+/// implementation keyed on `points[0]` mints the wrong namespace.
+///
+/// # Discrimination
+///
+/// Fold with no split ⇒ (a) publishes ONE life seat where the allocation names three; keep the
+/// split but drop the remainder distribution ⇒ (c) is short on the elements whose count the
+/// candidates do not divide, while (a) at the suggested count still passes; publish the
+/// suggested count's magnitudes on every element ⇒ (c) fails on the second published count;
+/// re-attribute the looper's library axis too ⇒ (b) fails.
+#[test]
+fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
+    use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionResponseSpec, InteractionSessionId,
+        InteractionShortcutCountSpec, InteractionShortcutPointKind, InteractionShortcutPreview,
+        InteractionShortcutPreviewFamily,
+    };
+
+    let mut state = load_f4();
+    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+    let (proposer, certificate, schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .clone()
+        .expect("a bounded offer publishes its per-period signature");
+
+    // ── The announced slot and its candidate seats, read off the SCHEMA — the same "first
+    //    `Targets` point" the producer keys the allocation on.
+    let (charged_slot, seats) = schema
+        .points
+        .iter()
+        .find_map(|point| match &point.kind {
+            DecisionPointKind::Targets { legal_targets, .. } => Some((
+                point.slot.clone(),
+                legal_targets
+                    .iter()
+                    .map(|target| match target {
+                        TargetRef::Player(seat) => Some(*seat),
+                        TargetRef::Object(_) => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .expect("this board announces player targets"),
+            )),
+            _ => None,
+        })
+        .expect("the F4 offer announces a Targets point");
+    let rate = per_cycle
+        .victim_slot
+        .iter()
+        .find(|(slot, _)| *slot == charged_slot)
+        .map(|(_, magnitude)| *magnitude)
+        .expect("the period charges the announced slot");
+    assert!(
+        rate > 0 && seats.len() > 1,
+        "reach-guard: a positive charge over MORE THAN ONE announced candidate is what makes a \
+         per-seat split observable at all; rate={rate} seats={seats:?}"
+    );
+    assert_eq!(
+        per_cycle.delta.life.len(),
+        1,
+        "reach-guard: this board's life map names ONE seat, so a per-seat split published here \
+         cannot have been read off the life map; got {:?}",
+        per_cycle.delta.life
+    );
+    assert!(
+        !per_cycle.delta.library_delta.is_empty(),
+        "reach-guard: the unattributed seat-keyed control axis must be fed, or (b) below is \
+         vacuous; got {:?}",
+        per_cycle.delta
+    );
+
+    let mut probe = state.clone();
+    bind_interaction_authority(
+        &mut probe,
+        InteractionSessionId("f4-count-keyed-preview".to_string()),
+    )
+    .expect("bind the interaction authority over the live offer");
+    let filtered = filter_state_for_viewer(&probe, proposer);
+    let view = derive_viewer_interaction(&probe, &filtered, proposer);
+    let InteractionOpportunityResponse::Schema {
+        spec:
+            InteractionResponseSpec::Shortcut {
+                count,
+                points,
+                preview,
+                ..
+            },
+        ..
+    } = &view
+        .opportunities
+        .first()
+        .expect("the live offer publishes an interaction opportunity")
+        .response
+    else {
+        panic!("the live offer publishes a Shortcut response schema");
+    };
+    let InteractionShortcutCountSpec::Fixed {
+        min,
+        max,
+        suggested,
+    } = count
+    else {
+        panic!("a bounded offer publishes a Fixed count window, got {count:?}");
+    };
+    let candidate_ids = points
+        .iter()
+        .find(|point| point.kind == InteractionShortcutPointKind::Targets)
+        .map(|point| point.candidate_ids.clone())
+        .expect("the offer publishes its announced Targets point");
+
+    // ── THE COUNT AXIS: the window's own endpoints are always stated.
+    let published: Vec<u32> = preview.iter().map(|element| element.count).collect();
+    for endpoint in [*min, *suggested, *max] {
+        assert!(
+            published.contains(&endpoint),
+            "CR 732.2a: the window's own {endpoint} must be published; got {published:?}"
+        );
+    }
+
+    // ── REACH-GUARDS on the published list, before any magnitude is read.
+    assert!(
+        published.len() > 1,
+        "reach-guard: more than one count must be published, or a producer that ignores \
+         `count` passes every leg below; got {published:?}"
+    );
+    assert!(
+        preview.iter().any(|element| {
+            u32::try_from(element.allocation.len())
+                .is_ok_and(|parts| parts > 0 && element.count % parts != 0)
+        }),
+        "reach-guard: some published count must NOT divide its part count, or a split that \
+         drops its remainder still totals correctly"
+    );
+    assert!(
+        preview.iter().any(|element| element
+            .allocation
+            .iter()
+            .map(|assignment| &assignment.choice_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1),
+        "reach-guard: some element must allocate over more than one candidate — the count-1 \
+         element necessarily names exactly one"
+    );
+
+    let life_of = |element: &InteractionShortcutPreview| {
+        let mut entries: Vec<(Option<u8>, i32)> = element
+            .entries
+            .iter()
+            .filter(|entry| entry.family == InteractionShortcutPreviewFamily::Life)
+            .map(|entry| (entry.player, entry.amount))
+            .collect();
+        entries.sort_unstable();
+        entries
+    };
+
+    for element in preview {
+        // ── THE SPLIT: one part per announced candidate, truncated by the count, ids taken
+        //    from the point's own published order.
+        let parts = usize::try_from(element.count)
+            .expect("a published count fits usize")
+            .min(candidate_ids.len());
+        assert_eq!(element.allocation.len(), parts);
+        assert_eq!(
+            element
+                .allocation
+                .iter()
+                .map(|assignment| assignment.choice_id.clone())
+                .collect::<Vec<_>>(),
+            candidate_ids[..parts].to_vec(),
+            "CR 601.2c: the split speaks the announced point's OWN candidate ids, in the order \
+             it published them"
+        );
+        let amounts: Vec<u32> = element
+            .allocation
+            .iter()
+            .map(|assignment| assignment.amount)
+            .collect();
+        assert!(amounts.iter().all(|amount| *amount >= 1));
+        assert!(amounts.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert_eq!(amounts.iter().sum::<u32>(), element.count);
+
+        // ── (a) THE ENTRIES FOLLOW THE SPLIT: each allocated candidate at its own share.
+        let mut expected: Vec<(Option<u8>, i32)> = seats
+            .iter()
+            .zip(element.allocation.iter())
+            .map(|(seat, assignment)| {
+                (
+                    Some(seat.0),
+                    i32::try_from(-rate * i64::from(assignment.amount))
+                        .expect("a previewed magnitude fits i32"),
+                )
+            })
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(
+            life_of(element),
+            expected,
+            "CR 119.3: at count {} the drain is charged to each announced candidate at the \
+             published rate {rate} times its own share",
+            element.count
+        );
+
+        // ── (c) TOTAL INVARIANCE: whatever the split, the seats together absorb the count.
+        assert_eq!(
+            life_of(element)
+                .iter()
+                .map(|(_, amount)| i64::from(*amount))
+                .sum::<i64>(),
+            -rate * i64::from(element.count),
+            "the published split totals the element's own count at count {}",
+            element.count
+        );
+
+        // ── (b) PAIRED CONTROL: the looper's own library axis is seat-keyed too and is NOT
+        //    victim-attributed, so it keeps its seat and its unscaled product.
+        for (seat, magnitude) in &per_cycle.delta.library_delta {
+            assert!(
+                element.entries.iter().any(|entry| {
+                    entry.family == InteractionShortcutPreviewFamily::Mill
+                        && entry.player == Some(seat.0)
+                        && i64::from(entry.amount) == magnitude * i64::from(element.count)
+                }),
+                "an axis the announced slot does not charge keeps the seat `payload_seat` gave \
+                 it and the raw count product: {:?}",
+                element.entries
+            );
+        }
+    }
+}
+
+/// **T3** — the token axis is PUBLISHED and DELIVERED, and the two are coupled.
+///
+/// CR 111.1: a token creation is an event, so the snapshot pair the per-period signature used
+/// to be measured with reported zero on this axis while the board really minted a token every
+/// cycle. `ResourceVector::period` derives the axis from the board pair, so the offer's
+/// preview states the token product and the accepted drive delivers it.
+///
+/// The preview is read through the whole published projection
+/// (`bind_interaction_authority` + `derive_viewer_interaction`), on a CLONE so nothing here
+/// perturbs the drive that (b) then measures.
+///
+/// # Discrimination
+///
+/// (i) drop the token term from `period` ⇒ the rate guard and (a) red; (ii) point the
+/// conformance site back at the raw snapshot pair while leaving the mint fed ⇒ zero cycles
+/// commit, so (b) reds while (a) still passes — that coupling is the assertion; (iii) revert
+/// `ring_delta_signature`'s `per_period` binding ⇒ this board certifies on the
+/// resource-signature basis, the published rate returns to zero and the guard reds.
+#[test]
+fn t3_the_published_token_rate_is_delivered_by_the_accepted_drive() {
+    use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionResponseSpec, InteractionSessionId,
+        InteractionShortcutCountSpec, InteractionShortcutPreviewFamily,
+    };
+
+    let mut state = load_f4();
+    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+    let (proposer, certificate, schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .clone()
+        .expect("a bounded offer publishes its per-period signature");
+    let schema = schema.clone();
+
+    let token_rate = per_cycle.delta.tokens_created;
+    assert!(
+        token_rate > 0,
+        "the published per-cycle token rate must be strictly positive — a ZERO rate FAILS this \
+         row rather than satisfying it, because a zero-token preview is exactly the unfed axis \
+         under test. published delta={:?}",
+        per_cycle.delta
+    );
+    let life_rate = -per_cycle.delta.life.values().copied().min().unwrap_or(0);
+    assert!(
+        life_rate > 0,
+        "ANTI-VACUITY: (b) re-derives the committed count as `total life loss / life_rate`, \
+         which needs a strictly positive rate. published life={:?}",
+        per_cycle.delta.life
+    );
+
+    // ── (a) THE PUBLISHED SIDE, read through the real viewer projection on a clone.
+    let mut probe = state.clone();
+    bind_interaction_authority(
+        &mut probe,
+        InteractionSessionId("t3-token-preview".to_string()),
+    )
+    .expect("bind the interaction authority over the live offer");
+    let filtered = filter_state_for_viewer(&probe, proposer);
+    let view = derive_viewer_interaction(&probe, &filtered, proposer);
+    let opportunity = view
+        .opportunities
+        .first()
+        .expect("the live offer publishes an interaction opportunity");
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { count, preview, .. },
+        ..
+    } = &opportunity.response
+    else {
+        panic!(
+            "the live offer publishes a Shortcut response schema, got {:?}",
+            opportunity.response
+        );
+    };
+    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count else {
+        panic!("a bounded offer publishes a Fixed count window, got {count:?}");
+    };
+    let preview = preview
+        .iter()
+        .find(|element| element.count == *suggested)
+        .expect("the published sample always states the offer's suggested count");
+    let tokens: Vec<i32> = preview
+        .entries
+        .iter()
+        .filter(|entry| entry.family == InteractionShortcutPreviewFamily::Tokens)
+        .map(|entry| entry.amount)
+        .collect();
+    assert_eq!(
+        tokens.len(),
+        1,
+        "the preview must carry exactly ONE Tokens entry — none means the axis is unfed, \
+         several means the projection stopped folding it. entries={:?}",
+        preview.entries
+    );
+    assert_eq!(
+        i64::from(tokens[0]),
+        token_rate * i64::from(preview.count),
+        "the preview states the token product for the count it travels with \
+         ({}), at the published rate {token_rate}",
+        preview.count
+    );
+
+    // ── (b) THE DELIVERED SIDE: the same count, driven, on the untouched board.
+    let count = preview.count;
+    let template = f4_pin_template(&schema, proposer, count);
+    let (_, _, _, tokens_before) = commit_axes(&state);
+    let life_before = life_by_seat(&state);
+
+    apply(
+        &mut state,
+        proposer,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(count),
+            template: Some(template),
+        },
+    )
+    .expect("the declaration is dispatched");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+        "the declaration of the previewed count must be ACCEPTED, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the CR 732.2c window must actually take responses"
+    );
+
+    let (_, _, _, tokens_after) = commit_axes(&state);
+    let life_after = life_by_seat(&state);
+    let total_life_loss: i64 = life_before
+        .iter()
+        .map(|(seat, before)| (*before - life_of(&life_after, *seat)).max(0))
+        .sum();
+    let committed = total_life_loss / life_rate;
+    // The REACH-GUARD on (b): a drive that committed nothing would satisfy a bare
+    // "tokens grew by rate times committed" with 0 == 0.
+    assert_eq!(
+        committed,
+        i64::from(count),
+        "the accepted drive must commit the very count the preview stated: life \
+         {life_before:?} -> {life_after:?} at rate {life_rate}"
+    );
+    assert_eq!(
+        (tokens_after - tokens_before) as i64,
+        token_rate * committed,
+        "the board must mint the published per-cycle token rate {token_rate} on each of the \
+         {committed} committed cycles: {tokens_before} -> {tokens_after} battlefield tokens"
+    );
+}
+
+/// **T8** — the enumerated consumer MOVES, its channel stays CLOSED, and the admissible-action
+/// set at the offer beat is PINNED by driving rather than asserted.
+///
+/// (a) is U2's: feeding the token axis puts `TokensCreated` into `LoopCertificate.unbounded`,
+/// which is the consumption site the period-delta rewiring has to account for. (b) and (c)
+/// PASS AT BASE BY DESIGN and are REACH-GUARDS — (b) is the containment this phase must not
+/// break (a bounded offer publishes nothing to the unbounded-resource channel), and (c) is the
+/// reducer property that containment argument quantifies over.
+///
+/// `GameState::loop_period_controller` — the predicate guarding the only mark route this
+/// phase's new axis could reach — is `pub(crate)` and unnameable here, so (b) asserts its
+/// INPUT: `last_loop_action_sequence` is EMPTY, which makes that function's leading
+/// `first()?` return `None` outright.
+///
+/// # Discrimination
+///
+/// (a) reds if the token term is dropped from `ResourceVector::period`. (b) reds if the
+/// accept-side route stops testing the controller predicate.
+#[test]
+fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_closed() {
+    use engine::analysis::resource::ResourceAxis;
+
+    let mut state = load_f4();
+    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+    let (proposer, certificate, schema) = offer_parts(&state);
+    let unbounded = certificate.unbounded.clone();
+    let per_cycle = certificate
+        .per_cycle
+        .clone()
+        .expect("a bounded offer publishes its per-period signature");
+    let schema = schema.clone();
+    let n = schema.max_iterations;
+
+    // ── (a) the enumerated consumer moves.
+    assert!(
+        unbounded.contains(&ResourceAxis::TokensCreated),
+        "a bounded offer whose period MINTS tokens carries the token axis into the \
+         certificate's unbounded set. published axes={unbounded:?}"
+    );
+
+    // ── (c) THE FIREWALL LEG, taken first because it must be measured on the OFFER beat.
+    let torch = resolve_by_name(&state, TORCH);
+    assert!(
+        state.battlefield.contains(&torch),
+        "the refused action needs a LIVE battlefield source, else the refusal could be about \
+         the source rather than about the wait"
+    );
+    let sequence_at_offer = state.last_loop_action_sequence.clone();
+    let mut firewall = state.clone();
+    let refusal = apply(
+        &mut firewall,
+        proposer,
+        GameAction::ActivateAbility {
+            source_id: torch,
+            ability_index: 0,
+        },
+    );
+    assert!(
+        matches!(
+            refusal,
+            Err(engine::game::engine::EngineError::ActionNotAllowed(_))
+        ),
+        "an action outside the offer beat's admissible set is refused as ActionNotAllowed, \
+         got {refusal:?}"
+    );
+    assert_eq!(
+        firewall.last_loop_action_sequence, sequence_at_offer,
+        "the refused action must not mint a loop-action step — that sequence is the input to \
+         the very predicate guarding the mark route (b) asserts closed"
+    );
+    assert!(
+        matches!(firewall.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "the refusal leaves the offer standing, got {:?}",
+        firewall.waiting_for
+    );
+
+    // ── (b) the guard's input is unset at the offer beat, with its own positive control.
+    assert!(
+        sequence_at_offer.is_empty(),
+        "no seat owns a driving period at the offer beat, so the object-growth mark route is \
+         not live for anyone. sequence={sequence_at_offer:?}"
+    );
+    assert!(
+        state.unbounded_resources.is_empty(),
+        "the bounded offer publishes nothing to the unbounded-resource channel. got {:?}",
+        state.unbounded_resources
+    );
+    let mut marked = state.clone();
+    marked.mark_unbounded_loop(proposer, &[ResourceAxis::TokensCreated]);
+    assert!(
+        !marked.unbounded_resources.is_empty(),
+        "POSITIVE CONTROL: the same reader returns non-empty on a hand-marked state, so the \
+         empty result above is a real negative and not a dead instrument"
+    );
+
+    // ── (c) PAIRED POSITIVE + (b) across the whole window: the SAME beat accepts a
+    //    declaration, which then commits its whole count with the channel still closed.
+    let life_rate = -per_cycle.delta.life.values().copied().min().unwrap_or(0);
+    assert!(
+        life_rate > 0,
+        "ANTI-VACUITY: the committed count below is re-derived from the life relation. \
+         published life={:?}",
+        per_cycle.delta.life
+    );
+    let template = f4_pin_template(&schema, proposer, n);
+    let life_before = life_by_seat(&state);
+    apply(
+        &mut state,
+        proposer,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(n),
+            template: Some(template),
+        },
+    )
+    .expect("the declaration is dispatched");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+        "PAIRED POSITIVE for the firewall: `DeclareShortcut` on the SAME beat is ADMITTED and \
+         moves the wait, so an Err-on-everything reducer cannot satisfy the refusal above. got \
+         {:?}",
+        state.waiting_for
+    );
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the CR 732.2c window must actually take responses"
+    );
+
+    let life_after = life_by_seat(&state);
+    let committed: i64 = life_before
+        .iter()
+        .map(|(seat, before)| (*before - life_of(&life_after, *seat)).max(0))
+        .sum::<i64>()
+        / life_rate;
+    assert_eq!(
+        committed,
+        i64::from(n),
+        "the accepted declaration commits its whole count, so the channel assertion below is \
+         about a drive that actually ran: life {life_before:?} -> {life_after:?}"
+    );
+    assert!(
+        state.last_loop_action_sequence.is_empty() && state.unbounded_resources.is_empty(),
+        "after the bounded drive the object-growth route is STILL not live and nothing was \
+         published to the unbounded-resource channel. sequence={:?} marks={:?}",
+        state.last_loop_action_sequence,
+        state.unbounded_resources
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════
+// PHASE 4 — the per-victim ALLOCATION INGRESS, driven on the real 4p dump
+//
+// Every row below enters through `resolve_interaction_response` — the wire path a client
+// actually takes — rather than by handing `apply` a `DecisionTemplate` the test built itself.
+// Restrict the ingress to a per-position pin and the submission is refused, so none of these
+// rows can dispatch.
+// ═════════════════════════════════════════════════════════════════════════════════════════
+
+/// The published allocation surface of one CR 732.2a offer, read off the offer's own fields.
+///
+/// Nothing here is spelled: the legal victim set, the candidate ids, the count window, the
+/// per-cycle rate and the pre-announced seat all come from published state.
+struct F4Allocation {
+    interaction_id: engine::types::interaction::InteractionId,
+    proposer: PlayerId,
+    /// The `Targets` point's index in `schema.points`, which is also its published `group`.
+    target_group: u32,
+    /// Seat candidates in published order, positionally aligned with `candidate_ids`.
+    legal_seats: Vec<PlayerId>,
+    candidate_ids: Vec<engine::types::interaction::InteractionChoiceId>,
+    /// Pins answering every OTHER non-read-only point, so a submission is complete.
+    other_pins: Vec<engine::types::interaction::InteractionShortcutPin>,
+    /// Those same points, carrying their own candidate lists — so a row can author a DIFFERENT
+    /// answer than `other_pins`' default first pick without re-reading the offer.
+    answerable: Vec<engine::types::interaction::InteractionShortcutPoint>,
+    /// The offer's own count-keyed published preview list, read at the offer beat because the
+    /// interaction id rotates the moment the declaration is dispatched.
+    published_preview: Vec<engine::types::interaction::InteractionShortcutPreview>,
+    /// The offer beat's published candidates, for the same reason.
+    offer_candidates: Vec<engine::types::interaction::InteractionChoice>,
+    /// The CR 601.2c announcement journal's answer at the `Targets` slot — the seat the
+    /// drive's LEADING cycle resolves, before anything the allocation governs.
+    preannounced: PlayerId,
+    /// The published `InteractionShortcutCountSpec::Fixed` ceiling.
+    max_count: u32,
+    /// Magnitude of the published per-cycle life charge at `preannounced`.
+    rate: i64,
+}
+
+/// Drive the real dump to its bounded offer, bind the interaction authority, and read the
+/// allocation surface off the published offer.
+fn f4_allocation_offer(state: &mut GameState) -> F4Allocation {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, LoopAnswer, LoopAnswerValue, TargetPin, TargetSchedule,
+    };
+    use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionResponseSpec, InteractionSessionId,
+        InteractionShortcutCountSpec, InteractionShortcutPin, InteractionShortcutPointKind,
+    };
+
+    drive_f4_to_offer(state, 400).expect("reach-guard: the bounded offer fires (see R1)");
+    let (proposer, certificate, schema) = offer_parts(state);
+    let per_cycle = certificate
+        .per_cycle
+        .clone()
+        .expect("a bounded offer publishes its per-period signature");
+    let schema = schema.clone();
+
+    let target_group = schema
+        .points
+        .iter()
+        .position(|p| matches!(p.kind, DecisionPointKind::Targets { .. }))
+        .expect("reach-guard: the offer publishes Torch's CR 601.2c Targets point");
+    let DecisionPointKind::Targets { legal_targets, .. } = &schema.points[target_group].kind else {
+        unreachable!("the position above selected a Targets point");
+    };
+    let legal_seats: Vec<PlayerId> = legal_targets
+        .iter()
+        .map(|t| match t {
+            TargetRef::Player(seat) => *seat,
+            other => panic!("this board's victims are seats, got {other:?}"),
+        })
+        .collect();
+
+    // The pre-announced seat is read from the CR 601.2c announcement journal — the authority
+    // `c2a_row_t1` reads and `c2a_row_t1p` proves follows the announcement. Identifying it as
+    // "the seat that lost one extra cycle" would make every sum leg below unfalsifiable.
+    let preannounced = match state.loop_answer(&schema.points[target_group].slot, proposer) {
+        Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(pins))) => match pins.as_slice() {
+            [TargetPin::Scheduled(TargetSchedule::Constant(ranking))] => match ranking.head() {
+                AnnouncementSubject::Seat(seat) => *seat,
+                other => panic!("the journalled announcement is a seat, got {other:?}"),
+            },
+            other => panic!("the journal holds one scheduled constant pin, got {other:?}"),
+        },
+        other => panic!("the CR 601.2c journal must hold this slot's announcement, got {other:?}"),
+    };
+    let rate = -per_cycle
+        .delta
+        .life
+        .get(&preannounced)
+        .copied()
+        .unwrap_or(0);
+
+    bind_interaction_authority(state, InteractionSessionId("p4-allocation".to_string()))
+        .expect("valid interaction authority binding");
+    let filtered = filter_state_for_viewer(state, proposer);
+    let view = derive_viewer_interaction(state, &filtered, proposer);
+    let opportunity = view
+        .opportunities
+        .iter()
+        .find(|o| {
+            matches!(
+                &o.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::Shortcut { .. },
+                    ..
+                }
+            )
+        })
+        .expect("reach-guard: the offer is published as a shortcut schema");
+    let InteractionOpportunityResponse::Schema {
+        spec:
+            InteractionResponseSpec::Shortcut {
+                count,
+                points,
+                preview,
+                ..
+            },
+        candidates: offer_candidates,
+    } = &opportunity.response
+    else {
+        unreachable!("the find above selected a shortcut schema");
+    };
+    assert_eq!(
+        points.len(),
+        schema.points.len(),
+        "reach-guard: the projection publishes one point per schema point, which is what makes \
+         `target_group` address the SAME point in both"
+    );
+    let target_point = &points[target_group];
+    assert_eq!(
+        target_point.kind,
+        InteractionShortcutPointKind::Targets,
+        "reach-guard: the published point at the schema's Targets index is a Targets point"
+    );
+    assert_eq!(
+        target_point.candidate_ids.len(),
+        legal_seats.len(),
+        "reach-guard: candidate ids are positionally aligned with the published legal victims, \
+         which is how every allocation below names a seat without spelling an id"
+    );
+    let max_count = match count {
+        InteractionShortcutCountSpec::Fixed { max, .. } => *max,
+        other => panic!("this board publishes a Fixed count window, got {other:?}"),
+    };
+
+    let answerable: Vec<_> = points
+        .iter()
+        .enumerate()
+        .filter(|(group, point)| !point.read_only && *group != target_group)
+        .map(|(_, point)| point.clone())
+        .collect();
+    let other_pins = answerable
+        .iter()
+        .map(|point| InteractionShortcutPin {
+            group: point.group,
+            choice_ids: point
+                .candidate_ids
+                .iter()
+                .take(point.min as usize)
+                .cloned()
+                .collect(),
+            amounts: Vec::new(),
+        })
+        .collect();
+
+    F4Allocation {
+        interaction_id: opportunity.interaction_id.clone(),
+        proposer,
+        target_group: target_group as u32,
+        legal_seats,
+        candidate_ids: target_point.candidate_ids.clone(),
+        other_pins,
+        answerable,
+        published_preview: preview.clone(),
+        offer_candidates: offer_candidates.clone(),
+        preannounced,
+        max_count,
+        rate,
+    }
+}
+
+/// One `InteractionSubmission` naming `allocation` as a SEQUENCED pin on the published
+/// `Targets` point. `allocation` is client-authored input; the published count is the
+/// authority it must match, so a re-dump that moved the ceiling fails here loudly instead of
+/// quietly testing a different claim.
+fn f4_allocation_submission(
+    offer: &F4Allocation,
+    count: u32,
+    allocation: &[(PlayerId, u32)],
+) -> engine::types::interaction::InteractionSubmission {
+    use engine::types::interaction::{
+        AmountAssignment, InteractionResponse, InteractionShortcutDecision, InteractionShortcutPin,
+        InteractionSubmission,
+    };
+
+    assert_eq!(
+        allocation.iter().map(|(_, amount)| amount).sum::<u32>(),
+        count,
+        "reach-guard: an allocation partitions the DECLARED count; this row's shape does not"
+    );
+    let choice_ids: Vec<_> = allocation
+        .iter()
+        .map(|(seat, _)| {
+            let index = offer
+                .legal_seats
+                .iter()
+                .position(|candidate| candidate == seat)
+                .unwrap_or_else(|| panic!("{seat:?} is not a published legal victim"));
+            offer.candidate_ids[index].clone()
+        })
+        .collect();
+    let amounts = choice_ids
+        .iter()
+        .zip(allocation)
+        .map(|(choice_id, (_, amount))| AmountAssignment {
+            choice_id: choice_id.clone(),
+            amount: *amount,
+        })
+        .collect();
+    let mut pins = offer.other_pins.clone();
+    pins.push(InteractionShortcutPin {
+        group: offer.target_group,
+        choice_ids,
+        amounts,
+    });
+    InteractionSubmission {
+        interaction_id: offer.interaction_id.clone(),
+        response: InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::Fixed { iterations: count },
+            pins,
+        },
+    }
+}
+
+/// Submit `allocation` through the ingress, dispatch the action it mints, let every living
+/// opponent accept, and return the per-seat life LOSSES positionally by `state.players`.
+fn f4_drive_allocation(
+    state: &mut GameState,
+    offer: &F4Allocation,
+    count: u32,
+    allocation: &[(PlayerId, u32)],
+) -> Vec<i64> {
+    use engine::game::interaction::resolve_interaction_response;
+
+    let before: Vec<i64> = state.players.iter().map(|p| p.life as i64).collect();
+    let action = resolve_interaction_response(
+        state,
+        offer.proposer,
+        &f4_allocation_submission(offer, count, allocation),
+    )
+    .expect("the allocation ingress accepts a conformant sequenced pin");
+    apply(state, offer.proposer, action).expect("the minted declaration is dispatched");
+    // THE DISCRIMINATOR between "declare refused it" and "the drive aborted": a refused
+    // declaration hands priority straight back and never opens the APNAP window.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+        "the accepted declaration must open the CR 732.2b APNAP window, got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        accept_all_opponents(state) > 0,
+        "the CR 732.2c window must actually take responses"
+    );
+    state
+        .players
+        .iter()
+        .enumerate()
+        .map(|(seat, p)| before[seat] - p.life as i64)
+        .collect()
+}
+
+/// The seat each `state.players` position holds, so a loss vector can be read by seat.
+fn f4_loss(state: &GameState, losses: &[i64], seat: PlayerId) -> i64 {
+    let index = state
+        .players
+        .iter()
+        .position(|p| p.id == seat)
+        .unwrap_or_else(|| panic!("{seat:?} is not seated on this board"));
+    losses[index]
+}
+
+/// The announced target of the trigger still on the stack when a CR 732.2a drive hands back.
+fn f4_pending_announcement(state: &GameState) -> Vec<TargetRef> {
+    let entry = state
+        .stack
+        .last()
+        .expect("the drive hands back with the next repetition's trigger still on the stack");
+    match &entry.kind {
+        StackEntryKind::TriggeredAbility { ability, .. } => ability.targets.clone(),
+        other => panic!("the pending entry is a triggered ability, got {other:?}"),
+    }
+}
+
+/// **Row (1)** — an allocation of the published `Fixed` ceiling across all three legal victims
+/// decodes to `TargetSchedule::Piecewise` at the prefix sums its amounts imply, and commits its
+/// whole declared count.
+///
+/// # Discrimination
+///
+/// Restrict the ingress to a per-position pin (drop the `sequenced` gate, or the `Piecewise`
+/// build) ⇒ `resolve_interaction_response` returns `ConstraintUnsatisfied` and this row cannot
+/// dispatch at all.
+///
+/// # Shape
+///
+/// The near-equal split, whose every segment start lands inside the window a drive of `n`
+/// cycles actually realizes: the FIRST cycle resolves the target announced before the drive
+/// begins, so template indices `0..=n-2` govern the rest. Row (1c) pins that window as its own
+/// class property rather than smuggling it into this row's wording.
+///
+/// # Paired positives
+///
+/// The published rate is asserted strictly positive, else every product below degenerates to
+/// `0 == 0 * n`; the declaration must open the APNAP window, separating "declare refused" from
+/// "drive aborted"; and the realized split is asserted NON-uniform, so a uniform-split bug
+/// cannot satisfy it.
+///
+/// # The set the omitted-victim leg quantifies over
+///
+/// With all three legal victims declared, the only undeclared seat is the PROPOSER, who is not
+/// among the offer's published `legal_targets`. The charter's omitted-legal-victim clause has
+/// no member in this row; [`p4_row_1b_an_authored_non_canonical_distribution_is_accepted`]'s
+/// third arm is where a real one lives.
+#[test]
+fn p4_row_1_an_allocation_of_the_published_ceiling_commits_its_whole_count() {
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let count = offer.max_count;
+
+    assert!(
+        offer.rate > 0,
+        "ANTI-VACUITY: the published per-cycle life rate must be strictly positive, else every \
+         product below degenerates to `0 == 0 * {count}`"
+    );
+    assert_eq!(
+        offer.legal_seats.len(),
+        3,
+        "reach-guard: this board publishes three legal victims, which is what makes a \
+         three-segment allocation a real member of the composition set"
+    );
+    assert!(
+        !offer.legal_seats.contains(&offer.proposer),
+        "the undeclared-seat leg below is stated over the set it walks: the proposer is NOT a \
+         published legal victim, so declaring all three victims leaves no omitted victim here"
+    );
+
+    let third = count / 3;
+    let allocation = [
+        (offer.legal_seats[0], third),
+        (offer.legal_seats[1], third),
+        (offer.legal_seats[2], count - 2 * third),
+    ];
+    let losses = f4_drive_allocation(&mut state, &offer, count, &allocation);
+
+    for (seat, _) in &allocation {
+        assert!(
+            f4_loss(&state, &losses, *seat) > 0,
+            "CR 732.2a: every seat this allocation declares takes repetitions, so each strictly \
+             decreases. {seat:?} losses={losses:?}"
+        );
+    }
+    assert_eq!(
+        allocation
+            .iter()
+            .map(|(seat, _)| f4_loss(&state, &losses, *seat))
+            .sum::<i64>(),
+        offer.rate * i64::from(count),
+        "CR 732.2a: the accepted shortcut commits EXACTLY {count} repetitions of the published \
+         per-cycle charge, and with every legal victim declared the whole charge lands on them. \
+         losses={losses:?} rate={}",
+        offer.rate
+    );
+    assert_eq!(
+        f4_loss(&state, &losses, offer.proposer),
+        0,
+        "the proposer is not a published victim and loses nothing. losses={losses:?}"
+    );
+    let realized: Vec<i64> = allocation
+        .iter()
+        .map(|(seat, _)| f4_loss(&state, &losses, *seat))
+        .collect();
+    assert!(
+        realized.windows(2).any(|pair| pair[0] != pair[1]),
+        "ANTI-VACUITY: an EQUAL declared split still realizes a NON-uniform loss map, because \
+         the leading cycle shifts every segment boundary one cycle late. A uniform-split bug \
+         would satisfy the sum leg above; it cannot satisfy this one. realized={realized:?}"
+    );
+}
+
+/// **Row (1b)** — an authored, NON-CANONICAL distribution is accepted: shapes the published
+/// preview allocation does not offer.
+///
+/// Paired with row (1), the two show the ingress admits the whole composition set rather than
+/// the canonical member. Restrict the ingress to the published allocation ⇒ all three arms fail
+/// while row (1) still passes.
+///
+/// # One rule governs both sum legs, and the arms sit on opposite sides of it
+///
+/// Total realized loss is always `rate * count`; the pre-announced seat takes the leading cycle
+/// ON TOP OF whatever the allocation gives it. So the declared seats sum to `rate * (count - 1)`
+/// exactly when the allocation OMITS that seat, and to `rate * count` when it INCLUDES it.
+/// Asserting one figure in both arms would be false in one of them.
+#[test]
+fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
+    let count_probe = {
+        let mut state = load_f4();
+        f4_allocation_offer(&mut state).max_count
+    };
+
+    // ── (a) UNEQUAL PARTS over all three victims ──
+    {
+        let mut state = load_f4();
+        let offer = f4_allocation_offer(&mut state);
+        let count = offer.max_count;
+        assert!(
+            offer.rate > 0,
+            "ANTI-VACUITY: the published rate is positive"
+        );
+        let allocation = [
+            (offer.legal_seats[0], 2),
+            (offer.legal_seats[1], 4),
+            (offer.legal_seats[2], count - 6),
+        ];
+        let losses = f4_drive_allocation(&mut state, &offer, count, &allocation);
+        for (seat, _) in &allocation {
+            assert!(
+                f4_loss(&state, &losses, *seat) > 0,
+                "(a) every declared seat takes repetitions. {seat:?} losses={losses:?}"
+            );
+        }
+        assert_eq!(
+            allocation
+                .iter()
+                .map(|(seat, _)| f4_loss(&state, &losses, *seat))
+                .sum::<i64>(),
+            offer.rate * i64::from(count),
+            "(a) an unequal composition of the same count commits the same total. \
+             losses={losses:?}"
+        );
+    }
+
+    // ── (b) A PROPER SUBSET omitting the PRE-ANNOUNCED seat ──
+    {
+        let mut state = load_f4();
+        let offer = f4_allocation_offer(&mut state);
+        let count = offer.max_count;
+        let declared: Vec<PlayerId> = offer
+            .legal_seats
+            .iter()
+            .copied()
+            .filter(|seat| *seat != offer.preannounced)
+            .collect();
+        assert_eq!(
+            declared.len(),
+            2,
+            "reach-guard: omitting the pre-announced seat must leave a real subset to declare"
+        );
+        let half = count / 2;
+        let allocation = [(declared[0], half), (declared[1], count - half)];
+        let losses = f4_drive_allocation(&mut state, &offer, count, &allocation);
+
+        assert!(
+            !allocation
+                .iter()
+                .any(|(seat, _)| *seat == offer.preannounced),
+            "(b) the submitted allocation omits the pre-announced seat"
+        );
+        assert_eq!(
+            f4_loss(&state, &losses, offer.preannounced),
+            offer.rate,
+            "(b) CR 601.2c: the pre-announced seat still takes the LEADING cycle — the one \
+             resolving a target announced before the drive begins — and nothing else. Reading \
+             that seat from the announcement journal rather than from 'the one that lost rate' \
+             is what lets a drive that charged the leading cycle elsewhere red this row. \
+             losses={losses:?}"
+        );
+        assert_eq!(
+            allocation
+                .iter()
+                .map(|(seat, _)| f4_loss(&state, &losses, *seat))
+                .sum::<i64>(),
+            offer.rate * i64::from(count - 1),
+            "(b) with the leading cycle discounted, the declared seats take the REMAINING \
+             repetitions. losses={losses:?}"
+        );
+    }
+
+    // ── (c) A PROPER SUBSET omitting a legal victim that is NOT the pre-announced seat ──
+    //
+    // This is the arm that gives the omitted-victim clause a member the leading-cycle
+    // exception does not excuse. Without it the conjunct ranges over the empty set across the
+    // whole matrix: row (1) declares every victim, and arm (b)'s only omission is excused.
+    {
+        let mut state = load_f4();
+        let offer = f4_allocation_offer(&mut state);
+        let count = offer.max_count;
+        let omitted = *offer
+            .legal_seats
+            .iter()
+            .rev()
+            .find(|seat| **seat != offer.preannounced)
+            .expect("reach-guard: some legal victim is not the pre-announced seat");
+        let declared: Vec<PlayerId> = offer
+            .legal_seats
+            .iter()
+            .copied()
+            .filter(|seat| *seat != omitted)
+            .collect();
+        assert!(
+            offer.legal_seats.contains(&omitted) && omitted != offer.preannounced,
+            "the omitted seat is a PUBLISHED legal victim and is NOT the pre-announced seat, so \
+             its zero below cannot be explained by either exception"
+        );
+        assert!(
+            declared.contains(&offer.preannounced),
+            "reach-guard: this arm keeps the pre-announced seat in the allocation, which is \
+             what puts its sum leg on the other side of the rule from arm (b)"
+        );
+        let half = count / 2;
+        let allocation = [(declared[0], half), (declared[1], count - half)];
+        let losses = f4_drive_allocation(&mut state, &offer, count, &allocation);
+
+        assert_eq!(
+            f4_loss(&state, &losses, omitted),
+            0,
+            "(c) a legal victim left OUT of the allocation loses nothing. losses={losses:?}"
+        );
+        assert_eq!(
+            allocation
+                .iter()
+                .map(|(seat, _)| f4_loss(&state, &losses, *seat))
+                .sum::<i64>(),
+            offer.rate * i64::from(count),
+            "(c) the pre-announced seat is IN this allocation, so the declared seats take the \
+             whole charge including the leading cycle. losses={losses:?}"
+        );
+    }
+
+    // The omitted seat's zero in (c) is an AXIS, not a dead reading: the same seat reads a
+    // strictly positive loss under row (1)'s allocation on the same board.
+    let mut control = load_f4();
+    let control_offer = f4_allocation_offer(&mut control);
+    assert_eq!(
+        control_offer.max_count, count_probe,
+        "reach-guard: the loaded board is the same one every arm above used"
+    );
+    let third = control_offer.max_count / 3;
+    let control_allocation = [
+        (control_offer.legal_seats[0], third),
+        (control_offer.legal_seats[1], third),
+        (
+            control_offer.legal_seats[2],
+            control_offer.max_count - 2 * third,
+        ),
+    ];
+    let control_losses = f4_drive_allocation(
+        &mut control,
+        &control_offer,
+        control_offer.max_count,
+        &control_allocation,
+    );
+    let omitted = *control_offer
+        .legal_seats
+        .iter()
+        .rev()
+        .find(|seat| **seat != control_offer.preannounced)
+        .expect("some legal victim is not the pre-announced seat");
+    assert!(
+        f4_loss(&control, &control_losses, omitted) > 0,
+        "CONTROL for (c): the seat that read zero when omitted reads a positive loss when \
+         declared, so that zero is a measurement and not a dead instrument. \
+         losses={control_losses:?}"
+    );
+}
+
+/// **Row (1c)** — THE REALIZED INDEX WINDOW, the class property the ingress now exposes.
+///
+/// A drive of `n` cycles commits `rate * n` in total. Its FIRST cycle resolves the target
+/// announced before the drive begins, so template indices `0..=n-2` govern the remaining
+/// `n-1` cycles; index `n-1`'s announcement lands on the trigger left on the stack at the
+/// CR 732.2a handback and resolves in manual play.
+///
+/// # What the pair isolates, exactly
+///
+/// `8/8/2` (last start `n-2`) gives its trailing seat ONE realized cycle; `8/9/1` (last start
+/// `n-1`) gives it NONE. Same arity, same first two boundaries, last start one index apart —
+/// so the 1 -> 0 step isolates the index window FROM ARITY. It does NOT isolate it from
+/// segment length, and no pair over LAST segments can: at fixed `n` a last segment's start is
+/// `n - length`, so the two move together. The middle-segment rows are what separate those —
+/// row (1b) arm (a)'s middle seat realizes its full declared 4, not 3. The two-segment form
+/// (`16/2` vs `17/1`) reproduces the step independently.
+///
+/// This is not a revert row for the ingress: it pins a shipped drive property. It reds if the
+/// ingress starts refusing trailing segments, or if the drive's leading-cycle offset moves.
+#[test]
+fn p4_row_1c_a_segment_starting_at_the_last_index_realizes_nothing_but_stays_announced() {
+    let drive = |allocation_of: &dyn Fn(&F4Allocation) -> Vec<(PlayerId, u32)>| {
+        let mut state = load_f4();
+        let offer = f4_allocation_offer(&mut state);
+        let count = offer.max_count;
+        let allocation = allocation_of(&offer);
+        let trailing = allocation
+            .last()
+            .expect("an allocation has a last segment")
+            .0;
+        let losses = f4_drive_allocation(&mut state, &offer, count, &allocation);
+        let declared_total: i64 = allocation
+            .iter()
+            .map(|(seat, _)| f4_loss(&state, &losses, *seat))
+            .sum();
+        (
+            offer.rate,
+            count,
+            f4_loss(&state, &losses, trailing),
+            declared_total,
+            trailing,
+            f4_pending_announcement(&state),
+            losses,
+        )
+    };
+
+    // Arity 3, adjacent last-segment starts.
+    let (rate, count, last_len2, total_len2, _, _, losses_len2) = drive(&|o: &F4Allocation| {
+        let head = o.max_count / 2 - 1;
+        vec![
+            (o.legal_seats[0], head),
+            (o.legal_seats[1], head),
+            (o.legal_seats[2], o.max_count - 2 * head),
+        ]
+    });
+    let (_, _, last_len1, total_len1, trailing_len1, pending_len1, losses_len1) =
+        drive(&|o: &F4Allocation| {
+            let head = o.max_count / 2 - 1;
+            vec![
+                (o.legal_seats[0], head),
+                (o.legal_seats[1], o.max_count - head - 1),
+                (o.legal_seats[2], 1),
+            ]
+        });
+
+    assert!(rate > 0, "ANTI-VACUITY: the published rate is positive");
+    assert_eq!(
+        (last_len2, last_len1),
+        (rate, 0),
+        "the trailing seat realizes ONE cycle when its segment starts at index n-2 and NONE \
+         when it starts at n-1. losses were {losses_len2:?} then {losses_len1:?}"
+    );
+    assert_eq!(
+        (total_len2, total_len1),
+        (rate * i64::from(count), rate * i64::from(count)),
+        "both shapes are ACCEPTED and both commit the whole declared count — the trailing \
+         segment is admitted, not refused"
+    );
+    assert_eq!(
+        pending_len1,
+        vec![TargetRef::Player(trailing_len1)],
+        "the trailing seat loses nothing INSIDE the drive while its announcement is LIVE: it \
+         is the announced target of the trigger left on the stack at the CR 732.2a handback"
+    );
+
+    // Arity 2 reproduces the step independently, and its pending readout takes a DIFFERENT
+    // seat — so the readout above follows index n-1's segment rather than being a constant.
+    let (_, _, two_len2, _, _, _, losses_two_len2) =
+        drive(&|o: &F4Allocation| vec![(o.legal_seats[0], o.max_count - 2), (o.legal_seats[1], 2)]);
+    let (_, _, two_len1, _, two_trailing, two_pending, losses_two_len1) =
+        drive(&|o: &F4Allocation| vec![(o.legal_seats[0], o.max_count - 1), (o.legal_seats[1], 1)]);
+    assert_eq!(
+        (two_len2, two_len1),
+        (rate, 0),
+        "the two-segment form reproduces the same 1 -> 0 step at the same two starts. \
+         losses were {losses_two_len2:?} then {losses_two_len1:?}"
+    );
+    assert_eq!(
+        two_pending,
+        vec![TargetRef::Player(two_trailing)],
+        "the pending announcement follows index n-1's segment"
+    );
+    assert_ne!(
+        two_trailing, trailing_len1,
+        "CONTROL: the two shapes' trailing seats DIFFER, so the pending readout asserted twice \
+         above is not a constant this board would print either way"
+    );
+}
+
+/// Grant player hexproof from a permanent that seat controls, AFTER the offer latched.
+///
+/// Built with production `zones::create_object` rather than a raw `objects.insert`: a raw
+/// insert never joins `state.battlefield`, so the grantor would be invisible to
+/// `game_functioning_statics`. The dirty mark is fixture bookkeeping — after a completed drive
+/// this board reads `Clean` and `create_object` does not re-dirty it, so a bare `flush_layers`
+/// returns immediately and the O(1) `static_mode_presence` gate answers `false` for `Hexproof`
+/// no matter what the grantor carries.
+fn f4_grant_player_hexproof(state: &mut GameState, seat: PlayerId, card_id: u64) {
+    use engine::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+    use engine::types::game_state::LayersDirty;
+    use engine::types::identifiers::CardId;
+    use engine::types::statics::StaticMode;
+    use engine::types::zones::Zone;
+
+    let grantor = engine::game::zones::create_object(
+        state,
+        CardId(card_id),
+        seat,
+        "You Have Hexproof Source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&grantor)
+        .expect("the grantor was just created")
+        .static_definitions =
+        vec![
+            StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        ]
+        .into();
+    state.layers_dirty = LayersDirty::Full;
+    engine::game::layers::flush_layers(state);
+    assert!(
+        engine::game::static_abilities::player_has_hexproof(state, seat),
+        "reach-guard: the grant must actually land on {seat:?}, else the refusal it is supposed \
+         to cause proves nothing"
+    );
+}
+
+/// **Row (2)** — THE VALIDATED-RANGE REPAIR, its own row rather than a side effect of row (1),
+/// and **row (4)'s hexproof leg**: the refusal takes the WHOLE declaration.
+///
+/// A `Piecewise` pin whose LATER segment names a seat granted hexproof after the offer latched
+/// must be REFUSED. Under the `1` literal the human ingress replaced, index 0 lands in the
+/// FIRST segment and the later one is never re-resolved, so the same submission is accepted.
+///
+/// # Discrimination, at the seam itself
+///
+/// The template the ingress minted is handed to `validate_pins` at range 1 and at the declared
+/// count against the same hostile board: `Ok` at 1, `Err` at the count. That IS the literal's
+/// verdict beside the repair's, on one value, so "restore the `1`" needs no code edit to read.
+///
+/// # Paired positive reach-guard — mandatory
+///
+/// The SAME declaration with every segment legal is ACCEPTED end to end. A bare refusal is
+/// satisfiable by any upstream short-circuit.
+///
+/// # Attribution control
+///
+/// Hexproof on the FIRST segment's seat is refused too — at range 1 as well as at the count —
+/// so the middle-segment result above is attributable to the index window and not to a board
+/// that refuses every hexproofed seat only at wide ranges.
+#[test]
+fn p4_row_2_a_later_segment_that_went_illegal_refuses_the_whole_declaration() {
+    use engine::analysis::decision_template::validate_pins;
+    use engine::game::interaction::resolve_interaction_response;
+
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let count = offer.max_count;
+    let third = count / 3;
+    let allocation = [
+        (offer.legal_seats[0], third),
+        (offer.legal_seats[1], third),
+        (offer.legal_seats[2], count - 2 * third),
+    ];
+    let submission = f4_allocation_submission(&offer, count, &allocation);
+
+    // ── PAIRED POSITIVE: every segment legal ⇒ accepted end to end ──
+    let action = resolve_interaction_response(&state, offer.proposer, &submission).expect(
+        "paired positive: with every segment legal the ingress ACCEPTS, so the refusals below \
+         are not an ingress that had simply started refusing everything",
+    );
+    let (declared_count, template) = match action {
+        GameAction::DeclareShortcut { count, template } => (
+            count,
+            template.expect("a shortcut acceptance carrying pins materializes a template"),
+        ),
+        other => panic!("the allocation ingress mints a declaration, got {other:?}"),
+    };
+    assert_eq!(declared_count, IterationCount::Fixed(count));
+    let schema = offer_parts(&state).2.clone();
+    assert!(
+        validate_pins(&schema, &template, count, &state).is_ok(),
+        "paired positive at the seam: the minted Piecewise validates at the FULL declared range \
+         on the un-hexproofed board"
+    );
+
+    let torch = resolve_by_name(&state, TORCH);
+    let torch_controller = state.objects[&torch].controller;
+
+    // ── THE CLAIM: hexproof on the MIDDLE segment's seat ──
+    let middle = offer.legal_seats[1];
+    let mut hostile = state.clone();
+    assert!(
+        engine::game::players::is_opponent(&hostile, middle, torch_controller),
+        "reach-guard: CR 702.11c only excludes OPPONENTS' abilities, so {middle:?} must be \
+         Torch's controller {torch_controller:?}'s opponent"
+    );
+    f4_grant_player_hexproof(&mut hostile, middle, 9402);
+    assert!(
+        !engine::game::static_abilities::player_cannot_be_targeted_by(
+            &hostile,
+            offer.legal_seats[0],
+            torch,
+            torch_controller
+        ),
+        "reach-guard: a DIFFERENT seat on the same hostile board is still targetable, so the \
+         refusal below is the hexproof and not a blanket one"
+    );
+    assert!(
+        validate_pins(&schema, &template, 1, &hostile).is_ok(),
+        "THE REVERT READING: at range 1 — the literal this phase replaced — index 0 lands in \
+         the FIRST segment and the hexproofed MIDDLE seat is never re-resolved, so the same \
+         declaration is ACCEPTED"
+    );
+    assert!(
+        validate_pins(&schema, &template, count, &hostile).is_err(),
+        "CR 608.2b + CR 702.11c: validated over the range the ACCEPTED COUNT drives, the later \
+         segment's seat is re-resolved and is an illegal target"
+    );
+    assert!(
+        resolve_interaction_response(&hostile, offer.proposer, &submission).is_err(),
+        "row (4): the refusal takes the WHOLE declaration — no action is minted at all, rather \
+         than one segment being dropped"
+    );
+
+    // ── ATTRIBUTION CONTROL: hexproof on the FIRST segment's seat ──
+    let first = offer.legal_seats[0];
+    let mut first_hostile = state.clone();
+    assert!(
+        engine::game::players::is_opponent(&first_hostile, first, torch_controller),
+        "reach-guard: {first:?} must be Torch's controller's opponent too"
+    );
+    f4_grant_player_hexproof(&mut first_hostile, first, 9403);
+    assert!(
+        validate_pins(&schema, &template, 1, &first_hostile).is_err()
+            && validate_pins(&schema, &template, count, &first_hostile).is_err(),
+        "CONTROL: a FIRST-segment seat gone illegal reds at BOTH ranges, so the middle-segment \
+         split above is attributable to the index window rather than to a range-shaped board"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// E — `DerivedViews::bounded_loop_max_repetitions`, the open window's own repetition ceiling
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
+/// **Rows E1 / E2 / E3.** CR 732.2a: a narrowed offer publishes the largest number of
+/// repetitions its proposal may specify; the `∞` channel beside it is neither admitted nor
+/// withheld by that publication; and the channel is absent before the window opens and again
+/// after the accepted drive hands priority back.
+///
+/// # Non-vacuity
+///
+/// The bound is READ OFF the live offer, never written as a literal, so a re-dump that moves the
+/// board's CR 704.5a threshold flows through instead of reddening the row. Every absence leg
+/// carries its matched positive in the same test: the `∞` emptiness at the offer beat is paired
+/// with a hand-marked clone of that same beat, and both `None` readings are paired with the
+/// `Some(..)` this row asserts between them.
+///
+/// # Discrimination
+///
+/// Delete the `derive_views` `LoopShortcut` arm ⇒ the offer-beat assertion reads `None`. Emit
+/// the channel unconditionally ⇒ the load-time and handback legs read `Some(..)`.
+#[test]
+fn e1_a_narrowed_offer_publishes_its_bound_beside_an_untouched_infinity_channel() {
+    use engine::analysis::resource::ResourceAxis;
+    use engine::game::derived_views::derive_views;
+
+    for (label, mut state) in [
+        ("F4", load_f4()),
+        ("MODE1", load_mode1()),
+        ("MODE2", load_mode2()),
+    ] {
+        // ── E3, load leg: no window is open, so there is no ceiling to state.
+        assert_eq!(
+            derive_views(&state, None).bounded_loop_max_repetitions,
+            None,
+            "[{label}] CR 732.2a: a board with no open shortcut window states no ceiling"
+        );
+
+        drive_f4_to_offer(&mut state, 400)
+            .unwrap_or_else(|| panic!("[{label}] reach-guard: the bounded offer must FIRE"));
+        let (proposer, _certificate, schema) = offer_parts(&state);
+        let bound = schema.max_iterations;
+        let bounded = schema.is_bounded();
+        let schema = schema.clone();
+        assert!(
+            bounded && bound > 1,
+            "[{label}] reach-guard: this offer's producer must have NARROWED the bound below the \
+             engine cap, and to more than one repetition — an unnarrowed offer takes the other \
+             arm and a ceiling of 1 could not discriminate. max_iterations={bound} cap={}",
+            MAX_SHORTCUT_CYCLES_MIRROR
+        );
+
+        // ── E1.
+        let views = derive_views(&state, None);
+        assert_eq!(
+            views.bounded_loop_max_repetitions,
+            Some(bound),
+            "[{label}] CR 732.2a: the open window's own ceiling, read off the live offer"
+        );
+
+        // ── E2, both directions on the same beat. The marked clone is the matched positive
+        //    without which the emptiness below could mean the `∞` channel never fills at all.
+        assert!(
+            views.unbounded_resources.is_empty(),
+            "[{label}] the bounded window marks no unbounded resource; got {:?}",
+            views.unbounded_resources
+        );
+        let mut marked = state.clone();
+        marked.mark_unbounded_loop(proposer, &[ResourceAxis::TokensCreated]);
+        let marked_views = derive_views(&marked, None);
+        assert_eq!(
+            marked_views
+                .unbounded_resources
+                .iter()
+                .map(|row| (row.player, row.axis))
+                .collect::<Vec<_>>(),
+            vec![(proposer, ResourceAxis::TokensCreated)],
+            "[{label}] CR 732.2a: a marked `∞` row is published unchanged while the bounded \
+             window is open"
+        );
+        assert_eq!(
+            marked_views.bounded_loop_max_repetitions,
+            Some(bound),
+            "[{label}] and the bound is still stated beside it — neither channel withholds the \
+             other"
+        );
+
+        // ── E3, handback leg: the window's own lifetime ends the channel.
+        let template = f4_pin_template(&schema, proposer, 3);
+        apply(
+            &mut state,
+            proposer,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(3),
+                template: Some(template),
+            },
+        )
+        .unwrap_or_else(|e| panic!("[{label}] the declaration is dispatched: {e:?}"));
+        let responders = accept_all_opponents(&mut state);
+        assert!(
+            responders > 0,
+            "[{label}] reach-guard: the CR 732.2b window must have opened and been answered, \
+             else no drive ran and no window was ever closed"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "[{label}] reach-guard: CR 732.2a's ending point is a place where a player has \
+             priority; got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            derive_views(&state, None).bounded_loop_max_repetitions,
+            None,
+            "[{label}] CR 732.2a: the closed window states no ceiling — the channel is WITHDRAWN, \
+             not merely never set"
+        );
+    }
+}
+
+/// **Row E4.** The channel is additive on the wire: a `DerivedViews` object serialized before it
+/// existed still decodes, and an absent channel is omitted from emitted JSON.
+///
+/// # Non-vacuity
+///
+/// Each leg carries the opposite-direction control in the same test, because "decodes to `None`"
+/// alone is satisfied by a decoder that never looks at the field, and "the key is absent" alone
+/// is satisfied by a serializer that never emits it.
+///
+/// # Discrimination
+///
+/// Remove `#[serde(default, ..)]` ⇒ the key-absent decode fails; remove
+/// `skip_serializing_if = "Option::is_none"` ⇒ the omitted-key assertion fails.
+#[test]
+fn e4_the_bounded_repetition_channel_is_additive_in_both_directions() {
+    use engine::game::derived_views::DerivedViews;
+
+    const KEY: &str = "bounded_loop_max_repetitions";
+    let absent =
+        serde_json::to_value(DerivedViews::default()).expect("an empty projection serializes");
+    assert!(
+        absent.get(KEY).is_none(),
+        "an absent channel is OMITTED from emitted JSON; got {absent:?}"
+    );
+    assert_eq!(
+        serde_json::from_value::<DerivedViews>(absent.clone())
+            .expect("a projection without the key decodes")
+            .bounded_loop_max_repetitions,
+        None,
+        "a `DerivedViews` object serialized before this channel existed still decodes"
+    );
+
+    let mut present = absent;
+    present[KEY] = serde_json::json!(7);
+    assert_eq!(
+        serde_json::from_value::<DerivedViews>(present)
+            .expect("a projection carrying the key decodes")
+            .bounded_loop_max_repetitions,
+        Some(7),
+        "control: the decoder does read the field, so the `None` above is the default and not a \
+         field the decoder ignores"
+    );
+
+    let emitted = serde_json::to_value(DerivedViews {
+        bounded_loop_max_repetitions: Some(7),
+        ..DerivedViews::default()
+    })
+    .expect("a populated projection serializes");
+    assert_eq!(
+        emitted.get(KEY),
+        Some(&serde_json::json!(7)),
+        "control: the serializer does emit the field, so the omission above is \
+         `skip_serializing_if` and not a field that is never written"
+    );
+}
+
+/// **Rows E5a / E5b / E6.** CR 732.2a: only a producer that NARROWED the bound has a ceiling to
+/// state. An unnarrowed offer publishes nothing, a legal `Fixed(n)` declaration made against
+/// that unnarrowed offer still publishes nothing, and neither does a respond window on a
+/// narrowed offer.
+///
+/// # Non-vacuity
+///
+/// E5b's `None` would pass on a board where the declaration was simply refused, so four
+/// reach-guards run before it: the dispatch returned `Ok`, the respond window is open, the
+/// proposal carries the declared count, and the proposal's axis vector is NON-EMPTY — the vector
+/// the accept path marks, which is what makes a published `n` here a false bound rather than a
+/// merely missing one. E6 is paired with the `Some(..)` read one beat earlier on the same board.
+///
+/// # Discrimination
+///
+/// Drop the `is_bounded()` guard ⇒ E5a reads `Some(cap)`. Add a `RespondToShortcut` arm ⇒ E5b
+/// and E6 both read `Some(n)`.
+#[test]
+fn e5_an_unnarrowed_offer_and_every_respond_window_state_no_ceiling() {
+    use engine::game::derived_views::derive_views;
+
+    for (label, mut state) in [
+        ("F4", load_f4()),
+        ("MODE1", load_mode1()),
+        ("MODE2", load_mode2()),
+    ] {
+        drive_f4_to_offer(&mut state, 400)
+            .unwrap_or_else(|| panic!("[{label}] reach-guard: the bounded offer must FIRE"));
+        let (proposer, _certificate, schema) = offer_parts(&state);
+        let declared = schema.max_iterations;
+        let schema = schema.clone();
+
+        // ── E5a: the same board with its bound un-narrowed to the engine cap.
+        let mut unnarrowed = state.clone();
+        let WaitingFor::LoopShortcut {
+            schema: hostile_schema,
+            ..
+        } = &mut unnarrowed.waiting_for
+        else {
+            panic!("[{label}] the driven beat is the CR 732.2a offer");
+        };
+        hostile_schema.max_iterations = MAX_SHORTCUT_CYCLES_MIRROR;
+        assert!(
+            !hostile_schema.is_bounded(),
+            "[{label}] reach-guard: the mutated board really is UNNARROWED, so the absence below \
+             is the guard's work and not a failure to build the offer"
+        );
+        assert_eq!(
+            derive_views(&unnarrowed, None).bounded_loop_max_repetitions,
+            None,
+            "[{label}] CR 732.2a: a producer that never narrowed the bound has no ceiling to state"
+        );
+
+        // ── E5b: a LEGAL declaration against that unnarrowed offer still states nothing.
+        apply(
+            &mut unnarrowed,
+            proposer,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(declared),
+                template: Some(f4_pin_template(&schema, proposer, declared)),
+            },
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "[{label}] reach-guard: a `Fixed({declared})` under the cap is legal here: {e:?}"
+            )
+        });
+        let WaitingFor::RespondToShortcut { proposal, .. } = &unnarrowed.waiting_for else {
+            panic!(
+                "[{label}] reach-guard: the declaration must open the CR 732.2b window, got {:?}",
+                unnarrowed.waiting_for
+            );
+        };
+        assert_eq!(
+            proposal.count,
+            IterationCount::Fixed(declared),
+            "[{label}] reach-guard: the open window carries the count that was declared"
+        );
+        assert!(
+            !proposal.unbounded.is_empty(),
+            "[{label}] reach-guard: the proposal carries the axis vector the accept path marks — \
+             publishing a count here would be a FALSE bound, not a missing one"
+        );
+        assert_eq!(
+            derive_views(&unnarrowed, None).bounded_loop_max_repetitions,
+            None,
+            "[{label}] CR 732.2a: a proposal carries no boundedness witness, so no respond window \
+             states a ceiling"
+        );
+
+        // ── E6: the same refusal on a NARROWED offer, with its matched positive one beat back.
+        assert_eq!(
+            derive_views(&state, None).bounded_loop_max_repetitions,
+            Some(declared),
+            "[{label}] matched positive: the narrowed offer DOES state its ceiling one beat \
+             before the declaration below"
+        );
+        apply(
+            &mut state,
+            proposer,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(declared),
+                template: Some(f4_pin_template(&schema, proposer, declared)),
+            },
+        )
+        .unwrap_or_else(|e| panic!("[{label}] the declaration is dispatched: {e:?}"));
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+            "[{label}] reach-guard: the CR 732.2b window is open, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            derive_views(&state, None).bounded_loop_max_repetitions,
+            None,
+            "[{label}] CR 732.2a: the respond surface is refused UNIFORMLY — narrowed offer or not"
+        );
+    }
+}
+
+/// **Row E7.** CR 732.2a: the ceiling this channel states IS the ceiling the count picker
+/// publishes for the same window — one number in the dialog, not two that could diverge.
+///
+/// # Non-vacuity
+///
+/// The comparison is against the OTHER projection's live output, never against a re-derived
+/// clamp, so it can red independently of E1. The interaction authority is BOUND on the clone
+/// before the read, and the proposer's opportunity list is asserted non-empty first: an unbound
+/// probe can answer `AuthorityUnbound` with no ceiling at all, which is a dead instrument rather
+/// than a disagreement.
+///
+/// # Discrimination
+///
+/// Publish `max_iterations + 1` from the new arm ⇒ the equality reds. The hostile leg is the
+/// unnarrowed board, where the picker still publishes a ceiling at the cap while this channel
+/// states nothing — so no disagreement is representable there.
+#[test]
+fn e7_the_published_bound_is_the_count_pickers_own_ceiling() {
+    use engine::game::derived_views::derive_views;
+    use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionResponseSpec, InteractionSessionId,
+        InteractionShortcutCountSpec,
+    };
+
+    fn published_ceiling(state: &GameState, proposer: PlayerId, label: &str) -> u32 {
+        let mut probe = state.clone();
+        bind_interaction_authority(
+            &mut probe,
+            InteractionSessionId("e7-bounded-channel".to_string()),
+        )
+        .expect("bind the interaction authority over the live offer");
+        let filtered = filter_state_for_viewer(&probe, proposer);
+        let view = derive_viewer_interaction(&probe, &filtered, proposer);
+        assert!(
+            !view.opportunities.is_empty(),
+            "[{label}] liveness control: a bound proposer must read a non-empty opportunity list, \
+             else the ceiling below is an unbound probe's silence"
+        );
+        let InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Shortcut { count, .. },
+            ..
+        } = &view.opportunities[0].response
+        else {
+            panic!("[{label}] the live offer publishes a Shortcut response schema");
+        };
+        let InteractionShortcutCountSpec::Fixed { max, .. } = count else {
+            panic!("[{label}] a Fixed count window publishes a ceiling, got {count:?}");
+        };
+        *max
+    }
+
+    for (label, mut state) in [
+        ("F4", load_f4()),
+        ("MODE1", load_mode1()),
+        ("MODE2", load_mode2()),
+    ] {
+        drive_f4_to_offer(&mut state, 400)
+            .unwrap_or_else(|| panic!("[{label}] reach-guard: the bounded offer must FIRE"));
+        let (proposer, _certificate, schema) = offer_parts(&state);
+        let bound = schema.max_iterations;
+        assert!(
+            schema.is_bounded() && bound > 1,
+            "[{label}] reach-guard: a narrowed window with a ceiling above 1 — a ceiling of 1 \
+             could not discriminate a clamp from an identity"
+        );
+
+        assert_eq!(
+            derive_views(&state, None).bounded_loop_max_repetitions,
+            Some(published_ceiling(&state, proposer, label)),
+            "[{label}] CR 732.2a: the badge's number and the count picker's ceiling are the same \
+             engine value"
+        );
+
+        // ── HOSTILE: unnarrowed. The picker still caps at the engine-wide limit while this
+        //    channel states nothing, so the two cannot disagree.
+        let mut unnarrowed = state.clone();
+        let WaitingFor::LoopShortcut {
+            schema: hostile_schema,
+            ..
+        } = &mut unnarrowed.waiting_for
+        else {
+            panic!("[{label}] the driven beat is the CR 732.2a offer");
+        };
+        hostile_schema.max_iterations = MAX_SHORTCUT_CYCLES_MIRROR;
+        assert_eq!(
+            published_ceiling(&unnarrowed, proposer, label),
+            MAX_SHORTCUT_CYCLES_MIRROR,
+            "[{label}] reach-guard: the picker still publishes a ceiling on the unnarrowed board"
+        );
+        assert_eq!(
+            derive_views(&unnarrowed, None).bounded_loop_max_repetitions,
+            None,
+            "[{label}] CR 732.2a: and this channel states nothing there, so no number can \
+             disagree with the picker beside it"
+        );
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════
+// CR 732.2b — WHAT THE RESPONDING OPPONENT ACTUALLY SEES
+//
+// A responder reads the proposer's declaration here, not only the count. These tests drive the
+// tracked dump through the real ingress, open the accept-or-shorten window, and read the
+// published `InteractionResponseSpec::ShortcutReply` off `derive_viewer_interaction`.
+// ═════════════════════════════════════════════════════════════════════════════════════════
+
+/// What one seat's published accept-or-shorten schema carries.
+struct F4Reply {
+    points: Vec<engine::types::interaction::InteractionShortcutPoint>,
+    declared: Option<engine::types::interaction::InteractionShortcutPreview>,
+    candidates: Vec<engine::types::interaction::InteractionChoice>,
+}
+
+/// Read `viewer`'s own respond-side projection. Panics unless that seat has exactly one
+/// opportunity, so a row cannot silently assert about a seat the projection never addressed.
+fn f4_reply_at(state: &GameState, viewer: PlayerId) -> F4Reply {
+    use engine::game::interaction::derive_viewer_interaction;
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::interaction::{InteractionOpportunityResponse, InteractionResponseSpec};
+
+    let filtered = filter_state_for_viewer(state, viewer);
+    let view = derive_viewer_interaction(state, &filtered, viewer);
+    let [opportunity] = view.opportunities.as_slice() else {
+        panic!(
+            "{viewer:?} must carry exactly one opportunity at the respond beat, got {}",
+            view.opportunities.len()
+        );
+    };
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::ShortcutReply {
+            points, declared, ..
+        },
+        candidates,
+    } = &opportunity.response
+    else {
+        panic!("the accept-or-shorten window uses a shortcut-reply schema");
+    };
+    F4Reply {
+        points: points.clone(),
+        declared: declared.clone(),
+        candidates: candidates.clone(),
+    }
+}
+
+/// How many opportunities `viewer` reads, and the availability it reads them under.
+fn f4_opportunity_count(
+    state: &GameState,
+    viewer: PlayerId,
+) -> (usize, engine::types::interaction::InteractionAvailability) {
+    use engine::game::interaction::derive_viewer_interaction;
+    use engine::game::visibility::filter_state_for_viewer;
+
+    let filtered = filter_state_for_viewer(state, viewer);
+    let view = derive_viewer_interaction(state, &filtered, viewer);
+    (view.opportunities.len(), view.availability)
+}
+
+/// [`f4_allocation_submission`] with each answerable point's candidate chosen by INDEX rather
+/// than defaulted to the first, so a row can author a declaration whose optional decisions went
+/// different ways.
+fn f4_submission_with_answers(
+    offer: &F4Allocation,
+    count: u32,
+    allocation: &[(PlayerId, u32)],
+    answers: &[usize],
+) -> engine::types::interaction::InteractionSubmission {
+    use engine::types::interaction::InteractionResponse;
+
+    assert_eq!(
+        answers.len(),
+        offer.answerable.len(),
+        "fixture guard: one authored answer per answerable point"
+    );
+    let mut submission = f4_allocation_submission(offer, count, allocation);
+    let InteractionResponse::Shortcut { pins, .. } = &mut submission.response else {
+        unreachable!("the allocation submission is a shortcut response");
+    };
+    for (point, answer) in offer.answerable.iter().zip(answers) {
+        let pin = pins
+            .iter_mut()
+            .find(|pin| pin.group == point.group)
+            .expect("every answerable point already carries a pin");
+        pin.choice_ids = vec![point.candidate_ids[*answer].clone()];
+    }
+    submission
+}
+
+/// Dispatch a declaration through the real ingress and STOP at the CR 732.2b window, rather
+/// than draining it the way [`f4_drive_allocation`] does.
+fn f4_open_respond_window(
+    state: &mut GameState,
+    offer: &F4Allocation,
+    submission: &engine::types::interaction::InteractionSubmission,
+) -> PlayerId {
+    use engine::game::interaction::resolve_interaction_response;
+
+    let action = resolve_interaction_response(state, offer.proposer, submission)
+        .expect("the allocation ingress accepts a conformant sequenced pin");
+    apply(state, offer.proposer, action).expect("the minted declaration is dispatched");
+    // THE DISCRIMINATOR between "declare refused it" and "the drive aborted": a refused
+    // declaration hands priority straight back and never opens the APNAP window.
+    let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for else {
+        panic!(
+            "the accepted declaration must open the CR 732.2b APNAP window, got {:?}",
+            state.waiting_for
+        );
+    };
+    player
+}
+
+/// The seat a published candidate names, read off the engine's own player surface.
+fn f4_candidate_seat(
+    candidates: &[engine::types::interaction::InteractionChoice],
+    id: &engine::types::interaction::InteractionChoiceId,
+) -> Option<u8> {
+    use engine::types::interaction::InteractionPresentationSurface;
+    candidates
+        .iter()
+        .find(|choice| choice.id == *id)?
+        .surfaces
+        .iter()
+        .find_map(|surface| match surface {
+            InteractionPresentationSurface::Player { seat, .. } => Some(*seat),
+            _ => None,
+        })
+}
+
+/// The object reference a published candidate names, read off the engine's own object surface.
+fn f4_candidate_object(
+    candidates: &[engine::types::interaction::InteractionChoice],
+    id: &engine::types::interaction::InteractionChoiceId,
+) -> Option<String> {
+    use engine::types::interaction::InteractionPresentationSurface;
+    candidates
+        .iter()
+        .find(|choice| choice.id == *id)?
+        .surfaces
+        .iter()
+        .find_map(|surface| match surface {
+            InteractionPresentationSurface::Object { reference, .. } => Some(reference.clone()),
+            _ => None,
+        })
+}
+
+/// The discriminant a published `mayChoice` answer candidate states.
+fn f4_candidate_value(
+    candidates: &[engine::types::interaction::InteractionChoice],
+    id: &engine::types::interaction::InteractionChoiceId,
+) -> Option<String> {
+    use engine::types::interaction::InteractionPresentationSurface;
+    candidates
+        .iter()
+        .find(|choice| choice.id == *id)?
+        .surfaces
+        .iter()
+        .find_map(|surface| match surface {
+            InteractionPresentationSurface::Value { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+}
+
+/// The per-seat life magnitudes one published element states, keyed by seat.
+fn f4_life_entries(
+    element: &engine::types::interaction::InteractionShortcutPreview,
+) -> Vec<(u8, i32)> {
+    use engine::types::interaction::InteractionShortcutPreviewFamily;
+    element
+        .entries
+        .iter()
+        .filter(|entry| entry.family == InteractionShortcutPreviewFamily::Life)
+        .map(|entry| {
+            (
+                entry
+                    .player
+                    .expect("a Life magnitude is keyed by the seat that loses it"),
+                entry.amount,
+            )
+        })
+        .collect()
+}
+
+/// AGREEMENT MODULO BEAT-LOCAL IDS — the substitute for a byte equality that cannot hold.
+///
+/// `InteractionChoiceId` embeds the interaction id, and that id ROTATES between the offer beat
+/// and the respond beat (`rebind_interaction_slots_after_action`: "Single decisions always
+/// rotate, including A→A and A→B→A"), so a whole-struct equality across beats could only ever
+/// fail. Each side therefore resolves its OWN beat's candidate list, and the conjunct is that
+/// the two allocations name the same seats in the same order.
+///
+/// Returns the conjunct that refused, so a caller can assert WHICH one did.
+fn shortcut_elements_agree_modulo_ids(
+    a: (
+        &engine::types::interaction::InteractionShortcutPreview,
+        &[engine::types::interaction::InteractionChoice],
+    ),
+    b: (
+        &engine::types::interaction::InteractionShortcutPreview,
+        &[engine::types::interaction::InteractionChoice],
+    ),
+) -> Result<(), &'static str> {
+    let (left, left_candidates) = a;
+    let (right, right_candidates) = b;
+    if left.count != right.count {
+        return Err("count");
+    }
+    if left.entries != right.entries {
+        return Err("entries");
+    }
+    if left.allocation.len() != right.allocation.len() {
+        return Err("allocation arity");
+    }
+    if left
+        .allocation
+        .iter()
+        .zip(&right.allocation)
+        .any(|(x, y)| x.amount != y.amount)
+    {
+        return Err("allocation amounts");
+    }
+    for (x, y) in left.allocation.iter().zip(&right.allocation) {
+        let left_seat = f4_candidate_seat(left_candidates, &x.choice_id);
+        if left_seat.is_none() || left_seat != f4_candidate_seat(right_candidates, &y.choice_id) {
+            return Err("allocation subject");
+        }
+    }
+    Ok(())
+}
+
+/// **The responder reads the declared partition, each declared seat's own magnitude, and nothing
+/// that belongs to another seat.**
+///
+/// CR 732.2b's right is to name a place where this player's choice will differ from what was
+/// proposed, so the responder is published the proposer's declaration and not only the count.
+///
+/// # Non-vacuity, on a fixture that is cardinality-degenerate by default
+///
+/// The tracked dump's per-cycle life rate is 1 and its life map names exactly ONE seat, so a
+/// driven row can admit a flag where a count is required. The declaration this row authors is
+/// therefore `1 / 2 / 3` at a count of 6: THREE segments, PAIRWISE DISTINCT, and a non-canonical
+/// split (the canonical one at 6 over three seats is `2 / 2 / 2`). Every per-seat magnitude is
+/// asserted as the published rate times the authored segment, so a uniform re-attribution, a
+/// flag standing in for a count, and an equality between two empty lists all fail.
+///
+/// # The per-seat opportunity claim rides here, because this test's harness proof is its
+/// positive control
+///
+/// The projection is empty for every seat at every beat unless the interaction authority is
+/// bound first, and what is uniform under an unbound harness is `opportunities = 0` AT THE OFFER
+/// BEAT TOO. So the opportunity COUNT is what the obligation asserts on, and the offer beat's
+/// proposer-only opportunity is the control that the binding took.
+///
+/// # Discrimination
+///
+/// Leave `declared: None` on the spec ⇒ the responder is back to the two-number shape and the
+/// element assertions fail. Publish to any seat but the current responder ⇒ the per-seat
+/// opportunity counts fail.
+#[test]
+fn the_responder_reads_the_declared_partition_and_its_per_seat_magnitudes() {
+    use engine::types::interaction::{
+        InteractionAvailability, InteractionShortcutPointKind, InteractionShortcutPreviewFamily,
+    };
+
+    const COUNT: u32 = 6;
+    const SEGMENTS: [u32; 3] = [1, 2, 3];
+
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let seats: Vec<PlayerId> = state.players.iter().map(|player| player.id).collect();
+
+    // ── HARNESS CONTROL + the per-seat paired positive: at the OFFER beat exactly the proposer
+    //    carries an opportunity. Under an unbound authority every seat reads zero, so a
+    //    non-zero count here is what proves the binding took.
+    for seat in &seats {
+        let (count, availability) = f4_opportunity_count(&state, *seat);
+        if *seat == offer.proposer {
+            assert_eq!(
+                count, 1,
+                "control: the proposer's own offer opportunity is what proves the interaction \
+                 authority is bound — a zero here makes every count below a dead instrument"
+            );
+        } else {
+            assert_eq!(
+                (count, availability),
+                (0, InteractionAvailability::Waiting),
+                "CR 732.2a: the offer addresses the player with priority and nobody else \
+                 ({seat:?})"
+            );
+        }
+    }
+
+    assert!(
+        offer.rate > 0,
+        "ANTI-VACUITY: the published per-cycle life rate is strictly positive, else every \
+         magnitude below degenerates to zero"
+    );
+    assert_eq!(
+        offer.legal_seats.len(),
+        3,
+        "reach-guard: three legal victims, which is what makes a three-segment declaration a \
+         real member of the composition set"
+    );
+    let allocation: Vec<(PlayerId, u32)> =
+        offer.legal_seats.iter().copied().zip(SEGMENTS).collect();
+    let responder = f4_open_respond_window(
+        &mut state,
+        &offer,
+        &f4_allocation_submission(&offer, COUNT, &allocation),
+    );
+
+    // ── PER-SEAT: at the RESPOND beat exactly the current responder carries an opportunity. The
+    //    queued opponents read `Waiting`, which is what distinguishes "not yet their turn" from
+    //    "published to everyone".
+    let WaitingFor::RespondToShortcut {
+        ref remaining_players,
+        ..
+    } = state.waiting_for
+    else {
+        unreachable!("the window was just asserted open");
+    };
+    assert!(
+        !remaining_players.is_empty(),
+        "reach-guard: opponents are still QUEUED behind this responder, so the zero counts \
+         below are a routing rule and not an empty table"
+    );
+    for seat in &seats {
+        let (count, availability) = f4_opportunity_count(&state, *seat);
+        if *seat == responder {
+            assert_eq!(count, 1, "CR 732.2b addresses the current responder");
+        } else {
+            assert_eq!(
+                (count, availability),
+                (0, InteractionAvailability::Waiting),
+                "CR 732.2b: neither the proposer nor a queued opponent is addressed yet \
+                 ({seat:?})"
+            );
+        }
+    }
+
+    // ── THE GAP ITSELF.
+    let reply = f4_reply_at(&state, responder);
+    let targets: Vec<_> = reply
+        .points
+        .iter()
+        .filter(|point| point.kind == InteractionShortcutPointKind::Targets)
+        .collect();
+    let [target_point] = targets.as_slice() else {
+        panic!("the declaration states exactly one announced-target decision");
+    };
+    assert_eq!(
+        target_point
+            .candidate_ids
+            .iter()
+            .map(|id| f4_candidate_seat(&reply.candidates, id))
+            .collect::<Vec<_>>(),
+        offer
+            .legal_seats
+            .iter()
+            .map(|seat| Some(seat.0))
+            .collect::<Vec<_>>(),
+        "the declaration's announced seats reach the responder in the proposer's own order"
+    );
+    let element = reply
+        .declared
+        .as_ref()
+        .expect("CR 732.2b: the responder is published the declaration they are judging");
+    assert_eq!(element.count, COUNT);
+    assert_eq!(
+        element
+            .allocation
+            .iter()
+            .map(|assignment| assignment.amount)
+            .collect::<Vec<_>>(),
+        SEGMENTS.to_vec(),
+        "the published partition is the one the proposer authored — THREE segments, pairwise \
+         distinct, and NOT the canonical split of {COUNT} over three seats"
+    );
+    assert_eq!(
+        element
+            .allocation
+            .iter()
+            .map(|assignment| f4_candidate_seat(&reply.candidates, &assignment.choice_id))
+            .collect::<Vec<_>>(),
+        offer
+            .legal_seats
+            .iter()
+            .map(|seat| Some(seat.0))
+            .collect::<Vec<_>>(),
+        "and every segment names its own seat through this beat's published candidates"
+    );
+    let expected: Vec<(u8, i32)> = allocation
+        .iter()
+        .map(|(seat, segment)| (seat.0, -(offer.rate * i64::from(*segment)) as i32))
+        .collect();
+    assert_eq!(
+        f4_life_entries(element),
+        expected,
+        "CR 119.3: each declared seat's magnitude is the published per-cycle rate times ITS \
+         OWN segment — {expected:?} — so a producer that re-attributed the drain uniformly, or \
+         keyed it on the seat the period was measured on, fails here"
+    );
+    let magnitudes: Vec<i32> = f4_life_entries(element)
+        .into_iter()
+        .map(|(_, amount)| amount)
+        .collect();
+    assert_eq!(
+        magnitudes
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        magnitudes.len(),
+        "ANTI-VACUITY: the three magnitudes are PAIRWISE DISTINCT, so a flag standing in for a \
+         count cannot satisfy the equality above. magnitudes={magnitudes:?}"
+    );
+    assert!(
+        element
+            .entries
+            .iter()
+            .any(|entry| entry.family != InteractionShortcutPreviewFamily::Life),
+        "reach-guard: the element states the period's other families too, so the Life filter \
+         above is selecting rather than describing the whole list"
+    );
+
+    // ── HOSTILE (a): the count-only route. A proposal carrying no declaration — every offer
+    //    minted before the declaration ingress existed, and every save written then — publishes
+    //    no statement point and no element. First production branch: the decoder's template
+    //    `as_ref()`.
+    let mut count_only = state.clone();
+    let WaitingFor::RespondToShortcut { proposal, .. } = &mut count_only.waiting_for else {
+        unreachable!("the clone parks on the same window");
+    };
+    proposal.template = None;
+    let bare = f4_reply_at(&count_only, responder);
+    assert!(
+        bare.points.is_empty() && bare.declared.is_none(),
+        "a count-only proposal states no declaration, so the responder reads the base shape"
+    );
+
+    // ── HOSTILE (b): a declaration whose proposal states NO per-period signature. The
+    //    statement points and the PARTITION still publish — segment lengths are not magnitudes —
+    //    but no magnitude is invented beside them. First production branch:
+    //    `shortcut_preview_basis`'s `per_cycle`.
+    let mut signatureless = state.clone();
+    let WaitingFor::RespondToShortcut { proposal, .. } = &mut signatureless.waiting_for else {
+        unreachable!("the clone parks on the same window");
+    };
+    proposal.per_cycle = None;
+    let unmeasured = f4_reply_at(&signatureless, responder);
+    assert_eq!(
+        unmeasured.points.len(),
+        reply.points.len(),
+        "the declaration is still published whole — only its magnitudes are unstated"
+    );
+    let unmeasured_element = unmeasured.declared.as_ref().expect(
+        "CR 732.2b: the responder judges the whole declaration, and its partition is the \
+         proposer's own whether or not a period was measured",
+    );
+    assert_eq!(
+        (
+            unmeasured_element.count,
+            unmeasured_element
+                .allocation
+                .iter()
+                .map(|assignment| assignment.amount)
+                .collect::<Vec<_>>(),
+        ),
+        (COUNT, SEGMENTS.to_vec()),
+        "and it is the SAME partition the measured board published — three segments, pairwise \
+         distinct, so an element emptied wholesale cannot satisfy this"
+    );
+    assert!(
+        unmeasured_element.entries.is_empty(),
+        "CR 732.2a: a magnitude is the period times the count, and there is no period to \
+         multiply. got {:?}",
+        unmeasured_element.entries
+    );
+    assert!(
+        !element.entries.is_empty(),
+        "reach-guard: the measured board one field apart DOES state magnitudes, so the emptiness \
+         above is this branch rather than a producer that never states any"
+    );
+}
+
+/// **ONE PRODUCER, AND THE CALL SITES AGREE — the responder's element is minted by the same
+/// function the proposer's own preview and the offer's published list are.**
+///
+/// # A byte equality across the two beats is unsatisfiable, and the substitute is pinned
+///
+/// `InteractionChoiceId` embeds the interaction id, which rotates between the two beats, so a
+/// whole-struct equality could only fail. [`shortcut_elements_agree_modulo_ids`] is the
+/// substitute, and the ADMITTED-MEMBER leg below is what shows it is not merely weaker: it
+/// constructs a pair that agrees on every conjunct EXCEPT the resolved subject mapping and
+/// asserts the predicate refuses it, naming that conjunct.
+///
+/// # Discrimination
+///
+/// Re-derive the entries at the respond-side call site instead of calling
+/// `shortcut_preview_element` ⇒ the two disagree and the main leg fails. Delete the resolved-
+/// subject conjunct ⇒ the admitted-member leg's second half fails.
+#[test]
+fn the_responders_element_agrees_with_the_producers_other_two_call_sites() {
+    use engine::game::interaction::preview_interaction;
+    use engine::types::interaction::{
+        AmountAssignment, InteractionChoice, InteractionChoiceId, InteractionPresentationSurface,
+        InteractionPreviewRequest, InteractionShortcutPreview, InteractionShortcutPreviewEntry,
+        InteractionShortcutPreviewFamily, PreviewRequestId,
+    };
+
+    const COUNT: u32 = 6;
+    const SEGMENTS: [u32; 3] = [1, 2, 3];
+
+    // ── MAIN LEG: the proposer's own preview of this declaration, through `preview_interaction`,
+    //    the responder's published element for the same declaration.
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let allocation: Vec<(PlayerId, u32)> =
+        offer.legal_seats.iter().copied().zip(SEGMENTS).collect();
+    let submission = f4_allocation_submission(&offer, COUNT, &allocation);
+    let authored = preview_interaction(
+        &state,
+        offer.proposer,
+        &InteractionPreviewRequest {
+            request_id: PreviewRequestId("declared-element-agreement".to_string()),
+            interaction_id: submission.interaction_id.clone(),
+            response: submission.response.clone(),
+        },
+    )
+    .shortcut_preview
+    .expect("the proposer's own declaration previews an element");
+
+    let responder = f4_open_respond_window(&mut state, &offer, &submission);
+    let reply = f4_reply_at(&state, responder);
+    let published = reply
+        .declared
+        .as_ref()
+        .expect("the responder is published the same declaration");
+
+    // Reach-guards, before the comparison: MORE than one segment, non-empty entries, and
+    // PAIRWISE-DISTINCT per-seat magnitudes — so an equality between two empty elements, or
+    // between two uniform ones, cannot satisfy the agreement below.
+    assert!(published.allocation.len() > 1 && !published.entries.is_empty());
+    let magnitudes: Vec<i32> = f4_life_entries(published)
+        .into_iter()
+        .map(|(_, amount)| amount)
+        .collect();
+    assert_eq!(
+        magnitudes,
+        SEGMENTS
+            .iter()
+            .map(|segment| -(offer.rate * i64::from(*segment)) as i32)
+            .collect::<Vec<_>>(),
+        "reach-guard: the compared element states three DISTINCT per-seat magnitudes"
+    );
+    assert_ne!(
+        submission.interaction_id,
+        reply_interaction_id(&state, responder),
+        "reach-guard: the interaction id really DID rotate across the two beats, which is why \
+         a byte equality is unsatisfiable and this predicate exists"
+    );
+    assert_eq!(
+        shortcut_elements_agree_modulo_ids(
+            (&authored, &offer.offer_candidates),
+            (published, &reply.candidates),
+        ),
+        Ok(()),
+        "CR 732.2a: one producer mints both, so the two call sites cannot disagree about what \
+         this declaration does"
+    );
+
+    // ── SECOND LEG: when the declaration IS the canonical split at a count the offer publishes
+    //    an element for, the responder's element agrees with THAT element too.
+    let mut canonical_state = load_f4();
+    let canonical_offer = f4_allocation_offer(&mut canonical_state);
+    let sampled = canonical_offer
+        .published_preview
+        .iter()
+        .find(|element| {
+            element.allocation.len() == canonical_offer.legal_seats.len()
+                && element.count % 3 != 0
+                && element.count > 3
+        })
+        .cloned()
+        .expect(
+            "reach-guard: the offer publishes an element whose canonical split has a REMAINDER, \
+             so the compared magnitudes are not all equal",
+        );
+    let canonical_allocation: Vec<(PlayerId, u32)> = sampled
+        .allocation
+        .iter()
+        .map(|assignment| {
+            let seat = f4_candidate_seat(&canonical_offer.offer_candidates, &assignment.choice_id)
+                .expect("every published allocation position names a seat");
+            (PlayerId(seat), assignment.amount)
+        })
+        .collect();
+    let canonical_submission =
+        f4_allocation_submission(&canonical_offer, sampled.count, &canonical_allocation);
+    let canonical_responder = f4_open_respond_window(
+        &mut canonical_state,
+        &canonical_offer,
+        &canonical_submission,
+    );
+    let canonical_reply = f4_reply_at(&canonical_state, canonical_responder);
+    let canonical_published = canonical_reply
+        .declared
+        .as_ref()
+        .expect("the responder is published the canonical declaration too");
+    let canonical_magnitudes: Vec<i32> = f4_life_entries(canonical_published)
+        .into_iter()
+        .map(|(_, amount)| amount)
+        .collect();
+    assert!(
+        canonical_magnitudes.len() > 1
+            && canonical_magnitudes
+                .windows(2)
+                .any(|pair| pair[0] != pair[1]),
+        "reach-guard: the canonical split at {} carries a remainder, so its per-seat magnitudes \
+         are NOT all equal and a uniform producer cannot satisfy the agreement below. \
+         magnitudes={canonical_magnitudes:?}",
+        sampled.count
+    );
+    assert_eq!(
+        shortcut_elements_agree_modulo_ids(
+            (&sampled, &canonical_offer.offer_candidates),
+            (canonical_published, &canonical_reply.candidates),
+        ),
+        Ok(()),
+        "CR 732.2a: the offer's own published element for that count and the responder's \
+         element for the same declaration are the same arithmetic"
+    );
+
+    // ── ADMITTED-MEMBER LEG: the substitute must not admit what a byte equality would have
+    //    refused aside from ids. Such a member is CONSTRUCTIBLE — two elements agreeing on
+    //    count, entries and allocation AMOUNTS while position 0 resolves to a different seat —
+    //    so both halves are asserted: that the pair really satisfies every other conjunct, and
+    //    that the predicate refuses it naming the subject conjunct.
+    let seat_choice = |id: &str, seat: u8| InteractionChoice {
+        id: InteractionChoiceId(id.to_string()),
+        surfaces: vec![InteractionPresentationSurface::Player {
+            role: engine::types::interaction::InteractionRoleCode::Target,
+            index: None,
+            seat,
+        }],
+        status: engine::types::interaction::InteractionChoiceStatus::Available,
+    };
+    let element = |first: &str, second: &str| InteractionShortcutPreview {
+        count: 3,
+        entries: vec![InteractionShortcutPreviewEntry {
+            family: InteractionShortcutPreviewFamily::Tokens,
+            player: None,
+            amount: 9,
+        }],
+        allocation: vec![
+            AmountAssignment {
+                choice_id: InteractionChoiceId(first.to_string()),
+                amount: 1,
+            },
+            AmountAssignment {
+                choice_id: InteractionChoiceId(second.to_string()),
+                amount: 2,
+            },
+        ],
+    };
+    let left = element("beat-a.k0", "beat-a.k1");
+    let right = element("beat-b.k0", "beat-b.k1");
+    let left_candidates = [seat_choice("beat-a.k0", 1), seat_choice("beat-a.k1", 2)];
+    // The SAME ids in the same order, resolving to the OPPOSITE seats — the whole difference.
+    let right_candidates = [seat_choice("beat-b.k0", 2), seat_choice("beat-b.k1", 1)];
+    assert_eq!(left.count, right.count);
+    assert_eq!(left.entries, right.entries);
+    assert_eq!(
+        left.allocation.iter().map(|a| a.amount).collect::<Vec<_>>(),
+        right
+            .allocation
+            .iter()
+            .map(|a| a.amount)
+            .collect::<Vec<_>>(),
+        "the constructed pair really is a member only the resolved-subject conjunct can refuse: \
+         it agrees on count, on entries element-for-element, and on the allocation amounts"
+    );
+    assert_eq!(
+        shortcut_elements_agree_modulo_ids((&left, &left_candidates), (&right, &right_candidates),),
+        Err("allocation subject"),
+        "the substitute REFUSES a pair whose allocation positions name different seats — delete \
+         that conjunct and this leg fails while the two agreements above still pass"
+    );
+}
+
+/// The interaction id `viewer` is currently answering under, so a row can show that it rotated.
+fn reply_interaction_id(
+    state: &GameState,
+    viewer: PlayerId,
+) -> engine::types::interaction::InteractionId {
+    use engine::game::interaction::derive_viewer_interaction;
+    use engine::game::visibility::filter_state_for_viewer;
+
+    let filtered = filter_state_for_viewer(state, viewer);
+    let view = derive_viewer_interaction(state, &filtered, viewer);
+    view.opportunities
+        .first()
+        .expect("the responder carries an opportunity")
+        .interaction_id
+        .clone()
+}
+
+/// **THE ANSWERED OPTIONAL DECISIONS REACH THE RESPONDER, AND WHICH WAY EACH ONE WENT.**
+///
+/// CR 732.2c makes every choice in the proposal actually taken on acceptance, so the answers are
+/// the rule's own object rather than decoration. Each published statement point carries exactly
+/// two candidate ids, read in order as its own decision's SUBJECT and that decision's ANSWER.
+///
+/// # HOSTILE, and it is what makes the row discriminating rather than decorative
+///
+/// The declaration is authored with the two answers going DIFFERENT ways. A producer that keyed
+/// an answer on anything but its own pin's slot pairs the wrong answer to the wrong source, and
+/// one that states "taken" for every optional decision passes the uniform case and fails this.
+///
+/// # Discrimination
+///
+/// Drop one answered decision ⇒ the point count fails. Publish both answers from the first
+/// point ⇒ the difference assertion fails. The uniform sibling below keeps the difference from
+/// being a shape the producer always emits.
+#[test]
+fn both_answered_optional_decisions_reach_the_responder_with_their_own_answers() {
+    use engine::types::interaction::InteractionShortcutPointKind;
+
+    const COUNT: u32 = 6;
+
+    let answered = |answers: &[usize]| {
+        let mut state = load_f4();
+        let offer = f4_allocation_offer(&mut state);
+        assert_eq!(
+            offer.answerable.len(),
+            2,
+            "reach-guard: the tracked offer publishes TWO optional decisions, which is what \
+             makes a differing pair constructible at all"
+        );
+        assert!(
+            offer
+                .answerable
+                .iter()
+                .all(|point| point.kind == InteractionShortcutPointKind::MayChoice),
+            "reach-guard: both answerable points are optional decisions"
+        );
+        let allocation: Vec<(PlayerId, u32)> = offer
+            .legal_seats
+            .iter()
+            .copied()
+            .zip([1u32, 2, 3])
+            .collect();
+        let submission = f4_submission_with_answers(&offer, COUNT, &allocation, answers);
+        let responder = f4_open_respond_window(&mut state, &offer, &submission);
+        let reply = f4_reply_at(&state, responder);
+        let published: Vec<_> = reply
+            .points
+            .iter()
+            .filter(|point| point.kind == InteractionShortcutPointKind::MayChoice)
+            .cloned()
+            .collect();
+        assert_eq!(
+            published.len(),
+            2,
+            "both answered optional decisions reach the responder"
+        );
+        let stated: Vec<(String, String)> = published
+            .iter()
+            .map(|point| {
+                let [subject, answer] = point.candidate_ids.as_slice() else {
+                    panic!(
+                        "a published optional-decision statement point carries EXACTLY two \
+                         candidate ids — subject then answer — got {}",
+                        point.candidate_ids.len()
+                    );
+                };
+                (
+                    f4_candidate_object(&reply.candidates, subject)
+                        .expect("the subject candidate names its decision's own source object"),
+                    f4_candidate_value(&reply.candidates, answer)
+                        .expect("the answer candidate states which way the decision went"),
+                )
+            })
+            .collect();
+        (stated, reply.declared)
+    };
+
+    // ── HOSTILE: take one, decline the other.
+    let (differing, differing_declared) = answered(&[0, 1]);
+    assert_ne!(
+        differing[0].0, differing[1].0,
+        "reach-guard: the two statement points name DIFFERENT source objects, so pairing an \
+         answer to the wrong one is visible"
+    );
+    assert_eq!(
+        differing
+            .iter()
+            .map(|(_, answer)| answer.as_str())
+            .collect::<Vec<_>>(),
+        vec!["take", "decline"],
+        "CR 732.2c: each published answer is its OWN decision's — a producer that stated \
+         'taken' for every optional decision passes the uniform sibling below and fails here"
+    );
+    assert!(
+        differing_declared.is_some(),
+        "and publishing the answered decisions does not cost the declaration its partition"
+    );
+
+    // ── SIBLING: the same board declared with BOTH answers taken, so the difference above is a
+    //    branch rather than a shape the producer always emits.
+    let (uniform, _) = answered(&[0, 0]);
+    assert_eq!(
+        uniform
+            .iter()
+            .map(|(_, answer)| answer.as_str())
+            .collect::<Vec<_>>(),
+        vec!["take", "take"]
+    );
+    assert_eq!(
+        uniform
+            .iter()
+            .map(|(subject, _)| subject)
+            .collect::<Vec<_>>(),
+        differing
+            .iter()
+            .map(|(subject, _)| subject)
+            .collect::<Vec<_>>(),
+        "and both boards name the same two decisions, so only the ANSWERS differ between them"
+    );
+}
+
+/// CR 732.2a + CR 601.2c: whether an authored split is an ADMISSIBLE declaration of `count`
+/// over the announced-target decision's own candidates, read in the canonical published order.
+///
+/// Returns the conjunct that refused — the [`shortcut_elements_agree_modulo_ids`] idiom — so a
+/// caller asserts WHICH clause a constructed member trips rather than that something did. This
+/// is not the ingress's own condition: the ingress accepts members this refuses. It is what
+/// every leg of the composed row needs of the split it drives.
+///
+/// * `"dropped seat"` — the canonical element's own seats, each exactly once. Stated as a SET,
+///   so a REORDERING reaches the final clause instead of being refused here.
+/// * `"zero part"` — every part at least 1: the entries producer drops a family netting to
+///   zero, so a zero part publishes no magnitude and no per-seat decrease.
+/// * `"total"` — the parts total the declared count.
+/// * `"unedited"` — the sequence differs from the canonical one, else "edits the allocation
+///   away from the canonical split" is satisfied by re-sending it.
+/// * `"repeated part"` — pairwise-distinct parts, which is what makes the per-seat magnitudes
+///   distinguishable.
+/// * `"final segment length"` — a final part of at least 2. With positive parts totalling the
+///   count that is exactly "every segment START inside the window a drive of that count
+///   realizes"; a segment starting at the last index realizes nothing, which
+///   [`p4_row_1c_a_segment_starting_at_the_last_index_realizes_nothing_but_stays_announced`]
+///   drives.
+/// * `"leading-cycle seat"` — the final segment's seat is NOT the one the leading cycle
+///   resolves, which repays exactly the cycle that segment loses.
+fn authored_split_is_admissible(
+    canonical: &[(PlayerId, u32)],
+    authored: &[(PlayerId, u32)],
+    count: u32,
+    leading: PlayerId,
+) -> Result<(), &'static str> {
+    use std::collections::{BTreeSet, HashSet};
+
+    let seats_of = |split: &[(PlayerId, u32)]| -> BTreeSet<PlayerId> {
+        split.iter().map(|(seat, _)| *seat).collect()
+    };
+    if authored.len() != canonical.len() || seats_of(authored) != seats_of(canonical) {
+        return Err("dropped seat");
+    }
+    if authored.iter().any(|(_, part)| *part == 0) {
+        return Err("zero part");
+    }
+    if authored.iter().map(|(_, part)| *part).sum::<u32>() != count {
+        return Err("total");
+    }
+    if authored == canonical {
+        return Err("unedited");
+    }
+    let parts: Vec<u32> = authored.iter().map(|(_, part)| *part).collect();
+    if parts.iter().collect::<HashSet<_>>().len() != parts.len() {
+        return Err("repeated part");
+    }
+    let Some((final_seat, final_part)) = authored.last() else {
+        return Err("dropped seat");
+    };
+    if *final_part < 2 {
+        return Err("final segment length");
+    }
+    if *final_seat == leading {
+        return Err("leading-cycle seat");
+    }
+    Ok(())
+}
+
+/// **ONE CHAIN** — the published offer, the authored edit, the ingress, the responder's own
+/// projection and the committed drive are ONE object travelling ONE chain.
+///
+/// Every leg is already asserted by the row that built it — the ceiling by
+/// [`e1_a_narrowed_offer_publishes_its_bound_beside_an_untouched_infinity_channel`] and
+/// [`e7_the_published_bound_is_the_count_pickers_own_ceiling`], the token product by
+/// [`t3_the_published_token_rate_is_delivered_by_the_accepted_drive`], the full commit across
+/// an authored allocation by [`p4_row_1_an_allocation_of_the_published_ceiling_commits_its_whole_count`],
+/// the one-producer identity by [`the_responders_element_agrees_with_the_producers_other_two_call_sites`].
+/// What none of them holds is that those surfaces are the SAME object, so this is ONE test with
+/// ONE `load_f4()` and every leg reading what the previous leg produced.
+///
+/// No magnitude is transcribed: the board is re-dumpable by design, so a pinned figure would
+/// bind this row to one dump, and a re-dump the derivation cannot serve reds LOUDLY at the
+/// admissibility predicate rather than quietly at a leg.
+///
+/// # Discrimination, per leg
+///
+/// (a) revert `DerivedViews::bounded_loop_max_repetitions`' population ⇒ `None`. (b) drop the
+/// token term from `ResourceVector::period` ⇒ this guard reds directly, never as `0 == 0`.
+/// (c) stop publishing `allocation` ⇒ there is no split to select. (d) derive a same-total
+/// RE-COMPOSITION (two parts exchanged) instead of a transfer ⇒ the prefix-sum leg reds while
+/// every predicate clause, the total included, still passes. (e) fall back to the canonical allocation when a pin
+/// states `amounts` ⇒ the returned allocation is (c)'s; re-derive the entries at that call site
+/// instead of calling the shared producer ⇒ its magnitudes disagree with (f)'s. (f) publish the
+/// canonical split on the respond side ⇒ the agreement predicate returns
+/// `Err("allocation amounts")`. (g) revert the slot-attributed subtraction ⇒ the declaration
+/// truncates strictly short of its declared count. (h) point the conformance site back at the
+/// raw snapshot pair while leaving the mint fed ⇒ zero cycles commit, so this leg reds while
+/// (b) still passes.
+#[test]
+fn the_published_offer_the_authored_edit_and_the_committed_drive_are_one_chain() {
+    use engine::game::derived_views::derive_views;
+    use engine::game::interaction::preview_interaction;
+    use engine::types::interaction::{InteractionPreviewRequest, PreviewRequestId};
+
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+
+    // ── (a) THE BADGE. The open window's ceiling is the engine-published bound, and that bound
+    //    is the count picker's own — ONE value, which every leg below then runs on.
+    let (bound, per_cycle) = {
+        let (_, certificate, schema) = offer_parts(&state);
+        (
+            schema.max_iterations,
+            certificate
+                .per_cycle
+                .clone()
+                .expect("a bounded offer publishes its per-period signature"),
+        )
+    };
+    assert_eq!(
+        derive_views(&state, None).bounded_loop_max_repetitions,
+        Some(bound),
+        "CR 732.2a: the open window's ceiling is the schema's own bound {bound}"
+    );
+    assert_eq!(
+        bound, offer.max_count,
+        "CR 732.2a: the badge's bound and the count picker's published ceiling are ONE engine \
+         value, which is what makes every leg below run on the same count"
+    );
+    let count = offer.max_count;
+
+    // ── (b) THE RATES, asserted BEFORE anything multiplies by them, so no product below can
+    //    meet its clause as `0 == 0 * n`.
+    let token_rate = per_cycle.delta.tokens_created;
+    assert!(
+        token_rate > 0,
+        "ANTI-VACUITY: a ZERO published token rate FAILS this row rather than satisfying it. \
+         published delta={:?}",
+        per_cycle.delta
+    );
+    assert!(
+        offer.rate > 0,
+        "ANTI-VACUITY: the published per-cycle life rate is strictly positive, else every \
+         per-seat magnitude below degenerates to zero. published life={:?}",
+        per_cycle.delta.life
+    );
+
+    // ── (c) THE PUBLISHED ELEMENT, selected by its published count rather than by index.
+    let element = offer
+        .published_preview
+        .iter()
+        .find(|element| element.count == count)
+        .expect("the published preview list always samples the picker's own ceiling");
+    let canonical: Vec<(PlayerId, u32)> = element
+        .allocation
+        .iter()
+        .map(|assignment| {
+            let seat = f4_candidate_seat(&offer.offer_candidates, &assignment.choice_id)
+                .expect("every published allocation position names a seat");
+            (PlayerId(seat), assignment.amount)
+        })
+        .collect();
+    // Identity and ORDER against the offer's OWN published victims, so the arity this row runs
+    // at is the offer's rather than a transcribed number and a re-dump that moves the victim
+    // set flows through.
+    assert_eq!(
+        canonical.iter().map(|(seat, _)| *seat).collect::<Vec<_>>(),
+        offer.legal_seats,
+        "CR 601.2c: the count-keyed element allocates over the offer's own published legal \
+         victims, in published order. canonical={canonical:?}"
+    );
+    assert!(
+        canonical.len() > 1,
+        "reach-guard: more than one segment, which is what a per-seat comparison below needs. \
+         canonical={canonical:?}"
+    );
+
+    // ── (d) THE EDIT. Repetitions are TRANSFERRED from earlier segments to later ones until
+    //    the parts are strictly increasing in the canonical published order; the offsets sum to
+    //    zero, so the count is preserved by construction.
+    let spread = i64::try_from(canonical.len()).expect("a published arity fits an i64") - 1;
+    let authored: Vec<(PlayerId, u32)> = canonical
+        .iter()
+        .enumerate()
+        .map(|(index, (seat, part))| {
+            let shifted =
+                i64::from(*part) + 2 * i64::try_from(index).expect("an index fits an i64") - spread;
+            (*seat, u32::try_from(shifted).unwrap_or(0))
+        })
+        .collect();
+    let prefix_sums = |split: &[(PlayerId, u32)]| -> Vec<u32> {
+        split
+            .iter()
+            .scan(0u32, |running, (_, part)| {
+                *running += part;
+                Some(*running)
+            })
+            .collect()
+    };
+    let (authored_prefix, canonical_prefix) = (prefix_sums(&authored), prefix_sums(&canonical));
+    assert!(
+        authored_prefix
+            .iter()
+            .zip(&canonical_prefix)
+            .all(|(edited, published)| edited <= published)
+            && authored_prefix
+                .iter()
+                .zip(&canonical_prefix)
+                .any(|(edited, published)| edited < published),
+        "the edit MOVES repetitions from earlier segments to later ones: every prefix sum is at \
+         most the canonical's, and one is strictly less. A same-total re-composition over the \
+         same seats — two parts exchanged — preserves the total the predicate checks and fails \
+         here. canonical={canonical_prefix:?} authored={authored_prefix:?}"
+    );
+    assert_eq!(
+        authored_split_is_admissible(&canonical, &authored, count, offer.preannounced),
+        Ok(()),
+        "the derived split must be admissible; a re-dump this derivation cannot serve reds \
+         HERE. canonical={canonical:?} authored={authored:?} count={count}"
+    );
+
+    // Both refusals are REAL members the ingress accepts and commits, and each falsifies a
+    // named conjunct of (g). The admitted split above, run through the IDENTICAL predicate in
+    // this same invocation, is their positive control.
+    let mut trailing_one = authored.clone();
+    let last = trailing_one.len() - 1;
+    let moved = trailing_one[last].1 - 1;
+    trailing_one[last].1 = 1;
+    trailing_one[0].1 += moved;
+    assert_eq!(
+        authored_split_is_admissible(&canonical, &trailing_one, count, offer.preannounced),
+        Err("final segment length"),
+        "a split whose FINAL PART is 1 starts its last segment past the window a drive of \
+         {count} realizes, so its trailing seat realizes nothing. split={trailing_one:?}"
+    );
+    let mut swapped_seats: Vec<PlayerId> = authored.iter().map(|(seat, _)| *seat).collect();
+    let leading_index = swapped_seats
+        .iter()
+        .position(|seat| *seat == offer.preannounced)
+        .expect("the leading cycle's seat is one of the published legal victims");
+    swapped_seats.swap(leading_index, last);
+    let leading_last: Vec<(PlayerId, u32)> = swapped_seats
+        .into_iter()
+        .zip(authored.iter().map(|(_, part)| *part))
+        .collect();
+    assert_eq!(
+        authored_split_is_admissible(&canonical, &leading_last, count, offer.preannounced),
+        Err("leading-cycle seat"),
+        "a split whose FINAL SEGMENT is the leading cycle's seat has that cycle repay exactly \
+         the cycle the segment loses, so it realizes the declared split scaled. \
+         split={leading_last:?}"
+    );
+
+    // ── (e) THE ROUND-TRIP: what the proposer is shown back for the split just authored.
+    let submission = f4_allocation_submission(&offer, count, &authored);
+    let returned = preview_interaction(
+        &state,
+        offer.proposer,
+        &InteractionPreviewRequest {
+            request_id: PreviewRequestId("h1-one-chain".to_string()),
+            interaction_id: submission.interaction_id.clone(),
+            response: submission.response.clone(),
+        },
+    )
+    .shortcut_preview
+    .expect("the proposer's own authored declaration previews an element");
+    assert_eq!(
+        returned
+            .allocation
+            .iter()
+            .map(|assignment| (
+                f4_candidate_seat(&offer.offer_candidates, &assignment.choice_id).map(PlayerId),
+                assignment.amount
+            ))
+            .collect::<Vec<_>>(),
+        authored
+            .iter()
+            .map(|(seat, part)| (Some(*seat), *part))
+            .collect::<Vec<_>>(),
+        "CR 732.2a: the returned element states the allocation the player AUTHORED, not the \
+         canonical one it was derived from. canonical={canonical:?}"
+    );
+    assert_eq!(
+        f4_life_entries(&returned),
+        authored
+            .iter()
+            .map(|(seat, part)| (seat.0, -(offer.rate * i64::from(*part)) as i32))
+            .collect::<Vec<_>>(),
+        "CR 732.2a: the per-victim lines are the RETURNED element's own entries — the \
+         predictable result of the described sequence, the published rate {} times EACH seat's \
+         own segment",
+        offer.rate
+    );
+
+    // ── (f) SUBMISSION AND THE RESPOND BEAT.
+    assert!(
+        !offer.other_pins.is_empty(),
+        "reach-guard: the split travels ALONGSIDE a pin for every other non-read-only point, \
+         else that clause is vacuous on this board"
+    );
+    let (life_before, _, _, tokens_before) = commit_axes(&state);
+    let responder = f4_open_respond_window(&mut state, &offer, &submission);
+    let reply = f4_reply_at(&state, responder);
+    let published = reply
+        .declared
+        .as_ref()
+        .expect("CR 732.2b: the responding seat is published the declaration it is judging");
+    assert!(
+        published.allocation.len() > 1 && !published.entries.is_empty(),
+        "reach-guard: an equality between two empty or single-segment elements cannot satisfy \
+         the agreement below. allocation={:?} entries={:?}",
+        published.allocation,
+        published.entries
+    );
+    let magnitudes: Vec<i32> = f4_life_entries(published)
+        .into_iter()
+        .map(|(_, amount)| amount)
+        .collect();
+    assert_eq!(
+        magnitudes
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        magnitudes.len(),
+        "reach-guard: the compared per-seat magnitudes are PAIRWISE DISTINCT, so a uniform \
+         re-attribution cannot satisfy the agreement below. magnitudes={magnitudes:?}"
+    );
+    assert_eq!(
+        shortcut_elements_agree_modulo_ids(
+            (&returned, &offer.offer_candidates),
+            (published, &reply.candidates),
+        ),
+        Ok(()),
+        "CR 732.2c: the choices taken on acceptance are the ones this seat was SHOWN — the \
+         round-tripped element and the published one agree modulo the ids that rotate across \
+         the beat"
+    );
+
+    // ── (g) THE COMMIT.
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the CR 732.2c window must actually take responses"
+    );
+    let (life_after, _, _, tokens_after) = commit_axes(&state);
+    let losses: Vec<i64> = life_before
+        .iter()
+        .zip(&life_after)
+        .map(|(before, after)| i64::from(before - after))
+        .collect();
+    for (seat, _) in &authored {
+        assert!(
+            f4_loss(&state, &losses, *seat) > 0,
+            "CR 732.2a: every seat the declaration names takes repetitions. {seat:?} \
+             losses={losses:?}"
+        );
+    }
+    assert_eq!(
+        authored
+            .iter()
+            .map(|(seat, _)| f4_loss(&state, &losses, *seat))
+            .sum::<i64>(),
+        offer.rate * i64::from(count),
+        "CR 732.2a: the accepted drive commits EXACTLY {count} repetitions of the published \
+         per-cycle charge, and every legal victim is declared. losses={losses:?}"
+    );
+    assert_eq!(
+        f4_loss(&state, &losses, offer.proposer),
+        0,
+        "the proposer is not a published victim and loses nothing. losses={losses:?}"
+    );
+    let realized: Vec<i64> = authored
+        .iter()
+        .map(|(seat, _)| f4_loss(&state, &losses, *seat))
+        .collect();
+    let declared_scaled: Vec<i64> = authored
+        .iter()
+        .map(|(_, part)| offer.rate * i64::from(*part))
+        .collect();
+    assert_ne!(
+        realized, declared_scaled,
+        "CR 601.2c: the leading cycle resolves a target announced BEFORE the drive begins, so \
+         every segment boundary lands one cycle late while the total stays exact — the realized \
+         map is not the declared split scaled. realized={realized:?}"
+    );
+
+    // ── (h) THE TOKENS, at the very count this row committed.
+    assert_eq!(
+        (tokens_after - tokens_before) as i64,
+        token_rate * i64::from(count),
+        "CR 732.2a: the board mints the published per-cycle token rate {token_rate} on each of \
+         the {count} committed cycles: {tokens_before} -> {tokens_after} battlefield tokens"
     );
 }

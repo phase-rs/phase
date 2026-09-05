@@ -96,7 +96,7 @@ vi.mock("../useDeckBuilder", async () => {
         estimate: null,
         auditEmptyReason: "not-commander" as const,
         cmcValues: [1],
-        colorValues: [""],
+        colorDistribution: [],
         cardCounts: new Map([["Sol Ring", 1]]),
         warnings: [],
         handleListContextMenu: (cardName: string, x: number, y: number) => {
