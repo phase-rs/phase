@@ -1760,7 +1760,7 @@ fn mana_ability_ready_without_simulation_gated(
     if !obj.detained_by.is_empty() {
         return false;
     }
-    // CR 602.2a: Only the controller may activate the ability.
+    // CR 602.2: only an object's controller may activate its activated ability.
     if obj.controller != player {
         return false;
     }
