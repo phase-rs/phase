@@ -253,6 +253,7 @@ CANDIDATE_ACTION_ORDER = {
     "close_stale_changes_for_handler": 0,
     "dequeue_stale_for_handler": 0,
     "update_branch_for_handler": 1,
+    "recheck_ci_hold_for_handler": 2,
     "approve_ready_for_handler": 2,
     "warn_stale_changes_for_handler": 3,
     "review": 3,
@@ -321,6 +322,11 @@ class Policy:
     @property
     def quality_label(self) -> str | None:
         value = self.raw.get("labels", {}).get("quality")
+        return str(value) if value else None
+
+    @property
+    def approved_for_review_label(self) -> str | None:
+        value = self.raw.get("labels", {}).get("approved_for_review")
         return str(value) if value else None
 
     @property
@@ -2713,6 +2719,19 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     local_event_type = local_event.get("event_type")
     local_outcome = local_event.get("outcome")
     local_event_timestamp = local_event.get("timestamp")
+    review_routing_label = (
+        (packet.get("policy") or {}).get("labels", {}).get("approved_for_review")
+    )
+    label_names = {
+        str(label).casefold() for label in pr.get("labels", []) if label
+    }
+    label_forces_review = (
+        bool(review_routing_label)
+        and not pr.get("self_authored")
+        and str(review_routing_label).casefold() in label_names
+        and str(local_event.get("review_routing_label") or "").casefold()
+        != str(review_routing_label).casefold()
+    )
     freshness = packet.get("freshness") or {}
     author_followup_after_local_event = freshness.get(
         "author_followup_after_local_event",
@@ -2733,7 +2752,10 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         parse_diff.get("updated_at"), local_event_timestamp
     )
     author_policy = packet.get("author_policy", {})
-    local_hold = local_event_type == "held" or local_outcome in HOLD_STATES
+    local_ci_hold = local_event_type == "hold_ci" or local_outcome == "hold_ci"
+    local_hold = local_event_type == "held" or local_ci_hold or local_outcome in HOLD_STATES
+    ci_state = (packet.get("ci") or {}).get("state")
+    settled_ci_hold = local_ci_hold and ci_state in {"green", "failed"}
     local_block = is_block_event(local_event)
     conflicts_with_base = (
         pr.get("mergeStateStatus") == "DIRTY" or pr.get("mergeable") == "CONFLICTING"
@@ -2751,6 +2773,13 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif pr.get("self_authored"):
         action = "skip"
         reason = "self_authored"
+    elif label_forces_review:
+        # A maintainer label is a review-routing instruction. It must surface the
+        # current head even when a hard-stop path would normally route directly to
+        # handler-only changes requested. Safety handling remains downstream of the
+        # full review; the record marker prevents re-reviewing the same label/head.
+        action = "review"
+        reason = "approved_for_review_label"
     elif classification.get("hard_stop_paths"):
         action = "request_changes"
         reason = "hard_stop"
@@ -2781,7 +2810,7 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_hold and pr.get("isDraft"):
         action = "hold"
         reason = "local_hold_current_head"
-    elif local_hold and (packet.get("ci") or {}).get("state") != "green":
+    elif local_hold and not settled_ci_hold and ci_state != "green":
         action = "hold_ci"
         reason = "local_hold_current_head"
     elif local_hold and conflicts_with_base:
@@ -2790,6 +2819,12 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_hold and parse_diff_after_local_event:
         action = "review"
         reason = "parse_diff_after_local_hold"
+    elif settled_ci_hold:
+        # A CI hold is a temporary external condition, not a terminal routing state.
+        # Once required CI settles, the handler must live-check the current head and
+        # either approve/enqueue it or turn the failed result into a concrete disposition.
+        action = "recheck_ci_hold_for_handler"
+        reason = "ci_hold_settled"
     elif local_hold:
         action = "hold"
         reason = "local_hold_current_head"
@@ -3128,6 +3163,7 @@ def make_packet(
             "labels": {
                 "frontend_deferred": policy.frontend_deferred_label,
                 "quality": policy.quality_label,
+                "approved_for_review": policy.approved_for_review_label,
             },
             "admission": {
                 "mode": policy.admission_mode,
