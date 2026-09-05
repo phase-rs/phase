@@ -2171,12 +2171,16 @@ pub fn fallback_action(
             stack_entry_index,
             scope,
             current_targets,
+            slots,
+            slot_pools,
             legal_new_targets,
             ..
         } => retarget_actions(
             state,
             *stack_entry_index,
             scope,
+            slots,
+            slot_pools,
             current_targets,
             legal_new_targets,
         )

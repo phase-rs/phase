@@ -944,10 +944,89 @@ fn move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
     }
 }
 
+/// CR 112.2 + CR 613.1b: the CURRENT controller of an object on the stack.
+///
+/// `StackEntry.controller` is the CR 112.2 *by-default* controller — "a spell's
+/// controller is, by default, the player who put it on the stack" — and is never
+/// written after construction (the one exception, the CR 901.10b planar handoff in
+/// `game::planechase`, replaces that default itself rather than layering over it).
+/// A layer-2 control-changing effect (CR 613.1b) can move control of a spell without
+/// touching that default; `layers::evaluate_layers` seeds every stack object from its
+/// entry and then applies layer 2 on top, so the OBJECT is the authority for "now"
+/// and the ENTRY stays the authority for "by default" (CR 110.2b / CR 800.4c).
+///
+/// CR 113.8: an ACTIVATED ability's controller is fixed at activation and a TRIGGERED
+/// ability's at trigger time, so an ability entry must answer by-default. That falls
+/// out for free rather than needing a branch: an ability entry has no `state.objects`
+/// row keyed by `entry.id` (MEASURED), so the `map_or` fallback IS the CR 113.8 answer.
+///
+/// PRECONDITION (asserted NOWHERE), stated in the two halves that are actually true:
+///
+///   1. SEEDED-AT-ARRIVAL. `zones::move_to_zone` marks a full pass on every move
+///      INTO `Zone::Stack` (CR 601.2a: continuous effects "begin as it is put on the
+///      stack"; CR 611.2f), so a spell that has finished being put onto the stack has
+///      a full pass MARKED that will seed it from its `StackEntry` on the NEXT FLUSH —
+///      not necessarily already applied. A reader that cannot flush (see the
+///      `derived_views` note below) may still observe the pre-flush value for that
+///      spell.
+///      `a_cast_from_each_origin_zone_seeds_the_stack_objects_controller` is the test
+///      that pins it, per origin zone, with the Hand cast as positive control.
+///      DO NOT WEAKEN THAT MARK: before it existed, Exile/Graveyard/Command -> Stack
+///      marked NOTHING (MEASURED), and this accessor answered the card's OWNER for
+///      every spell cast from a zone its caster does not own.
+///   2. NOT-STALE-AFTERWARDS. `prepare_incremental_flush` refuses the incremental arm
+///      whenever an active continuous effect names a stack recipient, so a later CR
+///      613.1b control change cannot be skipped by the cheap arm;
+///      `incremental_flush_escalates_when_a_stack_object_is_a_layer_recipient` pins it.
+///
+/// The invariant these two give is "a spell that reached the stack has been seeded, and
+/// a live control change on it is never skipped" — NOT "a Clean lattice implies a seeded
+/// stack". THAT STRONGER CLAIM IS FALSE and must not be written here: the lattice is
+/// Clean whenever nothing marked it, including when nothing ran.
+///
+/// KNOWN LIMITATION (CR 109.4), out of run: between CR 601.2a announcement and cast
+/// finalization the `StackEntry` is already on the stack while `obj.zone` is still the
+/// ORIGIN zone (MEASURED), so during that window this accessor reports origin-zone data.
+/// Only the caster holds priority in that window, so no other player's legality read can
+/// observe it. Closing it means giving `announce_spell_on_stack` and the finalize move a
+/// shared base, which is a separate unit with its own gate run.
+///
+/// This is deliberately NOT a `debug_assert!`, here or at any caller.
+/// `derived_views::derive_views` takes `&GameState` and structurally cannot flush, so
+/// the invariant is unenforceable on the projection path; and `resolve_top` — the
+/// highest-consequence caller — is legitimately entered with a dirty lattice by
+/// existing in-repo tests that push straight onto the stack (`move_to_zone` from
+/// `Zone::Hand` marks `LayersDirty::Full` and `stack.rs` has no production
+/// `flush_layers`), so an assert there fails the suite rather than guarding it.
+/// The CR 601.2a arrival mark seeds the object controller on the NEXT FLUSH, not
+/// instantaneously; a caller that reads before that flush (e.g. `derive_views`, which
+/// structurally cannot flush) degrades to the CR 112.2 `entry.controller` this accessor
+/// replaces — i.e. it can lag a live control change by at most one pass. (Before that
+/// mark existed it degraded to the card's OWNER, which is the defect this design
+/// closes.)
+pub fn stack_object_controller(state: &GameState, entry: &StackEntry) -> PlayerId {
+    state
+        .objects
+        .get(&entry.id)
+        .map_or(entry.controller, |obj| obj.controller)
+}
+
 /// CR 608.3 + CR 400.7d: Snapshot cast-link / target facts for a permanent spell
 /// paused mid-resolution (delivery-tail `NeedsChoice`, replacement-choice
 /// `NeedsChoice`, or CallerEpilogue `CopyTargetChoice`). Single authority so a
 /// new cast-metadata field cannot be threaded into only two of three stash sites.
+///
+/// `live_controller` MUST be the caller's already-computed [`resolve_top`]
+/// value (CR 109.4-safe, read while the object was still on the stack) — never
+/// re-derived here via [`stack_object_controller`]. All three call sites in
+/// `resolve_top` invoke this from inside `zone_pipeline::deliver`'s
+/// `NeedsChoice` / `CopyTargetChoice` continuations, i.e. AFTER
+/// `move_to_zone_with_entry_flags` has already moved the object to the
+/// battlefield and possibly applied an `enters_under` control change; a fresh
+/// `stack_object_controller(state, entry)` read at that point would read the
+/// object's battlefield-scoped controller (CR 109.4: only stack/battlefield
+/// objects have a controller, but that's the WRONG one here) instead of the
+/// controller this spell resolved for.
 fn pending_spell_resolution_snapshot(
     state: &GameState,
     entry: &StackEntry,
@@ -955,6 +1034,7 @@ fn pending_spell_resolution_snapshot(
     casting_variant: CastingVariant,
     actual_mana_spent: u32,
     spell_targets: &[TargetRef],
+    live_controller: PlayerId,
 ) -> PendingSpellResolution {
     let obj = state.objects.get(&entry.id);
     let cast_from_zone = ability
@@ -982,9 +1062,18 @@ fn pending_spell_resolution_snapshot(
         .unwrap_or_default();
     PendingSpellResolution {
         object_id: entry.id,
-        controller: entry.controller,
+        // CR 608.2c: the mid-resolution pause snapshot must carry the same live-controller
+        // answer the resolution path uses, or a paused stolen spell resumes for the caster.
+        // Passed in by the caller (`resolve_top`'s `live_controller`, read while the object
+        // was still on the stack) rather than re-derived here — a fresh
+        // `stack_object_controller` read at this point in `resolve_top` would be
+        // battlefield-scoped (see the doc comment above).
+        controller: live_controller,
         casting_variant,
         cast_from_zone,
+        // CR 601.2a: "that player becomes its controller" — the CASTER, a historical fact
+        // keyed by every "if you cast it" rider on the resulting permanent. Stays by-default
+        // deliberately; unaffected by the CR 608.2c re-stamp in `resolve_top`.
         cast_controller: Some(entry.controller),
         cast_timing_permission,
         spell_targets: spell_targets.to_vec(),
@@ -1311,6 +1400,60 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         ),
     };
 
+    // CR 608.2c + CR 400.7a + CR 613.1b: "The controller of the spell or ability follows
+    // its instructions in the order written." A layer-2 control-changing effect can move
+    // control of a SPELL while it is on the stack, so every decision this resolution owes
+    // belongs to the LIVE controller, not to the CR 112.2 by-default controller baked into
+    // the entry at announcement.
+    //
+    // LATCHED ONCE, HERE, and read by every routed consumer below — never re-derived
+    // downstream. Two rules make the latch the correct shape rather than a convenience:
+    //   * CR 603.7d: a delayed triggered ability created during resolution is controlled
+    //     by "the player who controlled that spell as it resolved" — one instant, not a
+    //     value that keeps tracking.
+    //   * CR 109.4: "Only objects on the stack or on the battlefield have a controller."
+    //     By the time a mutate spell merges, cipher offers its encode, or a permanent
+    //     spell has entered, this object has LEFT `Zone::Stack`, so a second
+    //     `stack_object_controller` call there would read a battlefield-scoped answer or
+    //     a zone where the field is meaningless. This read happens while it is still on
+    //     the stack.
+    //
+    // CR 113.8 needs no branch here: an activated ability's controller is fixed at
+    // activation and a triggered ability's at trigger time, and an ability entry has no
+    // `state.objects` row keyed by `entry.id`, so the accessor's `map_or` fallback already
+    // returns `entry.controller` for those kinds. Computing this unconditionally is safe.
+    //
+    // NO `debug_assert!` on the lattice: `resolve_top` is legitimately entered with
+    // `LayersDirty::Full` by in-repo tests that move a card Hand -> Stack and push an
+    // entry directly (`zones::move_to_zone` marks full from `Zone::Hand`; this file has no
+    // production `flush_layers`).
+    //
+    // THE SEED-BEFORE-READ INVARIANT HAS TWO HALVES AND THEY ARE DIFFERENT MECHANISMS:
+    //   * SEEDED AT ALL: `zones::move_to_zone` marks a full pass on every move INTO
+    //     `Zone::Stack` (CR 601.2a: continuous effects "begin as it is put on the stack";
+    //     CR 611.2f), pinned per origin zone by
+    //     `a_cast_from_each_origin_zone_seeds_the_stack_objects_controller`. Before that
+    //     term existed, Exile/Graveyard/Command -> Stack marked NOTHING and this read
+    //     returned the card's OWNER for the whole Gonti class -- MEASURED, and the reason
+    //     re-stamping on it would have made an opponent-cast spell resolve for the OWNER.
+    //   * NOT STALE AFTERWARDS: `layers::prepare_incremental_flush`'s escalation guard,
+    //     pinned by `incremental_flush_escalates_when_a_stack_object_is_a_layer_recipient`.
+    // With both in place a stale read here degrades to `entry.controller` -- the CR 112.2
+    // value this replaces -- and never to origin-zone data.
+    let live_controller = stack_object_controller(state, &entry);
+
+    // CR 608.2c + CR 109.5: re-stamp the resolving spell's baked announcement controller
+    // so its own effects run for whoever controls it now. Gated on `is_spell` per CR 113.8
+    // above. `original_controller` is deliberately NOT re-stamped — CR 109.5 makes "you"
+    // on a stolen spell refer to its NEW controller, which is exactly `controller`.
+    if is_spell {
+        if let Some(ability) = ability.as_mut() {
+            if ability.controller != live_controller {
+                ability.set_controller_recursive(live_controller);
+            }
+        }
+    }
+
     // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" /
     // "attacks a player" trigger introduces the damaged/attacked player as the
     // event referent. Stamp it onto the resolving ability's `scoped_player`
@@ -1472,6 +1615,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // plain creature spell. Re-evaluate against the SAME predicate the
         // cast-offer / target-attachment path used (`casting::mutate_target_filter`)
         // via the shared targeting/filter machinery so the two cannot drift.
+        //
+        // CR 702.140a: mutate "targets a non-Human creature WITH THE SAME OWNER AS
+        // THIS SPELL". `casting::mutate_target_filter()`'s property is
+        // `FilterProp::Owned { controller: ControllerRef::You }` — an OWNER-axis test
+        // whose "you" this context resolves. The CR-correct authority is therefore
+        // `state.objects[&entry.id].owner`, which is NEITHER `entry.controller` NOR
+        // the live controller; `entry.controller` is the closer approximation
+        // because owner == caster in every cast that is not Gonti-class. Do NOT
+        // route this to `live_controller` — that would be wrong in a new direction.
+        // KNOWN LIMITATION (CR 702.140a): seam is `mutate_target_filter`'s
+        // `FilterProp::Owned` and this context's controller argument; closing it
+        // means giving the recheck the spell's owner.
         let legal_target = mutate_target.filter(|&id| {
             if !state.battlefield.contains(&id) {
                 return false;
@@ -1487,13 +1642,21 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             Some(target_id) => {
                 // CR 702.140c: pause for the top/bottom choice. The merging spell
                 // (`entry.id`) has already been popped from the stack.
+                //
+                // CR 702.140c: "The spell's controller chooses whether the spell is put
+                // on top of the creature or on the bottom." The chooser is the spell's
+                // controller as it resolves (CR 608.2c), which is `live_controller`, not
+                // the CR 112.2 caster. CR 702.140b's illegal-target sibling is already
+                // correct by a different route — the spell is put onto the battlefield
+                // "under the control of the spell's controller" via the ETB
+                // `controller_override` path (CR 110.2b).
                 state.push_mutate_merge_frame(crate::types::resolution::PendingMutateMerge {
                     merging_id: entry.id,
                     target_id,
-                    controller: entry.controller,
+                    controller: live_controller,
                 });
                 state.waiting_for = crate::types::game_state::WaitingFor::MutateMergeChoice {
-                    player: entry.controller,
+                    player: live_controller,
                     merging_id: entry.id,
                     target_id,
                 };
@@ -1621,7 +1784,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // exiles+encodes on accept, or routes the card to its graveyard on decline.
     // Skipped (resolution proceeds to graveyard normally) when there is no legal
     // host. `is_spell` gates out triggered/activated stack entries.
-    if is_spell && super::cipher::begin_encode_choice(state, entry.id, entry.controller, events) {
+    // CR 702.99a + CR 109.5: "you may exile this card encoded on a creature you
+    // control" — "you" is the object's controller, i.e. the spell's controller as
+    // it resolves (CR 608.2c). This argument does double duty in `cipher.rs`: it
+    // selects `legal_encode_creatures(state, controller)` AND becomes
+    // `PendingCipherEncode.controller`, which owns the prompt. Both halves are the
+    // same "you".
+    if is_spell && super::cipher::begin_encode_choice(state, entry.id, live_controller, events) {
         events.push(GameEvent::StackResolved {
             object_id: entry.id,
         });
@@ -1649,7 +1818,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         });
         if has_paradigm {
             let card_name = obj.map(|o| o.name.clone()).unwrap_or_default();
-            super::effects::paradigm::arm_paradigm(state, entry.id, entry.controller, &card_name)
+            // CR 702.192a: Paradigm means "If this is the first time a spell YOU
+            // control with this spell's name has resolved this game, at the
+            // beginning of each of YOUR precombat main phases for the rest of the
+            // game, create a copy of this object in exile. You may cast the copy
+            // without paying its mana cost". ONE "you", both halves, no
+            // historical-cast clause — the same shape as epic's CR 702.50a below.
+            // Per CR 608.2c and CR 109.5 that "you" is the spell's controller AS IT
+            // RESOLVES, so a stolen Paradigm spell primes its THIEF and offers the
+            // free copy on the thief's precombat main phases. This argument is BOTH
+            // the `state.paradigm_primed` key and the `already_primed` gate that
+            // reads it three lines earlier inside `arm_paradigm` itself — one
+            // value, one site, so routing keeps the pair in agreement by
+            // construction rather than splitting it.
+            super::effects::paradigm::arm_paradigm(state, entry.id, live_controller, &card_name)
         } else {
             false
         }
@@ -1682,6 +1864,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             .as_ref()
             .and_then(|a| a.context.cast_from_zone)
             .or_else(|| super::casting::spell_cast_origin(state, entry.id));
+        // CR 702.88a: "If this spell was cast from YOUR hand … at the beginning of
+        // YOUR next upkeep, YOU may cast this card from exile." ONE "you" serves
+        // both the arming condition and the entitlement. This argument is the
+        // entitlement half — the player who may recast — but the engine's arming
+        // test is the separate, player-blind `cast_from_zone == Some(Zone::Hand)`
+        // above. Routing only this half would grant a thief a rebound whose own
+        // arming condition CR 702.88a makes false for them.
+        // KNOWN LIMITATION (CR 702.88a): closing it requires the arming test to
+        // record WHOSE hand, then both halves move together.
         if has_rebound && cast_from_zone == Some(Zone::Hand) {
             super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
         } else {
@@ -1706,7 +1897,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         });
         if has_epic {
             if let Some(spell_ability) = ability.clone() {
-                super::effects::epic::arm_epic(state, entry.id, entry.controller, *spell_ability);
+                // CR 702.50a: "For the rest of the game, you can't cast spells" and
+                // "At the beginning of each of your upkeeps for the rest of the
+                // game, copy this spell…" — ONE "you", used twice, with no
+                // historical-cast clause to entangle it. Per CR 608.2c and CR 109.5
+                // that is the spell's controller as it resolves, so a stolen Epic
+                // spell locks out its thief and copies on the thief's upkeeps.
+                super::effects::epic::arm_epic(state, entry.id, live_controller, *spell_ability);
             }
         }
     }
@@ -1837,6 +2034,21 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // control" replacement (enters_under) still wins — it runs later,
             // in replace_event below, and hard-overwrites this default
             // unconditionally.
+            // CR 110.2b + CR 400.7a: "If an effect causes a player to gain control of
+            // another player's permanent spell, the first player controls the permanent
+            // that spell becomes, but the permanent's controller BY DEFAULT is the player
+            // who put that spell onto the stack." This is that by-default value —
+            // `entry.controller` stays correct here; a live control change is layered on
+            // top of it by CR 400.7a, not substituted for it.
+            //
+            // KNOWN LIMITATION (CR 614.12 + CR 110.2b), out of run: this default is what
+            // `ProposedEvent::affected_player`'s `ZoneChange` arm reads to route an
+            // as-enters replacement choice, which offers that choice to the CASTER even
+            // when a layer-2 effect has already moved control of this permanent spell.
+            // CR 614.12 says the choice should follow "continuous effects that already
+            // exist and would apply to the permanent" — i.e. the live controller. Closing
+            // it needs `ProposedEvent::ZoneChange` to carry the CR 110.2b base/live split
+            // as two values, a separate unit with its own gate run.
             if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                 controller_override,
                 ..
@@ -1984,6 +2196,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     if let Some(cast_from_zone) = ability.context.cast_from_zone {
                         obj.cast_from_zone = Some(cast_from_zone);
                     }
+                    // CR 601.2a: "that player becomes its controller" — the CASTER, a
+                    // historical fact keyed by every "if you cast it" rider on the resulting
+                    // permanent. Unaffected by the CR 608.2c re-stamp above: `set_controller_
+                    // recursive` writes only `ResolvedAbility::controller` and recurses into
+                    // `sub_ability` / `else_ability`; it never touches `context.cast_
+                    // controller`, so the preferred arm is unchanged and this fallback still
+                    // answers the CR 112.2 by-default caster.
                     obj.cast_controller =
                         ability.context.cast_controller.or(Some(entry.controller));
                 }
@@ -2099,6 +2318,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                             casting_variant,
                                             actual_mana_spent,
                                             &spell_targets,
+                                            live_controller,
                                         ),
                                         entry_child_stack_start,
                                     );
@@ -2182,6 +2402,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             .get(&entry.id)
                             .and_then(super::room::cast_half_designation)
                         {
+                            // CR 709.5d: designation follows WHICH HALF was cast
+                            // (`cast_half_designation`), not who controls anything.
+                            // `None` is that rule's last sentence: neither half was
+                            // cast (enter-as-copy of a Room), so it enters with
+                            // neither designation.
+                            // KNOWN LIMITATION: the event's player_id label follows
+                            // `entry.controller` here; the permanent's controller is
+                            // settled by the ETB `controller_override` path.
                             super::room::unlock_door_designation(
                                 state,
                                 entry.id,
@@ -2259,6 +2487,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         casting_variant,
                         actual_mana_spent,
                         &spell_targets,
+                        live_controller,
                     ));
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);
@@ -2341,6 +2570,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             // grant — never earlier (a countered or fizzled
                             // spell's marker was cleared on its stack exit and
                             // never reaches here).
+                            // CR 603.7a + CR 603.7e (r5: was 603.7d — the rider is created
+                            // by a TRIGGERED ability's replacement, so CR 603.7e is the
+                            // rule and CR 603.7d, the spell-created case, is not;
+                            // `exile_resolving_spell::arm_return_to` already cites CR
+                            // 603.7e, and this annotation now agrees with it rather than
+                            // contradicting it three frames away). Chooser: the controller
+                            // of the REPLACEMENT EFFECT'S SOURCE (Feather, Lilah) — whose
+                            // id this call already carries as the fourth argument — NOT
+                            // the resolving spell's controller. `entry.controller`
+                            // approximates it correctly, because those sources trigger on
+                            // "whenever YOU cast", so the caster IS the source's
+                            // controller. Routing this to `live_controller` would hand a
+                            // stolen spell's Feather-return to the THIEF, which is wrong.
+                            // KNOWN LIMITATION (CR 603.7e): the exact authority is that
+                            // source's controller; deriving it here means resolving the
+                            // link source's controller at rider-apply time.
                             if let Some(rider) = exile_rider {
                                 effects::exile_resolving_spell::apply_exile_rider(
                                     state,
@@ -2498,6 +2743,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 casting_variant,
                                 actual_mana_spent,
                                 &spell_targets,
+                                live_controller,
                             ));
                             state.waiting_for = wf;
                         }
@@ -2523,6 +2769,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         .any(|k| matches!(k, crate::types::keywords::Keyword::Warp(_)))
                 });
                 if has_warp {
+                    // CR 702.185a + CR 603.7d. Chooser: who controls the end-step exile
+                    // trigger for the PERMANENT this spell became.
+                    // KNOWN LIMITATION (CR 603.7d): a permanent rider. CR 400.7a carries a
+                    // spell-level control change onto the permanent, but the permanent's
+                    // controller can then change again independently, and the trigger
+                    // keeps this latched value either way — the same pre-existing defect
+                    // as dash/blitz below, on the permanent's control lineage rather than
+                    // the spell's.
                     create_warp_delayed_trigger(state, entry.id, entry.controller, events);
                 }
                 // CR 702.185a + CR 400.7: stamp the per-object warp marker after
@@ -2702,6 +2956,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     .get(&entry.id)
                     .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature));
                 if is_creature {
+                    // CR 702.62a verified: suspend's third ability gives haste "until you
+                    // lose control of the spell or the permanent it becomes." "You" is the
+                    // suspend caster, and the rider re-checks live via
+                    // `Duration::ForAsLongAs { SourceControllerEquals { player:
+                    // resolution_controller } }` — so feeding it `entry.controller`
+                    // reproduces the printed behavior exactly (a stolen suspend spell's
+                    // haste ends immediately, because the caster HAS lost control).
+                    // By-default is correct here; not routed to `live_controller`.
                     let resolution_controller = entry.controller;
                     let suspended_id = entry.id;
                     state.add_transient_continuous_effect(
@@ -2738,11 +3000,33 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
             // CR 702.109a: a dash-cast permanent gains haste and is returned to
             // its owner's hand at the beginning of the next end step.
+            //
+            // CR 702.109a + CR 603.7d. Chooser: who controls the "return it to its
+            // owner's hand at the beginning of the next end step" delayed trigger.
+            // Outcome-equivalent either way (it returns to its OWNER regardless);
+            // only APNAP ordering differs.
+            // KNOWN LIMITATION (CR 603.7d): same permanent-lineage class as blitz
+            // below.
             if casting_variant == CastingVariant::Dash {
                 crate::game::dash::install_dash_riders(state, entry.id, entry.controller, events);
             }
             // CR 702.152a: a blitz-cast permanent gains haste and a dies-draw
             // trigger, and is sacrificed at the beginning of the next end step.
+            //
+            // CR 702.152a + CR 603.7d + CR 701.21a. Chooser: who controls the
+            // "sacrifice the permanent this spell becomes at the beginning of the
+            // next end step" delayed trigger. The difference IS observable — CR
+            // 701.21a: "A player can't sacrifice … something that's a permanent
+            // they don't control."
+            // KNOWN LIMITATION (CR 603.7d + CR 701.21a): this mismatch is already
+            // reachable today with printed cards and nothing from this change —
+            // Act of Treason gains control until end of turn and the blitz trigger
+            // fires at the beginning of the NEXT END STEP, inside that window, so
+            // the caster's trigger already cannot sacrifice the permanent. It is a
+            // PRE-EXISTING defect on the PERMANENT's control lineage, orthogonal to
+            // control of a spell. Closing the class means auditing every CR 603.7d
+            // delayed-trigger creation site against the permanent's live
+            // controller — a separate unit with its own gate run.
             if casting_variant == CastingVariant::Blitz {
                 crate::game::blitz::install_blitz_riders(state, entry.id, entry.controller, events);
             }

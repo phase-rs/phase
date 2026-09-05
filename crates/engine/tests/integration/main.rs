@@ -1102,6 +1102,7 @@ mod spark_double_as_enters;
 mod spear_of_bashenga_attacks_monarch_5249;
 mod special_action_x_runtime;
 mod specialize_runtime;
+mod spell_controller_is_derived;
 mod spell_resolution_child_boundary;
 mod spellstutter_sprite_counter_with_x;
 mod spelunking_shockland_order;
@@ -1536,3 +1537,6 @@ mod xantid_swarm_defending_player_cant_cast;
 mod you_have_been_caught_stealing_any_damage;
 mod yurlok_of_scorch_thrash;
 mod zhulodok_double_cascade;
+
+mod context_ref_slot_hygiene;
+mod exchange_control_of_a_spell;

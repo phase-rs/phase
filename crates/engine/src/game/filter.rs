@@ -2479,9 +2479,12 @@ pub fn is_owner_scoped_zone(zone: Zone) -> bool {
 /// In an owner-scoped zone (see [`is_owner_scoped_zone`]) this delegates to
 /// [`matches_target_filter_in_owner_zone`], so a stale `obj.controller` left behind
 /// by a control-change effect cannot exclude the object from its own owner's
-/// player-scoped query — the state `effects::change_zone` documents for a stolen
-/// creature that dies into its owner's graveyard, where `reset_for_battlefield_exit`
-/// leaves `controller = thief`. Everywhere else it delegates to the ordinary
+/// player-scoped query. `zones::apply_zone_exit_cleanup`'s
+/// `revert_layered_characteristics_to_base` call already resets `controller` back
+/// to the owner fallback for a stolen creature that dies into its owner's
+/// graveyard, but this filter is defence-in-depth for a hand-built or serialized
+/// state where the two have diverged — the state `effects::change_zone` documents
+/// at its own site. Everywhere else it delegates to the ordinary
 /// controller-scoped [`matches_target_filter`].
 pub fn matches_target_filter_for_zone(
     state: &GameState,
@@ -3614,8 +3617,26 @@ fn filter_inner_for_object(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringSourceController
         | TargetFilter::TriggeringPlayer
-        | TargetFilter::TriggeringSource
         | TargetFilter::DefendingPlayer => false,
+        // CR 608.2k: `TriggeringSource` IS object-valued (unlike its player-axis
+        // siblings above — types/ability.rs documents it as "the source object
+        // of the triggering event"), but it is still not a population predicate,
+        // so it belongs in its own arm rather than the CR 603.7c group. Its
+        // referent is bound at resolution time by `targeting::resolved_targets`
+        // (delegating to `targeting::resolve_event_context_target` for the event
+        // tier), and `TargetFilter::is_context_ref()` guarantees no target slot
+        // is ever built from it (`ability_utils::collect_target_slots_inner` /
+        // `build_target_slot_specs` skip it). Matching `true` here would make a
+        // resolution-time ref ENUMERABLE — selectable as a population member —
+        // across every `matches_target_filter` consumer, including
+        // `layers::apply_continuous_effect_filtered`, where a `TriggeringSource`
+        // affected-filter would start selecting a population instead of the one
+        // bound referent. It would also fire at trigger DETECTION time through
+        // `quantity::triggering_event_source_object`'s thread-local fallback,
+        // changing trigger-condition and intervening-if evaluation corpus-wide.
+        // Contrast `EventTarget` below: that arm serves a DIFFERENT consumer,
+        // CR 603.4 intervening-if object matching, not population enumeration.
+        TargetFilter::TriggeringSource => false,
         // CR 603.2 + CR 603.4: "that creature"/"that permanent" bound to the
         // object target carried by the current trigger event. Matches only that
         // specific object (including a BecomesTarget object), so an

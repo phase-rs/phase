@@ -105,6 +105,13 @@ pub struct StackEntryDisplay {
     /// stack provenance surface consumed by the frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<SyntheticTriggerProvenance>,
+    /// CR 112.2 + CR 613.1b: the LIVE controller of this stack object, as
+    /// `stack::stack_object_controller` derives it. The wire `StackEntry.controller`
+    /// stays the CR 112.2 by-default controller (rules state, replay-load-bearing);
+    /// this is the engine's answer to "who controls it right now", so the display layer
+    /// renders one engine-provided value and never picks between two.
+    #[serde(default)]
+    pub controller: PlayerId,
 }
 
 /// A single player-affecting condition the HUD surfaces as a status icon.
@@ -2762,6 +2769,28 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
             | StackEntryKind::ActivatedAbility { .. }
             | StackEntryKind::KeywordAction { .. } => None,
         },
+        // CR 109.4 + CR 601.2a: the live controller, EXCEPT during the
+        // announcement window. Between `announce_spell_on_stack` and cast
+        // finalization the `StackEntry` is already on the stack while the
+        // object is still in its ORIGIN zone, and an off-stack, off-battlefield
+        // object's `controller` is its OWNER — so for a cast from a zone the
+        // caster does not own (Gonti / Etali / Memory Plunder), reading the
+        // object there renders the row under the opponent's seat and inverts
+        // the You/Opp label for both players until finalization.
+        //
+        // `stack_object_controller`'s own doc records this window but argues it
+        // is unobservable because only the caster holds priority; that argument
+        // covers LEGALITY reads, and this is a display projection, which is
+        // exactly the non-legality observer that does see it. Guarded here
+        // rather than inside the accessor so the legality readers keep the
+        // semantics they were reasoned about with — `derive_views` takes
+        // `&GameState` and structurally cannot flush, so the projection is the
+        // one caller that needs the narrower answer.
+        controller: state
+            .objects
+            .get(&entry.id)
+            .filter(|obj| obj.zone == crate::types::zones::Zone::Stack)
+            .map_or(entry.controller, |obj| obj.controller),
     }
 }
 
@@ -5073,6 +5102,7 @@ mod tests {
             paid: Vec::new(),
             trigger_context: Vec::new(),
             provenance: None,
+            controller: PlayerId(0),
         };
         let empty_json = serde_json::to_string(&empty).expect("serialize empty display");
         assert!(

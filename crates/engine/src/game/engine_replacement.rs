@@ -3059,14 +3059,22 @@ pub(crate) fn apply_pending_spell_resolution(
         }
     }
 
-    // CR 709.5d: the replacement-choice resume path delivers the same entry as
-    // the ordinary resolution tail in `stack.rs`, so it asks the same single
-    // authority. Previously it granted `RoomDoor::Left` unconditionally — no
-    // door check and no Room check: every permanent spell that paused for a
-    // replacement choice and then entered as a copy of a Room (Copy
-    // Enchantment, Mirrormade, Estrid's Invocation) was handed a designation
-    // although neither of ITS halves was cast, which is exactly the case
-    // CR 709.5d's last sentence covers.
+    // CR 709.5d / CR 702.185a + CR 603.7d: both of these are KEEP-classified
+    // consumers of the historical cast-time controller (`entry.controller` on
+    // the unpaused `stack.rs` path — the same known limitation noted there),
+    // NOT the live/CR 608.2c re-stamped controller `ctx.controller` carries.
+    // Reading `ctx.controller` here would make a warp/Room rider resolve under
+    // a DIFFERENT controller than the unpaused path resolves it under,
+    // depending only on whether the resolution paused for a choice.
+    // `cast_controller` is always `Some` (set unconditionally in
+    // `pending_spell_resolution_snapshot`); the fallback only guards the type.
+    let cast_time_controller = ctx.cast_controller.unwrap_or(ctx.controller);
+
+    // CR 709.5d: same single authority as the ordinary resolution tail in
+    // `stack.rs`. Previously this granted `RoomDoor::Left` unconditionally —
+    // every permanent spell that paused for a replacement choice and then
+    // entered as a copy of a Room was handed a designation although neither
+    // of ITS halves was cast (CR 709.5d last sentence).
     if let Some(cast_door) = state
         .objects
         .get(&ctx.object_id)
@@ -3075,7 +3083,7 @@ pub(crate) fn apply_pending_spell_resolution(
         super::room::unlock_door_designation(
             state,
             ctx.object_id,
-            ctx.controller,
+            cast_time_controller,
             cast_door,
             events,
         );
@@ -3089,7 +3097,12 @@ pub(crate) fn apply_pending_spell_resolution(
                 .any(|k| matches!(k, crate::types::keywords::Keyword::Warp(_)))
         });
         if has_warp {
-            super::stack::create_warp_delayed_trigger(state, ctx.object_id, ctx.controller, events);
+            super::stack::create_warp_delayed_trigger(
+                state,
+                ctx.object_id,
+                cast_time_controller,
+                events,
+            );
         }
     }
 
