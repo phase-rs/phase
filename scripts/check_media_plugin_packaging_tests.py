@@ -615,6 +615,39 @@ class MediaPluginPackagingTests(unittest.TestCase):
                 self.assertNotEqual(r.returncode, 0, r.stdout)
                 self.assertIn("without running it", r.stderr)
 
+    def test_an_operator_glued_to_a_word_refuses(self) -> None:
+        # `shlex` splits on whitespace, not on shell metacharacters, so
+        # `update&&echo` survives as one token and hides the command boundary
+        # between the head this gate checks and the `install` it searches for
+        # -- the same fail-open as the spaced form, one space away.
+        joined = " ".join(DEFAULT_PACKAGES)
+        for shape, command in (
+            ("&&", f"sudo apt-get update&&echo apt-get install -y {joined}"),
+            (";", f"sudo apt-get update;echo apt-get install -y {joined}"),
+            ("|", f"sudo apt-get update|echo apt-get install -y {joined}"),
+        ):
+            with self.subTest(operator=shape):
+                t = self.tree()
+                t.write_workflow(run=command)
+                r = t.run()
+                self.assertEqual(r.returncode, 2, r.stdout)
+                self.assertIn("joins a shell operator to a word", r.stderr)
+
+    def test_another_tools_install_alongside_a_real_one_is_not_refused(self) -> None:
+        # `pip install` and `cargo install` name a verb this gate does not own.
+        # Holding every segment containing the bare word `install` to the apt
+        # head check refuses a line that does run a real apt install alongside.
+        joined = " ".join(DEFAULT_PACKAGES)
+        for shape, tail in (("pip", "pip install pyyaml"),
+                            ("cargo", "cargo install tauri-cli"),
+                            ("prose", "echo install complete")):
+            with self.subTest(tool=shape):
+                t = self.tree()
+                t.write_workflow(run=("sudo apt-get update\n"
+                                      f"sudo apt-get install -y {joined} && {tail}"))
+                r = t.run()
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_an_apt_step_that_installs_nothing_refuses(self) -> None:
         # The step still exists, on the right job and the right arm, and runs
         # no `apt-get install`. Zero packages read out of it is not zero
@@ -786,6 +819,10 @@ class MediaPluginPackagingTests(unittest.TestCase):
         t = self.tree(); t.write_workflow(
             run="sudo apt-get update\necho apt-get install libgtk-3-dev")
         cases["mention without a command"] = t.run()
+
+        t = self.tree(); t.write_workflow(
+            run="sudo apt-get update&&echo apt-get install -y libgtk-3-dev")
+        cases["operator glued to a word"] = t.run()
 
         t = self.tree(); t.write_workflow(
             run="sudo apt-get update\nif true; then sudo apt-get install -y x\nfi")

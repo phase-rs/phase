@@ -99,6 +99,8 @@ APT_COMMANDS = frozenset({"apt-get", "apt"})
 DEBIAN_NAME = re.compile(r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?")
 #: Shell operators that end a command's argument list.
 SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", "&"})
+#: The characters those operators are built from, for spotting one glued to a word.
+OPERATOR_CHARS = frozenset("&|;")
 
 
 class Refusal(Exception):
@@ -391,8 +393,13 @@ def appimage_apt_packages() -> set[str]:
         # credited everything after it -- a step that installs nothing reading
         # as full coverage, which is the fail-open this gate exists to prevent.
         for segment in split_on_operators(tokens):
-            if "install" not in segment:
-                continue  # `apt-get update`, `true`, and other non-installs.
+            # Only a command that claims to be an apt install is held to that
+            # standard. `pip install pyyaml` and `echo install complete` name a
+            # verb this gate does not own, and refusing them would block a line
+            # that does run a real apt install alongside. `echo apt-get install
+            # x` still matches here, and still has to pass the head check.
+            if not APT_INSTALL.search(" ".join(segment)):
+                continue
 
             head, wrapped = 0, False
             while head < len(segment):
@@ -449,6 +456,20 @@ def split_on_operators(tokens: list[str]) -> list[list[str]]:
     """
     segments: list[list[str]] = [[]]
     for token in tokens:
+        # `shlex` splits on whitespace, not on shell metacharacters, so
+        # `update&&echo` survives as one token and hides a command boundary
+        # between the head this gate checks and the `install` it searches for.
+        # No package name, flag, or path contains one, so a token that carries
+        # an operator without being one is a shape this gate cannot read.
+        # A single trailing `;` is an ordinary separator and is handled below;
+        # strip it before looking for an operator buried inside a word.
+        body = token[:-1] if token.endswith(";") else token
+        if token not in SHELL_OPERATORS and OPERATOR_CHARS.intersection(body):
+            raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' has {token!r}, "
+                          "which joins a shell operator to a word. This gate "
+                          "splits a line into commands on whitespace-delimited "
+                          "operators and cannot see the boundary inside that "
+                          "token; put spaces around the operator")
         if token in SHELL_OPERATORS:
             segments.append([])
         elif token.endswith(";"):
