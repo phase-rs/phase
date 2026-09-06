@@ -63,6 +63,7 @@ struct ActiveCombatAssignmentRuleEffect {
 #[derive(Default)]
 struct LayerZoneObjectCache {
     ids_by_zone: HashMap<Zone, Vec<ObjectId>>,
+    members_by_zone: HashMap<Zone, HashSet<ObjectId>>,
 }
 
 impl LayerZoneObjectCache {
@@ -73,6 +74,55 @@ impl LayerZoneObjectCache {
             super::targeting::zone_object_ids(state, zone)
         })
     }
+
+    /// Membership in EXACTLY the population [`Self::ids_for`] yields for `zone`
+    /// — the set is built from that very call, so the two can never disagree.
+    ///
+    /// CR 702.26b + CR 702.26e: that identity matters most for
+    /// `Zone::Battlefield`, whose population
+    /// (`targeting::zone_object_ids`) is the phased-IN subset, not every
+    /// object whose `zone` field says battlefield. CR 702.26b treats a
+    /// phased-out permanent as though it does not exist, and CR 702.26e keeps
+    /// it out of an affected set "even [for] continuous effects that reference
+    /// the permanent specifically" — which is precisely the identity filter
+    /// this index serves.
+    ///
+    /// Indexed once per zone per pass, so an identity filter costs O(1) instead
+    /// of re-walking the zone.
+    fn zone_contains(&mut self, state: &GameState, zone: Zone, id: ObjectId) -> bool {
+        if !self.members_by_zone.contains_key(&zone) {
+            let members: HashSet<ObjectId> = self.ids_for(state, zone).iter().copied().collect();
+            self.members_by_zone.insert(zone, members);
+        }
+        self.members_by_zone
+            .get(&zone)
+            .is_some_and(|members| members.contains(&id))
+    }
+}
+
+/// The single object a continuous effect's `affected_filter` provably denotes,
+/// given the effect's source, or `None` when the filter is a PREDICATE over the
+/// board whose membership only a scan can decide.
+///
+/// (No CR annotation: this decides nothing about the rules, it only reports
+/// what a filter's shape already tells us — same contract as
+/// `effect_names_single_affected_object`, which now delegates here.)
+///
+/// EXACT under the layer pass's own matcher, which is the only claim made here.
+/// Both layer call sites match their affected filter through a
+/// `FilterContext::from_source_with_controller(source_id, ..)`, whose
+/// `trigger_source` is `None`; `filter.rs::filter_inner_for_object` then
+/// reduces `TargetFilter::SelfRef` to `object_id == source_id`
+/// (via `object_matches_trigger_source`, whose `trigger_source.map_or` arm is
+/// exactly that comparison) and `TargetFilter::SpecificObject { id }` to
+/// `object_id == id`. Neither variant carries a `FilterProp`, a zone marker or
+/// a controller clause that could admit a second object.
+fn filter_names_single_object(filter: &TargetFilter, source_id: ObjectId) -> Option<ObjectId> {
+    match filter {
+        TargetFilter::SelfRef => Some(source_id),
+        TargetFilter::SpecificObject { id } => Some(*id),
+        _ => None,
+    }
 }
 
 /// CR 400.1 + CR 611.3a: Gather candidate recipients from every zone implied
@@ -81,18 +131,58 @@ impl LayerZoneObjectCache {
 fn effect_candidate_ids(
     state: &GameState,
     filter: &TargetFilter,
+    source_id: ObjectId,
     zone_cache: &mut LayerZoneObjectCache,
 ) -> Vec<ObjectId> {
     let zones = continuous_effect_scan_zones(state, filter);
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::new();
-    for zone in zones {
-        for &id in zone_cache.ids_for(state, zone) {
-            if seen.insert(id) {
-                candidates.push(id);
+    // An IDENTITY filter (`filter_names_single_object`) denotes ONE object, so
+    // the candidate universe it needs is that object — not the whole of every
+    // zone the scan covers. This is an engine-representation fact, not a rules
+    // one, so it carries no CR annotation of its own; what it must not disturb
+    // is the rules-bearing behaviour of the scan it replaces, and it does not:
+    //
+    //  * SAME MEMBERS. Both callers filter every candidate through
+    //    `matches_target_filter` under a `trigger_source`-free `FilterContext`,
+    //    which passes the named object and rejects every other — so the union
+    //    scan could only ever have yielded `[named]` too. Narrowing the
+    //    candidate list cannot drop a match, only work the caller threw away.
+    //  * SAME ZONE GATE. CR 702.26b + CR 702.26e: membership is read from the
+    //    very list `ids_for` builds, so a phased-out permanent — or an object
+    //    parked in a zone this pass does not own — stays out of the population
+    //    exactly as it did, and the result is empty, not `[named]`.
+    //  * SAME ORDER. A one-element result cannot be ordered two ways, and the
+    //    caller's `newly_affected_ids` preserves candidate order either way.
+    //
+    // Not a rare shape: 2641 of the 6559 corpus cards that carry a static
+    // ability carry a `SelfRef`-affected one ("This creature gets +1/+0 for
+    // each other Rat you control"), and every resolved clone / bound grant is
+    // `SpecificObject`. Before this, each such effect copied the entire
+    // battlefield into a fresh `Vec` and `HashSet` EVERY layer pass, making a
+    // pass cost O(identity effects x |battlefield|) just to discover one
+    // recipient apiece.
+    let candidates = if let Some(named) = filter_names_single_object(filter, source_id) {
+        if zones
+            .into_iter()
+            .any(|zone| zone_cache.zone_contains(state, zone, named))
+        {
+            vec![named]
+        } else {
+            Vec::new()
+        }
+    } else {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        for zone in zones {
+            for &id in zone_cache.ids_for(state, zone) {
+                if seen.insert(id) {
+                    candidates.push(id);
+                }
             }
         }
-    }
+        candidates
+    };
+    #[cfg(test)]
+    record_effect_candidates_scanned(candidates.len());
     candidates
 }
 
@@ -2276,6 +2366,59 @@ thread_local! {
 #[cfg(test)]
 fn record_active_effect_collection() {
     ACTIVE_EFFECT_COLLECTION_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+// Test-only counter incremented once per SHARED (recipient-independent)
+// dynamic-quantity resolution performed by `apply_continuous_effect_filtered`.
+// A single such resolution can cost a whole-battlefield census
+// (`quantity::object_count_matching_ids`), so it is the unit the
+// empty-affected-set skip below is measured in. Thread-local for the same
+// reason as its siblings: layer evaluation is synchronous, so a test reads only
+// the work its own thread did.
+#[cfg(test)]
+thread_local! {
+    static SHARED_DYNAMIC_QUANTITY_RESOLUTIONS: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_shared_dynamic_quantity_resolution() {
+    SHARED_DYNAMIC_QUANTITY_RESOLUTIONS.with(|count| count.set(count.get() + 1));
+}
+
+// Test-only counter of the CANDIDATE objects `effect_candidate_ids` hands back,
+// summed over every continuous effect in a pass. It is the unit the identity-
+// filter shortcut is measured in: an effect whose `affected_filter` names ONE
+// object contributes 1 here, where a whole-zone scan would contribute
+// |battlefield|.
+#[cfg(test)]
+thread_local! {
+    static EFFECT_CANDIDATES_SCANNED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_effect_candidates_scanned(count: usize) {
+    EFFECT_CANDIDATES_SCANNED.with(|c| c.set(c.get() + count));
+}
+
+#[cfg(test)]
+fn reset_effect_candidates_scanned() {
+    EFFECT_CANDIDATES_SCANNED.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+fn effect_candidates_scanned() -> usize {
+    EFFECT_CANDIDATES_SCANNED.with(core::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_shared_dynamic_quantity_resolution_count() {
+    SHARED_DYNAMIC_QUANTITY_RESOLUTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn shared_dynamic_quantity_resolution_count() -> usize {
+    SHARED_DYNAMIC_QUANTITY_RESOLUTIONS.with(core::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -5276,11 +5419,7 @@ fn incremental_recipient_ids(
 /// without a board scan. (No CR annotation: this decides nothing about the rules,
 /// it only reports what a filter's shape already tells us.)
 fn effect_names_single_affected_object(effect: &ActiveContinuousEffect) -> Option<ObjectId> {
-    match &effect.affected_filter {
-        TargetFilter::SelfRef => Some(effect.source_id),
-        TargetFilter::SpecificObject { id } => Some(*id),
-        _ => None,
-    }
+    filter_names_single_object(&effect.affected_filter, effect.source_id)
 }
 
 /// Is this effect provably CONFINED to the incremental recipients — i.e. can the
@@ -7096,7 +7235,12 @@ fn apply_combat_assignment_rule_effects_filtered(
     let mut zone_cache = LayerZoneObjectCache::default();
 
     for effect in effects {
-        let scan_ids = effect_candidate_ids(state, &effect.affected_filter, &mut zone_cache);
+        let scan_ids = effect_candidate_ids(
+            state,
+            &effect.affected_filter,
+            effect.source_id,
+            &mut zone_cache,
+        );
         let condition_controller = combat_effect_condition_controller(state, &effect);
         let ctx =
             FilterContext::from_source_with_controller(effect.source_id, condition_controller);
@@ -8133,7 +8277,8 @@ fn apply_continuous_effect_filtered(
     let affected_ids: &[ObjectId] = if let Some(retained) = retained_affected_ids {
         retained
     } else {
-        let scan_ids = effect_candidate_ids(state, &effect.affected_filter, zone_cache);
+        let scan_ids =
+            effect_candidate_ids(state, &effect.affected_filter, effect.source_id, zone_cache);
         // CR 109.5 + CR 611.2c: a continuous effect created by a RESOLVED spell
         // or ability reads "you"/"your" as that spell or ability's controller,
         // not as whoever controls the source object at the moment of some later
@@ -8389,13 +8534,50 @@ fn apply_continuous_effect_filtered(
         .unwrap_or(PlayerId(0));
     let dynamic_uses_recipient =
         dynamic_pt_expr.is_some_and(crate::game::quantity::quantity_expr_uses_recipient);
+    // The shared value is read ONLY by the per-recipient loop below (`for &id in
+    // affected_ids`, its single reader), so an effect whose affected set is
+    // empty on this pass has nothing to spend it on. No CR annotation: the
+    // magnitude spans layer 6 (`AddDynamicKeyword`), 7b (`SetDynamic*`) and 7c
+    // (`AddDynamic*`) alike, and this guard says nothing about any of them — it
+    // is a dead-computation elision, not a rules decision.
+    //
+    // Resolving it anyway is not free: an `ObjectCount` magnitude is a whole-battlefield census
+    // (`quantity::object_count_matching_ids`), so the previous unconditional
+    // resolve made every pass cost O(dynamic-count effects x |battlefield|) even
+    // when none of those effects touched an object being derived.
+    //
+    // That is the incremental arm's normal shape, not a corner case:
+    // `apply_layers_incremental` passes `restrict_to = recipient_ids`, which
+    // filters a `TargetFilter::SelfRef` static on a PRE-EXISTING permanent down
+    // to the empty set — the entrant is not its source — while the census it
+    // demanded still swept the whole board, once per such permanent per entry.
+    //
+    // WHICH CARDS: only those whose magnitude is recipient-INDEPENDENT, since a
+    // recipient-DEPENDENT one is resolved inside the loop below and never
+    // reaches this binding at all. That excludes Rat Colony ("each OTHER Rat"
+    // carries `FilterProp::Another`, which `quantity::filter_uses_recipient`
+    // reports as recipient-relative) and includes the 161 corpus cards shaped
+    // like Beanstalk Giant / Ashaya / Adeline ("equal to the number of lands you
+    // control"). The test pair below is built on the latter for exactly that
+    // reason — a Rat Colony fixture would assert zero against a counter that can
+    // never move.
+    //
+    // Skipping it is a pure evaluation-order change, not a semantic one: the
+    // affected set is already fixed above (and CR 613.6-retained through
+    // `started_effect_sets`), it is not a function of this value, and no other
+    // reader of `dynamic_pt_shared` exists. `resolve_quantity` is a read-only
+    // query over `&GameState`, so eliding it writes nothing either.
     let dynamic_pt_shared = match (dynamic_pt_expr, dynamic_uses_recipient) {
-        (Some(value), false) => Some(crate::game::quantity::resolve_quantity(
-            state,
-            value,
-            effect_controller,
-            effect.source_id,
-        )),
+        (Some(value), false) if !affected_ids.is_empty() => {
+            #[cfg(test)]
+            record_shared_dynamic_quantity_resolution();
+            Some(crate::game::quantity::resolve_quantity(
+                state,
+                value,
+                effect_controller,
+                effect.source_id,
+            ))
+        }
         _ => None,
     };
 
@@ -9661,6 +9843,600 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    // ---- CR 611.3a + CR 613.1: per-effect scan cost on a populated board ----
+
+    /// A permanent carrying the Rat Colony static: "This creature gets +1/+0 for
+    /// each other Rat you control" — `TargetFilter::SelfRef` affected set, an
+    /// `ObjectCount` magnitude. The two axes this module's per-effect cost rides
+    /// on, with the affected filter and the census filter transcribed from the
+    /// card's own parse (base P/T is left at the helper's 1/1 rather than the
+    /// printed 2/1; nothing here reads it but the arithmetic in the
+    /// assertions).
+    fn make_rat_colony(state: &mut GameState, name: &str, player: PlayerId) -> ObjectId {
+        let id = make_plain_rat(state, name, player);
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        // Corpus-exact: the parsed card's census filter is
+                        // `type_filters: [Subtype("Rat")], controller: You,
+                        // properties: [Another]` — no explicit Creature leg.
+                        filter: TargetFilter::Typed(
+                            TypedFilter::default()
+                                .subtype("Rat".to_string())
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::Another]),
+                        ),
+                    },
+                },
+            }]);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.static_definitions.push(def.clone());
+        obj.base_static_definitions = Arc::new(vec![def]);
+        id
+    }
+
+    /// A vanilla 1/1 Rat — joins the counted population, sources nothing.
+    fn make_plain_rat(state: &mut GameState, name: &str, player: PlayerId) -> ObjectId {
+        let id = make_creature(state, name, 1, 1, player);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.subtypes.push("Rat".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    /// CR 611.2c + CR 613.1: an IDENTITY affected filter (`SelfRef` here; every
+    /// resolved clone's `SpecificObject` is the same shape) denotes exactly one
+    /// object, so the candidate universe `effect_candidate_ids` builds for it
+    /// must be that one object — not a copy of the whole battlefield that the
+    /// caller's very next `matches_target_filter` throws all but one member of
+    /// away.
+    ///
+    /// The old scan was O(|battlefield|) with two allocations PER EFFECT PER
+    /// PASS, so a board of k self-referential statics cost k x |battlefield| just
+    /// to discover k recipients.
+    ///
+    /// REVERT-PROBE (discriminating, RUN): drop the `filter_names_single_object`
+    /// arm from `effect_candidate_ids` ⇒ `effect_candidates_scanned() == 44`
+    /// (4 sources x the 11-object battlefield) and the equality below fails.
+    #[test]
+    fn identity_affected_filter_scans_one_candidate_not_the_whole_battlefield() {
+        let mut state = setup();
+        let player = P0;
+        let mut sources = Vec::new();
+        for i in 0..4 {
+            let id = make_creature(&mut state, &format!("Selfish{i}"), 2, 2, player);
+            let def = StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.static_definitions.push(def.clone());
+            obj.base_static_definitions = Arc::new(vec![def]);
+            sources.push(id);
+        }
+        for i in 0..7 {
+            make_creature(&mut state, &format!("Bystander{i}"), 2, 2, player);
+        }
+        // LOAD-BEARING FIXTURE: the battlefield really is much larger than the
+        // affected set, so "one candidate per effect" is a real reduction and not
+        // an artifact of a one-object board.
+        assert_eq!(
+            state.battlefield.len(),
+            11,
+            "4 self-referential sources + 7 bystanders must be on the battlefield"
+        );
+
+        reset_effect_candidates_scanned();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            effect_candidates_scanned(),
+            4,
+            "each of the 4 identity-filtered effects must scan exactly its own one \
+             named object"
+        );
+        // POSITIVE control: the shortcut did not simply drop the effects. Each
+        // source is derived 2 + 1 = 3 power; no bystander gained anything.
+        for &id in &sources {
+            assert_eq!(
+                state.objects[&id].power,
+                Some(3),
+                "the SelfRef anthem must still apply to its own source"
+            );
+        }
+        assert!(
+            state
+                .battlefield
+                .iter()
+                .filter(|id| !sources.contains(id))
+                .all(|id| state.objects[id].power == Some(2)),
+            "and must still reach nobody else"
+        );
+    }
+
+    /// CR 702.26e: the shortcut must keep the ZONE test the whole-zone scan did.
+    /// `targeting::zone_object_ids(Battlefield)` yields the phased-IN subset, so a
+    /// `SpecificObject` grant bound to a phased-out permanent finds it outside the
+    /// scanned population and applies to nothing. The shortcut reads membership
+    /// from that very list, so the two cannot disagree.
+    ///
+    /// REVERT-PROBE (discriminating, RUN): replace the
+    /// `zone_cache.zone_contains(..)` test in `effect_candidate_ids` with an
+    /// unconditional `true` ⇒ the candidate assertion below fails, 1 against 0.
+    /// The POWER assertion still holds under that revert, and deliberately so:
+    /// `filter.rs::filter_inner` rejects a phased-out object independently, so
+    /// phasing is defended twice and only the counter can see the difference.
+    /// The zone gate is not merely a saving, though — see
+    /// `identity_shortcut_declines_for_a_predicate_and_spans_non_battlefield_zones`,
+    /// where the same revert makes a graveyard-bound grant LAND.
+    #[test]
+    fn identity_affected_filter_still_respects_the_scanned_zone_population() {
+        let mut state = setup();
+        let player = P0;
+        let target = make_creature(&mut state, "Target", 2, 2, player);
+        let source = make_creature(&mut state, "Granter", 2, 2, player);
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: target })
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.static_definitions.push(def.clone());
+            obj.base_static_definitions = Arc::new(vec![def]);
+        }
+        // The GRANTER stays phased in throughout, so the effect is always
+        // collected (`for_each_static_effect_source` skips phased-out sources);
+        // only the TARGET's population membership is under test.
+        state.objects.get_mut(&target).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        assert!(
+            !state.objects[&target].is_phased_in() && state.objects[&source].is_phased_in(),
+            "the fixture must really have a phased-out target and a live granter"
+        );
+        reset_effect_candidates_scanned();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            effect_candidates_scanned(),
+            0,
+            "CR 702.26e: a phased-out permanent is outside the scanned battlefield \
+             population, so the identity shortcut must yield NO candidate for it"
+        );
+        assert_eq!(
+            state.objects[&target].power,
+            Some(2),
+            "and the grant must not reach it"
+        );
+
+        // POSITIVE control: phase it back in and the very same grant lands — so the
+        // zero above is a real zone gate, not a grant that never worked, and the
+        // counter is not simply dead.
+        state.objects.get_mut(&target).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedIn;
+        reset_effect_candidates_scanned();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            effect_candidates_scanned(),
+            1,
+            "phased in, the same filter names exactly one candidate"
+        );
+        assert_eq!(
+            state.objects[&target].power,
+            Some(3),
+            "phased in, the identity-filtered grant applies"
+        );
+    }
+
+    /// HOSTILE FIXTURE for the identity shortcut: one pass, one board, four
+    /// affected filters chosen so the shortcut must APPLY to two of them,
+    /// DECLINE for one that is a single combinator away from an identity, and
+    /// yield NOTHING for one whose object sits in a zone this pass does not own.
+    /// The whole-zone scan answers the same on all four; only the candidate
+    /// COUNT separates them, which is what the counter reads.
+    ///
+    ///
+    /// `SelfRef` — 1 candidate. The shortcut applies, on the battlefield.
+    ///
+    /// `And[Typed(creature You), Not(SelfRef)]` — 8 candidates, the whole
+    /// battlefield. The shortcut DECLINES: "other creatures you control" is a
+    /// predicate, not an identity, even though `SelfRef` appears inside it.
+    ///
+    /// `SpecificObject` naming a card in HAND — 1 candidate, found in
+    /// `Zone::Hand`. The membership index is per zone, not battlefield-only.
+    ///
+    /// `SpecificObject` naming a card in a GRAVEYARD — 0 candidates.
+    /// `layer_pass_materializes_keywords` owns no graveyard, so the zone list
+    /// falls back to the battlefield default and the named card is not in it.
+    ///
+    /// REVERT-PROBES (discriminating, both RUN):
+    ///  * drop the `filter_names_single_object` arm from `effect_candidate_ids`
+    ///    ⇒ `effect_candidates_scanned() == 25` (8 + 8 for the two battlefield
+    ///    scans, 1 for the one-card hand, 8 again for the graveyard-bound grant
+    ///    falling back to the battlefield default) against the 10 asserted here.
+    ///  * replace the `zone_cache.zone_contains(..)` test with an unconditional
+    ///    `true` ⇒ the count goes to 11 AND the graveyard assertion at the foot
+    ///    of this test fails: the grant lands on a card in a zone this pass does
+    ///    not own. That gate is correctness, not just cost.
+    #[test]
+    fn identity_shortcut_declines_for_a_predicate_and_spans_non_battlefield_zones() {
+        let mut state = setup();
+        let player = P0;
+
+        let selfish = make_creature(&mut state, "Selfish", 2, 2, player);
+        let anthem_source = make_creature(&mut state, "Anthem", 2, 2, player);
+        let hand_granter = make_creature(&mut state, "Hand Granter", 2, 2, player);
+        let graveyard_granter = make_creature(&mut state, "Graveyard Granter", 2, 2, player);
+        for i in 0..4 {
+            make_creature(&mut state, &format!("Bystander{i}"), 2, 2, player);
+        }
+
+        let hand_card = create_object(
+            &mut state,
+            CardId(0),
+            player,
+            "Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let graveyard_card = create_object(
+            &mut state,
+            CardId(0),
+            player,
+            "Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+
+        let install = |state: &mut GameState, source: ObjectId, def: StaticDefinition| {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.static_definitions.push(def.clone());
+            obj.base_static_definitions = Arc::new(vec![def]);
+        };
+        install(
+            &mut state,
+            selfish,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        );
+        install(
+            &mut state,
+            anthem_source,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::SelfRef),
+                        },
+                    ],
+                })
+                .modifications(vec![ContinuousModification::AddToughness { value: 1 }]),
+        );
+        install(
+            &mut state,
+            hand_granter,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: hand_card })
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }]),
+        );
+        install(
+            &mut state,
+            graveyard_granter,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: graveyard_card })
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }]),
+        );
+
+        // LOAD-BEARING FIXTURE: the battlefield is 8 objects, so the predicate's
+        // whole-zone scan is eight times the identity's and the counts below
+        // cannot coincide by accident; and the two off-battlefield cards really
+        // are off the battlefield.
+        assert_eq!(state.battlefield.len(), 8, "4 sources + 4 bystanders");
+        assert_eq!(state.objects[&hand_card].zone, Zone::Hand);
+        assert_eq!(state.objects[&graveyard_card].zone, Zone::Graveyard);
+
+        reset_effect_candidates_scanned();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            effect_candidates_scanned(),
+            10,
+            "1 (identity) + 8 (predicate, declined) + 1 (hand identity) + \
+             0 (unowned-zone identity)"
+        );
+
+        // BEHAVIOUR PRESERVED, on every one of the four.
+        assert_eq!(
+            state.objects[&selfish].power,
+            Some(3),
+            "the SelfRef pump still reaches its own source"
+        );
+        assert_eq!(
+            state.objects[&anthem_source].toughness,
+            Some(2),
+            "and the 'other creatures' anthem still exempts its own source"
+        );
+        assert!(
+            state
+                .battlefield
+                .iter()
+                .filter(|id| **id != anthem_source)
+                .all(|id| state.objects[id].toughness == Some(3)),
+            "while still reaching every OTHER creature — the declined scan is a \
+             real whole-board population, not an empty one"
+        );
+        assert!(
+            state.objects[&hand_card]
+                .keywords
+                .contains(&Keyword::Flying),
+            "the hand-bound identity grant lands in Zone::Hand"
+        );
+        assert!(
+            !state.objects[&graveyard_card]
+                .keywords
+                .contains(&Keyword::Flying),
+            "CR 613.1: the graveyard-bound grant is delivered by the off-zone \
+             authority, not by this pass — exactly as the whole-zone scan left it"
+        );
+    }
+
+    /// CR 611.3a: the verdict on issue #4745 ("Token Creation takes Forever"),
+    /// pinned as an invariant rather than a timing.
+    ///
+    /// The escalation gate is NOT indiscriminate: a dynamic `ObjectCount`
+    /// magnitude on the board does not by itself send every battlefield entry to
+    /// the full pass. `active_effects_force_incremental_escalation` asks
+    /// `quantity::entered_object_perturbs_quantity_expr`, so an entrant outside
+    /// the counted population keeps the incremental arm.
+    ///
+    /// What DOES escalate is a Rat entering a board of Rat Colonies — and that is
+    /// correct, not a defect to optimize away: CR 611.3a says a static ability's
+    /// continuous effect "applies at any given moment to whatever its text
+    /// indicates", so every Colony's power really does change when the seventh Rat
+    /// arrives, and every Colony must be re-derived. Any "fast path" that skipped
+    /// that would compute a wrong board. The cost of #4745 is a correct full pass
+    /// per Rat token, not a missed incremental one.
+    #[test]
+    fn a_dynamic_object_count_escalates_only_for_an_entrant_that_perturbs_it() {
+        let mut state = setup();
+        let player = P0;
+        let colonies: Vec<ObjectId> = (0..3)
+            .map(|i| make_rat_colony(&mut state, &format!("Rat Colony {i}"), player))
+            .collect();
+        for i in 0..4 {
+            make_plain_rat(&mut state, &format!("Rat {i}"), player);
+        }
+        evaluate_layers(&mut state);
+
+        // LOAD-BEARING FIXTURE: 7 Rats, so each Colony counts 6 OTHER Rats and is
+        // a live 7/1. A census that answered 0 would make both arms below look
+        // alike.
+        assert_eq!(state.battlefield.len(), 7, "3 Colonies + 4 plain Rats");
+        for &id in &colonies {
+            assert_eq!(state.objects[&id].power, Some(7), "1 base + 6 other Rats");
+        }
+
+        // A NON-Rat entrant joins no counted population: incremental, and every
+        // Colony keeps the value the last full pass gave it.
+        let bear = make_creature(&mut state, "Grizzly Bears", 2, 2, player);
+        state.layers_dirty = LayersDirty::EnteredObjects([bear].into());
+        crate::game::perf_counters::reset();
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            (counters.layers_incremental, counters.layers_escalated),
+            (1, 0),
+            "a non-Rat entrant must NOT escalate a board of dynamic Rat counts"
+        );
+        for &id in &colonies {
+            assert_eq!(state.objects[&id].power, Some(7));
+        }
+
+        // A RAT entrant perturbs every Colony's count: escalation, and the derived
+        // power really does move — which is why the escalation is required.
+        let rat = make_plain_rat(&mut state, "Rat 4", player);
+        state.layers_dirty = LayersDirty::EnteredObjects([rat].into());
+        crate::game::perf_counters::reset();
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            (counters.layers_incremental, counters.layers_escalated),
+            (0, 1),
+            "a Rat entrant MUST escalate: it changes every Colony's magnitude"
+        );
+        for &id in &colonies {
+            assert_eq!(
+                state.objects[&id].power,
+                Some(8),
+                "1 base + 7 other Rats — the escalation is load-bearing, not \
+                 conservatism"
+            );
+        }
+    }
+
+    /// A permanent carrying the Beanstalk Giant / Ashaya CDA: "This creature's
+    /// power and toughness are each equal to the number of lands you control" —
+    /// `TargetFilter::SelfRef` affected set, an `ObjectCount` magnitude over a
+    /// filter with NO recipient-relative property, transcribed from the card's
+    /// own parse.
+    ///
+    /// That last part is what makes this the fixture for the `dynamic_pt_shared`
+    /// guard and Rat Colony NOT: "each OTHER Rat" carries `FilterProp::Another`,
+    /// which `quantity::filter_uses_recipient` reports as recipient-dependent, so
+    /// a Colony's census is resolved per recipient INSIDE the affected loop and
+    /// never reaches `dynamic_pt_shared` at all. 161 corpus cards carry this
+    /// recipient-INDEPENDENT `SelfRef` + `ObjectCount` shape (Ashaya, Adeline,
+    /// Beanstalk Giant, ...), and they are the ones the guard is for.
+    fn make_land_count_cda_creature(
+        state: &mut GameState,
+        name: &str,
+        player: PlayerId,
+    ) -> ObjectId {
+        let id = make_creature(state, name, 0, 0, player);
+        let count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            },
+        };
+        let def = StaticDefinition::continuous()
+            .cda()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![
+                ContinuousModification::SetDynamicPower {
+                    value: count.clone(),
+                },
+                ContinuousModification::SetDynamicToughness { value: count },
+            ]);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.static_definitions.push(def.clone());
+        obj.base_static_definitions = Arc::new(vec![def]);
+        id
+    }
+
+    /// The SHARED (recipient-independent) dynamic magnitude is read only by the
+    /// per-recipient loop, so an effect whose affected set came out EMPTY on this
+    /// pass must not pay for it. An `ObjectCount` magnitude is a whole-board
+    /// census, and the empty set is the incremental arm's normal shape:
+    /// `apply_layers_incremental` restricts every effect to the entrants, which
+    /// empties a PRE-EXISTING `SelfRef` static's set — the entrant is not its
+    /// source — while the census it demanded still swept the board, once per such
+    /// permanent per entry.
+    ///
+    /// REVERT-PROBE (discriminating, RUN): drop the `if !affected_ids.is_empty()`
+    /// guard from `dynamic_pt_shared` ⇒ `shared_dynamic_quantity_resolution_count()
+    /// == 6` after the incremental flush (3 Giants x 2 modifications) and the
+    /// zero-assertion below fails.
+    #[test]
+    fn incremental_flush_skips_the_census_of_a_dynamic_count_reaching_no_recipient() {
+        let mut state = setup();
+        let player = P0;
+        let giants: Vec<ObjectId> = (0..3)
+            .map(|i| {
+                make_land_count_cda_creature(&mut state, &format!("Beanstalk Giant {i}"), player)
+            })
+            .collect();
+        for i in 0..5 {
+            make_land(&mut state, &format!("Forest {i}"), player);
+        }
+        evaluate_layers(&mut state);
+
+        // LOAD-BEARING FIXTURE: 5 lands, so each Giant is a live 5/5. A board
+        // where the census answered 0 would make the assertions below satisfiable
+        // by an effect that never ran.
+        assert_eq!(state.battlefield.len(), 8, "3 Giants + 5 lands");
+        for &id in &giants {
+            assert_eq!(
+                (state.objects[&id].power, state.objects[&id].toughness),
+                (Some(5), Some(5)),
+                "the land census must really be live and non-zero"
+            );
+        }
+
+        // A NON-LAND entrant: it joins no counted population, so the magnitude is
+        // unperturbed and the flush stays on the incremental arm.
+        let entrant = make_creature(&mut state, "Grizzly Bears", 2, 2, player);
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        crate::game::perf_counters::reset();
+        reset_shared_dynamic_quantity_resolution_count();
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+
+        // REACH GUARD: we really are on the fast path, so a zero census count is
+        // attributable to the guard rather than to a full pass never happening.
+        assert_eq!(
+            (counters.layers_incremental, counters.layers_full_eval),
+            (1, 0),
+            "a non-land entrant must not escalate a board of dynamic land counts"
+        );
+        assert_eq!(
+            shared_dynamic_quantity_resolution_count(),
+            0,
+            "no Giant's SelfRef effect reaches the entrant, so no whole-board \
+             census may run for one"
+        );
+        // BEHAVIOUR PRESERVED: the pre-existing Giants keep their derived P/T and
+        // the entrant is derived correctly.
+        for &id in &giants {
+            assert_eq!(
+                (state.objects[&id].power, state.objects[&id].toughness),
+                (Some(5), Some(5))
+            );
+        }
+        assert_eq!(state.objects[&entrant].power, Some(2));
+    }
+
+    /// The other side of that guard: a dynamic count whose effect DOES reach a
+    /// recipient must still be resolved, and resolved against the post-entry
+    /// board. Without this pair the guard above could be satisfied by never
+    /// resolving a census at all.
+    #[test]
+    fn incremental_flush_still_runs_the_census_of_a_dynamic_count_reaching_a_recipient() {
+        let mut state = setup();
+        let player = P0;
+        for i in 0..4 {
+            make_plain_rat(&mut state, &format!("Rat {i}"), player);
+        }
+        // A board-wide lord: "creatures you control get +1/+0 for each Rat you
+        // control". Its affected set is a predicate, so the incremental arm's
+        // restriction keeps the ENTRANT in it.
+        let lord = make_creature(&mut state, "Rat Lord", 2, 2, player);
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .subtype("Rat".to_string())
+                                .controller(ControllerRef::You),
+                        ),
+                    },
+                },
+            }]);
+        {
+            let obj = state.objects.get_mut(&lord).unwrap();
+            obj.static_definitions.push(def.clone());
+            obj.base_static_definitions = Arc::new(vec![def]);
+        }
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&lord].power,
+            Some(6),
+            "2 base + 4 Rats — the fixture's census is live and non-zero"
+        );
+
+        // A NON-Rat entrant: the count does not change, so no escalation, but the
+        // lord's board-wide effect still reaches the entrant.
+        let entrant = make_creature(&mut state, "Grizzly Bears", 2, 2, player);
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        crate::game::perf_counters::reset();
+        reset_shared_dynamic_quantity_resolution_count();
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+
+        assert_eq!(
+            (counters.layers_incremental, counters.layers_full_eval),
+            (1, 0),
+            "a non-Rat entrant must not escalate"
+        );
+        assert_eq!(
+            shared_dynamic_quantity_resolution_count(),
+            1,
+            "the lord's effect DOES reach the entrant, so its census must run"
+        );
+        assert_eq!(
+            state.objects[&entrant].power,
+            Some(6),
+            "2 base + 4 Rats: the entrant must be derived with the live count"
+        );
     }
 
     // ---- Issue #8485: CR 611.2c / CR 613.1 resolution-shield durability ----
