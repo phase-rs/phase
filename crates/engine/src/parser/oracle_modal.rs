@@ -1230,16 +1230,15 @@ pub(crate) fn lower_oracle_block_ir(
                     Err(effect) => {
                         let actor = mode_ctx.actor.clone();
                         ctx.diagnostics.extend(mode_ctx.diagnostics);
-                        trigger.body = Some(TriggerBody::EffectChain(
-                            EffectChainIr::single_clause(
+                        trigger.body =
+                            Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
                                 &header.raw,
                                 AbilityKind::Spell,
                                 parsed_clause(effect),
                                 None,
                                 actor,
                                 true,
-                            ),
-                        ));
+                            )));
                         continue;
                     }
                 };
