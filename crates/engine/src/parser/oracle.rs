@@ -4156,7 +4156,7 @@ fn attach_modifier_unsupported_marker(execute: &mut AbilityDefinition, fragment:
 /// directly on the un-stripped line. If a DIFFERENT ability word labels the
 /// line, the labeled branch's `ability_word != "strive"` guard still
 /// correctly returns `None` without ever reaching the bare fallback.
-fn parse_strive_cost_line(line: &str) -> Option<ManaCost> {
+pub(crate) fn parse_strive_cost_line(line: &str) -> Option<ManaCost> {
     let stripped = strip_reminder_text(line.trim());
 
     if let Some((ability_word, effect_text)) = strip_ability_word_with_name(&stripped) {
