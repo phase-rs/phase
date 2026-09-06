@@ -113,7 +113,13 @@ describe("HostSetup", () => {
       lastHostConfig: null,
       // Without these four a picker fixture leaks into every following case.
       userLobbySources: [],
-      sourceStatus: new Map(),
+      sourceStatus: new Map([[DEFAULT_MULTIPLAYER_SERVER_URL, {
+        state: "open", playerCount: 0,
+        serverInfo: {
+          version: "test", buildCommit: "test", mode: "Full",
+          protocolVersion: PROTOCOL_VERSION, lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+        },
+      }]]),
       directorySources: [],
       disabledDirectorySources: [],
     });
@@ -165,6 +171,7 @@ describe("HostSetup", () => {
       median_rtt_ms: 50,
     });
     useMultiplayerStore.setState({
+      sourceStatus: new Map(),
       directorySources: directoryEntries(
         // Fails the LOBBY window: below the lobby protocol floor, so
         // `ensureSubscriptionSocket` refuses it the browse socket.
@@ -408,9 +415,9 @@ describe("HostSetup", () => {
 
     render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
-    // Reach-guard: the form mounted with an empty candidate list, which is the
-    // state the defect needs.
-    expect(screen.getByRole("button", { name: "Host Game" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Host Game" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHost).not.toHaveBeenCalled();
 
     // The directory lands a moment later, exactly as `refreshServerDirectory`
     // delivers it.
@@ -1110,13 +1117,7 @@ describe("HostSetup", () => {
     );
   });
 
-  /**
-   * Listing and transport are independent, but not unconditionally: a P2P room
-   * reaches the public list only through a `LobbyOnly` broker. Against a `Full`
-   * anchor `startP2PHostingSession` gets `useBroker: false` and `hostIsPublic`
-   * is false whatever this form submits, so the toggle would do nothing.
-   */
-  it("withholds the lobby listing for P2P only against a known Full anchor", () => {
+  it("keeps lobby listing available for P2P with a dedicated server anchor", () => {
     const fullAnchor = {
       state: "open" as const,
       serverInfo: {
@@ -1143,8 +1144,8 @@ describe("HostSetup", () => {
       <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />,
     );
     expect(
-      screen.queryByRole("switch", { name: "List in lobby" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("switch", { name: "List in lobby" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps the lobby listing in P2P when the anchor is a broker or unknown", () => {
@@ -1198,14 +1199,14 @@ describe("HostSetup", () => {
       />,
     );
 
-    const group = screen.getByRole("group", { name: "Connection" });
+    const group = screen.getByRole("group", { name: "Who hosts?" });
     expect(
-      within(group).getByRole("button", { name: "Official Server" }),
+      within(group).getByRole("button", { name: "Dedicated server" }),
     ).toHaveAttribute("aria-pressed", "true");
     // Listing is offered under both transports, so it must survive the flip.
     expect(screen.getByText("List in lobby")).toBeInTheDocument();
 
-    await user.click(within(group).getByRole("button", { name: "P2P" }));
+    await user.click(within(group).getByRole("button", { name: "You host (P2P)" }));
 
     // The page owns the value, so the form reports and does not self-apply.
     expect(onConnectionModeChange).toHaveBeenCalledWith("p2p");

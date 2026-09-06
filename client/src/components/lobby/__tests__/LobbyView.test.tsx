@@ -764,7 +764,7 @@ describe("LobbyView", () => {
     renderLobby({});
 
     expect(
-      screen.queryByRole("group", { name: "Connection" }),
+      screen.queryByRole("group", { name: "Who hosts?" }),
     ).not.toBeInTheDocument();
     // The switch replaced this shortcut, and removing the switch must not
     // bring it back.

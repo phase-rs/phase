@@ -4,7 +4,7 @@ import type { ConnectionMode } from "../../stores/multiplayerStore";
 
 /**
  * Selected-segment styling per mode. This is the app's EXISTING colour
- * language for the two connection modes — emerald for the official server,
+ * language for the two connection modes — emerald for dedicated hosting,
  * cyan for P2P (`HostSetup`'s `accentTone`, which the rest of this form
  * follows) — which until now was only ever shown and never explained.
  */
