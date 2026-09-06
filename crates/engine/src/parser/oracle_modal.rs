@@ -23,8 +23,8 @@ use super::oracle_cost::parse_oracle_cost;
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
 use super::oracle_effect::{
-    conditions::strip_leading_general_conditional, parse_ability_ir_with_context,
-    try_parse_named_choice,
+    conditions::{split_leading_conditional, strip_leading_general_conditional},
+    parse_ability_ir_with_context, try_parse_named_choice,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
@@ -1016,11 +1016,27 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
 /// `When you do, if <condition>, choose one`. The modal splitter keeps that
 /// condition in `header.raw`, so parse it through the shared conditional
 /// parser and compose it with the reflexive marker rather than discarding it.
-fn reflexive_modal_connector(header: &ModalHeaderAst, ctx: &mut ParseContext) -> AbilityCondition {
+fn reflexive_modal_connector(
+    header: &ModalHeaderAst,
+    ctx: &mut ParseContext,
+) -> Result<AbilityCondition, Effect> {
     let (guard, _) = strip_leading_general_conditional(&header.raw, ctx);
-    guard
-        .map(AbilityCondition::when_you_do_with_guard)
-        .unwrap_or(AbilityCondition::WhenYouDo)
+    if let Some(guard) = guard {
+        return Ok(AbilityCondition::when_you_do_with_guard(guard));
+    }
+
+    // `strip_leading_general_conditional` returns `None` both for a header
+    // with no guard and for an unmodeled leading conditional. Only the first
+    // may become a bare `WhenYouDo`: lowering the second that way would make
+    // an unsupported intervening-if condition silently permissive.
+    if split_leading_conditional(&header.raw).is_some() {
+        return Err(Effect::unimplemented(
+            "modal_reflexive_condition",
+            &header.raw,
+        ));
+    }
+
+    Ok(AbilityCondition::WhenYouDo)
 }
 
 /// CR 603.12: remove a bare reflexive connector after `trigger_line`'s final
@@ -1205,9 +1221,28 @@ pub(crate) fn lower_oracle_block_ir(
                 if let Some(scope) = modal_relative_player_scope_for_trigger(trigger) {
                     mode_ctx.relative_player_scope = Some(scope);
                 }
-                let reflexive_connector = reflexive_parent
+                let reflexive_connector = match reflexive_parent
                     .as_ref()
-                    .map(|_| reflexive_modal_connector(&header, &mut mode_ctx));
+                    .map(|_| reflexive_modal_connector(&header, &mut mode_ctx))
+                    .transpose()
+                {
+                    Ok(connector) => connector,
+                    Err(effect) => {
+                        let actor = mode_ctx.actor.clone();
+                        ctx.diagnostics.extend(mode_ctx.diagnostics);
+                        trigger.body = Some(TriggerBody::EffectChain(
+                            EffectChainIr::single_clause(
+                                &header.raw,
+                                AbilityKind::Spell,
+                                parsed_clause(effect),
+                                None,
+                                actor,
+                                true,
+                            ),
+                        ));
+                        continue;
+                    }
+                };
                 let payload = ModalIr {
                     marker: EffectChainIr::single_clause(
                         &header.raw,
@@ -1509,6 +1544,23 @@ pub(crate) fn lower_oracle_block(
             reflexive_parent,
         } => {
             let mut triggers = parse_trigger_lines(&trigger_line, card_name);
+            let reflexive_connector = match reflexive_parent
+                .as_ref()
+                .map(|_| reflexive_modal_connector(&header, &mut ParseContext::default()))
+                .transpose()
+            {
+                Ok(connector) => connector,
+                Err(effect) => {
+                    for trigger in &mut triggers {
+                        trigger.execute = Some(Box::new(
+                            AbilityDefinition::new(AbilityKind::Spell, effect.clone())
+                                .description(header.raw.clone()),
+                        ));
+                    }
+                    result.triggers.extend(triggers);
+                    return;
+                }
+            };
             // CR 608.2k + CR 301.5a: Derive the trigger subject from the parsed
             // trigger so modal-mode pronoun anaphora ("that creature") binds to
             // `TriggeringSource` instead of an unbound `ParentTarget`. Pip-Boy
@@ -1561,10 +1613,7 @@ pub(crate) fn lower_oracle_block(
                 // `should_resolve_subability_on_optional_decline` (WhenYouDo →
                 // false), so declining the sacrifice resolves no modes.
                 Some(ReflexiveModalParent::MayPay(cost_text)) => {
-                    modal_ability.condition = Some(reflexive_modal_connector(
-                        &header,
-                        &mut ParseContext::default(),
-                    ));
+                    modal_ability.condition = reflexive_connector.clone();
                     let mut cost_ability = crate::parser::oracle_effect::parse_effect_chain(
                         cost_text,
                         AbilityKind::Spell,
@@ -1580,10 +1629,7 @@ pub(crate) fn lower_oracle_block(
                 // line, so the parent is the trigger's own execute and the modal
                 // becomes its reflexive body.
                 Some(ReflexiveModalParent::Mandatory) => {
-                    modal_ability.condition = Some(reflexive_modal_connector(
-                        &header,
-                        &mut ParseContext::default(),
-                    ));
+                    modal_ability.condition = reflexive_connector.clone();
                     Box::new(modal_ability)
                 }
                 // Plain triggered modal (Pip-Boy): the modal attaches directly.
@@ -4500,6 +4546,41 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             "the conjunction must retain Cobra King's five-or-more threshold"
         );
         assert_eq!(sub.mode_abilities.len(), 2, "both modes must survive");
+    }
+
+    /// An unmodeled intervening-if guard is not equivalent to an absent guard.
+    /// Keep this syntactically modal reflexive form explicitly unsupported
+    /// rather than lowering it as an unconditional `WhenYouDo` connector.
+    #[test]
+    fn unmodeled_reflexive_modal_guard_stays_unimplemented() {
+        let parsed = parse_oracle_text(
+            "When this creature enters, draw a card. When you do, if the moon is full, choose one —\n• Draw a card.\n• You gain 2 life.",
+            "Reflexive Guard Probe",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_ref())
+            .expect("the trigger must reach the reflexive modal lowering path");
+        let Effect::Unimplemented { name, description } = execute.effect.as_ref() else {
+            panic!(
+                "an unmodeled reflexive guard must not become a bare WhenYouDo modal: {execute:?}"
+            );
+        };
+        assert_eq!(name, "modal_reflexive_condition");
+        assert!(
+            description
+                .as_deref()
+                .is_some_and(|fragment| fragment.contains("if the moon is full")),
+            "the unsupported effect must retain the unmodeled guard fragment"
+        );
+        assert!(
+            execute.sub_ability.is_none(),
+            "the parser must not attach an unconditional modal beneath the parent"
+        );
     }
 
     /// CR 706.3b: result-table rows belong to the mandatory printed die-roll
