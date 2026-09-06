@@ -254,6 +254,7 @@ mod equipment_attach_event_context;
 mod equipment_etb_attach_parent_target;
 mod ertai_trickery_counter_kicked;
 mod escape_tunnel_landfall;
+mod esix_fractal_bloom;
 mod esper_origins_flashback_transform;
 mod etali_primal_sickness_poison;
 mod eternal_wanderer_attacker_limit_7153;

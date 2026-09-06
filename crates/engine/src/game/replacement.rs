@@ -812,6 +812,34 @@ fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
     }
 }
 
+/// CR 614.1a + CR 614.5: does this ability tree reach a `CopyTokenOf`? The
+/// single authority behind both the copy-source prompt's `purpose` and the
+/// `CreateToken` applied-set / "that many" stamp, so the two can never disagree.
+///
+/// The descend set is deliberately narrow — `sub_ability`, `else_ability`, and
+/// `ChooseOneOf` branches — and mirrors `ability_tree_creates_tokens` exactly.
+/// It must NOT reach a `CopyTokenOf` that lives inside a granted trigger
+/// (CR 603.3: a triggered ability is put on the stack and resolves separately,
+/// so it is not part of *this* replacement's substitution). That is Progenitor
+/// Mimic's measured shape — `BecomeCopy.additional_modifications` →
+/// `GrantTrigger.trigger` → `CopyTokenOf` — and the inline test below pins it.
+pub(super) fn ability_tree_copies_tokens(def: &AbilityDefinition) -> bool {
+    let effect_copies = match &*def.effect {
+        Effect::CopyTokenOf { .. } => true,
+        Effect::ChooseOneOf { branches, .. } => branches.iter().any(ability_tree_copies_tokens),
+        _ => false,
+    };
+    effect_copies
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_tree_copies_tokens)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_tree_copies_tokens)
+}
+
 // CR 614.12a + issue #4886 (review #6): must classify the WHOLE ability tree,
 // not just the ChooseOneOf's branches — `ability_tree_creates_tokens` already
 // walks `def.sub_ability`/`def.else_ability`, so a token created by a tail
@@ -823,13 +851,20 @@ fn is_token_replacement_choice(def: &AbilityDefinition) -> bool {
     matches!(&*def.effect, Effect::ChooseOneOf { .. }) && ability_tree_creates_tokens(def)
 }
 
-/// A `CopyTokenOf`-substitution replacement post-effect (Moonlit Meditation:
-/// "create that many tokens that are copies of enchanted permanent"). Sibling of
+/// A `CopyTokenOf`-substitution replacement post-effect. Sibling of
 /// `is_token_replacement_choice` (the Jinnie Fay `ChooseOneOf` shape) — both name
 /// the token-creation substitution families whose continuation must inherit the
 /// originating event's applied set to self-suppress.
+///
+/// Two members, which is why this is a tree walk rather than a root `matches!`:
+/// the copy sits at the ROOT when the source is fixed by the card (Moonlit
+/// Meditation: "create that many tokens that are copies of enchanted
+/// permanent"), and under a `ChoosePermanent`'s `sub_ability` when the source is
+/// chosen during resolution (Esix, Fractal Bloom). Walking via
+/// `ability_tree_copies_tokens` brings this into agreement with its sibling,
+/// which already walks (`ChooseOneOf` root ∧ `ability_tree_creates_tokens`).
 fn is_copy_token_substitution(def: &AbilityDefinition) -> bool {
-    matches!(&*def.effect, Effect::CopyTokenOf { .. })
+    ability_tree_copies_tokens(def)
 }
 
 /// CR 614.6: Single authority for ABANDONING a live post-replacement
@@ -10715,10 +10750,11 @@ mod tests {
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
-        ChosenAttribute, Comparator, ControllerRef, Effect, EffectScope, FilterProp,
-        OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityModification, QuantityRef,
-        ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, SourceExclusion,
-        TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        ChosenAttribute, Comparator, ContinuousModification, ControllerRef, Effect, EffectScope,
+        FilterProp, OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityModification,
+        QuantityRef, ReplacementDefinition, ReplacementMode, ReplacementPlayerScope,
+        SourceExclusion, TapStateChange, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -10731,10 +10767,89 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{AppliedReplacementKey, EtbTapState, TokenSpec};
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::triggers::TriggerMode;
     use std::collections::HashSet;
 
     fn make_repl(event: ReplacementEvent) -> ReplacementDefinition {
         ReplacementDefinition::new(event)
+    }
+
+    /// V14 — `ability_tree_copies_tokens` walks the substitution's OWN tree and
+    /// stops at a granted trigger.
+    ///
+    /// CR 603.3: once an ability has triggered, its controller puts it on the
+    /// stack and it resolves separately — so a `CopyTokenOf` reached only
+    /// through a `GrantTrigger` belongs to a later, independent resolution and
+    /// is NOT part of this replacement's substitution. That is Progenitor
+    /// Mimic's measured shape (`BecomeCopy.additional_modifications` →
+    /// `GrantTrigger.trigger` → `CopyTokenOf`), and widening
+    /// `is_copy_token_substitution` to a walk must not newly swallow it.
+    ///
+    /// The two positives are what give the negative meaning: without them a
+    /// walker that simply returned `false` for everything would pass.
+    #[test]
+    fn ability_tree_copies_tokens_walks_own_tree_but_not_granted_triggers() {
+        let copy_token = || Effect::CopyTokenOf {
+            target: TargetFilter::Any,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        };
+
+        // Positive 1 — Moonlit Meditation's shape: the copy is the root effect.
+        let root = AbilityDefinition::new(AbilityKind::Spell, copy_token());
+        assert!(
+            ability_tree_copies_tokens(&root),
+            "a root CopyTokenOf is a copy-token substitution"
+        );
+
+        // Positive 2 — Esix's shape: the copy rides under a ChoosePermanent's
+        // sub_ability. This is the member the widening exists for.
+        let chosen = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChoosePermanent {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(AbilityKind::Spell, copy_token()));
+        assert!(
+            ability_tree_copies_tokens(&chosen),
+            "a ChoosePermanent whose sub_ability copies tokens is a copy-token \
+             substitution — this is the shape the raise-site discriminant reads"
+        );
+
+        // Negative — Progenitor Mimic: the CopyTokenOf is inside a GRANTED
+        // trigger, which resolves separately (CR 603.3). The trigger mode is
+        // immaterial to the walk; only the nesting is.
+        let mut granted = TriggerDefinition::new(TriggerMode::Phase);
+        granted.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            copy_token(),
+        )));
+        let mimic = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(granted),
+                }],
+            },
+        );
+        assert!(
+            !ability_tree_copies_tokens(&mimic),
+            "a CopyTokenOf reachable only through a granted trigger belongs to a \
+             separate later resolution (CR 603.3) and must not be classified as \
+             this replacement's own substitution"
+        );
     }
 
     /// CR 614.9: the durable-redirection recipient mapping covers the supported

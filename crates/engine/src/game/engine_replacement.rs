@@ -1875,6 +1875,150 @@ fn handle_persist_chosen_attribute_choice(
     })
 }
 
+/// The `CopyTokenOf`-predicated sibling of `copy_effect_for_source`: recover the
+/// copy tail of a first-time token substitution whose copy source is chosen at
+/// resolution (Esix, Fractal Bloom).
+///
+/// The `active_replacements` scan is THE ONLY route, not a preference over some
+/// other one. By the time this runs, the post-replacement drain has already
+/// moved its continuation out: `begin_dispatch` does
+/// `mem::replace(&mut drain.status, DrainStatus::Dispatching)` and hands the
+/// continuation to the caller, `DrainStatus::Paused` carries no payload, and
+/// `ready_continuation()` returns `None` for both `Dispatching` and `Paused`.
+/// There is no parked continuation left to read, so the tail is re-derived from
+/// the source's live replacements instead.
+///
+/// The predicate goes through the single authority `ability_tree_copies_tokens`,
+/// so this cannot disagree with the `purpose` the raise site stamped.
+fn copy_token_tail_for_source(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<&AbilityDefinition> {
+    state.objects.get(&source_id)?;
+    // CR 702.26b + CR 114.4: `active_replacements` filters out phased-out /
+    // non-emblem command-zone sources.
+    super::functioning_abilities::active_replacements(state)
+        .filter(|(_, o, _)| o.id == source_id)
+        .filter_map(|(_, _, replacement)| replacement.execute.as_deref())
+        .find_map(|effect_def| {
+            super::replacement::EventModifiers::first_non_modifier_ability(Some(effect_def)).filter(
+                |real| {
+                    matches!(&*real.effect, Effect::ChoosePermanent { .. })
+                        && super::replacement::ability_tree_copies_tokens(real)
+                },
+            )
+        })
+        .and_then(|real_work| real_work.sub_ability.as_deref())
+}
+
+/// CR 707.1 + CR 614.12a: answer path for a first-time token-substitution copy
+/// SOURCE choice — Esix, Fractal Bloom's "choose a creature other than ~ and
+/// create that many tokens that are copies of that creature". The chosen
+/// permanent is the object the substitute tokens copy (CR 707.2: they acquire
+/// its copiable values), not a donor of copiable values to some third party.
+///
+/// A deliberate SIBLING of `handle_persist_chosen_attribute_choice`, never a
+/// shared refactor of it: that function's completion carries a `debug_assert!`
+/// requiring its source to still be an attached Aura ("the Aura must remain
+/// attached after installing the host copy"), which is Aura-specific machinery.
+/// Esix is a resident creature with no `attached_to`, so routing it through that
+/// handler would trip the assertion rather than share useful code.
+fn handle_copy_token_source_choice(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    target_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(tail) = copy_token_tail_for_source(state, source_id) else {
+        return Err(EngineError::InvalidAction(
+            "Missing copy-token tail for chosen copy source".to_string(),
+        ));
+    };
+    // Clone to end the immutable borrow of `state` taken by the scan above.
+    let tail = tail.clone();
+
+    // `state.waiting_for` is STILL the `CopyTargetChoice` being answered here:
+    // `handle_copy_target_choice` takes its `waiting_for` by value and never
+    // clears the field. Snapshot it so the retire step below can distinguish
+    // "nothing new was raised" from "the copy batch parked and raised its own
+    // question".
+    let inbound = state.waiting_for.clone();
+
+    // CR 707.2: the copy reads the chosen object's copiable values. The tail's
+    // `CopyTokenOf { target: Any }` plus this explicit target resolves to the
+    // answered object, and "that many" (`QuantityRef::EventContextAmount`) reads
+    // the still-live `post_replacement_token_substitution_count`. Resolving
+    // BEFORE the retire step below is load-bearing: the retire can clear the
+    // pause, and those transients must still be live here.
+    let mut ability = build_resolved_from_def_with_targets(
+        &tail,
+        source_id,
+        player,
+        vec![TargetRef::Object(target_id)],
+    );
+    // CR 614.5: a replacement effect gets only one opportunity to affect an
+    // event. The substitute copies must not re-enter Esix's own replacement, so
+    // this resolution inherits the originating event's applied set. This scan
+    // route does not inherit the drain's `applied` set the way a parked
+    // continuation would, so THIS CALL IS THE SOLE CARRIER of that
+    // self-suppression — dropping it lets the copies re-prompt or compound.
+    // Stamped on the RESOLVED ability (the receiver `set_replacement_applied_
+    // recursive` is defined on), mirroring the raise site's own
+    // `build_resolved_from_def_with_targets` → stamp order.
+    ability.set_replacement_applied_recursive(
+        state
+            .post_replacement_token_choice_applied
+            .clone()
+            .unwrap_or_default(),
+    );
+    effects::resolve_ability_chain(state, &ability, events, 0)
+        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+    // CR 614.12a + CR 616.1: `Effect::ChoosePermanent` IS the post-replacement
+    // continuation being answered, so a completed resolution must retire it —
+    // leaving it paused lets a later post-action pass re-drain it into a second
+    // `CopyTargetChoice`. But the copy-token batch can PARK mid-resolution and
+    // raise its own question, and `resolve_ability_chain` returns
+    // `Result<(), EffectError>` with no pause channel — `state.waiting_for` is
+    // the only signal it has. Four sites in `effects/token_copy.rs` write it:
+    // the outer `CreateToken` `NeedsChoice` arm, the per-token `TokenEntry`
+    // `NeedsChoice` arm, a nested post-replacement effect that parks a liminal
+    // entry resume, and a copied Aura token's `ReturnAsAuraTarget` host choice.
+    // Forcing `Priority` here would swallow that prompt and strand the parked
+    // batch behind it.
+    //
+    // Both conjuncts are load-bearing. A nested prompt can itself be a
+    // `CopyTargetChoice` (the liminal-resume site propagates whatever
+    // `apply_pending_post_replacement_effect` returned), so a shape-only
+    // `matches!` test would mistake it for our own resident prompt and retire
+    // the pause; comparing against the snapshotted inbound value distinguishes
+    // them by `source_id` / `valid_targets` / `purpose`. Conversely a fully
+    // completed batch legitimately writes `Priority` itself, and the `Priority`
+    // conjunct is what admits that completion path instead of misreading it as
+    // a new question.
+    let raised_new_prompt =
+        state.waiting_for != inbound && !matches!(state.waiting_for, WaitingFor::Priority { .. });
+    if raised_new_prompt {
+        // The nested question owns the pause; its own resume path retires it.
+        return Ok(state.waiting_for.clone());
+    }
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    state.finish_active_paused_post_replacement_dispatch();
+
+    // No `replay_deferred_entry_events` here, and that omission is deliberate
+    // rather than forgotten. The replaced event is `CreateToken`, whose source
+    // (Esix) is a resident permanent that is NOT entering the battlefield, so
+    // `capture_deferred_entry_events_if_mid_entry_choice`'s entry-event filter
+    // (`ZoneChanged { object_id == source_id, to: Battlefield }`) matched
+    // nothing and captured nothing. There is no deferred entry event belonging
+    // to this source to replay. Contrast the Aura sibling, whose source IS the
+    // entering object and which therefore must replay.
+    Ok(state.waiting_for.clone())
+}
+
 pub(super) fn handle_copy_target_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -1908,8 +2052,25 @@ pub(super) fn handle_copy_target_choice(
     // Layer-1 copy effect on the Aura's enchanted host. The entering Aura is
     // NEVER turned into a copy (never `BecomeCopy`), and this path never runs
     // the enter-as-a-copy / copy-token completion tail below.
-    if matches!(purpose, CopyTargetPurpose::PersistChosenAttribute) {
-        return handle_persist_chosen_attribute_choice(state, source_id, player, target_id, events);
+    match purpose {
+        CopyTargetPurpose::PersistChosenAttribute => {
+            return handle_persist_chosen_attribute_choice(
+                state, source_id, player, target_id, events,
+            );
+        }
+        // CR 707.1: Esix, Fractal Bloom — the chosen permanent is the copy
+        // SOURCE for a `CreateToken` substitution, not a donor of copiable
+        // values to a third party. Its tail is a `CopyTokenOf`, resolved against
+        // the answered object.
+        CopyTargetPurpose::CopyTokenSource => {
+            return handle_copy_token_source_choice(state, source_id, player, target_id, events);
+        }
+        // Exhaustive on purpose: falling through to the enter-as-a-copy tail
+        // below is correct ONLY for `BecomeCopy`. A wildcard here would silently
+        // route a future variant into that tail, where `copy_effect_for_source`
+        // returns `None` and the `unwrap_or_else` fabricates a `BecomeCopy` that
+        // transforms the source.
+        CopyTargetPurpose::BecomeCopy => {}
     }
 
     if state.liminal_entries.contains_key(&source_id) {
@@ -2701,12 +2862,27 @@ pub(super) fn apply_post_replacement_effect(
         if valid_targets.is_empty() {
             return None;
         }
+        // CR 707.1 + CR 707.2c: the same "choose a permanent" prompt serves two
+        // dispositions. A choice whose ability tree reaches a `CopyTokenOf` is a
+        // token-substitution copy source (Esix, Fractal Bloom — CR 707.1: an
+        // effect creates tokens that are copies of the chosen object). Anything
+        // else latches the chosen permanent's copiable values onto a third-party
+        // recipient (Metamorphic Alteration — CR 707.2c: a static copy effect's
+        // copiable values are fixed when it first starts to apply).
+        // Discriminated semantically through the single authority
+        // `ability_tree_copies_tokens`, never by an incidental structural probe
+        // such as `sub_ability.is_some()`.
+        let purpose = if super::replacement::ability_tree_copies_tokens(real_work) {
+            CopyTargetPurpose::CopyTokenSource
+        } else {
+            CopyTargetPurpose::PersistChosenAttribute
+        };
         return Some(WaitingFor::CopyTargetChoice {
             player: controller,
             source_id,
             valid_targets,
             max_mana_value: None,
-            purpose: CopyTargetPurpose::PersistChosenAttribute,
+            purpose,
         });
     }
 
@@ -3046,6 +3222,17 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
     // could let one object's capture `clear()`/overwrite another's deferred
     // events. This already affects CopyTargetChoice today, is unreachable in real
     // cards, and is the CR 614.12b simultaneous-entry boundary.
+    //
+    // The caller set is no longer entry-shaped. `CopyTargetPurpose::CopyTokenSource`
+    // (Esix, Fractal Bloom) raises a `CopyTargetChoice` for a source that is a
+    // RESIDENT permanent on a `CreateToken` replacement — it is not entering the
+    // battlefield at all. The arm above still selects on that shape (it carries
+    // no `purpose` guard and no entering-object guard), and the `clear()` below
+    // still runs UNCONDITIONALLY for it; what comes back empty is the capture,
+    // because the entry-event filter in the loop below matches only a
+    // `ZoneChanged` to the battlefield for `source_id` and a non-entering source
+    // produces none. Clearing and capturing-nothing are separate facts here, and
+    // the clear is a write that happens either way.
     state.deferred_entry_events.clear();
     for event in events.iter() {
         if matches!(
