@@ -1387,7 +1387,9 @@
       "exileCount": "Esilia ({{selected}}/{{count}})",
       "discardCount": "Scarta ({{selected}}/{{count}})",
       "collectCount": "Raccogli ({{total}}/{{minimum}})",
-      "labelCount": "{{label}} ({{selected}}/{{count}})"
+      "labelCount": "{{label}} ({{selected}}/{{count}})",
+      "moveEarlier": "Sposta prima",
+      "moveLater": "Sposta dopo"
     },
     "ringBearer": {
       "title": "Scegli il Portatore dell'Anello",
@@ -1399,7 +1401,7 @@
       "labelRummage": "Discard & draw",
       "labelSkip": "Skip"
     },
-    "reorderHint": "Trascina per riordinare · la prima carta è pescata per prima",
+    "reorderHint": "Trascina o usa le frecce per riordinare · la prima carta è pescata per prima",
     "scry": {
       "title": "Profetizzare",
       "subtitle_one": "Guarda la prima {{count}} carta del tuo grimorio",

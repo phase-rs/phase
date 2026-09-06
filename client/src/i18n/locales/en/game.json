@@ -1425,7 +1425,9 @@
       "exileCount": "Exile ({{selected}}/{{count}})",
       "discardCount": "Discard ({{selected}}/{{count}})",
       "collectCount": "Collect ({{total}}/{{minimum}})",
-      "labelCount": "{{label}} ({{selected}}/{{count}})"
+      "labelCount": "{{label}} ({{selected}}/{{count}})",
+      "moveEarlier": "Move earlier",
+      "moveLater": "Move later"
     },
     "ringBearer": {
       "title": "Choose Ring-bearer",
@@ -1437,7 +1439,7 @@
       "labelRummage": "Discard & draw",
       "labelSkip": "Skip"
     },
-    "reorderHint": "Drag to reorder · the top card is drawn first",
+    "reorderHint": "Drag or use arrows to reorder · the top card is drawn first",
     "scry": {
       "title": "Scry",
       "subtitle_one": "Look at the top {{count}} card of your library",

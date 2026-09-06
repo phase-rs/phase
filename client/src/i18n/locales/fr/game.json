@@ -1387,7 +1387,9 @@
       "exileCount": "Exiler ({{selected}}/{{count}})",
       "discardCount": "Défausser ({{selected}}/{{count}})",
       "collectCount": "Collecter ({{total}}/{{minimum}})",
-      "labelCount": "{{label}} ({{selected}}/{{count}})"
+      "labelCount": "{{label}} ({{selected}}/{{count}})",
+      "moveEarlier": "Déplacer plus tôt",
+      "moveLater": "Déplacer plus tard"
     },
     "ringBearer": {
       "title": "Choisir le porteur de l'Anneau",
@@ -1399,7 +1401,7 @@
       "labelRummage": "Discard & draw",
       "labelSkip": "Skip"
     },
-    "reorderHint": "Glissez pour réorganiser · la première carte est piochée en premier",
+    "reorderHint": "Glissez ou utilisez les flèches pour réorganiser · la première carte est piochée en premier",
     "scry": {
       "title": "Cartomancie",
       "subtitle_one": "Regardez la {{count}} carte du dessus de votre bibliothèque",

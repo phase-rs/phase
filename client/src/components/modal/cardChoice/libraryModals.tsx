@@ -42,12 +42,25 @@ export function ReorderableTopChoice({
   keepTone: "emerald" | "blue";
   exactKeepCount?: number;
 }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [order, setOrder] = useState<ObjectId[]>(cards);
   const [restSet, setRestSet] = useState<Set<ObjectId>>(new Set());
   const scrollRef = useHorizontalScroll<HTMLDivElement>({ drag: false });
+
+  const moveCard = useCallback((id: ObjectId, direction: -1 | 1) => {
+    setOrder((prev) => {
+      const index = prev.indexOf(id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= prev.length) return prev;
+
+      const next = [...prev];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
+  }, []);
 
   const toggleRest = useCallback((id: ObjectId) => {
     setRestSet((prev) => {
@@ -99,49 +112,70 @@ export function ReorderableTopChoice({
           layoutScroll
           className="mx-auto flex w-max items-center gap-2 px-1 py-2 lg:gap-3"
         >
-          {order.map((id) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isRest = restSet.has(id);
-          const position = keepOrder.indexOf(id) + 1;
-          return (
-            <Reorder.Item
-              key={id}
-              as="div"
-              value={id}
-              className="relative flex shrink-0 cursor-grab flex-col items-center gap-2 active:cursor-grabbing"
-              whileDrag={{ scale: 1.05, zIndex: 20 }}
-            >
-              <div
-                className={`relative rounded-lg ring-2 transition ${
-                  isRest ? "opacity-50 ring-red-400/70" : keepRing
-                }`}
-                {...hoverProps(id)}
+          {order.map((id, index) => {
+            const obj = objects[id];
+            if (!obj) return null;
+            const isRest = restSet.has(id);
+            const position = keepOrder.indexOf(id) + 1;
+            return (
+              <Reorder.Item
+                key={id}
+                as="div"
+                value={id}
+                className="relative flex shrink-0 cursor-grab flex-col items-center gap-2 active:cursor-grabbing"
+                whileDrag={{ scale: 1.05, zIndex: 20 }}
               >
-                <CardImage
-                  {...objectImageProps(obj)}
-                  size="normal"
-                  className={CHOICE_CARD_IMAGE_CLASS}
-                />
-                {!isRest && (
-                  <div
-                    className={`pointer-events-none absolute left-1 top-1 flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold text-white ${keepBadge}`}
+                <div
+                  className={`relative rounded-lg ring-2 transition ${
+                    isRest ? "opacity-50 ring-red-400/70" : keepRing
+                  }`}
+                  {...hoverProps(id)}
+                >
+                  <CardImage
+                    {...objectImageProps(obj)}
+                    size="normal"
+                    className={CHOICE_CARD_IMAGE_CLASS}
+                  />
+                  {!isRest && (
+                    <div
+                      className={`pointer-events-none absolute left-1 top-1 flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold text-white ${keepBadge}`}
+                    >
+                      {position}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center justify-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => moveCard(id, -1)}
+                    disabled={index === 0}
+                    aria-label={`${obj.name}: ${t("cardChoice.buttons.moveEarlier")}`}
+                    className="rounded-full bg-slate-700/80 px-2 py-1 text-xs font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
                   >
-                    {position}
-                  </div>
-                )}
-              </div>
-              <button
-                onClick={() => toggleRest(id)}
-                className={`rounded-full px-3 py-1 text-xs font-bold text-white transition ${
-                  isRest ? "bg-red-500/80" : keepBtn
-                }`}
-              >
-                {isRest ? restLabel : keepLabel}
-              </button>
-            </Reorder.Item>
-          );
-        })}
+                    &lt;
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleRest(id)}
+                    className={`rounded-full px-3 py-1 text-xs font-bold text-white transition ${
+                      isRest ? "bg-red-500/80" : keepBtn
+                    }`}
+                  >
+                    {isRest ? restLabel : keepLabel}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveCard(id, 1)}
+                    disabled={index === order.length - 1}
+                    aria-label={`${obj.name}: ${t("cardChoice.buttons.moveLater")}`}
+                    className="rounded-full bg-slate-700/80 px-2 py-1 text-xs font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
+                  >
+                    &gt;
+                  </button>
+                </div>
+              </Reorder.Item>
+            );
+          })}
         </Reorder.Group>
       </div>
       <p className="mt-1 shrink-0 text-center text-xs text-slate-400">{reorderHint}</p>

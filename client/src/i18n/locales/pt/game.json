@@ -1387,7 +1387,9 @@
       "exileCount": "Exilar ({{selected}}/{{count}})",
       "discardCount": "Descartar ({{selected}}/{{count}})",
       "collectCount": "Coletar ({{total}}/{{minimum}})",
-      "labelCount": "{{label}} ({{selected}}/{{count}})"
+      "labelCount": "{{label}} ({{selected}}/{{count}})",
+      "moveEarlier": "Mover antes",
+      "moveLater": "Mover depois"
     },
     "ringBearer": {
       "title": "Escolher Portador do Anel",
@@ -1399,7 +1401,7 @@
       "labelRummage": "Discard & draw",
       "labelSkip": "Skip"
     },
-    "reorderHint": "Arraste para reordenar · a primeira carta é comprada primeiro",
+    "reorderHint": "Arraste ou use as setas para reordenar · a primeira carta é comprada primeiro",
     "scry": {
       "title": "Vidência",
       "subtitle_one": "Olhe a {{count}} carta do topo de seu grimório",

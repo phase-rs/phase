@@ -1387,7 +1387,9 @@
       "exileCount": "Exiliar ({{selected}}/{{count}})",
       "discardCount": "Descartar ({{selected}}/{{count}})",
       "collectCount": "Recolectar ({{total}}/{{minimum}})",
-      "labelCount": "{{label}} ({{selected}}/{{count}})"
+      "labelCount": "{{label}} ({{selected}}/{{count}})",
+      "moveEarlier": "Mover antes",
+      "moveLater": "Mover después"
     },
     "ringBearer": {
       "title": "Elegir Portador del Anillo",
@@ -1399,7 +1401,7 @@
       "labelRummage": "Discard & draw",
       "labelSkip": "Skip"
     },
-    "reorderHint": "Arrastra para reordenar · la primera carta se roba antes",
+    "reorderHint": "Arrastra o usa las flechas para reordenar · la primera carta se roba antes",
     "scry": {
       "title": "Adivinar",
       "subtitle_one": "Mira la {{count}} carta superior de tu biblioteca",
