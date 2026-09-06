@@ -26,7 +26,8 @@ use crate::types::resolved_commands::{
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
-    build_target_slots, flatten_targets_in_chain, validate_targets_in_chain,
+    build_target_slots, flatten_specified_targets_in_chain, flatten_targets_in_chain,
+    validate_targets_in_chain,
 };
 use super::effects;
 use super::targeting;
@@ -1573,12 +1574,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut bestow_reverted_at_resolution = false;
     if casting_variant == CastingVariant::Bestow {
         let target_is_illegal = ability.as_ref().is_some_and(|a| {
-            let original = flatten_targets_in_chain(a);
+            // CR 702.103e asks CR 608.2b's question — use the same
+            // specified-target count as the main fizzle site below.
+            let original = flatten_specified_targets_in_chain(a);
             if original.is_empty() {
                 return false;
             }
             let validated = validate_targets_in_chain(state, a);
-            let legal = flatten_targets_in_chain(&validated);
+            let legal = flatten_specified_targets_in_chain(&validated);
             targeting::check_fizzle(&original, &legal)
         });
         let still_bestow_form = state
@@ -1706,7 +1709,24 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Permanent spells with no spell ability (ability is None) skip straight to
     // zone-change handling below.
     if let Some(ref ability) = ability {
-        let original_targets = flatten_targets_in_chain(ability);
+        // CR 608.2b + CR 115.10a: count only the targets the spell SPECIFIED, not
+        // anaphoric snapshots an inheriting rider carries — see
+        // `flatten_specified_targets_in_chain`. BOTH sides use it: an all-anaphoric
+        // chain must report "no targets" and take the enclosing
+        // `!original_targets.is_empty()` gate ABOVE `check_fizzle` (stack.rs:1733;
+        // the bestow closure's own `if original.is_empty()` at :1580). Taking that
+        // gate skips `validate_targets_in_chain` at :1737 AND routes resolution to
+        // the `else` arm below — `execute_effect(state, ability, ..)` at :1795, the
+        // UNVALIDATED chain, not `execute_effect(state, &validated, ..)` at :1793.
+        // That branch is UNREACHABLE by this change, not merely harmless: the only
+        // writer of an inherited entry pushes `parent_creature_target`, a `find_map`
+        // over the HEAD's own `TargetRef::Object`s (ability_utils.rs:7876-7879), so
+        // an empty head pushes nothing and its sub is empty too. This flatten can
+        // only be empty where the old one already was, so the gate is taken on
+        // exactly the same chains as at BASE. Symmetry is safe by construction —
+        // `validate_targets_in_chain` clones and mutates only `.targets`, and the
+        // discriminator reads no `.targets`.
+        let original_targets = flatten_specified_targets_in_chain(ability);
         // CR 702.103e: when a bestowed Aura reverted at the start of resolution,
         // suppress the fizzle check — the spell is no longer an Aura and proceeds
         // to resolve as a creature spell with no remaining target.
@@ -1715,7 +1735,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             && !mutate_reverted_at_resolution
         {
             let validated = validate_targets_in_chain(state, ability);
-            let legal_targets = flatten_targets_in_chain(&validated);
+            let legal_targets = flatten_specified_targets_in_chain(&validated);
             if targeting::check_fizzle(&original_targets, &legal_targets) {
                 // CR 608.2b: Fizzle — all targets illegal, spell is countered on resolution.
                 if is_spell {

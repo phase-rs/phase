@@ -1500,6 +1500,7 @@ mod suspect_printed_menace_701_60c;
 mod swashbuckler_extraordinaire_declined_sacrifice_3179;
 mod swashbuckler_repro_3179_accept;
 mod swords_life_equals_power_counters_2895;
+mod swords_target_legality_recheck;
 mod taigam_master_opportunist_exiles_cast_spell_749;
 mod taii_wakeen;
 mod tamiyo_inquisitive_student_flip;
