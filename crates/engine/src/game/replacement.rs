@@ -125,10 +125,17 @@ pub(crate) fn replacement_source_player(obj: &GameObject) -> PlayerId {
 /// Deliberately snapshot-at-apply-time rather than look-up-at-drain-time.
 /// CR 704.3: every applicable state-based action is performed simultaneously as
 /// a single event, so a shield that dies alongside the creature it is replacing
-/// is still on the battlefield when its replacement applies — Head of the Hunt's
-/// Gatherer ruling for exactly that case says the creature is still exiled. This
-/// call therefore always answers; a drain-time lookup would run after the shield
-/// was gone and answer nothing at all.
+/// is still on the battlefield when its replacement applies. This call therefore
+/// always answers; a drain-time lookup would run after the shield was gone and
+/// answer nothing at all.
+///
+/// Behavior change riding inside this de-duplication, called out rather than
+/// left to be discovered: the inline derivation this replaces read the
+/// `controller` field directly, while [`replacement_source_player`] reads
+/// `controller_or_owner()`. The two answers differ for a replacement source
+/// outside the battlefield and the stack, where CR 108.4a gives the card no
+/// controller and directs an effect asking for one to use the owner instead —
+/// so the new reading is the CR-correct one, not merely the shorter one.
 fn replacement_ability_controller(
     state: &GameState,
     rid: ReplacementId,
