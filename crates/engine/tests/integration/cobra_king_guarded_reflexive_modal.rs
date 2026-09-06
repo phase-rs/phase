@@ -54,7 +54,10 @@ fn cobra_king_does_not_create_a_reflexive_modal_below_five() {
     let runner = cobra_king_upkeep(2);
 
     assert!(
-        !matches!(runner.state().waiting_for, WaitingFor::AbilityModeChoice { .. }),
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { .. }
+        ),
         "four Snakes and/or Serpents must not present Cobra King's modal"
     );
     assert!(

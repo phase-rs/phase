@@ -1016,10 +1016,7 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
 /// `When you do, if <condition>, choose one`. The modal splitter keeps that
 /// condition in `header.raw`, so parse it through the shared conditional
 /// parser and compose it with the reflexive marker rather than discarding it.
-fn reflexive_modal_connector(
-    header: &ModalHeaderAst,
-    ctx: &mut ParseContext,
-) -> AbilityCondition {
+fn reflexive_modal_connector(header: &ModalHeaderAst, ctx: &mut ParseContext) -> AbilityCondition {
     let (guard, _) = strip_leading_general_conditional(&header.raw, ctx);
     guard
         .map(AbilityCondition::when_you_do_with_guard)
