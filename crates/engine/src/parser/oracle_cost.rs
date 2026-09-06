@@ -765,8 +765,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
         // CR 205.2a: a sacrifice cost's filter may be a TYPE UNION whose right
         // conjunct leads with an indefinite article — "Sacrifice another creature
-        // or an artifact" (Mold Folk, Slaughter-Priest of Mogis, Elite
-        // Headhunter). The shared grammar leaves that tail as remainder because
+        // or an artifact" (Mold Folk, Elite Headhunter), "... or an enchantment"
+        // (Slaughter-Priest of Mogis), "... or a Treasure" (Skullport Merchant). The shared grammar leaves that tail as remainder because
         // the same surface is an elided-verb clause elsewhere; a cost has no verb
         // to elide, so it opts into the union reading. `ensure_another_sacrifice_
         // filter` then distributes `Another` across BOTH legs, matching the

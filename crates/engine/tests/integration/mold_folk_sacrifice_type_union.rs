@@ -40,7 +40,7 @@ fn mold_folk_pays_its_cost_by_sacrificing_an_artifact() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario
-        .add_creature_from_oracle(P0, "Mold Folk", 2, 2, MOLD_FOLK)
+        .add_creature_from_oracle(P0, "Mold Folk", 1, 1, MOLD_FOLK)
         .id();
     let artifact = scenario.add_artifact_from_oracle(P0, "Bone Shard", "").id();
     // CR 602.1a: {1} for the activation cost (everything before the colon).
@@ -84,7 +84,7 @@ fn mold_folk_still_pays_its_cost_by_sacrificing_a_creature() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario
-        .add_creature_from_oracle(P0, "Mold Folk", 2, 2, MOLD_FOLK)
+        .add_creature_from_oracle(P0, "Mold Folk", 1, 1, MOLD_FOLK)
         .id();
     let fodder = scenario.add_creature(P0, "Fodder", 1, 1).id();
     scenario.with_mana_pool(

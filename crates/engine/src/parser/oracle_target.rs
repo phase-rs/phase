@@ -394,25 +394,34 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
 /// turns "another creature or artifact" into
 /// `Or[Typed{Creature, Another}, Typed{Artifact, Another}]`. Only the article
 /// blocks it, and that refusal is DELIBERATE, not an oversight — see the bare
-/// `and`/`or` branch of `parse_type_phrase_with_ctx`. Without a "card" noun on
-/// the left, an article-led "or a <type>" is ambiguous with an ELIDED-VERB
-/// clause that the condition layer folds one level up:
+/// `and`/`or` branch of `parse_type_phrase_with_ctx`, which leaves the tail as
+/// remainder (pinned by
+/// `parse_type_phrase_leaves_article_led_or_rhs_as_remainder`) because the same
+/// surface appears mid-CLAUSE with a verb elided after the connector:
 ///
-///   * "you control an artifact creature or a Plan"                (a condition)
+///   * "you control an artifact creature or a Plan"     (Doctor Doom)
 ///   * "you control a land creature or a land entered the battlefield under your
-///     control this turn" (Earth Rumble Wrestlers — two separate conditions, NOT
-///     a type union; it lowers to an honest `StaticCondition::Unrecognized` that
-///     keeps the whole text, which widening the shared branch would turn into a
-///     silently wrong single condition)
+///     control this turn"                               (Earth Rumble Wrestlers)
 ///
-/// so the shared grammar must leave that tail as remainder, which
-/// `parse_type_phrase_leaves_article_led_or_rhs_as_remainder` pins.
+/// WHY A WRAPPER RATHER THAN WIDENING THAT BRANCH — stated carefully, because the
+/// obvious argument is wrong. It is NOT that those two cards would break: the
+/// condition layer folds an article-led right-hand side itself
+/// (`oracle_nom::condition::parse_you_control_a`), so Doctor Doom already lowers
+/// to `IsPresent{Or[Typed{Artifact, Creature}, Typed{Subtype(Plan)}]}` — the very
+/// union a widened branch would have built one layer lower. Earth Rumble
+/// Wrestlers stays an honest `StaticCondition::Unrecognized` either way, because
+/// its trailing "entered the battlefield …" fails the full-consumption guard in
+/// `oracle_static::shared`, not because of anything this branch does.
 ///
-/// A COST carries no such ambiguity: there is no verb to elide and the entire
-/// phrase is the filter, so this OPT-IN wrapper resolves the same surface in the
-/// union direction for that consumer alone. Every other caller of the shared
-/// grammar keeps today's behaviour — the disambiguator is the consumer's intent,
-/// which is why this is a wrapper rather than a widening of the branch itself.
+/// The real reason is BLAST RADIUS. `parse_type_phrase_with_ctx` is the shared
+/// entry point for target phrases, cost filters, trigger filters, keyword costs
+/// and condition subjects; widening it changes every one of those at once, and
+/// the pinning test above exists precisely to stop that happening casually. A
+/// COST, by contrast, has no verb to elide — the entire phrase is the filter — so
+/// its consumer can opt into the union reading on its own, and the measured
+/// effect stays the eight cost-position cards this change actually intends.
+/// The disambiguator is the consumer's intent, which is what a wrapper expresses
+/// and a widened branch cannot.
 /// Mirrors [`parse_target_with_disjunctive_restriction`] directly above: parse
 /// with the shared grammar, then fold a recognized remainder into a
 /// `TargetFilter::Or`.
@@ -430,8 +439,12 @@ pub(crate) fn parse_target_with_article_led_type_union(text: &str) -> (TargetFil
         return (base, rest);
     };
     let (right, right_rest) = parse_type_phrase(&rest[consumed..]);
-    // A right conjunct that carries no type content is not a union leg — bail
-    // rather than build an `Or` whose second leg matches every object.
+    // A right conjunct that carries no TYPE content is not treated as a union leg.
+    // Deliberately stricter than `target_filter_has_meaningful_content`: a bare
+    // "or a token" parses to `Typed{[], [Token]}`, which matches only tokens
+    // rather than every object, but it is a property-only leg the cost grammar
+    // has no corpus instance of, so this bails to today's behaviour rather than
+    // guessing. Widening to accept property-only legs needs its own measurement.
     let TargetFilter::Typed(ref right_typed) = right else {
         return (base, rest);
     };
