@@ -1000,6 +1000,25 @@ pub fn apply_resolved_combat_membership(
 
 /// Validate attacker declarations per CR 508.1.
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
+    // CR 508.1c: a caller holding no prebuilt constraints model pays the
+    // whole-battlefield sweep for the global cap here.
+    validate_attackers_with_cap(state, attacker_ids, max_attackers_each_combat(state))
+}
+
+/// CR 508.1a-c body of [`validate_attackers`] against an ALREADY-DERIVED global
+/// attacker cap (`MaxAttackersEachCombat { defender: None }`).
+///
+/// `AttackDeclarationConstraints::build` caches that cap in `global_cap`, so
+/// [`validate_declaration_core`] passes it straight through instead of
+/// re-sweeping the whole battlefield. That matters because the
+/// declare-attackers prompt (`selectable_targets_by_attacker`) validates one
+/// witness per (attacker, target) PAIR: re-deriving the cap there cost one full
+/// static sweep per pair, which the model already had in hand.
+fn validate_attackers_with_cap(
+    state: &GameState,
+    attacker_ids: &[ObjectId],
+    global_cap: Option<u32>,
+) -> Result<(), String> {
     let active = state.active_player;
 
     // CR 508.1a: choosing a creature more than once cannot produce two
@@ -1011,7 +1030,7 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
     }
 
     // CR 508.1c: Attack restrictions make the declaration illegal if disobeyed.
-    if let Some(max) = max_attackers_each_combat(state) {
+    if let Some(max) = global_cap {
         if attacker_ids.len() as u32 > max {
             return Err(format!(
                 "No more than {} creature(s) can attack each combat",
@@ -1192,9 +1211,11 @@ pub fn passes_combat_attacker_restriction(state: &GameState, obj_id: ObjectId) -
 
 /// CR 508.1c: The global "no more than N creatures can attack each combat" cap
 /// (`defender: None`). Defender-scoped caps ("...attack you each combat") are
-/// enforced separately by `validate_per_defender_attacker_caps` because they
+/// enforced separately by `validate_per_defender_attacker_caps_with` because they
 /// restrict only attacks against a specific player.
 fn max_attackers_each_combat(state: &GameState) -> Option<u32> {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_attack_cap_static_sweep();
     super::functioning_abilities::battlefield_active_statics(state)
         .filter_map(|(_, def)| match def.mode {
             StaticMode::MaxAttackersEachCombat {
@@ -1212,11 +1233,19 @@ fn max_attackers_each_combat(state: &GameState) -> Option<u32> {
 /// limits only creatures directly attacking the static's controller, so
 /// opponents and non-player permanents may still be attacked freely. Returns an
 /// error if any active defender-scoped cap is exceeded.
-fn validate_per_defender_attacker_caps(
-    state: &GameState,
+///
+/// Takes ALREADY-DERIVED cap sets. `AttackDeclarationConstraints::build` caches
+/// both (`per_defender_caps` / `per_permanent_defender_caps`) from the same
+/// state, so [`validate_declaration_core`] reads them instead of taking two more
+/// whole-battlefield static sweeps per validated declaration — the
+/// declare-attackers prompt validates one witness per (attacker, target) PAIR,
+/// so those sweeps were paid once per pair.
+fn validate_per_defender_attacker_caps_with(
     attacks: &[(ObjectId, AttackTarget)],
+    per_defender_caps: &[(PlayerId, u32)],
+    per_permanent_defender_caps: &[(ObjectId, u32)],
 ) -> Result<(), String> {
-    for (protected_player, max) in per_defender_caps(state) {
+    for &(protected_player, max) in per_defender_caps {
         let count = attacks
             .iter()
             .filter(|(_, target)| matches!(target, AttackTarget::Player(pid) if *pid == protected_player))
@@ -1233,7 +1262,7 @@ fn validate_per_defender_attacker_caps(
     // combat"). Each such static limits only creatures attacking the static's
     // own source object, so the source's controller and every other
     // player/planeswalker/battle may still be attacked freely.
-    for (protected_permanent, max) in per_permanent_defender_caps(state) {
+    for &(protected_permanent, max) in per_permanent_defender_caps {
         let count = attacks
             .iter()
             .filter(|(_, target)| {
@@ -1256,9 +1285,11 @@ fn validate_per_defender_attacker_caps(
 /// CR 508.1c + CR 802.1: The active per-defender attacker caps
 /// (`MaxAttackersEachCombat { defender: Some(Controller) }`, e.g. Judoon
 /// Enforcers), as `(protected_player, max)` pairs. Single authority shared by the
-/// strict validator (`validate_per_defender_attacker_caps`) and the CR 508.1d
+/// strict validator (`validate_per_defender_attacker_caps_with`) and the CR 508.1d
 /// solver (`max_no_payment`), so both read one cap set.
 fn per_defender_caps(state: &GameState) -> Vec<(PlayerId, u32)> {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_attack_cap_static_sweep();
     super::functioning_abilities::battlefield_active_statics(state)
         .filter_map(|(source, def)| match def.mode {
             // CR 109.5: "you" resolves to the controller of the permanent
@@ -1280,7 +1311,7 @@ fn per_defender_caps(state: &GameState) -> Vec<(PlayerId, u32)> {
 /// source's controller or any other permanent that controller defends.
 ///
 /// Single authority shared by the strict validator
-/// (`validate_per_defender_attacker_caps`) AND the CR 508.1d solver
+/// (`validate_per_defender_attacker_caps_with`) AND the CR 508.1d solver
 /// (`AttackDeclarationConstraints::per_permanent_defender_caps`,
 /// `max_no_payment` / `best_free_declaration` / `dp_best_suffix`) — mirroring
 /// how [`per_defender_caps`] is shared by both. The solver treats this cap as
@@ -1289,6 +1320,8 @@ fn per_defender_caps(state: &GameState) -> Vec<(PlayerId, u32)> {
 /// permanent than this cap allows, even when a `MustAttack*` requirement is
 /// also in play.
 fn per_permanent_defender_caps(state: &GameState) -> Vec<(ObjectId, u32)> {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_attack_cap_static_sweep();
     super::functioning_abilities::battlefield_active_statics(state)
         .filter_map(|(source, def)| match def.mode {
             StaticMode::MaxAttackersEachCombat {
@@ -4456,29 +4489,207 @@ impl AttackDeclarationConstraints {
         state: &GameState,
     ) -> HashMap<ObjectId, Vec<AttackTarget>> {
         let required = max_no_payment(self, state);
+        // CR 508.1d: on an uncoupled board the answer is closed-form per pair;
+        // only a coupled or individually-undeclarable board needs the exact
+        // per-pair solver below.
+        if let Some(separable) = self.selectable_targets_separable(state, required) {
+            return separable;
+        }
+        self.selectable_targets_by_exact_solver(state, required)
+    }
+
+    /// CR 508.1d: the separable closed form of [`selectable_targets_by_attacker`],
+    /// or `None` when this board does not qualify and the caller must fall back
+    /// to the exact per-pair solver.
+    ///
+    /// The exact solver answers ONE question per (attacker, target) pair: is the
+    /// maximum score of a hard-legal declaration containing that pair at least
+    /// `required`, and does that maximum witness validate? Answering it by
+    /// running the solver per pair walks every candidate per pair, which is what
+    /// makes the prompt quadratic in the attacker count. Two preconditions
+    /// collapse it to arithmetic:
+    ///
+    ///  1. **Uncoupled** — no global cap (CR 508.1c), no defender-scoped cap of
+    ///     either kind (CR 508.1c + CR 508.5), and no `CombatAlone`
+    ///     classification (CR 506.5). This is the SAME `coupled` predicate
+    ///     [`max_no_payment`] tests before taking its own separable fast path.
+    ///     With no coupling constraint every candidate may attack at any of its
+    ///     own legal targets independently of every other candidate.
+    ///  2. **Every candidate is individually declarable.** `candidates` comes
+    ///     from `team_eligible_attacker_ids`, which does not screen every
+    ///     creature-level bar [`validate_attackers`] applies — CR 701.35a
+    ///     detain is the live gap (CR 702.26b phased-out is already excluded by
+    ///     `battlefield_phased_in_ids`, but the sweep re-checks it rather than
+    ///     depending on that). Checking each candidate ONCE here is what makes
+    ///     "every declaration over `candidates` x `legal_targets` validates"
+    ///     true, at O(candidates) instead of O(pairs).
+    ///
+    /// Under both, `validate_declaration_core` can only ever reject on the CR
+    /// 508.1d score bar: a solver witness never repeats a creature, both cap
+    /// checks are vacuous, bands are empty, and every pair it contains came from
+    /// `legal_targets` — i.e. already passed `attacker_can_attack_target`.
+    ///
+    /// Why the remaining candidates for inter-attacker interference cannot
+    /// reach this decision — each is either rejected above or provably per-pair:
+    ///
+    ///  * **CR 508.1e banding.** `selectable_targets_by_attacker` builds the
+    ///    payload BEFORE bands are announced and passes `bands: &[]` on every
+    ///    path, so `validate_attack_band_declarations` never runs in either the
+    ///    closed form or the exact solver it replaces.
+    ///  * **CR 508.1d "can't attack unless you pay" taxes** (Propaganda, Norn's
+    ///    Annex). Taxes never enter `validate_declaration_core` at all, and the
+    ///    only place they are read — `max_no_payment`'s free universe — is
+    ///    evaluated ONCE by the shared caller, before the fork, so both paths
+    ///    see the same `required`. The per-pairing tax verdict's independence
+    ///    from the rest of the declared set is separately guarded by the
+    ///    `UnlessPayScaling` E0004 tripwire above `attack_incurs_tax`.
+    ///  * **CR 508.1c "can't attack" restrictions**, scoped or global
+    ///    (Eriette-class `CantAttack`, `AttackOnlyNeighbor`, temporary
+    ///    prohibitions). All are functions of `(creature, target, state)` alone,
+    ///    never of the declared set, and are already folded into `legal_targets`
+    ///    by `attacker_can_attack_target` at model-build time.
+    ///  * **Defending-side restrictions** (menace and friends, CR 509.1b) bind
+    ///    the BLOCK declaration, not the attack one; nothing in CR 508.1
+    ///    consults them.
+    ///  * **Planeswalker / battle defenders with their own caps** are exactly
+    ///    `per_permanent_defender_caps`, rejected by precondition 1. An
+    ///    UNcapped planeswalker or battle is just another `AttackTarget`, and
+    ///    every `AttackRequirement` variant names exactly one creature, so a
+    ///    lure onto one is scored per pair like any other.
+    ///
+    /// And the score is separable: a requirement names exactly one creature and
+    /// each creature attacks exactly one target, so `score_declaration` is the
+    /// sum of `score_single` over the declared pairs (the same fact
+    /// `max_no_payment`'s fast path and `dp_best_suffix`'s dominance pruning
+    /// already rest on). With no cap to violate, the best declaration containing
+    /// `(c, t)` therefore lets every OTHER candidate take its own best target:
+    ///
+    /// ```text
+    /// max score = score_single(c, t) + SUM over c' != c of best_single(c')
+    /// ```
+    ///
+    /// That is the exact solver's `>= 2`-attacker partition, which dominates its
+    /// single-attacker partition because `best_single` is never negative. When
+    /// `c` is the only candidate with any legal target the `>= 2` partition is
+    /// unreachable — and the sum is then 0 anyway, because a candidate with no
+    /// legal target contributes nothing — so the same expression degrades to the
+    /// single-attacker partition without a special case. A pair is selectable iff
+    /// that maximum meets `required`.
+    fn selectable_targets_separable(
+        &self,
+        state: &GameState,
+        required: u32,
+    ) -> Option<HashMap<ObjectId, Vec<AttackTarget>>> {
+        self.separable_precondition(state)
+            .then(|| self.selectable_targets_closed_form(required))
+    }
+
+    /// Whether [`selectable_targets_separable`]'s two preconditions hold. Split
+    /// out from the closed form itself so a test can run the closed form on a
+    /// board that FAILS the precondition and show the two answers genuinely
+    /// diverge there — i.e. that declining is load-bearing, not decorative.
+    fn separable_precondition(&self, state: &GameState) -> bool {
+        // Precondition 1: uncoupled. The SAME predicate `max_no_payment` tests
+        // before taking its own separable fast path.
+        let coupled = self.global_cap.is_some()
+            || !self.per_defender_caps.is_empty()
+            || !self.per_permanent_defender_caps.is_empty()
+            || !self.needs_companion.is_empty()
+            || !self.must_be_sole.is_empty();
+        if coupled {
+            return false;
+        }
+        // Precondition 2: CR 508.1a + CR 702.26b + CR 701.35a — every candidate
+        // is individually declarable. `team_eligible_attacker_ids` does not
+        // screen every creature-level bar `validate_attackers` applies (detain
+        // is the live gap), so a candidate can be in a solver witness that the
+        // strict validator then rejects. One O(candidates) sweep replaces the
+        // per-pair `validate_declaration_core` that would have caught it.
+        self.candidates
+            .iter()
+            .all(|&cid| validate_attackers_with_cap(state, &[cid], self.global_cap).is_ok())
+    }
+
+    /// The closed form itself, WITHOUT its precondition. Correct only when
+    /// [`separable_precondition`](Self::separable_precondition) holds; call
+    /// [`selectable_targets_separable`](Self::selectable_targets_separable)
+    /// instead. Takes no `state`: on an uncoupled board the answer is pure
+    /// arithmetic over the already-built model.
+    fn selectable_targets_closed_form(
+        &self,
+        required: u32,
+    ) -> HashMap<ObjectId, Vec<AttackTarget>> {
+        let best_single: HashMap<ObjectId, u32> = self
+            .candidates
+            .iter()
+            .map(|&cid| {
+                let best = self
+                    .legal_targets
+                    .get(&cid)
+                    .into_iter()
+                    .flatten()
+                    .map(|&target| score_single(self, cid, target))
+                    .max()
+                    .unwrap_or(0);
+                (cid, best)
+            })
+            .collect();
+        let total: u32 = best_single.values().sum();
+
         self.candidates
             .iter()
             .map(|&cid| {
+                let others = total - best_single.get(&cid).copied().unwrap_or(0);
                 let supported = self
                     .legal_targets
                     .get(&cid)
                     .into_iter()
                     .flatten()
                     .copied()
-                    .filter(|&target| {
-                        best_declaration(
-                            self,
-                            state,
-                            AttackTargetUniverse::HardLegal,
-                            Some((cid, target)),
-                        )
-                        .is_some_and(|(witness, score)| {
-                            score >= required
-                                && validate_declaration_core(state, &witness, &[], self, required)
-                                    .is_ok()
-                        })
-                    })
+                    .filter(|&target| score_single(self, cid, target) + others >= required)
                     .collect();
+                (cid, supported)
+            })
+            .collect()
+    }
+
+    /// CR 508.1d: the exact per-pair form of [`selectable_targets_by_attacker`] —
+    /// one complete accepted-declaration witness per (attacker, target) pair.
+    /// The general authority; [`selectable_targets_separable`] shortcuts it only
+    /// where the two are provably equal.
+    fn selectable_targets_by_exact_solver(
+        &self,
+        state: &GameState,
+        required: u32,
+    ) -> HashMap<ObjectId, Vec<AttackTarget>> {
+        // CR 508.1d: the solver's target table is forced-pair-invariant, so build
+        // it ONCE for the whole prompt rather than once per (attacker, target)
+        // pair inside `best_declaration`.
+        let table = SolverTargetTable::build(self, state, AttackTargetUniverse::HardLegal);
+        self.candidates
+            .iter()
+            .map(|&cid| {
+                let supported =
+                    self.legal_targets
+                        .get(&cid)
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .filter(|&target| {
+                            best_declaration_with_table(self, &table, Some((cid, target)))
+                                .is_some_and(|(witness, score)| {
+                                    score >= required
+                                        && validate_declaration_core(
+                                            state,
+                                            &witness,
+                                            &[],
+                                            self,
+                                            required,
+                                        )
+                                        .is_ok()
+                                })
+                        })
+                        .collect();
                 (cid, supported)
             })
             .collect()
@@ -4674,6 +4885,54 @@ fn best_free_declaration(
         .expect("the empty declaration is always a free witness")
 }
 
+/// CR 508.1d: the solver's per-candidate target table for ONE target universe.
+///
+/// Depends only on `(constraints, state, universe)`. A forced pair narrows a
+/// single candidate's row where that row is CONSUMED (scenario 2's sweep and the
+/// scenario-3 DP each skip every target but the forced one), so the table itself
+/// is forced-pair-INVARIANT: a caller that solves many forced pairs against one
+/// unchanged model builds it exactly once. That caller is
+/// `selectable_targets_by_attacker`, which solves one forced pair per
+/// (attacker, target) pair — rebuilding this table inside each of those calls
+/// made the declare-attackers prompt allocate an O(candidates) table per pair.
+struct SolverTargetTable {
+    /// One row per candidate, in `constraints.candidates` order.
+    all: Vec<(ObjectId, Vec<AttackTarget>)>,
+    /// `all` minus `MustBeSole` candidates — the scenario-3 (>=2 attackers) DP
+    /// domain, which such a creature can never join (CR 506.5).
+    dp: Vec<(ObjectId, Vec<AttackTarget>)>,
+}
+
+impl SolverTargetTable {
+    fn build(
+        constraints: &AttackDeclarationConstraints,
+        state: &GameState,
+        universe: AttackTargetUniverse,
+    ) -> Self {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_attack_solver_target_table_build();
+        let all: Vec<(ObjectId, Vec<AttackTarget>)> = constraints
+            .candidates
+            .iter()
+            .map(|&cid| (cid, constraints.targets_in_universe(state, cid, universe)))
+            .collect();
+        let dp = all
+            .iter()
+            .filter(|(cid, _)| !constraints.must_be_sole.contains(cid))
+            .cloned()
+            .collect();
+        SolverTargetTable { all, dp }
+    }
+
+    /// This candidate's universe row, or `None` when `cid` is not a candidate.
+    fn targets_for(&self, cid: ObjectId) -> Option<&[AttackTarget]> {
+        self.all
+            .iter()
+            .find(|(candidate, _)| *candidate == cid)
+            .map(|(_, targets)| targets.as_slice())
+    }
+}
+
 /// Exact CR 508.1c/d declaration solver. In forced mode, returns `None` unless
 /// its witness contains that exact attacker/target pair; it never substitutes an
 /// empty declaration for an unsupported pair.
@@ -4683,29 +4942,26 @@ fn best_declaration(
     universe: AttackTargetUniverse,
     forced_pair: Option<(ObjectId, AttackTarget)>,
 ) -> Option<(AttackAssignment, u32)> {
+    let table = SolverTargetTable::build(constraints, state, universe);
+    best_declaration_with_table(constraints, &table, forced_pair)
+}
+
+/// [`best_declaration`] against a PREBUILT [`SolverTargetTable`]. Same verdict,
+/// same determinism; the only difference is that the forced-pair-invariant table
+/// is supplied rather than rebuilt (and cloned) on every call.
+fn best_declaration_with_table(
+    constraints: &AttackDeclarationConstraints,
+    table: &SolverTargetTable,
+    forced_pair: Option<(ObjectId, AttackTarget)>,
+) -> Option<(AttackAssignment, u32)> {
     if let Some((forced_attacker, forced_target)) = forced_pair {
-        if !constraints.candidates.contains(&forced_attacker)
-            || !constraints
-                .targets_in_universe(state, forced_attacker, universe)
-                .contains(&forced_target)
+        if !table
+            .targets_for(forced_attacker)
+            .is_some_and(|targets| targets.contains(&forced_target))
         {
             return None;
         }
     }
-
-    let target_options: Vec<(ObjectId, Vec<AttackTarget>)> = constraints
-        .candidates
-        .iter()
-        .map(|&cid| {
-            let mut targets = constraints.targets_in_universe(state, cid, universe);
-            if let Some((forced_attacker, forced_target)) = forced_pair {
-                if forced_attacker == cid {
-                    targets = vec![forced_target];
-                }
-            }
-            (cid, targets)
-        })
-        .collect();
 
     // Scenario 1: the empty declaration (score 0) is the baseline.
     let mut best: Option<(Vec<(ObjectId, AttackTarget)>, u32)> =
@@ -4714,7 +4970,7 @@ fn best_declaration(
     // Scenario 2: exactly one attacker. `MustBeSole` allowed; `NeedsCompanion`
     // excluded (cannot attack alone). Caps are trivial for a single attacker but
     // still enforced (a `0` cap forbids attacking that defender at all).
-    for (cid, targets) in &target_options {
+    for (cid, targets) in &table.all {
         if forced_pair.is_some_and(|(forced_attacker, _)| forced_attacker != *cid) {
             continue;
         }
@@ -4725,6 +4981,12 @@ fn best_declaration(
             continue;
         }
         for &t in targets {
+            // A forced pair pins THIS candidate (every other one was skipped
+            // above) to exactly its forced target. The shared table row is
+            // unnarrowed, so narrow it at the point of use.
+            if forced_pair.is_some_and(|(_, forced_target)| forced_target != t) {
+                continue;
+            }
             if let AttackTarget::Player(pid) = t {
                 if constraints
                     .per_defender_caps
@@ -4750,11 +5012,6 @@ fn best_declaration(
     // Scenario 3: ≥2 attackers, memoized DP over non-`MustBeSole` candidates.
     // A forced `MustBeSole` pair can never occur in this shape, so skip the
     // whole branch rather than ranking an unforced DP witness against it.
-    let dp_targets: Vec<(ObjectId, Vec<AttackTarget>)> = target_options
-        .iter()
-        .filter(|(cid, _)| !constraints.must_be_sole.contains(cid))
-        .cloned()
-        .collect();
     // `clamp` bounds the tracked attacker count. When a global cap exists it must
     // be ≥2 for a ≥2-attacker declaration to be feasible; otherwise only the ">=2"
     // terminal gate matters, so clamping at 2 keeps the state space tiny (the
@@ -4774,7 +5031,7 @@ fn best_declaration(
             let mut memo: DpSuffixMemo = HashMap::new();
             if let Some(decl) = dp_best_suffix(
                 constraints,
-                &dp_targets,
+                &table.dp,
                 &capped,
                 &capped_permanents,
                 constraints.global_cap,
@@ -4883,6 +5140,13 @@ fn dp_best_suffix(
 
     // Option B: this candidate attacks each cap-respecting target.
     for &t in targets {
+        // A forced pair pins its attacker to exactly one target. `dp_targets` is
+        // the shared, forced-pair-invariant table, so narrow the row here.
+        if forced_pair.is_some_and(|(forced_attacker, forced_target)| {
+            forced_attacker == *cid && forced_target != t
+        }) {
+            continue;
+        }
         // CR 508.1c: global cap (enforced only when one exists; no cap ⇒ `used`
         // is clamped at 2 and never gates).
         if let Some(g) = global_cap {
@@ -5077,9 +5341,17 @@ fn validate_declaration_core(
     required: u32,
 ) -> Result<(), String> {
     let attacker_ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
-    validate_attackers(state, &attacker_ids)?;
+    // CR 508.1c: the global cap and both defender-scoped cap sets are ALREADY on
+    // the prebuilt model (`AttackDeclarationConstraints::build` derives all three
+    // from this same `state`), so read them instead of taking three more
+    // whole-battlefield static sweeps per validated declaration.
+    validate_attackers_with_cap(state, &attacker_ids, constraints.global_cap)?;
     // CR 508.1c + CR 508.5: defender-scoped attacker caps.
-    validate_per_defender_attacker_caps(state, attacks)?;
+    validate_per_defender_attacker_caps_with(
+        attacks,
+        &constraints.per_defender_caps,
+        &constraints.per_permanent_defender_caps,
+    )?;
     if !bands.is_empty() {
         validate_attack_band_declarations(state, attacks, bands)?;
     }
@@ -7504,6 +7776,21 @@ mod tests {
         state
     }
 
+    /// Test adapter: derive both defender-scoped cap sets from `state` exactly
+    /// as `AttackDeclarationConstraints::build` does, then run the single shared
+    /// validator. Production callers all hold a prebuilt model and pass its
+    /// cached cap sets straight to `validate_per_defender_attacker_caps_with`.
+    fn validate_per_defender_attacker_caps(
+        state: &GameState,
+        attacks: &[(ObjectId, AttackTarget)],
+    ) -> Result<(), String> {
+        validate_per_defender_attacker_caps_with(
+            attacks,
+            &per_defender_caps(state),
+            &per_permanent_defender_caps(state),
+        )
+    }
+
     fn create_creature(
         state: &mut GameState,
         owner: PlayerId,
@@ -7683,7 +7970,7 @@ mod tests {
     /// creature can attack ~ each combat") must be a coupled resource inside
     /// the CR 508.1d solver itself (`max_no_payment` / `best_declaration` /
     /// `dp_best_suffix`), not merely a post-hoc check in
-    /// `validate_per_defender_attacker_caps`. Two creatures are each REQUIRED
+    /// `validate_per_defender_attacker_caps_with`. Two creatures are each REQUIRED
     /// to attack the SAME capped planeswalker (a Gideon-Jura-style
     /// `MustAttackDefender { defender: RequiredDefender::Permanent }` grant
     /// combined with the Wanderer's cap) — the two requirements are not
@@ -7796,7 +8083,7 @@ mod tests {
         // are the same coupled DP resource as `per_defender_caps` above (see
         // `per_permanent_defender_caps`'s doc comment) — the brute-force oracle
         // must reject any assignment the strict validator
-        // (`validate_per_defender_attacker_caps`) would reject, or it is not a
+        // (`validate_per_defender_attacker_caps_with`) would reject, or it is not a
         // valid ground truth for the DP solver's own permanent-cap enforcement.
         for (permanent, cap) in &c.per_permanent_defender_caps {
             let cnt = attacks
@@ -8312,6 +8599,755 @@ mod tests {
             scans, 0,
             "no static-ability whole-board scan with no MustBlock static"
         );
+    }
+
+    /// Revert-failing CR 508.1d perf guard for the declare-attackers PROMPT.
+    ///
+    /// On an uncoupled go-wide board the prompt answers every (attacker, target)
+    /// pair from the separable closed form: it runs the exact per-pair
+    /// declaration solver ZERO times, and takes no attacker-cap static sweep
+    /// beyond the three `AttackDeclarationConstraints::build` performs once when
+    /// it caches them.
+    ///
+    /// Pre-fix `selectable_targets_by_attacker` ran `best_declaration` +
+    /// `validate_declaration_core` once per PAIR — one solver target table built
+    /// and cloned per pair, plus three whole-battlefield cap sweeps per pair on
+    /// top of that. Both counters therefore scaled with the attacker count, which
+    /// is the O(attackers^2) the HUMAN active player paid before being prompted
+    /// at all (CR 508.1: declaring attackers is the active player's turn-based
+    /// action, and `turns::auto_advance` builds this payload for them).
+    #[test]
+    fn uncoupled_declare_attackers_prompt_runs_no_per_pair_declaration_solve() {
+        const ATTACKERS: usize = 12;
+        let mut state = setup_combat_phase();
+        state.combat = Some(CombatState::default());
+        let ids: Vec<ObjectId> = (0..ATTACKERS)
+            .map(|i| create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2))
+            .collect();
+
+        crate::game::perf_counters::reset();
+        let waiting = build_declare_attackers_waiting_for(&state);
+        let snap = crate::game::perf_counters::attack_declaration_solver_snapshot();
+
+        let crate::types::game_state::WaitingFor::DeclareAttackers {
+            player,
+            valid_attacker_ids,
+            valid_attack_targets_by_attacker,
+            ..
+        } = &waiting
+        else {
+            panic!("expected a DeclareAttackers prompt, got {waiting:?}");
+        };
+
+        // Load-bearing fixture: an empty board would satisfy both counters
+        // trivially, so pin that the prompt really answers ATTACKERS pairs and
+        // that every one of them stayed selectable against the opponent.
+        assert_eq!(
+            *player,
+            PlayerId(0),
+            "CR 508.1: this payload is the ACTIVE player's turn-based-action prompt"
+        );
+        assert_eq!(
+            valid_attacker_ids.len(),
+            ATTACKERS,
+            "every untapped vanilla creature is an eligible attacker"
+        );
+        let by_attacker = valid_attack_targets_by_attacker
+            .as_ref()
+            .expect("new prompts always emit the per-attacker map");
+        assert_eq!(by_attacker.len(), ATTACKERS);
+        for &id in &ids {
+            assert_eq!(
+                by_attacker.get(&id).map(Vec::as_slice),
+                Some(&[AttackTarget::Player(PlayerId(1))][..]),
+                "{id:?} must still be selectable against the opponent"
+            );
+        }
+        // Anti-vacuity anchor with a LITERAL count, not one derived from
+        // `ATTACKERS`: shrinking the fixture (including to zero creatures, which
+        // would satisfy both counter assertions trivially) fails here first.
+        let answered_pairs: usize = by_attacker.values().map(Vec::len).sum();
+        assert_eq!(
+            answered_pairs, 12,
+            "the prompt must really answer 12 (attacker, target) pairs — an empty \
+             board satisfies both counter assertions below for free"
+        );
+
+        assert_eq!(
+            snap.target_table_builds, 0,
+            "an uncoupled prompt must run the exact declaration solver zero times \
+             (pre-fix: one solver target table per (attacker, target) pair)"
+        );
+        assert_eq!(
+            snap.cap_static_sweeps, 3,
+            "only the constraints model itself may sweep for the three attacker \
+             caps (pre-fix: three more whole-battlefield sweeps per pair)"
+        );
+    }
+
+    /// CR 508.1d: the separable closed form and the exact per-pair solver must
+    /// return the SAME selectable map everywhere the fast path claims to apply —
+    /// including boards carrying requirements, where `required` is nonzero and
+    /// the closed form has to reproduce the solver's arithmetic instead of
+    /// trivially accepting every pair.
+    #[test]
+    fn separable_selectable_map_matches_exact_solver() {
+        // (a) Vanilla go-wide: no requirements, so the CR 508.1d bar is 0.
+        let vanilla = {
+            let mut state = setup_combat_phase();
+            for i in 0..4 {
+                create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2);
+            }
+            state
+        };
+        // (b) One "attacks each combat if able" creature among vanillas: the bar
+        // is 1, and a vanilla only clears it because the OTHER candidate's best
+        // target contributes to the same declaration (the `others` term).
+        let must_attack = {
+            let mut state = setup_combat_phase();
+            create_must_attack_creature(&mut state, PlayerId(0));
+            for i in 0..3 {
+                create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2);
+            }
+            state
+        };
+        // (c) CR 701.15b goad at a three-seat table: attacking the GOADING player
+        // obeys one requirement, attacking the third seat obeys two, so
+        // (goaded, goader) must come back UNSELECTABLE while every other pair
+        // stays selectable. This is the fixture that makes the equality below
+        // discriminating rather than "everything is selectable".
+        let goaded = {
+            let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+            state.turn_number = 2;
+            state.active_player = PlayerId(0);
+            state.phase = crate::types::phase::Phase::DeclareAttackers;
+            let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
+            let bystander = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            (state, goaded, bystander)
+        };
+
+        // (d) A Gideon-Jura-style lure onto an UNCAPPED planeswalker: the bar is
+        // 1 and only the lured creature can pay it, so `(lured, opponent)` must
+        // come back unselectable while every pair involving the planeswalker or
+        // the bystander stays selectable. Exercises a non-`Player` `AttackTarget`
+        // through the closed form.
+        let lure = {
+            let mut state = setup_combat_phase();
+            let pw = create_planeswalker(&mut state, PlayerId(1), "Gideon Jura");
+            let pw_ref = ObjectIncarnationRef::from_object(state.objects.get(&pw).unwrap());
+            let lured = create_creature(&mut state, PlayerId(0), "Lured", 2, 2);
+            state
+                .objects
+                .get_mut(&lured)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Permanent { permanent: pw_ref },
+                    })
+                    .affected(TargetFilter::SelfRef),
+                );
+            let bystander = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            (state, pw, lured, bystander)
+        };
+
+        for (label, state) in [
+            ("vanilla", vanilla),
+            ("must-attack", must_attack),
+            ("goaded (3 seats)", goaded.0.clone()),
+            ("planeswalker lure", lure.0.clone()),
+        ] {
+            let constraints = AttackDeclarationConstraints::build(&state);
+            let required = max_no_payment(&constraints, &state);
+            assert!(
+                !constraints.candidates.is_empty(),
+                "{label}: fixture must actually have attack candidates"
+            );
+            let fast = constraints
+                .selectable_targets_separable(&state, required)
+                .unwrap_or_else(|| panic!("{label}: fixture is uncoupled, fast path must apply"));
+            let exact = constraints.selectable_targets_by_exact_solver(&state, required);
+            assert!(
+                exact.values().any(|targets| !targets.is_empty()),
+                "{label}: fixture must have at least one selectable pair"
+            );
+            assert_eq!(
+                fast, exact,
+                "{label}: separable map must equal the exact map"
+            );
+        }
+
+        // The goad fixture's discriminating pairs, spelled out so a closed form
+        // that simply accepted everything could not pass this test.
+        let (state, goaded_id, bystander) = goaded;
+        let constraints = AttackDeclarationConstraints::build(&state);
+        let required = max_no_payment(&constraints, &state);
+        assert_eq!(
+            required, 2,
+            "CR 508.1d: goad contributes both a generic and an away-from requirement"
+        );
+        let map = constraints
+            .selectable_targets_separable(&state, required)
+            .expect("uncoupled");
+        assert_eq!(
+            map.get(&goaded_id).map(Vec::as_slice),
+            Some(&[AttackTarget::Player(PlayerId(2))][..]),
+            "CR 701.15b: a goaded creature may only be sent at the seat that obeys both requirements"
+        );
+        assert_eq!(
+            map.get(&bystander).map(Vec::as_slice),
+            Some(
+                &[
+                    AttackTarget::Player(PlayerId(1)),
+                    AttackTarget::Player(PlayerId(2))
+                ][..]
+            ),
+            "the ungoaded creature is unrestricted: the goaded one carries the bar on its own"
+        );
+
+        // The lure fixture's discriminating pairs: a non-`Player` `AttackTarget`
+        // carries the CR 508.1d bar, and the lured creature loses its player
+        // pairing while the bystander keeps both.
+        let (state, pw, lured, bystander) = lure;
+        let constraints = AttackDeclarationConstraints::build(&state);
+        let required = max_no_payment(&constraints, &state);
+        assert_eq!(
+            required, 1,
+            "CR 508.1d: the lure is the board's one obeyable requirement"
+        );
+        let map = constraints
+            .selectable_targets_separable(&state, required)
+            .expect("uncoupled");
+        assert_eq!(
+            map.get(&lured).map(Vec::as_slice),
+            Some(&[AttackTarget::Planeswalker(pw)][..]),
+            "CR 508.1d: the lured creature may only be sent at the planeswalker it must attack"
+        );
+        assert_eq!(
+            map.get(&bystander).map(Vec::as_slice),
+            Some(
+                &[
+                    AttackTarget::Player(PlayerId(1)),
+                    AttackTarget::Planeswalker(pw)
+                ][..]
+            ),
+            "the unlured creature keeps both pairings: the lured one carries the bar alone"
+        );
+    }
+
+    /// Revert-failing CR 508.1c/d perf guard for the prompt's EXACT-solver path.
+    ///
+    /// A coupled board (global "no more than one creature can attack each
+    /// combat") cannot take the separable fast path, so `build_declare_attackers_
+    /// waiting_for` runs `best_declaration` + `validate_declaration_core` once per
+    /// (attacker, target) pair here. Even then the two invariants that path was
+    /// paying per pair must be paid ONCE:
+    ///
+    ///  * the solver's target table (`SolverTargetTable`) is forced-pair-invariant
+    ///    — ONE build for the whole hard-legal pair sweep, never one per pair
+    ///    (this fixture carries no CR 508.1d requirement, so `max_no_payment`
+    ///    short-circuits at 0 and builds no free table of its own);
+    ///  * the three attacker caps are already cached on the constraints model, so
+    ///    validating a witness must add no whole-battlefield sweep at all.
+    #[test]
+    fn coupled_declare_attackers_prompt_hoists_table_and_caps_out_of_the_pair_loop() {
+        const ATTACKERS: usize = 6;
+        let mut state = setup_combat_phase();
+        state.combat = Some(CombatState::default());
+        let arbiter = create_creature(&mut state, PlayerId(1), "Silent Arbiter", 1, 5);
+        state
+            .objects
+            .get_mut(&arbiter)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MaxAttackersEachCombat {
+                max: 1,
+                defender: None,
+            }));
+        let ids: Vec<ObjectId> = (0..ATTACKERS)
+            .map(|i| create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2))
+            .collect();
+
+        crate::game::perf_counters::reset();
+        let waiting = build_declare_attackers_waiting_for(&state);
+        let snap = crate::game::perf_counters::attack_declaration_solver_snapshot();
+
+        let crate::types::game_state::WaitingFor::DeclareAttackers {
+            valid_attack_targets_by_attacker,
+            ..
+        } = &waiting
+        else {
+            panic!("expected a DeclareAttackers prompt, got {waiting:?}");
+        };
+        // Load-bearing fixture: the exact solver really has to answer ATTACKERS
+        // pairs here, and the CR 508.1c cap must not remove any of them (a cap of
+        // one still lets each creature be the one attacker).
+        let by_attacker = valid_attack_targets_by_attacker
+            .as_ref()
+            .expect("new prompts always emit the per-attacker map");
+        assert_eq!(by_attacker.len(), ATTACKERS);
+        for &id in &ids {
+            assert_eq!(
+                by_attacker.get(&id).map(Vec::as_slice),
+                Some(&[AttackTarget::Player(PlayerId(1))][..]),
+                "{id:?} must still be selectable against the opponent under a cap of one"
+            );
+        }
+        // Anti-vacuity anchor with a LITERAL count (see the uncoupled guard).
+        let answered_pairs: usize = by_attacker.values().map(Vec::len).sum();
+        assert_eq!(
+            answered_pairs, 6,
+            "the exact solver must really answer 6 (attacker, target) pairs here"
+        );
+
+        assert_eq!(
+            snap.target_table_builds, 1,
+            "exactly one solver target table for the whole hard-legal pair sweep \
+             (pre-fix: one built and cloned per (attacker, target) pair)"
+        );
+        assert_eq!(
+            snap.cap_static_sweeps, 3,
+            "only the constraints model itself may sweep for the three attacker \
+             caps (pre-fix: three more per validated witness, i.e. per pair)"
+        );
+    }
+
+    /// Test helper: a Ghostly-Prison-style "creatures can't attack you unless
+    /// their controller pays {N}" static (CR 508.1g + CR 508.1h), defending its
+    /// controller AS A PLAYER only — so that controller's planeswalkers stay
+    /// free targets. Mirrors `engine_combat`'s `install_attack_tax_static`.
+    fn install_player_attack_tax(state: &mut GameState, controller: PlayerId, generic: u32) {
+        use crate::types::ability::{ControllerRef, StaticCondition, TypeFilter, TypedFilter};
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Ghostly Prison".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        let mut def = StaticDefinition::new(StaticMode::CantAttack).affected(TargetFilter::Typed(
+            TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            },
+        ));
+        def.condition = Some(StaticCondition::UnlessPay {
+            cost: crate::types::mana::ManaCost::generic(generic),
+            scaling: crate::types::ability::UnlessPayScaling::PerAffectedCreature,
+            defended: Some(crate::types::triggers::AttackTargetFilter::Player),
+        });
+        obj.static_definitions.push(def);
+    }
+
+    /// CR 508.1d + CR 508.1h: under a Propaganda-style attack tax the FREE
+    /// universe (which sets the requirement bar via `max_no_payment`) is a
+    /// STRICT SUBSET of the hard-legal universe the selectable map is drawn
+    /// from — the one place where "which universe" could make the closed form
+    /// and the exact solver disagree. CR 508.1d is explicit that a player is
+    /// never required to pay such a cost to raise the bar, but may pay one
+    /// voluntarily, so both paths must offer the taxed pairings and neither may
+    /// let a taxed pairing raise `required`.
+    #[test]
+    fn separable_map_matches_exact_solver_under_an_attack_tax() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        install_player_attack_tax(&mut state, PlayerId(1), 2);
+        let pw = create_planeswalker(&mut state, PlayerId(1), "Walker");
+        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
+        let bystander = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // Anti-vacuity: the tax must actually be live, and must NOT reach the
+        // planeswalker — otherwise "free" and "hard-legal" coincide and this
+        // test degenerates into the untaxed one.
+        assert!(
+            attack_incurs_tax(&state, goaded, AttackTarget::Player(PlayerId(1))),
+            "CR 508.1h: attacking the taxing player must incur the tax"
+        );
+        assert!(
+            !attack_incurs_tax(&state, goaded, AttackTarget::Planeswalker(pw)),
+            "the player-scoped tax must leave its controller's planeswalker free"
+        );
+        assert!(
+            !attack_incurs_tax(&state, goaded, AttackTarget::Player(PlayerId(2))),
+            "the tax defends only its own controller"
+        );
+
+        let constraints = AttackDeclarationConstraints::build(&state);
+        let required = max_no_payment(&constraints, &state);
+        assert_eq!(
+            required, 2,
+            "CR 508.1d: goad's two requirements are both obeyable for FREE by \
+             attacking the untaxed third seat"
+        );
+        assert!(constraints.separable_precondition(&state));
+        let fast = constraints.selectable_targets_closed_form(required);
+        let exact = constraints.selectable_targets_by_exact_solver(&state, required);
+        assert_eq!(fast, exact, "taxed board: closed form must equal exact map");
+
+        // Discriminating: the goaded creature clears the bar only at the third
+        // seat, while the bystander keeps every pairing including the taxed one.
+        assert_eq!(
+            fast.get(&goaded).map(Vec::as_slice),
+            Some(&[AttackTarget::Player(PlayerId(2))][..]),
+            "CR 701.15b: only the third seat obeys both goad requirements"
+        );
+        assert_eq!(
+            fast.get(&bystander).map(Vec::as_slice),
+            Some(
+                &[
+                    AttackTarget::Player(PlayerId(1)),
+                    AttackTarget::Player(PlayerId(2)),
+                    AttackTarget::Planeswalker(pw),
+                ][..]
+            ),
+            "CR 508.1d: the taxed pairing stays SELECTABLE — a player may pay \
+             voluntarily; the tax only fails to raise the bar"
+        );
+    }
+
+    /// CR 508.1d: randomized differential between the separable closed form and
+    /// the exact per-pair solver over ~200 generated UNCOUPLED boards — varying
+    /// seat count, candidate count, planeswalker count, and per-creature
+    /// requirement flavor (vanilla / "attacks each combat if able" / goad /
+    /// planeswalker lure). Four hand fixtures cannot cover the arithmetic; this
+    /// does, and it is deterministic (fixed xorshift seed) so a failure is
+    /// reproducible.
+    ///
+    /// The two counters at the end are the anti-vacuity guard: the sweep must
+    /// actually produce boards where SOME pair is refused and boards where some
+    /// pair is offered, or "the two maps agree" would be a statement about
+    /// nothing.
+    #[test]
+    fn separable_closed_form_matches_exact_solver_across_randomized_uncoupled_boards() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        }
+
+        let mut seed: u64 = 0x5eed_1234_abcd_0001;
+        let mut boards_with_a_refused_pair = 0usize;
+        let mut boards_with_an_offered_pair = 0usize;
+
+        for board in 0..200u64 {
+            let seats = 2 + (next(&mut seed) % 2) as u8; // 2 or 3
+            let mut state = GameState::new(FormatConfig::standard(), seats, board);
+            state.turn_number = 2;
+            state.active_player = PlayerId(0);
+            state.phase = crate::types::phase::Phase::DeclareAttackers;
+
+            let planeswalkers: Vec<ObjectId> = (0..next(&mut seed) % 3)
+                .map(|i| {
+                    let owner = PlayerId(1 + (next(&mut seed) % (seats as u64 - 1)) as u8);
+                    create_planeswalker(&mut state, owner, &format!("Walker {i}"))
+                })
+                .collect();
+
+            let creatures = 1 + next(&mut seed) % 4;
+            for i in 0..creatures {
+                let id = create_creature(&mut state, PlayerId(0), &format!("C{i}"), 2, 2);
+                match next(&mut seed) % 4 {
+                    0 => {} // vanilla
+                    1 => {
+                        // CR 508.1d: "attacks each combat if able".
+                        state.objects.get_mut(&id).unwrap().static_definitions.push(
+                            StaticDefinition::new(StaticMode::MustAttack)
+                                .affected(TargetFilter::SelfRef),
+                        );
+                    }
+                    2 => {
+                        // CR 701.15b: goaded by a random opponent.
+                        let goader = PlayerId(1 + (next(&mut seed) % (seats as u64 - 1)) as u8);
+                        state.objects.get_mut(&id).unwrap().goaded_by.insert(goader);
+                    }
+                    _ => {
+                        // CR 508.1d: a Gideon-Jura-style lure, when one exists.
+                        if let Some(&pw) = planeswalkers
+                            .get((next(&mut seed) as usize) % planeswalkers.len().max(1))
+                        {
+                            let pw_ref =
+                                ObjectIncarnationRef::from_object(state.objects.get(&pw).unwrap());
+                            state.objects.get_mut(&id).unwrap().static_definitions.push(
+                                StaticDefinition::new(StaticMode::MustAttackDefender {
+                                    defender: RequiredDefender::Permanent { permanent: pw_ref },
+                                })
+                                .affected(TargetFilter::SelfRef),
+                            );
+                        }
+                    }
+                }
+            }
+
+            let constraints = AttackDeclarationConstraints::build(&state);
+            let required = max_no_payment(&constraints, &state);
+            assert!(
+                constraints.separable_precondition(&state),
+                "board {board}: generator only builds uncoupled, individually-declarable boards"
+            );
+            let closed = constraints.selectable_targets_closed_form(required);
+            let exact = constraints.selectable_targets_by_exact_solver(&state, required);
+            assert_eq!(
+                closed, exact,
+                "board {board} (seats {seats}): closed form and exact solver disagree"
+            );
+
+            let offered: usize = exact.values().map(Vec::len).sum();
+            let universe: usize = constraints
+                .candidates
+                .iter()
+                .map(|cid| constraints.legal_targets[cid].len())
+                .sum();
+            if offered < universe {
+                boards_with_a_refused_pair += 1;
+            }
+            if offered > 0 {
+                boards_with_an_offered_pair += 1;
+            }
+        }
+
+        assert!(
+            boards_with_a_refused_pair >= 20,
+            "the sweep must generate boards where the CR 508.1d bar actually \
+             REFUSES pairs, or the equality above is vacuous (got \
+             {boards_with_a_refused_pair})"
+        );
+        assert!(
+            boards_with_an_offered_pair >= 150,
+            "the sweep must generate boards with selectable pairs (got \
+             {boards_with_an_offered_pair})"
+        );
+    }
+
+    /// Test helper: push a raw static definition onto an existing permanent.
+    fn push_static(state: &mut GameState, id: ObjectId, mode: StaticMode) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(mode));
+    }
+
+    /// Test helper: a creature that "attacks each combat if able" (CR 508.1d),
+    /// scoped to ITSELF so the requirement multiset is unambiguous.
+    fn create_self_scoped_must_attacker(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_creature(state, owner, "Berserker", 3, 3);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustAttack).affected(TargetFilter::SelfRef));
+        id
+    }
+
+    /// CR 508.1c + CR 506.5 + CR 701.35a: every board on which the separable
+    /// fast path must DECLINE, each paired with proof that declining is
+    /// load-bearing — on all six the closed form offers a pair the exact
+    /// per-pair solver refuses, so taking the fast path there would be a real
+    /// combat-legality bug, not merely a missed optimization.
+    ///
+    /// This is the discriminating half of
+    /// `separable_selectable_map_matches_exact_solver`: that test pins the two
+    /// paths EQUAL where the precondition holds, this one pins them UNEQUAL
+    /// everywhere it does not. A precondition that was too permissive on any of
+    /// these axes fails here on the `must not be offered` assertion; a
+    /// precondition that was merely decorative (declining boards where the
+    /// closed form happened to agree) fails on the `would wrongly offer`
+    /// assertion.
+    #[test]
+    fn separable_fast_path_declines_exactly_the_boards_where_it_would_be_wrong() {
+        // CR 508.1c: a global "no more than one creature can attack each combat"
+        // cap. The bar is 1 (the must-attacker can be that one creature), but a
+        // declaration containing the BYSTANDER can contain nothing else, so it
+        // scores 0. The closed form lets the must-attacker's score count anyway.
+        let global_cap = {
+            let mut state = setup_combat_phase();
+            let arbiter = create_creature(&mut state, PlayerId(1), "Silent Arbiter", 1, 5);
+            push_static(
+                &mut state,
+                arbiter,
+                StaticMode::MaxAttackersEachCombat {
+                    max: 1,
+                    defender: None,
+                },
+            );
+            create_self_scoped_must_attacker(&mut state, PlayerId(0));
+            let bystander = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            (
+                "CR 508.1c global cap",
+                state,
+                (bystander, AttackTarget::Player(PlayerId(1))),
+            )
+        };
+        // CR 508.1c + CR 802.1: a Judoon-Enforcers-style "no more than one
+        // creature can attack YOU each combat" cap. The opponent is the only
+        // defender, so the cap is as coupling as the global one.
+        let per_defender_cap = {
+            let mut state = setup_combat_phase();
+            let enforcers = create_creature(&mut state, PlayerId(1), "Judoon Enforcers", 3, 3);
+            push_static(
+                &mut state,
+                enforcers,
+                StaticMode::MaxAttackersEachCombat {
+                    max: 1,
+                    defender: Some(AttackDefenderScope::Controller),
+                },
+            );
+            create_self_scoped_must_attacker(&mut state, PlayerId(0));
+            let bystander = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            (
+                "CR 508.1c + CR 802.1 per-defender cap",
+                state,
+                (bystander, AttackTarget::Player(PlayerId(1))),
+            )
+        };
+        // CR 508.1c + CR 508.5: The Eternal Wanderer's `ThisPermanent` cap. The
+        // lured creature's requirement is obeyable only by attacking the capped
+        // planeswalker, so a bystander that spends the cap slot destroys the
+        // only witness that meets the bar.
+        let per_permanent_cap = {
+            let mut state = setup_combat_phase();
+            let wanderer = create_planeswalker(&mut state, PlayerId(1), "The Eternal Wanderer");
+            push_static(
+                &mut state,
+                wanderer,
+                StaticMode::MaxAttackersEachCombat {
+                    max: 1,
+                    defender: Some(AttackDefenderScope::ThisPermanent),
+                },
+            );
+            let wanderer_ref =
+                ObjectIncarnationRef::from_object(state.objects.get(&wanderer).unwrap());
+            let lured = create_creature(&mut state, PlayerId(0), "Lured", 2, 2);
+            state
+                .objects
+                .get_mut(&lured)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Permanent {
+                            permanent: wanderer_ref,
+                        },
+                    })
+                    .affected(TargetFilter::SelfRef),
+                );
+            let bystander = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            (
+                "CR 508.1c + CR 508.5 per-permanent cap",
+                state,
+                (bystander, AttackTarget::Planeswalker(wanderer)),
+            )
+        };
+        // CR 506.5: "can't attack alone". The sole candidate cannot legally be
+        // declared at all; the closed form, which never asks how many creatures
+        // a witness needs, would offer it.
+        let needs_companion = {
+            let mut state = setup_combat_phase();
+            let loner = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            push_static(
+                &mut state,
+                loner,
+                StaticMode::CombatAlone {
+                    action: CombatAloneAction::Attack,
+                    requirement: CombatAloneRequirement::NeedsCompanion,
+                },
+            );
+            (
+                "CR 506.5 NeedsCompanion",
+                state,
+                (loner, AttackTarget::Player(PlayerId(1))),
+            )
+        };
+        // CR 506.5: "can only attack alone". Declaring the sole-attacker locks
+        // the must-attacker out, so its score can never be borrowed.
+        let must_be_sole = {
+            let mut state = setup_combat_phase();
+            create_self_scoped_must_attacker(&mut state, PlayerId(0));
+            let solo = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            push_static(
+                &mut state,
+                solo,
+                StaticMode::CombatAlone {
+                    action: CombatAloneAction::Attack,
+                    requirement: CombatAloneRequirement::MustBeSole,
+                },
+            );
+            (
+                "CR 506.5 MustBeSole",
+                state,
+                (solo, AttackTarget::Player(PlayerId(1))),
+            )
+        };
+        // CR 701.35a: detain. This is the ONLY axis in the list that satisfies
+        // precondition 1 and fails precondition 2 — `team_eligible_attacker_ids`
+        // makes a detained creature a candidate, so without the per-candidate
+        // declarability sweep the closed form would offer a creature that
+        // `validate_attackers` refuses outright.
+        let detained = {
+            let mut state = setup_combat_phase();
+            let jailed = create_creature(&mut state, PlayerId(0), "Detained Bear", 2, 2);
+            state
+                .objects
+                .get_mut(&jailed)
+                .unwrap()
+                .detained_by
+                .insert(PlayerId(1));
+            create_creature(&mut state, PlayerId(0), "Free Bear", 2, 2);
+            (
+                "CR 701.35a detain",
+                state,
+                (jailed, AttackTarget::Player(PlayerId(1))),
+            )
+        };
+
+        for (label, state, (creature, target)) in [
+            global_cap,
+            per_defender_cap,
+            per_permanent_cap,
+            needs_companion,
+            must_be_sole,
+            detained,
+        ] {
+            let constraints = AttackDeclarationConstraints::build(&state);
+            let required = max_no_payment(&constraints, &state);
+            assert!(
+                constraints.candidates.contains(&creature),
+                "{label}: fixture must keep {creature:?} an eligible attack candidate"
+            );
+            assert!(
+                !constraints.separable_precondition(&state),
+                "{label}: the separable precondition must reject this board"
+            );
+
+            let closed = constraints.selectable_targets_closed_form(required);
+            let exact = constraints.selectable_targets_by_exact_solver(&state, required);
+            assert!(
+                closed
+                    .get(&creature)
+                    .is_some_and(|targets| targets.contains(&target)),
+                "{label}: the closed form would wrongly offer {creature:?} -> {target:?}; \
+                 without that the decline proves nothing"
+            );
+            assert!(
+                exact
+                    .get(&creature)
+                    .is_none_or(|targets| !targets.contains(&target)),
+                "{label}: the exact solver must not offer {creature:?} -> {target:?}"
+            );
+            assert_eq!(
+                constraints.selectable_targets_by_attacker(&state),
+                exact,
+                "{label}: the prompt must return the EXACT map on a declined board"
+            );
+        }
     }
 
     #[test]
