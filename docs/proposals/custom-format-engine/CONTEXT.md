@@ -218,7 +218,7 @@ cited PLAN.md sections for the actual schema/wiring changes.
    within the Combat phase, not a phase-end, even though the engine's own
    `Phase` enum treats every one of those as a variant transition).**
    Verified two things directly this session, not from memory:
-   - `docs/MagicCompRules.txt:8278` (the obsolete-rules glossary): "unspent
+   - The obsolete-rules glossary entry "Mana Burn (Obsolete)": "unspent
      mana caused a player to **lose life**" — life loss, not damage. The
      original PLAN.md/RESEARCH.md draft's "deal that many damage" framing
      was wrong.
@@ -409,22 +409,21 @@ being treated as correct).
   legacy flag is SMALL — but no EC preset uses it.** Fully investigated
   (RESEARCH.md §10). The legend rule (introduced by *Legends* 1994, legal in
   93-94/95) was **global / any-controller** through 2013, then M14 (2013-07-13)
-  made it **per-controller + choice** (current CR 704.5j,
-  `MagicCompRules.txt:5510`). The engine's `check_legend_rule`
-  (`sba.rs:902-956`) is hardcoded to the modern per-controller-with-choice form
-  (loops per player, filters `controller == player_id`, pauses with
-  `WaitingFor::ChooseLegend`). Re-adding the pre-M14 global-choiceless form is
-  SMALL — it mirrors the existing `check_world_rule` (`sba.rs:1348`) shape and
-  reuses the shared SBA departure mover. Modeled as a typed
-  `LegendRuleScope { Modern, PreM14AnyController }` enum on `LegacyRuleSet` (not a
-  bool). **HONEST CAVEAT:** EC's published rulesets do **not** list a legend-rule
-  reversion (their only legacy exceptions are mana burn / damage-on-stack /
-  wish), so all four EC presets default to `Modern`; the scope enum ships as a
-  *general* historical-rules axis (like Block Constructed's `mana_burn`), not an
-  EC-preset behavior. Planeswalker uniqueness needs no flag — the four pools end
-  at Scourge (2003) and planeswalkers postdate that (Lorwyn 2007). The
-  planeswalker-uniqueness → legend-rule fold happened at **Ixalan (2017-09-28)**,
-  not Dominaria 2018.
+  made it **per-controller + choice** (current CR 704.5j). The engine's
+  `check_legend_rule` (`sba.rs:902-956`) is hardcoded to the modern
+  per-controller-with-choice form (loops per player, filters `controller ==
+  player_id`, pauses with `WaitingFor::ChooseLegend`). Re-adding the pre-M14
+  global-choiceless form is SMALL — it mirrors the existing `check_world_rule`
+  (`sba.rs:1348`) shape and reuses the shared SBA departure mover. Modeled as a
+  typed `LegendRuleScope { Modern, PreM14AnyController }` enum on `LegacyRuleSet`
+  (not a bool). **HONEST CAVEAT:** EC's published rulesets do **not** list a
+  legend-rule reversion (their only legacy exceptions are mana burn /
+  damage-on-stack / wish), so all four EC presets default to `Modern`; the scope
+  enum ships as a *general* historical-rules axis (like Block Constructed's
+  `mana_burn`), not an EC-preset behavior. Planeswalker uniqueness needs no flag —
+  the four pools end at Scourge (2003) and planeswalkers postdate that (Lorwyn
+  2007). The planeswalker-uniqueness → legend-rule fold happened at **Ixalan
+  (2017-09-28)**, not Dominaria 2018.
 - **Pre-M10 Wish templating is small and is a REAL functional difference.**
   Fully investigated (RESEARCH.md §9). It reverts the M10 change that made exile
   an in-game zone (CR 400.11/400.11a): pre-M10, Wishes could retrieve an owned

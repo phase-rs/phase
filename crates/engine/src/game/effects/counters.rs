@@ -14,8 +14,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CounterAddedRecord, CounterMoveChoice, CounterRemoveChoice, DelayedTrigger, GameState,
     PendingCounterAddition, PendingCounterAdditionQueue, PendingCounterMove,
-    PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemovalQueue,
-    PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
+    PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemoval,
+    PendingCounterRemovalQueue, PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1974,6 +1974,125 @@ pub(crate) fn remove_counter_optional_is_infeasible(
     !feasible
 }
 
+/// CR 701.10e + CR 115.1 + CR 608.2d: the battlefield population a NON-TARGETED
+/// counter multiplication acts on ("double the number of ... counters on each
+/// <filter>"). `Some(ids)` when the ability genuinely names a described
+/// population; `None` when it does not, so the caller keeps its ordinary
+/// targeted / anaphoric resolution.
+///
+/// THE GATE — six refusal conditions, grouped into five bullets below (the
+/// `multi_target` / `optional_targeting` pair shares one), and why this is not a
+/// pool-scan fallback
+/// (`effects/phase_out.rs`):
+///  * `target_choice_timing == Resolution` is the LEADING conjunct and the only
+///    one that is correct by construction. CR 115.10a: a clause with no literal
+///    "target" names its recipient by description, and
+///    `lower::target_choice_timing_for_clause` stamps exactly that clause
+///    `Resolution`; a clause that DID say "target" keeps `Stack` and can never
+///    reach this tier no matter what its target list looks like at resolution.
+///    This is the same discriminator the source-attachment-host arm of
+///    `resolve_defined_or_targets` already uses, further down this FILE (that is
+///    a different function — this helper is called from it).
+///  * `ability.targets.is_empty()` is a second, weaker guard and is NOT by itself
+///    sufficient — do not restore the earlier claim that it reads a raw list.
+///    `ability_utils::validate_targets_in_chain` REWRITES `targets` to the
+///    CR 608.2b-legal subset before `stack.rs` resolves the ability, so a
+///    targeted ability whose chosen target went stale can arrive here with an
+///    EMPTY list. Nothing sweeps today only because CR 608.2b fizzling is
+///    chain-wide (`targeting::check_fizzle`) and no counter-multiplication card
+///    has a chain sibling that would keep such an ability resolving — an accident
+///    of the corpus, not an invariant. The timing conjunct above is what makes it
+///    an invariant. `targets.is_empty()` is also wrong in the other direction — a
+///    `ChooseOneOf` branch injects a bookkeeping `TargetRef::Player` that is not
+///    an object choice at all — so it must stay a conjunct rather than become the
+///    test. (It is NOT reachable via chain propagation: `can_inherit_parent_
+///    targets` in `effects/mod.rs` refuses to propagate into a `Resolution`-timed
+///    node unless the effect names `ParentTarget`, so a descriptor node cannot
+///    inherit its parent's targets.)
+///  * CR 601.2c + CR 608.2b — `multi_target.is_none()` and `!optional_targeting`:
+///    "up to N target ..." / "any number of target ..." may LEGALLY announce zero
+///    targets (Zimone, Paradox Sculptor: `MultiTargetSpec { min: 0, max: 2 }`;
+///    Kinetic Ooze: `{ min: 0, max: None }`). Empty targets there means the
+///    controller chose none and the effect must affect NOTHING — the same refusal
+///    `effects::resolved_battlefield_object_ids` states in `effects/mod.rs`.
+///    This conjunct is NOT theoretical: without it, an "any number of other target
+///    creatures" activation announced with zero targets doubles every matching
+///    creature on the battlefield, INCLUDING THE OPPONENT'S. Guarded by the
+///    apply()-level tests in this module and in `double.rs`.
+///  * `!target.is_context_ref()`: `SelfRef` / `TriggeringSource` / `ParentTarget`
+///    / `None` are deterministic anaphors resolved by the tiers above, not
+///    populations. Defence in depth only, and stated as such rather than
+///    oversold: every filter this refuses is ALSO refused by
+///    `names_enumerable_population()` below — the unit variants fall into its
+///    `_ => false` arm, a `chosen_player` filter is a CONTENTLESS `Typed` that
+///    fails its `!type_filters.is_empty() || !properties.is_empty()` test, and an
+///    `ExiledBySource` composite fails its every-leg test — so no input
+///    discriminates it here. It is genuinely
+///    load-bearing in the PARSER twin `counter_recipient_is_resolvable`, which
+///    ADMITS anaphors — keep the two in step.
+///  * `target.names_enumerable_population()`: the filter must actually DESCRIBE a
+///    population. Without this, a recipient phrase the parser could not classify
+///    at all (a contentless `Typed`, or `TargetFilter::Any`) matches every object
+///    and doubles every counter on every permanent BOTH players control. The
+///    parser keeps such a phrase at `Effect::unimplemented` (`counter.rs`), and
+///    this is the second, independent guard. Note the predicate's documented
+///    scope: it refuses UNCLASSIFIED recipients, not MISCLASSIFIED ones.
+///
+/// Upstream, the parser reaches this shape only for a clause with no literal
+/// "target" (CR 115.10a), which `lower::target_choice_timing_for_clause` stamps
+/// `TargetChoiceTiming::Resolution` so no target slot is ever built — a third
+/// independent guard.
+///
+/// CR 702.26b: a phased-out permanent is treated as though it does not exist, so
+/// the population comes from `battlefield_phased_in_ids()`.
+///
+/// ZONE SCOPE: the enumeration is the BATTLEFIELD only, and the gate's last
+/// conjunct refuses anything else rather than answering a zone-qualified
+/// recipient with a battlefield population. `names_enumerable_population()` is
+/// zone-agnostic on purpose — it answers "does this describe a population", and
+/// "each creature in your graveyard" (`Typed{[Creature], You, InZone(Graveyard)}`)
+/// genuinely does — so the zone conjunct lives here, next to the enumeration it
+/// constrains. Without it that filter resolves to nothing and the effect is a
+/// SILENT NO-OP; with it the clause never lowers to an effect at all
+/// (`counter.rs::recipient_zone_is_battlefield` is the parser half) and stays an
+/// honest `Effect::unimplemented`. This is deliberately narrower than
+/// `effects::resolved_battlefield_object_ids`, which honours
+/// `TargetFilter::extract_in_zone()` and enumerates that zone; a future
+/// zone-aware counter multiplication should route through that helper rather
+/// than loosen this conjunct in place.
+pub(super) fn nontargeted_counter_population_ids(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<Vec<ObjectId>> {
+    if ability.target_choice_timing != TargetChoiceTiming::Resolution
+        || !ability.targets.is_empty()
+        || ability.multi_target.is_some()
+        || ability.optional_targeting
+        || target.is_context_ref()
+        || !target.names_enumerable_population()
+        // CR 400.1: this enumeration is the BATTLEFIELD only (see ZONE SCOPE
+        // above), so a zone-qualified recipient must not be answered with a
+        // battlefield population. `None` = no zone constraint = the battlefield
+        // default. `counter.rs`'s `recipient_zone_is_battlefield` is the parser
+        // half of this guard.
+        || !matches!(target.extract_in_zone(), None | Some(Zone::Battlefield))
+    {
+        return None;
+    }
+    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    Some(
+        state
+            .battlefield_phased_in_ids()
+            .into_iter()
+            .filter(|id| {
+                crate::game::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
+            })
+            .collect(),
+    )
+}
+
 /// Resolve targeting to object IDs using the typed TargetFilter.
 fn resolve_defined_or_targets(
     state: &GameState,
@@ -2105,10 +2224,12 @@ fn resolve_defined_or_targets(
     // counters on the exiled card"). Resolved from the recursively-stamped
     // `cost_paid_object`; mirrors the `resolved_targets` chokepoint arm.
     if let Some(TargetFilter::CostPaidObject) = target_spec {
+        // CR 400.7: the shared live-reference guard — a departed/returned
+        // referent yields nothing rather than a same-id object.
         return ability
             .cost_paid_object
             .iter()
-            .map(|snap| snap.object_id)
+            .filter_map(|snap| snap.live_object_id(state))
             .collect();
     }
 
@@ -2150,16 +2271,8 @@ fn resolve_defined_or_targets(
     }
 
     if let Effect::MultiplyCounter { target, .. } = &ability.effect {
-        if ability.targets.is_empty() {
-            let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
-            let ctx = crate::game::filter::FilterContext::from_ability(ability);
-            return state
-                .battlefield_phased_in_ids()
-                .into_iter()
-                .filter(|id| {
-                    crate::game::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
-                })
-                .collect();
+        if let Some(population) = nontargeted_counter_population_ids(state, ability, target) {
+            return population;
         }
     }
 
@@ -2680,7 +2793,15 @@ pub fn resolve_remove(
         _ => (Some(CounterType::Plus1Plus1), 1),
     };
 
-    let targets = resolve_defined_or_targets(state, ability);
+    let targets = match &ability.effect {
+        Effect::RemoveCounter {
+            target:
+                target @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }),
+            ..
+        } => crate::game::targeting::resolved_object_ids_for_filter(state, ability, target),
+        _ => resolve_defined_or_targets(state, ability),
+    };
+    let mut remaining = Vec::new();
     for obj_id in targets {
         // Build the list of (counter_type, count) pairs to remove.
         let removals: Vec<(CounterType, u32)> = if let Some(counter_type) = &counter_type {
@@ -2728,27 +2849,25 @@ pub fn resolve_remove(
             }
         };
 
-        for (ct, counter_num) in removals {
-            // CR 614.1: Delegate to the single-authority remove pipeline so
-            // prevention/modification replacements apply and derived fields
-            // (obj.loyalty / obj.defense) stay in lockstep with the counter map.
-            remove_counter_with_replacement(state, obj_id, ct, counter_num, events);
-            // If a replacement requires player choice, suspend and bail — the
-            // continuation re-enters the remove pipeline after the choice resolves.
-            if matches!(
-                state.waiting_for,
-                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
-            ) {
-                return Ok(());
-            }
-        }
+        remaining.extend(removals.into_iter().filter_map(|(counter_type, count)| {
+            (count > 0).then_some(PendingCounterRemoval {
+                object_id: obj_id,
+                counter_type,
+                count,
+            })
+        }));
     }
 
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
+    let total = remaining.iter().map(|entry| entry.count).sum();
+    state.push_counter_removals(PendingCounterRemovalQueue {
+        remaining,
+        effect_kind: EffectKind::from(&ability.effect),
+        source_ability_id: ability.source_id,
+        total,
+        applied_total: 0,
+        in_flight: None,
     });
+    drain_pending_counter_removals(state, events);
 
     Ok(())
 }
@@ -2879,16 +2998,21 @@ pub(crate) fn validate_and_queue_counter_removal(
     pending_effect: &ResolvedAbility,
 ) -> Result<(), EffectError> {
     let total = validate_counter_selection(available, selections)?;
-    let remaining: Vec<(CounterType, u32)> = selections
+    let remaining: Vec<PendingCounterRemoval> = selections
         .iter()
-        .map(|s| (s.counter_type.clone(), s.count))
+        .map(|s| PendingCounterRemoval {
+            object_id: source_id,
+            counter_type: s.counter_type.clone(),
+            count: s.count,
+        })
         .collect();
     state.push_counter_removals(PendingCounterRemovalQueue {
         remaining,
-        source_id,
         effect_kind: EffectKind::from(&pending_effect.effect),
         source_ability_id: pending_effect.source_id,
         total,
+        applied_total: 0,
+        in_flight: None,
     });
     Ok(())
 }
@@ -2898,15 +3022,36 @@ pub(crate) fn validate_and_queue_counter_removal(
 /// single-authority remove pipeline so prevention/modification replacements
 /// apply. Mirrors `drain_pending_counter_moves`: re-parks the queue (returning
 /// early) when a per-removal replacement surfaces a `ReplacementChoice`, and when
-/// the queue empties stamps `last_effect_count = total` BEFORE emitting
+/// the queue empties stamps `last_effect_count = applied_total` BEFORE emitting
 /// `EffectResolved` so a downstream "create that many" / "add that much" rider
 /// reading `QuantityRef::EventContextAmount` picks up the removed count.
 pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
     while let Some(mut queue) = state.active_counter_removals().cloned() {
-        let Some((counter_type, count)) = queue.remaining.first().cloned() else {
-            // CR 608.2h: ordering invariant — stamp the total removed before the
+        if let Some(in_flight) = queue.in_flight.take() {
+            let counter_count_after = counter_count(
+                state,
+                in_flight.removal.object_id,
+                &in_flight.removal.counter_type,
+            );
+            queue.applied_total = queue.applied_total.saturating_add(
+                in_flight
+                    .counter_count_before
+                    .saturating_sub(counter_count_after),
+            );
+            state
+                .replace_active_counter_removals(queue)
+                .expect("settled counter-removal must retain its active frame");
+            continue;
+        }
+        let Some(PendingCounterRemoval {
+            object_id,
+            counter_type,
+            count,
+        }) = queue.remaining.first().cloned()
+        else {
+            // CR 608.2h: ordering invariant — stamp the actual removed total before the
             // terminating EffectResolved (and thus before the continuation drains).
-            state.last_effect_count = Some(queue.total as i32);
+            state.last_effect_count = Some(queue.applied_total as i32);
             state
                 .take_active_counter_removals()
                 .expect("settled counter-removals queue must own the active frame")
@@ -2919,13 +3064,20 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
             continue;
         };
         queue.remaining.remove(0);
-        let source_id = queue.source_id;
+        queue.in_flight = Some(crate::types::game_state::PendingCounterRemovalInFlight {
+            counter_count_before: counter_count(state, object_id, &counter_type),
+            removal: PendingCounterRemoval {
+                object_id,
+                counter_type: counter_type.clone(),
+                count,
+            },
+        });
         state
             .replace_active_counter_removals(queue)
             .expect("re-parked counter-removals queue must own the active frame");
         // CR 614.1: single-authority remove pipeline (applies prevention /
         // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
-        remove_counter_with_replacement(state, source_id, counter_type, count, events);
+        remove_counter_with_replacement(state, object_id, counter_type, count, events);
         // If a replacement needs a player choice, suspend — the ReplacementChoice
         // resume path re-invokes this drain to finish the remaining removals.
         if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
@@ -2936,6 +3088,26 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 115.10a: the non-targeted population tier is gated on
+    /// `TargetChoiceTiming::Resolution` — the stamp
+    /// `lower::target_choice_timing_for_clause` puts on a clause whose recipient
+    /// carries no literal "target". A hand-built `ResolvedAbility` defaults to
+    /// `Stack` (`ResolvedAbility::new`), which the real parser never produces for
+    /// a descriptor population, so these resolver-level fixtures set it
+    /// explicitly. Without it every refusal below would be attributable to the
+    /// TIMING conjunct rather than to the conjunct actually under test, and the
+    /// negatives would pass for the wrong reason.
+    fn resolution_timed(
+        effect: Effect,
+        targets: Vec<TargetRef>,
+        source: ObjectId,
+        controller: PlayerId,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(effect, targets, source, controller);
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability
+    }
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
@@ -2958,6 +3130,471 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// Kinetic Ooze's full verbatim Oracle text, used only as the branch-identity
+    /// reach-guard for the lifted activation line below.
+    const KINETIC_OOZE: &str = "This creature enters with X +1/+1 counters on it.\n\
+        When this creature enters, destroy up to one target artifact or enchantment with mana value X or less. \
+        If X is 5 or more, you draw a card. \
+        If X is 10 or more, double the number of +1/+1 counters on any number of other target creatures.";
+
+    /// Kinetic Ooze's recipient clause, verbatim, lifted onto an activation cost
+    /// so the clause is reachable through the real activation pipeline. Proven to
+    /// take the same parser branch by `kinetic_ooze_counter_clause` below.
+    const OOZE_ACTIVATED_LINE: &str =
+        "{G}{U}, {T}: Double the number of +1/+1 counters on any number of other target creatures.";
+
+    /// Collect every `(MultiplyCounter effect, enclosing multi_target)` pair in an
+    /// ability tree, so a nested conditional sub-ability chain can be compared to
+    /// a top-level activated ability.
+    fn collect_multiply_counter_shapes(
+        def: &crate::types::ability::AbilityDefinition,
+        out: &mut Vec<(Effect, Option<crate::types::ability::MultiTargetSpec>)>,
+    ) {
+        if matches!(&*def.effect, Effect::MultiplyCounter { .. }) {
+            out.push(((*def.effect).clone(), def.multi_target.clone()));
+        }
+        if let Some(sub) = &def.sub_ability {
+            collect_multiply_counter_shapes(sub, out);
+        }
+        if let Some(other) = &def.else_ability {
+            collect_multiply_counter_shapes(other, out);
+        }
+    }
+
+    fn multiply_counter_shape(
+        oracle: &str,
+        name: &str,
+    ) -> (Effect, Option<crate::types::ability::MultiTargetSpec>) {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let mut found = Vec::new();
+        for ability in &parsed.abilities {
+            collect_multiply_counter_shapes(ability, &mut found);
+        }
+        for trigger in &parsed.triggers {
+            if let Some(execute) = &trigger.execute {
+                collect_multiply_counter_shapes(execute, &mut found);
+            }
+        }
+        assert_eq!(
+            found.len(),
+            1,
+            "{name}: expected exactly one MultiplyCounter node, got {found:?}"
+        );
+        found.remove(0)
+    }
+
+    /// Board of the zero-target `apply()` tests: an ability source plus three
+    /// counter-bearing creatures with pairwise-distinct counts, two controlled by
+    /// the activator and one by the opponent.
+    struct ZeroTargetBoard {
+        runner: crate::game::scenario::GameRunner,
+        src: ObjectId,
+        mine_a: ObjectId,
+        mine_b: ObjectId,
+        theirs: ObjectId,
+    }
+
+    fn zero_target_board(activated_line: &str) -> ZeroTargetBoard {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let src = scenario
+            .add_creature_from_oracle(P0, "Counter Doubler", 2, 2, activated_line)
+            .id();
+        let mine_a = scenario.add_creature(P0, "Mine A", 1, 1).id();
+        let mine_b = scenario.add_creature(P0, "Mine B", 1, 1).id();
+        let theirs = scenario.add_creature(P1, "Theirs", 1, 1).id();
+
+        scenario.with_counter(src, CounterType::Plus1Plus1, 1);
+        scenario.with_counter(mine_a, CounterType::Plus1Plus1, 2);
+        // A second counter KIND, so the untyped "each kind" sibling can be told
+        // apart from the typed one on the same board.
+        scenario.with_counter(mine_a, CounterType::Lore, 3);
+        scenario.with_counter(mine_b, CounterType::Plus1Plus1, 4);
+        scenario.with_counter(theirs, CounterType::Plus1Plus1, 7);
+        // CR 602.1a: {G}{U} for the activation cost (everything before the colon).
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ],
+        );
+
+        ZeroTargetBoard {
+            runner: scenario.build(),
+            src,
+            mine_a,
+            mine_b,
+            theirs,
+        }
+    }
+
+    fn counters_on(state: &GameState, id: ObjectId, counter: CounterType) -> u32 {
+        state.objects[&id]
+            .counters
+            .get(&counter)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// V3 — CR 601.2c + CR 608.2b: an "any number of target ..." counter
+    /// multiplication announced with ZERO targets affects NOTHING. "Any number"
+    /// (CR 115.6) means zero or more, so declining every optional target is a
+    /// legal announcement — and a targeting ability affects only the objects its
+    /// controller chose.
+    ///
+    /// Drives the real `apply()` pipeline (`GameAction::ActivateAbility` → cost
+    /// payment → `ChooseTarget{None}` / `SelectCards{[]}` per optional slot →
+    /// stack → `counters::resolve_multiply` → `resolve_defined_or_targets`), not a
+    /// hand-built `ResolvedAbility`.
+    ///
+    /// REVERT-FAILING, in the sweep direction and across the table: with only the
+    /// old `ability.targets.is_empty()` conjunct guarding the mass tier, zero
+    /// announced targets doubled Mine A (2→4), Mine B (4→8) AND the opponent's
+    /// creature (7→14) — the recipient filter's `controller` is `None`.
+    ///
+    /// The committed positive control this gate must not break is
+    /// `multiply_counter_with_no_explicit_targets_expands_filter` in this module.
+    #[test]
+    fn multiply_counter_zero_announced_targets_affects_nothing_through_apply() {
+        // BRANCH-IDENTITY REACH-GUARD (/card-test foot-gun 4): the lifted
+        // activation line must take the SAME parser branch as the real card, or
+        // the rest of this test proves nothing about Kinetic Ooze's class.
+        let (card_effect, card_multi) = multiply_counter_shape(KINETIC_OOZE, "Kinetic Ooze");
+        let (line_effect, line_multi) =
+            multiply_counter_shape(OOZE_ACTIVATED_LINE, "Kinetic Ooze Activated Line");
+        assert_eq!(
+            card_effect, line_effect,
+            "the lifted clause must lower to the same MultiplyCounter as the real card"
+        );
+        assert_eq!(
+            card_multi, line_multi,
+            "and to the same MultiTargetSpec: {card_multi:?} vs {line_multi:?}"
+        );
+        assert!(
+            matches!(
+                card_multi,
+                Some(crate::types::ability::MultiTargetSpec {
+                    min: QuantityExpr::Fixed { value: 0 },
+                    max: None,
+                })
+            ),
+            "reach-guard: the clause must really be an optional min-0 target set, got {card_multi:?}"
+        );
+
+        // --- Zero announced targets: nothing may change.
+        let board = zero_target_board(OOZE_ACTIVATED_LINE);
+        let mut runner = board.runner;
+        let outcome = runner.activate(board.src, 0).resolve();
+        assert!(
+            matches!(
+                outcome.final_waiting_for(),
+                crate::types::game_state::WaitingFor::Priority { .. }
+            ),
+            "the activation must halt at a clean priority window, got {:?}",
+            outcome.final_waiting_for()
+        );
+        assert_eq!(outcome.stack_size(), 0, "the ability must have resolved");
+
+        let state = outcome.state();
+        assert_eq!(
+            counters_on(state, board.src, CounterType::Plus1Plus1),
+            1,
+            "\"other\" excludes the source, on both builds"
+        );
+        assert_eq!(
+            counters_on(state, board.mine_a, CounterType::Plus1Plus1),
+            2,
+            "zero announced targets must leave Mine A alone (today: 4)"
+        );
+        assert_eq!(
+            counters_on(state, board.mine_b, CounterType::Plus1Plus1),
+            4,
+            "zero announced targets must leave Mine B alone (today: 8)"
+        );
+        assert_eq!(
+            counters_on(state, board.theirs, CounterType::Plus1Plus1),
+            7,
+            "the sweep crossed the table — the opponent's creature must be untouched (today: 14)"
+        );
+
+        // --- PAIRED POSITIVE REACH-GUARD, same test: declaring ONE target on the
+        // identical board still doubles exactly that target. Proves cost payment,
+        // target announcement and the resolver are all live, so "nothing changed"
+        // above cannot pass vacuously.
+        let board = zero_target_board(OOZE_ACTIVATED_LINE);
+        let mut runner = board.runner;
+        let outcome = runner
+            .activate(board.src, 0)
+            .target_object(board.mine_a)
+            .resolve();
+        let state = outcome.state();
+        assert_eq!(
+            counters_on(state, board.mine_a, CounterType::Plus1Plus1),
+            4,
+            "the one declared target is doubled"
+        );
+        assert_eq!(
+            counters_on(state, board.mine_a, CounterType::Lore),
+            3,
+            "the TYPED form touches only +1/+1 counters"
+        );
+        assert_eq!(
+            counters_on(state, board.mine_b, CounterType::Plus1Plus1),
+            4,
+            "an undeclared creature is untouched"
+        );
+        assert_eq!(
+            counters_on(state, board.theirs, CounterType::Plus1Plus1),
+            7,
+            "the opponent is untouched"
+        );
+    }
+
+    /// V3c — the gate's `optional_targeting` and `multi_target` conjuncts
+    /// (CR 608.2b), which refuse identically. THIS is the row that discriminates
+    /// them: it is `resolution_timed`, so the leading timing conjunct passes and
+    /// the refusal is attributable to these two — drop either from the gate and
+    /// the matching block below turns red.
+    ///
+    /// Stated precisely because it is easy to get backwards: the `apply()`-level
+    /// V3 row above does NOT discriminate `multi_target`. Kinetic Ooze's and
+    /// Zimone's clauses both contain the literal word "target", so
+    /// `lower::target_choice_timing_for_clause` stamps them `Stack` and the gate's
+    /// LEADING conjunct refuses first. V3 is still the honest end-to-end proof
+    /// that a zero-target announcement changes nothing through the real pipeline;
+    /// it is just not the proof that this conjunct is load-bearing.
+    ///
+    /// No Oracle text in the corpus produces `optional_targeting: true` on a
+    /// counter multiplication, so that half has no `apply()` reachability at all.
+    #[test]
+    fn multiply_counter_optional_targeting_zero_target_affects_nothing() {
+        let (mut state, ids) = two_player_counter_board();
+        let effect = Effect::MultiplyCounter {
+            counter_type: CounterType::Plus1Plus1,
+            multiplier: 2,
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+        let mut ability = resolution_timed(effect.clone(), vec![], ObjectId(100), PlayerId(0));
+        ability.optional_targeting = true;
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+        for id in ids {
+            assert_eq!(
+                state.objects[&id].counters[&CounterType::Plus1Plus1],
+                2,
+                "an optionally-targeted ability with no chosen target affects nothing"
+            );
+        }
+
+        // Same shape with a hand-built `MultiTargetSpec { min: 0, max: 2 }`.
+        let mut ability = resolution_timed(effect.clone(), vec![], ObjectId(100), PlayerId(0));
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 2));
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+        for id in ids {
+            assert_eq!(state.objects[&id].counters[&CounterType::Plus1Plus1], 2);
+        }
+
+        // PAIRED POSITIVE, same test: neither conjunct set ⇒ the mass tier runs.
+        let ability = resolution_timed(effect, vec![], ObjectId(100), PlayerId(0));
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_eq!(state.objects[&ids[0]].counters[&CounterType::Plus1Plus1], 4);
+        assert_eq!(state.objects[&ids[1]].counters[&CounterType::Plus1Plus1], 4);
+        assert_eq!(
+            state.objects[&ids[2]].counters[&CounterType::Plus1Plus1],
+            2,
+            "`controller: You` still scopes the population"
+        );
+    }
+
+    /// V3d — the gate's LEADING conjunct, `target_choice_timing == Resolution`
+    /// (CR 115.10a), and the ONLY row that discriminates it. A `Stack`-timed
+    /// ability arriving with an EMPTY target list must affect nothing: it said
+    /// "target", so its recipient was chosen at announcement, and an empty list at
+    /// resolution means that choice is gone — never a licence to enumerate the
+    /// battlefield instead.
+    ///
+    /// The shape is production-reachable in principle, which is why it has a
+    /// fixture rather than a comment: `ability_utils::validate_targets_in_chain`
+    /// REWRITES `targets` to the CR 608.2b-legal subset before `stack.rs` resolves
+    /// the ability, so a stale-target ability can reach a resolver with an empty
+    /// list. Nothing reaches it today only because CR 608.2b fizzling is
+    /// chain-wide and no counter-multiplication card has a chain sibling — a
+    /// property of the corpus, not an invariant.
+    ///
+    /// GUARD-FAILING: delete the timing conjunct from
+    /// `nontargeted_counter_population_ids` and the first block below doubles both
+    /// creatures P0 controls (2 → 4) instead of leaving them alone.
+    #[test]
+    fn multiply_counter_stack_timed_with_emptied_targets_affects_nothing() {
+        let effect = || Effect::MultiplyCounter {
+            counter_type: CounterType::Plus1Plus1,
+            multiplier: 2,
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+
+        // `ResolvedAbility::new` defaults to `TargetChoiceTiming::Stack` — the
+        // stamp a clause carrying the literal word "target" keeps.
+        let (mut state, ids) = two_player_counter_board();
+        let ability = ResolvedAbility::new(effect(), vec![], ObjectId(100), PlayerId(0));
+        assert_eq!(
+            ability.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "reach-guard: this fixture must really be Stack-timed, or it proves nothing"
+        );
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+        for id in ids {
+            assert_eq!(
+                state.objects[&id].counters[&CounterType::Plus1Plus1],
+                2,
+                "a Stack-timed ability with no surviving target must not sweep"
+            );
+        }
+
+        // PAIRED POSITIVE, same board and same filter: ONLY the timing differs, so
+        // the refusal above is attributable to the timing conjunct and nothing else.
+        let ability = resolution_timed(effect(), vec![], ObjectId(100), PlayerId(0));
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_eq!(state.objects[&ids[0]].counters[&CounterType::Plus1Plus1], 4);
+        assert_eq!(state.objects[&ids[1]].counters[&CounterType::Plus1Plus1], 4);
+        assert_eq!(
+            state.objects[&ids[2]].counters[&CounterType::Plus1Plus1],
+            2,
+            "`controller: You` still scopes the population"
+        );
+    }
+
+    /// V4 — CR 115.1: a counter multiplication whose recipient phrase names NO
+    /// enumerable population affects nothing. Resolver-level by construction:
+    /// after the parser gate (`counter_recipient_is_resolvable`) no Oracle text
+    /// can emit this shape, so there is no `apply()` instrument;
+    /// `counter_multiplication_with_unresolvable_recipient_stays_unimplemented`
+    /// in `parser/oracle_effect/counter.rs` covers the parser half.
+    ///
+    /// REVERT-FAILING: today a contentless `Typed` matches every object, so all
+    /// three creatures — including the opponent's — are doubled.
+    ///
+    /// The committed positive control this gate must not break is
+    /// `multiply_counter_with_no_explicit_targets_expands_filter` in this module.
+    #[test]
+    fn multiply_counter_unenumerable_population_affects_nothing() {
+        for unenumerable in [
+            TargetFilter::Typed(TypedFilter::default()),
+            TargetFilter::Any,
+        ] {
+            let (mut state, ids) = two_player_counter_board();
+            let ability = resolution_timed(
+                Effect::MultiplyCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    multiplier: 2,
+                    target: unenumerable.clone(),
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+            for id in ids {
+                assert_eq!(
+                    state.objects[&id].counters[&CounterType::Plus1Plus1],
+                    2,
+                    "{unenumerable:?} names no population and must double nothing"
+                );
+            }
+
+            // PAIRED POSITIVE, same test: a real population on the same board does
+            // double the controller's creatures, so the resolver is not inert.
+            let ability = resolution_timed(
+                Effect::MultiplyCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    multiplier: 2,
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+            assert_eq!(state.objects[&ids[0]].counters[&CounterType::Plus1Plus1], 4);
+            assert_eq!(state.objects[&ids[1]].counters[&CounterType::Plus1Plus1], 4);
+            assert_eq!(
+                state.objects[&ids[2]].counters[&CounterType::Plus1Plus1],
+                2,
+                "the opponent's creature stays out of a `controller: You` population"
+            );
+        }
+
+        // HOSTILE FIXTURE: `SelfRef` returns from its own dedicated arm before the
+        // helper is consulted, so the source is still doubled.
+        let (mut state, ids) = two_player_counter_board();
+        let source = ids[0];
+        let ability = resolution_timed(
+            Effect::MultiplyCounter {
+                counter_type: CounterType::Plus1Plus1,
+                multiplier: 2,
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert_eq!(
+            state.objects[&source].counters[&CounterType::Plus1Plus1],
+            4,
+            "SelfRef resolves through its own tier, above the population gate"
+        );
+        assert_eq!(state.objects[&ids[1]].counters[&CounterType::Plus1Plus1], 2);
+        assert_eq!(state.objects[&ids[2]].counters[&CounterType::Plus1Plus1], 2);
+    }
+
+    /// Two creatures for P0 and one for P1, each carrying two +1/+1 counters.
+    fn two_player_counter_board() -> (GameState, [ObjectId; 3]) {
+        let mut state = GameState::new_two_player(42);
+        let mine_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine A".to_string(),
+            Zone::Battlefield,
+        );
+        let mine_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mine B".to_string(),
+            Zone::Battlefield,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [mine_a, mine_b, theirs] {
+            mark_creature(&mut state, id);
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Plus1Plus1, 2);
+        }
+        (state, [mine_a, mine_b, theirs])
     }
 
     /// T4 (counter resolver arm) — CR 608.2c + CR 122.1: a `PutCounter` whose
@@ -3628,6 +4265,11 @@ mod tests {
                 .contains_key(&CounterType::Plus1Plus1),
             "zero-count +1/+1 entry should be pruned after removal"
         );
+        assert_eq!(
+            state.last_effect_count,
+            Some(1),
+            "effect context records the one counter actually removed, not the requested three"
+        );
     }
 
     #[test]
@@ -4073,7 +4715,7 @@ mod tests {
                 .counters
                 .insert(CounterType::Plus1Plus1, 2);
         }
-        let ability = ResolvedAbility::new(
+        let ability = resolution_timed(
             Effect::MultiplyCounter {
                 counter_type: CounterType::Plus1Plus1,
                 multiplier: 2,
@@ -4911,6 +5553,14 @@ mod tests {
                 .len(),
             1
         );
+        assert!(
+            state
+                .active_counter_removals()
+                .expect("counter-removals queue owns its prompt")
+                .in_flight
+                .is_some(),
+            "the paused replacement's removal remains serializable until its actual count settles"
+        );
 
         let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
             .expect("paused CounterRemovals prompt serializes as v2");
@@ -4920,18 +5570,227 @@ mod tests {
             serde_json::from_value(saved).expect("v2 CounterRemovals prompt restores");
         let mut state = restored.into_game_state();
 
-        for _ in 0..8 {
+        for replacement_index in 0..8 {
             if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
                 break;
             }
             apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
                 .expect("production replacement action resumes the counter-removals queue");
             if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
-                assert!(matches!(
-                    state.resolution_stack.last(),
-                    Some(ResolutionFrame::CounterRemovals(_))
-                ));
+                let queue = state
+                    .active_counter_removals()
+                    .expect("re-parked counter-removals queue owns the next prompt");
+                assert_eq!(
+                    queue.applied_total,
+                    replacement_index + 1,
+                    "each completed replacement-delayed removal is accumulated before the next re-park"
+                );
+                assert!(queue.in_flight.is_some());
             }
+        }
+
+        assert!(state.active_counter_removals().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_effect_count, Some(2));
+        assert!(state.objects[&source_id].counters.is_empty());
+    }
+
+    /// CR 122.1 + CR 614.1 + CR 608.2h: a v1 save parked an accepted
+    /// counter-removal replacement after removing its current tuple from the
+    /// queue. Restore reconstructs that tuple from `pending_replacement`, so
+    /// accepting the replacement counts it before the queued tail drains.
+    #[test]
+    fn legacy_counter_removal_replacement_pause_recovers_in_flight_removal() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(916),
+            PlayerId(0),
+            "Legacy Counter Removal Source".to_string(),
+            Zone::Battlefield,
+        );
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let source = state
+                .objects
+                .get_mut(&source_id)
+                .expect("counter-removal source exists");
+            source.counters.insert(CounterType::Plus1Plus1, 1);
+            source.counters.insert(charge.clone(), 1);
+        }
+        install_counter_removal_optional_replacement(&mut state);
+        state.waiting_for = WaitingFor::RemoveCountersChoice {
+            player: PlayerId(0),
+            source_id,
+            counter_type: None,
+            available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            pending_effect: Box::new(make_counter_ability(
+                Effect::RemoveCounter {
+                    counter_type: None,
+                    count: QuantityExpr::Fixed { value: -1 },
+                    target: TargetFilter::Any,
+                },
+                source_id,
+            )),
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseCountersToRemove {
+                selections: vec![
+                    CounterRemoveChoice {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: 1,
+                    },
+                    CounterRemoveChoice {
+                        counter_type: charge.clone(),
+                        count: 1,
+                    },
+                ],
+            },
+        )
+        .expect("production removal choice creates its first replacement prompt");
+
+        let queue = state
+            .active_counter_removals()
+            .expect("counter-removals queue owns the paused prompt")
+            .clone();
+        let mut legacy_queue = serde_json::to_value(queue).expect("queue serializes");
+        legacy_queue["source_id"] = serde_json::to_value(source_id).expect("source ID serializes");
+        legacy_queue["remaining"] =
+            serde_json::to_value(vec![(charge.clone(), 1_u32)]).expect("legacy tail serializes");
+        legacy_queue
+            .as_object_mut()
+            .expect("queue is an object")
+            .remove("in_flight");
+
+        let mut v1 = serde_json::to_value(state).expect("paused game state serializes");
+        v1.as_object_mut()
+            .expect("game state is an object")
+            .remove("resolution_stack");
+        v1["pending_counter_removals"] = legacy_queue;
+        v1["resolution_state_version"] = serde_json::json!(1);
+
+        let restored: ResolutionStateWire =
+            serde_json::from_value(v1).expect("v1 counter-removal prompt restores");
+        let mut state = restored.into_game_state();
+        let in_flight = state
+            .active_counter_removals()
+            .expect("restored counter-removals queue owns the prompt")
+            .in_flight
+            .as_ref()
+            .expect("legacy replacement prompt recovers its current removal");
+        assert_eq!(in_flight.removal.object_id, source_id);
+        assert_eq!(in_flight.removal.counter_type, CounterType::Plus1Plus1);
+        assert_eq!(in_flight.removal.count, 1);
+        assert_eq!(in_flight.counter_count_before, 1);
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("replacement choice resumes the legacy counter-removals queue");
+        }
+
+        assert!(state.active_counter_removals().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_effect_count, Some(2));
+        assert!(state.objects[&source_id].counters.is_empty());
+    }
+
+    /// CR 122.1 + CR 614.1 + CR 608.2h: a v1 queue did not retain the actual
+    /// count of a replacement-settled prefix. When its second removal is
+    /// paused, migration reconstructs the current removal from the proposed
+    /// event and seeds the already-consumed prefix from the only v1 evidence:
+    /// requested total minus the unconsumed tail and current request.
+    #[test]
+    fn legacy_counter_removal_replacement_pause_seeds_settled_prefix() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(917),
+            PlayerId(0),
+            "Legacy Counter Removal Prefix Source".to_string(),
+            Zone::Battlefield,
+        );
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let source = state
+                .objects
+                .get_mut(&source_id)
+                .expect("counter-removal source exists");
+            source.counters.insert(CounterType::Plus1Plus1, 1);
+            source.counters.insert(charge.clone(), 1);
+        }
+        install_counter_removal_optional_replacement(&mut state);
+        state.waiting_for = WaitingFor::RemoveCountersChoice {
+            player: PlayerId(0),
+            source_id,
+            counter_type: None,
+            available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            pending_effect: Box::new(make_counter_ability(
+                Effect::RemoveCounter {
+                    counter_type: None,
+                    count: QuantityExpr::Fixed { value: -1 },
+                    target: TargetFilter::Any,
+                },
+                source_id,
+            )),
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseCountersToRemove {
+                selections: vec![
+                    CounterRemoveChoice {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: 1,
+                    },
+                    CounterRemoveChoice {
+                        counter_type: charge.clone(),
+                        count: 1,
+                    },
+                ],
+            },
+        )
+        .expect("first removal creates its replacement prompt");
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("first replacement settles and pauses the second removal");
+
+        let queue = state
+            .active_counter_removals()
+            .expect("counter-removals queue owns the second prompt");
+        assert!(queue.remaining.is_empty());
+        assert_eq!(queue.applied_total, 1);
+        assert!(queue.in_flight.is_some());
+
+        let mut legacy_queue = serde_json::to_value(queue).expect("queue serializes");
+        legacy_queue["source_id"] = serde_json::to_value(source_id).expect("source ID serializes");
+        let legacy_queue_object = legacy_queue.as_object_mut().expect("queue is an object");
+        legacy_queue_object.remove("applied_total");
+        legacy_queue_object.remove("in_flight");
+
+        let mut v1 = serde_json::to_value(state).expect("paused game state serializes");
+        v1.as_object_mut()
+            .expect("game state is an object")
+            .remove("resolution_stack");
+        v1["pending_counter_removals"] = legacy_queue;
+        v1["resolution_state_version"] = serde_json::json!(1);
+
+        let restored: ResolutionStateWire =
+            serde_json::from_value(v1).expect("v1 second counter-removal prompt restores");
+        let mut state = restored.into_game_state();
+        let queue = state
+            .active_counter_removals()
+            .expect("restored counter-removals queue owns the second prompt");
+        assert_eq!(queue.applied_total, 1);
+        assert!(queue.in_flight.is_some());
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("replacement choice resumes the legacy counter-removals queue");
         }
 
         assert!(state.active_counter_removals().is_none());
@@ -7064,5 +7923,173 @@ mod tests {
                  pushed, so a later append still has a queue to land on"
             );
         }
+    }
+
+    /// CR 400.7 + CR 608.2k: End-to-end same-storage-id leave-and-return guard
+    /// for a LIVE `CostPaidObject` consumer.
+    ///
+    /// This resolves a real `PutCounter` effect rather than stopping at target
+    /// resolution, so it exercises the production boundary
+    /// (`resolve_defined_or_targets`) that a `resolved_targets`-only assertion
+    /// cannot reach. The referent is captured BEFORE it departs, the
+    /// incarnation change is asserted explicitly, and a live inherited parent
+    /// target plus an unrelated bystander are on the battlefield throughout —
+    /// so a regression cannot hide behind an empty board.
+    ///
+    /// Paired with
+    /// `cost_paid_object_counter_applies_to_referent_that_never_departed`,
+    /// which drives the same fixture down the acting branch.
+    #[test]
+    fn cost_paid_object_counter_skips_new_incarnation_after_same_id_round_trip() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::CostPaidObjectSnapshot;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let referent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Referent".to_string(),
+            Zone::Battlefield,
+        );
+        let parent_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Inherited Parent Target".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Capture BEFORE departure — capturing after the round trip would
+        // record the NEW incarnation and the test would pass either way.
+        let referent_obj = state.objects.get(&referent).expect("referent exists");
+        let incarnation_before = referent_obj.incarnation;
+        let snapshot = CostPaidObjectSnapshot::capture(
+            referent_obj,
+            referent_obj.snapshot_public_characteristics(),
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::CostPaidObject,
+            },
+            // A live inherited parent target is present, per the review spec.
+            vec![TargetRef::Object(parent_target)],
+            source,
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(snapshot);
+
+        // CR 400.7: battlefield -> graveyard -> battlefield, same storage id.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, referent, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, referent, Zone::Battlefield, &mut events);
+
+        let returned = state.objects.get(&referent).expect("row survives the move");
+        assert_eq!(
+            returned.zone,
+            Zone::Battlefield,
+            "fixture reach-guard: the id must be back on the battlefield, or the \
+             assertions below would hold for the wrong reason"
+        );
+        assert!(
+            returned.incarnation > incarnation_before,
+            "fixture reach-guard: the round trip must have bumped the incarnation \
+             ({} -> {})",
+            incarnation_before,
+            returned.incarnation
+        );
+
+        let resolved = resolve_defined_or_targets(&state, &ability);
+
+        assert!(
+            resolved.is_empty(),
+            "CR 400.7: the returned permanent is a new object, so the live \
+             counter consumer must act on nothing. Got {resolved:?}"
+        );
+        assert!(
+            !resolved.contains(&parent_target),
+            "the live inherited parent target must never be substituted"
+        );
+        assert!(
+            !resolved.contains(&bystander),
+            "the unrelated bystander must never be substituted"
+        );
+    }
+
+    /// CR 608.2k: Paired positive for
+    /// `cost_paid_object_counter_skips_new_incarnation_after_same_id_round_trip`.
+    /// Identical fixture — same live inherited parent target and bystander — but
+    /// the referent never departs, so the live consumer DOES act on it. Without
+    /// this, the negative above could pass simply by never reaching the arm.
+    #[test]
+    fn cost_paid_object_counter_applies_to_referent_that_never_departed() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::CostPaidObjectSnapshot;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let referent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Referent".to_string(),
+            Zone::Battlefield,
+        );
+        let parent_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Inherited Parent Target".to_string(),
+            Zone::Battlefield,
+        );
+        let _bystander = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+
+        let referent_obj = state.objects.get(&referent).expect("referent exists");
+        let snapshot = CostPaidObjectSnapshot::capture(
+            referent_obj,
+            referent_obj.snapshot_public_characteristics(),
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::CostPaidObject,
+            },
+            vec![TargetRef::Object(parent_target)],
+            source,
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(snapshot);
+
+        let resolved = resolve_defined_or_targets(&state, &ability);
+
+        assert_eq!(
+            resolved,
+            vec![referent],
+            "CR 608.2k: an undeparted cost-paid referent is still the counter \
+             subject, and the inherited parent target does not displace it"
+        );
     }
 }

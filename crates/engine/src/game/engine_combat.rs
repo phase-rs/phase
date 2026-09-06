@@ -268,10 +268,7 @@ pub(super) fn apply_attack_enlist(
     let Some(obj) = state.objects.get(&tapped) else {
         return Ok(());
     };
-    let snapshot = CostPaidObjectSnapshot {
-        object_id: tapped,
-        lki: obj.snapshot_public_characteristics(),
-    };
+    let snapshot = CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics());
 
     // CR 508.1g + CR 702.154b + CR 701.26a: the enlisted creature is tapped to
     // pay an optional attack cost, so route it through the single tap-cost

@@ -785,18 +785,17 @@ export function useDeckBuilder({
     });
   }, []);
 
-  // Compute CMC and color arrays for ManaCurve
+  // Card metadata supplies CMCs; the engine supplies color identities.
   const cmcValues: number[] = [];
-  const colorValues: string[] = [];
   for (const entry of deck.main) {
     const card = cardDataCache.get(entry.name);
     if (card) {
       for (let i = 0; i < entry.count; i++) {
         cmcValues.push(card.cmc);
-        colorValues.push(card.color_identity?.join("") ?? "");
       }
     }
   }
+  const colorDistribution = compatibility?.color_distribution ?? [];
 
   const cardCounts = new Map(deck.main.map((entry) => [entry.name, entry.count]));
   for (const commander of commanders) {
@@ -849,7 +848,7 @@ export function useDeckBuilder({
     estimate,
     auditEmptyReason,
     cmcValues,
-    colorValues,
+    colorDistribution,
     cardCounts,
     warnings,
     // Handlers

@@ -18,6 +18,7 @@ import {
   normalizeVirtualBasicCount,
 } from "../components/draft/workspace/workspaceMigration";
 import {
+  appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
   makeInteractiveVirtualBasicInstanceId,
   reconcileWorkspaceState,
@@ -491,8 +492,7 @@ function applyDestination(
   for (const instanceId of instanceIds) {
     const placement = next.placements[instanceId];
     if (!placement) continue;
-    next = updateWorkspacePlacement(next, pool, instanceId, {
-      ...placement,
+    next = appendWorkspaceInstanceToResolvedDestination(next, pool, instanceId, {
       zone: destination,
       column: placementHint?.column ?? placement.column,
       row: placementHint?.row ?? placement.row,
@@ -1037,7 +1037,10 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     });
   },
 
-  selectCard: (selectedCard) => set({ selectedCard }),
+  selectCard: (selectedCard) => {
+    if (get().pickInteractionLocked) return;
+    set({ selectedCard });
+  },
 
   addBasicLand: (name) => {
     const state = get();

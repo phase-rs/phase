@@ -163,9 +163,10 @@ fn commander_draft_deck_allows_duplicates_but_enforces_color_identity() {
         !compatible,
         "a card outside the commander's colour identity must be rejected"
     );
-    assert!(
-        reasons.iter().any(|r| r.contains("color identity")),
-        "expected a colour-identity reason, got {reasons:?}"
+    assert_eq!(
+        reasons,
+        vec!["Cards outside commander's color identity: Off Color Card"],
+        "the engine must retain the exact named colour-identity reason"
     );
 }
 
@@ -209,12 +210,13 @@ fn commander_draft_enforces_a_minimum_deck_size_and_no_maximum() {
 #[test]
 fn commander_draft_suppresses_the_singleton_rule() {
     let db = test_db();
-    let main = deck(100, 4);
+    let draft_main = deck(60, 4);
+    let constructed_main = deck(100, 4);
 
     for summary_only in [false, true] {
         let draft = DeckCompatibilityRequest {
             summary_only,
-            ..request(main.clone(), vec![COMMANDER.to_string()])
+            ..request(draft_main.clone(), vec![COMMANDER.to_string()])
         };
         let (compatible, reasons) = verdict(&db, &draft);
         assert!(
@@ -229,7 +231,7 @@ fn commander_draft_suppresses_the_singleton_rule() {
         let constructed = DeckCompatibilityRequest {
             selected_format: Some(GameFormat::Commander),
             summary_only,
-            ..request(main.clone(), vec![COMMANDER.to_string()])
+            ..request(constructed_main.clone(), vec![COMMANDER.to_string()])
         };
         let (_, reasons) = verdict(&db, &constructed);
         assert!(

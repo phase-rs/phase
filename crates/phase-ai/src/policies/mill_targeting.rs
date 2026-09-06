@@ -141,7 +141,7 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, Chooser, QuantityExpr, ResolvedAbility, TargetFilter,
-        ZoneOwner,
+        ZoneChoiceCandidateSource, ZoneOwner,
     };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::{CardId, ObjectId};
@@ -177,7 +177,9 @@ mod tests {
             additional_zones: Vec::new(),
             zone_owner: ZoneOwner::Controller,
             filter: None,
-            chooser: Chooser::Controller,
+            chooser: Chooser::Controller.into(),
+            candidate_source: ZoneChoiceCandidateSource::Legacy,
+            reciprocal_role: None,
             up_to: false,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             constraint: None,

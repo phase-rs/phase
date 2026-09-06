@@ -437,7 +437,7 @@ export function CardPoolBoard({
       touchDragEnabled={touchDragEnabled}
       touchScrollEnabled={touchScrollEnabled}
       makeDragSource={makeDragSource}
-      registerRoot={registerColumn?.(zone, column.column)}
+      registerCardArea={registerColumn?.(zone, column.column)}
       registerCard={(instanceId) => (element) => {
         if (element === null) cardRefs.current.delete(instanceId);
         else cardRefs.current.set(instanceId, element);
@@ -490,8 +490,8 @@ export function CardPoolBoard({
         )}
         {visualColumnCap === undefined ? (
           <div className={model.rowCount === 2
-          ? "grid w-full grid-cols-[2rem_minmax(0,1fr)] grid-rows-[auto_auto_auto] gap-x-2 p-2"
-          : "flex w-full gap-2 p-2"
+          ? "grid w-full grid-cols-[2rem_minmax(0,1fr)] grid-rows-[auto_auto_auto] gap-x-2 p-6"
+          : "flex w-full gap-2 p-6"
           }>
           {model.rowCount === 2 && (
             <div
@@ -527,7 +527,7 @@ export function CardPoolBoard({
           </div>
           </div>
         ) : (
-          <div data-board-columns className="grid min-w-0 gap-y-2 p-2">
+          <div data-board-columns className="grid min-w-0 gap-y-2 p-6">
             {visualColumnGroups.map((columns, groupIndex) => (
               model.rowCount === 2 ? (
                 <div

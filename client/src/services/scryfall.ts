@@ -1,13 +1,19 @@
 import type { GameFormat, TokenImageRef } from "../adapter/types";
 import type { CardImageSource, ImageRungs } from "./visualPacks/types.ts";
 
+interface ScryfallImageFace {
+  small?: string | null;
+  normal?: string | null;
+  art_crop?: string | null;
+}
+
 interface ScryfallDataEntry {
   oracle_id: string;
   /** Lowercased face names in Scryfall's `card_faces` order; one entry for
    * single-faced cards. Used to resolve `faceIndex` from an engine-reported
    * `printed_ref.face_name`. */
   face_names: string[];
-  faces: Array<{ small?: string; normal: string; art_crop: string }>;
+  faces: ScryfallImageFace[];
   layout?: string;
   name: string;
   mana_cost: string;
@@ -34,14 +40,72 @@ interface ScryfallDataEntry {
 export const CARD_BACK_URL =
   "https://backs.scryfall.io/normal/0/a/0aeebaf5-8c7d-4636-9e82-8c27447861f7.jpg";
 
-/** Build the authoritative Scryfall source URL for an admitted mana shard. */
-export function manaSymbolSourceUrl(shard: string): string {
-  const code = shard === "∞"
+declare const manaSymbolShardBrand: unique symbol;
+/** A mana shard string admitted by the finite Scryfall card-symbol catalog. */
+export type ManaSymbolShard = string & { readonly [manaSymbolShardBrand]: true };
+
+/**
+ * The catalog below is the COMPLETE set published by Scryfall's `/symbology`
+ * endpoint — all 84 symbols, every one of which has an SVG asset.
+ *
+ * "Complete" is the definition on purpose, rather than "the ones we happen to
+ * have needed". A symbol missing from here is not merely un-rendered: it is
+ * also never installed by `coreDescriptors()`, so it breaks offline in exactly
+ * the way this catalog exists to prevent. `manaSymbolCatalog.test.ts` pins the
+ * full expected set against an independently-authored literal, because a test
+ * that derives its expectation from `MANA_SYMBOL_SHARDS` cannot see an omission.
+ */
+const SINGLE_MANA_SYMBOL_SHARDS = [
+  "W", "U", "B", "R", "G", "C", "S", "T", "Q", "E", "P", "X", "Y", "Z", "A", "∞", "½", "CHAOS",
+  // One colored mana or two life, one-half white/red mana, one mana from a
+  // legendary source, one potential land drop, planeswalker, ticket counter.
+  "H", "HW", "HR", "L", "D", "PW", "TK",
+] as const;
+const COMPOSITE_MANA_SYMBOL_SHARDS = [
+  "W/U", "W/B", "U/B", "U/R", "B/R", "B/G", "R/W", "R/G", "G/W", "G/U",
+  "2/W", "2/U", "2/B", "2/R", "2/G",
+  "W/P", "U/P", "B/P", "R/P", "G/P",
+  "W/U/P", "W/B/P", "U/B/P", "U/R/P", "B/R/P", "B/G/P", "R/W/P", "R/G/P", "G/W/P", "G/U/P",
+  "C/W", "C/U", "C/B", "C/R", "C/G",
+  // Colorless Phyrexian: one colorless mana or two life.
+  "C/P",
+] as const;
+const FINITE_NUMERIC_MANA_SYMBOL_SHARDS: readonly string[] = [
+  ...Array.from({ length: 21 }, (_, value) => String(value)),
+  "100",
+  "1000000",
+];
+const MANA_SYMBOL_SHARD_SET = new Set<string>([
+  ...SINGLE_MANA_SYMBOL_SHARDS,
+  ...COMPOSITE_MANA_SYMBOL_SHARDS,
+  ...FINITE_NUMERIC_MANA_SYMBOL_SHARDS,
+]);
+
+/** True when `shard` has a corresponding Scryfall card-symbol SVG. */
+export function isManaSymbolShard(shard: string): shard is ManaSymbolShard {
+  return MANA_SYMBOL_SHARD_SET.has(shard);
+}
+
+/** Every admitted mana shard, for callers that must enumerate the whole
+ *  finite catalog (e.g. pre-caching every symbol for offline play). */
+export const MANA_SYMBOL_SHARDS: readonly ManaSymbolShard[] =
+  Array.from(MANA_SYMBOL_SHARD_SET) as ManaSymbolShard[];
+
+/** The URL- and asset-key-safe code for an admitted mana shard: strips the
+ *  hybrid/Phyrexian slash separators and spells out the two symbols with no
+ *  ASCII representation, matching Scryfall's `card-symbols` filenames. Also
+ *  usable verbatim as an `[A-Za-z0-9_-]+` visual-pack asset-key suffix. */
+export function manaSymbolCode(shard: string): string {
+  return shard === "∞"
     ? "INFINITY"
     : shard === "½"
       ? "HALF"
       : shard.replace(/\//g, "");
-  return `https://svgs.scryfall.io/card-symbols/${encodeURIComponent(code)}.svg`;
+}
+
+/** Build the authoritative Scryfall source URL for an admitted mana shard. */
+export function manaSymbolSourceUrl(shard: string): string {
+  return `https://svgs.scryfall.io/card-symbols/${encodeURIComponent(manaSymbolCode(shard))}.svg`;
 }
 
 export interface PrintingEntry {
@@ -53,7 +117,7 @@ export interface PrintingEntry {
   border_color: string;
   frame_effects: string[];
   full_art: boolean;
-  faces: Array<{ small?: string; normal: string; art_crop: string }>;
+  faces: ScryfallImageFace[];
 }
 
 type ScryfallDataMap = Record<string, ScryfallDataEntry>;
@@ -68,16 +132,86 @@ let printingsDataPromise: Promise<PrintingsDataMap | null> | null = null;
 let tokenImagesDataPromise: Promise<TokenImagesDataMap | null> | null = null;
 let scryfallQueue: Promise<void> = Promise.resolve();
 
+function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isScryfallImageFace(value: unknown): value is ScryfallImageFace {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const face = value as ScryfallImageFace;
+  return (face.small === undefined || face.small === null || typeof face.small === "string")
+    && (face.normal === undefined || face.normal === null || typeof face.normal === "string")
+    && (face.art_crop === undefined || face.art_crop === null || typeof face.art_crop === "string");
+}
+
+function isScryfallDataEntry(value: unknown): value is ScryfallDataEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Partial<ScryfallDataEntry>;
+  return typeof entry.oracle_id === "string"
+    && typeof entry.name === "string"
+    && typeof entry.mana_cost === "string"
+    && typeof entry.cmc === "number"
+    && typeof entry.type_line === "string"
+    && isStringArray(entry.face_names)
+    && isStringArray(entry.colors)
+    && isStringArray(entry.color_identity)
+    && isStringArray(entry.keywords)
+    && (entry.layout === undefined || typeof entry.layout === "string")
+    && Array.isArray(entry.faces)
+    && entry.faces.length > 0
+    && entry.faces.every(isScryfallImageFace);
+}
+
+function isScryfallDataMap(value: unknown): value is ScryfallDataMap {
+  return isNonEmptyRecord(value) && Object.values(value).every(isScryfallDataEntry);
+}
+
+function isPrintingEntry(value: unknown): value is PrintingEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Partial<PrintingEntry>;
+  return typeof entry.id === "string"
+    && typeof entry.set === "string"
+    && typeof entry.set_name === "string"
+    && typeof entry.collector_number === "string"
+    && typeof entry.released_at === "string"
+    && typeof entry.border_color === "string"
+    && isStringArray(entry.frame_effects)
+    && typeof entry.full_art === "boolean"
+    && Array.isArray(entry.faces)
+    && entry.faces.length > 0
+    && entry.faces.every(isScryfallImageFace);
+}
+
+function isPrintingsDataMap(value: unknown): value is PrintingsDataMap {
+  return isNonEmptyRecord(value)
+    && Object.values(value).every((printings) =>
+      Array.isArray(printings) && printings.length > 0 && printings.every(isPrintingEntry));
+}
+
 export function loadScryfallData(): Promise<ScryfallDataMap | null> {
   if (!scryfallDataPromise) {
-    scryfallDataPromise = fetch(__SCRYFALL_DATA_URL__)
-      .then((r) => r.json() as Promise<ScryfallDataMap>)
-      .then((data) => {
-        scryfallDataResolved = data;
-        scryfallFoldedNameIndex = buildFoldedNameIndex(data);
-        return data;
-      })
+    const pending = (async () => {
+      const response = await fetch(__SCRYFALL_DATA_URL__);
+      if (!response.ok) return null;
+      const data: unknown = await response.json();
+      if (!isScryfallDataMap(data)) return null;
+      const foldedNameIndex = buildFoldedNameIndex(data);
+      scryfallDataResolved = data;
+      scryfallFoldedNameIndex = foldedNameIndex;
+      return data;
+    })()
       .catch(() => null);
+    scryfallDataPromise = pending;
+    void pending.then((data) => {
+      if (!data && scryfallDataPromise === pending) scryfallDataPromise = null;
+    });
   }
   return scryfallDataPromise;
 }
@@ -86,13 +220,19 @@ let printingsDataResolved: PrintingsDataMap | null = null;
 
 export function loadPrintingsData(): Promise<PrintingsDataMap | null> {
   if (!printingsDataPromise) {
-    printingsDataPromise = fetch(__SCRYFALL_PRINTINGS_URL__)
-      .then((r) => r.json() as Promise<PrintingsDataMap>)
-      .then((data) => {
-        printingsDataResolved = data;
-        return data;
-      })
+    const pending = (async () => {
+      const response = await fetch(__SCRYFALL_PRINTINGS_URL__);
+      if (!response.ok) return null;
+      const data: unknown = await response.json();
+      if (!isPrintingsDataMap(data)) return null;
+      printingsDataResolved = data;
+      return data;
+    })()
       .catch(() => null);
+    printingsDataPromise = pending;
+    void pending.then((data) => {
+      if (!data && printingsDataPromise === pending) printingsDataPromise = null;
+    });
   }
   return printingsDataPromise;
 }
@@ -493,7 +633,7 @@ function localizeImageUrl(url: string): string {
  * history. Do not "fix" this without measuring that memory cost.
  */
 function localFaceImageUrl(
-  face: { small?: string; normal: string; art_crop: string } | undefined,
+  face: ScryfallImageFace | undefined,
   size: ImageSize,
 ): string | undefined {
   if (!face) return undefined;
@@ -502,9 +642,14 @@ function localFaceImageUrl(
   // lookup), rather than in each caller. Size derivation and localization
   // commute — `deriveImageUrl` rewrites segment 1, `localizeImageUrl` rewrites
   // segments 3-5 — so the order below is immaterial.
-  if (size === "art_crop") return localizeImageUrl(face.art_crop);
-  if (size === "small") return localizeImageUrl(face.small ?? deriveImageUrl(face.normal, "small"));
-  return localizeImageUrl(face.normal);
+  if (size === "art_crop") {
+    return face.art_crop ? localizeImageUrl(face.art_crop) : undefined;
+  }
+  if (size === "small") {
+    const url = face.small ?? (face.normal ? deriveImageUrl(face.normal, "small") : undefined);
+    return url ? localizeImageUrl(url) : undefined;
+  }
+  return face.normal ? localizeImageUrl(face.normal) : undefined;
 }
 
 export interface CardImageAsset {
@@ -759,6 +904,19 @@ export interface LocalSearchCardOverrides {
   legalities: Record<string, string>;
 }
 
+function localFaceImageUris(face: ScryfallImageFace): Record<string, string> | undefined {
+  const imageUris: Record<string, string> = {};
+  const artCrop = localFaceImageUrl(face, "art_crop");
+  const normal = localFaceImageUrl(face, "normal");
+  const small = localFaceImageUrl(face, "small");
+  const large = localFaceImageUrl(face, "large");
+  if (artCrop) imageUris.art_crop = artCrop;
+  if (normal) imageUris.normal = normal;
+  if (small) imageUris.small = small;
+  if (large) imageUris.large = large;
+  return Object.keys(imageUris).length > 0 ? imageUris : undefined;
+}
+
 /**
  * Build a display `ScryfallCard` for an engine search result. Rules data comes
  * from the engine (the `overrides`); presentation data — artwork, printed type
@@ -784,14 +942,7 @@ export function buildLocalSearchCard(overrides: LocalSearchCardOverrides): Scryf
     color_identity: overrides.colorIdentity,
     keywords: entry?.keywords ?? [],
     legalities: overrides.legalities,
-    image_uris: face
-      ? {
-          art_crop: localFaceImageUrl(face, "art_crop") ?? face.art_crop,
-          normal: localFaceImageUrl(face, "normal") ?? face.normal,
-          small: localFaceImageUrl(face, "small") ?? face.small ?? deriveImageUrl(face.normal, "small"),
-          large: localFaceImageUrl(face, "large") ?? face.normal,
-        }
-      : undefined,
+    image_uris: face ? localFaceImageUris(face) : undefined,
   };
 }
 

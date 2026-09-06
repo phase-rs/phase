@@ -26,7 +26,6 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Pomijaj rzadko używane okna priorytetu (eksperymentalne)",
     "skipLowUsePriorityWindowsDescription": "Automatycznie pomijaj własne okna priorytetu przy pustym stosie podczas kroku utrzymania, dobierania i końcowego. Zatrzymania faz oraz Pełna kontrola nadal wstrzymują grę.",
-    "logDefault": "Domyślny dziennik",
     "logDockSide": "Pozycja dziennika gry",
     "spellPayment": "Płatność za czary",
     "manualManaPayment": "Ręczna płatność many za czary",
@@ -56,10 +55,6 @@
       "small": "Małe",
       "medium": "Średnie",
       "large": "Duże"
-    },
-    "logDefaultOptions": {
-      "open": "Otwarty",
-      "closed": "Zamknięty"
     },
     "logDockSideOptions": {
       "left": "Lewo",
@@ -177,6 +172,7 @@
     "signedInAs": "Zalogowano jako {{name}}",
     "syncNow": "Synchronizuj teraz",
     "statusSyncing": "Synchronizowanie…",
+    "statusPaused": "Synchronizacja w chmurze jest wstrzymana, gdy nie masz połączenia z internetem.",
     "statusError": "Synchronizacja nie powiodła się",
     "lastSynced": "Ostatnia synchronizacja: {{time}}",
     "never": "nigdy",
@@ -216,6 +212,7 @@
   "visualPacks": {
     "title": "Katalog wizualny offline",
     "description": "Wybierz, które obrazy zaufanych kart chcesz zachować na tym urządzeniu, lub zainstaluj cały aktualny katalog.",
+    "offlineUnavailable": "Pobieranie z sieci jest niedostępne w trybie offline. Połącz się ponownie, aby zaktualizować katalog lub instalować, synchronizować, naprawiać albo wznawiać obrazy.",
     "availability": {
       "loading": "Sprawdzam obsługę katalogu wizualnego offline…",
       "browser": "Pobieranie obrazów offline nie jest skonfigurowane w tej kompilacji.",
@@ -404,6 +401,23 @@
       "combat": "Czas obrażeń bojowych — jak długo blokujący i atakujący pozostają, zanim obrażenia zostaną rozpatrzone.",
       "banners": "Wyświetlanie banera na początku tury."
     }
+  },
+  "offlinePreparation": {
+    "title": "Przygotowanie offline",
+    "description": "Przygotuj to urządzenie do lokalnej gry offline przed włączeniem pracy offline.",
+    "prepare": "Przygotuj do pracy offline",
+    "preparing": "Przygotowywanie…",
+    "workOffline": "Pracuj offline",
+    "checklistLabel": "Lista gotowości offline",
+    "visualWarning": "Zainstalowane pakiety wizualne wymagają uwagi. Otwórz Pakiety wizualne, aby je naprawić; gra lokalna pozostaje dostępna.",
+    "cardArtMissing": "Nie zainstalowano żadnych obrazów kart. Karty będą wyświetlane offline bez grafiki — zainstaluj pakiet w Pakietach wizualnych poniżej.",
+    "cardArtInstalled": "Zapisane obrazy kart: {{packs}}",
+    "incompleteTitle": "Przygotowanie offline jest niepełne",
+    "incompleteMessage": "Brakuje: {{capabilities}}. Mimo to włączyć pracę offline?",
+    "confirmOffline": "Włącz pracę offline",
+    "states": { "needs-preparation": "Przygotuj to urządzenie przed pracą offline.", "preparing": "Przygotowywanie możliwości gry lokalnej…", "ready": "To urządzenie jest gotowe do lokalnej gry offline.", "failed": "Niektóre wymagane możliwości nie są gotowe.", "reconnect-required": "Połącz się ponownie przed przygotowaniem gry offline.", "reload-or-relaunch-required": "Odśwież aplikację lub uruchom ponownie desktop, a następnie spróbuj ponownie." },
+    "capabilities": { "appShell": "Powłoka aplikacji", "browserEngine": "Silnik przeglądarki i baza kart", "scryfallSearch": "Dane wyszukiwania", "preconCatalog": "Wygenerowane talie", "bundledAiCatalog": "Katalog talii SI", "deckLibrary": "Zainstalowana biblioteka talii", "coreVisuals": "Rewers karty i symbole many", "nativeEngine": "Silnik natywny" },
+    "capabilityStates": { "ready": "Gotowe", "not-ready": "Nie gotowe", "reload-required": "Wymagane odświeżenie", "not-applicable": "Nie dotyczy", "not-installed": "Nie zainstalowano" }
   },
   "artChain": {
     "emptyState": "Używanie domyślnej grafiki Scryfall. Dodaj reguły poniżej, aby dostosować.",

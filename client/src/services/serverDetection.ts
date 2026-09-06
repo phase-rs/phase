@@ -2,7 +2,13 @@ import { useMultiplayerStore } from "../stores/multiplayerStore";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   OFFICIAL_MULTIPLAYER_SERVER_URL,
+  parseWebSocketUrl,
 } from "../config/multiplayerServer";
+
+// Re-exported from the config leaf, which needs it to validate the runtime
+// /config.js override and cannot import this module without a cycle. One
+// implementation, and every existing import of it from here still resolves.
+export { parseWebSocketUrl };
 
 const DEFAULT_PORT = 9374;
 
@@ -41,26 +47,20 @@ export function flagForServer(url: string): FlagCode | null {
   return SERVER_PRESETS.find((p) => p.url === url)?.flag ?? null;
 }
 
-export function parseWebSocketUrl(value: string): URL | null {
-  try {
-    const url = new URL(value);
-    if ((url.protocol !== "ws:" && url.protocol !== "wss:") || !url.host) {
-      return null;
-    }
-    return url;
-  } catch {
-    return null;
-  }
-}
-
 export function isValidWebSocketUrl(value: string): boolean {
   return parseWebSocketUrl(value) !== null;
 }
 
 /**
- * The server a game socket must open on: the address the player chose — server
- * picker, or the host carried in a `CODE@host` join code — falling back to this
- * build's default when nothing valid is stored.
+ * The fallback server a socket opens on when the caller carries no explicit
+ * origin: the hosting server the player chose in the server picker, falling
+ * back to this build's default when none is chosen or the stored value is
+ * unusable.
+ *
+ * A join or spectate origin is NOT read from here — it is carried explicitly
+ * by the route (`?server=`) from the source that listed the game, so browsing
+ * one authority and joining another cannot silently switch the player's
+ * hosting target.
  *
  * Reachability is deliberately not consulted. The desktop shell reaches its own
  * native engine over a Tauri IPC bridge (`services/nativeEngineSocket.ts`) on an
@@ -70,8 +70,8 @@ export function isValidWebSocketUrl(value: string): boolean {
  * Stays `async` for its awaiting callers; there is nothing left to wait for.
  */
 export async function detectServerUrl(): Promise<string> {
-  const stored = useMultiplayerStore.getState().serverAddress;
-  return isValidWebSocketUrl(stored) ? stored : DEFAULT_SERVER;
+  const stored = useMultiplayerStore.getState().hostingServer;
+  return stored !== null && isValidWebSocketUrl(stored) ? stored : DEFAULT_SERVER;
 }
 
 /**

@@ -17,6 +17,7 @@ import type {
   UnboundedFamily,
 } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useBoundedLoopRepetitions } from "../../hooks/usePlayerDesignations.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { getKeywordDisplayText } from "../../viewmodel/keywordProps.ts";
@@ -471,36 +472,32 @@ export const UNBOUNDED_FAMILY_LABEL_KEY: Record<UnboundedFamily, string> = {
   triggers: "badges.unboundedTriggers",
 };
 
-/**
- * CR 732.2a: an `∞` badge for one unbounded-resource display family. Rendered
- * once per distinct family per player. The HUD callers pass the engine's
- * `unbounded_families` rows straight through — the engine decides which families
- * are present, on which HUD, and what each one may promise; `LoopShortcutModal`
- * still de-dups a bare axis list with a `Set` and passes no state. This badge only
- * formats the family to a glyph + label.
- */
-// `state` is OPTIONAL and defaults to `Unscheduled` so a caller with no family row in hand renders
-// today's bare-`∞` badge unchanged. `LoopShortcutModal`'s FamilyBadges is exactly that caller and
-// stays that way on purpose: it renders at OFFER time, before any player has accepted, so nothing
-// can be scheduled.
+/** CR 732.2a: a badge for one unbounded-resource display family. */
 export function UnboundedBadge({
   family,
-  state = { type: "Unscheduled" },
+  state,
 }: {
   family: UnboundedFamily;
+  /** The engine's published `unbounded_families` row behind this badge. ABSENT means this badge
+   *  is not backed by a published `∞` row. */
   state?: FamilyCollapseState;
 }) {
   const { t } = useTranslation("game");
   const resource = t(UNBOUNDED_FAMILY_LABEL_KEY[family]);
-  // Both hooks are called UNCONDITIONALLY, before any branch — rules of hooks. No render site
+  // The hooks are called UNCONDITIONALLY, before any branch — rules of hooks. No render site
   // changed: the badge resolves the viewer itself rather than taking it as a prop.
   const viewer = usePlayerId();
   const spectating = useSpectatorMode();
+  const boundedRepetitions = useBoundedLoopRepetitions();
+  // CR 732.2a: a badge with no published `∞` row behind it, while the engine states a repetition
+  // ceiling for the open window, names that ceiling instead of an unbounded glyph.
+  const bound = state === undefined ? boundedRepetitions : null;
+  const collapse: FamilyCollapseState = state ?? { type: "Unscheduled" };
   // A `Committed` scheduled collapse is an accepted-but-unapplied bound, and N is named at the
   // next step/phase end by the loop's CONTROLLER — who is NOT necessarily the seat this badge sits
   // on: the row is keyed by the engine's attribution player, which for `Life`/`DamageDealt`/
   // `LibraryDelta`/`Poison` axes is the victim, and the badge also renders on opponent HUDs. The
-  // engine now publishes that controller as `state.data.prompted`, so the copy can address the
+  // engine now publishes that controller as `collapse.data.prompted`, so the copy can address the
   // seat that will actually be asked, and falls back to the passive voice for everyone else.
   // `Conditional` promises no bound at all, which is why it keeps its own copy in both voices.
   // The window itself is CR 732.2c's advance to the shortcut's ending point; this only reports
@@ -524,15 +521,16 @@ export function UnboundedBadge({
   // read "you'll name the count" to every spectator. `useSpectatorMode()`'s predicate is exactly
   // the union of `useCanActForWaitingState`'s two spectator gates, so this badge is never more
   // permissive than the submit authority it is describing.
-  const you = !spectating && state.type === "Scheduled" && state.data.prompted === viewer;
+  const you = !spectating && collapse.type === "Scheduled" && collapse.data.prompted === viewer;
   const title = ((): string => {
-    switch (state.type) {
+    if (bound !== null) return t("badges.boundedLoopTooltip", { resource, bound });
+    switch (collapse.type) {
       case "Unscheduled":
         return t("badges.unboundedTooltip", { resource });
       case "Mixed":
         return t("badges.unboundedMixedTooltip", { resource });
       case "Scheduled":
-        return state.data.certainty === "Committed"
+        return collapse.data.certainty === "Committed"
           ? t(you ? "badges.unboundedScheduledYouTooltip" : "badges.unboundedScheduledTooltip", {
               resource,
             })
@@ -558,7 +556,8 @@ export function UnboundedBadge({
             the same reason its tooltip is. */}
         <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">
           {((): string => {
-            switch (state.type) {
+            if (bound !== null) return t("badges.boundedLoopGlyph", { bound });
+            switch (collapse.type) {
               // `Mixed` renders a BARE `∞`: part of this family has a pending collapse and part
               // does not, and one glyph cannot say two things, so it says the weaker true one.
               case "Unscheduled":
@@ -567,7 +566,7 @@ export function UnboundedBadge({
               // The GLYPH is not person-dependent: `∞→N` / `∞→?` says what will land, not who is
               // asked. Only the tooltip changes voice.
               case "Scheduled":
-                return state.data.certainty === "Committed"
+                return collapse.data.certainty === "Committed"
                   ? t("badges.unboundedScheduledGlyph")
                   : t("badges.unboundedConditionalGlyph");
             }

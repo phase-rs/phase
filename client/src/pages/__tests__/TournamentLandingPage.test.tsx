@@ -203,7 +203,7 @@ beforeEach(() => {
   localStorageMock.items.clear();
   useMultiplayerStore.setState({
     tournamentCredentials: {},
-    serverAddress: "ws://localhost:8787",
+    hostingServer: "ws://localhost:8787",
     displayName: "",
   });
 });

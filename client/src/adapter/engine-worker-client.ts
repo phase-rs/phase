@@ -24,7 +24,11 @@ import {
   AdapterErrorCode,
   isActionRejection,
 } from "./types";
-import type { InteractionSubmission } from "./generated/interaction";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
@@ -323,6 +327,16 @@ export class EngineWorkerClient {
   async previewManaPayment(actor: number, action: GameAction): Promise<number[]> {
     return this.request<number[]>(
       { type: "previewManaPayment", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async previewInteraction(
+    actor: number,
+    request: InteractionPreviewRequest,
+  ): Promise<InteractionPreview> {
+    return this.request<InteractionPreview>(
+      { type: "previewInteraction", actor, request },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

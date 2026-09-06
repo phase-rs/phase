@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { manaSymbolSourceUrl } from "../services/scryfall.ts";
+import { manaSymbolSourceUrl, type ManaSymbolShard } from "../services/scryfall.ts";
 import { manaSymbolCandidate } from "../services/visualPacks/candidateKeys.ts";
 import { visualPackRepository } from "../services/visualPacks/repository.ts";
 import type {
   CandidateKey,
   CardImageSource,
 } from "../services/visualPacks/types.ts";
+import { useEffectiveOffline } from "../stores/connectivityStore.ts";
 import { nextImageSourceIndex } from "./imageSourceLadder.ts";
 
 export interface UseFixedVisualImageResult {
@@ -16,20 +17,18 @@ export interface UseFixedVisualImageResult {
   advanceFailedSource(failedSrc: string): void;
 }
 
-declare const manaSymbolShardBrand: unique symbol;
-export type ManaSymbolShard = string & { readonly [manaSymbolShardBrand]: true };
-
 /** Resolve one fixed visual without synthesizing responsive companion rungs. */
 export function useFixedVisualImage(
   candidate: CandidateKey | null,
   remoteSrc: string | null,
 ): UseFixedVisualImageResult {
+  const effectiveOffline = useEffectiveOffline();
   const [repositoryRevision, setRepositoryRevision] = useState(
     visualPackRepository.currentRevision(),
   );
   const requestKey = useMemo(
-    () => JSON.stringify([candidate, remoteSrc, repositoryRevision]),
-    [candidate, remoteSrc, repositoryRevision],
+    () => JSON.stringify([candidate, remoteSrc, effectiveOffline, repositoryRevision]),
+    [candidate, remoteSrc, effectiveOffline, repositoryRevision],
   );
   const [stateRequestKey, setStateRequestKey] = useState<string | null>(null);
   const [sources, setSources] = useState<CardImageSource[]>([]);
@@ -62,6 +61,7 @@ export function useFixedVisualImage(
     void visualPackRepository.resolve({
       groups: [{ requested: [candidate] }],
       rung: "normal",
+      allowRemote: !effectiveOffline,
       remote: remoteSrc ? { src: remoteSrc } : null,
     }).then((result) => {
       if (cancelled) return;
@@ -73,7 +73,7 @@ export function useFixedVisualImage(
     return () => {
       cancelled = true;
     };
-  }, [candidate, remoteSrc, requestKey]);
+  }, [candidate, effectiveOffline, remoteSrc, requestKey]);
 
   const advanceFailedSource = useCallback((failedSrc: string) => {
     if (failedSources.current.generation !== requestKey) return;

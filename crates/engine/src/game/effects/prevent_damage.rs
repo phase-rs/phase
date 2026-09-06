@@ -115,11 +115,15 @@ pub(crate) fn resolve_source_filter(
             if !has_chosen_ref {
                 return filter.clone();
             }
-            // Resolve IsChosenColor → concrete HasColor using source's chosen attributes.
+            // CR 608.2d: Resolve IsChosenColor -> concrete HasColor using
+            // the source's CURRENT chosen color. The shield is resolved into a
+            // concrete filter once, when it is CREATED (this function), so it
+            // must read whichever answer is current at that moment — the same
+            // "current answer" `game/filter.rs`'s two `IsChosenColor` arms read.
             let chosen_color = state
                 .objects
                 .get(&source_id)
-                .and_then(|obj| obj.chosen_color());
+                .and_then(|obj| obj.current_chosen_color());
             let mut resolved = tf.clone();
             resolved
                 .properties

@@ -492,7 +492,11 @@ pub struct GameObject {
     /// CR 702.16p: Per [`StaticGateKey::def_index`] on this source and enchanted
     /// host, the controlled attachments matching that effect's resolved protection
     /// quality when it first started applying to that host.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        with = "crate::types::deterministic_serde::hash_map_entries"
+    )]
     pub protection_start_exempt_attachments:
         HashMap<ProtectionEffectHostKey, ProtectionStartSnapshot>,
     /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:
@@ -2968,9 +2972,34 @@ impl GameObject {
         !super::coverage::unimplemented_mechanics(self).is_empty()
     }
 
-    /// Look up a stored choice by category.
+    /// CR 607.2d: the LINKED read — "the chosen color" as a linked
+    /// anaphoric reader means "what did this object's own supplier choose".
+    /// Oldest-since-entry (first match): `chosen_attributes` is cleared only
+    /// on leave-battlefield, so this is the object's FIRST recorded colour.
+    /// Sibling of `current_chosen_color` (newest) — see that doc for why the
+    /// two accessors read different ends of the same list.
     pub fn chosen_color(&self) -> Option<ManaColor> {
         self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Color(c) => Some(*c),
+            _ => None,
+        })
+    }
+
+    /// CR 608.2d: "the current answer" — the most recently chosen
+    /// colour. Newest (last match), the `.rev()` idiom `chosen_card_name`
+    /// already uses. Called by ONE of `game/filter.rs`'s two `IsChosenColor`
+    /// arms; the other inlines the same `.rev()` scan because its `source` is a
+    /// `SourceContext` carrying its own `chosen_attributes`, not a `GameObject`,
+    /// so it cannot reach this accessor. Also read by
+    /// `game/effects/prevent_damage.rs`'s prevention-shield read, both of
+    /// which want the current answer rather than the historical (CR 607.2d)
+    /// one `chosen_color` returns. Drift guard: if this object can hold more
+    /// than one `ChosenAttribute::Color` (Wash Out / Prismatic Strands
+    /// recast, or a re-activated persisting chooser), `chosen_color` and
+    /// `current_chosen_color` can disagree — that disagreement is the whole
+    /// point of the split, not a bug.
+    pub fn current_chosen_color(&self) -> Option<ManaColor> {
+        self.chosen_attributes.iter().rev().find_map(|a| match a {
             ChosenAttribute::Color(c) => Some(*c),
             _ => None,
         })

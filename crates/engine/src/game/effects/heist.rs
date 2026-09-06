@@ -128,6 +128,7 @@ pub fn resolve(
         up_to: false,
         constraint: None,
         source_id,
+        reciprocal_role: None,
     };
 
     events.push(GameEvent::EffectResolved {

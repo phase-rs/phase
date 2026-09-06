@@ -20,7 +20,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { MotionGlobalConfig } from "framer-motion";
 
 import { GamePage } from "../GamePage";
@@ -44,6 +44,8 @@ let capturedOnNoDeck: ((reason?: string, bracketViolation?: boolean) => void) | 
 let capturedFormatConfig: FormatConfig | undefined;
 let capturedOnWsEvent: ((event: WsAdapterEvent) => void) | undefined;
 let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
+// The join/spectate origin the route carried, handed down as a provider prop.
+let capturedServerUrl: string | undefined;
 
 const { mockClearPromptOverlayState, mockIsMobile, mockSetGameState, storeOverrides } = vi.hoisted(() => ({
   mockClearPromptOverlayState: vi.fn(),
@@ -57,6 +59,7 @@ const { mockClearPromptOverlayState, mockIsMobile, mockSetGameState, storeOverri
     gameState: null as unknown,
     gameMode: null as unknown,
     waitingFor: null as unknown,
+    activationBlockReasons: {} as Record<string, Array<{ ability_index: number; type: string }>>,
   },
 }));
 
@@ -105,17 +108,20 @@ vi.mock("../../providers/GameProvider", () => ({
     onWsEvent,
     onP2PEvent,
     formatConfig,
+    serverUrl,
   }: {
     children: React.ReactNode;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
     onWsEvent?: (event: WsAdapterEvent) => void;
     onP2PEvent?: (event: P2PAdapterEvent) => void;
     formatConfig?: FormatConfig;
+    serverUrl?: string;
   }) => {
     capturedOnNoDeck = onNoDeck;
     capturedOnWsEvent = onWsEvent;
     capturedOnP2PEvent = onP2PEvent;
     capturedFormatConfig = formatConfig;
+    capturedServerUrl = serverUrl;
     return <>{children}</>;
   },
 }));
@@ -156,6 +162,10 @@ vi.mock("../../stores/gameStore", async () => ({
         autoPassRecommended: false,
         spellCosts: {},
         legalActionsByObject: {},
+        // CR 118.3: the acting-player "can't pay this cost right now" read-out.
+        // Mutable so a test can seed it; reset in `beforeEach` alongside the
+        // other `storeOverrides` fields.
+        activationBlockReasons: storeOverrides.activationBlockReasons,
         events: [],
         eventHistory: [],
         logHistory: [],
@@ -262,10 +272,33 @@ vi.mock("../../components/modal/CardDataMissingModal", () => ({
 // the rendering boundary lets the test exercise GamePage's module-private
 // AbilityChoiceModal and observe the actual labels it supplies without pulling
 // card-art loading into a label-wiring test.
+// `onChoose` is wired through and called UNCONDITIONALLY — deliberately WITHOUT
+// re-implementing the real `ChoiceModal`'s `opt.disabled` guard. That guard is
+// tested against the real component in
+// `components/modal/__tests__/ChoiceModal.test.tsx`; mirroring it here would
+// make GamePage's OWN `blocked:` / `!action` guard unreachable, and this mock
+// exists precisely so a `blocked:` id can reach it.
 vi.mock("../../components/modal/ChoiceModal", () => ({
-  ChoiceModal: ({ options }: { options: Array<{ id: string; label: string }> }) => (
+  ChoiceModal: ({
+    options,
+    onChoose,
+  }: {
+    options: Array<{ id: string; label: string; description?: string; disabled?: boolean }>;
+    onChoose: (id: string) => void;
+  }) => (
     <div data-testid="ability-choice-options">
-      {options.map((option) => <button key={option.id} type="button">{option.label}</button>)}
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          data-option-id={option.id}
+          data-option-description={option.description}
+          data-option-disabled={option.disabled ? "true" : undefined}
+          onClick={() => onChoose(option.id)}
+        >
+          {option.label}
+        </button>
+      ))}
     </div>
   ),
 }));
@@ -321,6 +354,13 @@ vi.mock("../../hooks/useCardDataMeta", () => ({
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** Renders whatever router state the deck-rejected re-entry navigated with,
+ * so a dropped field is visible rather than inferred. */
+function MultiplayerStub() {
+  const { state } = useLocation();
+  return <div data-testid="multiplayer-stub">{JSON.stringify(state)}</div>;
+}
+
 function gamePageTree(
   initialEntry: string | { pathname: string; search: string; state: unknown } =
     "/game/test-game-123?mode=ai",
@@ -330,6 +370,7 @@ function gamePageTree(
       <Routes>
         <Route path="/game/:id" element={<GamePage />} />
         <Route path="/setup" element={<div data-testid="setup-page">Setup</div>} />
+        <Route path="/multiplayer" element={<MultiplayerStub />} />
         <Route path="/" element={<div>Home</div>} />
       </Routes>
     </MemoryRouter>
@@ -376,11 +417,13 @@ beforeEach(() => {
   capturedFormatConfig = undefined;
   capturedOnWsEvent = undefined;
   capturedOnP2PEvent = undefined;
+  capturedServerUrl = undefined;
   capturedGameMenuProps = undefined;
   storeOverrides.adapter = null;
   storeOverrides.gameState = null;
   storeOverrides.gameMode = null;
   storeOverrides.waitingFor = null;
+  storeOverrides.activationBlockReasons = {};
   useUiStore.setState({ pendingAbilityChoice: null });
   mockIsMobile.mockReturnValue(false);
   usePreferencesStore.setState({
@@ -612,6 +655,141 @@ describe("GamePage — Room unlock labels", () => {
 
     expect(screen.getByRole("button", { name: "Unlock Greenhouse ({2}{G})" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Unlock Rickety Gazebo ({3}{G})" })).toBeInTheDocument();
+  });
+});
+
+describe("GamePage — CR 118.3 unaffordable-ability rows in the ability picker", () => {
+  const ENGINE_ID = 9301 as const;
+  // Index 0 is OFFERED (an action row); index 1 is WITHHELD by the engine
+  // because its cost is unpayable right now, and is the row this feature adds.
+  const OFFERED_DESC = "{1}: Draw a card.";
+  const BLOCKED_DESC = "{7}: Search your library for a Sliver card.";
+  // The localized reason lands in the row's `description`, which this file's
+  // `ChoiceModal` mock deliberately does not render: appending it inside the
+  // <button> would change the accessible names the Room-unlock test above
+  // asserts on. The reason text is covered against the REAL component in
+  // `components/modal/__tests__/ChoiceModal.test.tsx` (rows 15/16).
+
+  /** Seed a board whose picker is open on `ENGINE_ID` with one offered ability. */
+  function seedPicker(activationBlockReasons: Record<string, Array<{ ability_index: number; type: string }>>) {
+    const engine = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .withId(ENGINE_ID)
+      .ownedBy(0)
+      .named("Costly Engine")
+      .build({
+        abilities: [
+          { description: OFFERED_DESC },
+          { description: BLOCKED_DESC },
+        ] as never,
+      });
+    const gameState = gameStateFactory
+      .withPlayers(0, 1)
+      .withObjects(engine)
+      .priority(0)
+      .build();
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+    storeOverrides.activationBlockReasons = activationBlockReasons;
+    useUiStore.setState({
+      pendingAbilityChoice: {
+        objectId: ENGINE_ID,
+        actions: [
+          { type: "ActivateAbility", data: { source_id: ENGINE_ID, ability_index: 0 } },
+        ],
+      },
+    });
+    renderGamePage();
+  }
+
+  /** Every option button the private `AbilityChoiceModal` supplied, in DOM order. */
+  function optionIds(): string[] {
+    return Array.from(
+      screen.getByTestId("ability-choice-options").querySelectorAll("button"),
+    ).map((b) => b.getAttribute("data-option-id") ?? "");
+  }
+
+  function optionLabels(): string[] {
+    return Array.from(
+      screen.getByTestId("ability-choice-options").querySelectorAll("button"),
+    ).map((b) => b.textContent ?? "");
+  }
+
+  /**
+   * Select by the option's ID, not by its accessible name. `abilityChoiceLabel`
+   * splits an ActivateAbility description at the colon (the offered row renders
+   * as `{1}`, not the whole sentence), and most rows here are not about that
+   * formatting — binding to it would make the test fail for an unrelated
+   * viewmodel change. The one row that IS about it asserts the split explicitly.
+   */
+  function optionButton(id: string): HTMLElement {
+    const el = screen
+      .getByTestId("ability-choice-options")
+      .querySelector(`[data-option-id="${id}"]`);
+    expect(el, `option ${id} must be rendered`).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  // Row 17 (a) — THE USER-VISIBLE HALF OF THE FIX. The reported defect was that
+  // an ability the engine withholds for cost simply vanished from the picker.
+  // The blocked row must be appended AFTER the action rows, because the offered
+  // rows' ids are positional (`String(i)` <-> `pending.actions[Number(id)]`) and
+  // prepending would silently re-index every dispatch.
+  it("appends a non-selectable row per withheld ability, after the offered rows", () => {
+    seedPicker({ [String(ENGINE_ID)]: [{ ability_index: 1, type: "CostNotPayableNow" }] });
+
+    // The load-bearing claim: the blocked row exists, and it is LAST.
+    expect(optionIds()).toEqual(["0", "blocked:1"]);
+    // The blocked row uses the SAME label/description split as the offered rows
+    // (`abilityLabel` + `stripCostPrefix`), so the bold line is the cost pip on
+    // both and the two are visually comparable in one list — the comparison the
+    // reported defect is about. Asserting the split, not just "some label".
+    expect(optionLabels()[1]).toBe("{7}");
+    expect(optionButton("blocked:1")).toHaveAttribute(
+      "data-option-description",
+      "Search your library for a Sliver card. — You can't pay this cost right now",
+    );
+    // PAIRED POSITIVE for the convention itself: the OFFERED row's label is a
+    // bare cost too, so the assertion above pins a shared shape rather than a
+    // coincidence of this fixture.
+    expect(optionLabels()[0]).toBe("{1}");
+    expect(optionButton("blocked:1")).toHaveAttribute("data-option-disabled", "true");
+    // PAIRED POSITIVE, mandatory: the offered row is NOT disabled, so a modal
+    // that disabled everything cannot satisfy the assertion above.
+    expect(optionButton("0")).not.toHaveAttribute("data-option-disabled");
+  });
+
+  // Row 17 (b) — the empty-read-out control. With no withheld abilities the
+  // picker is byte-for-byte what it was before this feature, so the change is
+  // additive rather than a rewrite of the option list.
+  it("adds no rows when the engine withholds nothing", () => {
+    seedPicker({});
+
+    expect(optionIds()).toEqual(["0"]);
+  });
+
+  // Row 17 (c) — GamePage's OWN dispatch guard, reached through the real
+  // `onChoose`. `setPending(null)` is the observable: a chosen action clears
+  // `pendingAbilityChoice`, so "the picker stays open" is the signal that the
+  // guard refused the id. `useUiStore` is the real store here, not a mock.
+  it("refuses to dispatch a blocked row's id while still dispatching a real one", () => {
+    seedPicker({ [String(ENGINE_ID)]: [{ ability_index: 1, type: "CostNotPayableNow" }] });
+
+    fireEvent.click(optionButton("blocked:1"));
+    expect(
+      useUiStore.getState().pendingAbilityChoice,
+      "clicking a blocked row must not resolve the choice",
+    ).not.toBeNull();
+
+    // PAIRED POSITIVE, mandatory: the SAME handler in the SAME render does
+    // resolve the choice for a real action row, so the refusal above is a
+    // refusal and not a dead modal.
+    fireEvent.click(optionButton("0"));
+    expect(
+      useUiStore.getState().pendingAbilityChoice,
+      "clicking an offered row must resolve the choice",
+    ).toBeNull();
   });
 });
 
@@ -1312,5 +1490,47 @@ describe("GamePage — rematch preserves the format the game was played with", (
     // `FORMAT_DEFAULTS` is a Proxy in this suite, so a lost hand-over surfaces
     // as `undefined` here rather than as the real 40.
     expect(capturedFormatConfig?.starting_life).toBe(25);
+  });
+});
+
+describe("GamePage — join origin", () => {
+  const ORIGIN = "wss://play.example.com/ws";
+
+  it("passes the route's server to GameProvider and carries it through deck rejection", async () => {
+    renderGamePage(
+      `/game/g1?mode=join&code=ABC123&server=${encodeURIComponent(ORIGIN)}`,
+    );
+
+    expect(capturedServerUrl).toBe(ORIGIN);
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "deckRejected", reason: "bad deck" });
+    });
+
+    const stub = await screen.findByTestId("multiplayer-stub");
+    expect(JSON.parse(stub.textContent ?? "null")).toEqual({
+      deckRejected: true,
+      reason: "bad deck",
+      joinCode: "ABC123",
+      server: ORIGIN,
+    });
+  });
+
+  it("carries no server when the route had none", async () => {
+    renderGamePage("/game/g1?mode=join&code=ABC123");
+
+    expect(capturedServerUrl).toBeUndefined();
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "deckRejected", reason: "bad deck" });
+    });
+
+    const stub = await screen.findByTestId("multiplayer-stub");
+    // Paired with the case above: the field is absent, not stale.
+    expect(JSON.parse(stub.textContent ?? "null")).toEqual({
+      deckRejected: true,
+      reason: "bad deck",
+      joinCode: "ABC123",
+    });
   });
 });

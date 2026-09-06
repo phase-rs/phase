@@ -2135,6 +2135,77 @@ fn collect_matching_triggers_from_context(
     )
 }
 
+/// CR 303.4b + CR 603.10a + CR 603.10f: Collect an off-battlefield observer's
+/// triggers with its last-known `attached_to` temporarily restored.
+///
+/// `sever_battlefield_attachment_graph_on_exit` clears the live field when the
+/// object leaves the battlefield. The LKI value is installed for the duration
+/// of collection and restored immediately afterward, so no LKI state leaks
+/// into later passes.
+///
+/// The mutation mirrors the discipline of the existing CR 603.10a `co_departed`
+/// arm, which carries the identical comment and the identical
+/// save/mutate/restore, and it defends any LIVE-object reader that
+/// `collect_matching_triggers_inner` may reach while the window is open.
+///
+/// HONESTY NOTE (review round 3, verified at source): do NOT justify this by
+/// naming `ControllerRef::EnchantedPlayer`. Its collection-time path is
+/// LATCHED — `filter.rs`'s `source_enchanted_player` reads `SourceContext`,
+/// built from `read.attached_to()`, which is latched whenever a
+/// `trigger_source` is present (always, for a triggered ability). The
+/// genuinely live reader, `filter.rs`'s `controller_ref_player` (no
+/// `trigger_source` parameter), is reached only from stack-resolution callers
+/// (`effects/sacrifice.rs`, `effects/change_zone.rs`, `effects/search_library.rs`,
+/// `effects/cast_from_zone.rs`) — long after this window has closed. The
+/// mutation is therefore retained for PARITY with the existing arm, not
+/// because a reader inside the window needs it. Whether BOTH arms can drop it
+/// is a real question, deliberately left as a follow-up rather than widened
+/// into this change.
+///
+/// `TargetFilter::AttachedTo` in `player_matches_filter` (`trigger_matchers.rs`)
+/// already reads the LATCHED context via `source_read(..).attached_to()`, with
+/// no live fallback at all, and needs no mutation.
+#[allow(clippy::too_many_arguments)]
+fn collect_observer_triggers_under_lki_attachment(
+    state: &mut GameState,
+    observer_id: ObjectId,
+    lki_attached_to: Option<crate::game::game_object::AttachTarget>,
+    event: &GameEvent,
+    events: &[GameEvent],
+    source_context: &TriggerSourceContext,
+    batched_this_pass: &mut HashSet<(ObjectId, usize)>,
+    registered_this_event: &mut HashSet<(ObjectId, usize)>,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+    collection: LogicalZoneTriggerCollection<'_>,
+) -> Vec<MatchedTrigger> {
+    let saved_attached_to = state.objects.get(&observer_id).and_then(|o| o.attached_to);
+    if lki_attached_to.is_some() {
+        if let Some(obs_obj) = state.objects.get_mut(&observer_id) {
+            obs_obj.attached_to = lki_attached_to;
+        }
+    }
+    let matched = collect_matching_triggers_from_context(
+        state,
+        event,
+        events,
+        source_context,
+        Some(Zone::Battlefield),
+        batched_this_pass,
+        registered_this_event,
+        active_suppress_triggers,
+        collection,
+        TriggerSourceVisit::Observer,
+    );
+    // Restore unconditionally, before the caller consumes `matched`, so every
+    // early-return path the caller may take is still covered.
+    if lki_attached_to.is_some() {
+        if let Some(obs_obj) = state.objects.get_mut(&observer_id) {
+            obs_obj.attached_to = saved_attached_to;
+        }
+    }
+    matched
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers_inner(
     state: &GameState,
@@ -2425,6 +2496,32 @@ fn collect_matching_triggers_inner(
             if !admitted {
                 continue;
             }
+            // CR 603.10d + CR 603.3a: "when you lose control of ~" is
+            // controlled by the PRE-change controller — the player who just
+            // lost control — not by whoever controls the object now.
+            // `source_context.lki.controller` (captured into `controller`
+            // above) already reflects the POST-change live controller for a
+            // self-ref source: `collect_pending_triggers` flushes layers
+            // before this scan runs, so the changing object's own controller
+            // has already moved to `new_controller` by the time trigger
+            // sources are gathered. Mirror
+            // `trigger_matchers::match_changes_controller`'s own directional
+            // discriminant (`source_id == *object_id`) here rather than
+            // re-deriving it, since `admitted` above already confirms this
+            // trig_def's matcher accepted the event. The delayed /
+            // `SpecificObject` shape (Stolen Uniform, `source_id !=
+            // object_id`) is left UNCHANGED: its source is a different object
+            // whose own controller is already the right answer (CR 113.8).
+            let controller = match event {
+                GameEvent::ControllerChanged {
+                    object_id,
+                    old_controller,
+                    ..
+                } if trig_def.mode == TriggerMode::ChangesController && *object_id == obj_id => {
+                    *old_controller
+                }
+                _ => controller,
+            };
             if !check_trigger_constraint_with_ref(
                 state,
                 trig_def,
@@ -2460,6 +2557,16 @@ fn collect_matching_triggers_inner(
                 &source_context,
                 definition_ref.as_ref(),
             );
+            // CR 603.3a + CR 113.8: `build_triggered_ability_from_context` has
+            // no `event` parameter and so re-derives its own controller from
+            // `source_context.lki.controller` — the same value `controller`
+            // held before the CR 603.10d override above. Rebind the ability
+            // (and every sub/else branch, via the existing `player_scope`
+            // rebinding authority) to the possibly-overridden `controller` so
+            // the ability's controller and its `PendingTrigger.controller`
+            // agree by construction. A no-op for every trigger mode other
+            // than the self-ref `ChangesController` case above.
+            ability.set_controller_recursive(controller);
             // CR 603.4: Stamp the printed-trigger index so per-turn resolution
             // tracking (`AbilityCondition::NthResolutionThisTurn`) can identify
             // "this ability" at resolution time.
@@ -2812,7 +2919,7 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
             .iter()
             .filter_map(|entry| match &entry.kind {
                 StackEntryKind::Spell { .. } => Some(entry.id),
-                // CR 111.1b + CR 113.3b: Activated/triggered ability stack entries
+                // CR 113.3b + CR 113.3c: Activated/triggered ability stack entries
                 // (including KeywordAction) are abilities, not objects.
                 StackEntryKind::ActivatedAbility { .. }
                 | StackEntryKind::TriggeredAbility { .. }
@@ -4931,33 +5038,119 @@ fn collect_pending_triggers_with_collection(
                     }
                     None
                 });
-                let saved_attached_to = state.objects.get(&observer_id).and_then(|o| o.attached_to);
-                if lki_attached_to.is_some() {
-                    if let Some(obs_obj) = state.objects.get_mut(&observer_id) {
-                        obs_obj.attached_to = lki_attached_to;
+                // The save/mutate/collect/restore discipline lives in one place
+                // and is shared with the CR 603.10f player-loss arm below.
+                let matched_triggers = collect_observer_triggers_under_lki_attachment(
+                    state,
+                    observer_id,
+                    lki_attached_to,
+                    event,
+                    events,
+                    observer_source_context,
+                    &mut batched_this_pass,
+                    &mut registered_this_event,
+                    &active_suppress_triggers,
+                    collection,
+                );
+                for matched in matched_triggers {
+                    session.record_match(state, &matched, event);
+                    if matched.batched {
+                        batched_this_pass.insert((observer_id, matched.trig_idx));
                     }
+                    registered_this_event.insert((observer_id, matched.trig_idx));
+                    pending.push(PendingTriggerContext::batched(
+                        matched.pending,
+                        matched.trigger_events,
+                    ));
                 }
-                let matched_triggers = {
-                    collect_matching_triggers_from_context(
-                        state,
-                        event,
-                        events,
-                        observer_source_context,
-                        Some(Zone::Battlefield),
-                        &mut batched_this_pass,
-                        &mut registered_this_event,
-                        &active_suppress_triggers,
-                        collection,
-                        TriggerSourceVisit::Observer,
-                    )
+            }
+        }
+
+        // CR 603.10f: "Abilities that trigger when a player loses the game look
+        // back in time." CR 704.3 runs state-based actions in one pass, and
+        // within that pass CR 104.3b eliminates the player before the CR 704.5m
+        // sweep puts an Aura attached to that now-illegal player into its
+        // owner's graveyard — all before triggers are collected. Per CR 400.7
+        // the Aura is a new object with no memory of the battlefield, so the
+        // empty-`trigger_zones` battlefield gate would reject it. CR 603.10f is
+        // the rule that says it triggers anyway; the departure record
+        // (CR 608.2h last-known information) is the authority for what it was
+        // attached to.
+        //
+        // Admission is a POSITIVE IDENTITY match on `record.attached_to`, not an
+        // inference from simultaneity: the CR 704.5m sweep does not call
+        // `mark_simultaneous_departures`, so `record.co_departed` can be empty
+        // on this path, and when it is non-empty it names unrelated permanents
+        // that died in the same pass. Only the recorded attachment identifies
+        // the observer as having been attached to THIS losing player.
+        if let GameEvent::PlayerLost { player_id } = event {
+            for observer_event in events {
+                let GameEvent::ZoneChanged {
+                    object_id: observer_id,
+                    record,
+                    ..
+                } = observer_event
+                else {
+                    continue;
                 };
-                // Restore the live object's `attached_to` to avoid leaking
-                // LKI state into subsequent trigger passes.
-                if lki_attached_to.is_some() {
-                    if let Some(obs_obj) = state.objects.get_mut(&observer_id) {
-                        obs_obj.attached_to = saved_attached_to;
-                    }
+                // CR 303.4b: only a permanent attached to the player who just
+                // lost. CR 301.5 restricts Equipment hosts to creatures, so
+                // `AttachTarget::Player` excludes the CR 704.5n Equipment case
+                // by construction.
+                if record.attached_to
+                    != Some(crate::game::game_object::AttachTarget::Player(*player_id))
+                {
+                    continue;
                 }
+                // The live battlefield scan already covers observers still on
+                // the battlefield; this arm only admits objects it excluded, so
+                // skip ONLY an object that is both present AND still on the
+                // battlefield.
+                //
+                // CR 704.5d: an ABSENT object must fall through to admission. A
+                // token Aura is swept to its owner's graveyard by CR 704.5m and
+                // then ceases to exist in the SAME state-based-action pass,
+                // before triggers are collected — so `state.objects` no longer
+                // holds it at all. Treating absence as "off the battlefield" is
+                // what CR 603.10f requires: the departure record (CR 608.2h last
+                // known information) remains the authority for what the observer
+                // was attached to, and it outlives the object itself.
+                if state
+                    .objects
+                    .get(observer_id)
+                    .is_some_and(|o| o.zone == Zone::Battlefield)
+                {
+                    continue;
+                }
+                // CR 400.7 + CR 608.2h: the record's own source context — not a
+                // later same-id object — owns the source identity.
+                let source_context =
+                    match crate::types::game_state::battlefield_departure_trigger_source_context(
+                        observer_event,
+                    ) {
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                            context,
+                        ) => context,
+                        // Fail closed on absent/malformed provenance, exactly as
+                        // the co-departure arm does.
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+                        | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
+                            continue
+                        }
+                    };
+                let observer_id = *observer_id;
+                let matched_triggers = collect_observer_triggers_under_lki_attachment(
+                    state,
+                    observer_id,
+                    record.attached_to,
+                    event,
+                    events,
+                    source_context,
+                    &mut batched_this_pass,
+                    &mut registered_this_event,
+                    &active_suppress_triggers,
+                    collection,
+                );
                 for matched in matched_triggers {
                     if !session.record_match(state, &matched, event) {
                         continue;
@@ -5212,13 +5405,19 @@ fn collect_pending_triggers_with_collection(
                 })
                 .unwrap_or_default();
             for n in ripple_instances {
+                // CR 702.60a: Ripple fires "when you cast this spell". The
+                // WasCast intervening-if is intentionally omitted (mirroring the
+                // Storm and Casualty seams above/below): this synthesized
+                // trigger is only collected from SpellCast, which is only
+                // emitted for an actual cast, so cast-ness is already implied by
+                // the trigger event itself. A redundant WasCast condition here
+                // also FAILS its CR 603.4 resolution recheck for any Ripple card
+                // that carries a real spell ability (every printed one — Surging
+                // Dementia, Surging Flame, …), because `TriggerSourceRead`'s
+                // `cast_from_zone` reads the object field that only abilityless
+                // permanent spells populate.
                 let ripple_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                    .description("Ripple".to_string())
-                    .condition(TriggerCondition::WasCast {
-                        zone: None,
-                        controller: None,
-                        owner: None,
-                    });
+                    .description("Ripple".to_string());
                 let mut ripple_ability = ResolvedAbility::new(
                     Effect::Ripple { count: n },
                     Vec::new(),
@@ -8290,7 +8489,7 @@ enum PreparedTriggerTargets {
 }
 
 fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> PreparedTriggerTargets {
-    let target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
+    let mut target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
         Ok(target_slots) => target_slots,
         Err(_) => {
             return if matches!(
@@ -8307,6 +8506,19 @@ fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> Prepa
             };
         }
     };
+    // CR 603.3d: putting a triggered ability on the stack follows the spell
+    // process of CR 601.2c–d for choosing targets and dividing an effect, so a
+    // triggered divided effect ("deals N damage divided as you choose among any
+    // number of targets") offers at most one slot per divisible unit, the same
+    // cap `cast_spell` applies. CR 601.2d: each chosen target must receive at
+    // least one, so a target set wider than the pool has no legal division and
+    // the prompt would have no acceptable answer.
+    super::ability_utils::cap_distribution_target_slots(
+        state,
+        &trigger.ability,
+        trigger.distribute.as_ref(),
+        &mut target_slots,
+    );
 
     let mut prepared_state = state.clone();
     let mut prepared_trigger = trigger.clone();
@@ -9530,6 +9742,61 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
         return false;
     }
     true
+}
+
+/// CR 603.3b + CR 608.2d: whether a resolution frame is live while a
+/// non-`Priority` prompt is open, so a freshly collected trigger batch must be
+/// PARKED into `deferred_triggers` rather than ordered now.
+///
+/// CR 603.3b places triggered abilities on the stack — and therefore orders
+/// them — only for abilities that triggered "since the last time a player
+/// received priority", i.e. at a priority boundary (CR 117.5, CR 704.3). A
+/// spell paused on one of its own CR 608.2d choices ("you may put a land card
+/// from your hand onto the battlefield") has NOT reached such a boundary: that
+/// choice is announced *while applying the effect*, and no player receives
+/// priority for it. Its earlier siblings' triggers are still "waiting to be put
+/// on the stack" (CR 704.3) and must stay parked until the resolution completes
+/// (CR 603.3 + CR 117.5). CR 608.2c is what keeps the later sentence part of
+/// the same resolution.
+///
+/// This is the collection-side counterpart of the `resolution_stack` clause of
+/// [`resolution_completion_can_settle`], which already refuses to DRAIN (or
+/// offer CR 603.3b ordering) for the same structural reason. It corresponds to
+/// that one clause only, narrowed to non-`Priority` waits. Of the other refusal
+/// conditions there, `pending_replacement` and the `handles` half are already
+/// guarded collection-side by the neighbouring disjuncts at this same fork;
+/// `is_pending_trigger_construction_active`, `pending_cost_move_resume`,
+/// `pending_deferred_life_cost_resume` and `pending_triggered_mana_resume` are
+/// not.
+///
+/// The `Priority` test keeps the guard off genuine CR 117.5 boundaries, where a
+/// batch must be ordered promptly rather than deferred; an unconditional guard
+/// is measurably rejected by
+/// `analysis::corpus_tests::drive_row_classifies_corpus_via_shared_pipeline`.
+/// The `resolution_stack` test is a deliberate narrowing to non-`Priority`
+/// waits that own a live frame — CR 508.2b / CR 510.3a put declare-attackers
+/// and combat-damage triggers on the stack before the active player gets
+/// priority, and this guard stays off those windows because no resolution
+/// frame is live there — measured indirectly by the P7 regression filter, not
+/// pinned by any assertion. No existing test distinguishes it: both
+/// single-conjunct-dropped variants pass the full ordering/combat regression
+/// filter, so this conjunct is pinned only by the unit rows in
+/// `resolution_frame_is_live_off_priority_requires_a_live_frame_and_a_non_priority_wait`.
+///
+/// Structural on purpose. The historical guard at the collection seam
+/// enumerated pause shapes via `engine_resolution_choices::handles`, which is
+/// an action-DISPATCH predicate; measured against the closed specification
+/// [`crate::types::resolution::DirectChoiceGate::matches`], it admits only four
+/// of the ten permitted (gate, prompt) pairs and misses `OptionalEffectChoice`,
+/// `OpponentMayChoice`, `ProliferateChoice` and the resolution-scoped sacrifice
+/// `PayCost`. Asking the frame stack covers every present and future
+/// direct-choice frame by construction, and covers every install route —
+/// including the frame-push wrappers that bypass
+/// `GameState::install_direct_choice_frame` entirely. It is added BESIDE
+/// `handles` at the fork rather than in place of it: `handles` still carries
+/// the resolution-owned prompts that own no frame.
+pub(crate) fn resolution_frame_is_live_off_priority(state: &GameState) -> bool {
+    !matches!(state.waiting_for, WaitingFor::Priority { .. }) && !state.resolution_stack.is_empty()
 }
 
 /// Which deferred-trigger drain, if any, a post-action seam owns.
@@ -11696,7 +11963,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::WasPlayed
         | FilterProp::WasKicked
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -12682,6 +12949,11 @@ fn delayed_trigger_event_with_index(
             phase,
             player,
             gate,
+            // `binding` is only consulted at delayed-trigger CREATION
+            // (`effects::delayed_trigger::resolve`), which has already
+            // stamped `player` to a concrete id by the time this matcher
+            // runs each phase change — nothing left here to read it for.
+            binding: _,
         } => {
             if state.active_player != *player {
                 return None;
@@ -13627,13 +13899,12 @@ fn evaluate_trigger_condition_with_source(
         // `Not { Box::new(WasCast) }`. The `Not` arm inverts the result, so an
         // unanswerable subject resolves Not(WasCast) to `true`. This is NOT because
         // CR 603.4 removes the ability when the source leaves its zone — CR 603.4
-        // (`docs/MagicCompRules.txt:2596`) says nothing about the source's zone, and
-        // CR 113.7a explicitly says the opposite for abilities ("Destruction or
-        // removal of the source after that time won't affect the ability"). Rather,
-        // a subject the engine cannot answer for yields `false` for the plain
-        // condition, and `Not` inverts that `false` to `true` — the same
-        // "unanswerable is not a licence to substitute a different object" contract
-        // `trigger_subject_read` documents.
+        // says nothing about the source's zone, and CR 113.7a explicitly says the
+        // opposite for abilities ("Destruction or removal of the source after that
+        // time won't affect the ability"). Rather, a subject the engine cannot
+        // answer for yields `false` for the plain condition, and `Not` inverts that
+        // `false` to `true` — the same "unanswerable is not a licence to substitute
+        // a different object" contract `trigger_subject_read` documents.
         // CR 601.2 + CR 603.4: cast-origin check. zone=None → cast from anywhere
         // (Discover/Wedding Ring/Satoru back-compat). zone=Some(z) → cast specifically
         // from zone z (Twilight Diviner: graveyard). Two independent scope axes:
@@ -17345,11 +17616,22 @@ pub mod tests {
         min_targets: usize,
         target: TargetFilter,
     ) -> ObjectId {
+        make_divided_damage_etb_source_with_amount(state, 4, min_targets, target)
+    }
+
+    /// "Deals `amount` damage divided as you choose among any number of
+    /// target …" as an ETB trigger on a 3/3 controlled by P0.
+    fn make_divided_damage_etb_source_with_amount(
+        state: &mut GameState,
+        amount: i32,
+        min_targets: usize,
+        target: TargetFilter,
+    ) -> ObjectId {
         let source = make_creature(state, PlayerId(0), "Divided Damage Source", 3, 3);
         let mut execute = AbilityDefinition::new(
             AbilityKind::Database,
             Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 4 },
+                amount: QuantityExpr::Fixed { value: amount },
                 target,
                 damage_source: None,
                 excess: None,
@@ -21482,6 +21764,77 @@ pub mod tests {
         );
     }
 
+    /// CR 603.3b + CR 508.2b + CR 510.3a: the collection-side guard must fire
+    /// ONLY when a non-`Priority` wait is open AND a resolution frame is live.
+    /// Each row below is failed by a different over-broad predicate, so this
+    /// test — not any integration test — is what pins the two conjuncts.
+    #[test]
+    fn resolution_frame_is_live_off_priority_requires_a_live_frame_and_a_non_priority_wait() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::resolution::OptionalEffectFrame;
+
+        fn runner_with_source() -> (GameRunner, ObjectId) {
+            let mut scenario = GameScenario::new();
+            let source_id = scenario.add_creature(P0, "Frame Source", 2, 2).id();
+            (scenario.build(), source_id)
+        }
+
+        fn live_frame(source_id: ObjectId) -> OptionalEffectFrame {
+            OptionalEffectFrame {
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source_id,
+                    P0,
+                )),
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                trigger_match_count: None,
+            }
+        }
+
+        // Row 1 — a settled Priority window with a frame still live (mid-`RepeatFor`
+        // shape). Must be FALSE: dropping the `Priority` conjunct returns true here.
+        let (mut runner, source_id) = runner_with_source();
+        let state = runner.state_mut();
+        state.push_optional_effect_frame(live_frame(source_id));
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        assert!(!resolution_frame_is_live_off_priority(state));
+
+        // Row 2 — a non-`Priority` combat wait with an EMPTY frame stack
+        // (CR 508.2b / CR 510.3a). Must be FALSE: dropping the `resolution_stack`
+        // conjunct returns true here.
+        let (mut runner, _) = runner_with_source();
+        let state = runner.state_mut();
+        assert!(state.resolution_stack.is_empty());
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: Vec::new(),
+            valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        assert!(!resolution_frame_is_live_off_priority(state));
+
+        // Row 3 — POSITIVE REACH-GUARD: a direct-choice prompt above a live frame.
+        // Must be TRUE, so a predicate that always returns false fails too.
+        let (mut runner, source_id) = runner_with_source();
+        let state = runner.state_mut();
+        state.push_optional_effect_frame(live_frame(source_id));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: P0,
+            source_id,
+            description: None,
+            may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
+        };
+        assert!(resolution_frame_is_live_off_priority(state));
+    }
+
     /// CR 400.7d: an emerge-cast permanent's ETB "instead create X of those
     /// tokens, where X is the sacrificed creature's toughness" reads the
     /// sacrificed creature via `ObjectScope::CostPaidObject` (Adipose Offspring).
@@ -21508,6 +21861,7 @@ pub mod tests {
             CostPaidObjectSnapshot {
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         runner
@@ -21578,6 +21932,7 @@ pub mod tests {
             CostPaidObjectSnapshot {
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         runner
@@ -21765,6 +22120,7 @@ pub mod tests {
             CostPaidObjectSnapshot {
                 object_id: sacrificed,
                 lki: obj.snapshot_for_mana_spent(),
+                incarnation: 0,
             }
         };
         runner
@@ -25715,6 +26071,50 @@ pub mod tests {
         assert_eq!(
             context.pending.ability.distribution, None,
             "preparation must leave the live pending trigger untouched"
+        );
+    }
+
+    /// CR 603.3d + CR 601.2c + CR 601.2d: a triggered "1 damage divided as you
+    /// choose among any number of target creatures" facing two legal targets
+    /// offers ONE slot, not two — the triggered ability follows the spell's
+    /// target-and-division process. Each chosen target must receive at least
+    /// one point, so a two-target choice could never be divided, and the
+    /// prompt it opened would have no answer `apply` accepts — the same cap
+    /// `cast_spell` already applies (issue #2856).
+    #[test]
+    fn divided_trigger_caps_target_slots_to_the_pool() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let _first = make_creature(&mut state, PlayerId(1), "First Target", 2, 2);
+        let _second = make_creature(&mut state, PlayerId(1), "Second Target", 2, 2);
+        let source = make_divided_damage_etb_source_with_amount(
+            &mut state,
+            1,
+            0,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+        );
+        let trigger_events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        let pending = collect_pending_triggers(&mut state, &trigger_events);
+        let [context] = pending.as_slice() else {
+            panic!("expected exactly one divided ETB trigger");
+        };
+
+        let PreparedTriggerTargets::NeedsPlayerChoice { target_slots } =
+            prepare_trigger_targets(&state, &context.pending)
+        else {
+            panic!("one slot with two legal targets must prompt the controller");
+        };
+        assert_eq!(
+            target_slots.len(),
+            1,
+            "a one-point pool offers one target slot, however many creatures are legal"
         );
     }
 

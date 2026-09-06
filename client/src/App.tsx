@@ -17,6 +17,7 @@ import { migrateSavedDecks } from "./services/deckMigrations";
 import { useDeckLibraryAutoSync } from "./services/visualPacks/deckLibraryAutoSync";
 import { ensurePreload, subscribePreload } from "./startup/preloadAssets";
 import { useCloudSyncStore } from "./stores/cloudSyncStore";
+import { useEffectiveOffline } from "./stores/connectivityStore";
 import { MenuPage } from "./pages/MenuPage";
 
 const GamePage = lazy(() =>
@@ -66,7 +67,8 @@ export function App() {
 }
 
 function AppContent() {
-  useFeedInitialization();
+  const effectiveOffline = useEffectiveOffline();
+  const feedInitializationReady = useFeedInitialization(effectiveOffline);
   useHostingSession();
 
   // One-shot localStorage migrations. Must run before cloud-sync init so the
@@ -76,12 +78,18 @@ function AppContent() {
     migrateSavedDecks();
   }, []);
 
-  // Install the storage watcher, restore any cloud-sync session, and reconcile
-  // on boot. init() returns an uninstaller so listeners are cleaned up on
-  // unmount / hot reload rather than stacking.
-  useEffect(() => useCloudSyncStore.getState().init(), []);
+  // Connectivity policy is the sole lifecycle authority. Offline mode keeps
+  // local dirty observation alive through pause(); only online generations own
+  // a cleanup function.
+  useEffect(() => {
+    if (effectiveOffline) {
+      useCloudSyncStore.getState().pause();
+      return;
+    }
+    return useCloudSyncStore.getState().init();
+  }, [effectiveOffline]);
 
-  useDeckLibraryAutoSync();
+  useDeckLibraryAutoSync(effectiveOffline, feedInitializationReady);
 
   const [showSplash, setShowSplash] = useState(true);
   const [progress, setProgress] = useState(0);

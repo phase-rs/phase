@@ -149,11 +149,11 @@ jobs:
             triple: x86_64-pc-windows-msvc
             extension: .exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.commit }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache-shared-key: rust-server-${{ matrix.os }}
 
@@ -184,7 +184,7 @@ jobs:
         shell: pwsh
 
       - name: Upload preview server binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: preview-server-${{ matrix.triple }}
           path: phase-server-${{ matrix.triple }}${{ matrix.extension }}
@@ -240,28 +240,28 @@ jobs:
               ;;
           esac
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: steps.publication-gate.outputs.already_published != 'true'
         with:
           node-version: 22
 
       - name: Download Linux binary
         if: steps.publication-gate.outputs.already_published != 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: preview-server-x86_64-unknown-linux-musl
           path: artifacts/x86_64-unknown-linux-musl
 
       - name: Download macOS binary
         if: steps.publication-gate.outputs.already_published != 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: preview-server-aarch64-apple-darwin
           path: artifacts/aarch64-apple-darwin
 
       - name: Download Windows binary
         if: steps.publication-gate.outputs.already_published != 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: preview-server-x86_64-pc-windows-msvc
           path: artifacts/x86_64-pc-windows-msvc

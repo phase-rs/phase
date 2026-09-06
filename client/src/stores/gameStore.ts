@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import type {
+  AbilityBlockEntry,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -29,7 +30,7 @@ import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersiste
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
-export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "endContinuousEffectOffers" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic" | "viewerInteraction"> {
+export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "endContinuousEffectOffers" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "activationBlockReasons" | "stuckDiagnostic" | "viewerInteraction"> {
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
@@ -37,6 +38,7 @@ export function legalResultState(result: LegalActionsResult): Pick<GameStoreStat
     manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     spellCosts: result.spellCosts ?? {},
     legalActionsByObject: result.legalActionsByObject ?? {},
+    activationBlockReasons: result.activationBlockReasons ?? {},
     stuckDiagnostic: result.stuckDiagnostic ?? null,
     viewerInteraction: result.viewerInteraction ?? null,
   };
@@ -99,6 +101,8 @@ interface GameModeTraits {
   readonly authority: EngineAuthority;
   readonly company: TableCompany;
   readonly seat: SeatSource;
+  /** Whether this client can request the unredacted state from its authority. */
+  readonly mayExportAuthoritativeState: boolean;
 }
 
 /**
@@ -113,14 +117,14 @@ interface GameModeTraits {
  * `spectate` is `remote-humans` by the *game* it observes, not by the observer.
  */
 export const GAME_MODE_TRAITS: Record<GameMode, GameModeTraits> = {
-  "ai": { authority: "client", company: "solo", seat: "seat-zero" },
-  "local": { authority: "client", company: "solo", seat: "seat-zero" },
-  "native-ai": { authority: "wire", company: "solo", seat: "seat-zero" },
-  "online": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
-  "p2p-host": { authority: "wire", company: "remote-humans", seat: "seat-zero" },
-  "p2p-join": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
-  "draft-match": { authority: "wire", company: "remote-humans", seat: "wire-assigned" },
-  "spectate": { authority: "wire", company: "remote-humans", seat: "no-seat" },
+  "ai": { authority: "client", company: "solo", seat: "seat-zero", mayExportAuthoritativeState: true },
+  "local": { authority: "client", company: "solo", seat: "seat-zero", mayExportAuthoritativeState: true },
+  "native-ai": { authority: "wire", company: "solo", seat: "seat-zero", mayExportAuthoritativeState: true },
+  "online": { authority: "wire", company: "remote-humans", seat: "wire-assigned", mayExportAuthoritativeState: false },
+  "p2p-host": { authority: "wire", company: "remote-humans", seat: "seat-zero", mayExportAuthoritativeState: true },
+  "p2p-join": { authority: "wire", company: "remote-humans", seat: "wire-assigned", mayExportAuthoritativeState: false },
+  "draft-match": { authority: "wire", company: "remote-humans", seat: "wire-assigned", mayExportAuthoritativeState: false },
+  "spectate": { authority: "wire", company: "remote-humans", seat: "no-seat", mayExportAuthoritativeState: false },
 };
 
 /** True when the authoritative engine state lives off this client — i.e. the
@@ -165,12 +169,12 @@ export function hasRemoteHumans(mode: GameMode | null): boolean {
 
 /**
  * Whether this client may download the engine's unredacted persistence envelope.
- * A shared remote table must never turn the authority's private view into a
- * player-facing file; solo games have no remote player whose hidden information
- * could be disclosed.
+ * Only the client that owns the P2P authority may export from a shared table.
+ * Guests and spectators receive redacted views, while the host's local WASM
+ * engine or native server owns the unredacted persistence envelope.
  */
 export function canExportAuthoritativeState(mode: GameMode | null): boolean {
-  return mode !== null && !hasRemoteHumans(mode);
+  return mode !== null && GAME_MODE_TRAITS[mode].mayExportAuthoritativeState;
 }
 
 /**
@@ -222,6 +226,13 @@ interface GameStoreState {
    * through this map instead of inferring action availability from objects.
    */
   legalActionsByObject: Record<string, ObjectAction[]>;
+  /**
+   * CR 118.3: acting-player-scoped read-out of activated abilities withheld
+   * solely because their cost is unpayable right now, keyed by object_id
+   * string. Display only — never dispatchable. Default `{}`, matching
+   * `legalActionsByObject`.
+   */
+  activationBlockReasons: Record<string, AbilityBlockEntry[]>;
   /**
    * Engine-owned non-fatal progress-wedge diagnostic (an engine anomaly, not a
    * rules outcome) — present only when the current decision is wedged (no legal
@@ -301,6 +312,7 @@ type CommitExtraState = Partial<Omit<GameStoreState,
   | "manaPaymentShortcutActions"
   | "spellCosts"
   | "legalActionsByObject"
+  | "activationBlockReasons"
   | "stuckDiagnostic"
   | "lastCommittedSeq"
   | "engineCommitEpoch"
@@ -463,6 +475,7 @@ const initialState: GameStoreState = {
   manaPaymentShortcutActions: [],
   spellCosts: {},
   legalActionsByObject: {},
+  activationBlockReasons: {},
   stuckDiagnostic: null,
   viewerInteraction: null,
   stateHistory: [],

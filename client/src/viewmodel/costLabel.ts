@@ -777,7 +777,7 @@ export function additionalCostChoices(
 }
 
 /** Strip the leading cost prefix from Oracle text (e.g. "[+2]: Draw a card." → "Draw a card.") */
-function stripCostPrefix(text: string): string {
+export function stripCostPrefix(text: string): string {
   // Bracket format: [+2]: ..., [−1]: ..., [0]: ...
   const bracketMatch = text.match(/^\[.*?\]:\s*/);
   if (bracketMatch) return text.slice(bracketMatch[0].length);

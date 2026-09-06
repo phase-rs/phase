@@ -13,6 +13,9 @@ use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::effect_classify::targeted_object_impact;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use super::removal_lethality::{
+    divided_damage_remaining_budget, divided_damage_verdict, DividedDamage,
+};
 use super::strategy_helpers::ai_can_block;
 
 pub struct EvasionRemovalPriorityPolicy;
@@ -65,6 +68,49 @@ impl EvasionRemovalPriorityPolicy {
 
         target_quality_bonus + evasion_bonus + velocity_bonus + lethality_bonus
     }
+}
+
+/// CR 601.2d: is this candidate an opposing CREATURE that the divided-damage
+/// pool remaining after the already-declared targets cannot kill?
+///
+/// Deliberately narrow. Player and planeswalker candidates are untouched — chip
+/// damage to the face is a legitimate use of a leftover point (CR 120.3a /
+/// CR 120.3c) — and so are non-creature and AI-controlled objects, the latter
+/// being `anti_self_harm`'s business. Card-local: one map lookup plus the
+/// divided-damage term's bounded scans, no board walk.
+fn divided_damage_target_is_wasted(ctx: &PolicyContext<'_>) -> bool {
+    let GameAction::ChooseTarget {
+        target: Some(target_ref),
+    } = &ctx.candidate.action
+    else {
+        return false;
+    };
+    // CR 601.2d: with the pool fully reserved there is no free point left. Any
+    // further target — player and planeswalker included — must still be given
+    // its mandatory one, and that one comes out of a reserve that was killing
+    // something. Chip damage to the face is only legitimate while a point is
+    // actually spare, so the non-creature exemption below applies to
+    // `remaining >= 1` alone.
+    if divided_damage_remaining_budget(ctx) == Some(0) {
+        return true;
+    }
+    let TargetRef::Object(target_id) = target_ref else {
+        return false;
+    };
+    let Some(target) = ctx.state.objects.get(target_id) else {
+        return false;
+    };
+    // An AI-controlled body is `anti_self_harm`'s business, and a non-creature
+    // recipient has no lethality to model (CR 120.3c).
+    if !target.card_types.core_types.contains(&CoreType::Creature)
+        || target.controller == ctx.ai_player
+    {
+        return false;
+    }
+    matches!(
+        divided_damage_verdict(ctx, *target_id, target),
+        Some(DividedDamage::CannotKill)
+    )
 }
 
 fn removal_target_quality_score(value: f64) -> f64 {
@@ -208,6 +254,16 @@ impl TacticalPolicy for EvasionRemovalPriorityPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+        // CR 601.2d: a divided-damage target the remaining pool cannot kill is
+        // categorically wrong, not merely low-value — every chosen target must
+        // receive at least one point, so adding it strictly shrinks what the
+        // targets that CAN die are assigned. Computed before `score`, whose
+        // early returns (impact threshold, threat value) would otherwise leave
+        // the candidate at a plain 0.0 that another policy's positive term
+        // outvotes. The registry maps `Reject` to -inf, so this is a bound.
+        if divided_damage_target_is_wasted(ctx) {
+            return PolicyVerdict::reject(PolicyReason::new("divided_damage_cannot_kill"));
+        }
         PolicyVerdict::score(
             self.score(ctx),
             PolicyReason::new("evasion_removal_priority_score"),

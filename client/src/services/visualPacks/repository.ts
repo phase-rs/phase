@@ -7,6 +7,7 @@ import type {
   CardImageSource,
   ImageRungs,
   InstalledRevision,
+  PackId,
   ResolutionKey,
   ResolvedAsset,
   VisualImageRung,
@@ -16,11 +17,16 @@ export interface VisualCandidateGroup {
   requested: CandidateKey[];
   small?: CandidateKey[];
   normal?: CandidateKey[];
+  /** Limit every rung in this group to one installed pack. */
+  packId?: PackId;
+  /** A semantic fallback may only use one distinct installed asset. */
+  requireUnambiguousAsset?: boolean;
 }
 
 export interface VisualRepositoryRequest {
   groups: VisualCandidateGroup[];
   rung: VisualImageRung | "large";
+  allowRemote: boolean;
   remote?: { src: string; rungs?: ImageRungs } | null;
 }
 
@@ -45,6 +51,16 @@ function compareUtf8(left: string, right: string): number {
 function sortMatches(matches: ResolvedAsset[]): ResolvedAsset[] {
   return [...matches].sort((left, right) =>
     compareUtf8(left.packId, right.packId) || compareUtf8(left.assetKey, right.assetKey));
+}
+
+function groupMatches(matches: ResolvedAsset[], group: VisualCandidateGroup): ResolvedAsset[] {
+  const filtered = group.packId
+    ? matches.filter((match) => match.packId === group.packId)
+    : matches;
+  if (group.requireUnambiguousAsset && new Set(filtered.map((match) => match.assetKey)).size !== 1) {
+    return [];
+  }
+  return sortMatches(filtered);
 }
 
 function unambiguousCompanion(
@@ -113,9 +129,11 @@ export class VisualPackRepository {
     return this.revisionUnlisten.then(() => undefined);
   }
 
-  private onlineSources(remote?: VisualRepositoryRequest["remote"]): CardImageSource[] {
+  private fallbackSources(request: VisualRepositoryRequest): CardImageSource[] {
     return [
-      ...(remote ? [{ kind: "remote" as const, src: remote.src, rungs: remote.rungs }] : []),
+      ...(request.allowRemote && request.remote
+        ? [{ kind: "remote" as const, src: request.remote.src, rungs: request.remote.rungs }]
+        : []),
       { kind: "fallback" as const, src: null },
     ];
   }
@@ -124,7 +142,7 @@ export class VisualPackRepository {
     const captured = this.revision;
     const backend = await this.backend();
     if (!backend || request.groups.length === 0) {
-      return { revision: this.revision, sources: this.onlineSources(request.remote) };
+      return { revision: this.revision, sources: this.fallbackSources(request) };
     }
     await this.ensureRevisionSubscription();
     try {
@@ -132,7 +150,7 @@ export class VisualPackRepository {
       if (compareRevisions(first.revision, this.revision) < 0) {
         const retry = await this.resolveOnce(backend, request);
         if (compareRevisions(retry.revision, this.revision) < 0) {
-          return { revision: this.revision, sources: this.onlineSources(request.remote) };
+          return { revision: this.revision, sources: this.fallbackSources(request) };
         }
         this.notify(retry.revision);
         return retry;
@@ -141,9 +159,9 @@ export class VisualPackRepository {
       return first;
     } catch (error) {
       if (error instanceof VisualPackBackendError) {
-        return { revision: this.revision, sources: this.onlineSources(request.remote) };
+        return { revision: this.revision, sources: this.fallbackSources(request) };
       }
-      return { revision: this.revision, sources: this.onlineSources(request.remote) };
+      return { revision: this.revision, sources: this.fallbackSources(request) };
     }
   }
 
@@ -161,16 +179,16 @@ export class VisualPackRepository {
     for (let groupIndex = 0; groupIndex < indexes.length; groupIndex += 1) {
       const index = indexes[groupIndex];
       for (let candidateIndex = 0; candidateIndex < index.requested.length; candidateIndex += 1) {
-        const requested = sortMatches(response.entries[index.requested[candidateIndex]].matches);
+        const requested = groupMatches(response.entries[index.requested[candidateIndex]].matches, request.groups[groupIndex]);
         if (requested.length === 0) continue;
         const smallOrdinal = index.small[candidateIndex];
         const normalOrdinal = index.normal[candidateIndex];
         const smallMatches = smallOrdinal === undefined
           ? []
-          : sortMatches(response.entries[smallOrdinal].matches);
+          : groupMatches(response.entries[smallOrdinal].matches, request.groups[groupIndex]);
         const normalMatches = normalOrdinal === undefined
           ? []
-          : sortMatches(response.entries[normalOrdinal].matches);
+          : groupMatches(response.entries[normalOrdinal].matches, request.groups[groupIndex]);
         const seen = new Set<string>();
         const installed = requested.flatMap<CardImageSource>((match) => {
           if (seen.has(match.assetKey)) return [];
@@ -188,11 +206,11 @@ export class VisualPackRepository {
         });
         return {
           revision: response.revision,
-          sources: [...installed, ...this.onlineSources(request.remote)],
+          sources: [...installed, ...this.fallbackSources(request)],
         };
       }
     }
-    return { revision: response.revision, sources: this.onlineSources(request.remote) };
+    return { revision: response.revision, sources: this.fallbackSources(request) };
   }
 }
 

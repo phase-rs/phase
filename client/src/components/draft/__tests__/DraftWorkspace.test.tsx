@@ -22,6 +22,7 @@ import {
 import type { DraftWorkspaceState } from "../workspace/types";
 import {
   createDefaultDraftWorkspacePreferences,
+  DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX,
   DRAFT_WORKSPACE_PACK_SCALE_MAX,
   type DraftWorkspacePreferences,
 } from "../workspace/workspacePreferences";
@@ -575,16 +576,19 @@ describe("draft workspace shell", () => {
     const deck = container.querySelector<HTMLElement>('[data-zone="deck"]')!;
     const board = deck.querySelector<HTMLElement>("div[data-drop-state]")!;
     const column = deck.querySelector<HTMLElement>('[data-board-column="0"]')!;
+    const cardArea = column.querySelector<HTMLElement>("[data-card-area]")!;
     const row = column.querySelector<HTMLElement>('[data-board-row="0"]')!;
-    const compactSideboard = container.querySelector<HTMLElement>('[data-drop-target="collapsed-sideboard"]')!;
+    const compactSideboard = screen.getByRole("region", { name: "Compact sideboard" });
+    const compactSideboardTarget = container.querySelector<HTMLElement>('[data-drop-target="collapsed-sideboard"]')!;
     const rect = (left: number, top: number, right: number, bottom: number) => ({
       left, top, right, bottom, width: right - left, height: bottom - top,
       x: left, y: top, toJSON: () => ({}),
     }) as DOMRect;
     board.getBoundingClientRect = () => rect(0, 0, 160, 160);
     column.getBoundingClientRect = () => rect(0, 0, 160, 160);
+    cardArea.getBoundingClientRect = () => rect(0, 0, 160, 160);
     row.getBoundingClientRect = () => rect(0, 0, 160, 160);
-    compactSideboard.getBoundingClientRect = () => rect(200, 0, 360, 160);
+    compactSideboardTarget.getBoundingClientRect = () => rect(200, 0, 360, 160);
 
     const boardCard = within(deck).getByRole("button", { name: "Inspect deck" });
     boardCard.getBoundingClientRect = () => rect(0, 0, 100, 140);
@@ -1383,7 +1387,9 @@ describe("draft workspace shell", () => {
     };
     const { container, rerender } = render(<DraftWorkspace {...props} />);
     expect(container.querySelector<HTMLElement>("[data-workspace-composition='collapsed']")!.style
-      .getPropertyValue("--collapsed-sideboard-card-width")).toContain("clamp(");
+      .getPropertyValue("--collapsed-sideboard-card-width")).toBe(
+        `clamp(166.4px, 16vw, ${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX * 0.8}px)`,
+      );
 
     rerender(<DraftWorkspace {...props} responsiveContext="builder" />);
     expect(container.querySelector<HTMLElement>("[data-workspace-composition='collapsed']")!.style
@@ -1534,6 +1540,54 @@ describe("draft workspace shell", () => {
     expect(pickControl).toHaveFocus();
     expect(container.querySelector('[aria-label="Deck workspace"] > [role="status"]'))
       .toHaveTextContent("Pick in progress.");
+  });
+
+  it("preserves_loaded_workspace_images_through_a_pick_lock", () => {
+    const cards = [card("deck", "Deck Card"), card("side", "Sideboard Card")];
+    const workspace = state({
+      deck: { zone: "deck", row: 0, column: 0, order: 0 },
+      side: { zone: "sideboard", row: 0, column: 0, order: 0 },
+    });
+    const sharedProps = {
+      pool: cards,
+      poolGroups: groups(cards),
+      workspace,
+      onWorkspaceChange: vi.fn(),
+      onPreferencesChange: vi.fn(),
+    };
+    const expanded = render(
+      <DraftWorkspace {...sharedProps} preferences={preferences({ sideboardCollapsed: false })} interactionLocked={false} />,
+    );
+    const deckImage = screen.getByAltText("Deck Card");
+    const sideboardImage = screen.getByAltText("Sideboard Card");
+
+    expanded.rerender(
+      <DraftWorkspace {...sharedProps} preferences={preferences({ sideboardCollapsed: false })} interactionLocked />,
+    );
+
+    expect(screen.getByAltText("Deck Card")).toBe(deckImage);
+    expect(screen.getByAltText("Sideboard Card")).toBe(sideboardImage);
+    expect(deckImage).toHaveAttribute("src", "/card.png");
+    expect(sideboardImage).toHaveAttribute("src", "/card.png");
+    expect(expanded.container.querySelector("fieldset")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Inspect Deck Card" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Inspect Sideboard Card" })).toBeDisabled();
+    expanded.unmount();
+
+    const compact = render(
+      <DraftWorkspace {...sharedProps} preferences={preferences({ sideboardCollapsed: true })} interactionLocked={false} />,
+    );
+    const compactImage = screen.getByAltText("Sideboard Card");
+
+    compact.rerender(
+      <DraftWorkspace {...sharedProps} preferences={preferences({ sideboardCollapsed: true })} interactionLocked />,
+    );
+
+    expect(screen.getByAltText("Sideboard Card")).toBe(compactImage);
+    expect(compactImage).toHaveAttribute("src", "/card.png");
+    expect(compact.container.querySelector("fieldset")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Inspect Sideboard Card" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Move Sideboard Card to Deck" })).toBeDisabled();
   });
 
   it("moves_deck_to_sideboard_with_destination_columns_rows_position_and_announcement", () => {
@@ -1725,26 +1779,93 @@ describe("draft workspace shell", () => {
     const target = container.querySelector<HTMLElement>('[data-drop-target="collapsed-sideboard"]')!;
     expect(registerCollapsedSideboard).toHaveBeenCalledWith(target);
     expect(target).toHaveAttribute("data-drop-state", "active");
-    // The highlight must not alter the target's own box, or the drop test flickers.
-    expect(target).not.toHaveClass("border", "border-dashed", "border-amber-300");
-    const highlight = target.querySelector<HTMLElement>('[data-drop-highlight="active"]')!;
-    expect(highlight).toBeInTheDocument();
-    expect(highlight).toHaveClass("pointer-events-none", "absolute", "inset-0");
-    // The highlight frames the card slot only, so it must sit outside the panel header.
-    expect(highlight.closest("header")).toBeNull();
-    expect(highlight.parentElement).toBe(
-      target.querySelector("[data-card-height-baseline]")!.parentElement,
-    );
+    expect(target).toHaveAttribute("data-sideboard-card-area");
+    expect(target).toHaveClass("draft-card-area-drop-active");
+    expect(target.closest('[aria-label="Compact sideboard"]')).toHaveClass("overflow-visible");
+    expect(target.closest("header")).toBeNull();
+    expect(target.closest('[aria-label="Compact sideboard"]')?.querySelector("header")).toHaveClass("z-10");
+    expect(target.closest('[aria-label="Compact sideboard"]')?.querySelector("[data-sideboard-body]")).not.toBeInTheDocument();
+    expect(target.querySelector("[data-card-stack], [data-instance-id]")).not.toBeInTheDocument();
+    expect(target.querySelector('[data-drop-highlight="active"]')).not.toBeInTheDocument();
 
     activeTarget = null;
     rerender(<DraftWorkspace {...props} />);
     expect(target).toHaveAttribute("data-drop-state", "idle");
-    expect(target.querySelector('[data-drop-highlight="active"]')).not.toBeInTheDocument();
+    expect(target).not.toHaveClass("draft-card-area-drop-active");
+    expect(target.closest('[aria-label="Compact sideboard"]')).toHaveClass("overflow-hidden");
 
     rerender(<DraftWorkspace {...props} preferences={preferences({ sideboardCollapsed: false })} />);
     expect(container.querySelector('[data-drop-target="collapsed-sideboard"]')).not.toBeInTheDocument();
     expect(registerCollapsedSideboard.mock.calls.some(([element]) => element === null)).toBe(true);
     expect(registerSideboard).toHaveBeenCalledWith(expect.any(HTMLElement));
+  });
+
+  it.each([
+    ["desktop", "deck"],
+    ["desktop", "sideboard"],
+    ["phone-portrait", "deck"],
+    ["phone-portrait", "sideboard"],
+    ["phone-landscape", "deck"],
+    ["phone-landscape", "sideboard"],
+    ["tablet-portrait", "deck"],
+    ["tablet-portrait", "sideboard"],
+    ["tablet-landscape", "deck"],
+    ["tablet-landscape", "sideboard"],
+  ] as const)("uses_card_area_only_drop_feedback_for_%s_%s_builder_layouts", (responsiveLayout, activeZone) => {
+    const registerCollapsedSideboard = vi.fn();
+    const registerColumn = vi.fn(() => vi.fn());
+    const activeTarget: DraftWorkspaceDragController["activeTarget"] = {
+      zone: activeZone,
+      column: 0,
+      row: null,
+    };
+    const controller = {
+      announcement: "", activeTarget, dragPreview: null,
+      handlePointerDown: vi.fn(), handleWorkspacePointerDown: vi.fn(),
+      handlePointerMove: vi.fn(), handlePointerUp: vi.fn(),
+      handlePointerCancel: vi.fn(), handleLostPointerCapture: vi.fn(),
+      consumeCompatibilityActivation: vi.fn(() => false),
+      registerBoard: vi.fn(() => vi.fn()), registerColumn, registerCollapsedSideboard,
+      dropState: vi.fn((zone: "deck" | "sideboard") => ({
+        zoneActive: zone === activeZone,
+        column: zone === activeZone ? 0 : null,
+        row: null,
+      })),
+      invalidateGeometry: vi.fn(), dispose: vi.fn(),
+    } satisfies DraftWorkspaceDragController;
+    const cards = [card("deck"), card("side")];
+    const { container } = render(
+      <DraftWorkspace
+        pool={cards}
+        poolGroups={groups(cards)}
+        workspace={state({
+          deck: { zone: "deck", row: 0, column: 0, order: 0 },
+          side: { zone: "sideboard", row: 0, column: 0, order: 0 },
+        })}
+        preferences={preferences({ sideboardCollapsed: true, builderPhoneSideboardCollapsed: true })}
+        responsiveLayout={responsiveLayout}
+        responsiveContext="builder"
+        dragController={controller}
+        onWorkspaceChange={vi.fn()}
+        onPreferencesChange={vi.fn()}
+      />,
+    );
+
+    const sideboard = screen.getByRole("region", { name: "Compact sideboard" });
+    const sideboardArea = sideboard.querySelector<HTMLElement>("[data-sideboard-card-area]")!;
+    expect(sideboardArea).toHaveAttribute("data-drop-target", "collapsed-sideboard");
+    expect(sideboardArea.classList.contains("draft-card-area-drop-active")).toBe(activeZone === "sideboard");
+    expect(sideboard.querySelector("header")?.contains(sideboardArea)).toBe(false);
+    expect(registerCollapsedSideboard).toHaveBeenCalledWith(sideboardArea);
+
+    if (responsiveLayout !== "desktop") {
+      expect(sideboard.querySelector("[data-sideboard-body], [data-card-stack], [data-instance-id]")).not.toBeInTheDocument();
+    }
+
+    const deckArea = container.querySelector<HTMLElement>('[data-zone="deck"] [data-card-area]')!;
+  expect(deckArea.classList.contains("draft-card-area-drop-active")).toBe(activeZone === "deck");
+    expect(deckArea.closest("section")?.querySelector("header")?.contains(deckArea)).toBe(false);
+    expect(registerColumn).toHaveBeenCalledWith("deck", 0);
   });
 
   it("renders_one_collapsed_sideboard_slot_without_duplicate_identities", () => {

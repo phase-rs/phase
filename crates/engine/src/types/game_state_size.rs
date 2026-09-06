@@ -39,7 +39,7 @@
 //!
 //! | Type | before boxing | after | ceiling |
 //! |---|---:|---:|---:|
-//! | `GameState` | 30,112 | 13,360 | 13,824 |
+//! | `GameState` | 30,112 | 13,440 | 13,824 |
 //! | `StackEntry` | 5,336 | 344 | 768 |
 //! | `PendingCast` | 6,632 | 1,376 | 1,792 |
 //! | `PendingTrigger` | 6,000 | 744 | 1,024 |

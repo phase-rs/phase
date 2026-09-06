@@ -999,7 +999,7 @@ mod tests {
         AbilityCost, AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect,
         ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter,
     };
-    use crate::types::actions::ResolveAllConsentDecision;
+    use crate::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
@@ -1396,7 +1396,10 @@ mod tests {
         super::super::engine::apply(
             &mut state,
             PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 0 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 0,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("priority holder begins the consent run");
         let epoch = match &state.waiting_for {
@@ -1449,7 +1452,10 @@ mod tests {
         super::super::engine::apply(
             &mut state,
             PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 0 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 0,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("priority holder begins the consent run");
         let epoch = match &state.waiting_for {

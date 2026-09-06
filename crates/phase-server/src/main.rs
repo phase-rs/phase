@@ -18,9 +18,10 @@ use axum::extract::{Request, State, WebSocketUpgrade};
 use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use clap::Parser;
 use engine::ai_support::{
+    activation_block_reasons_for_viewer as engine_activation_block_reasons_for_viewer,
     auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
     end_continuous_effect_offers as engine_end_continuous_effect_offers,
     legal_actions_full as engine_legal_actions_full,
@@ -33,14 +34,15 @@ use engine::game::validate_name_deck_for_format_full;
 use engine::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::GameState;
-use engine::types::interaction::InteractionSubmission;
+use engine::types::game_state::{GameState, TrustedGameStateEnvelope};
+use engine::types::interaction::{InteractionPreviewRequest, InteractionSubmission};
 use engine::types::player::PlayerId;
 use engine::types::GameLogEntry;
 use http::{HeaderMap, HeaderValue};
 use lobby_broker::{
-    check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
-    Outbound, NOT_OWNED_RESERVATION,
+    check_build_commit, conn_holds_reservation, validate_announcement, Broker, BrokerEnv,
+    BuildCommitCheck, ConnState, Outbound, RawAnnouncement, ServerAnnouncement, ServerInfoDocument,
+    DIRECTORY_VERSION, INFO_PATH, MAX_SERVER_NAME_LEN, NOT_OWNED_RESERVATION,
 };
 use rand::{Rng, TryRngCore};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
@@ -50,7 +52,9 @@ use server_core::client_message_wire_guard::{
     guard_broker_projection_inbound, guard_client_message_before_dispatch, wire_rejection_message,
 };
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
-use server_core::draft_session::{draft_seats_needing_auto_pick, DraftSessionManager};
+use server_core::draft_session::{
+    draft_seats_needing_auto_pick, DraftMatchPlayer, DraftMatchSpawn, DraftSessionManager,
+};
 use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
     guard_reconnect_draft,
@@ -74,8 +78,8 @@ use server_core::protocol::{
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{
-    ActionResult, FullRuntime, GameSession, RevisionedActionResult, SessionActionError,
-    SessionManager,
+    ActionResult, FullRuntime, GameSession, HostingMode, PreviewRefusal, RevisionedActionResult,
+    SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
@@ -485,6 +489,16 @@ fn build_game_started_message(
         });
     let derived = derive_transport_views(&session.state, &filtered, Some(player));
     let viewer_interaction = derive_viewer_interaction(&session.state, &filtered, player);
+    // CR 118.3 + CR 117.1: derived per recipient from the same raw pre-filter
+    // state binding its sibling `spell_costs` came from. No `if is_actor`
+    // wrapper: the entry point self-gates on `turn_control::is_authorized_submitter`,
+    // which is the SAME function `server_core::is_acting` delegates to.
+    let activation_block_reasons =
+        engine_activation_block_reasons_for_viewer(&session.state, player);
+    debug_assert!(
+        activation_block_reasons.is_empty() || is_actor,
+        "a non-empty CR 118.3 read-out implies an authorized viewer"
+    );
 
     ServerMessage::GameStarted {
         state_revision: session.state_revision,
@@ -506,6 +520,7 @@ fn build_game_started_message(
         } else {
             HashMap::new()
         },
+        activation_block_reasons,
         derived,
         viewer_interaction,
         player_token,
@@ -549,6 +564,7 @@ fn build_game_started_messages(session: &mut GameSession) -> Vec<(PlayerId, Serv
 fn build_state_update_message(
     result: &ActionResult,
     state_revision: u64,
+    full_key: &server_core::FullSessionKey,
     player: PlayerId,
     rewind_targets: Vec<RewindOption>,
 ) -> Result<ServerMessage, String> {
@@ -583,8 +599,16 @@ fn build_state_update_message(
     } else {
         Vec::new()
     };
+    // CR 118.3 + CR 117.1: same raw state binding the sibling `spell_costs`
+    // came from (both destructured from this `ActionResult`).
+    let activation_block_reasons = engine_activation_block_reasons_for_viewer(raw_state, player);
+    debug_assert!(
+        activation_block_reasons.is_empty() || is_actor,
+        "a non-empty CR 118.3 read-out implies an authorized viewer"
+    );
 
     Ok(ServerMessage::StateUpdate {
+        full_key: Some(full_key.clone()),
         state_revision,
         state: filtered,
         events: server_core::filter_events_for_player(events, raw_state, player),
@@ -608,6 +632,7 @@ fn build_state_update_message(
         } else {
             HashMap::new()
         },
+        activation_block_reasons,
         derived,
         viewer_interaction,
         rewind_targets,
@@ -637,6 +662,10 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
         mana_payment_shortcut_actions: Vec::new(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
+        // CR 117.1: a spectator is a non-seat viewer with no action authority,
+        // so the read-out is empty by the same existing design as the two
+        // siblings above.
+        activation_block_reasons: HashMap::new(),
         derived,
         viewer_interaction,
         player_token: None,
@@ -653,6 +682,7 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
 }
 
 fn build_spectator_state_update_message(
+    full_key: &server_core::FullSessionKey,
     raw_state: &GameState,
     events: &[GameEvent],
     log_entries: &[GameLogEntry],
@@ -672,6 +702,7 @@ fn build_spectator_state_update_message(
     let eliminated_players = raw_state.eliminated_players.clone();
 
     Ok(ServerMessage::StateUpdate {
+        full_key: Some(full_key.clone()),
         state_revision,
         state: filtered,
         events: server_core::filter_events_for_player(events, raw_state, SPECTATOR_PLAYER_ID),
@@ -683,6 +714,9 @@ fn build_spectator_state_update_message(
         log_entries: log_entries.to_vec(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
+        // CR 117.1: spectators have no action authority — empty by the same
+        // existing design as the two siblings above.
+        activation_block_reasons: HashMap::new(),
         derived,
         viewer_interaction,
         // Empty for the same reason as the spectator `GameStarted` builder
@@ -897,6 +931,13 @@ struct Cli {
     /// `NGROK_AUTHTOKEN` is set, the live tunnel URL is used when this is unset.
     #[arg(long, env = "PUBLIC_URL")]
     public_url: Option<String>,
+
+    /// Directory endpoint to announce this server to, e.g.
+    /// `https://lobby.phase-rs.dev/servers/announce`. Requires --public-url,
+    /// which must be an `https://` URL — the directory lists `wss://`
+    /// addresses only. Off by default.
+    #[arg(long, env = "PHASE_ANNOUNCE_TO", requires = "public_url")]
+    announce_to: Option<Url>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1157,7 +1198,9 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
+        | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
@@ -1416,7 +1459,9 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
 
         ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
+        | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::ExportAuthoritativeState
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
@@ -1597,7 +1642,7 @@ async fn disconnect_full_seat_if_current(
         return;
     };
 
-    let notify_senders = {
+    let (notify_senders, full_key) = {
         // The only nested acquisition in this path is state -> connections.
         // Both guards are released before the notification fan-out below.
         let mut mgr = state.lock().await;
@@ -1609,6 +1654,11 @@ async fn disconnect_full_seat_if_current(
         {
             return;
         }
+        let full_key = mgr
+            .sessions
+            .get(game_code)
+            .and_then(|session| session.full_runtime.as_ref())
+            .map(|runtime| runtime.key.clone());
 
         let mut conns = connections.lock().await;
         let Some(players) = conns.get_mut(game_code) else {
@@ -1623,10 +1673,11 @@ async fn disconnect_full_seat_if_current(
 
         players.remove(&player_id);
         mgr.handle_disconnect(game_code, player_id);
-        players.values().cloned().collect::<Vec<_>>()
+        (players.values().cloned().collect::<Vec<_>>(), full_key)
     };
 
     let message = ServerMessage::OpponentDisconnected {
+        full_key,
         grace_seconds: 120,
         player: Some(player_id),
     };
@@ -1729,6 +1780,163 @@ async fn reconnect_draft_seat(
     identity.draft_seat = Some(seat);
     identity.draft_token = Some(player_token);
     Ok(view)
+}
+
+#[derive(Debug)]
+struct DraftMatchAttachment {
+    match_start: ServerMessage,
+    game_started: ServerMessage,
+}
+
+/// Attach an authenticated draft seat to its current spawned Full game.
+///
+/// The draft token remains the root capability. The Full token and generation
+/// are derived from the current pairing and live game session, never accepted
+/// from the client.
+async fn attach_current_draft_match(
+    draft_state: &SharedDraftState,
+    state: &SharedState,
+    connections: &SharedConnections,
+    identity: &mut SocketIdentity,
+    draft_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> Result<Option<DraftMatchAttachment>, String> {
+    let (attached_draft, draft_seat, draft_token) = identity
+        .draft_seat()
+        .ok_or_else(|| "Socket is not attached to a draft seat".to_string())?;
+    let draft_token = draft_token.to_string();
+    if attached_draft != draft_code {
+        return Err(DRAFT_SOCKET_AUTHORITY_REJECTION.to_string());
+    }
+
+    let draft_manager = draft_state.lock().await;
+    if !draft_socket_is_current_while_state_locked(&draft_manager, connections, identity, tx).await
+    {
+        return Err(DRAFT_SOCKET_AUTHORITY_REJECTION.to_string());
+    }
+    let draft_session = draft_manager
+        .sessions
+        .get(draft_code)
+        .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
+    let Some((pairing, game_code, game_player)) = draft_session.active_match_for_seat(draft_seat)
+    else {
+        return Ok(None);
+    };
+    let opponent_index = match game_player {
+        PlayerId(0) => 1,
+        PlayerId(1) => 0,
+        _ => return Err("Draft match player identity is inconsistent".to_string()),
+    };
+    let opponent_seat = usize::from(pairing.players[opponent_index].0);
+    let match_id = pairing.match_id.clone();
+    let round = pairing.round;
+    let game_code = game_code.to_string();
+    let opponent_name = draft_session
+        .display_names
+        .get(opponent_seat)
+        .filter(|name| !name.is_empty())
+        .cloned()
+        .unwrap_or_else(|| format!("Player {opponent_seat}"));
+    let previous_full = identity
+        .full_seat()
+        .map(|(code, player, _)| (code.to_string(), player));
+
+    let (player_token, full_key, game_started, was_disconnected) = {
+        let mut manager = state.lock().await;
+        let player_index = usize::from(game_player.0);
+        let (player_token, full_key, was_disconnected) = {
+            let Some(session) = manager.sessions.get(&game_code) else {
+                warn!(
+                    draft = %draft_code,
+                    game = %game_code,
+                    "draft pairing references a game that is no longer resident"
+                );
+                return Ok(None);
+            };
+            let full_key = session
+                .full_runtime
+                .as_ref()
+                .map(|runtime| runtime.key.clone())
+                .ok_or_else(|| "Draft match Full identity is unavailable".to_string())?;
+            if full_key.game_code != game_code {
+                return Err("Draft match Full identity is inconsistent".to_string());
+            }
+            let player_token = session
+                .player_tokens
+                .get(player_index)
+                .filter(|token| !token.is_empty())
+                .cloned()
+                .ok_or_else(|| "Draft match player identity is unavailable".to_string())?;
+            if session.player_for_token(&player_token) != Some(game_player) {
+                return Err("Draft match player identity is inconsistent".to_string());
+            }
+            (player_token, full_key, !session.connected[player_index])
+        };
+
+        manager.handle_reconnect(&game_code, &player_token)?;
+        let session = manager
+            .sessions
+            .get(&game_code)
+            .expect("draft match remains present after reconnect");
+        let game_started = build_game_started_message(session, game_player, None, Vec::new());
+
+        let mut conns = connections.lock().await;
+        if let Some((previous_game, previous_player)) = previous_full {
+            if previous_game != game_code || previous_player != game_player {
+                if let Some(players) = conns.get_mut(&previous_game) {
+                    if players
+                        .get(&previous_player)
+                        .is_some_and(|sender| sender.same_channel(tx))
+                    {
+                        players.remove(&previous_player);
+                        manager.handle_disconnect(&previous_game, previous_player);
+                    }
+                }
+            }
+        }
+        conns
+            .entry(game_code.clone())
+            .or_default()
+            .insert(game_player, tx.clone());
+
+        (player_token, full_key, game_started, was_disconnected)
+    };
+    drop(draft_manager);
+
+    identity.set_session(game_code.clone(), game_player, player_token);
+
+    if was_disconnected {
+        let reconnect_senders = {
+            let conns = connections.lock().await;
+            conns
+                .get(&game_code)
+                .into_iter()
+                .flat_map(|players| players.iter())
+                .filter(|(player, _)| **player != game_player)
+                .map(|(_, sender)| sender.clone())
+                .collect::<Vec<_>>()
+        };
+        let message = ServerMessage::OpponentReconnected {
+            full_key: Some(full_key.clone()),
+            player: Some(game_player),
+        };
+        for sender in reconnect_senders {
+            let _ = sender.send(message.clone());
+        }
+    }
+
+    Ok(Some(DraftMatchAttachment {
+        match_start: ServerMessage::DraftMatchStart {
+            match_id,
+            round,
+            game_code,
+            full_key,
+            player_token: draft_token,
+            your_player: game_player,
+            opponent_name,
+        },
+        game_started,
+    }))
 }
 
 /// Mark a draft seat disconnected only if this socket still owns its sender
@@ -2387,6 +2595,39 @@ async fn serve() {
         cli.port
     );
 
+    // Both fallible announce-setup steps happen once, here, and share one
+    // `error!` arm: a bad configuration is a single startup error the operator
+    // is watching for, rather than a warning every 60 s forever — and, for the
+    // HTTP client, rather than a panic inside a detached task whose handle
+    // nothing holds. `requires = "public_url"` guarantees the flag was
+    // supplied; it guarantees nothing about the value surviving
+    // `validate_public_url`.
+    if let Some(endpoint) = cli.announce_to.clone() {
+        let announce_setup = announcement_from_state(&app_state).and_then(|base| {
+            reqwest::Client::builder()
+                .timeout(ANNOUNCE_REQUEST_TIMEOUT)
+                .build()
+                .map(|client| (base, client))
+                .map_err(|error| format!("could not build the announce HTTP client: {error}"))
+        });
+        match announce_setup {
+            Ok((base, client)) => {
+                // The handle is discarded as a bare statement, matching the
+                // expiry task above: `JoinHandle` is not `#[must_use]`.
+                spawn_announce_task(
+                    endpoint,
+                    client,
+                    base,
+                    app_state.player_count.clone(),
+                    ANNOUNCE_INTERVAL,
+                );
+            }
+            Err(error) => {
+                error!(%error, "--announce-to is set but this server cannot announce itself")
+            }
+        }
+    }
+
     let listener = tokio::net::TcpListener::bind((cli.bind, cli.port))
         .await
         .expect("failed to bind");
@@ -2537,6 +2778,32 @@ async fn health() -> &'static str {
     "ok"
 }
 
+/// `lobby_broker::ServerMode` mirrors `server_core::protocol::ServerMode`
+/// variant-for-variant and serde-shape-for-serde-shape (its own doc comment
+/// says so), so this is a total translation with no fallback. Same shape as
+/// `to_server_message`'s conversion in the other direction.
+fn directory_mode(mode: Mode) -> lobby_broker::ServerMode {
+    match mode {
+        ServerMode::Full => lobby_broker::ServerMode::Full,
+        ServerMode::LobbyOnly => lobby_broker::ServerMode::LobbyOnly,
+    }
+}
+
+/// Public identity document — the same values `ServerHello` advertises
+/// (`handle_socket`), served over plain HTTP so a directory can verify an
+/// announcement without opening a WebSocket. `lobby_broker::directory` owns the
+/// shape; the Cloudflare Durable Object serves the same document.
+async fn server_info(State(app_state): State<AppState>) -> Json<ServerInfoDocument> {
+    Json(ServerInfoDocument {
+        mode: directory_mode(app_state.mode),
+        protocol_version: PROTOCOL_VERSION,
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_commit: Some(build_commit().to_string()),
+        public_url: app_state.public_url,
+    })
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use std::collections::HashMap;
@@ -2549,9 +2816,128 @@ mod lifecycle_tests {
     use url::Url;
 
     use super::{
-        bootstrap_required, origin_is_allowed, prune_game_connections, select_card_data_source,
-        validate_public_url, CardDataSource, Cli, SharedConnections,
+        bootstrap_required, build_state_update_message, origin_is_allowed, prune_game_connections,
+        select_card_data_source, validate_public_url, CardDataSource, Cli, ServerMessage,
+        SharedConnections,
     };
+
+    /// CR 118.3 + CR 117.1 — matrix row 21 (actor axis), at a REAL
+    /// `ServerMessage` construction site rather than at the engine entry point.
+    ///
+    /// `build_state_update_message` is the sync builder behind `phase-server`'s
+    /// `StateUpdate` fan-out. It derives `activation_block_reasons` from the
+    /// SAME `raw_state` binding its sibling `spell_costs` is destructured from,
+    /// and passes no `if is_actor` wrapper — the engine entry point self-gates
+    /// on `turn_control::is_authorized_submitter`, which is exactly what
+    /// `server_core::is_acting` delegates to.
+    ///
+    /// Both halves asserted in one test so neither is vacuous: the acting seat
+    /// receives a NON-EMPTY read-out, and the non-acting seat receives an empty
+    /// one from the SAME `ActionResult`.
+    ///
+    /// RUNNER: CI. Tilt's test resources are scoped `-p phase-engine -p phase-ai`
+    /// and never compile `phase-server`, so a green `test-engine` is no evidence
+    /// for this test.
+    #[test]
+    fn state_update_publishes_the_cost_block_readout_only_to_the_acting_seat() {
+        // DB-free by construction: `GameState::new_two_player` + `create_object`
+        // only, mirroring `mana_display_self_sacrifice_clone_gate.rs`. `phase-server`
+        // does not enable the engine's `test-support` feature, so `GameScenario`
+        // is not available here.
+        use engine::game::game_object::GameObject;
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+        };
+        use engine::types::game_state::{GameState, WaitingFor};
+        use engine::types::identifiers::CardId;
+        use engine::types::phase::Phase;
+        use engine::types::player::PlayerId;
+        use engine::types::zones::Zone;
+        use std::sync::Arc as StdArc;
+
+        const P0: PlayerId = PlayerId(0);
+        const P1: PlayerId = PlayerId(1);
+
+        let mut raw_state = GameState::new_two_player(42);
+        raw_state.phase = Phase::PreCombatMain;
+        raw_state.waiting_for = WaitingFor::Priority { player: P0 };
+        raw_state.priority_player = P0;
+        raw_state.players[0].life = 1;
+
+        // `game::zones` is `pub(crate)`, so the object is placed directly:
+        // insert into `objects` and push onto the battlefield, which is exactly
+        // what `create_object` does for a pre-existing permanent.
+        let obj = engine::types::identifiers::ObjectId(raw_state.next_object_id);
+        raw_state.next_object_id += 1;
+        raw_state.objects.insert(
+            obj,
+            GameObject::new(
+                obj,
+                CardId(1),
+                P0,
+                "Costly Engine".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        raw_state.battlefield.push_back(obj);
+        // One unaffordable, resource-verdict ability: `Pay 5 life: draw` at 1 life.
+        {
+            let o = raw_state.objects.get_mut(&obj).expect("object exists");
+            StdArc::make_mut(&mut o.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                }),
+            );
+        }
+
+        let (legal_actions, spell_costs, by_object) =
+            engine::ai_support::legal_actions_full(&raw_state);
+        let result: server_core::session::ActionResult = (
+            raw_state,
+            Vec::new(),
+            legal_actions,
+            Vec::new(),
+            false,
+            spell_costs,
+            by_object,
+        );
+
+        let full_key = server_core::FullSessionKey {
+            game_code: "GAME01".to_string(),
+            generation: 1,
+        };
+        let readout_for =
+            |player| match build_state_update_message(&result, 1, &full_key, player, Vec::new())
+                .expect("the snapshot guard admits this small board")
+            {
+                ServerMessage::StateUpdate {
+                    activation_block_reasons,
+                    ..
+                } => activation_block_reasons,
+                other => panic!("expected a StateUpdate, got {other:?}"),
+            };
+
+        let acting = readout_for(P0);
+        let other = readout_for(P1);
+
+        // PAIRED POSITIVE, mandatory: without it, a builder that dropped the
+        // field entirely would satisfy the negative below.
+        assert!(
+            acting.get(&obj).is_some_and(|entries| entries.len() == 1),
+            "the acting seat's StateUpdate carries the CR 118.3 read-out; got {acting:?}"
+        );
+        assert!(
+            other.is_empty(),
+            "a non-acting recipient of the SAME ActionResult gets an empty map; got {other:?}"
+        );
+    }
 
     #[test]
     fn bind_flag_defaults_to_lan_and_accepts_loopback() {
@@ -2640,6 +3026,48 @@ mod lifecycle_tests {
         assert_eq!(validate_public_url("mailto:someone@example.com"), None);
         assert!(Url::parse("file:///var/lib/phase-server").is_ok());
         assert_eq!(validate_public_url("file:///var/lib/phase-server"), None);
+    }
+
+    /// V13. The flag pair is a coupling clap enforces, not a runtime check:
+    /// a directory row is an address, and there is no address to announce
+    /// without `--public-url`.
+    #[test]
+    fn announce_to_requires_a_public_url() {
+        // `Cli` is not `Debug`, so `expect_err` is not available here.
+        let alone = match Cli::try_parse_from([
+            "phase-server",
+            "--announce-to",
+            "https://d.example/servers/announce",
+        ]) {
+            Ok(_) => panic!("--announce-to alone must not parse"),
+            Err(error) => error,
+        };
+        // The `kind`, not merely that it errored: a typo'd flag name would
+        // otherwise pass this as `UnknownArgument`.
+        assert_eq!(
+            alone.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        // Paired positive: the same invocation WITH --public-url parses, and
+        // both fields are populated.
+        let both = Cli::try_parse_from([
+            "phase-server",
+            "--announce-to",
+            "https://d.example/servers/announce",
+            "--public-url",
+            "https://play.example.com",
+        ])
+        .expect("--announce-to with --public-url parses");
+        assert_eq!(
+            both.announce_to.as_ref().map(Url::to_string),
+            Some("https://d.example/servers/announce".to_string())
+        );
+        assert_eq!(both.public_url.as_deref(), Some("https://play.example.com"));
+
+        // Absent by default: announcing is opt-in.
+        let default = Cli::try_parse_from(["phase-server"]).expect("default CLI parses");
+        assert!(default.announce_to.is_none());
     }
 
     #[tokio::test]
@@ -3006,15 +3434,19 @@ fn admin_token_from_env() -> Option<String> {
 /// rather than through the response body a compressing layer would wrap —
 /// keeping the layer off that route entirely removes any dependence on that
 /// implementation detail continuing to hold across axum/tower-http upgrades.
-/// Every other route (health check, the P2P draft backup API, and — when
-/// `admin_token` is set — the bearer-guarded `/admin/*` routes) is served
-/// through gzip `CompressionLayer` so JSON/text responses shrink whenever the
-/// client advertises `Accept-Encoding: gzip`.
+/// Every other route (health check, the `lobby_broker::directory::INFO_PATH`
+/// identity document, the P2P draft backup API, and — when `admin_token` is
+/// set — the bearer-guarded `/admin/*` routes) is served through gzip
+/// `CompressionLayer` so JSON/text responses shrink whenever the client
+/// advertises `Accept-Encoding: gzip`.
 fn build_router(app_state: AppState, cors: CorsLayer, admin_token: Option<&str>) -> Router {
     let ws_router: Router<AppState> = Router::new().route("/ws", get(ws_handler));
 
     let mut http_router: Router<AppState> = Router::new()
         .route("/health", get(health))
+        // The constant, never a `"/info"` literal: every server kind must
+        // answer its info document on the same path a directory probes.
+        .route(INFO_PATH, get(server_info))
         .route("/p2p-draft-backup", post(admin::p2p_backup_store))
         .route(
             "/p2p-draft-backup/{code}",
@@ -3099,6 +3531,159 @@ fn validate_public_url(raw: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// How often a server re-asserts its directory listing. The directory expires
+/// rows that stop being re-asserted, so this is a heartbeat, not a one-shot
+/// registration.
+const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(60);
+/// Ceiling on one announce POST. A directory that hangs must never accumulate
+/// in-flight requests behind a 60 s heartbeat.
+const ANNOUNCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Build this server's directory announcement from live state. `Err` when the
+/// server has no announceable address: no `--public-url` (a malformed value is
+/// dropped by [`validate_public_url`], so the flag being present guarantees
+/// nothing about the value), a non-`https` one (the directory lists `wss://`
+/// only, and an `http://` public URL would announce an address this server does
+/// not serve), or one whose host the directory contract refuses.
+///
+/// Assembly only, with one deliberate exception: every rule it could have
+/// inlined — scheme, host shape, normalisation — lives in
+/// `lobby_broker::directory` and is applied by the same
+/// [`validate_announcement`] the directory itself runs. The exception is the
+/// name cap: `name` is the host truncated to [`MAX_SERVER_NAME_LEN`], while
+/// `url` keeps the full host, so a host too long to be a display name still
+/// yields an announceable address rather than no announcement at all.
+fn announcement_from_state(state: &AppState) -> Result<ServerAnnouncement, String> {
+    let public_url = state.public_url.as_deref().ok_or_else(|| {
+        "no public URL to announce (--public-url is unset, or was dropped as malformed)".to_string()
+    })?;
+    let parsed =
+        Url::parse(public_url).map_err(|error| format!("unparseable --public-url: {error}"))?;
+    if parsed.scheme() != "https" {
+        return Err(format!(
+            "--public-url scheme is `{}`; a directory listing must be wss://, which requires an \
+             https:// public URL",
+            parsed.scheme()
+        ));
+    }
+    // `host_str()` + `port()`, never `authority()` — the latter carries
+    // userinfo through into the announced address.
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "--public-url has no host".to_string())?;
+    let port_suffix = parsed
+        .port()
+        .map_or(String::new(), |port| format!(":{port}"));
+    // A host longer than the NAME cap must not disable announcing outright:
+    // `MAX_SERVER_URL_LEN` is 256 while `MAX_SERVER_NAME_LEN` is 64, so a host
+    // between those bounds yields an address the directory contract accepts and
+    // a display name it rejects. Truncate the name rather than fail the whole
+    // announcement — `url()` keeps the full host, and that is the field
+    // identity turns on.
+    //
+    // Truncating by CHARACTERS, which is the unit `validate_required_label`
+    // itself bounds (`value.chars().count()`), so this is the exact inverse of
+    // the check it has to satisfy and cannot split a codepoint. Characters and
+    // bytes also coincide here, but the guarantee for that is `Url::host_str()`
+    // having already applied IDNA ToASCII on a special scheme — and the scheme
+    // was checked to be `https` above (measured: `https://bücher.example`
+    // parses to host `xn--bcher-kva.example`). That guarantee is UPSTREAM of
+    // this line. The directory contract's own ASCII rule is not: it runs inside
+    // `validate_announcement` below, so nothing here may lean on it.
+    let name: String = host.chars().take(MAX_SERVER_NAME_LEN).collect();
+    // `/ws` by construction: this server is describing its own route, and
+    // `build_router` registers exactly that path.
+    let raw = RawAnnouncement {
+        directory_version: DIRECTORY_VERSION,
+        url: format!("wss://{host}{port_suffix}/ws"),
+        name,
+        mode: directory_mode(state.mode),
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: PROTOCOL_VERSION,
+        lobby_protocol_version: LOBBY_PROTOCOL_VERSION,
+        current_players: state.player_count.load(Ordering::Relaxed),
+    };
+    validate_announcement(&raw)
+}
+
+/// Heartbeat POSTing `base` every `period`, refreshing only the live player
+/// count. Warn-and-retry: a directory that is down, slow or rejecting must
+/// never affect the game server. Detached like the expiry task in `serve` — it
+/// ends with the runtime at process exit.
+///
+/// `base` is already validated (built once by [`announcement_from_state`] at
+/// startup) and `client` is already built (by the caller, carrying
+/// [`ANNOUNCE_REQUEST_TIMEOUT`]), so the task has no *fallible* setup — it
+/// cannot fail to build an announcement and it cannot fail to build a client.
+/// Both of those failures are the caller's single startup `error!`; building
+/// the client in here instead would put either a fourth outcome or a silent
+/// panic inside a task that is required never to die and whose handle
+/// production discards. Three per-tick failure classes remain, each logged at
+/// warn with the tick skipped and the loop continuing: a transport error, a
+/// non-success status, and a serialization error from `serde_json::to_vec`.
+/// `period` is a parameter so the test drives the real loop without a
+/// wall-clock minute; production passes [`ANNOUNCE_INTERVAL`]. The handle is
+/// returned only so that test can assert the task is still alive.
+///
+/// # Panics
+///
+/// `period` must be non-zero. `tokio::time::interval` panics on a zero period,
+/// and it would do so at the first poll *inside* the spawned task — precisely
+/// the unobservable failure mode the caller-built `client` exists to avoid,
+/// since production discards the handle. The `debug_assert!` below moves that
+/// failure onto the caller's thread instead.
+fn spawn_announce_task(
+    endpoint: Url,
+    client: reqwest::Client,
+    base: ServerAnnouncement,
+    player_count: SharedPlayerCount,
+    period: Duration,
+) -> tokio::task::JoinHandle<()> {
+    // Deliberately in the synchronous body rather than beside the `interval`
+    // call it guards: a panic raised inside the spawned task is exactly the
+    // unobservable failure this assertion exists to catch, so it has to fire on
+    // the caller's thread to be worth anything. No runtime branch — the loop
+    // keeps exactly its three per-tick failure classes.
+    debug_assert!(!period.is_zero(), "announce period must be non-zero");
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(period);
+        // A stalled process must not fire a burst of announcements on catch-up.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            // `interval`'s first tick completes immediately, so the server
+            // announces at startup and then every `period`.
+            interval.tick().await;
+            let announcement = base.with_current_players(player_count.load(Ordering::Relaxed));
+            let body = match serde_json::to_vec(&announcement) {
+                Ok(body) => body,
+                Err(error) => {
+                    warn!(%error, "could not serialize the directory announcement; skipping this tick");
+                    continue;
+                }
+            };
+            let sent = client
+                .post(endpoint.clone())
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .send()
+                .await;
+            match sent {
+                Ok(response) if response.status().is_success() => {}
+                Ok(response) => warn!(
+                    status = %response.status(),
+                    endpoint = %endpoint,
+                    "directory refused this announcement; retrying next tick"
+                ),
+                Err(error) => warn!(
+                    %error,
+                    endpoint = %endpoint,
+                    "could not reach the directory; retrying next tick"
+                ),
+            }
+        }
+    })
 }
 
 /// Open an embedded ngrok HTTP tunnel that forwards public traffic to the local
@@ -4562,16 +5147,65 @@ async fn report_draft_game_over(
     broadcast_draft_views(&draft_code, connections, draft_state).await;
 }
 
-/// When the draft pod is pairing or in match play, generate pairings (server-internal)
-/// and spawn 2-player game sessions for each pending table.
+/// Bind a spawned draft game to its exact Full lifetime before announcing it.
+fn initialize_draft_match_runtime(
+    game_manager: &mut SessionManager,
+    game_db: &SharedGameDb,
+    spawn: &DraftMatchSpawn,
+) -> Result<server_core::FullSessionKey, String> {
+    let full_key = game_db
+        .create_full_session_key(&spawn.game_code)
+        .map_err(|error| format!("Failed to bind draft match identity: {error}"))?;
+    let session = game_manager
+        .sessions
+        .get_mut(&spawn.game_code)
+        .ok_or_else(|| format!("Spawned draft match is missing: {}", spawn.game_code))?;
+    // These seats have not attached yet. Keep their presence accurate without
+    // starting reconnect expiry before an actual socket has disconnected.
+    session.connected.fill(false);
+    initialize_full_runtime(game_db, session, full_key.clone())?;
+
+    Ok(full_key)
+}
+
+/// Build the initial match announcement from the draft seat's stable credential.
+fn build_draft_match_start_message(
+    draft_manager: &DraftSessionManager,
+    draft_code: &str,
+    spawn: &DraftMatchSpawn,
+    full_key: &server_core::FullSessionKey,
+    player: &DraftMatchPlayer,
+    opponent_name: &str,
+) -> Result<ServerMessage, String> {
+    let draft_token = draft_manager
+        .sessions
+        .get(draft_code)
+        .and_then(|session| session.player_tokens.get(usize::from(player.draft_seat)))
+        .filter(|token| !token.is_empty())
+        .cloned()
+        .ok_or_else(|| "Draft match credential disappeared before announcement".to_string())?;
+
+    Ok(ServerMessage::DraftMatchStart {
+        match_id: spawn.match_id.clone(),
+        round: spawn.round,
+        game_code: spawn.game_code.clone(),
+        full_key: full_key.clone(),
+        player_token: draft_token,
+        your_player: player.game_player,
+        opponent_name: opponent_name.to_string(),
+    })
+}
+
+/// Generate pairings and spawn 2-player game sessions for pending draft tables.
 async fn maybe_spawn_draft_matches(
     draft_code: &str,
     draft_state: &SharedDraftState,
     game_state: &SharedState,
     db: &SharedDb,
+    game_db: &SharedGameDb,
     connections: &SharedConnections,
 ) {
-    let spawns = {
+    let spawns: Vec<(DraftMatchSpawn, server_core::FullSessionKey)> = {
         let mut draft_mgr = draft_state.lock().await;
         let mut game_mgr = game_state.lock().await;
         if let Err(error) = draft_mgr.ensure_pairings_generated(draft_code) {
@@ -4588,7 +5222,28 @@ async fn maybe_spawn_draft_matches(
             .map(|s| s.session.current_round)
             .unwrap_or(1);
         match draft_mgr.spawn_match_games_for_round(draft_code, &mut game_mgr, db, round) {
-            Ok(s) => s,
+            Ok(spawned) => spawned
+                .into_iter()
+                .filter_map(|spawn| {
+                    match initialize_draft_match_runtime(&mut game_mgr, game_db, &spawn) {
+                        Ok(full_key) => Some((spawn, full_key)),
+                        Err(error) => {
+                            warn!(
+                                draft = %draft_code,
+                                match_id = %spawn.match_id,
+                                game = %spawn.game_code,
+                                %error,
+                                "failed to initialize draft match"
+                            );
+                            game_mgr.remove_game(&spawn.game_code);
+                            if let Some(session) = draft_mgr.sessions.get_mut(draft_code) {
+                                session.active_matches.remove(&spawn.match_id);
+                            }
+                            None
+                        }
+                    }
+                })
+                .collect(),
             Err(e) => {
                 warn!(draft = %draft_code, error = %e, "draft match spawn skipped");
                 return;
@@ -4603,13 +5258,13 @@ async fn maybe_spawn_draft_matches(
     // Reacquire draft state before the sender map so a reconnect cannot renew
     // its engine state between pairing generation and match-start delivery.
     // Draft reconnects use the same draft state -> connections ordering.
-    let _draft_manager = draft_state.lock().await;
+    let draft_manager = draft_state.lock().await;
     let conns = connections.lock().await;
     let Some(players) = conns.get(draft_code) else {
         return;
     };
 
-    for spawn in spawns {
+    for (spawn, full_key) in spawns {
         info!(
             draft = %draft_code,
             match_id = %spawn.match_id,
@@ -4617,13 +5272,24 @@ async fn maybe_spawn_draft_matches(
             "draft match game spawned"
         );
         for (player, seat) in [(&spawn.player_a, 0usize), (&spawn.player_b, 1usize)] {
-            let msg = ServerMessage::DraftMatchStart {
-                match_id: spawn.match_id.clone(),
-                round: spawn.round,
-                game_code: spawn.game_code.clone(),
-                player_token: player.game_token.clone(),
-                your_player: player.game_player,
-                opponent_name: spawn.opponent_names[seat].clone(),
+            let msg = match build_draft_match_start_message(
+                &draft_manager,
+                draft_code,
+                &spawn,
+                &full_key,
+                player,
+                &spawn.opponent_names[seat],
+            ) {
+                Ok(message) => message,
+                Err(error) => {
+                    warn!(
+                        draft = %draft_code,
+                        match_id = %spawn.match_id,
+                        seat = player.draft_seat,
+                        %error
+                    );
+                    continue;
+                }
             };
             if let Some(sender) = players.get(&PlayerId(player.draft_seat)) {
                 let _ = sender.send(msg);
@@ -5030,12 +5696,13 @@ async fn draft_pack_generator_for_start(
 async fn broadcast_ai_results(
     connections: &SharedConnections,
     game_spectators: &SharedGameSpectators,
-    game_code: &str,
+    full_key: &server_core::FullSessionKey,
     player_count: u8,
     eliminated: &[PlayerId],
     ai_results: &[RevisionedActionResult],
     rewind_targets: &[RewindOption],
 ) {
+    let game_code = &full_key.game_code;
     // Broadcast AI follow-up results with delays
     for (i, (ai_revision, result)) in ai_results.iter().enumerate() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -5102,7 +5769,24 @@ async fn broadcast_ai_results(
                     } else {
                         HashMap::new()
                     };
+                    // CR 118.3: the STALENESS axis is the one part of disclosure
+                    // the engine cannot self-gate — "is this the final transition
+                    // of the fan-out" is a property of the transport's batch, not
+                    // of any `GameState`. An intermediate transition advertises no
+                    // actions, so it must advertise no read-out either. The
+                    // `is_actor` half is redundant with the entry point's own gate
+                    // and is kept only to mirror its `p_spell_costs` sibling above.
+                    let p_activation_block_reasons = if is_last && is_actor {
+                        engine_activation_block_reasons_for_viewer(ai_raw_state, *pid)
+                    } else {
+                        HashMap::new()
+                    };
+                    debug_assert!(
+                        p_activation_block_reasons.is_empty() || is_actor,
+                        "a non-empty CR 118.3 read-out implies an authorized viewer"
+                    );
                     let _ = s.send(ServerMessage::StateUpdate {
+                        full_key: Some(full_key.clone()),
                         state_revision: *ai_revision,
                         state: pstate.clone(),
                         events: server_core::filter_events_for_player(
@@ -5118,6 +5802,7 @@ async fn broadcast_ai_results(
                         log_entries: ai_log_entries.clone(),
                         spell_costs: p_spell_costs,
                         legal_actions_by_object: object_action_payloads(&p_by_object),
+                        activation_block_reasons: p_activation_block_reasons,
                         derived: derive_transport_views(ai_raw_state, pstate, Some(*pid)),
                         viewer_interaction: derive_viewer_interaction(ai_raw_state, pstate, *pid),
                         rewind_targets: rewind_targets.to_vec(),
@@ -5127,6 +5812,7 @@ async fn broadcast_ai_results(
         }
         let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
         if let Ok(spectator_msg) = build_spectator_state_update_message(
+            full_key,
             ai_raw_state,
             ai_events,
             ai_log_entries,
@@ -5175,6 +5861,7 @@ async fn broadcast_takeback_approved(
     connections: &SharedConnections,
     game_spectators: &SharedGameSpectators,
     game_code: &str,
+    full_key: &server_core::FullSessionKey,
     player_count: u8,
     state_revision: u64,
     snapshot: server_core::BroadcastSnapshot,
@@ -5217,7 +5904,19 @@ async fn broadcast_takeback_approved(
                 } else {
                     HashMap::new()
                 };
+                // CR 118.3 + CR 117.1: derived from `raw_state` (`snapshot.0`) —
+                // the SAME binding the sibling `spell_costs` (`snapshot.3`) came
+                // from. This path has no `session` in scope, and reading a
+                // different state here is precisely the freshness hazard the
+                // per-site state-binding rule exists to prevent.
+                let p_activation_block_reasons =
+                    engine_activation_block_reasons_for_viewer(&raw_state, *pid);
+                debug_assert!(
+                    p_activation_block_reasons.is_empty() || is_actor,
+                    "a non-empty CR 118.3 read-out implies an authorized viewer"
+                );
                 let _ = s.send(ServerMessage::StateUpdate {
+                    full_key: Some(full_key.clone()),
                     state_revision,
                     state: pstate.clone(),
                     events: vec![],
@@ -5229,6 +5928,7 @@ async fn broadcast_takeback_approved(
                     log_entries: vec![],
                     spell_costs: p_spell_costs,
                     legal_actions_by_object: object_action_payloads(&p_by_object),
+                    activation_block_reasons: p_activation_block_reasons,
                     derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
                     viewer_interaction: derive_viewer_interaction(&raw_state, pstate, *pid),
                     // Captured by the caller under the same lock as the
@@ -5263,7 +5963,7 @@ async fn broadcast_takeback_approved(
     // `Conceded`/`GameOver`. Without this, a spectator would stay frozen on
     // the pre-rollback state until some later action produced a new update.
     if let Ok(spectator_msg) =
-        build_spectator_state_update_message(&raw_state, &[], &[], state_revision)
+        build_spectator_state_update_message(full_key, &raw_state, &[], &[], state_revision)
     {
         let mut specs = game_spectators.lock().await;
         if let Some(spectators) = specs.get_mut(game_code) {
@@ -5309,6 +6009,15 @@ fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<Serv
         ClientMessage::PreviewManaPayment { request_id, .. } => {
             Some(ServerMessage::ManaPaymentPreviewFailed {
                 request_id: *request_id,
+                message,
+            })
+        }
+        ClientMessage::ExportAuthoritativeState => {
+            Some(ServerMessage::AuthoritativeStateExportFailed { message })
+        }
+        ClientMessage::PreviewInteraction { request } => {
+            Some(ServerMessage::InteractionPreviewFailed {
+                request_id: request.request_id.clone(),
                 message,
             })
         }
@@ -5423,6 +6132,66 @@ impl GameSubmission {
             }
         }
     }
+}
+
+/// Answer one interaction preview to its requester alone.
+///
+/// Takes NO socket: the reply rides the connection's own `tx`, which shares the
+/// one `biased` `tokio::select!` loop with `socket.recv()` on a single task, so
+/// it reaches exactly this socket with no interleaving hazard. That is also why
+/// this is a free function rather than an inline dispatch arm — `axum`'s
+/// `WebSocket` has no test constructor, so a socket-taking handler could not be
+/// driven from a test at all.
+///
+/// `connections` is read only through the socket-currency check; nothing is
+/// broadcast, and no lock is held across the send.
+async fn handle_preview_interaction(
+    request: InteractionPreviewRequest,
+    state: &SharedState,
+    connections: &SharedConnections,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+    identity: &SocketIdentity,
+) {
+    let request_id = request.request_id.clone();
+    let response = match (identity.game_code.clone(), identity.player_token.clone()) {
+        (Some(game_code), Some(player_token)) => {
+            let mgr = state.lock().await;
+            if !full_socket_is_current_while_state_locked(&mgr, connections, identity, tx).await {
+                ServerMessage::InteractionPreviewFailed {
+                    request_id,
+                    message: FULL_SOCKET_AUTHORITY_REJECTION.to_string(),
+                }
+            } else {
+                // No handler-level payload re-guard, deliberately:
+                // `guard_client_message_before_dispatch` already charged this
+                // frame at the wire, and `preview_interaction` re-charges every
+                // member and answers its own `PayloadTooLarge` INSIDE the
+                // preview — a correlated, non-tearing answer on this request's
+                // own channel, identical to what the local WASM seat gets.
+                match mgr.preview_interaction_with_rejection(&game_code, &player_token, &request) {
+                    Ok(preview) => ServerMessage::InteractionPreview { preview },
+                    Err(PreviewRefusal::Rejected(rejection)) => {
+                        ServerMessage::InteractionPreviewFailed {
+                            request_id,
+                            message: rejection.message,
+                        }
+                    }
+                    Err(PreviewRefusal::Operational(error)) => {
+                        ServerMessage::InteractionPreviewFailed {
+                            request_id,
+                            message: error,
+                        }
+                    }
+                }
+            }
+        }
+        _ => ServerMessage::InteractionPreviewFailed {
+            request_id,
+            message: "Not in a game".to_string(),
+        },
+    };
+
+    let _ = tx.send(response);
 }
 
 /// Apply one authenticated game submission from a Full-mode game socket, then
@@ -5546,6 +6315,12 @@ async fn handle_full_game_submission(
                 // message this transition produces.
                 let rewind_targets = session.rewind_options();
                 let player_count = session.player_count;
+                let full_key = session
+                    .full_runtime
+                    .as_ref()
+                    .expect("authenticated Full action retains its exact runtime")
+                    .key
+                    .clone();
                 let game_over_winner = match &session.state.waiting_for {
                     engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
                     _ => None,
@@ -5584,6 +6359,7 @@ async fn handle_full_game_submission(
                             terminal,
                             rewind_targets,
                             ai_failure,
+                            full_key,
                         )
                     })
             }
@@ -5610,6 +6386,7 @@ async fn handle_full_game_submission(
             terminal,
             rewind_targets,
             ai_failure,
+            full_key,
         )) => {
             if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
                 state: &raw_state,
@@ -5689,7 +6466,24 @@ async fn handle_full_game_submission(
                             } else {
                                 HashMap::new()
                             };
+                            // CR 118.3: the STALENESS axis again — a human action
+                            // followed by AI play must not advertise the pre-AI
+                            // action set, so it must not advertise a read-out
+                            // describing a board the player is not being offered
+                            // actions on. `is_actor` mirrors the `p_spell_costs`
+                            // sibling above and is redundant with the entry
+                            // point's own gate.
+                            let p_activation_block_reasons = if ai_results.is_empty() && is_actor {
+                                engine_activation_block_reasons_for_viewer(&raw_state, *pid)
+                            } else {
+                                HashMap::new()
+                            };
+                            debug_assert!(
+                                p_activation_block_reasons.is_empty() || is_actor,
+                                "a non-empty CR 118.3 read-out implies an authorized viewer"
+                            );
                             let _ = s.send(ServerMessage::StateUpdate {
+                                full_key: Some(full_key.clone()),
                                 state_revision: human_revision,
                                 state: pstate.clone(),
                                 events: server_core::filter_events_for_player(
@@ -5703,6 +6497,7 @@ async fn handle_full_game_submission(
                                 log_entries: log_entries.clone(),
                                 spell_costs: p_spell_costs,
                                 legal_actions_by_object: object_action_payloads(&p_by_object),
+                                activation_block_reasons: p_activation_block_reasons,
                                 derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
                                 viewer_interaction: derive_viewer_interaction(
                                     &raw_state, pstate, *pid,
@@ -5714,6 +6509,7 @@ async fn handle_full_game_submission(
                 }
             }
             if let Ok(spectator_msg) = build_spectator_state_update_message(
+                &full_key,
                 &raw_state,
                 &events,
                 &log_entries,
@@ -5731,7 +6527,7 @@ async fn handle_full_game_submission(
             broadcast_ai_results(
                 connections,
                 game_spectators,
-                &game_code,
+                &full_key,
                 player_count,
                 &eliminated,
                 &ai_results,
@@ -6501,16 +7297,13 @@ async fn handle_client_message(
                                     request_id,
                                     source_ids,
                                 },
-                                Err(SessionActionError::Rejected(rejection)) => {
+                                Err(PreviewRefusal::Rejected(rejection)) => {
                                     ServerMessage::ManaPaymentPreviewRejected {
                                         request_id,
                                         rejection,
                                     }
                                 }
-                                Err(SessionActionError::RequestRejected(reason)) => {
-                                    ServerMessage::RequestRejected { reason }
-                                }
-                                Err(SessionActionError::Operational(error)) => {
+                                Err(PreviewRefusal::Operational(error)) => {
                                     ServerMessage::ManaPaymentPreviewFailed {
                                         request_id,
                                         message: error,
@@ -6529,6 +7322,58 @@ async fn handle_client_message(
             if let Ok(json) = serde_json::to_string(&response) {
                 let _ = socket.send(Message::text(json)).await;
             }
+        }
+
+        ClientMessage::ExportAuthoritativeState => {
+            // The native P2P host is always Player 1 (seat zero). Its local
+            // server deliberately redacts normal broadcast snapshots per
+            // viewer, but the host needs an unredacted snapshot to report an
+            // engine stall. The export is a trusted engine envelope, not a
+            // PersistedSession, so reconnect tokens and server metadata never
+            // leave the server.
+            let response = match (identity.game_code.as_deref(), identity.player_id) {
+                (Some(game_code), Some(PlayerId(0))) => {
+                    let mut manager = state.lock().await;
+                    match manager.sessions.get_mut(game_code) {
+                        Some(session) if session.hosting == HostingMode::SingleUser => {
+                            let mut snapshot = session.state.clone();
+                            snapshot.capture_rng_word_pos();
+                            match serde_json::to_string(&TrustedGameStateEnvelope::capture(
+                                snapshot,
+                            )) {
+                                Ok(state) => ServerMessage::AuthoritativeStateExport { state },
+                                Err(error) => ServerMessage::AuthoritativeStateExportFailed {
+                                    message: format!(
+                                        "Failed to serialize authoritative game state: {error}"
+                                    ),
+                                },
+                            }
+                        }
+                        Some(_) => ServerMessage::AuthoritativeStateExportFailed {
+                            message:
+                                "Authoritative state export is available only from a local host"
+                                    .to_string(),
+                        },
+                        None => ServerMessage::AuthoritativeStateExportFailed {
+                            message: "Game session is no longer available".to_string(),
+                        },
+                    }
+                }
+                (Some(_), Some(_)) => ServerMessage::AuthoritativeStateExportFailed {
+                    message: "Only the game host can export authoritative state".to_string(),
+                },
+                _ => ServerMessage::AuthoritativeStateExportFailed {
+                    message: "Not in a game".to_string(),
+                },
+            };
+
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+        }
+
+        ClientMessage::PreviewInteraction { request } => {
+            handle_preview_interaction(request, state, connections, tx, identity).await;
         }
 
         ClientMessage::Action { action } => {
@@ -6759,6 +7604,7 @@ async fn handle_client_message(
                             .collect::<Vec<_>>()
                     };
                     let reconnect_msg = ServerMessage::OpponentReconnected {
+                        full_key: Some(full_key.clone()),
                         player: Some(player),
                     };
                     for sender in reconnect_senders {
@@ -6794,6 +7640,7 @@ async fn handle_client_message(
                             if let Ok(msg) = build_state_update_message(
                                 &result,
                                 state_revision,
+                                &full_key,
                                 pid,
                                 rewind_targets.clone(),
                             ) {
@@ -7927,7 +8774,7 @@ async fn handle_client_message(
                         game_code: game_code.clone(),
                         player_id: joiner,
                         player_token,
-                        full_key: Some(full_key),
+                        full_key: Some(full_key.clone()),
                     };
                     if let Ok(json) = serde_json::to_string(&attached) {
                         let _ = socket.send(Message::text(json)).await;
@@ -7964,6 +8811,7 @@ async fn handle_client_message(
                     let viewer_interaction =
                         derive_viewer_interaction(&raw_state, &filtered_state, joiner);
                     let msg = ServerMessage::StateUpdate {
+                        full_key: Some(full_key),
                         state_revision,
                         state: filtered_state,
                         events: vec![],
@@ -7975,6 +8823,11 @@ async fn handle_client_message(
                         log_entries: vec![],
                         spell_costs: HashMap::new(),
                         legal_actions_by_object: HashMap::new(),
+                        // CR 117.1b: the game has not started, so no player has
+                        // priority and no activated ability can be activated —
+                        // the read-out has nothing to describe. Empty by the
+                        // same existing design as its two siblings above.
+                        activation_block_reasons: HashMap::new(),
                         derived,
                         viewer_interaction,
                         // `JoinOutcome::Waiting` — the game has not started, so
@@ -8308,10 +9161,16 @@ async fn handle_client_message(
                                 Ok(None)
                             };
                             let rewind_targets = session.rewind_options();
+                            let full_key = session
+                                .full_runtime
+                                .as_ref()
+                                .expect("authenticated concession retains its exact runtime")
+                                .key
+                                .clone();
                             terminal
                                 .map_err(SessionActionError::Operational)
                                 .map(|terminal| {
-                                    (revision, result, winner, terminal, rewind_targets)
+                                    (revision, result, winner, terminal, rewind_targets, full_key)
                                 })
                         }
                         Err(error) => Err(error),
@@ -8331,7 +9190,7 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
                 }
-                Ok((revision, result, winner, terminal, rewind_targets)) => {
+                Ok((revision, result, winner, terminal, rewind_targets, full_key)) => {
                     let terminal_deliveries = match terminal {
                         Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
                             Ok(deliveries) => deliveries,
@@ -8349,6 +9208,7 @@ async fn handle_client_message(
                             if let Ok(update) = build_state_update_message(
                                 &result,
                                 revision,
+                                &full_key,
                                 *player,
                                 rewind_targets.clone(),
                             ) {
@@ -8418,13 +9278,21 @@ async fn handle_client_message(
                                 })
                             });
                             let rewind_targets = session.rewind_options();
+                            let full_key = session
+                                .full_runtime
+                                .as_ref()
+                                .expect("authenticated concession retains its exact runtime")
+                                .key
+                                .clone();
                             terminal_artifact(
                                 session,
                                 winner,
                                 "Match conceded".to_string(),
                                 ranked_result,
                             )
-                            .map(|terminal| (revision, result, winner, terminal, rewind_targets))
+                            .map(|terminal| {
+                                (revision, result, winner, terminal, rewind_targets, full_key)
+                            })
                             .map_err(SessionActionError::Operational)
                         }
                         Err(error) => Err(error),
@@ -8438,7 +9306,7 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
                 }
-                Ok((revision, result, winner, terminal, rewind_targets)) => {
+                Ok((revision, result, winner, terminal, rewind_targets, full_key)) => {
                     let terminal_deliveries = match prepare_full_terminal(game_db, terminal).await {
                         Ok(deliveries) => deliveries,
                         Err(error) => {
@@ -8453,6 +9321,7 @@ async fn handle_client_message(
                             if let Ok(update) = build_state_update_message(
                                 &result,
                                 revision,
+                                &full_key,
                                 *player,
                                 rewind_targets.clone(),
                             ) {
@@ -8544,6 +9413,12 @@ async fn handle_client_message(
             // eliminations from it would be exactly that staleness.
             let rewind_targets = session.rewind_options();
             let eliminated = session.state.eliminated_players.clone();
+            let full_key = session
+                .full_runtime
+                .as_ref()
+                .expect("authenticated takeback retains its exact runtime")
+                .key
+                .clone();
             // GH #1507: persist the rolled-back state immediately, in the
             // same lock as the rollback itself — otherwise SQLite still
             // holds the pre-rollback `GameState` until some later action
@@ -8597,6 +9472,7 @@ async fn handle_client_message(
                         connections,
                         game_spectators,
                         &game_code,
+                        &full_key,
                         player_count,
                         state_revision,
                         snapshot,
@@ -8607,7 +9483,7 @@ async fn handle_client_message(
                     broadcast_ai_results(
                         connections,
                         game_spectators,
-                        &game_code,
+                        &full_key,
                         player_count,
                         &eliminated,
                         &ai_results,
@@ -8668,6 +9544,12 @@ async fn handle_client_message(
             // arm above.
             let rewind_targets = session.rewind_options();
             let eliminated = session.state.eliminated_players.clone();
+            let full_key = session
+                .full_runtime
+                .as_ref()
+                .expect("authenticated takeback retains its exact runtime")
+                .key
+                .clone();
             // GH #1507: persist the rolled-back state immediately — see the
             // matching comment in the `RequestTakeback` arm above.
             if approved_snapshot.is_some() {
@@ -8699,6 +9581,7 @@ async fn handle_client_message(
                         connections,
                         game_spectators,
                         &game_code,
+                        &full_key,
                         player_count,
                         state_revision,
                         snapshot,
@@ -8709,7 +9592,7 @@ async fn handle_client_message(
                     broadcast_ai_results(
                         connections,
                         game_spectators,
-                        &game_code,
+                        &full_key,
                         player_count,
                         &eliminated,
                         &ai_results,
@@ -9625,8 +10508,15 @@ async fn handle_client_message(
                         );
                     }
 
-                    maybe_spawn_draft_matches(&draft_code, draft_state, state, db, connections)
-                        .await;
+                    maybe_spawn_draft_matches(
+                        &draft_code,
+                        draft_state,
+                        state,
+                        db,
+                        game_db,
+                        connections,
+                    )
+                    .await;
 
                     // Persist draft session after mutation
                     persist_draft_session_async(game_db, &draft_code, draft_state).await;
@@ -9686,6 +10576,33 @@ async fn handle_client_message(
 
             match result {
                 Ok(view) => {
+                    match attach_current_draft_match(
+                        draft_state,
+                        state,
+                        connections,
+                        identity,
+                        &draft_code,
+                        tx,
+                    )
+                    .await
+                    {
+                        Ok(Some(attachment)) => {
+                            for message in [attachment.match_start, attachment.game_started] {
+                                if let Ok(json) = serde_json::to_string(&message) {
+                                    let _ = socket.send(Message::text(json)).await;
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(reason) => {
+                            let msg = ServerMessage::DraftActionRejected { reason };
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                let _ = socket.send(Message::text(json)).await;
+                            }
+                            return;
+                        }
+                    }
+
                     let msg = ServerMessage::DraftStateUpdate { view };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -9865,7 +10782,11 @@ mod state_transport_derived_tests {
     }
 
     fn state_update_action_fields(result: &ActionResult, viewer: PlayerId) -> (usize, bool) {
-        match build_state_update_message(result, 1, viewer, Vec::new())
+        let full_key = server_core::FullSessionKey {
+            game_code: "ABC123".to_string(),
+            generation: 1,
+        };
+        match build_state_update_message(result, 1, &full_key, viewer, Vec::new())
             .expect("fixture state update")
         {
             ServerMessage::StateUpdate {
@@ -10007,7 +10928,10 @@ mod state_transport_derived_tests {
             apply(
                 &mut session.state,
                 PlayerId(0),
-                GameAction::BeginResolveAll { max_resolutions: 1 },
+                GameAction::BeginResolveAll {
+                    max_resolutions: 1,
+                    scope: ResolveAllScope::Shared,
+                },
             )
             .expect("priority holder may start Resolve All consent");
             let epoch = match session.state.waiting_for {
@@ -10312,6 +11236,412 @@ mod ranked_tests {
         assert!(ranked_duel_players_for_room(false, 2, false, &display_names).is_none());
         assert!(ranked_duel_players_for_room(true, 3, false, &display_names).is_none());
         assert!(ranked_duel_players_for_room(true, 2, true, &display_names).is_none());
+    }
+}
+
+#[cfg(test)]
+mod interaction_preview_route_tests {
+    use super::*;
+    use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::types::interaction::{
+        InteractionAvailability, InteractionPreview, InteractionPreviewRequest,
+        InteractionPreviewStatus, InteractionSubmission, PreviewRequestId,
+    };
+    use server_core::filter_state_for_player;
+    use server_core::{AiDriverFailure, AiDriverFault};
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    fn empty_identity() -> SocketIdentity {
+        SocketIdentity {
+            game_code: None,
+            player_id: None,
+            player_token: None,
+            lobby_subscribed: false,
+            session_span: None,
+            client_hello: None,
+            lobby_host_game: None,
+            seat_reservations: Vec::new(),
+            lobby_reservations: Vec::new(),
+            lobby_organized_tournaments: Vec::new(),
+            lobby_joined_tournaments: Vec::new(),
+            draft_code: None,
+            draft_seat: None,
+            draft_token: None,
+            spectator_draft_code: None,
+            spectator_visibility: None,
+            spectator_game_code: None,
+        }
+    }
+
+    /// The witness is minted by `derive_viewer_interaction`, never hand-built:
+    /// a fabricated id would be indistinguishable from a stale one.
+    fn live_witness(
+        manager: &SessionManager,
+        game_code: &str,
+        token0: &str,
+        token1: &str,
+    ) -> (String, String, InteractionSubmission) {
+        let state = &manager.sessions.get(game_code).expect("session").state;
+        for (player, token, other) in [(PlayerId(0), token0, token1), (PlayerId(1), token1, token0)]
+        {
+            let filtered = filter_state_for_player(state, player);
+            let view = derive_viewer_interaction(state, &filtered, player);
+            if let InteractionAvailability::ProgressAvailable { witness } = view.availability {
+                return (token.to_string(), other.to_string(), witness);
+            }
+        }
+        panic!("a started session must publish a progress witness for some seat");
+    }
+
+    /// Two seats, both senders installed through the production
+    /// `attach_full_seat`, plus a live engine-minted preview request for
+    /// whichever seat holds the capability.
+    async fn two_seat_table() -> (
+        SharedState,
+        SharedConnections,
+        String,
+        InteractionPreviewRequest,
+        (
+            SocketIdentity,
+            mpsc::UnboundedSender<ServerMessage>,
+            mpsc::UnboundedReceiver<ServerMessage>,
+        ),
+        (
+            SocketIdentity,
+            mpsc::UnboundedSender<ServerMessage>,
+            mpsc::UnboundedReceiver<ServerMessage>,
+        ),
+    ) {
+        let mut manager = SessionManager::new();
+        let (game_code, token0) = manager.create_game(PlayerDeckPayload::default());
+        let (token1, _) = manager
+            .join_game(&game_code, PlayerDeckPayload::default())
+            .expect("the second seat joins and starts the game");
+        let (acting_token, other_token, witness) =
+            live_witness(&manager, &game_code, &token0, &token1);
+
+        let request = InteractionPreviewRequest {
+            request_id: PreviewRequestId("req-1".to_string()),
+            interaction_id: witness.interaction_id.clone(),
+            response: witness.response.clone(),
+        };
+
+        let state: SharedState = Arc::new(Mutex::new(manager));
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+
+        let (requester_tx, requester_rx) = mpsc::unbounded_channel();
+        let mut requester_identity = empty_identity();
+        attach_full_seat(
+            &state,
+            &connections,
+            &mut requester_identity,
+            game_code.clone(),
+            acting_token,
+            &requester_tx,
+        )
+        .await
+        .expect("the requesting seat attaches");
+
+        let (other_tx, other_rx) = mpsc::unbounded_channel();
+        let mut other_identity = empty_identity();
+        attach_full_seat(
+            &state,
+            &connections,
+            &mut other_identity,
+            game_code.clone(),
+            other_token,
+            &other_tx,
+        )
+        .await
+        .expect("the second seat attaches");
+
+        (
+            state,
+            connections,
+            game_code,
+            request,
+            (requester_identity, requester_tx, requester_rx),
+            (other_identity, other_tx, other_rx),
+        )
+    }
+
+    fn fault() -> AiDriverFault {
+        AiDriverFault {
+            id: 1,
+            after_state_revision: 0,
+            cause: AiDriverFailure::ActionSafetyCapReached { limit: 1 },
+        }
+    }
+
+    /// Row 1. Fan the answer out through `connections` and the negative below
+    /// fails: the other seat's `rx` yields a frame.
+    #[tokio::test]
+    async fn preview_answers_the_requester_and_no_other_seat() {
+        let (
+            state,
+            connections,
+            game_code,
+            request,
+            (requester_identity, requester_tx, mut requester_rx),
+            (_other_identity, _other_tx, mut other_rx),
+        ) = two_seat_table().await;
+
+        handle_preview_interaction(
+            request.clone(),
+            &state,
+            &connections,
+            &requester_tx,
+            &requester_identity,
+        )
+        .await;
+
+        // Positive (i): the route ran. An unreached route yields an empty channel,
+        // which would also satisfy the negative below.
+        let preview: InteractionPreview = match requester_rx
+            .try_recv()
+            .expect("the requesting seat is answered")
+        {
+            ServerMessage::InteractionPreview { preview } => preview,
+            other => panic!("the requester must receive a preview, got {other:?}"),
+        };
+        assert!(
+            matches!(preview.status, InteractionPreviewStatus::Confirmable),
+            "the answer must reach the reducer simulation: {:?}",
+            preview.status
+        );
+        assert_eq!(preview.request_id, request.request_id);
+        assert_eq!(preview.interaction_id, request.interaction_id);
+        assert!(matches!(requester_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // The negative.
+        assert!(
+            matches!(other_rx.try_recv(), Err(TryRecvError::Empty)),
+            "a preview must reach no seat but the requester"
+        );
+
+        // Positive (ii): the instrument is alive. The landed production fan-out
+        // over the SAME `connections` map fills the SAME receiver, so a dead
+        // channel cannot pass both legs of this row.
+        broadcast_ai_failure(&connections, &game_code, Some(fault())).await;
+        assert!(
+            matches!(other_rx.try_recv(), Ok(ServerMessage::AiDriverFault { .. })),
+            "the second seat's channel is reachable by a real fan-out"
+        );
+    }
+
+    /// Row 1's sibling: the socket-currency check refuses a sender that is not
+    /// the one registered for this seat, and answers on the correlated channel.
+    #[tokio::test]
+    async fn preview_from_a_superseded_socket_is_refused() {
+        let (
+            state,
+            connections,
+            _game_code,
+            request,
+            (requester_identity, _requester_tx, mut requester_rx),
+            (_other_identity, _other_tx, _other_rx),
+        ) = two_seat_table().await;
+
+        let (stale_tx, mut stale_rx) = mpsc::unbounded_channel();
+        handle_preview_interaction(
+            request.clone(),
+            &state,
+            &connections,
+            &stale_tx,
+            &requester_identity,
+        )
+        .await;
+
+        match stale_rx.try_recv().expect("the stale socket is answered") {
+            ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, request.request_id);
+                assert_eq!(message, FULL_SOCKET_AUTHORITY_REJECTION);
+            }
+            other => panic!("expected a correlated authority refusal, got {other:?}"),
+        }
+        assert!(
+            matches!(requester_rx.try_recv(), Err(TryRecvError::Empty)),
+            "a refused stale socket must not leak an answer to the live seat"
+        );
+    }
+
+    /// A socket with no attached seat never reaches the session at all, and is
+    /// still answered on the correlated channel rather than left hanging.
+    #[tokio::test]
+    async fn preview_before_joining_is_refused_on_the_correlated_channel() {
+        let (state, connections, _game_code, request, _requester, _other) = two_seat_table().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        handle_preview_interaction(
+            request.clone(),
+            &state,
+            &connections,
+            &tx,
+            &empty_identity(),
+        )
+        .await;
+
+        match rx.try_recv().expect("a pre-join preview is answered") {
+            ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, request.request_id);
+                assert_eq!(message, "Not in a game");
+            }
+            other => panic!("expected a correlated refusal, got {other:?}"),
+        }
+    }
+
+    /// Row 11's transport half: a session-level refusal reaches the client as a
+    /// correlated failure carrying the session's own reason, not as an `Error`
+    /// (which the native client treats as a session teardown).
+    #[tokio::test]
+    async fn an_interlocked_session_answers_a_correlated_failure_not_an_error() {
+        let (
+            state,
+            connections,
+            game_code,
+            request,
+            (requester_identity, requester_tx, mut requester_rx),
+            (_other_identity, _other_tx, _other_rx),
+        ) = two_seat_table().await;
+
+        {
+            let mut manager = state.lock().await;
+            let session = manager.sessions.get_mut(&game_code).expect("session");
+            session.ai_driver_fault = Some(fault());
+        }
+
+        handle_preview_interaction(
+            request.clone(),
+            &state,
+            &connections,
+            &requester_tx,
+            &requester_identity,
+        )
+        .await;
+
+        match requester_rx.try_recv().expect("the requester is answered") {
+            ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, request.request_id);
+                assert!(
+                    message.contains("Native AI driver fault"),
+                    "the session's own reason must ride the correlated channel: {message}"
+                );
+            }
+            other => panic!("an interlock must not tear the session down: {other:?}"),
+        }
+
+        // Reach guard: with the interlock cleared the identical request is
+        // answered, so the failure above is the interlock and not a broken table.
+        {
+            let mut manager = state.lock().await;
+            manager
+                .sessions
+                .get_mut(&game_code)
+                .expect("session")
+                .ai_driver_fault = None;
+        }
+        handle_preview_interaction(
+            request,
+            &state,
+            &connections,
+            &requester_tx,
+            &requester_identity,
+        )
+        .await;
+        assert!(matches!(
+            requester_rx.try_recv(),
+            Ok(ServerMessage::InteractionPreview { .. })
+        ));
+    }
+
+    /// Row 5's non-compiler-enforced leg. `to_lobby_client_message` carries
+    /// `_ => return None`, so no compile error would catch a preview leaking
+    /// into a broker clone. `SubscribeLobby` is the in-test positive: without
+    /// it a wholesale-`None` regression would satisfy this.
+    #[test]
+    fn preview_is_never_projected_into_the_lobby_broker() {
+        let frame = ClientMessage::PreviewInteraction {
+            request: InteractionPreviewRequest {
+                request_id: PreviewRequestId("req-1".to_string()),
+                interaction_id: engine::types::interaction::InteractionId("i-1".to_string()),
+                response: engine::types::interaction::InteractionResponse::Choose {
+                    choice_id: engine::types::interaction::InteractionChoiceId("a".to_string()),
+                },
+            },
+        };
+        assert!(to_lobby_client_message(&frame).is_none());
+        assert!(to_lobby_client_message(&ClientMessage::SubscribeLobby).is_some());
+    }
+
+    /// Row 5's three compiler-enforced legs, asserted by value rather than by
+    /// "it compiled": the preview is classified exactly as `Interaction` is at
+    /// each, and its operational failure is CORRELATED where `Interaction`'s is
+    /// not — an uncorrelated `ActionFailed` would leave the pending promise
+    /// hanging. Move it to `reject_if_disabled`'s always-allowed group and the
+    /// LobbyOnly leg fails; give it `Independent` and the authority leg fails.
+    #[test]
+    fn preview_is_classified_exactly_as_its_submission_sibling() {
+        let request = InteractionPreviewRequest {
+            request_id: PreviewRequestId("req-1".to_string()),
+            interaction_id: engine::types::interaction::InteractionId("i-1".to_string()),
+            response: engine::types::interaction::InteractionResponse::Choose {
+                choice_id: engine::types::interaction::InteractionChoiceId("a".to_string()),
+            },
+        };
+        let preview = ClientMessage::PreviewInteraction {
+            request: request.clone(),
+        };
+        let interaction = ClientMessage::Interaction {
+            submission: InteractionSubmission {
+                interaction_id: request.interaction_id.clone(),
+                response: request.response.clone(),
+            },
+        };
+
+        assert!(reject_if_disabled(&preview, ServerMode::Full).is_none());
+        assert!(reject_if_disabled(&preview, ServerMode::LobbyOnly).is_some());
+        assert_eq!(
+            reject_if_disabled(&preview, ServerMode::LobbyOnly),
+            reject_if_disabled(&interaction, ServerMode::LobbyOnly)
+        );
+
+        assert_eq!(
+            full_socket_authority(&preview),
+            FullSocketAuthority::CurrentSeat
+        );
+        assert_eq!(
+            full_socket_authority(&preview),
+            full_socket_authority(&interaction)
+        );
+        // Non-vacuity for the equality above: not every variant is CurrentSeat.
+        assert_eq!(
+            full_socket_authority(&ClientMessage::Ping { timestamp: 1 }),
+            FullSocketAuthority::Independent
+        );
+
+        match operation_failed_message(&preview, "disabled".to_string()) {
+            Some(ServerMessage::InteractionPreviewFailed {
+                request_id,
+                message,
+            }) => {
+                assert_eq!(request_id, request.request_id);
+                assert_eq!(message, "disabled");
+            }
+            other => panic!("a preview failure must stay correlated, got {other:?}"),
+        }
+        assert!(matches!(
+            operation_failed_message(&interaction, "disabled".to_string()),
+            Some(ServerMessage::ActionFailed { .. })
+        ));
     }
 }
 
@@ -10754,9 +12084,11 @@ mod full_socket_authority_tests {
 mod draft_socket_authority_tests {
     use super::*;
     use draft_core::types::{
-        DeckAddableCards, DraftConfig, DraftKind, DraftSource, PodPolicy, SetLayout,
-        SpectatorVisibility, TournamentFormat,
+        DeckAddableCards, DraftConfig, DraftKind, DraftPairing, DraftSource, DraftStatus,
+        PairingStatus, PodPolicy, SetLayout, SpectatorVisibility, TournamentFormat,
     };
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     fn empty_identity() -> SocketIdentity {
         SocketIdentity {
@@ -10825,6 +12157,306 @@ mod draft_socket_authority_tests {
                 password: None,
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn initial_draft_match_token_attaches_the_current_full_match() {
+        use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            let (draft_code, draft_token, expected_key, initial_match_start) = {
+                let mut drafts = app_state.draft_sessions.lock().await;
+                let config = DraftConfig {
+                    source: DraftSource::single_set("TST".to_string()),
+                    set_code: "TST".to_string(),
+                    kind: DraftKind::Premier,
+                    pod_size: 8,
+                    cards_per_pack: 14,
+                    pack_count: 3,
+                    min_deck_size: 40,
+                    addable_cards: DeckAddableCards::standard_basics(),
+                    rng_seed: 42,
+                    tournament_format: TournamentFormat::Swiss,
+                    pod_policy: PodPolicy::Competitive,
+                    spectator_visibility: SpectatorVisibility::default(),
+                };
+                let (draft_code, draft_token, _) = drafts.create_draft(config, "Alice".to_string());
+                let mut games = app_state.sessions.lock().await;
+                // Any synthetic disconnect created by initialization would
+                // expire before this fixture's first socket attachment.
+                games.reconnect.grace_period = Duration::ZERO;
+                let (game_code, _host_token) = games
+                    .create_game_n_players(
+                        engine::game::deck_loading::PlayerDeckPayload::default(),
+                        "Alice".to_string(),
+                        None,
+                        2,
+                        Default::default(),
+                        None,
+                    )
+                    .expect("create draft match game");
+                games
+                    .join_game_with_name(
+                        &game_code,
+                        engine::game::deck_loading::PlayerDeckPayload::default(),
+                        "Bob".to_string(),
+                    )
+                    .expect("join draft match game");
+                games
+                    .sessions
+                    .get_mut(&game_code)
+                    .expect("draft match game exists")
+                    .game_started = true;
+
+                let draft = drafts.sessions.get_mut(&draft_code).expect("draft exists");
+                draft.session.status = DraftStatus::MatchInProgress;
+                draft.session.current_round = 1;
+                draft.session.pairings.push(DraftPairing {
+                    round: 1,
+                    table: 0,
+                    players: [PlayerId(0), PlayerId(1)],
+                    match_id: "r1-t0".to_string(),
+                    status: PairingStatus::Pending,
+                    winner: None,
+                });
+                draft
+                    .active_matches
+                    .insert("r1-t0".to_string(), game_code.clone());
+                let spawn = DraftMatchSpawn {
+                    match_id: "r1-t0".to_string(),
+                    round: 1,
+                    game_code,
+                    player_a: server_core::draft_session::DraftMatchPlayer {
+                        draft_seat: 0,
+                        game_player: PlayerId(0),
+                    },
+                    player_b: server_core::draft_session::DraftMatchPlayer {
+                        draft_seat: 1,
+                        game_player: PlayerId(1),
+                    },
+                    opponent_names: ["Bob".to_string(), "Alice".to_string()],
+                };
+                let key = initialize_draft_match_runtime(&mut games, &app_state.game_db, &spawn)
+                    .expect("bind draft match runtime");
+                let initial_match_start = build_draft_match_start_message(
+                    &drafts,
+                    &draft_code,
+                    &spawn,
+                    &key,
+                    &spawn.player_a,
+                    &spawn.opponent_names[0],
+                )
+                .expect("build initial draft match announcement");
+                (draft_code, draft_token, key, initial_match_start)
+            };
+
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            {
+                let mut games = app_state.sessions.lock().await;
+                let session = &games.sessions[&expected_key.game_code];
+                assert!(session.game_started);
+                assert_eq!(session.connected, vec![false, false]);
+                assert!(
+                    games.reconnect.check_expired().is_empty(),
+                    "awaiting the first attachment must not expire the match"
+                );
+            }
+
+            let announced_token = match initial_match_start {
+                ServerMessage::DraftMatchStart {
+                    player_token,
+                    full_key,
+                    your_player: PlayerId(0),
+                    ..
+                } => {
+                    assert_eq!(player_token, draft_token);
+                    assert_eq!(full_key, expected_key);
+                    player_token
+                }
+                other => panic!("expected initial DraftMatchStart, got {other:?}"),
+            };
+
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::ClientHello {
+                        client_version: env!("CARGO_PKG_VERSION").to_string(),
+                        build_commit: build_commit().to_string(),
+                        protocol_version: PROTOCOL_VERSION,
+                        lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                        wire_formats: Vec::new(),
+                    })
+                    .expect("hello json")
+                    .into(),
+                ))
+                .await
+                .expect("send hello");
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::ReconnectDraft {
+                        draft_code,
+                        player_token: announced_token.clone(),
+                    })
+                    .expect("draft reconnect json")
+                    .into(),
+                ))
+                .await
+                .expect("send draft reconnect");
+
+            match recv_server_message(&mut socket).await {
+                ServerMessage::DraftMatchStart {
+                    player_token,
+                    full_key,
+                    your_player: PlayerId(0),
+                    ..
+                } => {
+                    assert_eq!(player_token, announced_token);
+                    assert_eq!(full_key, expected_key);
+                }
+                other => panic!("expected DraftMatchStart, got {other:?}"),
+            }
+            match recv_server_message(&mut socket).await {
+                ServerMessage::GameStarted {
+                    full_key: Some(full_key),
+                    your_player: PlayerId(0),
+                    ..
+                } => assert_eq!(full_key, expected_key),
+                other => panic!("expected matching GameStarted, got {other:?}"),
+            }
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::DraftStateUpdate { .. }
+            ));
+
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Action {
+                        action: GameAction::GrantDebugPermission {
+                            player_id: PlayerId(1),
+                        },
+                    })
+                    .expect("action json")
+                    .into(),
+                ))
+                .await
+                .expect("send action");
+
+            loop {
+                match recv_server_message(&mut socket).await {
+                    ServerMessage::ActionRejected { rejection } => {
+                        assert_eq!(rejection.code, ActionRejectionCode::ActionNotAllowed);
+                        break;
+                    }
+                    ServerMessage::ActionFailed { message }
+                    | ServerMessage::Error { message, .. } => {
+                        panic!("draft match action missed Full authority: {message}")
+                    }
+                    _ => {}
+                }
+            }
+
+            socket
+                .close(None)
+                .await
+                .expect("close attached game socket");
+            loop {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                let mut games = app_state.sessions.lock().await;
+                if games
+                    .reconnect
+                    .is_disconnected(&expected_key.game_code, PlayerId(0))
+                {
+                    assert_eq!(
+                        games.reconnect.check_expired(),
+                        vec![expected_key.game_code.clone()],
+                        "an actual socket disconnect must still expire normally"
+                    );
+                    break;
+                }
+            }
+        })
+        .await;
+        server.abort();
+
+        outcome.expect("draft attachment, action, or disconnect response timed out");
+    }
+
+    #[tokio::test]
+    async fn draft_reconnect_sends_the_view_when_its_active_game_is_missing() {
+        use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let (drafts, _, draft_code, draft_token) = test_draft();
+        {
+            let mut drafts = drafts.lock().await;
+            let draft = drafts.sessions.get_mut(&draft_code).expect("draft exists");
+            draft.session.status = DraftStatus::MatchInProgress;
+            draft.session.current_round = 1;
+            draft.session.pairings.push(DraftPairing {
+                round: 1,
+                table: 0,
+                players: [PlayerId(0), PlayerId(1)],
+                match_id: "r1-t0".to_string(),
+                status: PairingStatus::Pending,
+                winner: None,
+            });
+            draft
+                .active_matches
+                .insert("r1-t0".to_string(), "GONE01".to_string());
+            assert!(draft.active_match_for_seat(0).is_some());
+            *app_state.draft_sessions.lock().await = std::mem::take(&mut *drafts);
+        }
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            for message in [
+                ClientMessage::ClientHello {
+                    client_version: env!("CARGO_PKG_VERSION").to_string(),
+                    build_commit: build_commit().to_string(),
+                    protocol_version: PROTOCOL_VERSION,
+                    lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                    wire_formats: Vec::new(),
+                },
+                ClientMessage::ReconnectDraft {
+                    draft_code: draft_code.clone(),
+                    player_token: draft_token,
+                },
+            ] {
+                socket
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&message)
+                            .expect("client message json")
+                            .into(),
+                    ))
+                    .await
+                    .expect("send client message");
+            }
+
+            match recv_server_message(&mut socket).await {
+                ServerMessage::DraftStateUpdate { view } => {
+                    assert_eq!(view.status, DraftStatus::MatchInProgress);
+                    assert_eq!(view.seats[0].seat_index, 0);
+                }
+                other => panic!("missing Full game must not block the draft view: {other:?}"),
+            }
+            assert!(app_state.connections.lock().await[&draft_code].contains_key(&PlayerId(0)));
+        })
+        .await;
+        server.abort();
+        outcome.expect("draft view response timed out");
     }
 
     #[tokio::test]
@@ -11195,8 +12827,12 @@ mod live_spectator_tests {
         let mut state = GameState::new_two_player(42);
         state.eliminated_players.push(PlayerId(1));
 
-        let msg =
-            build_spectator_state_update_message(&state, &[], &[], 1).expect("fixture snapshot");
+        let full_key = server_core::FullSessionKey {
+            game_code: "GAME01".to_string(),
+            generation: 1,
+        };
+        let msg = build_spectator_state_update_message(&full_key, &state, &[], &[], 1)
+            .expect("fixture snapshot");
 
         match msg {
             ServerMessage::StateUpdate {
@@ -12661,6 +14297,7 @@ mod mode_gate_tests {
                 request_id: 1,
                 action: GameAction::PassPriority,
             },
+            ClientMessage::ExportAuthoritativeState,
             ClientMessage::Reconnect {
                 game_code: "X".into(),
                 player_token: "t".into(),
@@ -12748,6 +14385,13 @@ mod mode_gate_tests {
             ),
             Some(ServerMessage::ManaPaymentPreviewFailed { request_id: 5, message }) if message == "disabled"
         ));
+        assert!(matches!(
+            operation_failed_message(
+                &ClientMessage::ExportAuthoritativeState,
+                "disabled".to_string(),
+            ),
+            Some(ServerMessage::AuthoritativeStateExportFailed { message }) if message == "disabled"
+        ));
         assert!(
             operation_failed_message(&ClientMessage::ConcedeMatch, "disabled".to_string(),)
                 .is_none()
@@ -12817,6 +14461,7 @@ mod mode_gate_tests {
                 request_id: 1,
                 action: GameAction::PassPriority,
             },
+            ClientMessage::ExportAuthoritativeState,
             ClientMessage::AbandonGame,
             ClientMessage::Concede,
             ClientMessage::ConcedeMatch,
@@ -14090,8 +15735,10 @@ mod admin_auth_tests {
 
 #[cfg(test)]
 mod compression_tests {
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+
+    use axum::http::StatusCode;
 
     use lobby_broker::Broker;
     use server_core::draft_session::DraftSessionManager;
@@ -14101,9 +15748,14 @@ mod compression_tests {
     use tower_http::cors::CorsLayer;
     use url::Url;
 
-    use super::{build_router, draft_pools, persistence, AppState, ServerContext, ServerMode};
+    use super::{
+        announcement_from_state, build_commit, build_router, draft_pools, persistence,
+        spawn_announce_task, validate_announcement, AppState, RawAnnouncement, ServerContext,
+        ServerInfoDocument, ServerMode, ANNOUNCE_REQUEST_TIMEOUT, DIRECTORY_VERSION, INFO_PATH,
+        LOBBY_PROTOCOL_VERSION, MAX_SERVER_NAME_LEN, PROTOCOL_VERSION,
+    };
 
-    fn test_app_state(temp_dir: &tempfile::TempDir) -> AppState {
+    fn test_app_state(temp_dir: &tempfile::TempDir, mode: ServerMode) -> AppState {
         let game_db_path = temp_dir.path().join("games.db");
         let game_db = Arc::new(
             persistence::GameDb::open(&game_db_path, persistence::SessionRetention::Multiplayer)
@@ -14121,7 +15773,7 @@ mod compression_tests {
             game_db,
             draft_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
             game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            mode: ServerMode::Full,
+            mode,
             context: ServerContext::default(),
             public_url: None,
             allowed_origin: None,
@@ -14130,8 +15782,9 @@ mod compression_tests {
 
     async fn spawn_compressed_test_server(
         temp_dir: &tempfile::TempDir,
+        mode: ServerMode,
     ) -> (String, tokio::task::JoinHandle<()>) {
-        let app_state = test_app_state(temp_dir);
+        let app_state = test_app_state(temp_dir, mode);
         let app = build_router(app_state, CorsLayer::permissive(), None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -14211,7 +15864,7 @@ mod compression_tests {
     #[tokio::test]
     async fn health_response_is_uncompressed_regardless_of_accept_encoding() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let (addr, server) = spawn_compressed_test_server(&temp_dir).await;
+        let (addr, server) = spawn_compressed_test_server(&temp_dir, ServerMode::Full).await;
 
         let (headers, body) = raw_http_get(&addr, "/health", &[("Accept-Encoding", "gzip")]).await;
 
@@ -14234,7 +15887,7 @@ mod compression_tests {
         const HOST_PEER: &str = "peer-compression-test";
 
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let app_state = test_app_state(&temp_dir);
+        let app_state = test_app_state(&temp_dir, ServerMode::Full);
         // A highly compressible payload comfortably over the predicate's
         // minimum size, matching the redactor's "JSON object" requirement.
         let padding = "a".repeat(4096);
@@ -14289,7 +15942,7 @@ mod compression_tests {
     #[tokio::test]
     async fn ws_upgrade_still_succeeds_through_the_compressed_router() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let (addr, server) = spawn_compressed_test_server(&temp_dir).await;
+        let (addr, server) = spawn_compressed_test_server(&temp_dir, ServerMode::Full).await;
 
         let connected = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await;
         assert!(
@@ -14299,6 +15952,282 @@ mod compression_tests {
         );
 
         server.abort();
+    }
+
+    /// Recorded announce requests: the header map and the raw body bytes of
+    /// every POST the directory stub received.
+    type AnnounceLog = Arc<std::sync::Mutex<Vec<(axum::http::HeaderMap, Vec<u8>)>>>;
+
+    /// A directory stub on an ephemeral port that records every announce POST
+    /// and answers `status`. Inlines the listener+spawn shape
+    /// `large_json_response_is_gzip_compressed_when_accepted` uses.
+    async fn spawn_recording_directory(
+        status: axum::http::StatusCode,
+    ) -> (Url, AnnounceLog, tokio::task::JoinHandle<()>) {
+        let log: AnnounceLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler_log = log.clone();
+        let app = axum::Router::new().route(
+            "/servers/announce",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let log = handler_log.clone();
+                    async move {
+                        log.lock()
+                            .expect("announce log")
+                            .push((headers, body.to_vec()));
+                        status
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind directory stub");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("directory stub");
+        });
+        let endpoint =
+            Url::parse(&format!("http://{addr}/servers/announce")).expect("directory endpoint");
+        (endpoint, log, server)
+    }
+
+    /// Polls to a deadline rather than sleeping a fixed interval, so a slow
+    /// machine does not turn a passing case into a flake.
+    async fn wait_for_requests(log: &AnnounceLog, want: usize) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = log.lock().expect("announce log").len();
+            if count >= want {
+                return count;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {count} of {want} announce requests arrived within 2s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Every recorded request must carry the JSON content type and a body the
+    /// directory's OWN validator accepts — not merely well-shaped bytes.
+    /// Returns each request's announced player count, in arrival order.
+    fn recorded_player_counts(log: &AnnounceLog) -> Vec<u32> {
+        let records = log.lock().expect("announce log");
+        assert!(!records.is_empty(), "no announce request was recorded");
+        records
+            .iter()
+            .map(|(headers, body)| {
+                assert_eq!(
+                    headers
+                        .get(axum::http::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("application/json")
+                );
+                let raw: RawAnnouncement =
+                    serde_json::from_slice(body).expect("wire body is a RawAnnouncement");
+                validate_announcement(&raw)
+                    .expect("the directory's own validator accepts the wire body")
+                    .current_players()
+            })
+            .collect()
+    }
+
+    /// V11. The info route serves exactly the identity `ServerHello`
+    /// advertises, on the shared constant path.
+    #[tokio::test]
+    async fn info_route_serves_the_server_hello_identity() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (addr, server) = spawn_compressed_test_server(&temp_dir, ServerMode::Full).await;
+
+        let (headers, body) = raw_http_get(&addr, INFO_PATH, &[]).await;
+        // Reach-guard: without this a 404 body would be "tested" as a serde
+        // failure instead of failing here.
+        assert!(
+            headers.starts_with("http/1.1 200"),
+            "expected 200 on {INFO_PATH}, got:\n{headers}"
+        );
+        let document: ServerInfoDocument =
+            serde_json::from_slice(&body).expect("info document parses");
+        assert_eq!(document.mode, lobby_broker::ServerMode::Full);
+        assert_eq!(document.server_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(document.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(document.lobby_protocol_version, LOBBY_PROTOCOL_VERSION);
+        assert_eq!(document.build_commit.as_deref(), Some(build_commit()));
+        server.abort();
+
+        // The sibling: `mode` tracks this server's actual role, so a hard-coded
+        // "Full" fails here.
+        let (addr, server) = spawn_compressed_test_server(&temp_dir, ServerMode::LobbyOnly).await;
+        let (headers, body) = raw_http_get(&addr, INFO_PATH, &[]).await;
+        assert!(
+            headers.starts_with("http/1.1 200"),
+            "expected 200 on {INFO_PATH}, got:\n{headers}"
+        );
+        let document: ServerInfoDocument =
+            serde_json::from_slice(&body).expect("info document parses");
+        assert_eq!(document.mode, lobby_broker::ServerMode::LobbyOnly);
+        server.abort();
+    }
+
+    /// V14. The announcement is assembled from live `AppState`, and only from
+    /// an `https://` public URL.
+    #[test]
+    fn announcement_from_state_carries_url_mode_and_live_player_count() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        // LobbyOnly rather than Full, so a hard-coded mode fails here.
+        let mut state = test_app_state(&temp_dir, ServerMode::LobbyOnly);
+        state.public_url = Some("https://play.example.com".to_string());
+        // Non-zero, so a stubbed-zero implementation fails.
+        state.player_count.store(7, Ordering::Relaxed);
+
+        let announcement = announcement_from_state(&state).expect("state is announceable");
+        assert_eq!(announcement.url().as_str(), "wss://play.example.com/ws");
+        assert_eq!(announcement.name(), "play.example.com");
+        assert_eq!(announcement.mode(), lobby_broker::ServerMode::LobbyOnly);
+        assert_eq!(announcement.current_players(), 7);
+        assert_eq!(announcement.directory_version(), DIRECTORY_VERSION);
+
+        // A non-default port survives; the scheme default does not.
+        state.public_url = Some("https://play.example.com:8443".to_string());
+        assert_eq!(
+            announcement_from_state(&state)
+                .expect("state is announceable")
+                .url()
+                .as_str(),
+            "wss://play.example.com:8443/ws"
+        );
+        state.public_url = Some("https://play.example.com:443".to_string());
+        assert_eq!(
+            announcement_from_state(&state)
+                .expect("state is announceable")
+                .url()
+                .as_str(),
+            "wss://play.example.com/ws"
+        );
+
+        // (a) Reachable whenever a malformed `--public-url` was dropped by
+        // `validate_public_url`, not only via the ngrok fallback.
+        state.public_url = None;
+        assert!(announcement_from_state(&state).is_err());
+        // (b) Without this the server would announce an address it does not
+        // serve, and warn every 60 s forever.
+        state.public_url = Some("http://myserver.example:9374".to_string());
+        let error =
+            announcement_from_state(&state).expect_err("an http:// public URL is not announceable");
+        assert!(
+            error.contains("http"),
+            "the scheme found must be named: {error}"
+        );
+        // (c) The silent-default-port case: `Url::port()` is `None` at :80, so
+        // this would otherwise become wss://host.example/ws, claiming 443.
+        state.public_url = Some("http://host.example:80".to_string());
+        assert!(announcement_from_state(&state).is_err());
+
+        // A host longer than the NAME cap but well inside the URL cap must
+        // still announce: the name is truncated, the ADDRESS is not. Without
+        // the truncation this returns `Err` and the server never announces at
+        // all. Every label is 60 bytes (inside rule 8's 63) and the whole host
+        // is 121 characters — a valid DNS name that exceeds
+        // MAX_SERVER_NAME_LEN.
+        let long_label = "a".repeat(60);
+        let long_host = format!("{long_label}.{long_label}");
+        assert!(long_host.chars().count() > MAX_SERVER_NAME_LEN);
+        state.public_url = Some(format!("https://{long_host}"));
+        let announcement =
+            announcement_from_state(&state).expect("a long but legal host is still announceable");
+        assert_eq!(announcement.name().len(), MAX_SERVER_NAME_LEN);
+        assert!(long_host.starts_with(announcement.name()));
+        assert_eq!(
+            announcement.url().as_str(),
+            format!("wss://{long_host}/ws"),
+            "the address must keep the FULL host; only the display name is truncated"
+        );
+    }
+
+    /// V16. The heartbeat actually POSTs: right shape, right cadence, and a
+    /// directory that rejects forever does not kill it.
+    #[tokio::test]
+    async fn announce_task_posts_json_repeatedly_and_survives_failures() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_app_state(&temp_dir, ServerMode::Full);
+        // `test_app_state` leaves `public_url: None`, which would make the base
+        // unbuildable and leave this test recording ZERO requests while every
+        // ">= 2"-shaped assertion below passed unreached.
+        state.public_url = Some("https://play.example.com".to_string());
+        state.player_count.store(3, Ordering::Relaxed);
+        let base = announcement_from_state(&state).expect("fixture must be announceable");
+        // Built the way `serve()` builds it, so the test drives the real
+        // parameterised loop rather than a differently-configured client.
+        // `reqwest::Client` is a cheap `Arc` handle, so cloning it per case is
+        // what sharing one configured client looks like.
+        let client = reqwest::Client::builder()
+            .timeout(ANNOUNCE_REQUEST_TIMEOUT)
+            .build()
+            .expect("announce client builds");
+
+        // (A) `interval`'s first tick is immediate, so a 30 s period still
+        // announces at startup — pinned without a 30 s wait.
+        let (endpoint, log, recorder) = spawn_recording_directory(StatusCode::OK).await;
+        let handle = spawn_announce_task(
+            endpoint,
+            client.clone(),
+            base.clone(),
+            state.player_count.clone(),
+            std::time::Duration::from_secs(30),
+        );
+        wait_for_requests(&log, 1).await;
+        assert_eq!(recorded_player_counts(&log), vec![3]);
+        handle.abort();
+        recorder.abort();
+
+        // (B) A directory returning 500 forever: the loop keeps announcing and
+        // the task stays alive. A `?` or an early return on the error path
+        // fails this.
+        let (endpoint, log, recorder) =
+            spawn_recording_directory(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let handle = spawn_announce_task(
+            endpoint,
+            client.clone(),
+            base.clone(),
+            state.player_count.clone(),
+            std::time::Duration::from_millis(25),
+        );
+        let seen = wait_for_requests(&log, 2).await;
+        assert!(seen >= 2, "expected a repeating heartbeat, saw {seen}");
+        assert!(
+            !handle.is_finished(),
+            "a directory rejecting every announcement must not end the heartbeat"
+        );
+        // The live count is re-read per tick rather than replayed from the
+        // frozen base.
+        state.player_count.store(9, Ordering::Relaxed);
+        wait_for_requests(&log, seen + 2).await;
+        assert_eq!(
+            recorded_player_counts(&log).last().copied(),
+            Some(9),
+            "the loop must refresh the player count, not replay the base"
+        );
+        handle.abort();
+        recorder.abort();
+
+        // (C) Paired positive: (B) is not an artifact of the error path — the
+        // success path loops too.
+        state.player_count.store(3, Ordering::Relaxed);
+        let (endpoint, log, recorder) = spawn_recording_directory(StatusCode::OK).await;
+        let handle = spawn_announce_task(
+            endpoint,
+            client.clone(),
+            base,
+            state.player_count.clone(),
+            std::time::Duration::from_millis(25),
+        );
+        let seen = wait_for_requests(&log, 2).await;
+        assert!(seen >= 2, "expected a repeating heartbeat, saw {seen}");
+        assert!(!handle.is_finished());
+        assert!(recorded_player_counts(&log).iter().all(|count| *count == 3));
+        handle.abort();
+        recorder.abort();
     }
 }
 

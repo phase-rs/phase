@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -14,13 +14,16 @@ import {
   packId,
   type CatalogSummary,
   type CuratedDrift,
+  type CuratedInstallSelector,
   type InstallEstimate,
   type ProgressEvent,
   type RevisionEvent,
 } from "../../../services/visualPacks/types.ts";
 import { shortDigest } from "./packLabels.ts";
 import { VisualPackManager } from "./VisualPackManager.tsx";
+import { useVisualPackManager } from "./useVisualPackManager.ts";
 import i18n from "../../../i18n/index.ts";
+import { useConnectivityStore } from "../../../stores/connectivityStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 
 const platform = vi.hoisted(() => ({ load: vi.fn() }));
@@ -158,9 +161,13 @@ function backend(status: VisualPackBackend["catalogStatus"] = vi.fn(async () => 
 }
 
 describe("VisualPackManager initialization", () => {
-  beforeEach(() => platform.load.mockReset());
+  beforeEach(() => {
+    platform.load.mockReset();
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+  });
   afterEach(async () => {
     cleanup();
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
     usePreferencesStore.getState().setLanguage("en");
     await waitFor(() => expect(i18n.resolvedLanguage).toBe("en"));
   });
@@ -233,7 +240,11 @@ describe("VisualPackManager initialization", () => {
       operationId: OPERATION, catalogRoot: ROOT_A, kind: "repair" as const, state: "downloading" as const,
       packTotal: 1, packsPromoted: 0, objectTotal: 0, objectEstimate: null, objectsPromoted: 0, completedRevision: null,
     };
-    fixture.emitProgress({ phase: "running", error: null, operation });
+    fixture.emitProgress({
+      phase: "running",
+      error: null,
+      operation,
+    });
     expect(await screen.findByText("Images downloaded: 0")).toBeInTheDocument();
     const progressBars = screen.getAllByRole("progressbar");
     expect(progressBars[progressBars.length - 1]).not.toHaveAttribute("value");
@@ -2078,5 +2089,175 @@ describe("VisualPackManager initialization", () => {
     render(<VisualPackManager />);
     expect(await screen.findByText("Catálogo visual sin conexión")).toBeInTheDocument();
     expect(screen.getByText(/no ofrece las funciones de almacenamiento local/i)).toBeInTheDocument();
+  });
+});
+
+describe("VisualPackManager offline network boundary", () => {
+  beforeEach(() => {
+    platform.load.mockReset();
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+  });
+  afterEach(() => {
+    cleanup();
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+  });
+
+  it.each([
+    ["forced offline", { forcedOffline: true, browserOnline: true }],
+    ["browser offline", { forcedOffline: false, browserOnline: false }],
+  ])("disables network actions while %s but keeps local controls available", async (_name, offline) => {
+    useConnectivityStore.setState(offline);
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+
+    expect(await screen.findByText(/Network downloads are unavailable while offline/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /check scryfall catalog/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /scan catalog and estimate/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /install selection/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("radio", { name: /one image per card/i }));
+    fireEvent.click(screen.getByRole("radio", { name: /deck library/i }));
+    expect(fixture.value.curatedSelector).not.toHaveBeenCalled();
+    expect(fixture.value.deckLibrarySelector).not.toHaveBeenCalled();
+    expect(fixture.value.estimateInstall).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(screen.getByRole("button", { name: /repair selected/i })).toBeDisabled();
+    const verify = screen.getByRole("button", { name: /verify metadata/i });
+    const remove = screen.getByRole("button", { name: /remove selected/i });
+    expect(verify).toBeEnabled();
+    expect(remove).toBeEnabled();
+    fireEvent.click(verify);
+    await waitFor(() => expect(fixture.value.verify).toHaveBeenCalledWith("metadata"));
+    fireEvent.click(screen.getByRole("button", { name: /verify all files/i }));
+    await waitFor(() => expect(fixture.value.verify).toHaveBeenCalledWith("full"));
+    fireEvent.click(remove);
+    await waitFor(() => expect(fixture.value.remove).toHaveBeenCalled());
+    expect(fixture.value.refreshCatalog).not.toHaveBeenCalled();
+    expect(fixture.value.start).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["empty", "forced offline", { forcedOffline: true, browserOnline: true }],
+    ["empty", "browser offline", { forcedOffline: false, browserOnline: false }],
+    ["invalid", "forced offline", { forcedOffline: true, browserOnline: true }],
+    ["invalid", "browser offline", { forcedOffline: false, browserOnline: false }],
+  ] as const)("does not refresh a %s catalog while %s", async (status, _name, offline) => {
+    useConnectivityStore.setState(offline);
+    const fixture = backend(vi.fn(async () => status === "empty"
+      ? { status: "empty" as const }
+      : { status: "invalid" as const }));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+
+    expect(await screen.findByRole("button", { name: /check scryfall catalog/i })).toBeDisabled();
+    expect(fixture.value.refreshCatalog).not.toHaveBeenCalled();
+  });
+
+  it("rechecks a captured stale callback before pending mutation", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    const { result } = renderHook(() => useVisualPackManager());
+    await waitFor(() => expect(result.current.availability.kind).toBe("ready"));
+
+    const staleRefresh = result.current.refresh;
+    act(() => useConnectivityStore.setState({ forcedOffline: true }));
+    await act(async () => { await staleRefresh(); });
+
+    expect(fixture.value.refreshCatalog).not.toHaveBeenCalled();
+    expect(result.current.pendingActions.size).toBe(0);
+    expect(result.current.availability.kind).toBe("ready");
+  });
+
+  it.each([
+    ["forced offline", { forcedOffline: true, browserOnline: true }],
+    ["browser offline", { forcedOffline: false, browserOnline: false }],
+  ])("cancels a pending curated estimate debounce while %s", async (_name, offline) => {
+    const selector = deferred<CuratedInstallSelector>();
+    const fixture = backend();
+    vi.mocked(fixture.value.curatedSelector).mockReturnValue(selector.promise);
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    const curatedSelection = await screen.findByRole("radio", { name: /one image per card/i });
+    fireEvent.click(curatedSelection);
+    await waitFor(() => expect(fixture.value.curatedSelector).toHaveBeenCalledTimes(1));
+    await act(async () => { selector.resolve({ kind: "curated", membershipDigest: CURATED_DIGEST }); });
+    expect(screen.getByRole("button", { name: /recalculate size/i })).toBeEnabled();
+    act(() => useConnectivityStore.setState(offline));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+
+    expect(fixture.value.estimateInstall).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /recalculate size/i })).toBeDisabled();
+    expect(screen.queryByText(/working out the size/i)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["forced offline", { forcedOffline: true, browserOnline: true }],
+    ["browser offline", { forcedOffline: false, browserOnline: false }],
+  ])("disables Recalculate and Sync while %s after an estimate, then reconnects without auto-starting", async (_name, offline) => {
+    const fixture = backend(vi.fn(async () => ({ status: "ready" as const, summary: curatedSummary() })));
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    const curatedSelection = await screen.findByRole("radio", { name: /one image per card/i });
+    fireEvent.click(curatedSelection);
+    const sync = await screen.findByRole("button", { name: /sync images/i });
+    await waitFor(() => expect(sync).toBeEnabled());
+    expect(fixture.value.estimateInstall).toHaveBeenCalledWith(
+      { kind: "curated", membershipDigest: CURATED_DIGEST },
+      expect.any(Function),
+    );
+    const estimateCalls = vi.mocked(fixture.value.estimateInstall).mock.calls.length;
+    expect(screen.getByRole("button", { name: /recalculate size/i })).toBeEnabled();
+    expect(sync).toBeEnabled();
+
+    act(() => useConnectivityStore.setState(offline));
+    expect(screen.getByRole("button", { name: /recalculate size/i })).toBeDisabled();
+    expect(sync).toBeDisabled();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(estimateCalls);
+
+    act(() => useConnectivityStore.setState({ forcedOffline: false, browserOnline: true }));
+    expect(screen.getByRole("button", { name: /recalculate size/i })).toBeEnabled();
+    expect(sync).toBeEnabled();
+    expect(fixture.value.estimateInstall).toHaveBeenCalledTimes(estimateCalls);
+    expect(fixture.value.start).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["forced offline", { forcedOffline: true, browserOnline: true }],
+    ["browser offline", { forcedOffline: false, browserOnline: false }],
+  ])("disables Resume while %s", async (_name, offline) => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await waitFor(() => expect(fixture.value.subscribeProgress).toHaveBeenCalled());
+    const operation = {
+      operationId: OPERATION, catalogRoot: ROOT_A, kind: "install" as const, state: "downloading" as const,
+      packTotal: 1, packsPromoted: 0, objectTotal: 1, objectEstimate: 1, objectsPromoted: 0, completedRevision: null,
+    };
+    fixture.emitProgress({ phase: "failed", error: "network", operation });
+    const resume = await screen.findByRole("button", { name: /resume operation/i });
+    act(() => useConnectivityStore.setState(offline));
+    expect(resume).toBeDisabled();
+    expect(fixture.value.start).not.toHaveBeenCalled();
+  });
+
+  it("keeps cancel available for a fresh active operation offline", async () => {
+    const fixture = backend();
+    platform.load.mockResolvedValue(fixture.value);
+    render(<VisualPackManager />);
+    await screen.findByText(/Offline card images/i);
+    await waitFor(() => expect(fixture.value.subscribeProgress).toHaveBeenCalled());
+    const operation = {
+      operationId: OPERATION, catalogRoot: ROOT_A, kind: "install" as const, state: "downloading" as const,
+      packTotal: 1, packsPromoted: 0, objectTotal: 1, objectEstimate: 1, objectsPromoted: 0, completedRevision: null,
+    };
+    fixture.emitProgress({ phase: "running", error: null, operation });
+    act(() => useConnectivityStore.setState({ forcedOffline: true }));
+    const cancel = await screen.findByRole("button", { name: /cancel operation/i });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    await waitFor(() => expect(fixture.value.cancel).toHaveBeenCalledWith(OPERATION));
   });
 });

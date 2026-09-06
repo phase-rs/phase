@@ -436,6 +436,8 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         stack_entry_index: 0,
         scope: RetargetScope::All,
         current_targets: vec![unchanged.clone()],
+        slots: vec![],
+        slot_pools: vec![],
         legal_new_targets: vec![legal_alternative],
     };
 
@@ -5465,7 +5467,7 @@ fn new_game_creates_two_player_state() {
 }
 
 /// CR 117.1c + CR 503.2: After Untap (no priority), the active player
-/// receives priority during their Upkeep step. CR 103.7a skips the
+/// receives priority during their Upkeep step. CR 103.8a skips the
 /// first-turn Draw step entirely, so passing both priorities through
 /// Upkeep lands at PreCombatMain.
 #[test]
@@ -5483,7 +5485,7 @@ fn start_game_pauses_at_first_turn_upkeep_priority() {
         }
     ));
 
-    // Both players pass through Upkeep → CR 103.7a skips Draw → PreCombatMain.
+    // Both players pass through Upkeep → CR 103.8a skips Draw → PreCombatMain.
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PreCombatMain);
@@ -5513,6 +5515,39 @@ fn start_game_skips_draw_on_first_turn() {
     // Card should still be in library (draw skipped on turn 1)
     assert!(state.players[0].library.contains(&id));
     assert!(!state.players[0].hand.contains(&id));
+}
+
+// CR 103.8 + CR 500: the starting player TAKES their first turn, so it must
+// count toward `turns_taken` like every other turn. Turn 1 is established
+// inline by the game-start path rather than by `turns::start_next_turn`, so
+// before this was fixed the starting player stayed permanently one turn behind
+// every other seat — `QuantityRef::TurnsTaken` read low for exactly the player
+// who had taken the most turns.
+#[test]
+fn start_game_counts_the_starting_players_first_turn() {
+    for starting_player in [PlayerId(0), PlayerId(1)] {
+        let mut state = new_game(42);
+        start_game_with_starting_player(&mut state, starting_player);
+
+        assert_eq!(
+            state.players[starting_player.0 as usize].turns_taken, 1,
+            "the starting player's own first turn counts"
+        );
+        for player in state.players.iter() {
+            if player.id != starting_player {
+                assert_eq!(
+                    player.turns_taken, 0,
+                    "a player who has not had a turn yet counts none"
+                );
+            }
+        }
+    }
+
+    // `start_game_skip_mulligan` establishes turn 1 through the same inline
+    // path and must agree.
+    let mut state = new_game(42);
+    start_game_skip_mulligan(&mut state);
+    assert_eq!(state.players[0].turns_taken, 1);
 }
 
 #[test]
@@ -5558,7 +5593,7 @@ fn integration_full_turn_cycle() {
     let mut state = new_game(42);
 
     // Start game (turn 1, player 0) — engine pauses at Upkeep priority per
-    // CR 117.1c. CR 103.7a skips the first-turn Draw step entirely.
+    // CR 117.1c. CR 103.8a skips the first-turn Draw step entirely.
     // (Libraries are empty, which is fine because the first-turn player
     // never draws and we stop the test before turn 2's draw step.)
     let _result = start_game_with_starting_player(&mut state, PlayerId(0));
@@ -5668,7 +5703,7 @@ fn integration_play_land_then_pass() {
 
     // CR 305.3 + CR 117.1c: lands are sorcery-speed, so pass Upkeep
     // priority (both players) to reach PreCombatMain before playing.
-    // CR 103.7a skips first-turn Draw so two passes is enough.
+    // CR 103.8a skips first-turn Draw so two passes is enough.
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PreCombatMain);
@@ -7492,7 +7527,7 @@ fn full_turn_integration_with_mulligan() {
     ));
     assert_eq!(state.phase, Phase::Upkeep);
 
-    // Drain Upkeep priority (turn 1 skips Draw per CR 103.7a) to reach Main.
+    // Drain Upkeep priority (turn 1 skips Draw per CR 103.8a) to reach Main.
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PreCombatMain);

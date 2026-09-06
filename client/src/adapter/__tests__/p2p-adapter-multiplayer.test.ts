@@ -15,7 +15,8 @@ import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView, type P2PAdapt
 import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState, type PersistedGameState, type RestoredGameStateResult } from "../types";
 import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
-import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
+import { PEER_CONNECT_OPTIONS } from "../../network/connection";
+import { WIRE_PROTOCOL_VERSION, type P2PMessage } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
 
@@ -110,6 +111,14 @@ const mocks = vi.hoisted(() => {
     initialize: vi.fn(async () => undefined),
     submitAction: vi.fn(async (_action: unknown) => ({ events: [] })),
     submitInteraction: vi.fn(async (_submission: unknown) => ({ events: [] })),
+    previewInteraction: vi.fn(async (request: { requestId: string }, _actor: number) => ({
+      requestId: request.requestId,
+      interactionId: "interaction-1",
+      status: { type: "confirmable" },
+      progress: { selected: 3, minimum: 1, maximum: 3, aggregate: 6, confirmable: true },
+      outcome: "advanced",
+      summaries: ["confirmAvailable", "progress"],
+    })),
     checkDeckCompatibility,
     evaluateDeckFormatGate,
     getState,
@@ -337,6 +346,7 @@ vi.mock("../wasm-adapter", () => {
     initializeMultiplayerHostGame: mocks.initializeMultiplayerHostGame,
     submitAction: mocks.submitAction,
     submitInteraction: mocks.submitInteraction,
+    previewInteraction: mocks.previewInteraction,
     checkDeckCompatibility: mocks.checkDeckCompatibility,
     evaluateDeckFormatGate: mocks.evaluateDeckFormatGate,
     getState: mocks.getState,
@@ -479,6 +489,123 @@ class FakeOpenableConnection extends FakeDataConnection {
   }
   fireOpen() {
     for (const h of this.openHandlers) h();
+  }
+
+  /**
+   * Every `state_ack` this fake fed back to the host, in emission order.
+   * Harness-only bookkeeping: the host's own record (`guestAckedRevisions`) is
+   * private, so this is the only direct observation point for what the seat
+   * acknowledged, as opposed to what the host did about it.
+   */
+  readonly acksSent: P2PMessage[] = [];
+
+  /**
+   * Stop auto-acking. Callable at any point — including before
+   * `initializeGame` — so a test can model a seat that never acknowledges
+   * anything, not merely one that stops mid-game.
+   */
+  stopAcking() {
+    this.acking = false;
+  }
+
+  /** Resume auto-acking after `stopAcking()`, so a test can show a seat that
+   *  missed a window and then recovers. */
+  resumeAcking() {
+    this.acking = true;
+  }
+
+  /**
+   * Default ON: a real guest acks every state-bearing frame it applies, and a
+   * seat that never acks reads as permanently behind. Defaulting off would
+   * change behavior in tests that have nothing to do with acknowledgement.
+   */
+  private acking = true;
+
+  /**
+   * The frame type after which this channel stops taking bytes, or `null`.
+   * Consumed once.
+   */
+  private refuseAfter: P2PMessage["type"] | null = null;
+
+  /**
+   * Model a channel that REFUSES bytes — `open = false`, so `PeerSession.send`
+   * resolves FALSE with no `close` event. `trySend` gates on `conn.open` both
+   * before and inside its queue and returns false at either gate without
+   * calling `handleDisconnect`, which is what makes this distinct from a `send`
+   * that THROWS (the only other failure the base fake can produce): a throw
+   * does call `handleDisconnect`, dropping the seat into `disconnectedSeats`
+   * where the sweep skips it — a different scenario entirely.
+   *
+   * What this is NOT is peerjs PARKING a frame past its buffered-amount
+   * budget. `_bufferedSend` returns `undefined` unconditionally and `trySend`
+   * returns `true` after any non-throwing `conn.send`, so a parked frame
+   * resolves TRUE and is indistinguishable from a delivered one at this
+   * boundary. That is exactly why the ADVANCE signal is the guest's own
+   * `state_ack` rather than the send result. The residual it leaves is
+   * `terminalDelivered`, which still records transmission: a parked terminal
+   * frame is recorded as delivered and the sweep stops nominating the seat.
+   * That residual is accepted (it is post-game, and acking it would need a
+   * second wire bump) and no test here covers it — this knob cannot produce
+   * it.
+   *
+   * The refusal starts AFTER the named frame has been sent and acked, so the
+   * seat is provably current on state when its next frame is refused.
+   * `reopen()` restores the channel.
+   */
+  refuseSendsAfter(type: P2PMessage["type"]) {
+    this.refuseAfter = type;
+  }
+
+  reopen() {
+    this.open = true;
+  }
+
+  protected override onDecodedSend(msg: P2PMessage): void {
+    // `FakeDataConnection.onDecodedSend` documents that an override MUST call
+    // super, so the base keep-alive `pong` reply survives. No test in this file
+    // currently fails without it — no seat here holds an open channel for a
+    // full 10s of fake time — but an override that silently models a dead peer
+    // is a trap for the next test that does.
+    super.onDecodedSend(msg);
+    this.ackDecodedSend(msg);
+    if (this.refuseAfter !== null && this.refuseAfter === msg.type) {
+      this.refuseAfter = null;
+      this.open = false;
+    }
+  }
+
+  private ackDecodedSend(msg: P2PMessage): void {
+    if (!this.acking) return;
+    // A decode `.then` from a pre-close send can settle AFTER
+    // `simulateClose()`; dispatching an ack into a torn-down session would
+    // model something a real guest never does.
+    if (!this.open) return;
+    if (msg.type !== "game_setup" && msg.type !== "state_update" && msg.type !== "reconnect_ack") {
+      return;
+    }
+    // `revision` is optional on `state_update` and `reconnect_ack`; only
+    // `game_setup` always carries one. An ack without a revision is not a
+    // frame a real guest could produce.
+    if (msg.revision == null) return;
+    const ack = {
+      type: "state_ack" as const,
+      revision: msg.revision,
+      // A real guest stamps `authority` on every outbound frame, so an
+      // unstamped ack would skip the host's pre-switch authority guard.
+      ...(msg.authority ? { authority: msg.authority } : {}),
+    };
+    this.acksSent.push(ack);
+    // Enqueue on the inherited drain so `getSentMessages()` reaches the
+    // fixed point: an ack can provoke host sends, which enqueue more decodes.
+    // The `.catch` prevents an unhandled rejection when a test never awaits
+    // `getSentMessages()`, but it must stay LOUD: a silently dropped ack makes
+    // a seat read as un-acked, which would let a redelivery test pass for the
+    // wrong reason.
+    this.pendingDecodes.push(
+      this.simulateData(ack).catch((e) => {
+        console.warn("[FakeOpenableConnection] auto-ack dispatch failed:", e);
+      }),
+    );
   }
 }
 
@@ -736,6 +863,19 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       expect(unsubscribe).toHaveBeenCalledOnce();
     }
     expect(mocks.setAiDecisionDiagnosticsEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it("exposes authoritative export from every P2P host", async () => {
+    const { adapter } = makeHost(2);
+
+    expect(adapter.exportPersistenceState).toBeDefined();
+    await expect(adapter.exportPersistenceState!()).resolves.toBe(
+      JSON.stringify({ players: [], objects: {} }),
+    );
+    expect(mocks.exportPersistenceState).toHaveBeenCalledOnce();
+
+    const { adapter: nativeHost } = makeNativeHost();
+    expect(nativeHost.exportPersistenceState).toBeDefined();
   });
 
   it("exposes local diagnostics after native guest attachment falls back to WASM", async () => {
@@ -1651,6 +1791,56 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockGetViewerSnapshot).toHaveBeenCalledTimes(2);
     expect(mockGetViewerSnapshot).toHaveBeenCalledWith(1);
     expect(mockGetViewerSnapshot).toHaveBeenCalledWith(2);
+  });
+
+  const isStateBearingWithRevision = (m: unknown): m is P2PMessage & { revision: number } =>
+    typeof m === "object"
+    && m !== null
+    && ["game_setup", "state_update", "reconnect_ack"].includes((m as { type: string }).type)
+    && typeof (m as { revision?: unknown }).revision === "number";
+
+  // Harness coverage for `FakeOpenableConnection`'s auto-ack. Nothing else in
+  // the suite observes it directly, so this test is the only thing standing
+  // between a silently-broken fake and every acceptance-semantics test built
+  // on top of it.
+  it("auto-acks every state-bearing frame the host sends, echoing its authority", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+
+    const sent = await guest.getSentMessages();
+    const stateBearing = sent.filter(isStateBearingWithRevision);
+    // Both a `game_setup` and at least one `state_update` must have flowed,
+    // or the ack assertion below would be vacuously satisfiable.
+    expect(stateBearing.map((m) => m.type)).toEqual(
+      expect.arrayContaining(["game_setup", "state_update"]),
+    );
+    // One ack per state-bearing frame, in order, carrying that frame's
+    // revision and the host's authority stamp verbatim.
+    expect(guest.acksSent).toEqual(
+      stateBearing.map((m) => ({
+        type: "state_ack",
+        revision: m.revision,
+        authority: m.authority,
+      })),
+    );
+
+    // The knob silences it: further host state changes provoke no new ack.
+    guest.stopAcking();
+    const ackCount = guest.acksSent.length;
+    const stateBearingCount = stateBearing.length;
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+    const afterStop = await guest.getSentMessages();
+    // Non-vacuity: the host really did send another state-bearing frame that
+    // the fake would have acked had the knob not been flipped.
+    expect(afterStop.filter(isStateBearingWithRevision).length).toBeGreaterThan(stateBearingCount);
+    expect(guest.acksSent).toHaveLength(ackCount);
+    adapter.dispose();
   });
 
   it("keeps a host zero-count debug create out of transition side effects", async () => {
@@ -2895,6 +3085,194 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
   });
 
+  it("does not replace a guest's newer snapshot with a stale state revision", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    await adapter.initialize();
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      revision: 8,
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+    emitted.mockClear();
+
+    await conn.simulateData({
+      type: "state_update",
+      revision: 9,
+      state: remoteState("current"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    emitted.mockClear();
+
+    await conn.simulateData({
+      type: "state_update",
+      revision: 8,
+      state: remoteState("stale"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+
+    expect(((await adapter.getState()) as unknown as { label: string }).label).toBe("current");
+    expect(emitted).not.toHaveBeenCalled();
+  });
+
+  it("acks the revision the guest has applied, including the held one on a stale drop", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+
+    const ackedRevisions = async (): Promise<number[]> => {
+      await flushPromises();
+      return (await conn.getSentMessages())
+        .filter(
+          (m): m is { type: "state_ack"; revision: number } =>
+            typeof m === "object" && m !== null && (m as { type: string }).type === "state_ack",
+        )
+        .map((m) => m.revision);
+    };
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      revision: 8,
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+    expect(await ackedRevisions()).toEqual([8]);
+
+    await conn.simulateData({
+      type: "state_update",
+      revision: 9,
+      state: remoteState("current"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    expect(await ackedRevisions()).toEqual([8, 9]);
+
+    // The stale frame is dropped, but the guest still answers — with the
+    // NEWER revision it holds. A host ledger that records transmission cannot
+    // observe this; the ack is the only way it learns the seat is ahead.
+    await conn.simulateData({
+      type: "state_update",
+      revision: 8,
+      state: remoteState("stale"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    expect(await ackedRevisions()).toEqual([8, 9, 9]);
+
+    // A resumed session re-declares the seat's revision. This test is the
+    // guest half only: it drives `P2PGuestAdapter` directly, with no host on
+    // the other end. The host half — `recordGuestAck` and the redelivery
+    // predicate it feeds — is pinned by the eventual-delivery block below.
+    await conn.simulateData({
+      type: "reconnect_ack",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      revision: 12,
+      state: remoteState("resumed"),
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    expect(await ackedRevisions()).toEqual([8, 9, 9, 12]);
+  });
+
+  it("still acks an applied state_update when a stateChanged listener throws", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+
+    // `P2PGuestAdapter.emit` does not wrap its listeners, so a throwing
+    // subscriber unwinds the rest of the arm — here, only an ack placed after
+    // the emit. It must already be on the wire: a resent EQUAL revision is not
+    // `<` the cached one, so it re-enters this same arm and throws again, and
+    // and since the host drives redelivery off these acks, that is a resend
+    // loop rather than a heal. The
+    // seat itself is fine throughout; it holds the state and serves
+    // `getState()`.
+    adapter.onEvent((event) => {
+      if (event.type === "stateChanged") throw new Error("subscriber blew up");
+    });
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      revision: 3,
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+
+    await conn.simulateData({
+      type: "state_update",
+      revision: 4,
+      state: remoteState("current"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await flushPromises();
+
+    const acked = (await conn.getSentMessages())
+      .filter(
+        (m): m is { type: "state_ack"; revision: number } =>
+          typeof m === "object" && m !== null && (m as { type: string }).type === "state_ack",
+      )
+      .map((m) => m.revision);
+    expect(acked).toEqual([3, 4]);
+  });
+
   it("guest receive path resolves action_noop without replacing its cached snapshot", async () => {
     const { peer } = createFakePeer();
     const conn = new FakeDataConnection();
@@ -2944,6 +3322,101 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(emitted).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "stateChanged" }),
     );
+  });
+
+  /** A guest adapter past its `game_setup` handshake, ready to submit. */
+  async function joinedGuest(): Promise<{ adapter: P2PGuestAdapter; conn: FakeDataConnection }> {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+    return { adapter, conn };
+  }
+
+  it("guest submission the host never answers rejects at the timeout instead of parking forever", async () => {
+    const { adapter, conn } = await joinedGuest();
+
+    // The host lease fence applies the action and then sends NOTHING: no
+    // `state_update` (so no ack, no ledger entry, no redelivery sweep), and no
+    // `action_rejected`/`action_failed` either. The channel stays open and
+    // healthy — a liveness detector has nothing to find here.
+    const stranded = adapter.submitAction({ type: "PassPriority" }, 1);
+    let settled = false;
+    void stranded.catch(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(stranded).rejects.toMatchObject({
+      code: "P2P_ERROR",
+      recoverable: true,
+    });
+    // The host is silent, not gone: nothing was sent after the action frame.
+    expect((await conn.getSentMessages()).filter(
+      (message) => (message as { type?: string }).type === "action",
+    )).toHaveLength(1);
+  });
+
+  it("guest settles an action submission displaced by an interaction submission", async () => {
+    const { adapter, conn } = await joinedGuest();
+
+    // `dispatchInteraction` never touches `isAnimating`/`inFlightLocalAction`
+    // while `dispatchActionInternal` does, so an interaction submit can overlap
+    // an action submit and take the single slot from under it.
+    const displaced = adapter.submitAction({ type: "PassPriority" }, 1);
+    const displacing = adapter.submitInteraction({} as never, 1);
+
+    await expect(displaced).rejects.toMatchObject({
+      code: "P2P_ERROR",
+      recoverable: true,
+    });
+
+    // The displacing submission still settles normally off the next reply. The
+    // slot remains single and unkeyed: this does NOT make reply routing correct
+    // after a displacement, it only stops the displaced caller from parking.
+    await conn.simulateData({ type: "action_noop" });
+    await expect(displacing).resolves.toEqual({ events: [], log_entries: [] });
+  });
+
+  it("guest timeout from a settled submission never rejects a later, unrelated one", async () => {
+    const { adapter, conn } = await joinedGuest();
+
+    const first = adapter.submitAction({ type: "PassPriority" }, 1);
+    await conn.simulateData({ type: "action_noop" });
+    await expect(first).resolves.toEqual({ events: [], log_entries: [] });
+
+    // Sit just short of the FIRST submission's original 30s deadline, then park
+    // a second submission. A timeout armed on park but cleared only in the
+    // teardown helper survives the successful settle and fires below — against
+    // a submission the host has had barely a second to answer. The slot is
+    // unkeyed, so that rejection would hit whatever is parked, breaking normal
+    // play rather than fixing the freeze.
+    await vi.advanceTimersByTimeAsync(29_000);
+    const second = adapter.submitInteraction({} as never, 1);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    await conn.simulateData({ type: "action_noop" });
+    await expect(second).resolves.toEqual({ events: [], log_entries: [] });
   });
 
   it("guest preserves a structured stale engine rejection from the host", async () => {
@@ -3348,6 +3821,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     conn.simulateClose();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(connect).toHaveBeenCalledOnce();
+    // The reconnect dial must carry the same options as the initial join.
+    // Without `reliable: true` PeerJS builds the channel `ordered: false`, and
+    // the guest's revision guards drop reordered frames rather than
+    // resequencing them.
+    expect(connect).toHaveBeenCalledWith("host-peer", PEER_CONNECT_OPTIONS);
 
     adapter.dispose();
     reconnectConn.fireOpen();
@@ -3794,14 +4272,14 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Revert 40 → 39 and BOTH halves red: the v39 frame stops being
-  // refused, and the v40 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v39" is also satisfied by a client
+  // bump. Revert 48 → 47 and BOTH halves red: the v47 frame stops being
+  // refused, and the v48 frame stops being admitted. The admitting half is
+  // the reach-guard — without it "refuses v46" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v39) and admits its own (v40)", async () => {
+  it("refuses the previous wire protocol (v47) and admits its own (v48)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(39));
+    await refusing.conn.simulateData(setupFrameAt(47));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -3813,7 +4291,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(40));
+    await admitting.conn.simulateData(setupFrameAt(48));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(
@@ -3865,7 +4343,7 @@ describe("P2P wire-protocol version gate", () => {
     adapter.dispose();
   });
 
-  it("refuses a guest that omits the mandatory v28 wire version", async () => {
+  it("refuses a guest that omits the mandatory wire version", async () => {
     const { adapter, emitConnection } = makeHost(2);
     await adapter.initialize();
 
@@ -4161,20 +4639,67 @@ describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
  * The immediate fan-out isolates a failed per-guest viewer read, but that
  * alone still strands the seat: its adapter cache never receives the applied
  * state, and the guest watchdog compares the screen against exactly that
- * cache. The host-side ledger (`guestDeliveredRevisions`) plus the 5s
- * redelivery sweep close the gap by resending the CURRENT authoritative
- * state until the channel accepts it.
+ * cache. Two host-side structures plus the 5s redelivery sweep close the gap:
+ * `guestAckedRevisions` (how far along each seat is) and `terminalDelivered`
+ * (whose statement reached the channel). `shouldRedeliver` reads both, and
+ * BOTH lag checks — the sweep's nomination and `redeliverGuestState`'s own
+ * re-check — go through it.
  *
- * Measured, so the claim stays honest: no-op'ing the sweep reds five of the
- * seven tests here. The two it leaves green are the setup pair, and each has a
- * probe of its own: dropping the rethrow after the setup loop reds both, and
- * dropping the create-guard in `markGuestBehind` reds the no-adoption one —
- * which is a NEGATIVE claim about the sweep and therefore trivially green
- * without it. The remaining guards likewise each have their own probe: the
- * ledger no longer recording accepted sends (the sweep then resends forever,
- * caught by the duplicate-frame assertion), a per-guest read failure still
- * aborting the fan-out, the per-seat isolation of the terminal close, and its
- * `markGuestBehind` handoff.
+ * `guestAckedRevisions` uses two different signals on purpose, because the two
+ * failure directions are not symmetric. It ADVANCES only on the seat's own
+ * `state_ack`: a `send` resolving true only means the bytes reached the
+ * channel (peerjs parks anything past its buffered-amount budget in a buffer
+ * `close()` discards), so a ledger that advanced on transmission marked a seat
+ * delivered while the host was still waiting on that seat to act, and the
+ * sweep skipped the very seat that deadlocked the match. It is CREATED on an
+ * accepted handshake send — `game_setup` or `reconnect_ack`, never
+ * `state_update` — because a seat with no entry is one the sweep can never
+ * nominate. The asymmetry is one-sided: a false negative disarms the sweep for
+ * good, while a false positive is merely no worse than the handshake never
+ * having been sent — a parked handshake never authenticates the guest, so the
+ * redelivered `state_update`s it would receive are discarded anyway.
+ *
+ * A consequence worth stating, because it changes what "duplicate frame"
+ * means here: a seat nominated ONLY by the terminal clause still runs the full
+ * `redeliverGuestState`, so it gets a state frame at its CURRENT revision
+ * before the terminal frame. That duplicate is expected and harmless — the
+ * guest's stale guard is a strict `<`, so an equal-revision frame passes
+ * through, settles `pendingResolve` and produces a fresh ack.
+ *
+ * Measured, so the claim stays honest. Each probe below was applied to
+ * `p2p-adapter.ts` alone and the whole frontend suite re-run; the counts are
+ * that run's, not an inference:
+ *
+ *   P1  no-op `queueLaggingRedeliveries`      → 10 of the 13 tests here red.
+ *       The three left green are the two setup tests and the
+ *       reconnect-stops-nominating one, all NEGATIVE claims about the sweep.
+ *   P2  drop the rethrow after the setup loop → both setup tests red.
+ *   P3  drop `shouldRedeliver`'s create-guard → "does not adopt a seat that
+ *       never took its game_setup" reds, and only it. That test's seat never
+ *       gets a `game_setup` send at all (its viewer read throws), so no
+ *       accepted send seeds it and the guard stays the only thing standing
+ *       between it and the terminal clause.
+ *   P4  leave `redeliverGuestState`'s own re-check on the lag-only inline
+ *       form                                  → the two terminal-clause tests
+ *       red ("heals a seat whose terminal-close viewer read rejected" and
+ *       "re-sends a terminal statement whose bytes never reached the
+ *       channel"): the seat is nominated and then returns before sending.
+ *   P5  restore TRANSMISSION semantics on the state fan-out (advance the
+ *       entry when `send` resolves true)      → 4 red: "resyncs a seat whose
+ *       channel took the frame but never applied it", "ignores a guest ack
+ *       claiming a revision the host never reached", and both new tests
+ *       below, each of which needs a seat that a true send does NOT make
+ *       current. This probe IS the shipped bug.
+ *   P6  drop the reconnect path's `terminalDelivered` write → "stops
+ *       nominating a seat that took its terminal result on reconnect" reds.
+ *   P7  drop `seedGuestEntry` from the setup fan-out → "heals a seat whose
+ *       handshake ack never reached the host" reds, and only it: with no
+ *       entry the create-guard disarms the sweep, and the seat cannot ack its
+ *       way back in because the frame that would let it never arrives.
+ *   P8  drop `recordGuestAck`'s `Number.isInteger` gate → "ignores a guest ack
+ *       whose revision is not a number" reds, and only it.
+ *
+ * Every test in this block is red under at least one probe.
  */
 describe("P2PHostAdapter — per-guest eventual state delivery", () => {
   beforeEach(() => {
@@ -4308,7 +4833,10 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
     const redelivered = statesSentTo((await guest.getSentMessages()).slice(before));
     expect(redelivered[0].state?.filteredFor).toBe(1);
 
-    // The accepted redelivery advanced the ledger: further sweeps stay quiet.
+    // The fake ACKED the redelivery, which is what advances the seat's entry
+    // to the authoritative revision: further sweeps stay quiet. (The send
+    // resolving true would not have been enough — this assertion depends on
+    // the harness's auto-ack, not on the redelivery alone.)
     await vi.advanceTimersByTimeAsync(5_000);
     // A negative ("nothing more went out") cannot be polled for, so cross the
     // real event loop the way this file already does elsewhere.
@@ -4358,7 +4886,7 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
   // The isolation half of the contract: seat 1's failed viewer read must not
   // abort seat 2's IMMEDIATE delivery (the pre-fix fan-out awaited the reads
   // serially, so one rejection starved every later seat). Seat 2's single
-  // frame also pins that a healthy broadcast advances the ledger — without
+  // frame also pins that a broadcast the seat ACKS leaves it current — without
   // that, the sweep would resend to a seat that missed nothing.
   it("serves the healthy seat immediately while the failed seat waits for the sweep", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
@@ -4405,9 +4933,9 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
 
   // The same isolation for the SETUP fan-out, which the sweep cannot repair.
   // Unisolated, one rejected read starved every LATER seat of its `game_setup`
-  // — permanently: such a seat has no ledger entry, so the sweep skips it by
-  // design, and a second start returns early because `gameStarted` is already
-  // true.
+  // — permanently: with no `game_setup` send there is nothing to seed the
+  // seat's entry, so the sweep skips it by design, and a second start returns
+  // early because `gameStarted` is already true.
   //
   // The isolation buys those later seats their frame. It must NOT also buy
   // silence: the seat whose own read failed waits on a promise that never
@@ -4437,22 +4965,30 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
     expect(await setupsFor(guestTwo)).toHaveLength(1);
     expect(await setupsFor(guestOne)).toHaveLength(0);
 
-    // The starved seat stays with the setup/reconnect path on purpose: without
-    // a `game_setup` it has no ledger entry, and a `state_update` cannot stand
-    // in for the handshake — a guest discards state frames it cannot
-    // authenticate. So the sweep must NOT adopt it.
+    // The starved seat stays with the setup/reconnect path on purpose: with no
+    // `game_setup` send there is no accepted handshake to seed its entry, and
+    // a `state_update` cannot stand in for the handshake — a guest discards
+    // state frames it cannot authenticate. So the sweep must NOT adopt it.
     await vi.advanceTimersByTimeAsync(5_000);
     await vi.advanceTimersByTimeAsync(0);
     expect(statesSentTo(await guestOne.getSentMessages())).toHaveLength(0);
     adapter.dispose();
   });
 
-  // `markGuestBehind` may LOWER a ledger entry, but must never CREATE one. A
-  // seat with no entry never took its `game_setup`, and the contract leaves it
-  // to the setup/reconnect path, because a `state_update` cannot stand in for
-  // the handshake — the guest discards state frames it cannot authenticate.
-  // Without the guard the terminal close adopts exactly such a seat, and the
-  // next sweep serves it a frame it never authenticated for.
+  // The create-guard: `shouldRedeliver` returns false for a seat with no
+  // `guestAckedRevisions` entry. Such a seat was never handed a handshake
+  // frame its channel accepted — here its viewer read throws, so no
+  // `game_setup` is ever sent and `seedGuestEntry` never runs — and the
+  // contract leaves it to the setup/reconnect path, because a `state_update`
+  // cannot stand in for the handshake (the guest discards state frames it
+  // cannot authenticate).
+  //
+  // The guard now gates BOTH clauses, and the terminal one is why it must be
+  // explicit: `undefined < N` is already false, so the lag clause was
+  // accidentally safe, but `terminalResult !== null && !terminalDelivered.has(pid)`
+  // is TRUE for exactly this seat once the game closes — the close ran, and
+  // this seat's terminal send never did. Dropping `acked === undefined` from
+  // `shouldRedeliver` is this test's probe.
   it("does not adopt a seat that never took its game_setup", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
@@ -4464,8 +5000,8 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    // Seat 1 misses its setup frame, so it has no ledger entry. The host is
-    // told (see the test above); here only the ledger consequence matters.
+    // Seat 1's setup frame is never sent, so nothing seeds its entry. The host
+    // is told (see the test above); here only that consequence matters.
     const setupInjection = failNextViewerSnapshot();
     await expect(adapter.initializeGame()).rejects.toThrow("viewer snapshot failed");
     await flushPromises();
@@ -4516,8 +5052,9 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
   // The game-ending broadcast is the one delivery a seat cannot afford to
   // miss twice: the terminal fan-out is one-shot, and the guest refuses a
   // `terminal_result` whose revision it never received. The sweep therefore
-  // re-commits the terminal statement AFTER the healing state frame; the
-  // ledger advances only once both frames are accepted.
+  // re-commits the terminal statement AFTER the healing state frame. The two
+  // frames settle independently: the seat's ack clears the lag clause, and
+  // only an accepted terminal send clears `terminalDelivered`.
   it("re-commits the terminal result for the seat that missed the game-ending broadcast", async () => {
     const { adapter, emitConnection } = makeHost(2, 5_000);
     await adapter.initialize();
@@ -4655,6 +5192,722 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
       await p2pFinalStateCommitment(healing.state as unknown as GameState),
     );
     expect(afterSweep.indexOf(healing as never)).toBeLessThan(afterSweep.indexOf(terminals[0] as never));
+    adapter.dispose();
+  });
+
+  /** Keepalive `ping`s ride the same channel and land in `sent` whenever the
+   * fake clock crosses 5 s. They are transport, not delivery, so an
+   * exact-zero assertion about what a seat received must exclude them. */
+  function deliveryFramesIn(messages: unknown[]): unknown[] {
+    return messages.filter((m) => {
+      const type = (m as { type?: string }).type;
+      return type !== "ping" && type !== "pong";
+    });
+  }
+
+  // THE BUG. `send` resolving true only means the bytes reached the channel;
+  // peerjs parks anything past its buffered-amount budget in a buffer that
+  // `close()` discards. A ledger recording transmission therefore called this
+  // seat current while the host was still waiting on it to act — the sweep
+  // skipped it, the host could not advance its revision, and the match
+  // deadlocked. Acceptance semantics make the sweep the way out.
+  //
+  // `stopAcking()` models exactly that seat: every send succeeds, nothing is
+  // ever applied.
+  it("resyncs a seat whose channel took the frame but never applied it", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    // The setup frame WAS applied, so the seat has an entry and the
+    // create-guard is not what this test measures.
+    expect(guest.acksSent).not.toHaveLength(0);
+    guest.stopAcking();
+    const before = (await guest.getSentMessages()).length;
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    // Non-vacuity: the fan-out succeeded. Every viewer read resolved and the
+    // channel took the bytes — a transmission ledger would record this seat as
+    // current here, and never send it anything again.
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(1);
+
+    // Acceptance semantics: no ack, so the seat is still behind and the sweep
+    // resends the current authoritative state.
+    await sweepAndWaitFor(async () => {
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(2);
+    });
+    const resent = statesSentTo((await guest.getSentMessages()).slice(before));
+    expect(resent[1].state?.filteredFor).toBe(1);
+    adapter.dispose();
+  });
+
+  // `revision` crosses the trust boundary: `validateMessage` checks type
+  // membership only, and nothing on the decode path validates a field. An
+  // unclamped `1e9` makes the lag clause false forever, which strands the seat
+  // permanently — this bug's own symptom, reachable from one frame.
+  it("ignores a guest ack claiming a revision the host never reached", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    guest.stopAcking();
+    await guest.simulateData({ type: "state_ack", revision: 1e9 });
+    const before = (await guest.getSentMessages()).length;
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+    expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(1);
+
+    // Clamped to the host's own revision, so the seat is still behind.
+    await sweepAndWaitFor(async () => {
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(2);
+    });
+    adapter.dispose();
+  });
+
+  // Terminal delivery gets its own bit rather than a revision, and this is
+  // why. Here the seat is FULLY current on state — its ack equals the
+  // authoritative revision — and must still be nominated, because its
+  // `terminal_result` never reached the channel. No revision ledger can
+  // express that, which is what the old ledger's `revision - 1` back-dating was
+  // simulating; and once the redelivered state frame is acked (the late ack),
+  // the simulation would be undone before the terminal frame ever went out.
+  it("re-sends a terminal statement whose bytes never reached the channel", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    const before = (await guest.getSentMessages()).length;
+    (mockGetState as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      players: [],
+      objects: {},
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    });
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => ({
+      state: { filteredFor: pid, players: [], waiting_for: { type: "GameOver", data: { winner: 0 } } },
+      actions: [],
+      autoPassRecommended: false,
+    }));
+    // The closing broadcast's state frame lands and is acked; the terminal
+    // frame that follows it finds a channel that cannot take bytes.
+    guest.refuseSendsAfter("state_update");
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    const immediate = (await guest.getSentMessages()).slice(before);
+    expect(statesSentTo(immediate)).toHaveLength(1);
+    expect(immediate.filter((m) => (m as { type?: string }).type === "terminal_result")).toHaveLength(0);
+    // The seat is provably current on state, so ONLY the terminal clause can
+    // nominate it below.
+    expect(guest.acksSent[guest.acksSent.length - 1])
+      .toMatchObject({ revision: statesSentTo(immediate)[0].revision });
+
+    guest.reopen();
+    await sweepAndWaitFor(async () => {
+      const sent = (await guest.getSentMessages()).slice(before);
+      expect(sent.filter((m) => (m as { type?: string }).type === "terminal_result")).toHaveLength(1);
+    });
+    const afterSweep = (await guest.getSentMessages()).slice(before);
+    const states = statesSentTo(afterSweep);
+    const terminals = afterSweep.filter((m) => (m as { type?: string }).type === "terminal_result") as
+      Array<{ result?: { recipient?: number; revision?: number } }>;
+    expect(states).toHaveLength(2);
+    expect(terminals[0].result?.recipient).toBe(1);
+    expect(terminals[0].result?.revision).toBe(states[1].revision);
+    expect(afterSweep.indexOf(states[1] as never)).toBeLessThan(afterSweep.indexOf(terminals[0] as never));
+
+    // And the flag terminates it: the delivered statement stops the sweep,
+    // even though `terminalResult` stays armed for the rest of the session.
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deliveryFramesIn((await guest.getSentMessages()).slice(before)))
+      .toHaveLength(deliveryFramesIn(afterSweep).length);
+    adapter.dispose();
+  });
+
+  // `terminalResult` is never cleared for an adapter incarnation, so the
+  // terminal clause stays armed forever after a close. A seat that takes its
+  // statement on the reconnect path must therefore be recorded there too —
+  // otherwise it is nominated every 5 s for the life of the session, each tick
+  // costing a `reconnectHandoff` viewer-snapshot round trip plus a duplicate
+  // pair of frames.
+  //
+  // The FIRST tick is the measurement. Two ticks would not discriminate: the
+  // redelivery's own terminal write self-terminates the loop after one tick,
+  // so a missing reconnect-path write shows up as one duplicate pair and then
+  // silence.
+  it("stops nominating a seat that took its terminal result on reconnect", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    const setup = (await guest.getSentMessages()).find(
+      (m): m is { type: "game_setup"; playerToken: string } =>
+        (m as { type?: string }).type === "game_setup",
+    );
+    const token = setup!.playerToken;
+
+    (mockGetState as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      players: [],
+      objects: {},
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    });
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => ({
+      state: { filteredFor: pid, players: [], waiting_for: { type: "GameOver", data: { winner: 0 } } },
+      actions: [],
+      autoPassRecommended: false,
+    }));
+    // The one-shot terminal fan-out cannot reach this seat, so the reconnect
+    // path is the ONLY place it can be recorded as having taken its statement.
+    // (Disconnecting the seat BEFORE the close is not an option: a
+    // disconnected seat pauses the host and `submitAction` refuses.)
+    guest.refuseSendsAfter("state_update");
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+    const closed = await guest.getSentMessages();
+    expect(closed.filter((m) => (m as { type?: string }).type === "terminal_result")).toHaveLength(0);
+
+    // Now the seat drops and comes back. The game is already terminal, so the
+    // seat is held without a grace timer.
+    guest.simulateClose();
+    const rejoin = await joinGuest(emitConnection, { type: "reconnect", playerToken: token });
+    // `handleFirstContact` fires the reconnect completion and forgets it, and
+    // the statement it commits crosses a real `crypto.subtle.digest`, so no
+    // microtask drain can await it. Poll, the way `sweepAndWaitFor` does — and
+    // well short of the 5 s sweep tick this test then fires deliberately.
+    await vi.waitFor(async () => {
+      const sent = await rejoin.getSentMessages();
+      expect(sent.filter((m) => (m as { type?: string }).type === "terminal_result")).toHaveLength(1);
+    }, { interval: 10, timeout: 2_000 });
+    const handshake = await rejoin.getSentMessages();
+    expect(handshake.filter((m) => (m as { type?: string }).type === "reconnect_ack")).toHaveLength(1);
+    // The seat is current on state because it acked the CLOSING `state_update`
+    // before it dropped, so its entry already equals `handoff.revision`. (Not
+    // because the reconnect ack was recorded: the host's real message handler
+    // is installed only after the `reconnect_ack` send, the seed, and the
+    // terminal send, and `peer.ts` buffers nothing while the drain handler is
+    // attached — so that ack races, and this test does not depend on it.)
+    // The lag clause is therefore provably false before the tick — exact zero
+    // assertion, not "no growth".
+    const before = handshake.length;
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deliveryFramesIn((await rejoin.getSentMessages()).slice(before))).toHaveLength(0);
+    adapter.dispose();
+  });
+
+  // Why the ENTRY is created on transmission even though it ADVANCES on
+  // acceptance. The guest's ack is fire-and-forget — `P2PGuestAdapter.send`
+  // returns `void` and discards `trySend`'s boolean — so a handshake ack can
+  // be lost with nothing anywhere retrying it. Were the ack also the create,
+  // that single loss would disarm the sweep permanently: the host holds no
+  // entry, `shouldRedeliver` returns false at the create-guard, and the seat
+  // cannot produce another ack because every remaining ack site needs a frame
+  // the sweep will now never send. That is the reported deadlock verbatim — a
+  // guest stuck on "Waiting for another player to decide their opening hand"
+  // while the host waits on that same seat.
+  //
+  // `seedGuestEntry` closes it: the accepted `game_setup` send creates the
+  // entry at revision 1, so one revision later the lag clause is true and the
+  // sweep serves the seat the frame it needs to rejoin the conversation.
+  it("heals a seat whose handshake ack never reached the host", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    // Every ack from this seat is lost, the handshake's included.
+    guest.stopAcking();
+    await adapter.initializeGame();
+    await flushPromises();
+
+    // Non-vacuity, and the line that separates this from the create-guard
+    // test: that seat's viewer read throws so no `game_setup` is ever sent,
+    // while this one WAS handed its frame and the channel took it.
+    const setups = (await guest.getSentMessages()).filter(
+      (m) => (m as { type?: string }).type === "game_setup",
+    );
+    expect(setups).toHaveLength(1);
+    expect(guest.acksSent).toHaveLength(0);
+
+    const before = (await guest.getSentMessages()).length;
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(1);
+
+    // Acks work again, but nothing on the guest side can restart the exchange:
+    // the host publishes no new revision while it waits on this seat, so the
+    // sweep is the only way out.
+    guest.resumeAcking();
+    await sweepAndWaitFor(async () => {
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(2);
+    });
+    const resent = statesSentTo((await guest.getSentMessages()).slice(before));
+    expect(resent[1].state?.filteredFor).toBe(1);
+
+    // Healed, not merely retried: the resend was acked, so the next sweep is
+    // quiet rather than resending forever.
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(2);
+    adapter.dispose();
+  });
+
+  // `Number.isInteger`, which the `1e9` test above cannot reach: `1e9` IS an
+  // integer, so that test probes only the clamp. `Math.min` applies ToNumber,
+  // so a non-numeric revision yields `NaN`, and a stored `NaN` is the mirror
+  // image of an unclamped `1e9` — neither `undefined` (the create-guard lets
+  // it through) nor `< authoritativeRevision` (the lag clause is false
+  // forever). It is also self-sealing: `capped > NaN` is false for every
+  // later honest ack, and `seedGuestEntry` sees an entry already present, so
+  // nothing can ever overwrite it.
+  //
+  // Sent BEFORE the handshake on purpose. That is when the seat has no entry,
+  // which is the one branch that would store the `NaN`.
+  it("ignores a guest ack whose revision is not a number", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    // `validateMessage` checks type membership only — no frame's fields are
+    // validated anywhere on the decode path — so this arrives verbatim.
+    await guest.simulateData({ type: "state_ack", revision: "not-a-number" });
+
+    await adapter.initializeGame();
+    await flushPromises();
+    guest.stopAcking();
+    const before = (await guest.getSentMessages()).length;
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+    expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(1);
+
+    // Unpoisoned: the seat still reads as behind, so the sweep serves it.
+    await sweepAndWaitFor(async () => {
+      expect(statesSentTo((await guest.getSentMessages()).slice(before))).toHaveLength(2);
+    });
+    adapter.dispose();
+  });
+});
+
+/**
+ * Rows 6, 7 (P2P half), 8 (guest leg) and 12 (guest leg).
+ *
+ * Wire-format note, disclosed: this file stubs `encodeWireMessage` /
+ * `decodeWireMessage` (see the `vi.mock` at the top), but the stub's decode
+ * ends in the REAL `validateMessage`, so an unknown tag still throws and the
+ * real `peer.ts` catch still runs. The real gzip wire format is exercised by
+ * `client/src/network/__tests__/protocol.test.ts`.
+ */
+describe("P2P interaction preview", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * An allocation whose segments are UNEQUAL and whose `choiceId` order is NOT
+   * the candidate publication order, so a sort or a canonicalisation anywhere
+   * on the P2P path is caught rather than coinciding with the input.
+   */
+  const request = (requestId: string) => ({
+    requestId,
+    interactionId: "interaction-1",
+    response: {
+      type: "shortcut",
+      data: {
+        decision: { type: "fixed", data: { iterations: 6 } },
+        pins: [{
+          group: 0,
+          choiceIds: ["choice-c", "choice-a", "choice-b"],
+          amounts: [
+            { choiceId: "choice-c", amount: 3 },
+            { choiceId: "choice-a", amount: 1 },
+            { choiceId: "choice-b", amount: 2 },
+          ],
+        }],
+      },
+    },
+  });
+
+  const previewAnswer = (requestId: string) => ({
+    requestId,
+    interactionId: "interaction-1",
+    status: { type: "confirmable" },
+    progress: { selected: 3, minimum: 1, maximum: 3, aggregate: 6, confirmable: true },
+    outcome: "advanced",
+    summaries: ["confirmAvailable", "progress"],
+  });
+
+  async function authenticatedGuest(conn: FakeDataConnection) {
+    const { peer } = createFakePeer();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("live"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    return adapter;
+  }
+
+  // Row 8, guest leg: the guest sends the authored request VERBATIM.
+  it("sends the guest's authored request verbatim", async () => {
+    const conn = new FakeDataConnection();
+    const adapter = await authenticatedGuest(conn);
+
+    const pending = adapter.previewInteraction(request("req-1") as never, 1);
+    await flushPromises();
+
+    const sent = (await conn.getSentMessages()).find(
+      (message) => (message as { type?: string }).type === "preview_interaction",
+    ) as { type: string; request: ReturnType<typeof request> } | undefined;
+    expect(sent).toBeDefined();
+    expect(sent!.request).toEqual(request("req-1"));
+    const pin = sent!.request.response.data.pins[0];
+    // Reach guard: the asserted allocation has more than one segment.
+    expect(pin.amounts.length).toBeGreaterThan(1);
+    expect(pin.amounts.map((a) => a.choiceId)).toEqual(pin.choiceIds);
+
+    await conn.simulateData({
+      type: "interaction_preview",
+      requestId: "req-1",
+      answer: { type: "preview", preview: previewAnswer("req-1") },
+    });
+    await expect(pending).resolves.toMatchObject({ requestId: "req-1" });
+  });
+
+  // Row 6: two in flight, answered OUT OF ORDER; each promise gets its own
+  // answer, and an id that was never sent settles nothing.
+  it("correlates out-of-order answers and drops an id it never sent", async () => {
+    const conn = new FakeDataConnection();
+    const adapter = await authenticatedGuest(conn);
+
+    const first = adapter.previewInteraction(request("req-1") as never, 1);
+    const second = adapter.previewInteraction(request("req-2") as never, 1);
+    const settledFirst = vi.fn();
+    const settledSecond = vi.fn();
+    void first.then(settledFirst, settledFirst);
+    void second.then(settledSecond, settledSecond);
+    await flushPromises();
+
+    await conn.simulateData({
+      type: "interaction_preview",
+      requestId: "req-never-sent",
+      answer: { type: "preview", preview: previewAnswer("req-never-sent") },
+    });
+    await flushPromises();
+    expect(settledFirst).not.toHaveBeenCalled();
+    expect(settledSecond).not.toHaveBeenCalled();
+
+    await conn.simulateData({
+      type: "interaction_preview",
+      requestId: "req-2",
+      answer: { type: "preview", preview: previewAnswer("req-2") },
+    });
+    await expect(second).resolves.toMatchObject({ requestId: "req-2" });
+    await flushPromises();
+    expect(settledFirst).not.toHaveBeenCalled();
+
+    await conn.simulateData({
+      type: "interaction_preview",
+      requestId: "req-1",
+      answer: { type: "preview", preview: previewAnswer("req-1") },
+    });
+    await expect(first).resolves.toMatchObject({ requestId: "req-1" });
+  });
+
+  it("rejects a correlated host failure without disturbing the other entry", async () => {
+    const conn = new FakeDataConnection();
+    const adapter = await authenticatedGuest(conn);
+
+    const failing = adapter.previewInteraction(request("req-1") as never, 1);
+    const surviving = adapter.previewInteraction(request("req-2") as never, 1);
+    const settledSurviving = vi.fn();
+    void surviving.then(settledSurviving, settledSurviving);
+    await flushPromises();
+
+    await conn.simulateData({
+      type: "interaction_preview",
+      requestId: "req-1",
+      answer: { type: "failed", message: "Game paused-manual" },
+    });
+    await expect(failing).rejects.toMatchObject({
+      code: "P2P_ERROR",
+      message: "Game paused-manual",
+    });
+    await flushPromises();
+    expect(settledSurviving).not.toHaveBeenCalled();
+
+    await conn.simulateData({
+      type: "interaction_preview",
+      requestId: "req-2",
+      answer: { type: "preview", preview: previewAnswer("req-2") },
+    });
+    await expect(surviving).resolves.toMatchObject({ requestId: "req-2" });
+  });
+
+  // Row 12, guest leg: two in flight, one answered on a live channel, then the
+  // channel closes. Delete the `handleHostDisconnect` clearing call and the
+  // unanswered promise never settles.
+  it("rejects every unanswered preview when the host channel goes away", async () => {
+    const conn = new FakeDataConnection();
+    const adapter = await authenticatedGuest(conn);
+
+    const answered = adapter.previewInteraction(request("req-1") as never, 1);
+    const unanswered = adapter.previewInteraction(request("req-2") as never, 1);
+    await flushPromises();
+
+    await conn.simulateData({
+      type: "interaction_preview",
+      requestId: "req-1",
+      answer: { type: "preview", preview: previewAnswer("req-1") },
+    });
+    await expect(answered).resolves.toMatchObject({ requestId: "req-1" });
+
+    conn.simulateClose();
+    // The clearing loop walks the map rather than rejecting indiscriminately.
+    await expect(answered).resolves.toMatchObject({ requestId: "req-1" });
+    await expect(unanswered).rejects.toMatchObject({
+      code: "P2P_ERROR",
+      message: "Host disconnected during interaction preview",
+    });
+    adapter.dispose();
+  });
+
+  // Row 7, P2P half, DRIVEN: an undecodable frame is dropped and the session
+  // survives it. The control that distinguishes "dropped" from "died" is that
+  // a SUBSEQUENT known frame on the same connection is still delivered.
+  it("survives an undecodable frame and still delivers the next known one", async () => {
+    const conn = new FakeDataConnection();
+    const adapter = await authenticatedGuest(conn);
+
+    const pending = adapter.previewInteraction(request("req-1") as never, 1);
+    await flushPromises();
+
+    await conn.simulateData({
+      type: "interaction_preview_from_the_future",
+      requestId: "req-1",
+      answer: { type: "preview", preview: previewAnswer("req-1") },
+    } as never);
+    await flushPromises();
+
+    await conn.simulateData({
+      type: "interaction_preview",
+      requestId: "req-1",
+      answer: { type: "preview", preview: previewAnswer("req-1") },
+    });
+    await expect(pending).resolves.toMatchObject({ requestId: "req-1" });
+    expect(conn.open).toBe(true);
+    adapter.dispose();
+  });
+
+  // Row 6, host half: the host answers the ASKING guest and no other peer.
+  it("answers only the asking guest", async () => {
+    const { adapter, emitConnection } = makeHost(3);
+    await adapter.initialize();
+    const asker = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    const bystander = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+    mocks.previewInteraction.mockClear();
+
+    await asker.simulateData({ type: "preview_interaction", request: request("req-1") as never });
+    await flushPromises();
+
+    // The seat the preview was EVALUATED as, not merely the channel it was
+    // answered on: a preview bound to another seat reads that seat's hidden
+    // zones. Each seat is read off its own `game_setup` rather than assumed.
+    const assignedSeat = async (conn: FakeOpenableConnection) =>
+      (
+        (await conn.getSentMessages()).find(
+          (message) => (message as { type?: string }).type === "game_setup",
+        ) as { assignedPlayerId: number }
+      ).assignedPlayerId;
+    const askerSeat = await assignedSeat(asker);
+    expect(askerSeat).not.toBe(await assignedSeat(bystander));
+    expect(mocks.previewInteraction).toHaveBeenCalledOnce();
+    expect(mocks.previewInteraction).toHaveBeenCalledWith(request("req-1"), askerSeat);
+
+    const answers = (await asker.getSentMessages()).filter(
+      (message) => (message as { type?: string }).type === "interaction_preview",
+    ) as { requestId: string; answer: { type: string; preview?: { requestId: string } } }[];
+    expect(answers).toHaveLength(1);
+    expect(answers[0].requestId).toBe("req-1");
+    expect(answers[0].answer.type).toBe("preview");
+    expect(answers[0].answer.preview!.requestId).toBe("req-1");
+
+    // The negative — and its live-instrument control in the same assertion:
+    // the bystander's channel DID carry other host traffic, so an empty
+    // preview-frame filter is a measured absence, not a dead capture.
+    const bystanderMessages = await bystander.getSentMessages();
+    expect(bystanderMessages.length).toBeGreaterThan(0);
+    expect(bystanderMessages.filter(
+      (message) => (message as { type?: string }).type === "interaction_preview",
+    )).toHaveLength(0);
+    adapter.dispose();
+  });
+
+  // Row 6, host refusals: each is a CORRELATED `failed` frame, never silence.
+  // The positive is the same request on a live, running seat, above.
+  it("answers a correlated failure for an eliminated seat and a non-running game", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    const host = adapter as unknown as {
+      eliminatedSeats: Set<number>;
+      gameRunState: string;
+    };
+
+    host.gameRunState = "paused-manual";
+    await guest.simulateData({ type: "preview_interaction", request: request("paused") as never });
+    await flushPromises();
+    host.gameRunState = "running";
+
+    host.eliminatedSeats.add(1);
+    await guest.simulateData({ type: "preview_interaction", request: request("gone") as never });
+    await flushPromises();
+    host.eliminatedSeats.delete(1);
+
+    const answers = (await guest.getSentMessages()).filter(
+      (message) => (message as { type?: string }).type === "interaction_preview",
+    ) as { requestId: string; answer: { type: string; message?: string } }[];
+    expect(answers.map((a) => [a.requestId, a.answer.type, a.answer.message])).toEqual([
+      ["paused", "failed", "Game paused-manual"],
+      ["gone", "failed", "Player has conceded and can no longer act"],
+    ]);
+
+    // Reach guard: the identical request on a live, running seat IS answered
+    // with a preview, so the refusals above are the guards and not a host that
+    // fails every preview.
+    await guest.simulateData({ type: "preview_interaction", request: request("live") as never });
+    await flushPromises();
+    const live = (await guest.getSentMessages()).filter(
+      (message) => (message as { type?: string }).type === "interaction_preview",
+    ) as { requestId: string; answer: { type: string } }[];
+    expect(live[live.length - 1]).toMatchObject({
+      requestId: "live",
+      answer: { type: "preview" },
+    });
+    adapter.dispose();
+  });
+
+  // The preview must NOT take the mutating arm's delivery path.
+  it("does not broadcast, persist or run the AI loop for a preview", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+    persistenceMocks.saveP2PHostSession.mockClear();
+    mocks.getViewerSnapshot.mockClear();
+    const before = (await guest.getSentMessages()).length;
+
+    await guest.simulateData({ type: "preview_interaction", request: request("req-1") as never });
+    await flushPromises();
+
+    const after = await guest.getSentMessages();
+    // Exactly one new frame: the answer. A `state_update` fan-out or a snapshot
+    // publish would add more.
+    expect(after.length).toBe(before + 1);
+    expect((after[after.length - 1] as { type?: string }).type).toBe("interaction_preview");
+    expect(persistenceMocks.saveP2PHostSession).not.toHaveBeenCalled();
+    expect(mocks.getViewerSnapshot).not.toHaveBeenCalled();
+
+    // Reach guard: a real submission on the same connection DOES take those
+    // paths, so the absences above are the preview arm and not a dead host.
+    await guest.simulateData({
+      type: "interaction",
+      senderPlayerId: 1,
+      submission: { interactionId: "interaction-1", response: { type: "choose", data: { choiceId: "a" } } } as never,
+    });
+    await flushPromises();
+    expect(mocks.getViewerSnapshot).toHaveBeenCalled();
     adapter.dispose();
   });
 });

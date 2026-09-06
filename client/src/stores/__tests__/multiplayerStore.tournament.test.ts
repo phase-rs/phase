@@ -33,6 +33,7 @@ import {
   type TournamentCredential,
 } from "../multiplayerStore";
 import { openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
+import { SERVER_PRESETS } from "../../services/serverDetection";
 import { LOBBY_PROTOCOL_VERSION } from "../../adapter/ws-adapter";
 import type {
   TournamentSummary,
@@ -251,7 +252,17 @@ beforeEach(() => {
   localStorageMock.items.clear();
   useMultiplayerStore.setState({
     tournamentCredentials: {},
-    serverAddress: "ws://localhost:8787",
+    // The hosting server IS the one browsed source here, so the single fake
+    // socket backs both the lobby channel and the tournament channel — see
+    // `tournamentBroadcastUrl`. Pointing them at different URLs would open two
+    // channels onto one fake and double every frame tally.
+    hostingServer: SERVER_PRESETS[0].url,
+    // Without these four a source added or listed by an earlier case leaks
+    // into every following one, and `subscribeLobby` dials it too.
+    userLobbySources: [],
+    sourceStatus: new Map(),
+    directorySources: [],
+    disabledDirectorySources: [],
     displayName: "",
   });
 });
@@ -802,7 +813,7 @@ describe("unified SubscribeLobby refcount", () => {
     });
     expect(secondCb).toHaveBeenCalledTimes(1);
     // The lobby snapshot still backs `findLobbyGameByCode`.
-    expect(findLobbyGameByCode("abcde")?.game_code).toBe("ABCDE");
+    expect(findLobbyGameByCode("abcde")?.game.game_code).toBe("ABCDE");
 
     detachSecond?.();
     expect(fake.tally("UnsubscribeLobby")).toBe(1);
@@ -1104,7 +1115,11 @@ describe("subscription teardown", () => {
       games: [{ game_code: "ABCDE" } as unknown as Record<string, unknown>],
     });
     fake.deliver("TournamentListUpdate", { tournaments: [summaryFor("AAA")] });
-    expect(fake.listenerCount()).toBe(2);
+    // Three, not two: a channel carries the lobby, ambient and tournament
+    // listeners, and all three are bound together by `attachLobbyListener`.
+    // The number is asserted so the teardown's `toBe(0)` below cannot pass
+    // against a socket that never had them attached.
+    expect(fake.listenerCount()).toBe(3);
     expect(findLobbyGameByCode("ABCDE")).toBeDefined();
 
     const inflight = store().getTournament("AAA");
@@ -1134,19 +1149,21 @@ describe("subscription teardown", () => {
     expect(lobbyCb).toHaveBeenCalledTimes(1); // only the pre-teardown push
   });
 
-  it("tears down the shared subscription when the server address changes", async () => {
+  it("drops the tournament stream when the hosting server changes", async () => {
     const fake = makeFakeSocket();
     primeSocket(fake);
 
     await store().subscribeLobby(vi.fn());
     const handlers = makeHandlers();
     await store().subscribeTournaments(handlers);
-    expect(fake.listenerCount()).toBe(2);
+    const attached = fake.listenerCount();
 
-    store().setServerAddress("ws://elsewhere:9999");
+    store().setHostingServer("ws://elsewhere:9999");
 
-    expect(fake.tally("UnsubscribeLobby")).toBe(1);
-    expect(fake.listenerCount()).toBe(0);
+    // Exactly one listener goes: the tournament stream, which is the only one
+    // bound to the HOSTING authority. The lobby and ambient listeners follow
+    // every browsed source and are unaffected by where games are registered.
+    expect(fake.listenerCount()).toBe(attached - 1);
     fake.deliver("TournamentListUpdate", { tournaments: [summaryFor("AAA")] });
     expect(handlers.onListUpdate).not.toHaveBeenCalled();
   });
@@ -1181,8 +1198,11 @@ describe("subscription teardown", () => {
     expect(fake.tally("UnsubscribeLobby")).toBe(1);
   });
 
-  it("a null socket makes subscribeTournaments resolve null and its caller's detach a safe no-op", async () => {
-    useMultiplayerStore.setState({ serverAddress: "not-a-websocket-url" });
+  it("no hosting authority makes subscribeTournaments resolve null and its caller's detach a safe no-op", async () => {
+    // Direct-codes mode. `hostingServer` is validated at every write
+    // (`setHostingServer`, `merge`), so "unusable address" is no longer a
+    // representable string here — `null` is the whole of that condition.
+    useMultiplayerStore.setState({ hostingServer: null });
 
     const handlers = makeHandlers();
     const detach = await store().subscribeTournaments(handlers);

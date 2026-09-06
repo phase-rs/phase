@@ -1,8 +1,9 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
 
 const mocks = vi.hoisted(() => ({
   draftProcedure: vi.fn(),
@@ -76,7 +77,6 @@ vi.mock("../../components/draft/HostControls", () => {
   };
 });
 vi.mock("../../components/draft/SetSelector", () => ({ SetSelector: () => null }));
-vi.mock("../../components/draft/CubeSetupPanel", () => ({ CubeSetupPanel: () => null }));
 
 import { DraftPodPage } from "../DraftPodPage";
 import { useDraftPodStore } from "../../stores/draftPodStore";
@@ -93,11 +93,13 @@ function engineView(
     pack_sizes: number[];
     min_deck_size: number;
     launch_capability: "None" | "CommanderMultiplayer";
+    commanders_required: number;
   }> = {},
 ) {
   return {
     kind,
     launch_capability: "None",
+    commanders_required: 0,
     seats: Array.from({ length: seatCount }, (_, seat_index) => ({ seat_index })),
     pack_count: 4,
     cards_per_pack: 12,
@@ -123,7 +125,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.view = null;
     mocks.loadActiveDraftPod.mockReturnValue(null);
-    mocks.draftProcedure.mockResolvedValue({
+    mocks.draftProcedure.mockResolvedValue(draftProcedureFixture({
       pod_size: 6,
       human_seats: 1,
       min_pod_size: 3,
@@ -133,9 +135,10 @@ describe("DraftPodPage ?kind= mode entry", () => {
       cards_per_pick: 2,
       distribution: "PickAndPass",
       min_deck_size: 60,
+      cube_min_deck_size: 53,
       post_draft_play: "CompleteImmediately",
-      match_config: { best_of: 1 },
-    });
+      match_config: { match_type: "Bo1" },
+    }));
     useDraftPodStore.getState().reset();
   });
 
@@ -227,7 +230,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     mocks.draftProcedure.mockImplementation(async (
       requestedKind: string,
       requestedTournamentFormat: string,
-    ) => ({
+    ) => draftProcedureFixture({
       pod_size: 8,
       human_seats: 1,
       min_pod_size: requestedKind === "CommanderDraft" ? 3 : 2,
@@ -242,10 +245,11 @@ describe("DraftPodPage ?kind= mode entry", () => {
       cards_per_pick: requestedKind === "CommanderDraft" ? 2 : 1,
       distribution: "PickAndPass",
       min_deck_size: 60,
+      cube_min_deck_size: 53,
       post_draft_play: requestedKind === "CommanderDraft"
         ? "CompleteImmediately"
         : "TournamentPairings",
-      match_config: { best_of: 1 },
+      match_config: { match_type: "Bo1" },
     }));
 
     renderAt("/draft-pod");
@@ -272,7 +276,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     let resolveCommanderProcedure!: () => void;
     mocks.draftProcedure.mockImplementation((kind: string) => {
       if (kind !== "CommanderDraft") {
-        return Promise.resolve({
+        return Promise.resolve(draftProcedureFixture({
           pod_size: 8,
           human_seats: 1,
           min_pod_size: 2,
@@ -282,13 +286,14 @@ describe("DraftPodPage ?kind= mode entry", () => {
           cards_per_pick: 1,
           distribution: "PickAndPass",
           min_deck_size: 60,
+          cube_min_deck_size: 53,
           post_draft_play: "TournamentPairings",
-          match_config: { best_of: 1 },
-        });
+          match_config: { match_type: "Bo1" },
+        }));
       }
 
       return new Promise((resolve) => {
-        resolveCommanderProcedure = () => resolve({
+        resolveCommanderProcedure = () => resolve(draftProcedureFixture({
           pod_size: 4,
           human_seats: 1,
           min_pod_size: 3,
@@ -298,9 +303,10 @@ describe("DraftPodPage ?kind= mode entry", () => {
           cards_per_pick: 2,
           distribution: "PickAndPass",
           min_deck_size: 60,
+          cube_min_deck_size: 73,
           post_draft_play: "CompleteImmediately",
-          match_config: { best_of: 1 },
-        });
+          match_config: { match_type: "Bo1" },
+        }));
       });
     });
 
@@ -330,6 +336,105 @@ describe("DraftPodPage ?kind= mode entry", () => {
       "7 players",
       "8 players",
     ]);
+  });
+
+  it("keeps the real cube panel mounted across pending floor changes", async () => {
+    let resolveHigher!: () => void;
+    let resolveLower!: () => void;
+    mocks.draftProcedure.mockImplementation((kind: string) => {
+      const base = draftProcedureFixture({
+        pod_size: 8,
+        human_seats: 1,
+        min_pod_size: 2,
+        max_pod_size: 8,
+        allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
+        packs_per_player: 3,
+        cards_per_pick: 1,
+        distribution: "PickAndPass",
+        min_deck_size: 40,
+        cube_min_deck_size: 53,
+        post_draft_play: "TournamentPairings",
+        match_config: { match_type: "Bo1" },
+      });
+      if (kind === "CommanderDraft") {
+        return new Promise((resolve) => {
+          resolveHigher = () => resolve({
+            ...base,
+            cube_min_deck_size: 73,
+            min_pod_size: 3,
+            cards_per_pick: 2,
+            post_draft_play: "CompleteImmediately",
+          });
+        });
+      }
+      if (kind === "Traditional") {
+        return new Promise((resolve) => {
+          resolveLower = () => resolve({ ...base, cube_min_deck_size: 61 });
+        });
+      }
+      return Promise.resolve(base);
+    });
+
+    const user = userEvent.setup();
+    renderAt("/draft-pod");
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
+    await waitFor(() => expect(useDraftPodStore.getState().cubeMinDeckSize).toBe(53));
+    await user.click(screen.getByRole("button", { name: "Cube" }));
+
+    const minimum = screen.getByRole("spinbutton", { name: "Min Deck" });
+    const cubeList = screen.getByPlaceholderText(/1 Lightning Bolt/);
+    fireEvent.change(minimum, { target: { value: "67" } });
+    await user.type(cubeList, "1 Opt");
+
+    await user.click(screen.getByRole("radio", { name: "Commander" }));
+    expect(screen.getByRole("spinbutton", { name: "Min Deck" })).toBe(minimum);
+    expect(screen.getByRole("button", { name: "Start Cube Draft" })).toBeDisabled();
+    expect(cubeList).toHaveValue("1 Opt");
+    resolveHigher();
+    await waitFor(() => expect(minimum).toHaveValue(73));
+
+    await user.click(screen.getByRole("radio", { name: "Traditional" }));
+    expect(screen.getByRole("spinbutton", { name: "Min Deck" })).toBe(minimum);
+    expect(screen.getByRole("button", { name: "Start Cube Draft" })).toBeDisabled();
+    expect(cubeList).toHaveValue("1 Opt");
+    resolveLower();
+    await waitFor(() => expect(minimum).toHaveValue(67));
+
+    await user.click(screen.getByRole("button", { name: "Start Cube Draft" }));
+    expect(useDraftPodStore.getState().cubeForm).toMatchObject({
+      cubeListText: "1 Opt",
+      settings: { min_deck_size: 67 },
+    });
+  });
+
+  it("leaves cube setup only after an all-at-once procedure resolves", async () => {
+    mocks.draftProcedure.mockImplementation(async (kind: string) => draftProcedureFixture({
+      pod_size: 8,
+      human_seats: 1,
+      min_pod_size: 2,
+      max_pod_size: 8,
+      allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
+      packs_per_player: kind === "Sealed" ? 6 : 3,
+      cards_per_pick: 1,
+      distribution: kind === "Sealed" ? "AllAtOnce" : "PickAndPass",
+      min_deck_size: 40,
+      cube_min_deck_size: 1,
+      post_draft_play: "TournamentPairings",
+      match_config: { match_type: "Bo1" },
+    }));
+
+    const user = userEvent.setup();
+    renderAt("/draft-pod");
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
+    await waitFor(() => expect(useDraftPodStore.getState().cubeMinDeckSize).toBe(1));
+    await user.click(screen.getByRole("button", { name: "Cube" }));
+    expect(screen.getByPlaceholderText(/1 Lightning Bolt/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: "Sealed" }));
+
+    await waitFor(() => expect(useDraftPodStore.getState().packDistribution).toBe("AllAtOnce"));
+    expect(useDraftPodStore.getState().poolMode).toBe("set");
+    expect(screen.queryByPlaceholderText(/1 Lightning Bolt/)).toBeNull();
   });
 
   it("lets the persisted session win over a URL kind intent", async () => {

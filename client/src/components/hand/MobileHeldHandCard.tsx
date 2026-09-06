@@ -14,6 +14,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import type { MobileHandGesture } from "../../stores/uiStore.ts";
 import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
+import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { StormCopyBadge } from "./StormCopyBadge.tsx";
@@ -35,6 +36,7 @@ export function MobileHeldHandCard({ gesture, object, stormCopyCount }: MobileHe
   const effectiveCost = useGameStore((s) =>
     object ? s.spellCosts[String(object.id)] : undefined,
   );
+  const backFace = useBackFaceSpellCost(object?.id, object?.back_face?.mana_cost);
   const shouldReduceMotion = useReducedMotion();
   const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
   const dragOffsetX = useMotionValue(gesture?.offsetX ?? 0);
@@ -130,7 +132,7 @@ export function MobileHeldHandCard({ gesture, object, stormCopyCount }: MobileHe
         className="!h-full !w-full"
       />
       <div className="pointer-events-none absolute inset-0 @container">
-        <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
+        <ManaCostPips cost={displayCost} isReduced={isReduced} backFace={backFace} size="fluid" />
       </div>
       {stormCopyCount !== undefined && (
         <StormCopyBadge count={stormCopyCount} variant="held" />

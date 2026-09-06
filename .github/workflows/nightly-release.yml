@@ -478,11 +478,16 @@ jobs:
           TAG: ${{ needs.cut-nightly-release.outputs.release_tag }}
         run: |
           set -euo pipefail
-          # Dispatch from main, not from the tag: --ref selects which release.yml is
-          # EXECUTED, and the tag's copy is frozen at whatever was broken when it was cut,
-          # so a CI fix landed on main could never reach a stuck tag. `-f tag=` still pins
-          # the SOURCE that gets built to the tag's SHA (see release.yml resolve-release-ref),
-          # so this changes the CI config only, never the released code.
+          # Dispatch from the tag, not from main. release.yml's build-web-image
+          # deploys to the protected `release` environment, whose deployment policy
+          # is matched against the run's own GITHUB_REF and admits tag refs only;
+          # the `release` job needs build-web-image, so a run started from a branch
+          # produces no release at all.
+          #
+          # The cost of that is real and accepted: recovery executes the release.yml
+          # frozen in the tag, so a workflow already broken when the tag was cut
+          # cannot be rescued by a fix on main. Re-cut the tag instead.
+          #
           # --repo is required: this job has no checkout, so gh cannot infer the
           # repository from a local git directory and dies with "not a git repository".
-          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$TAG"
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG" -f tag="$TAG"

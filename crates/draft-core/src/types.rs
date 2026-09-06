@@ -169,6 +169,10 @@ pub struct DraftProcedure {
     pub distribution: PackDistribution,
     /// CR 100.2b: limited decks have a 40-card minimum deck size.
     pub min_deck_size: usize,
+    /// Smallest deck size a cube request may select for this procedure.
+    /// Ordinary cube drafts permit any positive size. Commander Draft keeps
+    /// the CR 903.13f(1) minimum of 60 cards.
+    pub cube_min_deck_size: usize,
     /// CR 903.3: how many commanders each deck built from this kind's pool must
     /// designate. `0` for the four CR 905.1a kinds; `1` for CommanderDraft, whose
     /// decks are Commander decks (CR 903.13f routes deck construction through
@@ -245,6 +249,11 @@ impl DraftProcedure {
         } else {
             (self.local_cube_min_pod_size..=self.local_cube_max_pod_size).contains(&pod_size)
         }
+    }
+
+    /// Applies this procedure's engine-owned cube floor to a requested size.
+    pub fn effective_cube_min_deck_size(self, requested: usize) -> usize {
+        requested.max(self.cube_min_deck_size)
     }
 
     /// CR 903.13b: how many pick steps a pack of `cards_per_pack` contains for
@@ -326,6 +335,7 @@ impl DraftKind {
                 pick_selection_mode: PickSelectionMode::Direct,
                 distribution: PackDistribution::PickAndPass,
                 min_deck_size: 40,
+                cube_min_deck_size: 1,
                 commanders_required: 0,
                 // A local single-player event: the session ends when the deck
                 // is submitted and the client starts a game from it. No CR —
@@ -348,6 +358,7 @@ impl DraftKind {
                 pick_selection_mode: PickSelectionMode::Direct,
                 distribution: PackDistribution::PickAndPass,
                 min_deck_size: 40,
+                cube_min_deck_size: 1,
                 commanders_required: 0,
                 post_draft_play: PostDraftPlay::TournamentPairings,
                 match_config: MatchConfig {
@@ -367,6 +378,7 @@ impl DraftKind {
                 pick_selection_mode: PickSelectionMode::Direct,
                 distribution: PackDistribution::PickAndPass,
                 min_deck_size: 40,
+                cube_min_deck_size: 1,
                 commanders_required: 0,
                 post_draft_play: PostDraftPlay::TournamentPairings,
                 match_config: MatchConfig {
@@ -386,6 +398,7 @@ impl DraftKind {
                 pick_selection_mode: PickSelectionMode::Direct,
                 distribution: PackDistribution::AllAtOnce,
                 min_deck_size: 40,
+                cube_min_deck_size: 1,
                 commanders_required: 0,
                 post_draft_play: PostDraftPlay::TournamentPairings,
                 match_config: MatchConfig {
@@ -424,6 +437,9 @@ impl DraftKind {
                 // for `validate_limited_deck`. Format LEGALITY is
                 // `GameFormat::CommanderDraft`'s job, not this field's.
                 min_deck_size: 60,
+                // CR 903.13f(1): cube settings cannot lower Commander Draft's
+                // 60-card deck-construction minimum.
+                cube_min_deck_size: 60,
                 // CR 903.3 as routed by CR 903.13f: a Commander Draft deck is a
                 // Commander deck, so it designates a commander. `1` rather than
                 // `2`: CR 903.13f(3)'s partner grant needs the draft to have
@@ -1566,6 +1582,7 @@ mod tests {
 
         // CR 903.13f(1): the limited-pool floor, not format legality.
         assert_eq!(procedure.min_deck_size, 60);
+        assert_eq!(procedure.cube_min_deck_size, 60);
 
         // CR 903.3 as routed by CR 903.13f: a Commander Draft deck is a
         // Commander deck and designates a commander. `1`, not `2` — the
@@ -1578,6 +1595,24 @@ mod tests {
             procedure.post_draft_play,
             PostDraftPlay::CompleteImmediately
         );
+    }
+
+    #[test]
+    fn procedure_enforces_only_its_cube_minimum_deck_size() {
+        for kind in [
+            DraftKind::Quick,
+            DraftKind::Premier,
+            DraftKind::Traditional,
+            DraftKind::Sealed,
+        ] {
+            let ordinary = kind.procedure();
+            assert_eq!(ordinary.cube_min_deck_size, 1, "{kind:?}");
+            assert_eq!(ordinary.effective_cube_min_deck_size(73), 73, "{kind:?}");
+        }
+
+        let commander = DraftKind::CommanderDraft.procedure();
+        assert_eq!(commander.effective_cube_min_deck_size(1), 60);
+        assert_eq!(commander.effective_cube_min_deck_size(75), 75);
     }
 
     #[test]

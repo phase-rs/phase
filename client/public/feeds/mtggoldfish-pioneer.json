@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-02T00:00:00Z",
+  "updated": "2026-09-05T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -772,8 +772,8 @@
           "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 3,
-          "name": "Meticulous Archive"
+          "count": 1,
+          "name": "Field of Ruin"
         },
         {
           "count": 4,
@@ -816,7 +816,7 @@
           "name": "Irrigated Farmland"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Field of Ruin"
         },
         {
@@ -842,10 +842,6 @@
         {
           "count": 3,
           "name": "Deserted Beach"
-        },
-        {
-          "count": 2,
-          "name": "Ultima"
         },
         {
           "count": 3,
@@ -882,6 +878,14 @@
         {
           "count": 1,
           "name": "The Unagi of Kyoshi Island"
+        },
+        {
+          "count": 3,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 2,
+          "name": "Ultima"
         }
       ],
       "sideboard": [
@@ -906,10 +910,6 @@
           "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 3,
-          "name": "Kutzil's Flanker"
-        },
-        {
           "count": 1,
           "name": "Farewell"
         },
@@ -920,6 +920,10 @@
         {
           "count": 1,
           "name": "Three Steps Ahead"
+        },
+        {
+          "count": 3,
+          "name": "Kutzil's Flanker"
         }
       ]
     },
@@ -1042,8 +1046,8 @@
       "name": "Dimir Self-Bounce",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "U"
+        "U",
+        "B"
       ],
       "tags": [
         "metagame"
@@ -1051,11 +1055,7 @@
       "main": [
         {
           "count": 4,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 4,
-          "name": "Clearwater Pathway"
+          "name": "Fear of Isolation"
         },
         {
           "count": 4,
@@ -1063,15 +1063,19 @@
         },
         {
           "count": 4,
-          "name": "Darkslick Shores"
+          "name": "This Town Ain't Big Enough"
         },
         {
           "count": 4,
-          "name": "Thoughtseize"
+          "name": "Watery Grave"
         },
         {
           "count": 4,
-          "name": "Fear of Isolation"
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 2,
+          "name": "Urborg, Tomb of Yawgmoth"
         },
         {
           "count": 2,
@@ -1082,12 +1086,16 @@
           "name": "Hopeless Nightmare"
         },
         {
-          "count": 2,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Momentum Breaker"
         },
         {
           "count": 4,
-          "name": "Momentum Breaker"
+          "name": "Nowhere to Run"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
         },
         {
           "count": 4,
@@ -1095,7 +1103,15 @@
         },
         {
           "count": 4,
-          "name": "Nowhere to Run"
+          "name": "Clearwater Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Darkslick Shores"
+        },
+        {
+          "count": 2,
+          "name": "Island"
         },
         {
           "count": 1,
@@ -1114,12 +1130,8 @@
           "name": "Underground River"
         },
         {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
           "count": 2,
-          "name": "Island"
+          "name": "Swamp"
         },
         {
           "count": 1,
@@ -1127,19 +1139,11 @@
         },
         {
           "count": 4,
-          "name": "This Town Ain't Big Enough"
+          "name": "Thoughtseize"
         },
         {
           "count": 4,
           "name": "Fatal Push"
-        },
-        {
-          "count": 2,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
         },
         {
           "count": 4,
@@ -1170,141 +1174,6 @@
         {
           "count": 3,
           "name": "Unlicensed Hearse"
-        }
-      ]
-    },
-    {
-      "name": "Temur Lessons",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 4,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Divide by Zero"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 1,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 3,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 3,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 1,
-          "name": "Pop Quiz"
-        },
-        {
-          "count": 4,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 2,
-          "name": "Thor, God of Thunder"
-        },
-        {
-          "count": 4,
-          "name": "Willowrush Verge"
-        },
-        {
-          "count": 4,
-          "name": "Questing Druid"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Environmental Sciences"
-        },
-        {
-          "count": 2,
-          "name": "Sokka's Haiku"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 2,
-          "name": "Improvisation Capstone"
-        },
-        {
-          "count": 2,
-          "name": "Anger of the Gods"
-        },
-        {
-          "count": 1,
-          "name": "Origin of Metalbending"
-        },
-        {
-          "count": 1,
-          "name": "True Ancestry"
-        },
-        {
-          "count": 2,
-          "name": "Narset, Parter of Veils"
         }
       ]
     },
@@ -1428,6 +1297,132 @@
         {
           "count": 2,
           "name": "Disdainful Stroke"
+        }
+      ]
+    },
+    {
+      "name": "4c Scapeshift",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Aftermath Analyst"
+        },
+        {
+          "count": 4,
+          "name": "Arboreal Grazer"
+        },
+        {
+          "count": 1,
+          "name": "Arid Archway"
+        },
+        {
+          "count": 4,
+          "name": "Scapeshift"
+        },
+        {
+          "count": 2,
+          "name": "Castle Garenbrig"
+        },
+        {
+          "count": 4,
+          "name": "Crumbling Vestige"
+        },
+        {
+          "count": 4,
+          "name": "Underground Mortuary"
+        },
+        {
+          "count": 3,
+          "name": "Formidable Speaker"
+        },
+        {
+          "count": 1,
+          "name": "Glasspool Mimic"
+        },
+        {
+          "count": 2,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Lotus Field"
+        },
+        {
+          "count": 1,
+          "name": "Morlun, Devourer of Spiders"
+        },
+        {
+          "count": 4,
+          "name": "Hedge Maze"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 4,
+          "name": "Port of Karfell"
+        },
+        {
+          "count": 4,
+          "name": "Spelunking"
+        },
+        {
+          "count": 3,
+          "name": "Starting Town"
+        },
+        {
+          "count": 4,
+          "name": "The Wandering Minstrel"
+        },
+        {
+          "count": 2,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 4,
+          "name": "Lumra, Bellow of the Woods"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Clarion Conqueror"
+        },
+        {
+          "count": 3,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 4,
+          "name": "Culling Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Kaervek, the Spiteful"
+        },
+        {
+          "count": 3,
+          "name": "Lessons from Life"
+        },
+        {
+          "count": 1,
+          "name": "Tear Asunder"
+        },
+        {
+          "count": 1,
+          "name": "Cavern of Souls"
         }
       ]
     }

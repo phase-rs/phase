@@ -3328,10 +3328,15 @@ pub(super) fn match_taps_for_mana(
 /// CR 603.2 + CR 613.1b: ChangesController — fires on the `ControllerChanged`
 /// event a Layer-2 control change (or its end) emits. Every control-change path
 /// now emits this event (targeted `GainControl`, `GainControlAll`, `GiveControl`,
-/// `apply_permanent_control_change`, and the until-EOT expiry in
-/// `layers::prune_end_of_turn_effects`), so the redundant
-/// `EffectResolved { GainControl }` arm was dropped — matching both would have
-/// double-fired now that the gain also emits `ControllerChanged`.
+/// `apply_permanent_control_change`, `exchange_control::resolve` — CR 701.12a,
+/// on its success path only — and the until-EOT control reversion in
+/// `turns::execute_cleanup`), so the redundant `EffectResolved { GainControl }`
+/// arm was dropped — matching both would have double-fired now that the gain
+/// also emits `ControllerChanged`.
+///
+/// (The until-EOT emitter is `turns::execute_cleanup`, NOT
+/// `layers::prune_end_of_turn_effects`: the latter only retains over
+/// `transient_continuous_effects` and pushes no events.)
 ///
 /// The only producers of this mode are "When you lose control of ~"
 /// abilities (Khârn the Betrayer, Duplicity, Gustha's Scepter, and the S25
@@ -4335,7 +4340,7 @@ pub(super) fn matching_you_attack_events_by_attacked_player(
     let mut groups: Vec<(PlayerId, Vec<(ObjectId, crate::game::combat::AttackTarget)>)> =
         Vec::new();
     for (attacker, target) in matching_you_attack_pairs(event, trigger, source_context, state) {
-        // CR 508.5a + CR 310.8d: resolve the attacked object to the one player
+        // CR 508.5a + CR 310.9d: resolve the attacked object to the one player
         // it answers for (planeswalker → controller, battle → protector) so a
         // mixed declaration still groups by player identity.
         let attacked =

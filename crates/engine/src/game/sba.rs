@@ -44,6 +44,18 @@ fn live_battlefield_object_mut<'a>(
     })
 }
 
+/// CR 205.3q + CR 310.3: does this permanent have the Siege battle type?
+/// ("Battles have a unique subtype, called a battle type.")
+///
+/// Single authority for the Siege test inside this state-based-action sweep, so
+/// the CR 704.5v zero-defense deferral and the CR 310.12a protector-legality
+/// rule can never disagree about what a Siege is. Reads the layer-derived
+/// `card_types` rather than `base_card_types`, so a type-changing effect that
+/// grants or removes the Siege battle type is honored.
+fn has_siege_type(obj: &crate::game::game_object::GameObject) -> bool {
+    obj.card_types.subtypes.iter().any(|s| s == "Siege")
+}
+
 /// CR 704.4: state-based actions pay no attention to what happens during the
 /// resolution of a spell or ability. An entry that is mid-resolution — parked on
 /// a CR 616.1 replacement-ordering choice, or on a CR 303.4f Aura-host choice —
@@ -59,11 +71,27 @@ fn live_battlefield_object_mut<'a>(
 /// also cannot express the other half of this gate: `pending_replacement`, which
 /// is a parked event rather than a `WaitingFor` variant at all.
 fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
-    state.pending_replacement.is_some()
-        || matches!(
-            state.waiting_for,
-            crate::types::game_state::WaitingFor::ReturnAsAuraTarget { .. }
-        )
+    // CR 704.4: a resolution carrier that is paused on a player prompt (an
+    // "each opponent may sacrifice" fan-out waiting on the next opponent, for
+    // instance) is reached only by the player-loss safety net in
+    // `reconcile_terminal_result`. The prompt-owning SBAs below (CR 903.9a
+    // commander zone return, CR 704.5j legend rule) would overwrite that
+    // paused prompt with their own, orphaning the carrier and its parked frames
+    // until `start_next_turn` rejects the turn. Every deferred SBA (CR 704.3)
+    // reruns on the ordinary priority-gated pass once the resolution completes;
+    // commander eligibility is state-derived, so the owner is still offered the
+    // choice then. A carrier inside a Priority window is NOT paused: the
+    // CR 724.1c / CR 724.2c checks run by `end_the_turn` and
+    // `end_combat_phase` keep their full SBA pass when the effect resolves
+    // from the stack. The same effects resolved from an accepted optional
+    // prompt (`resolve_optional_effect_decision` runs before the handler
+    // restores Priority) are a documented deferral: their object SBAs run on
+    // the next priority-gated pass instead.
+    let paused_on_prompt = state.resolving_stack_entry.is_some()
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. });
+    paused_on_prompt
+        || state.pending_replacement.is_some()
+        || matches!(state.waiting_for, WaitingFor::ReturnAsAuraTarget { .. })
 }
 
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
@@ -224,9 +252,10 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 return;
             }
 
-            // CR 704.5v + CR 310.7: If a battle has defense 0 and isn't the source of an
-            // ability that has triggered but not yet left the stack, it's put into its
-            // owner's graveyard.
+            // CR 704.5v + CR 310.7: a Siege with defense 0 that isn't the source of an
+            // ability that has triggered but not yet left the stack is put into its
+            // owner's graveyard. CR 704.5w + CR 310.8: a non-Siege battle with defense 0
+            // is put into its owner's graveyard with no such deferral.
             check_zero_defense(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
                 return;
@@ -244,7 +273,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 &battlefield_snapshot,
             );
 
-            // CR 704.5w + CR 704.5x + CR 310.11: Battle with no (or illegal) protector —
+            // CR 704.5x + CR 310.11: Battle with no (or illegal) protector —
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
@@ -1755,9 +1784,24 @@ fn check_zero_loyalty(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
-/// CR 704.5v + CR 310.7: A battle with defense 0 is put into its owner's graveyard,
-/// unless it's the source of an ability that has triggered but not yet left the
-/// stack (e.g., the Siege's victory trigger).
+/// CR 704.5v + CR 704.5w: a battle with defense 0 is put into its owner's
+/// graveyard. The rule is split across two sub-rules by battle type, and only
+/// the Siege half carries a trigger-on-stack deferral:
+///
+/// > 704.5v If a Siege battle has defense 0 and it isn't the source of an
+/// > ability that has triggered but not yet left the stack, it's put into its
+/// > owner's graveyard.
+///
+/// > 704.5w If a non-Siege battle has defense 0, it's put into its owner's
+/// > graveyard.
+///
+/// CR 310.12b is why the carve-out is Siege-shaped: a Siege's intrinsic "when
+/// the last defense counter is removed from this permanent, exile it, then you
+/// may cast it transformed without paying its mana cost" has to find its source
+/// still on the battlefield when it resolves. A battle with any other battle
+/// type has no such intrinsic, so CR 704.5w grants it no deferral — it is put
+/// into its owner's graveyard immediately, even with one of its own triggered
+/// abilities still on the stack.
 fn check_zero_defense(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -1780,8 +1824,14 @@ fn check_zero_defense(
             if obj.defense.unwrap_or(0) != 0 {
                 return false;
             }
-            // CR 310.7: Don't SBA-destroy while one of this battle's triggered
-            // abilities is still on the stack (mirrors CR 714.4 Saga deferral).
+            // CR 704.5w: a non-Siege battle has no trigger-on-stack deferral —
+            // it dies now.
+            if !has_siege_type(obj) {
+                return true;
+            }
+            // CR 704.5v: a Siege is spared while one of its own abilities has
+            // triggered but not yet left the stack (mirrors the CR 714.4 Saga
+            // deferral), so its CR 310.12b victory trigger can resolve.
             let ability_on_stack = state.stack.iter().any(|entry| {
                 matches!(
                     &entry.kind,
@@ -1931,7 +1981,7 @@ fn check_illegal_attachment_unattach(
     }
 }
 
-/// CR 704.5w + CR 704.5x + CR 310.11 + CR 310.12a: If a battle that isn't being
+/// CR 704.5x + CR 310.11 + CR 310.12a: If a battle that isn't being
 /// attacked has no protector, an illegal protector, or (for Sieges) a protector
 /// that equals its controller, its controller chooses a legal protector. If no
 /// legal player exists, the battle is put into its owner's graveyard.
@@ -1977,7 +2027,7 @@ fn check_battle_protector(
             continue;
         };
         let controller = battle.controller;
-        let is_siege = battle.card_types.subtypes.iter().any(|s| s == "Siege");
+        let is_siege = has_siege_type(battle);
         let protector = battle.protector();
 
         // Legal protectors for a Siege are opponents of the controller (CR 310.12a).
@@ -1999,7 +2049,7 @@ fn check_battle_protector(
 
         // Compute legal choices.
         // CR 310.12a: a Siege's controller "must choose its protector from among their
-        // opponents", and CR 704.5w's SBA phrasing — "no player IN THE GAME designated as
+        // opponents", and CR 704.5x's SBA phrasing — "no player IN THE GAME designated as
         // its protector ... chooses an appropriate player" — seats CR 102.1 directly on
         // this seam. A CHOICE, not a target (CR 115.10a), so the candidate list is the
         // CHOOSABLE opponents. The pre-existing `eliminated_players` filter is LEFT IN
@@ -2022,7 +2072,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.11 / CR 704.5w + CR 614.6: No legal protector exists —
+                // CR 310.11 / CR 704.5x + CR 614.6: No legal protector exists —
                 // the battle is put into the graveyard, a "leaves the
                 // battlefield" event that must consult Moved redirects. Bail on a
                 // CR 616.1 pause (the SBA fixpoint re-runs and finds the rest).
@@ -2051,7 +2101,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.11 + CR 704.5w + CR 704.5x: multiple legal protectors —
+                // CR 310.11 + CR 704.5x: multiple legal protectors —
                 // the controller must choose. Pause the SBA fixpoint and yield
                 // a WaitingFor (mirrors `check_legend_rule`). The SBA re-runs
                 // on the next apply and finds any remaining battles.
@@ -2383,7 +2433,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ResolvedAbility,
+        TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
@@ -2393,6 +2444,102 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 704.4 + CR 903.9a: the player-loss safety net runs SBAs while a
+    /// resolution is paused on an opponent's prompt (Fandaniel, Telophoroi
+    /// Ascian's "each opponent may sacrifice a nontoken creature" fan-out with
+    /// P2 still to answer). The dying player loses, but the commander-zone
+    /// choice for the sacrificed commander must wait for the priority-gated
+    /// pass after the resolution completes — issuing it now overwrites the
+    /// paused prompt and orphans the resolution carrier (ai-duel commander
+    /// suite seed 30777 aborted in `start_next_turn`).
+    #[test]
+    fn paused_resolution_defers_commander_zone_choice_until_resolution_completes() {
+        use crate::types::resolution::OptionalEffectFrame;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Fan-out source".to_string(),
+            Zone::Battlefield,
+        );
+        let commander = create_object(
+            &mut state,
+            CardId(339),
+            PlayerId(3),
+            "Sacrificed commander".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        state.players[1].life = 0;
+
+        let ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0));
+        crate::game::stack::begin_resolving_stack_entry(
+            &mut state,
+            StackEntry {
+                id: ObjectId(394),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(ability.clone()),
+                },
+            },
+            None,
+        );
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ability),
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+        });
+        let paused_prompt = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(2),
+            source_id: source,
+            description: None,
+            may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
+        };
+        state.waiting_for = paused_prompt.clone();
+
+        let mut events = Vec::new();
+        assert!(has_pending_player_loss_sba(&state));
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(state.players[1].is_eliminated, "CR 704.5a still fires");
+        assert_eq!(
+            state.waiting_for, paused_prompt,
+            "the paused resolution prompt must survive the safety-net pass"
+        );
+        assert!(state.resolving_stack_entry.is_some());
+        assert_eq!(state.resolution_stack.len(), 1);
+
+        // The resolution completes; the ordinary priority-gated pass now offers
+        // the deferred CR 903.9a choice to the commander's owner.
+        let _ = state
+            .take_active_optional_effect_frame()
+            .expect("frame is not buried")
+            .expect("frame is present");
+        crate::game::stack::finish_resolving_stack_entry(
+            &mut state,
+            crate::game::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        check_state_based_actions(&mut state, &mut events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CommanderZoneChoice {
+                player: PlayerId(3),
+                commander_id,
+                current_zone: Zone::Graveyard,
+            } if commander_id == commander
+        ));
     }
 
     fn create_creature(
@@ -4171,6 +4318,8 @@ mod tests {
             player: PlayerId(2),
             candidate_count: 1,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
             proposed: ProposedEvent::Draw {

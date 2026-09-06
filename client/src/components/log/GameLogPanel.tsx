@@ -56,12 +56,13 @@ function isNearBottom(element: HTMLDivElement): boolean {
 export function GameLogPanel() {
   const { t } = useTranslation("game");
   const logHistory = useGameStore((s) => s.logHistory ?? EMPTY_LOG);
-  const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
+  const logPanelLastChoice = usePreferencesStore((s) => s.logPanelLastChoice);
   const logDockSide = usePreferencesStore((s) => s.logDockSide);
   const setLogDockSide = usePreferencesStore((s) => s.setLogDockSide);
   const isGameOver = useGameStore((s) => s.gameState?.waiting_for?.type === "GameOver");
   const isOpen = useUiStore((s) => s.logPanelOpen);
   const setLogPanelOpen = useUiStore((s) => s.setLogPanelOpen);
+  const setLogPanelOpenByUser = useUiStore((s) => s.setLogPanelOpenByUser);
   const inspectObjectSticky = useUiStore((s) => s.inspectObjectSticky);
   const gameSessionGeneration = useGameStore((s) => s.gameSessionGeneration);
   const reduceMotion = useReducedMotion();
@@ -77,19 +78,10 @@ export function GameLogPanel() {
   const [unreadCount, setUnreadCount] = useState(0);
   const [copyStatus, setCopyStatus] = useState<"success" | "failure" | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
   const lastGameSessionRef = useRef(gameSessionGeneration);
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nearBottomRef = useRef(true);
   const logDrag = useDraggableWidget({ kind: "widget", key: "logPanel" });
-
-  const setPanelNode = useCallback(
-    (node: HTMLDivElement | null) => {
-      panelRef.current = node;
-      logDrag.ref.current = node;
-    },
-    [logDrag.ref],
-  );
 
   const presentationFiltered = useMemo(
     () => filterLogByView(logHistory, view, categoryFilter.size > 0 ? categoryFilter : null, showHiddenInformation),
@@ -122,12 +114,27 @@ export function GameLogPanel() {
   const lastVisibleLogSeqRef = useRef(rows[rows.length - 1] && timelineRowSeq(rows[rows.length - 1]));
   const lastFilterSignatureRef = useRef(filterSignature);
 
-  const seededRef = useRef(false);
+  // Restore the user's remembered choice at the start of EVERY game session,
+  // not merely on mount. Rematch navigates /game/:id -> /game/:newId and the
+  // route carries no `key` (App.tsx:136), so this component RE-RENDERS in
+  // place rather than remounting — a mount-scoped ref would leave a game-over
+  // reveal's open panel standing through every subsequent rematch.
+  // Authoritative (it can close, not only open) because `logPanelOpen` lives
+  // in the non-persisted uiStore, which is a module singleton that outlives
+  // the game and is not reset by sessionCleanup.
+  // The mobile gate stays HERE rather than moving into the store's default
+  // because `logPanelLastChoice` is persisted and travels between a user's
+  // devices: services/backup.ts snapshots the raw blob and restore rehydrates
+  // it, so a platform-derived persisted default would let a desktop's "open"
+  // ride a backup onto a phone. Only a check at the point of consumption is
+  // device-correct — and that matters MORE now the value is written
+  // automatically on every user toggle.
+  const seededSessionRef = useRef<number | null>(null);
   useEffect(() => {
-    if (seededRef.current) return;
-    seededRef.current = true;
-    if (logDefaultState === "open") setLogPanelOpen(true);
-  }, [logDefaultState, setLogPanelOpen]);
+    if (seededSessionRef.current === gameSessionGeneration) return;
+    seededSessionRef.current = gameSessionGeneration;
+    setLogPanelOpen(!isMobile && logPanelLastChoice === "open");
+  }, [gameSessionGeneration, isMobile, logPanelLastChoice, setLogPanelOpen]);
 
   useEffect(() => {
     if (isGameOver) setLogPanelOpen(true);
@@ -179,30 +186,6 @@ export function GameLogPanel() {
     nearBottomRef.current = isNearBottom(element);
     if (nearBottomRef.current) setUnreadCount(0);
   }, []);
-
-  const closeIfAllowed = useCallback(() => {
-    if (!useUiStore.getState().flexEditMode) setLogPanelOpen(false);
-  }, [setLogPanelOpen]);
-
-  const handleOutsideClick = useCallback(
-    (event: MouseEvent) => {
-      if (isOpen && panelRef.current && !panelRef.current.contains(event.target as Node)) closeIfAllowed();
-    },
-    [closeIfAllowed, isOpen],
-  );
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeIfAllowed();
-    };
-    document.addEventListener("mousedown", handleOutsideClick);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handleOutsideClick);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [closeIfAllowed, handleOutsideClick, isOpen]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -271,7 +254,7 @@ export function GameLogPanel() {
     <AnimatePresence>
       {isOpen && (
         <motion.div
-          ref={setPanelNode}
+          ref={logDrag.ref}
           data-flex-zone="logPanel"
           role="region"
           aria-label={t("log.panelLabel")}
@@ -300,7 +283,7 @@ export function GameLogPanel() {
               )}
               <button type="button" onClick={() => void handleCopy()} className="min-h-11 rounded px-2 text-[10px] text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400" aria-label={t("log.copyFiltered", { count: filteredEntries.length })}>{t("log.copy")}</button>
               <button type="button" onClick={handleExport} className="min-h-11 rounded px-2 text-[10px] text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400" aria-label={t("log.exportFiltered", { count: filteredEntries.length })}>{t("log.export")}</button>
-              <button type="button" onClick={closeIfAllowed} disabled={logDrag.drag} className="min-h-11 min-w-11 rounded text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400 disabled:opacity-40" aria-label={t("log.closeLog")}>×</button>
+              <button type="button" onClick={() => setLogPanelOpenByUser(false)} disabled={logDrag.drag} className="min-h-11 min-w-11 rounded text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400 disabled:opacity-40" aria-label={t("log.closeLog")}>×</button>
             </div>
           </div>
 

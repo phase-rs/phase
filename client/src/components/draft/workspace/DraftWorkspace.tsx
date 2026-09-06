@@ -36,6 +36,7 @@ import {
 const DRAG_PREVIEW_SCALE = 0.55;
 const DRAG_PREVIEW_GAP = 4;
 const DRAG_PREVIEW_OFFSET = 12;
+const DESKTOP_DRAFT_COLLAPSED_SIDEBOARD_SCALE = 0.8;
 
 type VisualColumnCapOrientation = "portrait" | "landscape";
 type VisualColumnCapPreferenceTarget = "phoneDeckVisualColumnCaps" | "tabletDeckVisualColumnCaps";
@@ -154,11 +155,9 @@ export function DraftWorkspace({
   const { t } = useTranslation(["draft", "common"]);
   const [filter, setFilter] = useState<DraftWorkspaceFilter>("deck");
   const [compactSort, setCompactSort] = useState<DraftBoardSort>(preferences.deck.sort);
-  const [lockEpoch, setLockEpoch] = useState(0);
   const [deckCollapsed, setDeckCollapsed] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const cardPreviewMode = usePreferencesStore((state) => state.draftCardPreviewMode);
-  const previousLocked = useRef(interactionLocked);
   const normalizedWorkspaceSourceRef = useRef<DraftWorkspaceState | null>(null);
   const boardPreferences = { deck: preferences.deck, sideboard: preferences.sideboard };
   const normalized = normalizeWorkspaceForBoardGeometry(
@@ -247,7 +246,7 @@ export function DraftWorkspace({
   const builderCompact = builderPhoneOrTabletLayout && renderedView === "compact";
   const showDeckContents = shouldShowDraftWorkspaceDeck(deckCollapsed, builderCompact);
   const collapsedSideboardCardWidth = responsiveContext === "draft" && responsiveLayout === "desktop"
-    ? `clamp(208px, 20vw, ${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX}px)`
+    ? `clamp(${208 * DESKTOP_DRAFT_COLLAPSED_SIDEBOARD_SCALE}px, 16vw, ${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX * DESKTOP_DRAFT_COLLAPSED_SIDEBOARD_SCALE}px)`
     : `${DRAFT_WORKSPACE_COLLAPSED_SIDEBOARD_CARD_WIDTH_PX}px`;
   const collapsedCompositionClass = builderCompact
     ? tabletLayout
@@ -314,13 +313,6 @@ export function DraftWorkspace({
       onWorkspaceChange(normalized);
     }
   }, [interactionLocked, normalized, onWorkspaceChange, workspace]);
-
-  useEffect(() => {
-    if (!previousLocked.current && interactionLocked) {
-      setLockEpoch((current) => current + 1);
-    }
-    previousLocked.current = interactionLocked;
-  }, [interactionLocked]);
 
   useLayoutEffect(() => {
     const mediaQueries = typeof window.matchMedia === "function"
@@ -527,7 +519,7 @@ export function DraftWorkspace({
       <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
         {interactionLocked ? t("workspace.locked") : dragController?.announcement ?? ""}
       </div>
-      <fieldset key={lockEpoch} disabled={interactionLocked} className="contents">
+      <fieldset disabled={interactionLocked} className="contents">
         {sideboardCollapsed || builderPhoneLayout || draftPhoneLayout || tabletLayout ? (
           <div
             data-workspace-composition="collapsed"
@@ -538,11 +530,8 @@ export function DraftWorkspace({
           >
             {deck}
             {!deckCollapsed && !builderCompact && <section
-              ref={dragController?.registerCollapsedSideboard}
               aria-label={t("workspace.zone.sideboard")}
               data-zone="sideboard"
-              data-drop-target="collapsed-sideboard"
-              data-drop-state={sideboardDropActive ? "active" : "idle"}
               className={tabletPortraitLayout
                 ? sideboardCollapsed
                   ? "h-full min-h-0 min-w-0"
@@ -560,6 +549,7 @@ export function DraftWorkspace({
                 preferences={boardPreferences}
                 interactionLocked={interactionLocked}
                 dropActive={sideboardDropActive}
+                registerCardArea={dragController?.registerCollapsedSideboard}
                 collapsed={sideboardCollapsed}
                 {...(dragController === undefined ? {} : { dragController })}
                 onToggle={toggleSideboard}

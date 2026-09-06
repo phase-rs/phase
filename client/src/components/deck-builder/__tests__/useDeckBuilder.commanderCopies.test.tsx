@@ -2,9 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 
 import type { GameFormat } from "../../../adapter/types";
+import {
+  evaluateDeckCompatibility,
+  type DeckCompatibilityResult,
+} from "../../../services/deckCompatibility";
 
 const eligible = new Set<string>();
 const partnerCandidates = vi.fn(async () => [] as string[]);
+const cardDataCache = new Map<string, { name: string; cmc: number; color_identity: string[] }>();
 
 vi.mock("../../../services/engineRuntime", () => ({
   isCardCommanderEligibleForFormat: vi.fn(async (name: string) => eligible.has(name)),
@@ -17,7 +22,7 @@ vi.mock("../../../services/engineRuntime", () => ({
 }));
 
 vi.mock("../../../hooks/useDeckCardData", () => ({
-  useDeckCardData: () => ({ cardDataCache: new Map(), cacheCards: vi.fn() }),
+  useDeckCardData: () => ({ cardDataCache, cacheCards: vi.fn() }),
 }));
 
 vi.mock("../../../hooks/useBracketEstimate", () => ({
@@ -90,6 +95,7 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     eligible.add(OTHER);
     partnerCandidates.mockReset();
     partnerCandidates.mockResolvedValue([]);
+    cardDataCache.clear();
     localStorage.clear();
   });
 
@@ -178,5 +184,44 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     expect(result.current.deck.main.filter((e) => e.name === LEGEND)).toHaveLength(1);
     expect(mainCount(result, LEGEND)).toBe(3);
     expect(result.current.commanders).toEqual([]);
+  });
+
+  it("uses the engine distribution even when cached card data is absent or stale", async () => {
+    cardDataCache.set("Azorius Pair", {
+      name: "Azorius Pair",
+      cmc: 2,
+      color_identity: ["G"],
+    });
+    const distribution = [
+      { color: "White" as const, count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Blue" as const, count: 2, percentage: 40, display_percentage: 40 },
+      { color: "Red" as const, count: 1, percentage: 20, display_percentage: 20 },
+    ];
+    vi.mocked(evaluateDeckCompatibility).mockResolvedValue({
+      standard: { compatible: true, reasons: [] },
+      commander: { compatible: true, reasons: [] },
+      bo3_ready: false,
+      unknown_cards: [],
+      selected_format_reasons: [],
+      color_identity: ["W", "U", "R"],
+      color_distribution: distribution,
+    } satisfies DeckCompatibilityResult);
+    const { result } = setup();
+
+    act(() => {
+      result.current.handleImport({
+        main: [
+          { name: "Azorius Pair", count: 2 },
+          { name: "Red Card", count: 1 },
+          { name: "Wastes", count: 1 },
+          { name: "Uncached Card", count: 1 },
+        ],
+        sideboard: [],
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.colorDistribution).toEqual(distribution);
+    });
   });
 });

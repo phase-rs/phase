@@ -15,8 +15,25 @@ fail-fast = false
 # .github/workflows/ci.yml). This profile adds two CI-appropriate behaviors:
 #   - fail-fast = false: a shard reports every failure, not just the first one.
 #   - slow-timeout: warn on any test running past 60s and hard-kill it after
-#     4 periods (240s) as a runaway/hang guard. The slowest legitimate test is
-#     ~12s, so this never trips on healthy tests.
+#     4 periods (240s) as a runaway/hang guard. Every legitimate test but the
+#     one overridden below finishes well inside that.
 [profile.ci]
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 4 }
+
+# `loop_shortcut::an_evicting_beat_mints_without_growing_the_ring` drives a four-player
+# Commander dump through production `apply()` until the loop-detect ring evicts, stopping at
+# that witness (the first evicting beat, index 72) rather than at its 120-beat cap. Its cost is
+# `apply()` itself: the drive already takes the priority fast path, so the only beats still
+# paying an enumeration are the non-priority windows, and there is no test-side reduction left.
+# Alone on an idle machine it runs about 112s; a CI shard runs it beside three other test
+# threads, and there it landed past the 240s kill (PR #8301, shard 2/4). Re-time it alone before
+# assuming this override is still earned:
+#   cargo nextest run -p phase-engine \
+#     -E 'test(=loop_shortcut::an_evicting_beat_mints_without_growing_the_ring)'
+#
+# What this override does and nothing more: it raises the hard kill for this one test to ten
+# 60s periods. The test stays in the 60s slow-warn population, which is the signal to keep.
+[[profile.ci.overrides]]
+filter = 'test(=loop_shortcut::an_evicting_beat_mints_without_growing_the_ring)'
+slow-timeout = { period = "60s", terminate-after = 10 }

@@ -8,9 +8,13 @@
 //! a fresh tracked set so downstream effects ("pay {N} for each ... chosen
 //! this way", "untap those creatures") resolve against the exact selection.
 
+use crate::game::effects::counters::counter_removal_blocked;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::targeting::resolve_effect_player_ref;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ObjectSelectionCardinality, ObjectSelectionEligibility,
+    ResolvedAbility, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
@@ -21,13 +25,22 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (chooser_filter, filter, min, max) = match &ability.effect {
+    let (chooser_filter, filter, min, max, cardinality, eligibility) = match &ability.effect {
         Effect::ChooseObjectsIntoTrackedSet {
             chooser,
             filter,
             min,
             max,
-        } => (chooser.clone(), filter.clone(), *min, *max),
+            cardinality,
+            eligibility,
+        } => (
+            chooser.clone(),
+            filter.clone(),
+            *min,
+            *max,
+            *cardinality,
+            eligibility.clone(),
+        ),
         _ => {
             return Err(EffectError::MissingParam(
                 "ChooseObjectsIntoTrackedSet".to_string(),
@@ -53,20 +66,30 @@ pub fn resolve(
     // ability controller, so bind the filter context controller to the
     // chooser (mirrors `pay.rs`'s payer-rebinding pattern).
     let ctx = FilterContext::from_ability_with_controller(ability, chooser);
-    let eligible: Vec<TargetRef> = state
-        .battlefield
-        .iter()
-        .filter(|&&obj_id| matches_target_filter(state, obj_id, &filter, &ctx))
-        .map(|&obj_id| TargetRef::Object(obj_id))
-        .collect();
+    let eligible = eligible_targets(state, &filter, &ctx, eligibility.as_ref());
 
     // CR 609.3: If a resolving effect asks for more objects than are
     // available, the player chooses all that are available. Publish an
     // achievable runtime range at this trust seam so every consumer (engine,
     // AI, and client) sees the same liveness-preserving cardinality.
-    let available = u32::try_from(eligible.len()).unwrap_or(u32::MAX);
-    let max = max.map(|maximum| maximum.min(available));
-    let min = min.min(max.unwrap_or(available));
+    let (min, max) = match cardinality {
+        // CR 609.3: a mandatory instruction does as much as possible. An
+        // optional exact selection is screened before this resolver can run,
+        // so retain its exact published cardinality for that decision path.
+        Some(ObjectSelectionCardinality::Exactly { count }) if ability.optional => {
+            (count, Some(count))
+        }
+        Some(ObjectSelectionCardinality::Exactly { count }) => {
+            let available = u32::try_from(eligible.len()).unwrap_or(u32::MAX);
+            let achievable = count.min(available);
+            (achievable, Some(achievable))
+        }
+        None => {
+            let available = u32::try_from(eligible.len()).unwrap_or(u32::MAX);
+            let max = max.map(|maximum| maximum.min(available));
+            (min.min(max.unwrap_or(available)), max)
+        }
+    };
 
     // CR 608.2c: Surface the interactive selection. Even with an empty
     // `eligible` set the prompt is raised — the player's act of submitting an
@@ -89,15 +112,73 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 122.1 + CR 101.2: A counter-removal selection may include only objects
+/// that hold a removable matching counter. This is shared by the prompt and the
+/// optional-effect feasibility gate so they cannot disagree about availability.
+fn eligible_targets(
+    state: &GameState,
+    filter: &crate::types::ability::TargetFilter,
+    ctx: &FilterContext,
+    eligibility: Option<&ObjectSelectionEligibility>,
+) -> Vec<TargetRef> {
+    state
+        .battlefield
+        .iter()
+        .filter(|&&obj_id| matches_target_filter(state, obj_id, filter, ctx))
+        .filter(|&&obj_id| match eligibility {
+            None => true,
+            Some(ObjectSelectionEligibility::RemovableCounter { counter_type }) => {
+                state.objects.get(&obj_id).is_some_and(|object| {
+                    object.counters.iter().any(|(kind, &available)| {
+                        counter_type
+                            .as_ref()
+                            .is_none_or(|expected| expected == kind)
+                            && available > 0
+                            && !counter_removal_blocked(state, obj_id, kind)
+                    })
+                })
+            }
+        })
+        .map(|&obj_id| TargetRef::Object(obj_id))
+        .collect()
+}
+
+/// CR 608.2d: An optional exact selection is unavailable unless its complete
+/// selection cardinality can be met from the same eligible set shown by the UI.
+pub(crate) fn optional_exact_selection_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Effect::ChooseObjectsIntoTrackedSet {
+        chooser,
+        filter,
+        cardinality: Some(ObjectSelectionCardinality::Exactly { count }),
+        eligibility,
+        ..
+    } = &ability.effect
+    else {
+        return false;
+    };
+    let Some(chooser) = resolve_effect_player_ref(state, ability, chooser) else {
+        return true;
+    };
+    let ctx = FilterContext::from_ability_with_controller(ability, chooser);
+    eligible_targets(state, filter, &ctx, eligibility.as_ref()).len() < *count as usize
+}
+
 #[cfg(test)]
 mod tests {
+    use super::optional_exact_selection_is_infeasible;
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::scenario::GameScenario;
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, TargetFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, Effect, ObjectSelectionCardinality,
+        ObjectSelectionEligibility, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::ObjectId;
     use crate::types::phase::Phase;
@@ -118,6 +199,8 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 min: 2,
                 max: Some(2),
+                cardinality: Some(ObjectSelectionCardinality::Exactly { count: 2 }),
+                eligibility: None,
             },
         );
         let host = {
@@ -150,6 +233,164 @@ mod tests {
                 targets: vec![crate::types::ability::TargetRef::Object(only_eligible)],
             })
             .expect("CR 609.3 permits choosing the sole available object");
+    }
+
+    /// CR 608.2d + CR 122.1: an optional exact selection is offerable only
+    /// when its complete removable-counter set exists; unlike a legacy range,
+    /// one eligible object cannot be silently clamped into a "choose two".
+    #[test]
+    fn optional_exact_counter_selection_requires_every_object() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario
+            .add_artifact_from_oracle(P0, "Choice Host", "")
+            .id();
+        let creatures = [
+            scenario.add_creature(P0, "First", 1, 1).id(),
+            scenario.add_creature(P0, "Second", 1, 1).id(),
+        ];
+        let mut state = scenario.build().state().clone();
+        let effect = Effect::ChooseObjectsIntoTrackedSet {
+            chooser: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            min: 2,
+            max: Some(2),
+            cardinality: Some(ObjectSelectionCardinality::Exactly { count: 2 }),
+            eligibility: Some(ObjectSelectionEligibility::RemovableCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+            }),
+        };
+        let ability = ResolvedAbility::new(effect, Vec::new(), host, P0);
+
+        assert!(optional_exact_selection_is_infeasible(&state, &ability));
+        state
+            .objects
+            .get_mut(&creatures[0])
+            .expect("first creature exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        assert!(optional_exact_selection_is_infeasible(&state, &ability));
+        state
+            .objects
+            .get_mut(&creatures[1])
+            .expect("second creature exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        assert!(
+            !optional_exact_selection_is_infeasible(&state, &ability),
+            "one removable counter on each creature makes both objects selectable"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2d: An infeasible optional exact selection takes
+    /// the ordinary decline path instead of installing a choice whose minimum
+    /// is impossible to submit.
+    #[test]
+    fn infeasible_optional_exact_counter_selection_auto_declines() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario
+            .add_artifact_from_oracle(P0, "Choice Host", "")
+            .id();
+        let mut state = scenario.build().state().clone();
+        let mut ability = ResolvedAbility::new(
+            Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                min: 2,
+                max: Some(2),
+                cardinality: Some(ObjectSelectionCardinality::Exactly { count: 2 }),
+                eligibility: Some(ObjectSelectionEligibility::RemovableCounter {
+                    counter_type: Some(CounterType::Plus1Plus1),
+                }),
+            },
+            Vec::new(),
+            host,
+            P0,
+        );
+        ability.optional = true;
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .expect("infeasible optional selection declines");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseObjectsSelection { .. }),
+            "an infeasible exact selection must not leave the game waiting"
+        );
+    }
+
+    /// CR 608.2c + CR 122.1: The exact selection's tracked set feeds the
+    /// removal continuation. `RemoveCounter` removes as many as possible from
+    /// each selected object, so one counter remains a legal selection for a
+    /// two-counter instruction.
+    #[test]
+    fn exact_counter_selection_allows_partial_removal_from_every_selected_creature() {
+        let removal = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+            },
+        );
+        let choice = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                min: 2,
+                max: Some(2),
+                cardinality: Some(ObjectSelectionCardinality::Exactly { count: 2 }),
+                eligibility: Some(ObjectSelectionEligibility::RemovableCounter {
+                    counter_type: Some(CounterType::Plus1Plus1),
+                }),
+            },
+        )
+        .sub_ability(removal);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = {
+            let mut builder = scenario.add_artifact_from_oracle(P0, "Choice Host", "");
+            builder.with_ability_definition(choice);
+            builder.id()
+        };
+        let first = {
+            let mut builder = scenario.add_creature(P0, "First", 1, 1);
+            builder.with_plus_counters(1);
+            builder.id()
+        };
+        let second = {
+            let mut builder = scenario.add_creature(P0, "Second", 1, 1);
+            builder.with_plus_counters(1);
+            builder.id()
+        };
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: host,
+                ability_index: 0,
+            })
+            .expect("activate exact counter-removal choice");
+        runner.advance_until_stack_empty();
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(first), TargetRef::Object(second)],
+            })
+            .expect("select both eligible creatures");
+        for creature in [first, second] {
+            assert_eq!(
+                runner
+                    .state()
+                    .objects
+                    .get(&creature)
+                    .and_then(|object| object.counters.get(&CounterType::Plus1Plus1))
+                    .copied()
+                    .unwrap_or_default(),
+                0,
+                "selected creature must lose its +1/+1 counter"
+            );
+        }
     }
 
     /// CR 608.2c + CR 608.2d + official ruling: The Day of the Doctor IV — "Choose

@@ -11,7 +11,7 @@ import {
   buildPlayer,
   buildPriorityWaitingFor,
 } from "../../test/factories/gameStateFactory";
-import { dispatchAction, dispatchInteraction } from "../dispatch";
+import { dispatchAction, dispatchInteraction, isDispatchIdle } from "../dispatch";
 
 // Spy on the recovery escalation so we can assert the dispatch.ts branch that
 // fires `notifyEngineLost` on ENGINE_UNRESPONSIVE actually runs. Without this
@@ -102,6 +102,38 @@ describe("dispatchAction recovery on ENGINE_UNRESPONSIVE", () => {
     });
 
     expect(submitAction).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns the pipeline to idle when a P2P guest submission times out", async () => {
+    // What `P2PGuestAdapter`'s submission timeout rejects with. Before it
+    // existed the promise never settled, so `dispatchAction` never reached its
+    // `finally` and the module-level mutex stayed held — every later click was
+    // silently queued and the client sat frozen on a stale board.
+    const timeout = new AdapterError(
+      "P2P_ERROR",
+      "The host did not answer this action in time",
+      true,
+    );
+    const submitAction = vi.fn<EngineAdapter["submitAction"]>().mockRejectedValue(timeout);
+
+    useGameStore.setState({
+      adapter: buildEngineAdapterMock(emptyState, { submitAction }),
+      gameState: emptyState,
+      gameMode: "online",
+    });
+
+    await expect(dispatchAction({ type: "PassPriority", data: {} } as GameAction, 0)).rejects.toBe(
+      timeout,
+    );
+
+    expect(isDispatchIdle()).toBe(true);
+    // `P2P_ERROR`, not `ENGINE_UNRESPONSIVE`: the timeout must surface as a
+    // normal action error, never route to the engine-lost recovery prompt —
+    // the host may simply be gone, and the local engine is fine.
+    expect(notifyEngineLost).not.toHaveBeenCalled();
+    expect(useAppNotificationStore.getState().notification).toMatchObject({
+      description: timeout.message,
+    });
   });
 
   it("shows a clear toast when a normal game action fails", async () => {

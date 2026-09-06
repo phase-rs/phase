@@ -143,6 +143,7 @@
     "lastRefreshed": "Ostatnio odświeżono: {{date}}",
     "addCustomFeed": "Dodaj własny kanał",
     "add": "Dodaj",
+    "offlineUnavailable": "Aktualizacje kanałów są niedostępne offline.",
     "done": "Gotowe"
   },
   "importDeck": {
@@ -165,6 +166,7 @@
     "confirmOathbreakerImport": "Importuj talię Oathbreaker",
     "backToImport": "Powrót do importowania",
     "errorInvalidUrl": "Wprowadź prawidłowy URL talii Moxfield lub Archidekt.",
+    "errorOffline": "Importy z URL nie są dostępne offline. Użyj Wklej tekst lub Z pliku.",
     "errorNetworkFailure": "Nie udało się połączyć z usługą importu. Sprawdź połączenie i spróbuj ponownie.",
     "errorGeneric": "Nie udało się zaimportować talii.",
     "errorNoOathbreaker": "Ta lista nie zawiera kwalifikującego się Oathbreakera.",

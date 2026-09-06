@@ -2577,6 +2577,8 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                         // Tomorrow"). Reject it so the verb survives unmangled.
                         || super::oracle_nom::primitives::is_verb_word(&lower_candidate)
                         || is_subtype_word(&lower_candidate)
+                        || parse_subtype(&lower_candidate)
+                            .is_some_and(|(_, consumed)| consumed == lower_candidate.len())
                     {
                         continue;
                     }
@@ -2804,6 +2806,24 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sharuum enters", "Sharuum the Hegemon"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_first_word_short_name_preserves_plural_subtype() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Affinity for Allies (This spell costs {1} less to cast for each Ally you control.)",
+                "Allies at Last",
+            ),
+            "Affinity for Allies (This spell costs {1} less to cast for each Ally you control.)",
+            "a plural subtype is not a shortened self-reference"
+        );
+
+        assert_eq!(
+            parse_subtype("AlliesExtra"),
+            None,
+            "partial subtype matches must not suppress ordinary short-name normalization"
         );
     }
 

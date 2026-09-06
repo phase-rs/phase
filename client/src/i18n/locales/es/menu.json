@@ -143,6 +143,7 @@
     "lastRefreshed": "Última actualización: {{date}}",
     "addCustomFeed": "Añadir feed personalizado",
     "add": "Añadir",
+    "offlineUnavailable": "Las actualizaciones de feeds no están disponibles sin conexión.",
     "done": "Listo"
   },
   "importDeck": {
@@ -165,6 +166,7 @@
     "confirmOathbreakerImport": "Importar mazo Oathbreaker",
     "backToImport": "Volver a importar",
     "errorInvalidUrl": "Introduce una URL válida de Moxfield o Archidekt.",
+    "errorOffline": "Las importaciones por URL no están disponibles sin conexión. Usa Pegar texto o Desde archivo.",
     "errorNetworkFailure": "No se pudo contactar con el servicio de importación. Comprueba tu conexión e inténtalo de nuevo.",
     "errorGeneric": "No se pudo importar el mazo.",
     "errorNoOathbreaker": "Esta lista no tiene un Oathbreaker válido.",

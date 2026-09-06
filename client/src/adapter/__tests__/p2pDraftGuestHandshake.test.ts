@@ -7,6 +7,7 @@ type SavedDeckSubmission = {
   draftToken: string;
   submissionId: string;
   mainDeck: string[];
+  commanders: string[];
   timestamp: number;
 };
 
@@ -54,6 +55,7 @@ vi.mock("../../network/draftPeerSession", () => ({
 vi.mock("../../services/draftPersistence", () => persistenceState);
 
 import { P2PDraftGuest } from "../p2p-draft-guest";
+import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { DRAFT_PROTOCOL_VERSION, validateDraftMessage } from "../../network/draftProtocol";
 
 const reconnectAck = {
@@ -71,7 +73,7 @@ describe("P2P draft guest handshake attempts", () => {
     persistenceState.loadDraftDeckSubmission.mockResolvedValue(null);
   });
 
-  it("keeps a deck submission in the participant outbox until its matching receipt", async () => {
+  it("keeps an ordered duplicate commander designation in the participant outbox until its matching receipt", async () => {
     sessionState.sessions.length = 0;
     persistenceState.loadDraftDeckSubmission.mockResolvedValue(null);
     const guest = new P2PDraftGuest(
@@ -95,12 +97,17 @@ describe("P2P draft guest handshake attempts", () => {
     });
     await handshake;
 
-    const submitted = guest.submitDeck(["Island"], []);
+    const commanders = ["The Prismatic Piper", "The Prismatic Piper"];
+    const submitted = guest.submitDeck(["Island"], commanders);
     await vi.waitFor(() => expect(persistenceState.saveDraftDeckSubmission).toHaveBeenCalledOnce());
+    expect(persistenceState.saveDraftDeckSubmission).toHaveBeenCalledWith(
+      "phase2-ABCDE",
+      expect.objectContaining({ mainDeck: ["Island"], commanders }),
+    );
     const sent = sessionState.sessions[0]!.send.mock.calls.find(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
-    )?.[0] as { submissionId: string; mainDeck: string[] };
-    expect(sent).toMatchObject({ mainDeck: ["Island"] });
+    )?.[0] as { submissionId: string; mainDeck: string[]; commanders: string[] };
+    expect(sent).toMatchObject({ mainDeck: ["Island"], commanders });
     const sendIndex = sessionState.sessions[0]!.send.mock.calls.findIndex(
       ([message]) => (message as { type?: string }).type === "draft_submit_deck",
     );
@@ -267,7 +274,7 @@ describe("P2P draft guest handshake attempts", () => {
     persistenceState.loadDraftDeckSubmission.mockResolvedValue({
       hostPeerId: "phase2-ABCDE", draftCode: "draft-xyz", roomCode: "ABCDE",
       draftToken: "opaque-token", submissionId: command.submissionId,
-      mainDeck: ["Island"], timestamp: Date.now(),
+      mainDeck: ["Island"], commanders: [], timestamp: Date.now(),
     });
 
     const reconnect = privateGuest.handshakeOn({} as never, undefined, true);
@@ -298,6 +305,7 @@ describe("P2P draft guest handshake attempts", () => {
           draftToken: "old-token",
           submissionId: "old-submission",
           mainDeck: ["Island"],
+          commanders: [],
           timestamp: Date.now(),
         };
       }
@@ -703,5 +711,37 @@ describe("P2P draft guest handshake attempts", () => {
     sessionState.sessions[1]!.handler!(reconnectAck);
     await expect(second).resolves.toBeUndefined();
     expect(secondSettled).toBe(true);
+  });
+
+  it("dials the reconnect transport with the shared ordered-channel connect options", async () => {
+    // Unlike every other test here, this one needs a real `guestPeer`: the dial
+    // is `this.guestPeer.connect(...)`, which the shared `{} as never` peer
+    // cannot answer.
+    const connHandlers = new Map<string, (arg?: unknown) => void>();
+    const reconnectConn = {
+      on: vi.fn((event: string, handler: (arg?: unknown) => void) => {
+        connHandlers.set(event, handler);
+      }),
+    };
+    const connect = vi.fn(() => reconnectConn);
+    const guest = new P2PDraftGuest(
+      { connect } as never,
+      "phase2-ABCDE",
+      {} as never,
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "opaque-token" },
+    );
+    const privateGuest = guest as unknown as {
+      openReconnectConnection: (signal?: AbortSignal) => Promise<unknown>;
+    };
+
+    const dial = privateGuest.openReconnectConnection();
+
+    // `reliable: true` is what PeerJS maps to `createDataChannel(…, { ordered
+    // }) `; an option-less dial silently yields an unordered channel that a
+    // TURN relay will actually reorder.
+    expect(connect).toHaveBeenCalledWith("phase2-ABCDE", PEER_CONNECT_OPTIONS);
+
+    connHandlers.get("open")!();
+    await expect(dial).resolves.toBe(reconnectConn);
   });
 });

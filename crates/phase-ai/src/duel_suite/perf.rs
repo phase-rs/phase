@@ -194,6 +194,9 @@ impl PerfCounters {
             legend_rule_mode_gate_scans,
             sba_battlefield_snapshot_builds,
             sba_empty_battlefield_short_circuits,
+            activation_verdict_passes,
+            activation_block_display_abilities_examined,
+            activation_verdict_flush_clones,
         } = *snapshot;
 
         let mut map = BTreeMap::new();
@@ -338,6 +341,18 @@ impl PerfCounters {
             "sba_empty_battlefield_short_circuits".to_string(),
             sba_empty_battlefield_short_circuits,
         );
+        map.insert(
+            "activation_verdict_passes".to_string(),
+            activation_verdict_passes,
+        );
+        map.insert(
+            "activation_block_display_abilities_examined".to_string(),
+            activation_block_display_abilities_examined,
+        );
+        map.insert(
+            "activation_verdict_flush_clones".to_string(),
+            activation_verdict_flush_clones,
+        );
         Self(map)
     }
 
@@ -378,12 +393,13 @@ pub struct PerfReport {
 /// game on the *same thread*, and snapshot the counters. The reset/snapshot pair
 /// is only meaningful because the counted paths never leave the calling thread.
 pub fn run_perf_scenario(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     action_cap: usize,
 ) -> PerfCounterSnapshot {
     perf_counters::reset();
-    let _ = drive_game(payload, seed, AiDifficulty::Medium, action_cap);
+    let _ = drive_game(Some(db), payload, seed, AiDifficulty::Medium, action_cap);
     perf_counters::snapshot()
 }
 
@@ -416,7 +432,7 @@ pub fn run_perf_suite(
             n = n + 1,
             total = scenarios.len(),
         );
-        let snapshot = run_perf_scenario(&payload, seed, action_cap);
+        let snapshot = run_perf_scenario(db, &payload, seed, action_cap);
         let scenario_counters = PerfCounters::from_snapshot(&snapshot);
         // One JSON line per scenario: a killed child still leaves a machine-readable
         // partial payload for every scenario that did finish.
@@ -1205,6 +1221,9 @@ mod tests {
             legend_rule_mode_gate_scans: 26,
             sba_battlefield_snapshot_builds: 27,
             sba_empty_battlefield_short_circuits: 28,
+            activation_verdict_passes: 43,
+            activation_block_display_abilities_examined: 44,
+            activation_verdict_flush_clones: 45,
         };
         let counters = PerfCounters::from_snapshot(&snapshot);
 
@@ -1291,6 +1310,7 @@ mod tests {
         // and the counter snapshot for each run.
         perf_counters::reset();
         let wt_1 = drive_game(
+            Some(&db),
             &payload,
             PERF_BASE_SEED,
             AiDifficulty::Medium,
@@ -1300,6 +1320,7 @@ mod tests {
 
         perf_counters::reset();
         let wt_2 = drive_game(
+            Some(&db),
             &payload,
             PERF_BASE_SEED,
             AiDifficulty::Medium,

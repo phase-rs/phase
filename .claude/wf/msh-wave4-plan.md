@@ -216,7 +216,7 @@ Dragon Man + Wolverine extend existing parser branches (wider grammar, no new ty
 - Ms. Marvel: `parse_with_inner`/`parse_pt_comparison` (oracle_nom/filter.rs:172-251) → `FilterProp` (ability.rs:2280) → `matches_filter_prop`/`object_pt_value` (filter.rs:2885,2981-3632); modeled on `ToughnessGTPower` (filter.rs:3519).
 
 ### Variant Discoverability
-`data/engine-inventory.json` consulted — confirms `AssignDamageAsThoughUnblocked`/CR 510.1c (line 5797), `Aggregate`, `SetDynamicPower`, `ManaValue`; confirms **no** `PowerExceedsBase`. `/add-engine-variant` run for the one new variant → APPROVED (Stage1 DOES_NOT_EXIST, Stage2 EXTEND_OK, Stage3 WITHIN_SECTION). Dragon Man + Wolverine variants are Stage1 EXISTS → wire to existing slots.
+`data/engine-inventory.json` consulted — confirms `AssignDamageAsThoughUnblocked`/CR 510.1c, `Aggregate`, `SetDynamicPower`, `ManaValue`; confirms **no** `PowerExceedsBase`. `/add-engine-variant` run for the one new variant → APPROVED (Stage1 DOES_NOT_EXIST, Stage2 EXTEND_OK, Stage3 WITHIN_SECTION). Dragon Man + Wolverine variants are Stage1 EXISTS → wire to existing slots.
 
 ### Verification Matrix
 | Claim | Changed seam | Production entry | Runtime test | Revert-failing | Sibling/negative | Coverage |

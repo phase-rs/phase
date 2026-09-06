@@ -7,6 +7,7 @@ import {
   sanitizeTelemetryBatch,
   toDataPoint,
 } from "../src/telemetry.ts";
+import { serverProbeEvents } from "../src/directory.ts";
 
 /** Minimal valid envelope helper. */
 function batch(events, overrides = {}) {
@@ -267,4 +268,35 @@ test("game event engine-mode fields occupy appended columns for current and olde
   ]);
   assert.deepEqual(toDataPoint(olderGameEnd).blobs.slice(4), ["draw", "", "ai", "", "", "", ""]);
   assert.deepEqual(toDataPoint(olderGameStart).blobs.slice(4), ["ai", "Standard", "", ""]);
+});
+
+// V-U13e. The `server_probe` column layout, asserted through the SAME
+// `toDataPoint` projection every other event uses. Analytics Engine columns
+// are positional and permanent, so an inserted (rather than appended) column
+// silently re-labels historical data.
+test("V-U13e: server_probe events land in the documented AE columns", () => {
+  const [point] = serverProbeEvents([
+    { url: "wss://known.example/ws", outcome: "connect_ok", rtt_ms: 42, game_code: "ABC123" },
+  ]).map(toDataPoint);
+
+  assert.deepEqual(point.indexes, ["server_probe"]);
+  // The first four blobs are the shared envelope (event, app version, build
+  // hash, platform); the event-specific columns start at index 4.
+  assert.deepEqual(point.blobs.slice(0, 4), ["server_probe", "", "", ""]);
+  assert.deepEqual(point.blobs.slice(4), ["wss://known.example/ws", "connect_ok", "ABC123"]);
+  assert.deepEqual(point.doubles, [42]);
+
+  // An event with no latency: `0` is this file's documented "unknown", never
+  // "0 ms". Paired with the case above so a projection that dropped the
+  // column entirely fails.
+  const [noRtt] = serverProbeEvents([
+    { url: "wss://known.example/ws", outcome: "connect_fail" },
+  ]).map(toDataPoint);
+  assert.deepEqual(noRtt.blobs.slice(4), ["wss://known.example/ws", "connect_fail", ""]);
+  assert.deepEqual(noRtt.doubles, [0]);
+
+  // The column COUNTS come from the schema, so a schema edit moves both sides
+  // together rather than leaving a stale literal here.
+  assert.equal(point.blobs.length - 4, EVENT_SCHEMAS.server_probe.blobs.length);
+  assert.equal(point.doubles.length, EVENT_SCHEMAS.server_probe.doubles.length);
 });

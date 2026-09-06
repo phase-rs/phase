@@ -5,6 +5,7 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
+use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
@@ -24,6 +25,147 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
+
+/// CR 603.4 + CR 601.2f: Liberator's intervening "if" survives the whole
+/// pipeline. Its printed wording predates the Increment keyword (CR 702.191a)
+/// and spells the same sentence out; before the mana-spent subject was widened
+/// the clause was dropped and `condition` came out `None`, so every spell cast
+/// added a +1/+1 counter no matter what was actually paid — a face-down
+/// creature spell reduced to {0} by Kadena, Slinking Sorcerer included.
+#[test]
+fn liberator_mana_spent_intervening_if_survives_the_pipeline() {
+    let parsed = parse_oracle_text(
+        "Flash\nFlying\nYou may cast colorless spells and artifact spells as though they had \
+         flash.\nWhenever you cast a spell, if the amount of mana spent to cast that spell is \
+         greater than Liberator's power, put a +1/+1 counter on Liberator.",
+        "Liberator, Urza's Battlethopter",
+        &["Flash".to_string(), "Flying".to_string()],
+        &[
+            "Legendary".to_string(),
+            "Artifact".to_string(),
+            "Creature".to_string(),
+        ],
+        &["Thopter".to_string()],
+    );
+
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::SpellCast)
+        .expect("spell-cast trigger");
+    let condition = trigger
+        .condition
+        .as_ref()
+        .expect("the intervening 'if' must reach the trigger, not just its description");
+
+    // The gate is "mana spent on the triggering spell > this object's power",
+    // and NOTHING else. Two things are pinned by insisting on a bare
+    // comparison rather than digging one out of a conjunction:
+    //   * nothing reads the spell's mana VALUE — Kadena's reduction is exactly
+    //     the case where spent and value differ (CR 601.2f);
+    //   * no source-is-creature conjunct is bolted on. Liberator prints none.
+    //     CR 702.191a's clause belongs to the Increment keyword, and its rules
+    //     text words the subject exactly as Liberator does. What separates them
+    //     is what reaches the parser: no oracle face gives that keyword any
+    //     subject but its REMINDER's ("the amount of mana you spent"), which
+    //     this sentence's subject is not. The object phrase normalizes to the
+    //     same `~'s` either way and cannot decide it.
+    let TriggerCondition::QuantityComparison {
+        lhs,
+        comparator,
+        rhs,
+    } = condition
+    else {
+        panic!("expected a bare QuantityComparison, got {condition:?}");
+    };
+    assert_eq!(
+        *lhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                metric: crate::types::ability::CastManaSpentMetric::Total,
+            },
+        }
+    );
+    assert_eq!(*comparator, Comparator::GT);
+    assert_eq!(
+        *rhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+        }
+    );
+}
+
+/// CR 608.2d + CR 122.1b: Crystalline Giant's combat trigger lowers into a real
+/// choice, not `Unimplemented`. Both halves have to land: the producer (a random
+/// pick from the ten PRINTED kinds, minus the ones already on it) and the
+/// consumer ("put a counter of that kind on ~"), whose source-self recipient was
+/// a deliberate strict gap until exactly this producer existed.
+#[test]
+fn crystalline_giant_random_counter_kind_lowers_to_a_real_choice() {
+    use crate::types::ability::{CounterKindChooser, CounterKindDomain};
+    use crate::types::counter::CounterType;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, choose a kind of counter at random that this \
+         creature doesn't have on it from among flying, first strike, deathtouch, hexproof, \
+         lifelink, menace, reach, trample, vigilance, and +1/+1. Put a counter of that kind on \
+         this creature.",
+        "Crystalline Giant",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Golem".to_string()],
+    );
+
+    let trigger = parsed.triggers.first().expect("begin-combat trigger");
+    let choose = trigger.execute.as_deref().expect("choice effect");
+    let Effect::ChooseCounterKind {
+        target,
+        domain,
+        chooser,
+    } = choose.effect.as_ref()
+    else {
+        panic!("expected ChooseCounterKind, got {:?}", choose.effect);
+    };
+    assert_eq!(*target, TargetFilter::SelfRef);
+    assert_eq!(
+        *chooser,
+        CounterKindChooser::Random,
+        "\"at random\" is the game's draw, not a player decision"
+    );
+    let CounterKindDomain::Printed {
+        kinds,
+        excluding_kinds_on_target,
+    } = domain
+    else {
+        panic!("expected the printed list, got {domain:?}");
+    };
+    assert!(
+        *excluding_kinds_on_target,
+        "\"that this creature doesn't have on it\" must narrow the CHOICE, not the placement"
+    );
+    assert_eq!(kinds.len(), 10, "ten printed kinds, got {kinds:?}");
+    assert!(kinds.contains(&CounterType::Plus1Plus1));
+
+    // The consumer: the counter goes on the Giant itself.
+    let put = choose
+        .sub_ability
+        .as_deref()
+        .expect("put-counter continuation");
+    assert!(
+        matches!(
+            put.effect.as_ref(),
+            Effect::PutChosenCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected PutChosenCounter on ~, got {:?}",
+        put.effect
+    );
+}
 
 /// CR 608.2c + CR 119.3: Palantir's final life loss reduces the exact cards
 /// milled by its preceding clause and applies to the opponent targeted when the
@@ -4164,6 +4306,149 @@ fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
         "expected PlayFromExile grant bound to the tracked exiled card, got: {:?}",
         grant.effect
     );
+}
+
+/// CR 120.1 + CR 510.2 + CR 701.20e (issue #8467): "Whenever ~ deals combat
+/// damage to a player, look at the top three cards of that player's library"
+/// reads the DAMAGED player's library.
+///
+/// This is the surviving-`Dig` half of the class. The look-then-exile half
+/// (Gonti, Canny Acquisitor, above) rewrites its `Dig` into an `ExileTop` and
+/// re-resolved the owner anaphor on the way; the hideaway half ("exile one of
+/// them face down") keeps the `Dig`, so it kept whatever
+/// `parse_dig_library_owner` produced — a fixed `TargetFilter::ParentTarget`,
+/// which has NO referent on a combat-damage event. `resolve_player_for_context_ref`
+/// then fell through to `ability.controller` and Thief of Sanity dug its own
+/// controller's library.
+#[test]
+fn combat_damage_dig_binds_that_players_library_to_the_damaged_player() {
+    let def = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, look at the top three cards of \
+         that player's library, exile one of them face down, then put the rest into their \
+         graveyard. You may cast that card for as long as it remains exiled, and mana of any \
+         type can be spent to cast that spell.",
+        "Thief of Sanity",
+    );
+    // Reach-guard: the combat-damage trigger scope that supplies the "that
+    // player" antecedent really was established for this body.
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+    let Effect::Dig {
+        player,
+        count,
+        keep_count,
+        destination,
+        rest_destination,
+        ..
+    } = &*execute.effect
+    else {
+        panic!(
+            "the look step must stay an Effect::Dig for the hideaway idiom, got: {:?}",
+            execute.effect
+        );
+    };
+    // Reach-guard: the "exile one of them face down" fusion patched this exact
+    // Dig, so the assertion below is read off the arm production resolves — not
+    // off a bare keep-nothing peek that never reaches the library owner.
+    assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+    assert_eq!(*keep_count, Some(1));
+    assert_eq!(*destination, Some(crate::types::zones::Zone::Exile));
+    assert_eq!(
+        *rest_destination,
+        Some(crate::types::zones::Zone::Graveyard)
+    );
+    assert_eq!(
+        *player,
+        TargetFilter::TriggeringPlayer,
+        "the dug library must belong to the damaged player, not the ability controller"
+    );
+}
+
+/// CR 120.1 + CR 510.2 + CR 102.2 (issue #8467): the `"that opponent's"`
+/// spelling of the same library-owner anaphor. Gonti, Night Minister's damage
+/// trigger names its ACTING player separately ("its controller looks at ...")
+/// from the library it reads ("that opponent's library"), so a binding that
+/// collapses to the ability controller is observably wrong here even when the
+/// two coincide on `"that player's"` cards.
+#[test]
+fn combat_damage_look_binds_that_opponents_library_to_the_damaged_opponent() {
+    let def = parse_trigger_line(
+        "Whenever a creature deals combat damage to one of your opponents, its controller looks \
+         at the top card of that opponent's library and exiles it face down. They may play that \
+         card for as long as it remains exiled. Mana of any type can be spent to cast a spell \
+         this way.",
+        "Gonti, Night Minister",
+    );
+    // Reach-guard: the opponent-recipient damage trigger was recognized, which
+    // is what establishes the "that opponent" antecedent.
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+    let Effect::ExileTop { player, .. } = &*execute.effect else {
+        panic!(
+            "\"looks at ... and exiles it face down\" must fuse into ExileTop, got: {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        *player,
+        TargetFilter::TriggeringPlayer,
+        "the exiled top card must come from the damaged opponent's library"
+    );
+}
+
+/// CR 115.1 (issue #8467) — priority control for the arm above. A clause that
+/// prints BOTH possessives ("Look at the top card of target player's library.
+/// You may put that card on the bottom of that player's library.") must keep
+/// binding the *declared target*, not the anaphor: `"target player's library"`
+/// still outranks the `"that <owner>'s library"` scan.
+#[test]
+fn target_players_library_still_outranks_the_that_player_anaphor() {
+    let parsed = parse_oracle_text(
+        "[+2]: Look at the top card of target player's library. You may put that card on the \
+         bottom of that player's library.\n[0]: Draw three cards, then put two cards from your \
+         hand on top of your library in any order.\n[\u{2212}1]: Return target creature to its \
+         owner's hand.\n[\u{2212}12]: Exile all cards from target player's library, then that \
+         player shuffles their hand into their library.",
+        "Jace, the Mind Sculptor",
+        &[],
+        &["Legendary".to_string(), "Planeswalker".to_string()],
+        &["Jace".to_string()],
+    );
+    let dig_player = parsed
+        .abilities
+        .iter()
+        .find_map(|ability| match &*ability.effect {
+            Effect::Dig { player, .. } => Some(player.clone()),
+            _ => None,
+        })
+        .expect("the +2 look-at ability must lower to an Effect::Dig");
+    assert_eq!(
+        dig_player,
+        TargetFilter::Player,
+        "a declared player target must not be rebound by the \"that player's library\" anaphor"
+    );
+}
+
+/// CR 701.20e (issue #8467) — default control. A first-person library ("your
+/// library") carries no relative-player anaphor at all, so the owner stays
+/// `Controller`; the anaphor arm must not widen to every dig.
+#[test]
+fn your_library_dig_still_binds_the_controller() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, look at the top card of your library.",
+        "Delver of Secrets",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+    let Effect::Dig { player, .. } = &*execute.effect else {
+        panic!("expected an Effect::Dig, got: {:?}", execute.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
 }
 
 /// CR 406.3, CR 406.3a-b, CR 601.2a, and CR 611.2a: Rev's exact Oracle text
@@ -10152,6 +10437,7 @@ fn dreadhorde_invasion_upkeep_lose_life_and_amass() {
         Effect::Amass {
             ref subtype,
             ref count,
+            ..
         } => {
             assert_eq!(subtype, "Zombie");
             assert!(
@@ -10161,6 +10447,120 @@ fn dreadhorde_invasion_upkeep_lose_life_and_amass() {
         }
         other => panic!("expected Amass{{Zombie, 1}}, got {other:?}"),
     }
+}
+
+/// Azog, Moria's Ruin: "When Azog enters, destroy up to one other target
+/// creature. Its controller amasses Goblins X, where X is that creature's
+/// power. If you controlled that creature, draw a card."
+///
+/// Three composed clauses, each a distinct authority:
+/// - CR 115.1d: "destroy up to one other target creature" — optional (0-or-1)
+///   targeted `Destroy`.
+/// - CR 701.47a + CR 109.4 + CR 608.2h: "Its controller amasses
+///   Goblins X, where X is that creature's power" — the amass PERFORMER is
+///   the destroyed creature's controller (`TargetFilter::ParentTargetController`,
+///   not `Controller`, unlike every other printed "amass [subtype] N" card),
+///   and X reads that creature's power (`QuantityRef::Power { scope:
+///   ObjectScope::Target }`, bound via the chain's inherited `ability.targets`
+///   — the same referent `ParentTargetController` resolves against). `Target`
+///   reads the object LIVE while it remains on the battlefield (indestructible,
+///   regenerated, or otherwise-prevented destruction) and falls back to its
+///   LKI once it has actually left — unlike `ObjectScope::CostPaidObject`
+///   (Consuming Vapors's "that creature's toughness" class), which only reads
+///   a cost/trigger-condition snapshot that a non-destroyed target never
+///   populates.
+/// - CR 608.2c: "If you controlled that creature, draw a card" — conditional
+///   on AZOG'S controller (not the amass performer) having controlled the
+///   destroyed creature; this is pre-existing coverage (`TargetMatchesFilter`
+///   with `use_lki: true`), asserted here only as a regression guard against
+///   the "amass" `PREDICATE_VERBS` addition breaking the surrounding chain.
+///
+/// Zero `Effect::Unimplemented` nodes anywhere in the chain is the coverage
+/// gate: pre-fix, the middle clause parsed to
+/// `Effect::unimplemented("its", "Its controller amasses Goblins X, ...")`.
+#[test]
+fn azog_morias_ruin_destroy_amass_by_destroyed_controller_conditional_draw() {
+    let def = parse_trigger_line(
+        "When Azog enters, destroy up to one other target creature. Its controller amasses \
+         Goblins X, where X is that creature's power. If you controlled that creature, draw a \
+         card. (To amass Goblins X, that player puts X +1/+1 counters on an Army they control. \
+         It's also a Goblin. If they don't control an Army, they create a 0/0 black Goblin Army \
+         creature token first.)",
+        "Azog, Moria's Ruin",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.destination, Some(Zone::Battlefield));
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+
+    let destroy = def.execute.expect("execute");
+    assert_no_unimplemented(destroy.as_ref());
+
+    assert!(
+        matches!(*destroy.effect, Effect::Destroy { .. }),
+        "expected Destroy head, got {:?}",
+        destroy.effect
+    );
+    let multi_target = destroy
+        .multi_target
+        .as_ref()
+        .expect("\"up to one\" must carry a multi_target spec");
+    assert!(
+        multi_target.min_is_fixed_zero(),
+        "\"up to one\" allows zero targets: {multi_target:?}"
+    );
+    assert_eq!(
+        multi_target.max.clone(),
+        Some(QuantityExpr::Fixed { value: 1 }),
+        "\"up to one\" caps at a single target: {multi_target:?}"
+    );
+
+    let amass = destroy
+        .sub_ability
+        .expect("amass conjunct must survive as a sub_ability");
+    match *amass.effect {
+        Effect::Amass {
+            ref subtype,
+            ref count,
+            ref player,
+        } => {
+            assert_eq!(subtype, "Goblin");
+            assert_eq!(
+                *count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    }
+                },
+                "X must bind to the destroyed creature's power, read live while present and via LKI once it has left"
+            );
+            assert_eq!(
+                *player,
+                TargetFilter::ParentTargetController,
+                "the amass performer must be the destroyed creature's controller, not Azog's own controller"
+            );
+        }
+        ref other => panic!(
+            "expected Amass{{Goblin, Power{{Target}}, ParentTargetController}}, got {other:?}"
+        ),
+    }
+    assert_eq!(
+        amass.condition,
+        Some(AbilityCondition::HasObjectTarget),
+        "the amass must be gated on HasObjectTarget so declining the \"up to one\" destroy target leaves \"its controller\" undefined"
+    );
+
+    let draw = amass
+        .sub_ability
+        .expect("draw conjunct must survive as a sub_ability");
+    assert!(
+        matches!(*draw.effect, Effect::Draw { .. }),
+        "expected Draw head, got {:?}",
+        draw.effect
+    );
+    assert!(
+        draw.condition.is_some(),
+        "the draw must stay conditional on \"if you controlled that creature\""
+    );
 }
 
 /// CR 701.47a + CR 701.47c + CR 301.5a (Goblin Plate Mail, HOB): "When this
@@ -10186,6 +10586,7 @@ fn goblin_plate_mail_amass_then_attach_to_amassed_army() {
         Effect::Amass {
             ref subtype,
             ref count,
+            ..
         } => {
             assert_eq!(subtype, "Goblin");
             assert!(
@@ -13613,6 +14014,295 @@ fn find_effect_boundary_skips_spell_quality_comma() {
         &suffix[..expected.len()],
         expected,
         "boundary should follow the spell-quality clause, got {suffix:?}"
+    );
+}
+
+/// Issue #7451: the trigger condition/effect boundary must span the WHOLE
+/// Oxford-comma type list in the effect's subject, not stop at the list's
+/// first item. Revert-failing for all three rows: before the fix, the boundary
+/// walks to the LAST comma in the list, so the effect handed downstream keeps
+/// only the final list item.
+#[test]
+fn find_effect_boundary_splits_before_an_effect_subject_type_list() {
+    let subtype_list =
+        "whenever ~ attacks, birds, frogs, otters, and rats you control get +1/+1 until end of turn.";
+    let lower = subtype_list.to_lowercase();
+    let boundary = find_effect_boundary(&lower).expect("effect boundary");
+    let suffix = &lower[boundary..];
+    let expected = ", birds";
+    assert_eq!(
+        &suffix[..expected.len()],
+        expected,
+        "boundary should precede the whole subtype list, got {suffix:?}"
+    );
+
+    let core_type_list = "whenever you cast a noncreature spell, artifacts, creatures, and lands you control get +1/+1 until end of turn.";
+    let lower = core_type_list.to_lowercase();
+    let boundary = find_effect_boundary(&lower).expect("effect boundary");
+    let suffix = &lower[boundary..];
+    let expected = ", artifacts";
+    assert_eq!(
+        &suffix[..expected.len()],
+        expected,
+        "boundary should precede the whole core-type list, got {suffix:?}"
+    );
+
+    let two_item_list =
+        "whenever ~ attacks, birds, and rats you control get +1/+1 until end of turn.";
+    let lower = two_item_list.to_lowercase();
+    let boundary = find_effect_boundary(&lower).expect("effect boundary");
+    let suffix = &lower[boundary..];
+    let expected = ", birds";
+    assert_eq!(
+        &suffix[..expected.len()],
+        expected,
+        "boundary should precede the 2-item Oxford list, got {suffix:?}"
+    );
+}
+
+/// Monotonicity: pass 2 is a disjunct over pass 1, so a card decided `true` in
+/// pass 1 must never lose its boundary. Both rows are revert-failing against
+/// `naive-A` (issue #7451 round 1's single-pass `widened window AND NOT an
+/// event head` design): under `naive-A`, the only word in the narrow window is
+/// an event-head-lexicon word ("become"/"cast"), so the whole clause is
+/// excluded and `find_effect_boundary` returns `None`, losing the effect
+/// entirely. Assert `is_some()` explicitly rather than `unwrap()`, so a
+/// regression reports rather than panics.
+#[test]
+fn widened_boundary_window_is_monotone_over_effect_verbs() {
+    let thanos_copter =
+        "when ~ enters, vehicles you control become artifact creatures until end of turn.";
+    let lower = thanos_copter.to_lowercase();
+    let boundary = find_effect_boundary(&lower);
+    assert!(
+        boundary.is_some(),
+        "The Thanos-Copter must keep its effect clause (revert-failing against naive-A)"
+    );
+    let suffix = &lower[boundary.unwrap()..];
+    let expected = ", vehicles";
+    assert_eq!(&suffix[..expected.len()], expected);
+
+    let spellbinding_soprano =
+        "whenever ~ attacks, instant and sorcery spells you cast this turn cost {1} less to cast.";
+    let lower = spellbinding_soprano.to_lowercase();
+    let boundary = find_effect_boundary(&lower);
+    assert!(
+        boundary.is_some(),
+        "Spellbinding Soprano must keep its effect clause (revert-failing against naive-A)"
+    );
+    let suffix = &lower[boundary.unwrap()..];
+    let expected = ", instant";
+    assert_eq!(&suffix[..expected.len()], expected);
+}
+
+/// Issue #7451: the pass-2 scan must stop at a restrictive postmodifier
+/// (`that `/`which `/`with `) rather than reading into it. Without this bound,
+/// **Immolation Shaman**'s "an ability of an artifact, creature, or land THAT
+/// ISN'T a mana ability" would let the widened window reach "isn't", which
+/// `is_negated_auxiliary_predicate_token` classifies as an effect predicate,
+/// moving the boundary from the card's second comma to its first and
+/// narrowing `valid_card` from `AnyOf[Artifact, Creature]` to `Artifact`.
+/// Revert-failing against the round-2 variant (sentence bound only), under
+/// which row 1 moves to the first comma and row 3 returns
+/// `"creature, or land that isn't a mana ability"`.
+#[test]
+fn widened_window_stops_at_a_restrictive_postmodifier() {
+    let immolation_shaman = "whenever an opponent activates an ability of an artifact, creature, or land that isn't a mana ability, this creature deals 1 damage to that player.";
+    let lower = immolation_shaman.to_lowercase();
+    let boundary = find_effect_boundary(&lower).expect("effect boundary");
+    let suffix = &lower[boundary..];
+    let expected = ", or land that isn't";
+    assert_eq!(
+        &suffix[..expected.len()],
+        expected,
+        "boundary must stay at the card's second comma, got {suffix:?}"
+    );
+
+    let harsh_mentor = "whenever an opponent activates an ability of an artifact, creature, or land on the battlefield, if it isn't a mana ability, this creature deals 2 damage to that player.";
+    let lower = harsh_mentor.to_lowercase();
+    let boundary = find_effect_boundary(&lower).expect("effect boundary");
+    let suffix = &lower[boundary..];
+    let expected = ", if it isn't";
+    assert_eq!(
+        &suffix[..expected.len()],
+        expected,
+        "boundary must stay at the card's third comma, got {suffix:?}"
+    );
+
+    assert_eq!(
+        type_list_clause_window(
+            "creature, or land that isn't a mana ability, this creature deals 1 damage to that player."
+        ),
+        "creature, or land"
+    );
+}
+
+/// Issue #7451: the two-pass design keeps `find_effect_boundary` exactly where
+/// it is today for a mix of Event-classified and unclassified condition-side
+/// type lists — including the ones where `parse_event_head_start` must win
+/// over a same-word `PREDICATE_VERBS` entry ("is put into" vs. "put") and the
+/// ones where neither lexicon claims the next word at all.
+#[test]
+fn find_effect_boundary_keeps_a_condition_type_list_intact() {
+    let cases = [
+        (
+            "whenever a creature, planeswalker, or battle enters, draw a card",
+            ", draw",
+        ),
+        (
+            "whenever a bird, frog, or otter you control dies, draw a card",
+            ", draw",
+        ),
+        (
+            // Verbatim (post `strip_reminder_text`) April O'Neil, Live on the
+            // Scene text, trailing period included: `continues_player_action_list`'s
+            // FIRST check is a bare, pre-existing (unrelated to #7451)
+            // `all_consuming(parse_player_action_phrase_nom)` match, and a
+            // period-less `"investigate"` fragment fully satisfies it as a
+            // false "player action list" continuation — a shape no real
+            // corpus trigger line has, since `strip_reminder_text` always
+            // leaves the sentence-terminating period in place.
+            "whenever a mutant, ninja, or turtle you control enters, investigate.",
+            ", investigate",
+        ),
+        (
+            "whenever one or more other rabbits, bats, birds, and/or mice you control enter, scry 1",
+            ", scry",
+        ),
+        (
+            "whenever ~ deals combat damage to a player, planeswalker, or battle, surveil 1",
+            ", surveil",
+        ),
+        (
+            "whenever one or more mutants, ninjas, and/or turtles you control deal combat damage to a player, draw a card",
+            ", draw",
+        ),
+    ];
+    for (text, expected) in cases {
+        let lower = text.to_lowercase();
+        let boundary = find_effect_boundary(&lower).expect("effect boundary");
+        let suffix = &lower[boundary..];
+        assert_eq!(
+            &suffix[..expected.len()],
+            expected,
+            "for {text:?}, got {suffix:?}"
+        );
+    }
+}
+
+/// CR 603.1: a bare event verb terminated by a COMMA is still an event head, so
+/// pass 2 must not read it as the effect clause's predicate.
+///
+/// `parse_event_word` peeks a comma/period/EOF boundary; `parse_event_phrase` is a
+/// bare `tag`, so it required a trailing SPACE. Six single-word tags were
+/// space-only and are now boundary-aware: `die`, `deal`, `deals`, `enter`,
+/// `attack`, `block` — so a
+/// plural subject ("...Rats you control attack,") failed the event test at the
+/// comma, `normalize_verb_token` trimmed it to `attack`, a `PREDICATE_VERBS` entry,
+/// and pass 2 moved the boundary to the FIRST list comma — leaving `Whenever Birds`
+/// as the entire trigger subject. Found in review of PR #8336.
+///
+/// SCOPE, stated precisely. This pins that the first list comma is not taken. It
+/// does NOT pin `", draw"`: at the LAST list item the legacy pass-1 window is
+/// `"rats you control attack"`, which contains a `PREDICATE_VERBS` entry, so pass 1
+/// returns `true` there — byte-identically to the pre-#7451 code. Monotonicity
+/// forbids turning a pass-1 `true` into `false` (that is what keeps The
+/// Thanos-Copter's effect clause alive), so that split is pre-existing and out of
+/// scope here. Measured: the corpus boundary census moves ZERO cards between this
+/// fix and the head before it, so no printed card is in either shape.
+#[test]
+fn comma_terminated_bare_event_verb_is_an_event_head_not_a_predicate() {
+    for (line, first_list_comma, expected_suffix) in [
+        (
+            "whenever birds, frogs, otters, and rats you control attack, draw a card.",
+            ", frogs, otters",
+            ", and rats you control attack, draw a card.",
+        ),
+        (
+            "whenever birds, frogs, and rats you control block, draw a card.",
+            ", frogs, and rats",
+            ", and rats you control block, draw a card.",
+        ),
+    ] {
+        let boundary = find_effect_boundary(line).expect("effect boundary");
+        assert!(
+            !line[boundary..].starts_with(first_list_comma),
+            "the boundary must not fall at the FIRST list comma — the bare event \
+             verb is an event head, not a predicate; got {:?} for {line:?}",
+            &line[boundary..]
+        );
+        // Pin the exact landing point too: "not the first comma" would also be
+        // satisfied by the second, which is equally wrong. This is the LAST list
+        // comma — the pre-existing pass-1 split described above.
+        assert_eq!(
+            &line[boundary..],
+            expected_suffix,
+            "boundary must land on the last list comma for {line:?}"
+        );
+    }
+
+    // Control, not a pass-2 reach-guard: this line is claimed earlier by
+    // `type_phrase_continues_to_combat_damage_player_event`, which short-circuits
+    // before `is_new_sentence_not_type_continuation` runs. It pins that the
+    // space-terminated form is unchanged by the lexicon edit. The rows above are
+    // discriminating on their own — under the pre-fix code both land on the first
+    // list comma and both assertions fail.
+    let spaced =
+        "whenever birds, frogs, and rats you control deal combat damage to a player, draw a card.";
+    let b = find_effect_boundary(spaced).expect("effect boundary");
+    assert!(
+        spaced[b..].starts_with(", draw"),
+        "the space-terminated form must keep the whole list in the condition, got {:?}",
+        &spaced[b..]
+    );
+}
+
+/// Issue #7451: a condition-side Oxford type list — the trigger's SUBJECT, not
+/// its effect — must stay exactly where it is today. These cards remain
+/// `TriggerMode::Unknown`; turning them green is out of scope for #7451.
+/// Revert-failing against `naive-B` (the two-pass design with the widened
+/// window but WITHOUT the event-head exclusion): under `naive-B` the boundary
+/// jumps to the FIRST comma. **Not** revert-failing against `naive-A` — under
+/// `naive-A` the widened window still contains the event head ("attacks" /
+/// "becomes"), so `naive-A`'s whole-window veto also leaves the boundary at
+/// comma 2.
+#[test]
+fn condition_side_type_list_boundary_is_unchanged() {
+    let bird_frog_otter = "whenever a bird, frog, or otter you control attacks, draw a card";
+    let lower = bird_frog_otter.to_lowercase();
+    let boundary = find_effect_boundary(&lower).expect("effect boundary");
+    let suffix = &lower[boundary..];
+    let expected = ", or otter";
+    assert_eq!(&suffix[..expected.len()], expected, "got {suffix:?}");
+
+    let forest_island_swamp =
+        "whenever a forest, island, or swamp you control becomes tapped, draw a card";
+    let lower = forest_island_swamp.to_lowercase();
+    let boundary = find_effect_boundary(&lower).expect("effect boundary");
+    let suffix = &lower[boundary..];
+    let expected = ", or swamp";
+    assert_eq!(&suffix[..expected.len()], expected, "got {suffix:?}");
+}
+
+/// `type_list_clause_window` bounds: extended across every list comma when
+/// nothing stops it; truncated to the Oxford list when a following clause
+/// isn't a list continuation; and stopped at the SENTENCE boundary so a
+/// trailing instruction sentence's verbs never leak into the window.
+#[test]
+fn type_list_clause_window_spans_the_whole_list() {
+    let whole = "birds, frogs, otters, and rats you control get +1/+1 until end of turn.";
+    assert_eq!(type_list_clause_window(whole), whole);
+
+    assert_eq!(
+        type_list_clause_window("planeswalker, or battle, surveil 1."),
+        "planeswalker, or battle"
+    );
+
+    let sentence_bounded = "birds, frogs and rats you control get +1/+1. untap them.";
+    let window = type_list_clause_window(sentence_bounded);
+    assert_eq!(
+        window, "birds, frogs and rats you control get +1/+1",
+        "the window must stop at the sentence boundary, excluding the trailing instruction"
     );
 }
 
@@ -18224,6 +18914,52 @@ fn trigger_one_or_more_players_discard() {
     assert_eq!(def.valid_target, None); // any player
 }
 
+/// CR 603.2c: Tinybones, Pocket Nuisance's second ability — "a player" is the
+/// singular-subject spelling of the same any-player actor as "one or more
+/// players" above (both resolve to `valid_target: None`), and must pick up
+/// the same "one or more <cards>" batching so the damage ability fires once
+/// per discard event rather than once per discarded card.
+#[test]
+fn trigger_a_player_discards_one_or_more_cards() {
+    let def = parse_trigger_line(
+        "Whenever a player discards one or more cards, ~ deals 1 damage to each opponent.",
+        "Tinybones, Pocket Nuisance",
+    );
+    assert_eq!(def.mode, TriggerMode::DiscardedAll);
+    assert!(def.batched);
+    assert_eq!(def.valid_target, None); // any player, not just an opponent
+}
+
+/// The same batching axis composed onto the "an opponent"/"each player"
+/// actors, proving the fix is a general composition over the actor dispatch
+/// rather than a Tinybones-specific literal match.
+#[test]
+fn trigger_opponent_discards_one_or_more_cards() {
+    let def = parse_trigger_line(
+        "Whenever an opponent discards one or more cards, draw a card.",
+        "Opponent Batch Discard Test",
+    );
+    assert_eq!(def.mode, TriggerMode::DiscardedAll);
+    assert!(def.batched);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+}
+
+#[test]
+fn trigger_each_player_discards_one_or_more_cards() {
+    let def = parse_trigger_line(
+        "Whenever each player discards one or more cards, draw a card.",
+        "Each Player Batch Discard Test",
+    );
+    assert_eq!(def.mode, TriggerMode::DiscardedAll);
+    assert!(def.batched);
+    assert_eq!(def.valid_target, None);
+}
+
 // ── Work Item 3: Noncombat Damage to Opponent ─────────────────
 
 #[test]
@@ -21318,7 +22054,7 @@ fn trigger_copy_token_suffix_condition_attaches_otherwise() {
 fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
     use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
     use crate::parser::oracle_ir::effect_chain::{
-        ClauseDisposition, ClauseIrBuilder, EffectChainIr, OtherwiseKind,
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, InjectedColorChoice, OtherwiseKind,
     };
     use crate::types::ability::SubAbilityLink;
 
@@ -21378,6 +22114,7 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
         actor: None,
         in_trigger: true,
         repeat_until: None,
+        injected_color_choice: InjectedColorChoice::Permitted,
     };
 
     let root = lower_effect_chain_ir(&ir);
@@ -21409,7 +22146,7 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
 fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
     use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
     use crate::parser::oracle_ir::effect_chain::{
-        ClauseDisposition, ClauseIrBuilder, EffectChainIr, OtherwiseKind,
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, InjectedColorChoice, OtherwiseKind,
     };
 
     let draw_one = || Effect::Draw {
@@ -21459,6 +22196,7 @@ fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
         actor: None,
         in_trigger: true,
         repeat_until: None,
+        injected_color_choice: InjectedColorChoice::Permitted,
     };
 
     // Walk the lowered sub_ability chain and collect every effect.
@@ -21497,7 +22235,7 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
     use crate::parser::oracle_ir::effect_chain::{
-        ClauseDisposition, ClauseIrBuilder, EffectChainIr, PriorModifier,
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, InjectedColorChoice, PriorModifier,
     };
 
     let token_def = parse_effect_chain(
@@ -21554,6 +22292,7 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
         actor: None,
         in_trigger: true,
         repeat_until: None,
+        injected_color_choice: InjectedColorChoice::Permitted,
     };
 
     let root = lower_effect_chain_ir(&ir);
@@ -23269,6 +24008,16 @@ fn extract_mana_spent_comparison_condition_greater_than() {
             },
         })
     );
+}
+
+/// CR 603.4: a mana-spent condition after an effect is not an intervening-if;
+/// it remains part of the resolving effect rather than suppressing the trigger.
+#[test]
+fn trailing_mana_spent_comparison_is_not_hoisted_to_the_trigger() {
+    let text = "put a +1/+1 counter on ~ if the amount of mana spent to cast that spell was greater than its mana value";
+    let (cleaned, condition) = extract_if_condition(text);
+    assert_eq!(cleaned, text);
+    assert_eq!(condition, None);
 }
 
 // The extractor uses `scan_split_at_phrase`, so the clause doesn't have to
@@ -29694,7 +30443,9 @@ fn bare_you_attack_trigger_stays_you_attack_without_defender_scope() {
 // Entailment-gated plural-antecedent derivation — direct unit tests over the
 // private `trigger_plural_object_pronoun_ref_for_intervening_if` helper
 // (directly callable here via `use super::*`, since this file is mounted as
-// a child module of `oracle_trigger` at `oracle_trigger.rs:17850`). CR 603.4
+// a child module of `oracle_trigger` by the
+// `#[path = "oracle_trigger_tests.rs"] mod tests;` declaration at the end of
+// `oracle_trigger.rs`). CR 603.4
 // + CR 406.6 + CR 607.2a + CR 608.2k. U1-U11 exercise the fix's comparator ×
 // polarity × orientation entailment table; U5 (EQ 0), U6 (Not{GE 1}), and the
 // mixed-Or case inside U11 are REVERT-FAILING against the shipped
@@ -31335,5 +32086,150 @@ fn ogre_marauder_attack_trigger_carries_defending_player_unless_sacrifice() {
     assert!(
         !format!("{:?}", execute.effect).contains("Unimplemented"),
         "the body must not fall through to a parser gap"
+    );
+}
+
+/// CR 701.20a + CR 115.1: "target opponent reveals **their** hand" — when the
+/// clause names a DECLARED target as its subject, that subject is the
+/// possessive pronoun's antecedent, not the player who triggered the ability.
+/// The target is chosen as the triggered ability goes on the stack (CR 603.3d →
+/// CR 601.2c), so the reveal must show that chosen player's hand.
+///
+/// Issue #8428 (Brain Maggot). `parse_hand_possessive_target` resolves a bare
+/// "their hand" to `TriggeringPlayer`, which is correct only for a clause with
+/// no subject to bind to (`parse_look_at_possessive_hands_targets_player_axes`
+/// pins "Look at their hand." to exactly that, and it stays pinned). Because
+/// that default is not `Any`, `inject_subject_target`'s `Any`-guarded group
+/// could not correct it, so the pronoun default outranked a real declared
+/// subject and erased the target.
+///
+/// The two wordings below are the control pair: Brain Maggot and Kitesail
+/// Freebooter print the SAME clause and differ only in whether the choose
+/// clause is fused with "and" or split into its own sentence. Only the fused
+/// wording reaches the possessive parser — the split wording falls through it
+/// and was already binding its subject correctly. Asserting the two agree tests
+/// the building block (a possessive pronoun resolves to its clause subject)
+/// rather than one card's constant.
+#[test]
+fn possessive_their_hand_binds_to_the_clause_subject_not_the_trigger() {
+    fn reveal_target(line: &str) -> TargetFilter {
+        fn find(a: &AbilityDefinition) -> Option<TargetFilter> {
+            if let Effect::RevealHand { target, .. } = &*a.effect {
+                return Some(target.clone());
+            }
+            a.sub_ability.as_deref().and_then(find)
+        }
+        let def = parse_trigger_line(line, "Probe");
+        find(
+            def.execute
+                .as_ref()
+                .expect("trigger must have an execute body"),
+        )
+        .expect("trigger body must contain a RevealHand")
+    }
+
+    let opponent = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+    // Fused ("… and you choose …") — the wording that regressed.
+    let fused = reveal_target(
+        "When this creature enters, target opponent reveals their hand and you choose a nonland card from it. Exile that card until this creature leaves the battlefield.",
+    );
+    assert_eq!(
+        fused, opponent,
+        "\"target opponent reveals their hand\" must reveal the DECLARED target's hand"
+    );
+
+    // Split ("… their hand. You choose …") — the same clause, already correct.
+    let split = reveal_target(
+        "When this creature enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until this creature leaves the battlefield.",
+    );
+    assert_eq!(
+        fused, split,
+        "fusing the choose clause with \"and\" must not change whose hand is revealed"
+    );
+
+    // The same pronoun under a "that player" subject still resolves
+    // to the triggering player — the fix defers to the subject, it does not
+    // rewrite every reveal to an opponent (Biting-Palm Ninja).
+    assert_eq!(
+        reveal_target(
+            "When you do, that player reveals their hand and you choose a nonland card from it. Exile that card.",
+        ),
+        TargetFilter::TriggeringPlayer,
+        "\"that player reveals their hand\" must still bind to the triggering player"
+    );
+}
+
+/// Runtime half of the issue #8428 fix: the corrected AST must actually put the
+/// TARGET OPPONENT's cards in front of the controller. Drives Brain Maggot's
+/// verbatim Oracle text through the real cast pipeline (CR 601.2 cast → ETB
+/// trigger per CR 603.2 → CR 603.3d target choice → CR 701.20a reveal) and
+/// asserts on the hand the engine offers for the choose clause.
+///
+/// A parse-only assertion cannot see this: the reveal resolver reads its player
+/// from `ability.targets` first, and a `TriggeringPlayer` effect target builds
+/// NO player slot at all, so the wrong-hand behavior only becomes visible once
+/// the trigger reaches the stack.
+#[test]
+fn brain_maggot_reveals_the_target_opponents_hand_at_runtime() {
+    use crate::types::phase::Phase;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Black,
+                crate::types::identifiers::ObjectId(98_420),
+                false,
+                Vec::new(),
+            ),
+            crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Black,
+                crate::types::identifiers::ObjectId(98_421),
+                false,
+                Vec::new(),
+            ),
+        ],
+    );
+
+    let maggot = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Brain Maggot",
+            1,
+            1,
+            "When this creature enters, target opponent reveals their hand and you choose a nonland card from it. Exile that card until this creature leaves the battlefield.",
+        )
+        .id();
+
+    // Distinct hands so the revealed set identifies its owner unambiguously.
+    let mine = scenario.add_card_to_hand(P0, "Duress");
+    let theirs_a = scenario.add_card_to_hand(P1, "Llanowar Elves");
+    let theirs_b = scenario.add_card_to_hand(P1, "Giant Growth");
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(maggot).target_player(P1).resolve();
+
+    let WaitingFor::RevealChoice { player, cards, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "expected the reveal's choose prompt, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(
+        *player, P0,
+        "CR 109.5: \"you choose\" is the ability's controller, not the revealing player"
+    );
+
+    let revealed: std::collections::HashSet<_> = cards.iter().copied().collect();
+    assert!(
+        revealed.contains(&theirs_a) && revealed.contains(&theirs_b),
+        "the TARGET OPPONENT's hand must be revealed, got {revealed:?}"
+    );
+    assert!(
+        !revealed.contains(&mine),
+        "the controller's own hand must NOT be revealed (issue #8428), got {revealed:?}"
     );
 }

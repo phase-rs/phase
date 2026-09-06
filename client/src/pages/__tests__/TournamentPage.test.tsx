@@ -379,7 +379,7 @@ beforeEach(() => {
   localStorageMock.items.clear();
   useMultiplayerStore.setState({
     tournamentCredentials: {},
-    serverAddress: "ws://localhost:8787",
+    hostingServer: "ws://localhost:8787",
     displayName: "",
   });
   // happy-dom ships no `window.confirm`, so this is a stub rather than a spy.

@@ -82,7 +82,8 @@
     "clickModeButton": "Botón de modo clic",
     "shown": "Visible",
     "hidden": "Oculto",
-    "resume": "Reanudar",
+    "openGameLog": "Abrir el registro de la partida",
+    "closeGameLog": "Cerrar el registro de la partida",
     "settings": "Ajustes",
     "boardLayoutSplit": "Dividido",
     "boardLayoutLegacy": "Legacy",
@@ -106,6 +107,7 @@
   },
   "volume": {
     "deviceBlocked": "Audio no disponible — el servidor de audio del sistema no responde. Reinicia la aplicación para reintentar.",
+    "mediaUnavailable": "Audio no disponible — a este sistema le faltan los componentes multimedia necesarios para reproducir sonido. Instala los paquetes de complementos de GStreamer de tu distribución y reinicia la aplicación.",
     "mute": "Silenciar",
     "unmute": "Activar sonido",
     "volume": "Volumen"

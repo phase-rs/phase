@@ -306,6 +306,19 @@ fn static_condition_to_restriction_condition(
         StaticCondition::HasMaxSpeed => Some(ParsedCondition::HasMaxSpeed),
         // CR 702.195b: The enduring story designation is available to restrictions.
         StaticCondition::HasEnduringStory => Some(ParsedCondition::HasEnduringStory),
+        // CR 309.7 + CR 602.5b: dungeon completion is a player-status leaf of the
+        // same shape as the city's blessing and the enduring story above — read off
+        // the scoped player, carrying no filter or quantity, so it converts EXACTLY
+        // rather than approximately. The `Not` recursion arm yields the negative
+        // sense ("only if you haven't completed a dungeon").
+        //
+        // The shared grammar spells only the unqualified phrase, so `specific` is
+        // `None` here; the field exists to mirror the three sibling layers, whose
+        // named-dungeon form (`specific: Some(d)`) the same restriction evaluator
+        // will read unchanged once a card prints it.
+        StaticCondition::CompletedADungeon => {
+            Some(ParsedCondition::CompletedDungeon { specific: None })
+        }
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(ParsedCondition::OpponentPoisonAtLeast { count })
         }
@@ -385,7 +398,6 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
-        | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents

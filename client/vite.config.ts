@@ -118,7 +118,7 @@ function workspaceVersion(): string {
 // weight since no frontend code fetches it. Local dev falls back to the
 // public/ copy served at `/card-data.json` (also used by Tauri bundles and
 // phase-server via `data/card-data.json`).
-function dataFileDefines(mode: string): Record<string, string> {
+function dataFileDefines(mode: string, buildHash: string): Record<string, string> {
   const manifest = JSON.parse(
     readFileSync(path.resolve(__dirname, "../data-files.json"), "utf-8"),
   ) as string[];
@@ -133,7 +133,7 @@ function dataFileDefines(mode: string): Record<string, string> {
   const multiplayerServers = resolveMultiplayerServerUrls(envVar);
   const defines: Record<string, string> = {
     __APP_VERSION__: JSON.stringify(workspaceVersion()),
-    __BUILD_HASH__: JSON.stringify(gitHash()),
+    __BUILD_HASH__: JSON.stringify(buildHash),
     // Preview deployment stamps this with the fingerprint of its signed native
     // engine artifact. Local and release builds intentionally compile it as
     // `undefined`, which keeps preview native routing on the WASM fallback.
@@ -219,7 +219,26 @@ function dataFileDefines(mode: string): Record<string, string> {
   return defines;
 }
 
-export default defineConfig(({ mode }) => ({
+function offlineShellMarker(buildHash: string): Plugin {
+  const filename = `offline-shell-${buildHash}.json`;
+  return {
+    name: "offline-shell-marker",
+    apply: "build",
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: filename,
+        source: JSON.stringify({ build: buildHash }),
+      });
+    },
+  };
+}
+
+export default defineConfig(({ mode }) => {
+  const buildHash = gitHash();
+  const offlineShellMarkerFilename = `offline-shell-${buildHash}.json`;
+
+  return {
   resolve: {
     alias: {
       "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm"),
@@ -230,6 +249,7 @@ export default defineConfig(({ mode }) => ({
     wasmEnvShim(),
     externalEngineWasm(),
     trimManaFont(),
+    offlineShellMarker(buildHash),
     react(),
     tailwindcss(),
     wasm(),
@@ -248,6 +268,8 @@ export default defineConfig(({ mode }) => ({
       manifest: false, // Use public/manifest.json
       includeAssets: ["**/*.mp3", "**/*.m4a"],
       workbox: {
+        additionalManifestEntries: [{ url: `/${offlineShellMarkerFilename}`, revision: buildHash }],
+        ignoreURLParametersMatching: [/^utm_/, /^fbclid$/, /^phase-precache-probe$/],
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
         // Workbox's default globPatterns (`**/*.{js,wasm,css,html}`) omit fonts,
         // so the hashed self-hosted webfonts (@fontsource-variable/* and
@@ -267,6 +289,14 @@ export default defineConfig(({ mode }) => ({
           "**/draft_wasm_bg-*.wasm",
           "**/changelog.json",
           "**/changelog-meta.json",
+          // config.js is per-deployment: a self-hoster serves their own copy
+          // over the placeholder shipped in the bundle. `.js` is in
+          // globPatterns, so precaching it would pin the BUILD-TIME copy for
+          // every client that already has a service worker, and the deployed
+          // one would never be read. Same mechanism as the wasm entries above,
+          // different motive: those are fetched by a runtime rule, this one
+          // must always come from the network.
+          "**/config.js",
         ],
         runtimeCaching: [
           {
@@ -450,7 +480,7 @@ export default defineConfig(({ mode }) => ({
     }),
     compression({ algorithms: ["brotliCompress"] }),
   ],
-  define: dataFileDefines(mode),
+  define: dataFileDefines(mode, buildHash),
   worker: {
     plugins: () => [wasmEnvShim(), externalEngineWasm()],
   },
@@ -489,4 +519,5 @@ export default defineConfig(({ mode }) => ({
   build: {
     target: "esnext",
   },
-}));
+  };
+});

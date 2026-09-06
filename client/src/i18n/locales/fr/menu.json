@@ -143,6 +143,7 @@
     "lastRefreshed": "Dernière actualisation : {{date}}",
     "addCustomFeed": "Ajouter un flux personnalisé",
     "add": "Ajouter",
+    "offlineUnavailable": "Les mises à jour des flux ne sont pas disponibles hors ligne.",
     "done": "Terminé"
   },
   "importDeck": {
@@ -165,6 +166,7 @@
     "confirmOathbreakerImport": "Importer le deck Oathbreaker",
     "backToImport": "Retour à l'import",
     "errorInvalidUrl": "Saisissez une URL de deck Moxfield ou Archidekt valide.",
+    "errorOffline": "Les imports par URL ne sont pas disponibles hors ligne. Utilisez Coller du texte ou Depuis un fichier.",
     "errorNetworkFailure": "Impossible de contacter le service d'import. Vérifiez votre connexion et réessayez.",
     "errorGeneric": "Échec de l'import du deck.",
     "errorNoOathbreaker": "Cette liste ne contient aucun Oathbreaker valide.",

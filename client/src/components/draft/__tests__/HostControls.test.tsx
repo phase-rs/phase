@@ -220,7 +220,7 @@ describe("HostControls", () => {
     expect(draftState.requestResume).toHaveBeenCalledOnce();
   });
 
-  it("returns no responsive draft actions when disabled, non-drafting, or guest", () => {
+  it("gates responsive draft actions when disabled, in other phases, or guest", () => {
     draftState.phase = "drafting";
     const endDraftAction = makeEndDraftAction();
     const { result, rerender } = renderHook(
@@ -235,9 +235,14 @@ describe("HostControls", () => {
     rerender({ enabled: true });
     expect(result.current).toEqual([]);
     draftState.role = "host";
-    draftState.phase = "deckbuilding";
+    draftState.phase = "matchInProgress";
     rerender({ enabled: true });
     expect(result.current).toEqual([]);
+    draftState.phase = "deckbuilding";
+    rerender({ enabled: true });
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toBe(endDraftAction);
+    expect(result.current.some(({ id }) => id === "pause-resume")).toBe(false);
   });
 
   it("forwards the supplied page action through responsive and floating controls", () => {
@@ -266,6 +271,36 @@ describe("HostControls", () => {
     fireEvent.click(screen.getByRole("button", { name: "End Draft" }));
     expect(endDraftAction.onClick).toHaveBeenCalledTimes(2);
     expect(draftState.leave).not.toHaveBeenCalled();
+  });
+
+  it("renders a mapped deckbuilding end action only once", () => {
+    draftState.phase = "deckbuilding";
+    draftState.sideboardPrompt = null;
+    const endDraftAction = makeEndDraftAction();
+    const { rerender } = render(
+      <HostControls
+        draftTopActions={[endDraftAction]}
+        endDraftAction={endDraftAction}
+      />,
+    );
+
+    const endButtons = screen.getAllByRole("button", { name: "End Draft" });
+    expect(endButtons).toHaveLength(1);
+    fireEvent.click(endButtons[0]);
+    expect(endDraftAction.onClick).toHaveBeenCalledOnce();
+    expect(draftState.leave).not.toHaveBeenCalled();
+
+    const disabledEndDraftAction = {
+      ...endDraftAction,
+      disabled: true,
+    };
+    rerender(
+      <HostControls
+        draftTopActions={[disabledEndDraftAction]}
+        endDraftAction={disabledEndDraftAction}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "End Draft" })).toBeDisabled();
   });
 
   it("forwards the page action disabled state in both presentations", () => {

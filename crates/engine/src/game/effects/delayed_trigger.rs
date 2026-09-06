@@ -143,13 +143,42 @@ pub fn resolve(
         }
     }
 
-    // CR 505.1 + CR 603.7a: "your next <phase>" binds the trigger to the
-    // ability's controller. The parser emits a placeholder `PlayerId(0)` in
-    // `AtNextPhaseForPlayer.player` because compile-time AST has no access to
-    // runtime player ids; rewrite here to the actual controller at resolve
-    // time. Mirrors the `bind_contextual_filter_to_condition` pattern above.
-    if let DelayedTriggerCondition::AtNextPhaseForPlayer { player, gate, .. } = &mut condition {
-        *player = ability.controller;
+    // CR 505.1 / CR 608.2c + CR 603.7a: "your next <phase>" binds the trigger
+    // to the ability's controller; "that player's next <phase>" binds it to a
+    // chained effect's target's OWNER (CR 400.3) instead — The Eternal
+    // Wanderer's +1 exiles up to one target ARTIFACT OR CREATURE that may
+    // belong to any player, so the delayed return must fire on ITS owner's
+    // next end step, not unconditionally on the ability's controller's. The
+    // parser emits a placeholder `PlayerId(0)` in `AtNextPhaseForPlayer.player`
+    // because compile-time AST has no access to runtime player ids; `binding`
+    // says which live player to rewrite it to. Mirrors the
+    // `bind_contextual_filter_to_condition` pattern above.
+    if let DelayedTriggerCondition::AtNextPhaseForPlayer {
+        player,
+        gate,
+        binding,
+        ..
+    } = &mut condition
+    {
+        *player = match binding {
+            crate::types::ability::DelayedTriggerPlayerBinding::Controller => ability.controller,
+            // CR 608.2c + CR 400.3: resolve "that player" from the first
+            // object among the parent effect's chosen targets — the exiled
+            // permanent's owner, invariant across the zone change that just
+            // moved it (CR 400.3 only relocates library/graveyard/hand
+            // destinations to the owner's own zone; it does not change who
+            // the owner IS). Falls back to the ability's controller if the
+            // parent target is somehow gone (e.g. a malformed chain with no
+            // object target) rather than leaving a stale sentinel PlayerId.
+            crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner => ability
+                .targets
+                .iter()
+                .find_map(|target| match target {
+                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.owner),
+                    TargetRef::Player(_) => None,
+                })
+                .unwrap_or(ability.controller),
+        };
         // CR 513.2 + CR 603.7a: the "on your next turn" floor only becomes
         // concrete at creation. Stamp the symbolic parse-time gate to the actual
         // creation turn so the matcher skips the current turn's matching phase.
@@ -1482,6 +1511,7 @@ mod tests {
                 phase: Phase::End,
                 player: PlayerId(0),
                 gate: Default::default(),
+                binding: Default::default(),
             }
         ));
         for condition in [
@@ -2900,6 +2930,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -2918,6 +2949,7 @@ mod tests {
                 phase: Phase::PreCombatMain,
                 player: PlayerId(1),
                 gate: crate::types::ability::TurnGate::None,
+                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
             "placeholder player must be rewritten to ability.controller"
         );
@@ -2947,6 +2979,7 @@ mod tests {
                     phase: Phase::End,
                     player: PlayerId(0),
                     gate: TurnGate::AfterCreationTurn,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -2965,6 +2998,7 @@ mod tests {
                 phase: Phase::End,
                 player: PlayerId(0),
                 gate: TurnGate::After(5),
+                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
             "AfterCreationTurn must be stamped to After(state.turn_number)"
         );
@@ -2988,6 +3022,7 @@ mod tests {
                     phase: Phase::End,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -3043,6 +3078,7 @@ mod tests {
                     phase: Phase::End,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(inner_def),
                 uses_tracked_set: false,
@@ -3116,6 +3152,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -3221,6 +3258,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -3279,6 +3317,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -3331,6 +3370,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -3390,6 +3430,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -3438,6 +3479,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -3494,6 +3536,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -3545,6 +3588,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -3606,6 +3650,7 @@ mod tests {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -4025,6 +4070,7 @@ mod tests {
                 phase: Phase::Upkeep,
                 player: PlayerId(0),
                 gate: Default::default(),
+                binding: Default::default(),
             }
         ));
 

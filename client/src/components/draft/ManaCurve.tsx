@@ -2,12 +2,15 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { DraftCardInstance } from "../../adapter/draft-adapter";
+import type { DeckColorDistributionEntry } from "../../services/deckCompatibility";
+import { ColorDistribution } from "../deck-builder/ColorDistribution";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
 interface ManaCurveProps {
   pool: DraftCardInstance[];
   cards: string[];
+  colorDistribution: readonly DeckColorDistributionEntry[];
   /**
    * Compact is a presentation-only variant for space-constrained summaries.
    * It deliberately retains the curve's meter semantics and translated title.
@@ -27,7 +30,7 @@ const COMPACT_MAX_BAR_HEIGHT = 24;
 
 // ── Component ───────────────────────────────────────────────────────────
 
-export function ManaCurve({ pool, cards, presentation = "default" }: ManaCurveProps) {
+export function ManaCurve({ pool, cards, colorDistribution, presentation = "default" }: ManaCurveProps) {
   const { t } = useTranslation("draft");
   const compact = presentation === "compact";
   const maxBarHeight = compact ? COMPACT_MAX_BAR_HEIGHT : MAX_BAR_HEIGHT;
@@ -59,6 +62,7 @@ export function ManaCurve({ pool, cards, presentation = "default" }: ManaCurvePr
 
   return (
     <div
+      data-mana-curve
       data-mana-curve-presentation={presentation}
       data-mana-curve-geometry={presentation}
       className={compact ? "flex flex-col gap-0.5" : "flex flex-col gap-1"}
@@ -115,6 +119,7 @@ export function ManaCurve({ pool, cards, presentation = "default" }: ManaCurvePr
           </div>
         ))}
       </div>
+      <ColorDistribution distribution={colorDistribution} presentation={presentation} />
     </div>
   );
 }

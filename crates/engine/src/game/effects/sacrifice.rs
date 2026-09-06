@@ -310,6 +310,16 @@ pub fn resolve(
                                 *id,
                                 chooser,
                             )
+                            // CR 701.21a + CR 609.3: Sigarda, Host of Herons /
+                            // Tajuru Preserver class — an opponent's spell or
+                            // ability can't force the protected player to
+                            // sacrifice ANY permanent, regardless of which one.
+                            && !crate::game::static_abilities::forced_action_muzzled(
+                                state,
+                                ability.controller,
+                                chooser,
+                                crate::types::ability::CostCategory::SacrificesPermanent,
+                            )
                     })
             })
             .collect();
@@ -459,6 +469,18 @@ pub fn resolve(
 
         if crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
             state, ability, obj_id, player_id,
+        ) {
+            continue;
+        }
+
+        // CR 701.21a + CR 609.3: Sigarda, Host of Herons / Tajuru Preserver
+        // class — an opponent's spell or ability can't force the protected
+        // player to sacrifice ANY permanent, regardless of which one.
+        if crate::game::static_abilities::forced_action_muzzled(
+            state,
+            ability.controller,
+            player_id,
+            crate::types::ability::CostCategory::SacrificesPermanent,
         ) {
             continue;
         }

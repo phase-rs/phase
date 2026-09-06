@@ -82,7 +82,8 @@
     "clickModeButton": "Klickmodus-Schaltfläche",
     "shown": "Sichtbar",
     "hidden": "Ausgeblendet",
-    "resume": "Fortsetzen",
+    "openGameLog": "Spielprotokoll öffnen",
+    "closeGameLog": "Spielprotokoll schließen",
     "settings": "Einstellungen",
     "boardLayoutSplit": "Geteilt",
     "boardLayoutLegacy": "Legacy",
@@ -106,6 +107,7 @@
   },
   "volume": {
     "deviceBlocked": "Audio nicht verfügbar — der System-Audioserver antwortet nicht. App neu starten, um es erneut zu versuchen.",
+    "mediaUnavailable": "Audio nicht verfügbar — auf diesem System fehlen die Medienkomponenten für die Tonwiedergabe. Installiere die GStreamer-Plugin-Pakete deiner Distribution und starte die App neu.",
     "mute": "Stummschalten",
     "unmute": "Stummschaltung aufheben",
     "volume": "Lautstärke"

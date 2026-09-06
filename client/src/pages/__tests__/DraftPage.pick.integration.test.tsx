@@ -77,7 +77,7 @@ function card(instanceId: string): DraftCardInstance {
 
 function view({ pool = [], pack = [card("picked")], effects = [] }: { pool?: DraftCardInstance[]; pack?: DraftCardInstance[]; effects?: DraftCardInstance[] } = {}): DraftPlayerView {
   return {
-    status: "Drafting", kind: "Quick", launch_capability: "None", pool, current_pack: pack, draft_effects: effects,
+    status: "Drafting", kind: "Quick", launch_capability: "None", commanders_required: 0, pool, current_pack: pack, draft_effects: effects,
     pool_groups: {
       color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [],
       type_filter_options: [], color_filter_options: [],

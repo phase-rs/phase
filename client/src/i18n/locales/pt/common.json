@@ -82,7 +82,8 @@
     "clickModeButton": "Botão de modo de clique",
     "shown": "Visível",
     "hidden": "Oculto",
-    "resume": "Continuar",
+    "openGameLog": "Abrir o registro do jogo",
+    "closeGameLog": "Fechar o registro do jogo",
     "settings": "Configurações",
     "boardLayoutSplit": "Dividido",
     "boardLayoutLegacy": "Legacy",
@@ -106,6 +107,7 @@
   },
   "volume": {
     "deviceBlocked": "Áudio indisponível — o servidor de áudio do sistema não responde. Reinicie o aplicativo para tentar novamente.",
+    "mediaUnavailable": "Áudio indisponível — faltam neste sistema os componentes de mídia necessários para reproduzir som. Instale os pacotes de plugins do GStreamer da sua distribuição e reinicie o aplicativo.",
     "mute": "Silenciar",
     "unmute": "Reativar som",
     "volume": "Volume"

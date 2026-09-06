@@ -1,8 +1,5 @@
-import {
-  useManaSymbolImage,
-  type ManaSymbolShard,
-} from "../../hooks/useFixedVisualImage.ts";
-import { manaSymbolSourceUrl } from "../../services/scryfall.ts";
+import { useManaSymbolImage } from "../../hooks/useFixedVisualImage.ts";
+import { manaSymbolSourceUrl, type ManaSymbolShard } from "../../services/scryfall.ts";
 
 interface ManaGlyphPresentationProps {
   shard: ManaSymbolShard | null;
