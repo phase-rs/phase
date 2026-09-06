@@ -425,6 +425,21 @@ export function HostSetup({
     ? Math.min(formatConfig.max_players, P2P_MAX_PEERS)
     : formatConfig.max_players;
   const accentTone = isP2P ? "cyan" : "emerald";
+  // A P2P room reaches the public list only through a `LobbyOnly` broker: that
+  // is the sole path `MultiplayerPage` takes into `startP2PHostingSession` with
+  // `useBroker`, and `openBrokerClient` refuses every other mode. Against a
+  // `Full` anchor there is nothing to register with — `hostIsPublic` is false
+  // whatever this form submits — so offering the toggle there would be a
+  // control with no effect.
+  //
+  // Withheld on POSITIVE knowledge only. `sourceStatus` is not persisted, so a
+  // cold mount knows no mode until the handshake lands; treating that as "no
+  // broker" would make the row appear a beat after the form, and the default
+  // anchor is a broker anyway. Unknown therefore reads as available.
+  const p2pListingUnavailable =
+    isP2P
+    && hostingServer !== null
+    && sourceStatus.get(hostingServer)?.serverInfo?.mode === "Full";
 
   /** Apply a freshly-resolved format config. Shared by the built-in picker and
    *  the saved-custom-format picker so both reset the same dependent state. */
@@ -1159,13 +1174,16 @@ export function HostSetup({
               stopped that; it only removed the OPT-OUT, because `isPublic`
               defaults to true. `startP2PHostingSession` still ANDs it with
               `useBroker`, so against a `Full` anchor — which has no broker to
-              register with — the room is unlisted whatever this says. */}
-          <OptionRow
-            label={t("hostSetup.listInLobby")}
-            on={isPublic}
-            onChange={setIsPublic}
-            accent={accentTone}
-          />
+              register with — the room is unlisted whatever this says, which is
+              also why the row is withheld outright in that case. */}
+          {!p2pListingUnavailable && (
+            <OptionRow
+              label={t("hostSetup.listInLobby")}
+              on={isPublic}
+              onChange={setIsPublic}
+              accent={accentTone}
+            />
+          )}
           <OptionRow label={t("hostSetup.startWhenFull")} on={startWhenFull} onChange={setStartWhenFull} accent={accentTone} />
           {/* Sandbox mode — capability flag, orthogonal to format; lets the host
               submit debug actions. Off by default; immutable for the session. */}

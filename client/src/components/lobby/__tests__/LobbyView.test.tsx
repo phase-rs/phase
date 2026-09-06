@@ -762,11 +762,14 @@ describe("LobbyView", () => {
     renderLobby({});
 
     const input = screen.getByPlaceholderText("Enter code or CODE@IP:PORT");
-    // Regression guard. `MultiplayerPage` routes a join on the SHAPE of the
-    // code, never on a connection mode — but the field used to cap itself at
-    // the 5-character P2P length whenever the lobby was in P2P mode, which
-    // silently truncated exactly this string as the user typed it.
-    const scoped = "ABC12@play.example.com:8443";
+    // Regression guard, two caps deep. The field used to shrink to the
+    // 5-character P2P length whenever the lobby was in P2P mode, truncating
+    // this string as the user typed it; and the server-mode cap it fell back
+    // to was a flat 50, which this target exceeds. `parseJoinCode` and
+    // `parseWebSocketUrl` bound neither the code nor the host, so nothing
+    // downstream justified either number.
+    const scoped = "ABC12@really-long-regional-hostname.phase-rs.example.com:8443";
+    expect(scoped.length).toBeGreaterThan(50);
     await user.type(input, scoped);
     expect(input).toHaveValue(scoped);
   });

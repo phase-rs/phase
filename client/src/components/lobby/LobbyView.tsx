@@ -464,7 +464,7 @@ export function LobbyView({
             type="button"
             onClick={() => setServerPickerOpen(true)}
             title={hostingServer ?? ""}
-            className="flex min-w-0 max-w-full items-center gap-1.5 rounded-[7px] border border-white/10 bg-black/25 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 backdrop-blur-sm transition-colors hover:border-white/20 hover:bg-white/5"
+            className="flex min-h-11 min-w-0 max-w-full items-center gap-1.5 rounded-[7px] border border-white/10 bg-black/25 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 backdrop-blur-sm transition-colors hover:border-white/20 hover:bg-white/5"
           >
             {serverFlag && (
               <ServerFlag
@@ -483,7 +483,7 @@ export function LobbyView({
             <button
               type="button"
               onClick={() => setServerPickerOpen(true)}
-              className="rounded-[7px] border border-amber-300/20 bg-amber-500/15 px-2.5 py-0.5 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/25"
+              className="min-h-11 rounded-[7px] border border-amber-300/20 bg-amber-500/15 px-2.5 py-0.5 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/25"
             >
               {t("lobbyView.sourcesDegraded")}
             </button>
@@ -521,7 +521,7 @@ export function LobbyView({
             <button
               key={opt.value}
               onClick={() => setRoomTypeFilter(opt.value)}
-              className={`rounded-[7px] px-3 py-1 text-xs font-medium transition-colors ${
+              className={`min-h-11 rounded-[7px] px-3 py-1 text-xs font-medium transition-colors ${
                 roomTypeFilter === opt.value
                   ? "bg-white/12 text-white"
                   : "text-gray-400 hover:bg-white/5 hover:text-gray-200"
@@ -581,7 +581,6 @@ export function LobbyView({
             onChange={(e) => setJoinCode(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
             placeholder={t("lobbyView.serverCodePlaceholder")}
-            maxLength={50}
             className="min-w-0 flex-1 rounded-[8px] border border-white/10 bg-black/25 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none backdrop-blur-sm focus:border-white/20"
           />
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto">

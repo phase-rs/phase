@@ -1110,6 +1110,80 @@ describe("HostSetup", () => {
     );
   });
 
+  /**
+   * Listing and transport are independent, but not unconditionally: a P2P room
+   * reaches the public list only through a `LobbyOnly` broker. Against a `Full`
+   * anchor `startP2PHostingSession` gets `useBroker: false` and `hostIsPublic`
+   * is false whatever this form submits, so the toggle would do nothing.
+   */
+  it("withholds the lobby listing for P2P only against a known Full anchor", () => {
+    const fullAnchor = {
+      state: "open" as const,
+      serverInfo: {
+        version: "0.71.0",
+        buildCommit: "",
+        protocolVersion: PROTOCOL_VERSION,
+        mode: "Full" as const,
+        lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+      },
+      playerCount: 0,
+    };
+    useMultiplayerStore.setState({
+      hostingServer: OFFICIAL_MULTIPLAYER_SERVER_URL,
+      sourceStatus: new Map([[OFFICIAL_MULTIPLAYER_SERVER_URL, fullAnchor]]),
+    });
+
+    // Server mode is unaffected — the game runs ON that server, so it lists.
+    const { rerender } = render(
+      <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("switch", { name: "List in lobby" })).toBeInTheDocument();
+
+    rerender(
+      <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />,
+    );
+    expect(
+      screen.queryByRole("switch", { name: "List in lobby" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the lobby listing in P2P when the anchor is a broker or unknown", () => {
+    // Unknown: `sourceStatus` is not persisted, so a cold mount has no mode
+    // yet. The default anchor IS a broker, so unknown must read as available
+    // rather than making the row appear a beat late.
+    useMultiplayerStore.setState({
+      hostingServer: OFFICIAL_MULTIPLAYER_SERVER_URL,
+      sourceStatus: new Map(),
+    });
+    const { rerender } = render(
+      <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("switch", { name: "List in lobby" })).toBeInTheDocument();
+
+    useMultiplayerStore.setState({
+      sourceStatus: new Map([
+        [
+          OFFICIAL_MULTIPLAYER_SERVER_URL,
+          {
+            state: "open" as const,
+            serverInfo: {
+              version: "0.71.0",
+              buildCommit: "",
+              protocolVersion: PROTOCOL_VERSION,
+              mode: "LobbyOnly" as const,
+              lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+            },
+            playerCount: 0,
+          },
+        ],
+      ]),
+    });
+    rerender(
+      <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("switch", { name: "List in lobby" })).toBeInTheDocument();
+  });
+
   // ── Connection mode switch ──────────────────────────────────────────────
 
   it("mirrors the connection switch and reports a change to the page", async () => {
