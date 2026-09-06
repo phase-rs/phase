@@ -1911,9 +1911,10 @@ fn copy_token_tail_for_source(
         .and_then(|real_work| real_work.sub_ability.as_deref())
 }
 
-/// CR 707.1 + CR 614.12a: answer path for a first-time token-substitution copy
-/// SOURCE choice — Esix, Fractal Bloom's "choose a creature other than ~ and
-/// create that many tokens that are copies of that creature". The chosen
+/// CR 707.1 + CR 614.1a: answer path for a first-time token-substitution copy
+/// SOURCE choice — Esix, Fractal Bloom's "you may instead choose a creature
+/// other than ~ and create that many tokens that are copies of that creature"
+/// ("instead" is what makes it a replacement effect). The chosen
 /// permanent is the object the substitute tokens copy (CR 707.2: they acquire
 /// its copiable values), not a donor of copiable values to some third party.
 ///
@@ -1981,7 +1982,8 @@ fn handle_copy_token_source_choice(
     effects::resolve_ability_chain(state, &ability, events, 0)
         .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
 
-    // CR 614.12a + CR 616.1: `Effect::ChoosePermanent` IS the post-replacement
+    // CR 614.5: a replacement effect gets only one opportunity to affect an
+    // event. `Effect::ChoosePermanent` IS the post-replacement
     // continuation being answered, so a completed resolution must retire it —
     // leaving it paused lets a later post-action pass re-drain it into a second
     // `CopyTargetChoice`. But the copy-token batch can PARK mid-resolution and
