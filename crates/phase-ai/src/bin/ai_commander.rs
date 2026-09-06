@@ -29,6 +29,14 @@
 //! timeout on the process) -- but only under a `panic = 'unwind'` profile;
 //! see the note above.
 //!   cargo run --profile server-release --bin ai-commander -- client/public --games-file games.txt
+//!
+//! Optional engagement telemetry: repeat `--watch-card "Exact Name, With Comma"`
+//! for exact, case-sensitive names. Legacy `--watch-cards "Name One,Name Two"`
+//! still splits on commas. The last legacy list plus all exact names are watched.
+//! `PODLAB-TELEM` retains the sorted global draw/cast union `cards_seen` and adds
+//! `card_counts`: rows sorted by numeric `seat`, then `name`, with numeric `draws`
+//! and `casts`. Only observed, name-resolved draw/cast events produce rows; these
+//! are event counts, not evidence of resolution or a win-condition activation.
 
 // pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
 // wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
@@ -37,7 +45,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;
 use std::panic::PanicHookInfo;
 use std::path::PathBuf;
@@ -171,6 +179,7 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
     // per-event scan in `play_one_game` is skipped entirely, not merely a
     // no-op HashSet lookup — a run that doesn't pass this flag pays nothing.
     let mut watch_cards: HashSet<String> = HashSet::new();
+    let mut exact_watch_cards = HashSet::new();
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
@@ -216,6 +225,12 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
                     );
                 }
             },
+            "--watch-card" => match args_iter.next() {
+                Some(v) if !v.trim().is_empty() && !v.starts_with("--") => {
+                    exact_watch_cards.insert(v.clone());
+                }
+                _ => return Err("error: --watch-card requires an exact card name".to_string()),
+            },
             other => {
                 // `--difficulty-p0` .. `--difficulty-p3`: single-seat override,
                 // parameterized on seat index rather than four bespoke flags.
@@ -246,6 +261,7 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
         }
     }
 
+    watch_cards.extend(exact_watch_cards);
     let cards_path = cards_path.unwrap_or_else(|| "client/public".to_string());
 
     // `--games-file` batch entries are validated up front — same hard-fail-at-
@@ -555,7 +571,7 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     // (`deck_loading.rs`), not a stable per-name identity, and every
     // `GameObject` already carries its own resolved `name`, so matching on
     // name needs no extra database lookup.
-    let mut cards_seen: HashSet<String> = HashSet::new();
+    let mut watched_cards = WatchedCards::default();
     let mut last_turn_reported: u32 = 0;
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
@@ -591,7 +607,7 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
             }
 
             if !watch_cards.is_empty() {
-                record_watched_cards(results, watch_cards, &mut cards_seen);
+                record_watched_cards(results, watch_cards, &mut watched_cards);
             }
 
             if state.turn_number != last_turn_reported {
@@ -657,7 +673,7 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     println!("Total actions: {total_actions}");
     println!("Turns played: {}", state.turn_number);
     // pod-lab swap-liveness telemetry (loop-3 Q3(b)): one line, only when
-    // `--watch-cards` was given, so a harness that doesn't ask for this pays
+    // either watch option was given, so a harness that doesn't ask for this pays
     // nothing and every existing consumer's line-by-line parse is untouched.
     // `PODLAB-TELEM ` is a prefix no other line in this binary's stdout uses,
     // and this line does not begin with "Turn ", match `^--- GAME`, or
@@ -665,9 +681,7 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     // GameOver" (pod-lab's `runner.py`/`mechanisms.py` scan for exactly those
     // literals). Cards are sorted for a deterministic, diff-friendly line.
     if !watch_cards.is_empty() {
-        let mut seen: Vec<&str> = cards_seen.iter().map(String::as_str).collect();
-        seen.sort_unstable();
-        println!("PODLAB-TELEM {}", serde_json::json!({ "cards_seen": seen }));
+        println!("PODLAB-TELEM {}", watched_cards.to_json());
     }
     println!();
 
@@ -773,32 +787,84 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     outcome
 }
 
+#[derive(Default)]
+struct WatchedCards {
+    seen: HashSet<String>,
+    counts: BTreeMap<(PlayerId, String), WatchedCardCounts>,
+}
+
+#[derive(Default)]
+struct WatchedCardCounts {
+    draws: u64,
+    casts: u64,
+}
+
+#[derive(serde::Serialize)]
+struct WatchedCardCountRow<'a> {
+    seat: PlayerId,
+    name: &'a str,
+    draws: u64,
+    casts: u64,
+}
+
+impl WatchedCards {
+    fn to_json(&self) -> serde_json::Value {
+        let mut seen: Vec<&str> = self.seen.iter().map(String::as_str).collect();
+        seen.sort_unstable();
+        let card_counts: Vec<_> = self
+            .counts
+            .iter()
+            .map(|((seat, name), counts)| WatchedCardCountRow {
+                seat: *seat,
+                name,
+                draws: counts.draws,
+                casts: counts.casts,
+            })
+            .collect();
+        serde_json::json!({ "cards_seen": seen, "card_counts": card_counts })
+    }
+}
+
 /// pod-lab swap-liveness telemetry (loop-3 Q3(b)): scans one driver-loop
 /// batch's `AiActionResult`s for `SpellCast`/`CardDrawn` events naming an
 /// object whose CURRENT name (resolved via that action's own `r.state`, not
 /// a stale/outer snapshot) is in `watch`, inserting the resolved name into
-/// `seen`. Matches on name, not `CardId`: `CardId` is assigned per
+/// the legacy union and counting each event by its own player field, never
+/// the object's owner/current controller or the AI actor. Matches on name,
+/// not `CardId`: `CardId` is assigned per
 /// physical-card-object at deck load (`deck_loading.rs`), not a stable
 /// per-name identity, while every `GameObject` already carries its own
 /// resolved `name` — no extra database lookup needed. Pure and unit-tested
 /// separately from `play_one_game`'s full game-driving loop; the caller
 /// skips calling this entirely when `watch` is empty, so a run that doesn't
-/// pass `--watch-cards` pays nothing beyond the `is_empty()` check.
+/// pass either watch option pays nothing beyond the `is_empty()` check.
+/// Unresolvable object names are skipped, as in the legacy union.
 fn record_watched_cards(
     results: &[phase_ai::auto_play::AiActionResult],
     watch: &HashSet<String>,
-    seen: &mut HashSet<String>,
+    watched: &mut WatchedCards,
 ) {
     for r in results {
         for event in &r.events {
-            let object_id = match event {
-                GameEvent::SpellCast { object_id, .. } => *object_id,
-                GameEvent::CardDrawn { object_id, .. } => *object_id,
+            let (object_id, seat, draws, casts) = match event {
+                GameEvent::SpellCast {
+                    object_id,
+                    controller,
+                    ..
+                } => (*object_id, *controller, 0, 1),
+                GameEvent::CardDrawn {
+                    object_id,
+                    player_id,
+                    ..
+                } => (*object_id, *player_id, 1, 0),
                 _ => continue,
             };
             if let Some(obj) = r.state.objects.get(&object_id) {
                 if watch.contains(&obj.name) {
-                    seen.insert(obj.name.clone());
+                    watched.seen.insert(obj.name.clone());
+                    let counts = watched.counts.entry((seat, obj.name.clone())).or_default();
+                    counts.draws += draws;
+                    counts.casts += casts;
                 }
             }
         }
@@ -1308,7 +1374,7 @@ mod tests {
         let watch: HashSet<String> = ["Lightning Bolt".to_string(), "Sol Ring".to_string()]
             .into_iter()
             .collect();
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut watched = WatchedCards::default();
 
         let results = vec![
             AiActionResult {
@@ -1343,27 +1409,123 @@ mod tests {
                     GameEvent::PriorityPassed {
                         player_id: PlayerId(0),
                     },
+                    GameEvent::CardDrawn {
+                        player_id: PlayerId(0),
+                        object_id: ObjectId(999),
+                        nth_in_turn: 3,
+                        nth_in_step: 3,
+                    },
                 ],
                 log_entries: Vec::new(),
             },
         ];
 
-        record_watched_cards(&results, &watch, &mut seen);
+        record_watched_cards(&results, &watch, &mut watched);
 
         assert_eq!(
-            seen,
+            watched.seen,
             ["Lightning Bolt".to_string(), "Sol Ring".to_string()]
                 .into_iter()
                 .collect::<HashSet<_>>()
+        );
+        assert_eq!(
+            watched.to_json(),
+            serde_json::json!({
+                "cards_seen": ["Lightning Bolt", "Sol Ring"],
+                "card_counts": [
+                    {"seat": 0, "name": "Lightning Bolt", "draws": 0, "casts": 1},
+                    {"seat": 0, "name": "Sol Ring", "draws": 1, "casts": 0}
+                ]
+            })
         );
     }
 
     #[test]
     fn record_watched_cards_is_a_noop_on_empty_results() {
         let watch: HashSet<String> = ["Lightning Bolt".to_string()].into_iter().collect();
-        let mut seen: HashSet<String> = HashSet::new();
-        record_watched_cards(&[], &watch, &mut seen);
-        assert!(seen.is_empty());
+        let mut watched = WatchedCards::default();
+        record_watched_cards(&[], &watch, &mut watched);
+        assert_eq!(
+            watched.to_json(),
+            serde_json::json!({"cards_seen": [], "card_counts": []})
+        );
+    }
+
+    #[test]
+    fn watched_counts_use_event_seats_and_accumulate_across_batches() {
+        let name = "Xira, the Golden Sting";
+        let args: Vec<String> = ["ai-commander", "--watch-card", name]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let watch = parse_cli(&args, true).unwrap().watch_cards;
+        let mut state = GameState::new(FormatConfig::commander(), 4, 1);
+        let object_id = ObjectId(100);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(100),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Stack,
+        );
+        // Neither the owner nor the current controller determines the event seat.
+        object.controller = PlayerId(1);
+        state.objects.insert(object_id, object);
+        let result = AiActionResult {
+            action: GameAction::PassPriority,
+            state,
+            events: vec![
+                GameEvent::SpellCast {
+                    card_id: CardId(100),
+                    controller: PlayerId(3),
+                    object_id,
+                    cast_mana_value: None,
+                },
+                GameEvent::CardDrawn {
+                    player_id: PlayerId(2),
+                    object_id,
+                    nth_in_turn: 1,
+                    nth_in_step: 1,
+                },
+                GameEvent::SpellCast {
+                    card_id: CardId(100),
+                    controller: PlayerId(0),
+                    object_id,
+                    cast_mana_value: None,
+                },
+                GameEvent::CardDrawn {
+                    player_id: PlayerId(1),
+                    object_id,
+                    nth_in_turn: 1,
+                    nth_in_step: 1,
+                },
+            ],
+            log_entries: Vec::new(),
+        };
+        let mut watched = WatchedCards::default();
+        for _ in 0..2 {
+            record_watched_cards(std::slice::from_ref(&result), &watch, &mut watched);
+        }
+        assert_eq!(
+            watched.to_json(),
+            serde_json::json!({
+                "cards_seen": [name],
+                "card_counts": [
+                    {"seat": 0, "name": name, "draws": 0, "casts": 2},
+                    {"seat": 1, "name": name, "draws": 2, "casts": 0},
+                    {"seat": 2, "name": name, "draws": 2, "casts": 0},
+                    {"seat": 3, "name": name, "draws": 0, "casts": 2}
+                ]
+            })
+        );
+
+        // A new game's accumulator and an empty watch set cannot inherit counts.
+        let mut next_game = WatchedCards::default();
+        record_watched_cards(&[result], &HashSet::new(), &mut next_game);
+        assert_eq!(
+            next_game.to_json(),
+            serde_json::json!({"cards_seen": [], "card_counts": []})
+        );
     }
 
     #[test]
@@ -1587,6 +1749,7 @@ mod tests {
             &["--difficulty", "Easy", "some/path"],
             &["--games-file", games_path, "some/path"],
             &["--watch-cards", "Sol Ring,Arcane Signet", "some/path"],
+            &["--watch-card", "Xira, the Golden Sting", "some/path"],
             &["--difficulty-p0", "Easy", "some/path"],
         ];
         for row in rows {
@@ -1623,6 +1786,76 @@ mod tests {
             .collect();
         assert_eq!(cli.watch_cards, expected);
         assert_eq!(cli.cards_path, "some/path");
+    }
+
+    #[test]
+    fn parse_cli_watch_card_repeats_without_splitting_or_normalizing_names() {
+        let args: Vec<String> = [
+            "ai-commander",
+            "--watch-card",
+            "Xira, the Golden Sting",
+            "--watch-card",
+            "Éomer, Marshal of Rohan",
+            "--watch-card",
+            "Xira, the Golden Sting",
+            "--watch-card",
+            " Sol Ring ",
+            "some/path",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let cli = parse_cli(&args, false).unwrap();
+        assert_eq!(
+            cli.watch_cards,
+            [
+                "Xira, the Golden Sting",
+                "Éomer, Marshal of Rohan",
+                " Sol Ring "
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+        );
+        assert_eq!(cli.cards_path, "some/path");
+    }
+
+    #[test]
+    fn parse_cli_watch_options_combine_with_last_legacy_list() {
+        let args: Vec<String> = [
+            "ai-commander",
+            "--watch-card",
+            "Xira, the Golden Sting",
+            "--watch-cards",
+            "Forest",
+            "--watch-cards",
+            "Sol Ring, Arcane Signet,,",
+            "--watch-card",
+            "Sol Ring",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let cli = parse_cli(&args, false).unwrap();
+        assert_eq!(
+            cli.watch_cards,
+            ["Xira, the Golden Sting", "Sol Ring", "Arcane Signet"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn parse_cli_watch_card_rejects_missing_or_blank_name() {
+        for value in [None, Some(""), Some("  "), Some("--seed")] {
+            let mut args = vec!["ai-commander".to_string(), "--watch-card".to_string()];
+            args.extend(value.map(str::to_string));
+            assert!(matches!(
+                parse_cli(&args, false),
+                Err(message) if message == "error: --watch-card requires an exact card name"
+            ));
+        }
     }
 
     /// F4 value-consumption pin: the `--games-file` value must reach

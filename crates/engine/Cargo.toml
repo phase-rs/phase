@@ -86,6 +86,10 @@ path = "src/bin/card_data_validate.rs"
 test = false
 
 [[bin]]
+name = "deck-check"
+path = "src/bin/deck_check.rs"
+
+[[bin]]
 name = "interaction-bindings"
 path = "src/bin/interaction_bindings.rs"
 required-features = ["interaction-bindings"]
