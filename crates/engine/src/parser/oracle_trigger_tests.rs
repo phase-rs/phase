@@ -16900,6 +16900,126 @@ fn trigger_put_into_graveyard_from_anywhere() {
     assert_eq!(def.origin, None);
 }
 
+/// CR 603.6c + CR 700.4: "from anywhere other than the battlefield" on a
+/// singular put-into-graveyard trigger is a negative-disjunction origin that
+/// the scalar `def.origin: Option<Zone>` cannot model. It must route through
+/// `zone_change_clauses` as `OriginConstraint::NotEquals` so the disjunctive
+/// matcher (`match_changes_zone`) enforces it — the same routing the ETB path
+/// applies for "enters from anywhere other than a graveyard or exile" (Name
+/// Sticker Goblin class). Regression guard for the Disa the Restless class:
+/// "Whenever a Lhurgoyf permanent card is put into your graveyard from anywhere
+/// other than the battlefield, put it onto the battlefield."
+#[test]
+fn trigger_put_into_graveyard_from_anywhere_other_than_battlefield() {
+    // Class analog: a non-type-restricted permanent card with the same tail.
+    let def = parse_trigger_line(
+        "Whenever a permanent card is put into your graveyard from anywhere other than the battlefield, put it onto the battlefield.",
+        "Disa the Restless",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    // CR 603.6c: when a richer-than-`Equals`/`Any` origin is routed through
+    // `zone_change_clauses`, the clause path in `match_changes_zone` fully
+    // supersedes the scalar `destination`/`valid_card` fields (they are
+    // consulted only inside the clause). The parse mirrors the ETB analog at
+    // `oracle_trigger.rs:11430-11433`: clear the superseded scalar fields so
+    // the serialized trigger carries only the clause, not both it and a
+    // mirrored scalar `destination`. Assert that contract here.
+    assert!(
+        def.destination.is_none(),
+        "superseded scalar destination must be cleared, got {:?}",
+        def.destination
+    );
+    assert!(
+        def.origin.is_none(),
+        "negative-disjunction origin must NOT collapse to the scalar `origin` field"
+    );
+    assert!(
+        def.valid_card.is_none(),
+        "superseded scalar valid_card must be cleared, got {:?}",
+        def.valid_card
+    );
+    assert_eq!(
+        def.zone_change_clauses.len(),
+        1,
+        "expected one zone_change_clauses entry, got {:?}",
+        def.zone_change_clauses
+    );
+    let clause = &def.zone_change_clauses[0];
+    assert_eq!(
+        clause.origin,
+        OriginConstraint::NotEquals(Zone::Battlefield),
+        "the \"other than the battlefield\" tail must parse as NotEquals(Battlefield)"
+    );
+    assert_eq!(clause.destination, Some(Zone::Graveyard));
+    assert_eq!(clause.destination_constraint, DestinationConstraint::Any);
+    assert!(
+        clause.valid_card.is_some(),
+        "type/subject filter must be threaded into the clause's valid_card"
+    );
+
+    // Disa's actual Oracle text — type-restricted ("Lhurgoyf permanent card").
+    // The subject parse is a separate concern; this asserts the origin routing
+    // for the real card is correct and the clause fully supersedes scalars.
+    let disa = parse_trigger_line(
+        "Whenever a Lhurgoyf permanent card is put into your graveyard from anywhere other than the battlefield, put it onto the battlefield.",
+        "Disa the Restless",
+    );
+    assert_eq!(disa.mode, TriggerMode::ChangesZone);
+    assert!(disa.destination.is_none());
+    assert!(disa.origin.is_none());
+    assert!(disa.valid_card.is_none());
+    assert_eq!(disa.zone_change_clauses.len(), 1);
+    assert_eq!(
+        disa.zone_change_clauses[0].origin,
+        OriginConstraint::NotEquals(Zone::Battlefield)
+    );
+}
+
+/// Regression for the possessive-hand grammar gap surfaced by review
+/// (CodeRabbit line 18113 / Matthew Evans blocker -- "their hand"):
+/// `parse_graveyard_origin_zone` recognized `your hand` but not `their hand` /
+/// `an opponent's hand` / `a player's hand`, so "from anywhere other than
+/// their hand" fell through to `OriginConstraint::Any` and silently dropped
+/// the exclusion. Every possessive hand form now maps to `Zone::Hand`, so the
+/// negative tail routes through `parse_origin_constraint_tail` ->
+/// `OriginConstraint::NotEquals(Zone::Hand)`. Asserted on a class analog and
+/// on Disa's exact text with a "their hand" tail.
+#[test]
+fn trigger_put_into_graveyard_from_anywhere_other_than_their_hand() {
+    // Class analog: no subtype on the subject.
+    let def = parse_trigger_line(
+        "Whenever a permanent card is put into your graveyard from anywhere other than their hand, put it onto the battlefield.",
+        "Hand-Other Observer",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert!(
+        def.destination.is_none(),
+        "superseded scalar destination must be cleared"
+    );
+    assert!(def.origin.is_none());
+    assert!(def.valid_card.is_none());
+    assert_eq!(def.zone_change_clauses.len(), 1);
+    assert_eq!(
+        def.zone_change_clauses[0].origin,
+        OriginConstraint::NotEquals(Zone::Hand),
+        "\"other than their hand\" must parse as NotEquals(Hand), not fall back to Any"
+    );
+    assert_eq!(def.zone_change_clauses[0].destination, Some(Zone::Graveyard));
+
+    // Same subject with Disa's exact type-restricted phrasing but a
+    // "their hand" exclusion -- exercises the updated possession grammar.
+    let def = parse_trigger_line(
+        "Whenever a Lhurgoyf permanent card is put into your graveyard from anywhere other than their hand, put it onto the battlefield.",
+        "Disa the Restless",
+    );
+    assert_eq!(def.zone_change_clauses.len(), 1);
+    assert_eq!(
+        def.zone_change_clauses[0].origin,
+        OriginConstraint::NotEquals(Zone::Hand),
+        "the 'their hand' possessor must be recognized, not treated as Any"
+    );
+}
+
 #[test]
 fn trigger_you_discard_a_card() {
     let def = parse_trigger_line(
