@@ -17,6 +17,7 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/workflows/deploy.yml'
       - '.github/workflows/release.yml'
+      - '.github/workflows/shell-release.yml'
   pull_request:
     branches: [main]
   merge_group:
@@ -132,6 +133,24 @@ jobs:
         # checker together. The authority is action-pin-audit.yml, which runs
         # the default branch's copy of the checker against this commit.
         run: python3 scripts/check_action_pins.py
+
+      - name: Media plugin packaging checker unit tests
+        # Exercises the checker against throwaway trees only; it does not read
+        # this repository's own packaging files. What matters is that it refuses
+        # a degraded read -- a renamed constant or a renamed build step -- rather
+        # than reporting a clean pass over the empty package set that a failed
+        # read produces.
+        run: python3 scripts/check_media_plugin_packaging_tests.py
+
+      - name: Media plugin packaging coverage
+        # media_stack.rs's REQUIRED_PLUGINS is the single authority for the
+        # GStreamer plugins this app needs, and both packaging consumers must
+        # cover every package it declares: the .deb's bundle.linux.deb.depends,
+        # and shell-release.yml's Linux apt step, which is the whole set
+        # linuxdeploy-plugin-gstreamer has available to copy into the AppImage.
+        # They are checked separately because #8615 shipped a silent AppImage
+        # while only the .deb side was current.
+        run: python3 scripts/check_media_plugin_packaging.py
 
       - name: Resolution-frame boundary guard
         # Full-tree guard: legacy resolution keys are reader/fixture-only, and
