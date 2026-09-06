@@ -1559,3 +1559,4 @@ mod zhulodok_double_cascade;
 
 mod context_ref_slot_hygiene;
 mod exchange_control_of_a_spell;
+mod ripple_reveal_choice_interaction;

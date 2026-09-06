@@ -228,7 +228,6 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
-        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
@@ -315,6 +314,12 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::CastOffer { .. }
+        // CR 702.60a: Ripple's "you **may** reveal the top N" is a binary
+        // reveal/decline offer answered with `GameAction::RippleChoice` — the
+        // same finite two-action shape as the `CastOffer` free-cast decision
+        // above it, and it selects no cards. Only `RippleBottomOrder` (the
+        // "in any order" permutation) is a `Select`.
+        | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::MutateMergeChoice { .. }
