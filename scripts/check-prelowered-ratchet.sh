@@ -53,6 +53,8 @@ done < "$LEDGER"
 declare -A actual=()
 while IFS=: read -r path count; do
   [[ -z "${path:-}" ]] && continue
+  # Native Windows ripgrep emits backslashes; ledger paths use Git's slashes.
+  path="${path//\\//}"
   actual["$path"]="$count"
 done < <(
   rg --count-matches --glob '*.rs' --glob '!**/snapshots/**' "$NEEDLE" "$SCOPE" 2>/dev/null || true
