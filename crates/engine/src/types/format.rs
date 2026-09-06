@@ -587,15 +587,15 @@ impl Serialize for FormatConfig {
 /// of `i32`'s range for subsequent gameplay-driven life changes. This ceiling
 /// — and the CR 704.5a / CR 810.8c playability floor beside it — is enforced
 /// by `validate_starting_life_bounds`, which is the single shared authority
-/// called from BOTH arms of `FormatConfig::deserialize` (built-in and
-/// Custom): neither a built-in payload's `starting_life` nor a Custom
-/// payload's `custom_rules.structural.starting_life` may cross either bound.
+/// for both bounds: neither a built-in payload's `starting_life` nor a
+/// Custom payload's `custom_rules.structural.starting_life` may cross either
+/// bound, regardless of which of that function's call sites checks it.
 pub const MAX_STARTING_LIFE: i32 = 1_000_000;
 
 /// CR 704.5a / CR 810.8c playability floor, and the `MAX_STARTING_LIFE`
 /// overflow-safety ceiling, on a resolved `FormatConfig`. This is the single
-/// shared authority for both bounds, called from BOTH arms of
-/// `FormatConfig::deserialize`:
+/// shared authority for both bounds. `FormatConfig::deserialize` calls it
+/// from both of its arms:
 ///
 /// - the built-in (`None`) arm, via `built_in_axes_no_looser_than_rules`'s
 ///   `starting_life` `HostChoiceWithin` row;
@@ -605,6 +605,15 @@ pub const MAX_STARTING_LIFE: i32 = 1_000_000;
 ///   self-consistency, not that the declared life total is playable or
 ///   within the engine's arithmetic-safety ceiling, so this call is what
 ///   actually bounds it.
+///
+/// Two more callers bound a `FormatConfig` before it ever reaches
+/// `deserialize`, closing the gap where a raw, not-yet-validated config
+/// could otherwise reach a live session: `engine-wasm`'s
+/// `format_config_for_custom_rules` (the resolver the frontend calls when a
+/// player selects a saved custom format out of localStorage) and
+/// `server-core`'s `SessionManager::create_game_n_players` (defense in depth
+/// alongside its existing `validate_for_player_count`/
+/// `reject_unimplemented_range_of_influence` calls).
 ///
 /// CR 103.4 licenses a VARIANT starting life total; it does not by itself
 /// hand the number to a host. What does is the product: the shipped host UI
@@ -631,7 +640,10 @@ pub const MAX_STARTING_LIFE: i32 = 1_000_000;
 /// playability concern (a seat that cannot survive the first SBA check) is a
 /// per-seat question but the overflow concern is about the field's own
 /// magnitude before it is ever divided.
-fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String> {
+///
+/// `pub` (not `pub(crate)`): both of the two additional callers above are
+/// separate crates from `engine`.
+pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String> {
     if config.starting_life_for_seat() < 1 {
         return Err(format!(
             "FormatConfig.starting_life is {}, which resolves to {} per seat for {} — every seat \
@@ -1884,8 +1896,8 @@ impl FormatConfig {
     /// behavioral tightening — a `player_count` outside the format's range
     /// that an older server would have accepted is now rejected.
     ///
-    /// Six production call sites reach this check, and they split into three
-    /// groups by what they are validating:
+    /// Five production call sites reach this check, and they split into
+    /// three groups by what they are validating:
     ///
     /// - Retryable wire rejections, validating a player_count just supplied
     ///   on an inbound request against a *declared* `FormatConfig`: both
@@ -1900,28 +1912,27 @@ impl FormatConfig {
     ///   in front of it already checked, as defense in depth.
     /// - Checked against a PERSISTED `player_count` instead — a game that
     ///   already exists, not a fresh request. `server_core::session::
-    ///   GameSession::from_persisted` remains a hard rejection here: a
-    ///   session already saved with a `player_count` outside its format's
-    ///   registry range can never be restored again through that path (see
+    ///   GameSession::from_persisted` is a hard rejection here: a session
+    ///   already saved with a `player_count` outside its format's registry
+    ///   range can never be restored again through that path (see
     ///   `from_persisted_rejects_a_persisted_player_count_outside_the_
     ///   format_registry_range`). This is reachable, not merely
     ///   hypothetical — e.g. a `CommanderDraft` session (registry range
     ///   3..=8) persisted with `player_count` 2 from before this bound
-    ///   existed on whichever path created it. The WASM restore boundary
-    ///   (`decode_and_rehydrate_restored_game_state`, shared by
-    ///   `restore_game_state` and `resume_multiplayer_host_state`) is
-    ///   checked against the same kind of persisted, already-exists state,
-    ///   but instead REPAIRS: it widens the restored `format_config`'s
-    ///   `min_players`/`max_players` to admit the persisted seat count
-    ///   before calling this same validator (see
-    ///   `decoded_restore_repairs_a_persisted_seat_count_outside_the_
-    ///   format_registry_range`), because that boundary serves undo,
-    ///   localStorage save restore, and P2P host crash recovery — all cases
-    ///   where refusing the restore would strand user-owned state that was
-    ///   already playable. See that function's own comment for the full
-    ///   rationale. Whether `from_persisted` itself should someday repair
-    ///   the same way, rather than reject, is untracked and currently
-    ///   accepted as-is; this paragraph is disclosure only.
+    ///   existed on whichever path created it.
+    ///
+    /// The WASM restore boundary (`decode_and_rehydrate_restored_game_state`,
+    /// shared by `restore_game_state` and `resume_multiplayer_host_state`) is
+    /// NOT a call site of this function, even though it also handles
+    /// persisted, already-exists state. Rejecting there — or repairing by
+    /// widening the restored `format_config`'s `min_players`/`max_players`
+    /// before calling this validator — was tried and reverted; see that
+    /// closure's own comment for why widening is actively unsafe (a widened
+    /// `min_players` fails `FormatConfig::deserialize`'s own admission gate
+    /// on the very next load, since `min_players` is a Locked row in
+    /// `built_in_axes_no_looser_than_rules`). This asymmetry with
+    /// `from_persisted` is deliberate and accepted as-is; this paragraph is
+    /// disclosure only.
     pub fn validate_for_player_count(&self, player_count: u8) -> Result<(), String> {
         // CR 100.1a / CR 100.1b / CR 800.1: a two-player game begins with two
         // players and a multiplayer game with more than two; the exact seat

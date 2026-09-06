@@ -12457,7 +12457,7 @@ mod full_create_guard_tests {
 
     /// The `format_config.validate_for_player_count(pc)?` call
     /// (`guard_full_create_game_settings_inbound`, line 1265) is one of the
-    /// six production call sites; `fields()`'s `player_count: 2` clamps to
+    /// five production call sites; `fields()`'s `player_count: 2` clamps to
     /// `pc == 2`, which falls outside `CommanderDraft`'s own registry range
     /// (3-8) — this is a retryable wire rejection (the client can resubmit
     /// with a corrected `player_count`), unlike the same check's use at

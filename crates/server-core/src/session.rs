@@ -24,7 +24,7 @@ use engine::game::{
 use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
-use engine::types::format::FormatConfig;
+use engine::types::format::{validate_starting_life_bounds, FormatConfig};
 use engine::types::game_state::{GameState, PersistedGameState};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -1418,6 +1418,15 @@ impl SessionManager {
         let format_config = format_config.unwrap_or_else(FormatConfig::standard);
         format_config.validate_for_player_count(player_count)?;
         format_config.reject_unimplemented_range_of_influence()?;
+        // Defense in depth alongside the two checks above: every production
+        // caller of this `pub` constructor already passes a config that went
+        // through `FormatConfig::deserialize` (which calls this same bound
+        // via both `built_in_axes_no_looser_than_rules` and the Custom arm)
+        // or through the engine's own registry builders, but this function's
+        // visibility does not guarantee that — see
+        // `validate_starting_life_bounds`'s own doc comment for the other
+        // two callers that close this same gap.
+        validate_starting_life_bounds(&format_config)?;
 
         let game_code = generate_game_code();
         let player_token = generate_player_token();
@@ -2689,6 +2698,33 @@ mod tests {
             )
             .expect_err("Standard's registry range (2..=2) must reject a 3-seat session");
         assert!(err.contains("player_count"));
+        assert!(mgr.sessions.is_empty());
+    }
+
+    /// Round-6 finding: `create_game_n_players` is `pub` and validated seat
+    /// count and range-of-influence but not `starting_life`, so a caller that
+    /// builds its own `FormatConfig` (rather than deserializing one) could
+    /// seat a game whose life total loses every seat at the very first
+    /// state-based-action check (CR 704.5a). All three production callers
+    /// today happen to pass a deserialized or registry-built config, but this
+    /// function's own visibility does not guarantee that.
+    #[test]
+    fn create_game_rejects_starting_life_outside_bounds() {
+        let mut mgr = SessionManager::new();
+        let mut format_config = FormatConfig::standard();
+        format_config.starting_life = 0;
+
+        let err = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig::default(),
+                Some(format_config),
+            )
+            .expect_err("0 starting life loses every seat at the first SBA check (CR 704.5a)");
+        assert!(err.contains("starting_life"));
         assert!(mgr.sessions.is_empty());
     }
 

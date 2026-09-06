@@ -41,7 +41,9 @@ use engine::game::{
 };
 use engine::types::actions::DebugAction;
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
-use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
+use engine::types::format::{
+    validate_starting_life_bounds, DeckCopyLimit, FormatConfig, GameFormat,
+};
 use engine::types::game_state::{
     PersistedGameState, PersistedRestoreFinalization, PreparedPersistedGameState,
     TrustedGameStateEnvelope, WaitingFor,
@@ -238,7 +240,7 @@ mod external_format_config_tests {
     }
 
     /// `validate_external_format_config`'s `validate_for_player_count` call
-    /// (used by `initialize_game_impl`) is one of the six production call
+    /// (used by `initialize_game_impl`) is one of the five production call
     /// sites: `CommanderDraft`'s registry range is 3-8, so a 2-player
     /// initialize request must be rejected here too — a retryable wire
     /// rejection, unlike the same check's use at
@@ -250,6 +252,63 @@ mod external_format_config_tests {
         assert!(validate_external_format_config(&config, 2)
             .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
             .contains("player_count"));
+    }
+
+    /// `format_config_for_custom_rules` resolves a saved custom-format
+    /// definition into a live `FormatConfig` for the "select a saved custom
+    /// format" lobby action; `custom_rules` is user-editable localStorage
+    /// data with no other ingress check on `starting_life` before it reaches
+    /// a live session. `resolve_and_validate_custom_format_config` is the
+    /// resolve-plus-bound step behind the `#[wasm_bindgen]` shell (which
+    /// cannot be exercised natively — see its own doc comment).
+    #[test]
+    fn resolve_and_validate_custom_format_config_rejects_starting_life_outside_bounds() {
+        use engine::types::custom_format::{
+            CommandZoneMode, CustomFormatId, CustomFormatRules, LegacyRuleSet, LegalityRules,
+            StructuralRules,
+        };
+        use engine::types::format::{DeckSizeRule, SideboardPolicy, MAX_STARTING_LIFE};
+
+        fn rules_with_starting_life(starting_life: i32) -> CustomFormatRules {
+            CustomFormatRules {
+                id: CustomFormatId(1),
+                structural: StructuralRules {
+                    starting_life,
+                    min_players: 2,
+                    max_players: 4,
+                    deck_size: DeckSizeRule::Minimum(60),
+                    singleton: false,
+                    command_zone_mode: CommandZoneMode::Disabled,
+                    range_of_influence: None,
+                    team_based: false,
+                    sideboard_policy: SideboardPolicy::Unlimited,
+                    default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+                },
+                legality: LegalityRules {
+                    legal_sets: None,
+                    banned: Vec::new(),
+                    restricted: Vec::new(),
+                    legacy: LegacyRuleSet::default(),
+                },
+            }
+        }
+
+        assert!(
+            resolve_and_validate_custom_format_config(&rules_with_starting_life(20)).is_ok(),
+            "a playable, in-bounds starting_life must resolve"
+        );
+        assert!(
+            resolve_and_validate_custom_format_config(&rules_with_starting_life(0))
+                .expect_err("0 starting life loses every seat at the first SBA check (CR 704.5a)")
+                .contains("starting_life"),
+        );
+        assert!(
+            resolve_and_validate_custom_format_config(&rules_with_starting_life(
+                MAX_STARTING_LIFE + 1
+            ))
+            .expect_err("a starting_life above MAX_STARTING_LIFE risks i32 overflow")
+            .contains("starting_life"),
+        );
     }
 
     #[test]
@@ -1191,9 +1250,18 @@ pub fn custom_format_from_lobby_config(
 }
 
 /// The single authoritative `CustomFormatRules -> FormatConfig` resolver,
-/// exposed for the lobby's "select a saved custom format" action. Total and
-/// infallible: a `CustomFormatRules` carries every structural field the config
-/// needs, so there is no unresolvable input.
+/// exposed for the lobby's "select a saved custom format" action.
+/// `FormatConfig::for_custom_rules` itself is total and infallible: a
+/// `CustomFormatRules` carries every structural field the config needs, so
+/// there is no unresolvable input. This wrapper is fallible anyway — beyond
+/// deserializing the JS payload, it also bounds the resolved config's
+/// `starting_life` (CR 704.5a / CR 810.8c playability floor, and the engine's
+/// `MAX_STARTING_LIFE` overflow-safety ceiling) via
+/// `validate_starting_life_bounds`. `custom_rules` is user-editable
+/// localStorage data with no other ingress check on this field before it
+/// reaches a live session, so an out-of-bounds value must be caught here
+/// rather than surfacing as a raw, unreadable `FormatConfig::deserialize`
+/// error at game start.
 ///
 /// The frontend must call this rather than assembling a `FormatConfig` from the
 /// saved rules itself. `FormatConfig`'s own `Deserialize` re-derives the config
@@ -1203,7 +1271,22 @@ pub fn custom_format_from_lobby_config(
 pub fn format_config_for_custom_rules(custom_rules: JsValue) -> Result<JsValue, JsValue> {
     let rules: CustomFormatRules = serde_wasm_bindgen::from_value(custom_rules)
         .map_err(|e| JsValue::from_str(&format!("Invalid CustomFormatRules: {e}")))?;
-    Ok(to_js(&FormatConfig::for_custom_rules(&rules)))
+    let config =
+        resolve_and_validate_custom_format_config(&rules).map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&config))
+}
+
+/// The fallible resolve step behind [`format_config_for_custom_rules`],
+/// extracted so it is reachable from a native `#[cfg(test)]` module: the
+/// `#[wasm_bindgen]` shell above serializes through `to_js`, which panics
+/// outside a wasm32 runtime (see `validate_deck_list_seats`'s own note on the
+/// same constraint).
+fn resolve_and_validate_custom_format_config(
+    rules: &CustomFormatRules,
+) -> Result<FormatConfig, String> {
+    let config = FormatConfig::for_custom_rules(rules);
+    validate_starting_life_bounds(&config)?;
+    Ok(config)
 }
 
 /// Returns the engine-authored Oathbreaker signature-spell selection policy.
@@ -2402,36 +2485,26 @@ fn decode_and_rehydrate_restored_game_state(
     let state = restored
         .state
         .finalize_after_rehydration(|state| {
-            // Mirrors `server_core::session::GameSession::from_persisted`'s
-            // `validate_for_player_count` call, but REPAIRS rather than
-            // rejects: this closure is the shared body of both
-            // `restore_game_state` (undo, and resuming a localStorage save)
-            // and `resume_multiplayer_host_state` (P2P host crash recovery),
-            // so a hard rejection here would strand user-owned state that
-            // was already playable — undo would die, a saved game could
-            // never load again, and a returning P2P host could never resume.
-            // `from_persisted` faces the identical dilemma (a persisted
-            // `player_count` outside its format's registry range) and
-            // chooses to reject anyway, because there a server operator can
-            // intervene; here there is no operator, only the player whose
-            // state this is. Either way, the game ALREADY EXISTS with
-            // `players.len()` seats — the persisted seat count is
-            // authoritative and the format's registry range is what must
-            // yield. Widen `min_players`/`max_players` to admit the
-            // persisted seat count — never touch `players` itself — then run
-            // the normal validator so its other checks (e.g.
-            // `archenemy_player` bounds, `range_of_influence` radius) still
-            // apply unchanged.
-            let restored_player_count = state.players.len() as u8;
-            if restored_player_count < state.format_config.min_players {
-                state.format_config.min_players = restored_player_count;
-            }
-            if restored_player_count > state.format_config.max_players {
-                state.format_config.max_players = restored_player_count;
-            }
-            state
-                .format_config
-                .validate_for_player_count(restored_player_count)?;
+            // Deliberate, accepted asymmetry with
+            // `server_core::session::GameSession::from_persisted`: that path
+            // rejects a persisted `player_count` outside its format's
+            // registry range; this closure does not bound the persisted seat
+            // count against the registry range at all. This is the shared
+            // body of both `restore_game_state` (undo, and resuming a
+            // localStorage save) and `resume_multiplayer_host_state` (P2P
+            // host crash recovery), so a hard rejection here would strand
+            // user-owned state that was already playable. A repair that
+            // widens `min_players`/`max_players` to admit the persisted seat
+            // count was tried and reverted: `min_players` is a Locked row in
+            // `built_in_axes_no_looser_than_rules` (must equal the format
+            // registry's value exactly), so a widened config fails
+            // `FormatConfig::deserialize`'s own admission gate the very next
+            // time it is loaded — permanently bricking the save, and, since
+            // this state is autosaved and broadcast to P2P guests, taking
+            // them down with it. The residual risk of leaving this
+            // unvalidated is contained: it requires a hand-edited save, and
+            // the `restore_game_state` path is refused outright whenever
+            // `MULTIPLAYER_MODE` is set. Accepted as-is; untracked.
             rehydrate_restored_state_from_card_db(state)?;
             // Combat declaration snapshots are display data derived from the rehydrated
             // live board. Rebuild them before this external state becomes interactive.
@@ -2656,46 +2729,6 @@ mod restored_card_db_requirements_tests {
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
-    }
-
-    /// Phase 1d production seam, round-5-corrected: mirrors
-    /// `server_core::session::GameSession::from_persisted`'s
-    /// `validate_for_player_count` call, which the WASM restore boundary
-    /// lacked, but REPAIRS instead of rejecting (see
-    /// `decode_and_rehydrate_restored_game_state`'s own comment on this
-    /// closure for why: this boundary serves undo, localStorage save
-    /// restore, and P2P host crash recovery, all of which must not strand
-    /// already-playable user-owned state). `FormatConfig::commander_draft()`
-    /// is internally consistent on its own (min 3, max 8) so it passes
-    /// `FormatConfig::deserialize`'s own admission gate unchanged; the
-    /// persisted seat count (2) falls outside that format's registry range,
-    /// so this test pins that the restore now WIDENS `min_players` to admit
-    /// it (2) rather than rejecting the restore or touching `players`.
-    #[test]
-    fn decoded_restore_repairs_a_persisted_seat_count_outside_the_format_registry_range() {
-        clear_game_state();
-        set_multiplayer_mode(false);
-        load_minimal_test_card_database();
-        let mut state = GameState::new_two_player(17);
-        state.format_config = FormatConfig::commander_draft();
-        let json = serde_json::to_string(&state).unwrap();
-
-        let restored = decode_and_rehydrate_restored_game_state(&json, |_| {})
-            .expect("2 seats must be repaired, not rejected, against CommanderDraft's 3-8 range");
-        assert_eq!(
-            restored.state.players.len(),
-            2,
-            "repair must never drop, add, or otherwise touch the persisted seats"
-        );
-        assert_eq!(
-            restored.state.format_config.min_players, 2,
-            "min_players must widen to admit the persisted seat count"
-        );
-        assert_eq!(
-            restored.state.format_config.max_players, 8,
-            "max_players was already >= the persisted seat count and must stay unchanged"
-        );
-        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
     }
 }
 
