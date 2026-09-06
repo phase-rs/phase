@@ -17334,37 +17334,48 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
             clause = with_clause_duration(clause, duration);
         }
     }
-    // CR 611.2a: A during-resolution cast happens AS the ability resolves and
-    // cannot carry a lingering play-window duration. When the anaphor branch set
-    // the paid graveyard "cast that card" driver to `DuringResolution` from the
-    // chosen target's zone alone, but a trailing duration was stripped above
-    // ("cast that card THIS TURN" — Emry, Lurker in the Loch), this is really a
-    // standing `LingeringPermission` grant — restore it. The optionality
-    // reconciliation for the no-duration paid case (clearing the redundant
-    // `OptionalEffectChoice`) happens at the chunk-level `is_optional` derivation,
-    // where the offer's "may" is recognized (mirroring `FreeCastFromZones`).
+    // CR 611.2a + CR 608.2g: the trailing-duration seam of the shared cast-mechanism
+    // reconciliation. A stripped trailing duration means the grant is exercised at a
+    // LATER priority window (CR 117.1a), which is the defining property of a lingering
+    // permission — so both resolution-scoped mechanisms degrade back to one:
+    // `DuringResolution` for the single card an anaphor names ("cast that card THIS
+    // TURN" — Emry, Lurker of the Loch) and `ResolutionWindow` for the batch form
+    // ("You may cast spells with exactly three colors from among them THIS TURN" —
+    // Meeting of the Five).
+    //
+    // `CastFromZoneDriver::with_lingering_duration` is the single authority for that
+    // judgement; this seam only calls it. It used to be asked ONLY about the batch
+    // form, with the single-card degrade hand-written HERE behind a
+    // `without_paying_mana_cost: false` guard — a guard that decided by who pays, when
+    // CR 118.9 governs what a permission COSTS and not when it is exercised (CR 608.2g
+    // + CR 117.1a).
+    //
+    // WHAT THIS BLOCK STILL DOES — measured twice, because the answer is not the obvious
+    // one. A reach marker here fires over the corpus, so the block is NOT unreachable;
+    // every hit arrives already carrying `LingeringPermission`, because the trailing peel
+    // above routes through `with_clause_duration` → `apply_duration_to_effect`, which
+    // asked the same authority a few lines earlier. Neutralizing this block entirely and
+    // re-parsing leaves the affected grants byte-identical.
+    //
+    // So the block is redundant for a cast clause rather than dead, and the hand-written
+    // guard's defect was its CONDITION, not its address — a wider guard written here
+    // would have reached the trailing-duration members. It would still have missed the
+    // LEADING-duration ones: their duration is stamped in `parse_effect_clause` after
+    // this function has already returned, so they never see this gate. Only the shared
+    // authority covers both, which is why the judgement lives there and not in an
+    // `if let` at one seam.
+    //
+    // And the degrade is refusable, which is why `with_lingering_duration` returns an
+    // `Option`: a batch window that printed a cast cap ("up to two") or a running-total
+    // budget would otherwise land on a per-object permission with nowhere to keep the
+    // shared bound. No rules coordinate is cited for that because none states it — it is
+    // a property of the representation, and `cast_bound_lost_to_duration_gap` is the
+    // honest gap it produces.
+    //
+    // The optionality reconciliation for the no-duration paid case (clearing the
+    // redundant `OptionalEffectChoice`) happens at the chunk-level `is_optional`
+    // derivation, where the offer's "may" is recognized (mirroring `FreeCastFromZones`).
     if clause.duration.is_some() {
-        if let Effect::CastFromZone {
-            driver: driver @ crate::types::ability::CastFromZoneDriver::DuringResolution,
-            without_paying_mana_cost: false,
-            ..
-        } = &mut clause.effect
-        {
-            *driver = crate::types::ability::CastFromZoneDriver::LingeringPermission;
-        }
-        // CR 611.2a + CR 608.2g: same reconciliation for the FREE batch window
-        // ("… from among them"). A stripped trailing duration means the grant is
-        // exercised at a later priority window (Meeting of the Five: "You may
-        // cast spells with exactly three colors from among them THIS TURN"), so
-        // the resolution-scoped window degrades to a lingering permission. The
-        // `without_paying_mana_cost: false` guard above is deliberately NOT
-        // shared: it belongs to the paid chosen-target case, and this class is
-        // free by construction.
-        //
-        // CR 608.2c: and the degrade is refusable here for the same reason it is
-        // at the other two seams — a stripped trailing "… this turn" on a window
-        // that printed "up to two" (or a CR 202.3 running total) would otherwise
-        // land on a per-object permission with no shared budget.
         let mut refused_bound = None;
         if let Effect::CastFromZone { driver, .. } = &mut clause.effect {
             match driver.with_lingering_duration() {
@@ -26464,16 +26475,22 @@ fn cast_target_is_hand_origin(target: &TargetFilter) -> bool {
 /// NOT routed through here — its identical field tuple maps to the opposite
 /// driver (anaphor of a just-exiled single card vs. a standing filter pool).
 ///
-/// DURATION IS DELIBERATELY NOT A PARAMETER. The driver is decided while any
+/// DURATION IS DELIBERATELY NOT A PARAMETER, and this function is therefore NOT
+/// the last word on a durational clause. The driver is decided while any
 /// leading duration is stripped (`parse_effect_clause`), and the duration is
 /// stamped by a *separate* orthogonal pass (`with_clause_duration`) that never
-/// touches `driver`. The engine ships hand-origin `DuringResolution` casts that
-/// ALSO carry `duration=UntilEndOfTurn` (twinning glass, chandra flame's
-/// catalyst ultimate); a durational hand-origin free-cast is NOT lingering. The
-/// real discriminator is the *alternative casting method* (`without_paying` OR
-/// an alternative cost), proven by Sen Triplets (hand-origin, durational,
-/// FULL-cost → lingering) sitting opposite twinning glass (hand-origin,
-/// durational, FREE → during-resolution).
+/// touches `driver`. What this function answers is the NO-DURATION question:
+/// which casting mechanism a clause that states no lifetime uses. A stated
+/// lifetime is reconciled afterwards by
+/// `CastFromZoneDriver::with_lingering_duration`, which every duration seam
+/// calls (Chandra's own runs through `with_clause_duration` →
+/// `apply_duration_to_effect`) and which degrades any `DuringResolution` back to
+/// `LingeringPermission` (CR 611.2a + CR 608.2g + CR 117.1a: a stated lifetime
+/// means a later priority window, which a during-resolution cast has not got).
+/// So a hand-origin free cast that really is durational — Chandra, Flame's
+/// Catalyst's ultimate, "Until end of turn, you may cast spells from your hand
+/// without paying their mana costs" — ends as a lingering permission despite
+/// the `DuringResolution` this function returns for it.
 ///
 /// Casts during resolution iff it is a `Cast` (CR 601.2, not a CR 305.1 land
 /// play) from a `hand` origin via an alternative casting method — free

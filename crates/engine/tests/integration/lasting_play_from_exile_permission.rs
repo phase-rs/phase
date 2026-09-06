@@ -18,17 +18,20 @@
 //!     duration at all.
 //!
 //! F3 — the field gained a value it never carried, so its five reader sites were
-//! walked: `assembly.rs:2384`, `cast_from_zone.rs:733`, `:764`, `:1380`,
-//! `ability_rw.rs:3419`. The first and fourth are the two above. The other three
-//! cannot move for any input:
+//! walked: `is_lingering_cast_from_zone` (assembly), the two `duration.is_none()`
+//! gates in `cast_from_zone::resolve` (`immediate_graveyard_free_cast` and
+//! `paid_during_resolution_cast`), `record_lingering_permissions`, and
+//! `legacy_duration` (ability_rw). Named rather than numbered on purpose: the
+//! line numbers this paragraph once carried had all rotted by the time the
+//! fourth defect below was written. The first and fourth are the two above. The
+//! other three cannot move for any input:
 //!
-//!   * `cast_from_zone.rs:733` and `:764` both require `duration.is_none()`, so
-//!     populating the field can only ever CLOSE them, never open one.
-//!   * `ability_rw.rs:3419` feeds the duration to `legacy_duration`
-//!     (`ability_rw.rs:2115`), a two-armed match: `ForAsLongAs` delegates to
+//!   * both `duration.is_none()` gates require exactly that, so populating the
+//!     field can only ever CLOSE them, never open one.
+//!   * `legacy_duration` is a two-armed match: `ForAsLongAs` delegates to
 //!     `legacy_static_condition`, where the `Unrecognized` conditions this fix
-//!     installs are a `false` arm (`:2099`); every other variant is `false`
-//!     outright (`:2118-2128`). No duration this fix can install moves it.
+//!     installs are a `false` arm; every other variant is `false` outright. No
+//!     duration this fix can install moves it.
 //!
 //! Fix (first half): route that assignment through `with_clause_duration`.
 //!
@@ -102,15 +105,89 @@
 //! Both print "for as long as you CONTROL ~" and so carry
 //! `Duration::WhileControllingHost` (see the third defect set above).
 //!
-//! NOT covered: `Duration::ForAsLongAs` permissions. Both #8029 members carry
-//! that shape and neither reaches a usable fixture — Spelljack's countered card
-//! lands in exile behind a synthetic stack entry, and Resourceful Collector's
-//! grant hangs off a random end-step pick. Measured rather than assumed:
-//! Spelljack's node really is `ForAsLongAs { "it remains exiled" }`, NOT the
-//! `Duration::Permanent` that `parser::oracle_ir::ast::normalize_play_from_exile_duration`
-//! produces — that normalization only touches
-//! `GrantCastingPermission { PlayFromExile }`, and Spelljack lowers to
-//! `Effect::CastFromZone`.
+//! THE READER WALK ABOVE COVERS ONE DIRECTION ONLY, and this change is the
+//! first to need the other: "populating the field can only ever CLOSE them" is
+//! true of a write, and Twinning Glass is a CLEAR — it loses the invented
+//! `UntilEndOfTurn`. Both `duration.is_none()` gates were re-read for that
+//! direction and both stay shut: `immediate_graveyard_free_cast` additionally
+//! requires a target in `Zone::Graveyard`, `paid_during_resolution_cast`
+//! additionally requires `!without_paying`, and Twinning Glass is a free cast
+//! from the hand.
+//!
+//! FOURTH DEFECT, the free half of the same class (issue #8029, reported from
+//! play on Thranduil's Decree as #7132): recording, enforcing and typing the
+//! lifetime is still not enough while the CASTING MECHANISM ignores it. A
+//! stated lifetime and a CR 608.2g during-resolution cast are mutually
+//! exclusive — a cast that happens as the ability resolves has no later
+//! priority window (CR 117.1a), which is exactly what a printed lifetime
+//! claims. `CastFromZoneDriver::with_lingering_duration` nevertheless answered
+//! `Some(DuringResolution)` for the single-card mechanism, and the one seam
+//! that degraded it anyway did so behind a `without_paying_mana_cost: false`
+//! guard. So the free members of the shape kept the one-shot CR 608.2g
+//! mechanism their own text contradicts — surfacing, wherever the clause's
+//! "may" was promoted, as the CR 608.2d prompt this file is named after. CR
+//! 118.9 governs what a permission COSTS, never when it is exercised, and it
+//! was doing the deciding.
+//!
+//! Fix (fourth): the degrade moves INTO `with_lingering_duration`, the shared
+//! authority every duration seam already calls, and the hand-written guard goes.
+//! MEASURED, because "write the guard wider where it stood" is the obvious
+//! alternative and it does not work: a reach marker at that block does fire over
+//! the corpus, so a wider guard there would have reached the TRAILING-duration
+//! members — but a sentence-leading duration is stamped around the body
+//! lowering, after `lower_imperative_clause` has returned, and never sees that
+//! gate at all. Only the shared authority covers both. (With the judgement in
+//! the authority the block is now redundant for a cast clause: neutralizing it
+//! entirely leaves every cast grant in the corpus byte-identical.)
+//!
+//! NOT REPAIRED, and named because it is reachable and wrong rather than
+//! merely untested: the HAND-RESIDENT members. Chandra, Flame's Catalyst's
+//! ultimate offers the hand through a filter; Karlach, Tiefling Spellrager's
+//! sought card lands there by a different road. (Twinning Glass is hand-origin
+//! too, but it loses an invented duration and keeps its during-resolution
+//! cast.) For both this change moves the AST and nothing else. MEASURED end-to-end
+//! through `GameRunner`, with the degrade and without it, the ultimate stops at
+//! the same `WaitingFor::EffectZoneChoice { effect_kind: CastFromZone, zone:
+//! Hand, up_to: true, duration: None }`: a pick-one-now offer raised while the
+//! ability is still resolving, no permission recorded on any hand card, none
+//! castable afterwards. `resolve` does consult the driver earlier — for the
+//! library one-shot and for `window_bounds()` — but neither route's remaining
+//! conditions hold for a hand pool with no resolved targets, and the branch it
+//! does take reads neither field (`open_private_zone_cast_selection` writes
+//! `duration: None` as a literal). So the card behaves exactly as it does on
+//! main. This is not a
+//! wrong lifetime left standing: no permission is granted for the hand pool at
+//! all, before or after, so nothing outlives anything. The card already carried
+//! `duration: UntilEndOfTurn` on main; what the change buys it is an AST whose
+//! MECHANISM finally matches that printed lifetime, which is the field a runtime
+//! repair would have to read. Its parse side is pinned in
+//! `parser::oracle_effect::tests::a_leading_duration_also_degrades_the_cast_mechanism`.
+//!
+//! The `Duration::ForAsLongAs` half of that set IS covered, through Gale's
+//! Redirection — CR 202.3 makes its d20 table deterministic for a countered
+//! spell of mana value 14, so the 15+ row is reached without touching the die.
+//! Its three siblings are NOT reachable end-to-end, measured with a probe at
+//! `cast_from_zone::resolve`: Thranduil's Decree and Kheru Spellsnatcher never
+//! reach that resolver at all (the countered card lands in exile and the tracked
+//! set holds it, but the grant clause under the `ZoneChangedThisWay` link never
+//! resolves), and Planeswalker's Mischief reaches it with an empty tracked set
+//! (the "reveals a card at random … exile it" anaphor never binds the revealed
+//! card). Separate defects upstream of this seam; #7132 is open on the first and
+//! stays open.
+//!
+//! The PLURAL members are a third such case, and the reason a plural grant is a
+//! different FORM rather than a different anaphor ("cards exiled this way …
+//! their mana costs" on Dream Harvest, "those cards … their mana costs" on
+//! Ugin, Eye of the Storms):
+//! `driver_free_cast` binds a single object. Driven through `GameRunner` with
+//! the degrade and without it, Dream Harvest exiles its cards and records a
+//! permission on NONE of them either way — unchanged, like the hand pool below.
+//! Ugin, Eye of the Storms prints the same plural.
+//!
+//! Their parse side is pinned in
+//! `parser::oracle_effect::tests::a_free_cast_grant_with_a_stated_lifetime_is_a_lingering_permission`.
+//! Spelljack and Resourceful Collector print a similar lifetime but were already
+//! lingering (and Spelljack is `mode: Play`, CR 305.1), so neither discriminates.
 //!
 //! CR 611.2a: a continuous effect generated by the resolution of a spell or
 //! ability "lasts as long as stated by the spell or ability creating it".
@@ -1163,5 +1240,201 @@ fn control_bound_duration_ends_a_stolen_artifact_grant() {
         "CR 611.2b: \"for as long as you control this creature\" ends when control of that \
          creature changes, so the stolen artifact goes back — the Master Thief example from \
          the rule itself"
+    );
+}
+
+/// Verbatim Oracle text (`client/public/card-data.json`, key `stolen goods`).
+const STOLEN_GOODS: &str =
+    "Target opponent exiles cards from the top of their library until they exile a nonland \
+     card. Until end of turn, you may cast that card without paying its mana cost.";
+
+/// The second free branch of the same class, reached through the OTHER printed
+/// lifetime: "Until end of turn, you may cast that card without paying its mana
+/// cost" (Stolen Goods). Several further cards print the same free grant; which
+/// ones is measured in the double parse, not counted here.
+///
+/// DISCRIMINATING, and this is what the counter-probe MEASURED rather than what
+/// the shape suggests: restoring `Some(DuringResolution)` fails this test at the
+/// reach guard below — the exiled card is not in exile at all any more, because
+/// the one-shot mechanism casts it as Stolen Goods resolves. There is no later
+/// window to be offered one in.
+///
+/// The turn-boundary assertion is the POSITIVE COUNTER-DIRECTION: a permission
+/// that is now lingering must still END where the card says it does (CR 514.2),
+/// so over-suppression — a grant that outlives its printed turn — fails here too.
+#[test]
+fn a_free_until_end_of_turn_permission_is_exercised_at_a_later_priority_window() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 104.3c: the cleanup assertion below is made after a turn boundary, so
+    // both players must survive their draw steps. Without this the run reaches
+    // it in a `GameOver` state — the assertion stayed true (CR 514.2 prunes at
+    // cleanup, before the boundary) but it was no longer measuring a live game.
+    // Seeded BEFORE the exile target, because both library helpers prepend: the
+    // card Stolen Goods must find has to end up on top of the filler.
+    scenario.with_library_top(P0, &["P0 Filler A", "P0 Filler B", "P0 Filler C"]);
+    scenario.with_library_top(P1, &["P1 Filler A", "P1 Filler B", "P1 Filler C"]);
+    let loot = scenario
+        .add_spell_to_library_top(P1, "Opponent Top Card", false)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let goods = scenario
+        .add_spell_to_hand_from_oracle(P0, "Stolen Goods", false, STOLEN_GOODS)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(goods).target_player(P1).commit();
+    let saw_optional = settle_declining_optionals(&mut runner);
+
+    assert_eq!(
+        zone_of(&runner, loot),
+        Zone::Exile,
+        "reach guard: Stolen Goods must exile the opponent's top nonland card"
+    );
+    assert!(
+        !saw_optional,
+        "CR 611.2a: \"Until end of turn\" states the permission's lifetime, so resolution \
+         offers no CR 608.2d choice"
+    );
+    assert!(
+        can_cast(&runner, loot),
+        "CR 117.1a: the exiled card must be castable at a later priority window"
+    );
+    assert_eq!(
+        recorded_permission_durations(&runner, loot),
+        vec![Some(Duration::UntilEndOfTurn)],
+        "CR 611.2a: the grant must carry the printed turn-long lifetime"
+    );
+
+    // CR 514.2: the counter-direction — the permission must still expire.
+    runner.advance_to_phase(Phase::Cleanup);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+        "reach guard: the prune must be measured in a live game, not after a player decked out"
+    );
+    assert!(
+        recorded_permission_durations(&runner, loot).is_empty(),
+        "CR 514.2: the turn-long permission must be pruned at the cleanup step, not outlive it"
+    );
+}
+
+/// Verbatim Oracle text (`client/public/card-data.json`, key
+/// `gale's redirection`).
+const GALES_REDIRECTION: &str =
+    "Exile target spell, then roll a d20 and add that spell's mana value.\n\
+     1\u{2014}14 | You may cast the exiled card for as long as it remains exiled, and you may \
+     spend mana as though it were mana of any color to cast that spell.\n\
+     15+ | You may cast the exiled card without paying its mana cost for as long as it remains \
+     exiled.";
+
+/// The `Duration::ForAsLongAs` branch of the same class, end-to-end — the shape
+/// the module doc above named as NOT covered: "you may cast the exiled card
+/// WITHOUT PAYING ITS MANA COST for as long as it remains exiled" (Gale's
+/// Redirection's 15+ row; the module doc above names the three further members
+/// of that exact wording, none of which reaches the resolver).
+///
+/// DETERMINISTIC WITHOUT TOUCHING THE DIE. CR 202.3: the row is chosen by
+/// `d20 + that spell's mana value`, so a countered spell of mana value 14 puts
+/// every possible roll on the 15+ row. The die is rolled for real; the fixture
+/// only removes the branch it could otherwise land on.
+///
+/// DISCRIMINATING, and MEASURED: restoring `Some(DuringResolution)` in
+/// `with_lingering_duration` fails this test on `!saw_optional` — the clause's
+/// "may" becomes an `AbilityDefinition.optional` prompt raised while Gale's
+/// Redirection is still resolving. This is the row that pins the CR 608.2d
+/// offer itself; its Stolen Goods sibling pins the other face of the same
+/// defect, the card never staying in exile.
+///
+/// The zero-cost assertion is also the branch guard: the 1—14 row grants a
+/// FULL-cost permission with a colour concession, so a fixture that drifted
+/// onto it would fail here rather than pass vacuously.
+///
+/// Positive reach-guards: the countered spell really left the stack for EXILE,
+/// and the assertion is made on the grant holder's own turn, where they hold
+/// priority (CR 117.1a).
+#[test]
+fn a_free_for_as_long_as_exiled_lifetime_is_not_a_declinable_resolution_offer() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let fatty = scenario
+        .add_creature_to_hand(P0, "Big Spell", 5, 5)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 14,
+            shards: vec![],
+        })
+        .id();
+    let gale = scenario
+        .add_spell_to_hand_from_oracle(P1, "Gale's Redirection", true, GALES_REDIRECTION)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    for _ in 0..14 {
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+    }
+    // CR 104.3c: the assertion below is made on the grant holder's own turn, so
+    // BOTH players must survive their draw steps rather than losing to an empty
+    // library — the turn passes through the opponent's draw step to get there.
+    scenario.with_library_top(P0, &["P0 Filler A", "P0 Filler B", "P0 Filler C"]);
+    scenario.with_library_top(P1, &["P1 Filler A", "P1 Filler B", "P1 Filler C"]);
+    let mut runner = scenario.build();
+
+    runner.cast(fatty).commit();
+    // CR 117.3c: the caster keeps priority after putting the spell on the stack;
+    // the opponent's window to answer it opens only once it is passed.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the active player must be able to pass priority with the spell on the stack");
+    runner.cast(gale).target_object(fatty).commit();
+    let saw_optional = settle_declining_optionals(&mut runner);
+
+    assert_eq!(
+        zone_of(&runner, fatty),
+        Zone::Exile,
+        "reach guard: Gale's Redirection must resolve and exile the targeted spell"
+    );
+    assert!(
+        !saw_optional,
+        "CR 611.2a: \"for as long as it remains exiled\" states the permission's own lifetime, \
+         so resolution offers no CR 608.2d choice"
+    );
+    assert_eq!(
+        recorded_permission_durations(&runner, fatty),
+        vec![Some(Duration::ForAsLongAs {
+            condition: engine::types::StaticCondition::Unrecognized {
+                text: "it remains exiled".to_string(),
+            },
+        })],
+        "CR 611.2b: the grant must carry the printed \"for as long as\" lifetime"
+    );
+    let free = runner.state().objects[&fatty]
+        .casting_permissions
+        .iter()
+        .any(|p| matches!(p, CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()));
+    assert!(
+        free,
+        "branch guard: mana value 14 forces the 15+ row, whose permission is the FREE one — \
+         the 1—14 row grants a full-cost permission instead: {:?}",
+        runner.state().objects[&fatty].casting_permissions
+    );
+
+    // CR 117.1a: hand priority to the grant holder, on their own turn.
+    for _ in 0..4 {
+        if runner.state().active_player == P1 {
+            break;
+        }
+        runner.advance_to_phase(Phase::Cleanup);
+        runner.advance_to_phase(Phase::PreCombatMain);
+    }
+    assert_eq!(
+        runner.state().active_player,
+        P1,
+        "reach guard: the assertion below must be made while the grant holder holds priority"
+    );
+    assert!(
+        can_cast(&runner, fatty),
+        "CR 117.1a: the exiled card must be castable at a later priority window through the \
+         standing permission — and \"for as long as it remains exiled\" states no turn-based end, \
+         so the turn boundary must not have revoked it"
     );
 }

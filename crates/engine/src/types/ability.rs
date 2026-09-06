@@ -2039,13 +2039,16 @@ impl CastFromZoneDriver {
     }
 
     /// CR 611.2a: Reconcile this driver with a durational scope the parser
-    /// stamped on the grant AFTER the clause body was lowered (a leading
-    /// "Until end of turn, …" via `with_clause_duration`, or a stripped trailing
-    /// "… this turn"). A stated duration means the controller casts at a LATER
-    /// priority window, which is the defining property of a lingering
-    /// permission — so a resolution-scoped window degrades to one. The two
-    /// single-card mechanisms are unchanged here; the paid-cast downgrade has
-    /// its own narrower guard at the clause seam.
+    /// stamped on the grant AFTER the clause body was lowered — a leading
+    /// "Until end of turn, …", a stripped trailing "… this turn", or a duration
+    /// carried onto a coordinated cast conjunct. Every seam that stamps one
+    /// calls this. A stated duration means the controller casts at a LATER
+    /// priority window (CR 117.1a), which is the defining property of a
+    /// lingering permission — so both resolution-scoped mechanisms are asked to
+    /// degrade, the batch window and the single card alike. CR 118.9 governs
+    /// what the permission costs, never when it is exercised, so payment is not
+    /// part of this question. Only the batch window can REFUSE, and only when it
+    /// carries a bound; see the next paragraph.
     ///
     /// `None` is a REFUSAL, and the fallible return type is the point: the
     /// degrade is expressed as `for_batch_bounds(LingeringPermission, …)`, so a
@@ -2061,12 +2064,24 @@ impl CastFromZoneDriver {
             CastFromZoneDriver::ResolutionWindow { bounds } => {
                 Self::for_batch_bounds(CastMechanism::LingeringPermission, bounds)
             }
-            // CR 608.2g: the two single-card mechanisms carry no batch bound to
-            // lose, so a stated duration leaves them untouched (the paid
-            // `DuringResolution` → lingering move for a chosen single target
-            // — Emry, Lurker in the Loch — has its own narrower guard at the
-            // trailing-duration seam, which runs before this call).
-            other => Some(other),
+            // CR 608.2g + CR 117.1a: a during-resolution cast happens AS the
+            // ability resolves, with no priority window in between. A stated
+            // lifetime says the opposite, so the two are mutually exclusive and
+            // the single-card mechanism degrades as well — carrying no batch
+            // bound, it can never refuse. This arm used to answer
+            // `Some(DuringResolution)`, with the degrade hand-written at ONE
+            // seam behind a `without_paying_mana_cost: false` guard, so every
+            // FREE single-card grant with a printed lifetime kept a one-shot
+            // mechanism its own text contradicts. CR 118.9 governs what the
+            // permission COSTS, not when it is exercised. The affected cards are
+            // measured in the double parse cited by the change that moved this
+            // arm, not listed here, where the list would go stale unnoticed.
+            CastFromZoneDriver::DuringResolution => Some(CastFromZoneDriver::LingeringPermission),
+            // Already the lingering mechanism; a stated duration only stamps its
+            // lifetime.
+            CastFromZoneDriver::LingeringPermission => {
+                Some(CastFromZoneDriver::LingeringPermission)
+            }
         }
     }
 }

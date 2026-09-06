@@ -47560,10 +47560,13 @@ fn duration_reconciliation_refuses_a_bound_the_lingering_grant_cannot_carry() {
         Some(LingeringPermission),
         "reach guard: an unbounded window must still degrade to the lingering grant"
     );
-    // The two single-card mechanisms carry no batch bound and are untouched.
+    // The two single-card mechanisms carry no batch bound, so neither can refuse
+    // — but the during-resolution one still DEGRADES: CR 608.2g + CR 117.1a, a
+    // cast that happens as the ability resolves has no later priority window,
+    // which is exactly what a stated lifetime claims.
     assert_eq!(
         CastFromZoneDriver::DuringResolution.with_lingering_duration(),
-        Some(CastFromZoneDriver::DuringResolution)
+        Some(LingeringPermission)
     );
     assert_eq!(
         LingeringPermission.with_lingering_duration(),
@@ -53892,9 +53895,13 @@ fn face_of_boe_clause_folds_suspend_cost_and_during_resolution() {
 /// CR 608.2g vs CR 611.2: the shared filter-form DRIVER authority is
 /// duration-blind — the discriminator is mode + hand-origin + an alternative
 /// casting method (`without_paying` OR an alternative cost). Duration is
-/// intentionally not a parameter: twinning glass (durational, free →
-/// DuringResolution) and Sen Triplets (durational, full-cost → Lingering)
-/// prove the wp/alt axis decides, not duration.
+/// intentionally not a parameter because this authority answers the
+/// NO-DURATION question; a stated lifetime is reconciled afterwards by
+/// `CastFromZoneDriver::with_lingering_duration`, which degrades every
+/// `DuringResolution` it sees. So the rows below are the mechanism a clause
+/// gets BEFORE any duration is stamped, and Sen Triplets (hand-origin,
+/// full-cost → lingering) opposite Brain in a Jar (hand-origin, free →
+/// during-resolution) is what shows the wp/alt axis deciding.
 #[test]
 fn filter_cast_driver_authority_is_duration_blind() {
     let d = super::during_resolution_for_filter_cast_clause;
@@ -53905,7 +53912,7 @@ fn filter_cast_driver_authority_is_duration_blind() {
     assert_eq!(d(Cast, false, false, true), LingeringPermission);
     // Memory Plunder / Tasha: non-hand free pool.
     assert_eq!(d(Cast, true, false, false), LingeringPermission);
-    // Expertise cycle / Brain in a Jar / twinning glass / chandra: hand free.
+    // Expertise cycle / Brain in a Jar / Twinning Glass: hand free.
     assert_eq!(d(Cast, true, false, true), DuringResolution);
     // Xander's Pact: exile-origin alt cost — hand gate, not duration.
     assert_eq!(d(Cast, false, true, false), LingeringPermission);
@@ -61493,5 +61500,249 @@ fn subject_anchored_delayed_may_binds_the_named_player_not_the_caster() {
             "the caster's half draws for the caster"
         ),
         other => panic!("expected the caster half to Draw, got {other:?}"),
+    }
+}
+
+/// CR 611.2a + CR 608.2g + CR 117.1a: a stated lifetime and a during-resolution
+/// cast are mutually exclusive, and CR 118.9 (who pays) does not enter the
+/// question. All three free members of the "for as long as it remains exiled"
+/// shape must lower to `LingeringPermission` carrying the printed lifetime.
+///
+/// DISCRIMINATING: before the fix `with_lingering_duration` answered
+/// `Some(DuringResolution)` and the single seam that degraded anyway did so
+/// behind a `without_paying_mana_cost: false` guard, so every row here was
+/// `DuringResolution`. Measured over every card with Oracle text, the free
+/// `mode: Cast` members of this wording are these three plus Gale's Redirection.
+///
+/// PARSER-LEVEL FOR THESE THREE ONLY, and not by choice. The shape's end-to-end
+/// proof is `lasting_play_from_exile_permission::a_free_for_as_long_as_exiled_lifetime_is_not_a_declinable_resolution_offer`,
+/// which drives Gale's Redirection through `GameRunner`. The three here have no
+/// runtime fixture, MEASURED with a probe at `cast_from_zone::resolve`:
+/// Thranduil's Decree and Kheru Spellsnatcher never reach that resolver at all
+/// (the countered card lands in exile and the tracked set holds it, but the
+/// grant clause under the `ZoneChangedThisWay` link never resolves), and
+/// Planeswalker's Mischief reaches it with an empty tracked set (the "reveals a
+/// card at random … exile it" anaphor never binds the revealed card, so nothing
+/// is exiled). Both are separate defects upstream of this seam — issue #7132 is
+/// open on the first — and neither is repaired here.
+#[test]
+fn a_free_cast_grant_with_a_stated_lifetime_is_a_lingering_permission() {
+    // Verbatim Oracle text and printed card types (`client/public/card-data.json`).
+    let cards: [(&str, &str, &[&str], &[&str]); 3] = [
+        (
+            "Thranduil's Decree",
+            "Counter target spell. If a permanent spell is countered this way, exile it instead \
+             of putting it into its owner's graveyard. You may cast that card without paying its \
+             mana cost for as long as it remains exiled.",
+            &["Instant"],
+            &[],
+        ),
+        (
+            "Planeswalker's Mischief",
+            "{3}{U}: Target opponent reveals a card at random from their hand. If it's an \
+             instant or sorcery card, exile it. You may cast it without paying its mana cost for \
+             as long as it remains exiled. At the beginning of the next end step, if you haven't \
+             cast it, return it to its owner's hand. Activate only as a sorcery.",
+            &["Enchantment"],
+            &[],
+        ),
+        (
+            // The turned-face-up trigger alone; the printed Morph reminder line
+            // above it carries no cast grant.
+            "Kheru Spellsnatcher",
+            "When this creature is turned face up, counter target spell. If that spell is \
+             countered this way, exile it instead of putting it into its owner's graveyard. You \
+             may cast that card without paying its mana cost for as long as it remains exiled.",
+            &["Creature"],
+            &["Snake", "Wizard"],
+        ),
+    ];
+    for (name, text, types, subs) in cards {
+        let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let subs: Vec<String> = subs.iter().map(|s| s.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &[], &types, &subs);
+        let mut casts = Vec::new();
+        for def in parsed.abilities.iter() {
+            collect_cast_from_zone_defs(def, &mut casts);
+        }
+        for trigger in parsed.triggers.iter() {
+            if let Some(execute) = trigger.execute.as_ref() {
+                collect_cast_from_zone_defs(execute, &mut casts);
+            }
+        }
+        assert_eq!(
+            casts.len(),
+            1,
+            "{name}: reach guard — exactly one cast grant must be produced, got {casts:?}"
+        );
+        let def = &casts[0];
+        let Effect::CastFromZone {
+            without_paying_mana_cost,
+            duration,
+            driver,
+            ..
+        } = &*def.effect
+        else {
+            unreachable!("filtered above");
+        };
+        assert!(
+            *without_paying_mana_cost,
+            "{name}: reach guard — this is the FREE half of the class, the half the removed \
+             `without_paying_mana_cost: false` guard excluded"
+        );
+        assert_eq!(
+            *duration,
+            Some(Duration::ForAsLongAs {
+                condition: crate::types::StaticCondition::Unrecognized {
+                    text: "it remains exiled".to_string(),
+                },
+            }),
+            "{name}: the printed lifetime must reach the effect's own duration slot"
+        );
+        assert_eq!(
+            *driver, LingeringPermission,
+            "{name}: CR 611.2a — a stated lifetime means the permission is exercised at a later \
+             priority window, so the mechanism is the lingering grant"
+        );
+        assert!(
+            !def.optional,
+            "{name}: CR 608.2d — a lingering grant states no resolution-time choice, so the \
+             clause's \"may\" must not become an optional-effect prompt"
+        );
+    }
+}
+
+/// CR 611.2a: the HAND-ORIGIN row of the same reconciliation, which no
+/// integration fixture can reach — its runtime is the named gap below. "Until
+/// end of turn, you may cast spells from your hand without paying their mana
+/// costs" (Chandra, Flame's Catalyst's ultimate) is a hand-origin free cast, so
+/// `during_resolution_for_filter_cast_clause` selects `DuringResolution`, and
+/// the stated lifetime then degrades it.
+///
+/// DISCRIMINATING: this row is why the degrade belongs in
+/// `with_lingering_duration` rather than in an `if let` at one seam. A wider
+/// guard at the trailing-duration block in `lower_imperative_clause` would have
+/// reached the trailing-duration members of the class — MEASURED, a reach
+/// marker there fires over the corpus — but never this one: a sentence-leading
+/// duration is stamped around the body lowering, after `lower_imperative_clause`
+/// has returned, so it never sees that gate. Only the shared authority covers
+/// both.
+///
+/// A PARSE CLAIM, NOT A BEHAVIOUR CLAIM. Chandra is the hand-origin card this
+/// change gives the lingering mechanism to — Twinning Glass is hand-origin too,
+/// but it loses an invented duration and keeps its during-resolution cast — and
+/// at runtime it moves nothing: MEASURED end-to-end
+/// through `GameRunner` with and without the degrade, the ultimate stops at the
+/// same `WaitingFor::EffectZoneChoice { effect_kind: CastFromZone, zone: Hand,
+/// up_to: true, duration: None }` either way — a pick-one-now offer raised
+/// while the ability resolves, with no permission recorded on any hand card and
+/// none castable afterwards. `resolve` consults the driver before that branch —
+/// for the library one-shot and for `window_bounds()` — but neither route's
+/// remaining conditions hold for a hand pool with no resolved targets, and the
+/// branch it does take reads neither the driver nor the duration
+/// (`open_private_zone_cast_selection` writes `duration: None` as a literal).
+/// So the hand-origin half of this class stays as wrong as it is on main;
+/// repairing it is runtime work this change does not do. What the
+/// assertion below buys today is an honest AST and export for that card, and
+/// the one seam through which a later runtime fix can see the lifetime at all.
+#[test]
+fn a_leading_duration_also_degrades_the_cast_mechanism() {
+    // Verbatim Oracle text (`client/public/card-data.json`, key
+    // `chandra, flame's catalyst`), the ultimate alone.
+    let def = parse_effect_chain(
+        "Discard your hand, then draw seven cards. Until end of turn, you may cast spells from \
+         your hand without paying their mana costs.",
+        AbilityKind::Activated,
+    );
+    let mut casts = Vec::new();
+    collect_cast_from_zone_defs(&def, &mut casts);
+    assert_eq!(
+        casts.len(),
+        1,
+        "reach guard — the ultimate must produce exactly one cast grant, got {casts:?}"
+    );
+    let Effect::CastFromZone {
+        without_paying_mana_cost,
+        duration,
+        driver,
+        ..
+    } = &*casts[0].effect
+    else {
+        unreachable!("filtered above");
+    };
+    assert!(
+        *without_paying_mana_cost,
+        "reach guard — the free, hand-origin shape the filter-form authority sends to \
+         `DuringResolution`"
+    );
+    assert_eq!(
+        *duration,
+        Some(Duration::UntilEndOfTurn),
+        "the sentence-leading lifetime must reach the effect's own duration slot"
+    );
+    assert_eq!(
+        *driver, LingeringPermission,
+        "CR 611.2a + CR 117.1a: \"Until end of turn\" means the spells are cast at later \
+         priority windows, not as the ultimate resolves"
+    );
+}
+
+/// CR 608.2i: "a spell that WAS CAST this turn" looks back at a previous game
+/// action; its "this turn" scopes that look-back, not the effect. Twinning
+/// Glass states no duration at all, and `strip_trailing_duration` must not
+/// invent one.
+///
+/// DISCRIMINATING, and the reason this guard ships with the reconciliation
+/// above rather than separately: with the invented `UntilEndOfTurn` in place,
+/// the widened degrade would read it as proof of a later priority window and
+/// turn a during-resolution free cast into a turn-long standing permission —
+/// strictly worse than the bug being fixed. Removing
+/// `spell_history_relative_clause_owns_suffix` flips both assertions.
+///
+/// NOT REPAIRED HERE, and visible in the same parse: the "if it has the same
+/// name as …" condition is still swallowed (`OracleDiagnostic::SwallowedClause`,
+/// detector `Condition_If`), so the clause offers every card in hand rather
+/// than the matching one. That is a separate coverage gap; this test asserts
+/// only the duration and the mechanism.
+#[test]
+fn a_spell_history_lookback_does_not_invent_a_duration() {
+    // Verbatim Oracle text (`client/public/card-data.json`, key
+    // `twinning glass`), the activated ability's effect alone.
+    let def = parse_effect_chain(
+        "You may cast a spell from your hand without paying its mana cost if it has the same \
+         name as a spell that was cast this turn.",
+        AbilityKind::Activated,
+    );
+    let mut casts = Vec::new();
+    collect_cast_from_zone_defs(&def, &mut casts);
+    assert_eq!(
+        casts.len(),
+        1,
+        "reach guard — the clause must still produce its cast grant, got {casts:?}"
+    );
+    let Effect::CastFromZone {
+        duration, driver, ..
+    } = &*casts[0].effect
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(
+        *duration, None,
+        "CR 608.2i: the relative clause owns its \"this turn\"; no duration may be stamped"
+    );
+    assert_eq!(
+        *driver, DuringResolution,
+        "CR 608.2g: with no stated lifetime the hand-origin free cast keeps the \
+         during-resolution mechanism"
+    );
+}
+
+/// Collect every `CastFromZone`-carrying definition in a `sub_ability` chain.
+fn collect_cast_from_zone_defs(def: &AbilityDefinition, out: &mut Vec<AbilityDefinition>) {
+    if matches!(*def.effect, Effect::CastFromZone { .. }) {
+        out.push(def.clone());
+    }
+    if let Some(sub) = def.sub_ability.as_ref() {
+        collect_cast_from_zone_defs(sub, out);
     }
 }

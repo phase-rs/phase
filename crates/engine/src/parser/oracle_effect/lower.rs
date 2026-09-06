@@ -6279,6 +6279,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     let lower = duration_text.to_lowercase();
     if target_relative_clause_owns_suffix(lower.as_str())
         || player_lookback_relative_clause_owns_suffix(lower.as_str())
+        || spell_history_relative_clause_owns_suffix(lower.as_str())
         || cant_be_activated_clause_owns_tapped_suffix(lower.as_str())
     {
         return (text, None);
@@ -6524,6 +6525,70 @@ fn cant_be_activated_clause_owns_tapped_suffix(input: &str) -> bool {
             Ok((i, ()))
         })
         .is_some()
+}
+
+/// CR 608.2i + CR 611.2a: True when the trailing " this turn" belongs to a
+/// spell-history *look-back* relative clause on an OBJECT — "the same name as a
+/// spell that WAS CAST this turn" (Twinning Glass), "permanents that WERE CAST
+/// this turn" (Emrakul, the World Anew) — rather than being the effect's own
+/// duration. CR 608.2i is the look-back rule — such an effect asks about a
+/// previous game action rather than the current state — so the clause's "this
+/// turn" belongs to that question. CR 611.2a then supplies what follows: the
+/// effect states no duration of its own, and an effect with no stated duration
+/// is not one that ends at end of turn.
+///
+/// Without this guard `strip_trailing_duration` amputates the "this turn" and
+/// stamps `Duration::UntilEndOfTurn` on a clause that states no duration at
+/// all. On Twinning Glass that invented duration is not inert: it reaches the
+/// CR 611.2a cast-mechanism reconciliation below `lower_imperative_clause`,
+/// which reads a stated lifetime as proof that the permission is exercised at a
+/// later priority window (CR 117.1a) — turning a during-resolution free cast
+/// into a turn-long standing permission.
+///
+/// The object sibling of `player_lookback_relative_clause_owns_suffix`. Like
+/// that one it is self-standing rather than delegating to
+/// `parse_that_clause_suffix`: the target grammar has no filter property for
+/// "was cast this turn", so there is nothing there to consume the clause, and
+/// inventing one would claim a target restriction this guard does not
+/// implement. It recognizes the clause STRUCTURE (which owns the suffix), not
+/// its semantics — the spell-history restriction itself stays a coverage gap on
+/// both cards; only the duration becomes right.
+///
+/// MEASURED over `client/public/card-data.json`: the "that was/were cast this
+/// turn" wording appears on exactly those two cards, and only Twinning Glass's
+/// clause reaches this stripper — Emrakul parses byte-identically with and
+/// without the guard, so its `were cast` arm is unreached today and is here
+/// because the wording is, not because a card exercises it.
+///
+/// Positional discipline as in `player_lookback_relative_clause_owns_suffix`,
+/// the one sibling that shares it: anchored on the LAST " that " and required
+/// to consume through end-of-input, so a genuine OUTER duration after the
+/// relative clause leaves a non-empty remainder and still strips.
+/// (`target_relative_clause_owns_suffix` anchors on the FIRST " that " instead,
+/// via `take_until`.)
+fn spell_history_relative_clause_owns_suffix(input: &str) -> bool {
+    // allow-noncombinator: rfind anchors the word-boundary slice for the nom scan below (Pattern 5), not parsing dispatch.
+    let Some(that_idx) = input.rfind(" that ") else {
+        return false;
+    };
+    let after_that = &input[that_idx + " that ".len()..];
+    let Ok((rest, _)) = preceded(
+        alt((tag::<_, _, OracleError<'_>>("was cast"), tag("were cast"))),
+        tag::<_, _, OracleError<'_>>(" this turn"),
+    )
+    .parse(after_that) else {
+        return false;
+    };
+    // The relative clause must own the suffix: nothing but optional punctuation
+    // may follow, so an outer duration is not suppressed.
+    (
+        multispace0,
+        opt(alt((tag::<_, _, OracleError<'_>>("."), tag(",")))),
+        multispace0,
+        eof,
+    )
+        .parse(rest)
+        .is_ok()
 }
 
 fn target_relative_clause_owns_suffix(input: &str) -> bool {
