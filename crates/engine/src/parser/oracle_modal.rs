@@ -22,7 +22,10 @@ use super::oracle_classifier::has_trigger_prefix;
 use super::oracle_cost::parse_oracle_cost;
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
-use super::oracle_effect::{parse_ability_ir_with_context, try_parse_named_choice};
+use super::oracle_effect::{
+    conditions::strip_leading_general_conditional, parse_ability_ir_with_context,
+    try_parse_named_choice,
+};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{
@@ -1008,6 +1011,21 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
     (trigger_line, None)
 }
 
+/// CR 603.12 + CR 608.2c: A reflexive modal can retain an ordinary
+/// resolution-time guard between its connector and modal header, as in
+/// `When you do, if <condition>, choose one`. The modal splitter keeps that
+/// condition in `header.raw`, so parse it through the shared conditional
+/// parser and compose it with the reflexive marker rather than discarding it.
+fn reflexive_modal_connector(
+    header: &ModalHeaderAst,
+    ctx: &mut ParseContext,
+) -> AbilityCondition {
+    let (guard, _) = strip_leading_general_conditional(&header.raw, ctx);
+    guard
+        .map(AbilityCondition::when_you_do_with_guard)
+        .unwrap_or(AbilityCondition::WhenYouDo)
+}
+
 /// CR 603.12: remove a bare reflexive connector after `trigger_line`'s final
 /// sentence break, leaving the parent instruction for ordinary trigger parsing.
 ///
@@ -1190,6 +1208,9 @@ pub(crate) fn lower_oracle_block_ir(
                 if let Some(scope) = modal_relative_player_scope_for_trigger(trigger) {
                     mode_ctx.relative_player_scope = Some(scope);
                 }
+                let reflexive_connector = reflexive_parent
+                    .as_ref()
+                    .map(|_| reflexive_modal_connector(&header, &mut mode_ctx));
                 let payload = ModalIr {
                     marker: EffectChainIr::single_clause(
                         &header.raw,
@@ -1225,7 +1246,9 @@ pub(crate) fn lower_oracle_block_ir(
                                     .body,
                                 ),
                             },
-                            connector: AbilityCondition::WhenYouDo,
+                            connector: reflexive_connector
+                                .clone()
+                                .expect("reflexive parent has a connector"),
                             effect_chain: EffectChainIr::single_clause(
                                 cost_text,
                                 AbilityKind::Spell,
@@ -1251,7 +1274,9 @@ pub(crate) fn lower_oracle_block_ir(
                         Some(TriggerBody::EffectChain(instruction)) => {
                             TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
                                 parent: ReflexiveParent::Mandatory { instruction },
-                                connector: AbilityCondition::WhenYouDo,
+                                connector: reflexive_connector
+                                    .clone()
+                                    .expect("reflexive parent has a connector"),
                                 effect_chain: payload.marker.clone(),
                                 modal: Some(payload.clone()),
                             }))
@@ -1539,7 +1564,10 @@ pub(crate) fn lower_oracle_block(
                 // `should_resolve_subability_on_optional_decline` (WhenYouDo →
                 // false), so declining the sacrifice resolves no modes.
                 Some(ReflexiveModalParent::MayPay(cost_text)) => {
-                    modal_ability.condition = Some(AbilityCondition::WhenYouDo);
+                    modal_ability.condition = Some(reflexive_modal_connector(
+                        &header,
+                        &mut ParseContext::default(),
+                    ));
                     let mut cost_ability = crate::parser::oracle_effect::parse_effect_chain(
                         cost_text,
                         AbilityKind::Spell,
@@ -1555,7 +1583,10 @@ pub(crate) fn lower_oracle_block(
                 // line, so the parent is the trigger's own execute and the modal
                 // becomes its reflexive body.
                 Some(ReflexiveModalParent::Mandatory) => {
-                    modal_ability.condition = Some(AbilityCondition::WhenYouDo);
+                    modal_ability.condition = Some(reflexive_modal_connector(
+                        &header,
+                        &mut ParseContext::default(),
+                    ));
                     Box::new(modal_ability)
                 }
                 // Plain triggered modal (Pip-Boy): the modal attaches directly.
@@ -4423,8 +4454,8 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
     /// takes — The Cobra King, whose Cobra Coil token was dropped the same way
     /// Cemetery Desecrator's exile was.
     ///
-    /// Does NOT assert the "five or more" gate: that condition lands in the
-    /// modal header and is unrepresented both before and after this change.
+    /// The guard must be retained alongside the marker, so the runtime checks
+    /// it before it creates the reflexive modal trigger.
     #[test]
     fn a_mandatory_parent_survives_a_condition_between_connector_and_modes() {
         let parsed = parse_oracle_text(
@@ -4448,7 +4479,29 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             .sub_ability
             .as_ref()
             .expect("the mode list must hang off the instruction as its reflexive body");
-        assert_eq!(sub.condition, Some(AbilityCondition::WhenYouDo));
+        let Some(AbilityCondition::And { conditions }) = sub.condition.as_ref() else {
+            panic!(
+                "the reflexive connector and header guard must form a flat conjunction, got {:?}",
+                sub.condition
+            );
+        };
+        assert!(
+            conditions
+                .iter()
+                .any(|condition| matches!(condition, AbilityCondition::WhenYouDo)),
+            "the conjunction must retain the reflexive creation marker"
+        );
+        assert!(
+            conditions.iter().any(|condition| matches!(
+                condition,
+                AbilityCondition::QuantityCheck {
+                    comparator: crate::types::ability::Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 5 },
+                    ..
+                }
+            )),
+            "the conjunction must retain Cobra King's five-or-more threshold"
+        );
         assert_eq!(sub.mode_abilities.len(), 2, "both modes must survive");
     }
 
