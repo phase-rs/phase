@@ -14,7 +14,10 @@ use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
-use super::oracle_target::{distribute_shared_properties, parse_target, parse_type_phrase};
+use super::oracle_target::{
+    distribute_shared_properties, parse_target, parse_target_with_article_led_type_union,
+    parse_type_phrase,
+};
 use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_creature_subtype;
 use super::oracle_util::parse_mana_symbols;
@@ -760,7 +763,17 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             let stripped = strip_article(rest, &rest_lower);
             (1, stripped.to_string())
         };
-        let (filter, _) = parse_target(&format!("target {}", filter_text));
+        // CR 205.2a: a sacrifice cost's filter may be a TYPE UNION whose right
+        // conjunct leads with an indefinite article — "Sacrifice another creature
+        // or an artifact" (Mold Folk, Slaughter-Priest of Mogis, Elite
+        // Headhunter). The shared grammar leaves that tail as remainder because
+        // the same surface is an elided-verb clause elsewhere; a cost has no verb
+        // to elide, so it opts into the union reading. `ensure_another_sacrifice_
+        // filter` then distributes `Another` across BOTH legs, matching the
+        // article-less surface ("another creature or artifact") the shared
+        // grammar already unions.
+        let (filter, _) =
+            parse_target_with_article_led_type_union(&format!("target {}", filter_text));
         return AbilityCost::Sacrifice(SacrificeCost::count(
             ensure_another_sacrifice_filter(filter, &filter_text),
             use_count,
@@ -1986,6 +1999,109 @@ mod tests {
     };
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
+
+    /// CR 205.2a + CR 601.2h: a sacrifice cost whose filter is a TYPE UNION with
+    /// an article-led right conjunct keeps BOTH legs — "Sacrifice another
+    /// creature or an artifact" (Mold Folk, Sivriss, Elite Headhunter, Street
+    /// Urchin) and "... or an enchantment" (Skophos Warleader, Slaughter-Priest
+    /// of Mogis).
+    ///
+    /// Revert-failing: before the cost parser opted into
+    /// `parse_target_with_article_led_type_union` this collapsed to
+    /// `Typed{[Creature], Another}` and the engine refused to let the controller
+    /// sacrifice an artifact or enchantment to pay a cost the card allows.
+    ///
+    /// The article-less surface is the reach-guard: the shared grammar already
+    /// unions it, so both must produce the same legs and the same distributed
+    /// `Another`.
+    #[test]
+    fn sacrifice_cost_unions_an_article_led_right_conjunct() {
+        for (article_led, article_less, right) in [
+            (
+                "Sacrifice another creature or an artifact",
+                "Sacrifice another creature or artifact",
+                TypeFilter::Artifact,
+            ),
+            (
+                "Sacrifice another creature or an enchantment",
+                "Sacrifice another creature or enchantment",
+                TypeFilter::Enchantment,
+            ),
+        ] {
+            let cost = parse_oracle_cost(article_led);
+            let AbilityCost::Sacrifice(SacrificeCost {
+                target,
+                requirement,
+                ..
+            }) = &cost
+            else {
+                panic!("expected a Sacrifice cost for {article_led:?}, got {cost:?}");
+            };
+            assert_eq!(
+                *requirement,
+                SacrificeRequirement::Count { count: 1 },
+                "one permanent is sacrificed"
+            );
+            let TargetFilter::Or { filters } = target else {
+                panic!("{article_led:?} must union both legs, got {target:?}");
+            };
+            assert_eq!(filters.len(), 2, "{filters:?}");
+            let legs: Vec<&TypedFilter> = filters
+                .iter()
+                .map(|f| match f {
+                    TargetFilter::Typed(tf) => tf,
+                    other => panic!("each leg must be Typed, got {other:?}"),
+                })
+                .collect();
+            assert!(legs[0].type_filters.contains(&TypeFilter::Creature));
+            assert!(legs[1].type_filters.contains(&right));
+            // CR 109.4: "another" scopes the whole choice, so it must reach BOTH
+            // legs — `ensure_another_sacrifice_filter` distributes it.
+            for leg in &legs {
+                assert!(
+                    leg.properties.contains(&FilterProp::Another),
+                    "\"another\" must distribute to every leg: {leg:?}"
+                );
+            }
+
+            assert_eq!(
+                cost,
+                parse_oracle_cost(article_less),
+                "the article-led surface must lower exactly like its article-less twin"
+            );
+        }
+    }
+
+    /// The opt-in stays opt-in at the cost seam too: a sacrifice cost with a
+    /// single filter is untouched, and an article-led BARE-card disjunct does not
+    /// become a type union.
+    #[test]
+    fn sacrifice_cost_article_led_union_does_not_over_fire() {
+        let plain = parse_oracle_cost("Sacrifice a creature");
+        assert!(
+            matches!(
+                plain,
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::Typed(_),
+                    ..
+                })
+            ),
+            "a single-filter sacrifice cost must not grow an Or, got {plain:?}"
+        );
+
+        // Reach-guard: the union path is live on this harness.
+        let union = parse_oracle_cost("Sacrifice another creature or an artifact");
+        assert!(
+            matches!(
+                union,
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::Or { .. },
+                    ..
+                })
+            ),
+            "reach-guard: the union must still fold, got {union:?}"
+        );
+    }
 
     #[test]
     fn cost_tap() {
