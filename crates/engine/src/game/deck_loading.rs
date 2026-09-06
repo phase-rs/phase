@@ -217,12 +217,29 @@ where
 
 /// Resolve a flat name list into DeckEntry entries using the card database.
 /// Groups duplicate names and skips unresolvable names.
+///
+/// CR 709.2 / CR 712.1: grouping compares the RESOLVED face name, never the
+/// caller's raw spelling. A decklist may name one physical card by its
+/// composite name (`"Fire // Ice"`), its glued composite (`"Fire//Ice"`), its
+/// front-face name (`"Fire"`), or an unaccented alias, and every one of those
+/// is one copy of the same card. Comparing the already-resolved
+/// `entry.card.name` against the raw input would never match those spellings
+/// against each other and would emit several `DeckEntry` values for one card —
+/// the same name-identity error `deck_validation::same_card` documents.
+/// `db.get_face_by_name` performs the resolution (it routes through
+/// `CardDatabase::lookup_key`), so the comparison must happen after it.
 fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
     let mut entries: Vec<DeckEntry> = Vec::new();
     for name in names {
-        if let Some(index) = entries.iter().position(|entry| entry.card.name == *name) {
+        let Some(face) = db.get_face_by_name(name) else {
+            continue;
+        };
+        if let Some(index) = entries
+            .iter()
+            .position(|entry| entry.card.name.eq_ignore_ascii_case(&face.name))
+        {
             entries[index].count += 1;
-        } else if let Some(face) = db.get_face_by_name(name) {
+        } else {
             // CR 202.3d + CR 709.4b: build through the single authority so the
             // split-card off-stack override is stamped consistently with the
             // server transport resolver.
@@ -1289,6 +1306,55 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    fn single_face_card_json(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "mana_cost": { "type": "NoCost" },
+            "card_type": { "supertypes": [], "core_types": ["Instant"], "subtypes": [] },
+            "power": null,
+            "toughness": null,
+            "loyalty": null,
+            "defense": null,
+            "oracle_text": null,
+            "non_ability_text": null,
+            "flavor_name": null,
+            "keywords": [],
+            "abilities": [],
+            "triggers": [],
+            "static_abilities": [],
+            "replacements": [],
+            "color_override": null,
+            "scryfall_oracle_id": null
+        })
+    }
+
+    #[test]
+    fn resolve_names_groups_mixed_spellings_of_one_card() {
+        // CR 709.2 / CR 712.1: a composite name, its glued form, and its
+        // front-face name are three spellings of ONE physical card. Grouping
+        // must compare the RESOLVED face name — comparing the resolved
+        // `entry.card.name` against the raw input never matches these against
+        // each other and emits several entries for one card.
+        let mut cards = serde_json::Map::new();
+        cards.insert("fire".to_string(), single_face_card_json("Fire"));
+        let db =
+            CardDatabase::from_json_str(&serde_json::Value::Object(cards).to_string()).unwrap();
+
+        let entries = resolve_names(
+            &db,
+            &[
+                "Fire // Ice".to_string(),
+                "Fire".to_string(),
+                "Fire//Ice".to_string(),
+                "fire".to_string(),
+            ],
+        );
+
+        assert_eq!(entries.len(), 1, "four spellings are one card, not several");
+        assert_eq!(entries[0].card.name, "Fire");
+        assert_eq!(entries[0].count, 4, "every spelling contributes one copy");
     }
 
     #[test]

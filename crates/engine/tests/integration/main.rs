@@ -961,6 +961,7 @@ mod msh_wave5a_group1_classifier;
 mod msh_wave5a_group2_conditions;
 mod multi_layer_continuous_effect;
 mod multi_upkeep_triggers_suspend;
+mod multiface_composite_name_resolution;
 mod must_attack_player_attribution;
 mod mutable_pupa_perpetual_keyword_mirror;
 mod mycoloth_upkeep_trigger;
