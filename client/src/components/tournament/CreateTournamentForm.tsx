@@ -137,7 +137,8 @@ export function CreateTournamentForm({
           {t("create.totalRoundsLabel")}
         </label>
         {/* Empty is the "Automatic" affordance: `total_rounds` is the one
-            `CreateTournament` field the wire defaults (`protocol.rs:697-698`),
+            `CreateTournament` field the wire defaults
+            (`LobbyClientMessage::CreateTournament`, its `total_rounds`),
             so an omitted value is expressible and is submitted as `null`. */}
         <input
           id={roundsId}

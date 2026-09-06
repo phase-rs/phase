@@ -964,6 +964,12 @@ describe("TournamentPage catalog completeness", () => {
     expectCatalogValuePresent(container, "Your Match");
     // The display precedence is organizer-dominant even holding both tokens.
     expectCatalogValuePresent(container, "Organizer");
+    // Discriminating reach-guard: "Organizer" also appears in the always-on
+    // organizer-controls heading (gated on `roles.has("organizer")`, not on the
+    // relation), so the line above alone passes even if the RELATION badge were
+    // player-dominant. The badge itself must be organizer, not `entered` —
+    // flipping `viewerRelation` to player-dominant reddens exactly here.
+    expect(screen.queryByText("Entered")).toBeNull();
   });
 
   it("renders no unresolved key paths for a viewer holding no credential", async () => {

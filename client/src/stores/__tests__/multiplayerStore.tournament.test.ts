@@ -1209,6 +1209,9 @@ describe("subscription teardown", () => {
 
     expect(detach).toBeNull();
     expect(openPhaseSocket).not.toHaveBeenCalled();
-    expect(() => detach?.()).not.toThrow();
+    // No `detach?.()` no-op assertion here: with `detach` proven null above,
+    // `null?.()` short-circuits and cannot throw, so it could never fail. The
+    // caller's real safe-no-op path (a non-null detach called twice) is covered
+    // by the double-detach test above.
   });
 });

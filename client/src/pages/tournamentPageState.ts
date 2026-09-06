@@ -342,7 +342,7 @@ export interface GameWinEntry {
  *
  * The seat order is the authority, not the record's own key order, and that
  * is not merely stylistic. `player_key` is client-supplied and opaque
- * (`crates/lobby-broker/src/protocol.rs:699-702`), so an all-digit key is
+ * (`LobbyClientMessage::JoinTournament`, its `player_key`), so an all-digit key is
  * legal — and JavaScript hoists integer-like keys to the front of an object
  * in ascending numeric order. Measured:
  * `Object.keys(JSON.parse('{"12":2,"7":0,"alice":1}'))` is
@@ -421,7 +421,7 @@ export function arityLabel(arity: MatchArity): ArityLabel {
  * Prefill only. Mirrors `ScoringPolicy::default_for_arity`
  * (`crates/lobby-broker/src/tournament.rs:217-227`) because
  * `CreateTournament.scoring` is wire-mandatory and has no `#[serde(default)]`
- * (`crates/lobby-broker/src/protocol.rs:692`) and no RPC exposes the broker's
+ * (`LobbyClientMessage::CreateTournament`, its `scoring`) and no RPC exposes the broker's
  * default. The organizer may edit the result and the broker validates it
  * (`ScoringPolicy::new` rejects `win_points == 0`), so drift here degrades a
  * default, never a guarantee.
