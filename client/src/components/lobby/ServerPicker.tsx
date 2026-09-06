@@ -208,25 +208,6 @@ export function ServerPicker({ onClose }: ServerPickerProps) {
                 </button>
               );
             })}
-            {/* "None" bypasses the matchmaking broker entirely. `null` is the
-             * direct-codes sentinel: no lobby is browsed and `MultiplayerPage`
-             * forces P2P mode, so the UI lands directly on the direct-code
-             * flow without a round-trip through the offline prompt. */}
-            <button
-              type="button"
-              onClick={() => setHostingServer(null)}
-              className={
-                "flex w-full items-center justify-between rounded-[16px] border px-4 py-2.5 text-left text-sm transition-colors "
-                + (hostingServer === null
-                  ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-100"
-                  : "border-white/10 bg-black/18 text-gray-200 hover:border-white/18 hover:bg-white/6")
-              }
-            >
-              <span className="font-medium">{t("serverPicker.noneLabel")}</span>
-              <span className="shrink-0 pl-2 font-mono text-[10px] text-slate-500">
-                {t("serverPicker.directCodes")}
-              </span>
-            </button>
           </div>
         </div>
 

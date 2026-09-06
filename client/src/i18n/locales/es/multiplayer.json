@@ -127,11 +127,14 @@
     "kindFull": "(servidor de juego)",
     "kindLobbyOnly": "(intermediario de sala)"
   },
+  "connectionMode": {
+    "label": "Conexión",
+    "server": "Servidor oficial",
+    "p2p": "P2P"
+  },
   "serverPicker": {
     "title": "Servidor",
     "subtitle": "Elige dónde alojas tus partidas y qué salas exploras.",
-    "noneLabel": "Ninguno (solo P2P)",
-    "directCodes": "códigos directos",
     "official": "Oficial",
     "selfHosted": "Autoalojado",
     "customUrlPlaceholder": "wss://tu-servidor.ejemplo/ws",
@@ -179,8 +182,6 @@
   "lobbyView": {
     "directConnection": "Conexión directa",
     "onlineLobby": "Sala de espera en línea",
-    "pickServerTitle": "Elige un servidor para usar el modo de sala de espera en línea",
-    "pickServer": "Elegir servidor",
     "online": "{{count}} en línea",
     "format": "Formato",
     "allFormats": "Todos los formatos",
@@ -192,7 +193,7 @@
     "noFormatGames": "No hay partidas de {{format}} ahora mismo.",
     "noOpenGames": "No hay partidas abiertas ahora mismo.",
     "showAllFormats": "Mostrar todos los formatos",
-    "p2pNotice": "Servidor dedicado no disponible. Aún puedes hospedar o unirte directamente con un código de sala de 5 caracteres.",
+    "p2pNotice": "Modo peer-to-peer. Hospeda o únete directamente con un código de sala de 5 caracteres.",
     "joinByCode": "Unirse por código",
     "joinATable": "Unirse a una mesa",
     "p2pCodePlaceholder": "Introduce el código P2P de 5 caracteres",
@@ -203,7 +204,6 @@
     "hostServerDescription": "Abre una sala y espera a los jugadores.",
     "hostDraft": "Hospedar draft",
     "hostGame": "Hospedar partida",
-    "hostP2PGame": "Hospedar partida P2P",
     "passwordRequired": "Contraseña requerida",
     "passwordPlaceholder": "Introduce la contraseña",
     "watch": "Watch",
@@ -213,7 +213,8 @@
   "hostSetup": {
     "hostDirectMatch": "Hospedar partida directa",
     "hostMatch": "Hospedar partida",
-    "p2pNotice": "El servidor dedicado no está disponible, así que esta sala usará una conexión directa.",
+    "p2pNotice": "Modo peer-to-peer. Esta sala conecta a los jugadores directamente en lugar de ejecutarse en un servidor.",
+    "p2pSeatCap": "Las mesas P2P admiten como máximo {{max}} jugadores, así que el número de asientos está limitado.",
     "roomName": "Nombre de la sala",
     "optional": "(opcional)",
     "roomNamePlaceholder": "p. ej. Commander del viernes por la noche",

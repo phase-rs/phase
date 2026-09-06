@@ -127,11 +127,14 @@
     "kindFull": "(Spielserver)",
     "kindLobbyOnly": "(Lobby-Broker)"
   },
+  "connectionMode": {
+    "label": "Verbindung",
+    "server": "Offizieller Server",
+    "p2p": "P2P"
+  },
   "serverPicker": {
     "title": "Server",
     "subtitle": "Wähle, wo du hostest und welche Lobbys du durchsuchst.",
-    "noneLabel": "Keiner (nur P2P)",
-    "directCodes": "direkte Codes",
     "official": "Offiziell",
     "selfHosted": "Selbst gehostet",
     "customUrlPlaceholder": "wss://dein-server.beispiel/ws",
@@ -179,8 +182,6 @@
   "lobbyView": {
     "directConnection": "Direktverbindung",
     "onlineLobby": "Online-Lobby",
-    "pickServerTitle": "Wähle einen Server, um den Online-Lobby-Modus zu nutzen",
-    "pickServer": "Server wählen",
     "online": "{{count}} online",
     "format": "Format",
     "allFormats": "Alle Formate",
@@ -192,7 +193,7 @@
     "noFormatGames": "Derzeit keine {{format}}-Spiele.",
     "noOpenGames": "Derzeit keine offenen Spiele.",
     "showAllFormats": "Alle Formate anzeigen",
-    "p2pNotice": "Dedizierter Server nicht verfügbar. Du kannst trotzdem direkt mit einem 5-stelligen Raumcode hosten oder beitreten.",
+    "p2pNotice": "Peer-to-Peer-Modus. Hoste oder tritt direkt mit einem 5-stelligen Raumcode bei.",
     "joinByCode": "Per Code beitreten",
     "joinATable": "Einem Tisch beitreten",
     "p2pCodePlaceholder": "5-stelligen P2P-Code eingeben",
@@ -203,7 +204,6 @@
     "hostServerDescription": "Öffne einen Raum und warte auf Spieler.",
     "hostDraft": "Draft hosten",
     "hostGame": "Spiel hosten",
-    "hostP2PGame": "P2P-Spiel hosten",
     "passwordRequired": "Passwort erforderlich",
     "passwordPlaceholder": "Passwort eingeben",
     "watch": "Watch",
@@ -213,7 +213,8 @@
   "hostSetup": {
     "hostDirectMatch": "Direkte Partie hosten",
     "hostMatch": "Partie hosten",
-    "p2pNotice": "Der dedizierte Server ist nicht verfügbar, daher nutzt dieser Raum eine Direktverbindung.",
+    "p2pNotice": "Peer-to-Peer-Modus. Dieser Raum verbindet die Spieler direkt, statt auf einem Server zu laufen.",
+    "p2pSeatCap": "P2P-Tische haben höchstens {{max}} Plätze, daher ist die Spielerzahl begrenzt.",
     "roomName": "Raumname",
     "optional": "(optional)",
     "roomNamePlaceholder": "z. B. Freitagabend Commander",

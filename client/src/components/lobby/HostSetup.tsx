@@ -20,6 +20,7 @@ import {
 } from "../../stores/multiplayerStore";
 import type {
   AiSeatConfig,
+  ConnectionMode,
   HostingSettings,
   LobbySource,
 } from "../../stores/multiplayerStore";
@@ -36,6 +37,7 @@ import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
 import { expandParsedDeck } from "../../services/deckParser";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { ConnectionModeSwitch } from "./ConnectionModeSwitch";
 import { IntegerField } from "../ui/IntegerField";
 import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
 
@@ -54,7 +56,10 @@ interface HostSetupProps {
    */
   onHost: (settings: HostSettings, serverUrl: string | null) => void | Promise<boolean>;
   onBack: () => void;
-  connectionMode: "server" | "p2p";
+  connectionMode: ConnectionMode;
+  /** The page-level mode handler, shared with the lobby's switch. Mirrored
+   * here because the mode changes what the controls below it mean. */
+  onConnectionModeChange: (mode: ConnectionMode) => void;
   /** When true, the host-submit button is disabled (e.g. live deck check
    * says the active deck is illegal for the chosen format, or a check is
    * still in flight). The parent surfaces the *reason* via the legality
@@ -285,6 +290,7 @@ export function HostSetup({
   onHost,
   onBack,
   connectionMode,
+  onConnectionModeChange,
   hostDisabled = false,
   hostDisabledReason,
 }: HostSetupProps) {
@@ -539,6 +545,23 @@ export function HostSetup({
     setAiSeats((prev) => prev.filter((s) => s.seatIndex < count));
   };
 
+  // The mode switch above this form can lower the seat ceiling while the form
+  // is mounted (P2P seats at most `P2P_MAX_PEERS`), and this component is not
+  // remounted on a mode change — so the mount-time clamp on `playerCount`
+  // above is not enough. Anchored to the LIVE ceiling (`maxPlayers`, which is
+  // also what the seat buttons render from), and routed through
+  // `handlePlayerCountChange` so the AI seats past the new count are pruned
+  // with it rather than being submitted from `effectiveAiSeats`.
+  //
+  // Guarded on the comparison and depending on `[playerCount, maxPlayers]`
+  // deliberately: `handlePlayerCountChange` is a component-body function whose
+  // identity changes every render, so depending on it would re-render forever.
+  useEffect(() => {
+    if (playerCount <= maxPlayers) return;
+    handlePlayerCountChange(maxPlayers);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playerCount, maxPlayers]);
+
   const handleDeckSizeChange = (deckSize: number) => {
     // Variant-preserving: the engine is the authority for whether the format's
     // rule is a minimum or an exact count (CR 100.5 / CR 903.5a); this picker
@@ -782,6 +805,17 @@ export function HostSetup({
       onSubmit={(e) => { e.preventDefault(); void handleHost(); }}
       className="relative z-10 flex w-full flex-col gap-5"
     >
+      {/* Mode first: it changes what every control below it means, so it sits
+          above format and seats rather than among the option rows. */}
+      <Field label={t("connectionMode.label")}>
+        <div className="max-w-xs">
+          <ConnectionModeSwitch
+            value={connectionMode}
+            onChange={onConnectionModeChange}
+          />
+        </div>
+      </Field>
+
       {isP2P && (
         <p className="max-w-2xl text-sm leading-6 text-slate-400">
           {t("hostSetup.p2pNotice")}
@@ -909,6 +943,14 @@ export function HostSetup({
               </div>
             </Field>
           </div>
+          {/* The seat ceiling is a live consequence of the mode switch above,
+              so say so rather than letting seats vanish from the picker. The
+              number is `P2P_MAX_PEERS` — never a literal. */}
+          {isP2P && formatConfig.max_players > P2P_MAX_PEERS && (
+            <p role="status" className="-mt-1 text-xs text-fg-meta">
+              {t("hostSetup.p2pSeatCap", { max: P2P_MAX_PEERS })}
+            </p>
+          )}
           {playerCount !== 2 && <p className="-mt-1 text-xs text-fg-meta">{t("hostSetup.bo3Note")}</p>}
 
           {/* Free-for-all deck size (FFA only) */}

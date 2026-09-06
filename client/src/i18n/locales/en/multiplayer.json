@@ -127,11 +127,14 @@
     "kindFull": "(game server)",
     "kindLobbyOnly": "(lobby broker)"
   },
+  "connectionMode": {
+    "label": "Connection",
+    "server": "Official Server",
+    "p2p": "P2P"
+  },
   "serverPicker": {
     "title": "Server",
     "subtitle": "Choose where you host, and which lobbies you browse.",
-    "noneLabel": "None (P2P only)",
-    "directCodes": "direct codes",
     "official": "Official",
     "selfHosted": "Self-hosted",
     "customUrlPlaceholder": "wss://your-server.example/ws",
@@ -179,8 +182,6 @@
   "lobbyView": {
     "directConnection": "Direct Connection",
     "onlineLobby": "Online Lobby",
-    "pickServerTitle": "Pick a server to use online lobby mode",
-    "pickServer": "Pick server",
     "online": "{{count}} online",
     "format": "Format",
     "allFormats": "All formats",
@@ -192,7 +193,7 @@
     "noFormatGames": "No {{format}} games right now.",
     "noOpenGames": "No open games right now.",
     "showAllFormats": "Show all formats",
-    "p2pNotice": "Dedicated server unavailable. You can still host or join directly with a 5-character room code.",
+    "p2pNotice": "Peer-to-peer mode. Host or join directly with a 5-character room code.",
     "joinByCode": "Join by Code",
     "joinATable": "Join a Table",
     "p2pCodePlaceholder": "Enter 5-character P2P code",
@@ -204,7 +205,6 @@
     "hostServerDescription": "Open a room and wait for players.",
     "hostDraft": "Host Draft",
     "hostGame": "Host Game",
-    "hostP2PGame": "Host P2P Game",
     "passwordRequired": "Password Required",
     "passwordPlaceholder": "Enter password",
     "sourcesDegraded": "Some lobby sources are unreachable",
@@ -213,7 +213,8 @@
   "hostSetup": {
     "hostDirectMatch": "Host Direct Match",
     "hostMatch": "Host Match",
-    "p2pNotice": "Dedicated server is unavailable, so this room will use a direct connection.",
+    "p2pNotice": "Peer-to-peer mode. This room connects players directly instead of running on a server.",
+    "p2pSeatCap": "P2P tables seat at most {{max}} players, so the seat count is capped.",
     "roomName": "Room Name",
     "optional": "(optional)",
     "roomNamePlaceholder": "e.g. Friday Night Commander",

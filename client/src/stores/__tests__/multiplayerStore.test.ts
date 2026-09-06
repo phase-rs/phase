@@ -987,6 +987,40 @@ describe("multiplayerStore", () => {
     );
   });
 
+  // `connectionMode` is the one persisted key whose ABSENCE is meaningful: it is
+  // the sentinel that means "never chosen", which is what lets the page fall back
+  // to deriving the mode from `hostingServer`. A junk value must therefore land on
+  // `null` and not merely survive the spread — if it did, a corrupted blob would
+  // read as a deliberate choice and permanently override the fallback.
+  it.each([
+    ["a junk string", "peer-to-peer"],
+    ["a non-string", 7],
+    ["null", null],
+  ])("hydrates %s connection mode as never-chosen", (_label, stored) => {
+    localStorage.setItem(
+      "phase-multiplayer",
+      JSON.stringify({ state: { connectionMode: stored }, version: 6 }),
+    );
+
+    act(() => useMultiplayerStore.persist.rehydrate());
+
+    expect(useMultiplayerStore.getState().connectionMode).toBeNull();
+  });
+
+  it.each(["server", "p2p"] as const)(
+    "hydrates a stored %s connection mode as a real choice",
+    (stored) => {
+      localStorage.setItem(
+        "phase-multiplayer",
+        JSON.stringify({ state: { connectionMode: stored }, version: 6 }),
+      );
+
+      act(() => useMultiplayerStore.persist.rehydrate());
+
+      expect(useMultiplayerStore.getState().connectionMode).toBe(stored);
+    },
+  );
+
   it("strips AI seats from team-based server host settings", async () => {
     useMultiplayerStore.getState().startHosting(
       hostingSettings({
