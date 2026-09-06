@@ -2831,15 +2831,47 @@ pub(crate) fn combat_tax_mode_matches(
     mode: &StaticMode,
     context: &crate::types::game_state::CombatTaxContext,
 ) -> bool {
+    combat_tax_relevant_modes(context).contains(mode)
+}
+
+/// CR 508.1c / CR 509.1b: the taxable `StaticMode`s, per combat side. This array
+/// is the single authority: [`combat_tax_mode_matches`] tests membership in it and
+/// [`combat_tax_relevant_kinds`] maps it through `StaticMode::kind`, so the O(1)
+/// presence gate in [`compute_combat_tax`] and the exact walk it guards read the
+/// SAME list and cannot drift apart by editing only one of them.
+static ATTACKING_TAX_MODES: [StaticMode; 2] =
+    [StaticMode::CantAttack, StaticMode::CantAttackOrBlock];
+static BLOCKING_TAX_MODES: [StaticMode; 2] = [StaticMode::CantBlock, StaticMode::CantAttackOrBlock];
+
+fn combat_tax_relevant_modes(
+    context: &crate::types::game_state::CombatTaxContext,
+) -> &'static [StaticMode; 2] {
     use crate::types::game_state::CombatTaxContext;
     match context {
-        CombatTaxContext::Attacking => {
-            matches!(mode, StaticMode::CantAttack | StaticMode::CantAttackOrBlock)
-        }
-        CombatTaxContext::Blocking => {
-            matches!(mode, StaticMode::CantBlock | StaticMode::CantAttackOrBlock)
-        }
+        CombatTaxContext::Attacking => &ATTACKING_TAX_MODES,
+        CombatTaxContext::Blocking => &BLOCKING_TAX_MODES,
     }
+}
+
+/// The `StaticModeKind` discriminants the O(1) `static_mode_presence` index must
+/// be consulted for before [`compute_combat_tax`] may skip its board walk.
+///
+/// DERIVED, not restated: it is exactly `combat_tax_relevant_modes(context)`
+/// mapped through `StaticMode::kind`, so the gate is guaranteed to cover every
+/// mode [`combat_tax_mode_matches`] admits — for ANY future edit to that list,
+/// not merely for the variants some test happens to enumerate. The soundness
+/// step is one line: if the walk would match a functioning `def`, then
+/// `def.mode` is in the authority array, hence `def.mode.kind()` is in this
+/// array, hence the index (rebuilt from a SUPERSET of the walked universe)
+/// reports it present and the gate falls through to the walk. Deriving in this
+/// direction stays sound even if `StaticMode::kind` is ever made non-injective:
+/// a second variant sharing one of these discriminants can only make the gate
+/// admit MORE boards, never fewer.
+pub(crate) fn combat_tax_relevant_kinds(
+    context: &crate::types::game_state::CombatTaxContext,
+) -> [StaticModeKind; 2] {
+    let modes = combat_tax_relevant_modes(context);
+    [modes[0].kind(), modes[1].kind()]
 }
 
 /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Walk every battlefield / command-zone
@@ -2871,6 +2903,49 @@ pub fn compute_combat_tax(
     if creatures.is_empty() {
         return None;
     }
+
+    // CR 604.1: O(1) presence gate ahead of the whole-board sweep below.
+    //
+    // The walk below admits a `def` only when `combat_tax_mode_matches` does, and
+    // that predicate is membership in `combat_tax_relevant_modes(context)`.
+    // `combat_tax_relevant_kinds` is that same array mapped through
+    // `StaticMode::kind`, so "no functioning static carries one of these
+    // discriminants" implies "the walk below matches nothing" — decidable from
+    // the O(1) `StaticModePresence` index without touching the battlefield.
+    //
+    // Scoping is sound because the index is rebuilt wholesale from
+    // `game_functioning_statics` (battlefield ∪ command zone, CR 702.26b
+    // phased-out excluded, per-def `static_functions_in_zone` applied) — the
+    // SAME universe the loop below walks, minus the extra object-level
+    // `object_sources_static_from_command_zone` gate this function additionally
+    // applies to command-zone sources. That extra gate only REMOVES sources from
+    // the walk, so the walked set is a SUBSET of the indexed set and a `false`
+    // here cannot miss a tax. Before the first layers flush the index is
+    // `all_present`, which falls through to the exact walk unchanged.
+    //
+    // No NEW trust is placed in the index by doing this. Both callers consult it
+    // for these exact discriminants on this exact state immediately BEFORE
+    // asking for a tax: `handle_declare_attackers` runs
+    // `validate_attack_declaration` → `CombatStaticGates::compute`, which reads
+    // `static_kind_present(CantAttack)` / `(CantAttackOrBlock)`; and
+    // `handle_declare_blockers` runs `validate_blockers_for_player` →
+    // `collect_blocker_restriction_statics`, whose own presence gate is exactly
+    // `CantBlock || CantAttackOrBlock`. A stale index would already have let an
+    // illegal declaration through before it could reach this line.
+    //
+    // This matters because `complete_one` calls `attack_incurs_tax` once per
+    // proposed (attacker, target) pairing, so AI attack-candidate enumeration on
+    // an N-creature board ran a full board sweep of O(N) permanents for every one
+    // of them — 2N sweeps for the N single-attacker proposals plus the one
+    // alpha-strike proposal, pinned by
+    // `attack_candidate_enumeration_does_no_combat_tax_full_scans`.
+    if !combat_tax_relevant_kinds(&context)
+        .iter()
+        .any(|&kind| static_kind_present(state, kind))
+    {
+        return None;
+    }
+    crate::game::perf_counters::record_static_full_scan();
 
     // Pre-collect the affected creature count for scaling — used by
     // PerAffectedCreature (count of declared creatures this static touches) so
@@ -7495,6 +7570,631 @@ mod tests {
             ordered_valid_blocker_ids(&HashMap::from([(ObjectId(12), Vec::new())])),
             vec![ObjectId(12)]
         );
+    }
+
+    // ── Combat-tax presence-gate tests (CR 604.1 scan gate) ─────────────────
+
+    /// Build an N-creature go-wide board parked at the declare-attackers step,
+    /// with the `WaitingFor::DeclareAttackers` payload the AI enumerator reads.
+    /// Layers are flushed so `static_mode_presence` is PRECISE (production
+    /// reaches combat post-flush).
+    fn go_wide_declare_attackers_state(n: usize) -> (GameState, Vec<ObjectId>) {
+        let mut state = setup();
+        let ids: Vec<ObjectId> = (0..n)
+            .map(|i| create_creature(&mut state, PlayerId(0), &format!("Bear {i}"), 2, 2))
+            .collect();
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.priority_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+        crate::game::layers::evaluate_layers(&mut state);
+        let valid_attacker_ids = get_valid_attacker_ids(&state);
+        let valid_attack_targets = get_valid_attack_targets(&state);
+        state.waiting_for = crate::types::game_state::WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids,
+            valid_attack_targets,
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        (state, ids)
+    }
+
+    /// CR 508.1d + CR 604.1: attack-candidate enumeration on a go-wide board
+    /// carrying NO functioning combat-tax static must run ZERO whole-board
+    /// combat-tax sweeps.
+    ///
+    /// `complete_one` asks `attack_incurs_tax` once per proposed (attacker,
+    /// target) pairing, and `compute_combat_tax` walked
+    /// `battlefield ∪ command_zone` in FULL on every one of those calls. The
+    /// enumerator emits N single-attacker proposals plus one alpha-strike
+    /// proposal whose `.any()` visits all N pairings, so an N-creature board
+    /// cost 2N full board walks of O(N) permanents each — measured at exactly
+    /// 2N here (N=64 → 128 walks) before the O(1) `static_mode_presence` gate.
+    /// Deleting that gate in `compute_combat_tax` restores the 2N walks and
+    /// fails the `== 0` assertion.
+    #[test]
+    fn attack_candidate_enumeration_does_no_combat_tax_full_scans() {
+        const N: usize = 64;
+        let (state, ids) = go_wide_declare_attackers_state(N);
+
+        crate::game::perf_counters::reset();
+        let candidates = crate::ai_support::candidate_actions(&state);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        // (1) Counter guard — reverting the presence gate makes this 2N.
+        assert_eq!(
+            scans, 0,
+            "attack-candidate enumeration must not run any whole-board combat-tax sweep \
+             on a board with no CantAttack / CantAttackOrBlock static"
+        );
+
+        // (2) Non-vacuity: the board really carries N attackers, and the
+        //     enumerator really produced the proposals that drive those calls —
+        //     N single-attacker declarations plus the N-attacker alpha strike.
+        //     Without these anchors an empty candidate list would satisfy (1).
+        assert_eq!(ids.len(), N, "fixture builds N creatures");
+        let declarations: Vec<&Vec<(ObjectId, AttackTarget)>> = candidates
+            .iter()
+            .filter_map(|c| match &c.action {
+                crate::types::actions::GameAction::DeclareAttackers { attacks, .. } => {
+                    Some(attacks)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            declarations.iter().filter(|d| d.len() == 1).count(),
+            N,
+            "one single-attacker declaration per creature"
+        );
+        assert_eq!(
+            declarations.iter().filter(|d| d.len() == N).count(),
+            1,
+            "one N-attacker alpha-strike declaration"
+        );
+    }
+
+    /// CR 508.1d + CR 118.12a: positive control for the gate above. With a real
+    /// Ghostly Prison on the flushed board, `static_mode_presence` reports
+    /// `CantAttack` present, the gate falls through to the exact walk (the
+    /// counter fires), and the tax is still computed — proving the O(1) gate
+    /// suppresses only boards where no tax could apply.
+    #[test]
+    fn combat_tax_presence_gate_does_not_suppress_a_real_tax() {
+        let mut state = setup();
+        let _prison = create_ghostly_prison(&mut state, PlayerId(1));
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        crate::game::layers::evaluate_layers(&mut state);
+
+        crate::game::perf_counters::reset();
+        let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+        let tax = compute_attack_tax(&state, &attacks);
+        let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+        let (total, per_creature) = tax.expect("Ghostly Prison taxes the attack");
+        assert_eq!(total.mana_value(), 2, "Ghostly Prison charges {{2}}");
+        assert_eq!(per_creature, vec![(attacker, total.clone())]);
+        assert_eq!(
+            scans, 1,
+            "the gate admits the board and the exact walk runs exactly once"
+        );
+    }
+
+    /// Adds an UnlessPay combat-tax static of `mode` to a fresh permanent
+    /// controlled by `controller`, taxing that controller's OPPONENTS' creatures
+    /// `{1}` each. Shared by the differential matrix below so every board in it
+    /// differs only in the axis under test.
+    fn add_unless_pay_static(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        mode: StaticMode,
+        defended: Option<crate::types::triggers::AttackTargetFilter>,
+    ) -> ObjectId {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::mana::ManaCost;
+
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        let mut def = StaticDefinition::new(mode)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }))
+            .description(name.to_string());
+        def.condition = Some(StaticCondition::UnlessPay {
+            cost: ManaCost::generic(1),
+            scaling: UnlessPayScaling::PerAffectedCreature,
+            defended,
+        });
+        obj.static_definitions.push(def);
+        id
+    }
+
+    /// CORRECTNESS OVER SPEED — differential proof that the O(1) gate computes
+    /// the SAME answer as the exact walk it short-circuits, on a matrix built to
+    /// be hostile to it, and DECLINES only where the walk would find nothing.
+    ///
+    /// The control arm is the production code path from before this change:
+    /// `StaticModePresence::all_present()` is the documented pre-flush default
+    /// under which every consumer falls through to its exact per-object check, so
+    /// stamping it onto a clone disables the gate with no production edit. Every
+    /// row asserts `gated == ungated`, so a gate that dropped a real tax on ANY
+    /// row fails here rather than silently letting a Propaganda be ignored.
+    ///
+    /// The rows that matter most:
+    ///   * `cant-attack static without UnlessPay` — the index reports the kind
+    ///     PRESENT but no tax exists. The gate must ADMIT and let the walk decide.
+    ///   * `ghostly prison, blocking side` — a real `CantAttack` static asked for
+    ///     a BLOCK tax. `combat_tax_relevant_kinds(Blocking)` excludes
+    ///     `CantAttack`, so the gate suppresses; the walk would also match
+    ///     nothing. A gate that ignored `context` would still agree here, which is
+    ///     why the `CantBlock`/`CantAttackOrBlock` rows are present too.
+    ///   * `command-zone opt-in prison` — the walk applies an EXTRA
+    ///     `object_sources_static_from_command_zone` gate the index does not, so
+    ///     this is the row where walked ⊊ indexed. The tax must still be quoted.
+    ///   * `phased-out prison` (CR 702.26b) — excluded from BOTH the index refresh
+    ///     and the walk; the gate must suppress and the answer stay `None`.
+    #[test]
+    fn combat_tax_presence_gate_matches_the_ungated_walk_on_every_board() {
+        use crate::types::game_state::CombatTaxContext;
+        use crate::types::statics::StaticModePresence;
+        use crate::types::triggers::AttackTargetFilter;
+        use crate::types::zones::Zone;
+
+        type Board = (
+            &'static str,
+            GameState,
+            Vec<(ObjectId, Option<AttackTarget>)>,
+            CombatTaxContext,
+            // Does the O(1) gate short-circuit this board?
+            bool,
+        );
+
+        let mut boards: Vec<Board> = Vec::new();
+
+        // (1) Clean board — nothing to tax; the gate must short-circuit.
+        {
+            let mut state = setup();
+            let a = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            crate::game::layers::evaluate_layers(&mut state);
+            boards.push((
+                "clean board, attacking",
+                state,
+                vec![(a, Some(AttackTarget::Player(PlayerId(1))))],
+                CombatTaxContext::Attacking,
+                true,
+            ));
+        }
+
+        // (2) A real Ghostly Prison — the gate must admit and the tax must apply.
+        {
+            let mut state = setup();
+            let _prison = create_ghostly_prison(&mut state, PlayerId(1));
+            let a = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            crate::game::layers::evaluate_layers(&mut state);
+            boards.push((
+                "ghostly prison, attacking",
+                state,
+                vec![(a, Some(AttackTarget::Player(PlayerId(1))))],
+                CombatTaxContext::Attacking,
+                false,
+            ));
+        }
+
+        // (3) HOSTILE: `CantAttack` present in the index, but the static carries
+        //     no `UnlessPay` — a pure prohibition, not a tax. The gate must admit
+        //     and the walk must decide `None`.
+        {
+            use crate::types::ability::{
+                ControllerRef, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+            };
+            let mut state = setup();
+            let card_id = CardId(state.next_object_id);
+            let id = create_object(
+                &mut state,
+                card_id,
+                PlayerId(1),
+                "Pure Prohibition".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::Opponent),
+                        properties: vec![],
+                    }))
+                    .description("Pure Prohibition".to_string()),
+            );
+            let a = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            crate::game::layers::evaluate_layers(&mut state);
+            boards.push((
+                "cant-attack static without UnlessPay, attacking",
+                state,
+                vec![(a, Some(AttackTarget::Player(PlayerId(1))))],
+                CombatTaxContext::Attacking,
+                false,
+            ));
+        }
+
+        // (4) CR 702.26b: a phased-out prison functions nowhere — excluded from
+        //     both the index refresh and the walk.
+        {
+            let mut state = setup();
+            let prison = create_ghostly_prison(&mut state, PlayerId(1));
+            state.objects.get_mut(&prison).unwrap().phase_status =
+                crate::game::game_object::PhaseStatus::PhasedOut {
+                    cause: crate::game::game_object::PhaseOutCause::Directly,
+                };
+            let a = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            crate::game::layers::evaluate_layers(&mut state);
+            boards.push((
+                "phased-out prison, attacking",
+                state,
+                vec![(a, Some(AttackTarget::Player(PlayerId(1))))],
+                CombatTaxContext::Attacking,
+                true,
+            ));
+        }
+
+        // (5) CR 113.6b: command-zone source with an explicit `Command` opt-in —
+        //     the row where the walked universe is a STRICT subset of the indexed
+        //     one (the walk adds `object_sources_static_from_command_zone`).
+        {
+            use crate::types::ability::{
+                ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+                TypedFilter, UnlessPayScaling,
+            };
+            use crate::types::mana::ManaCost;
+            let mut state = setup();
+            let card_id = CardId(state.next_object_id);
+            let plane = create_object(
+                &mut state,
+                card_id,
+                PlayerId(1),
+                "Command-Opted Prison".to_string(),
+                Zone::Command,
+            );
+            let obj = state.objects.get_mut(&plane).unwrap();
+            obj.is_emblem = false;
+            let mut def = StaticDefinition::new(StaticMode::CantAttack)
+                .affected(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::Opponent),
+                    properties: vec![],
+                }))
+                .active_zones(vec![Zone::Command])
+                .description("Command-Opted Prison".to_string());
+            def.condition = Some(StaticCondition::UnlessPay {
+                cost: ManaCost::generic(2),
+                scaling: UnlessPayScaling::PerAffectedCreature,
+                defended: Some(AttackTargetFilter::Player),
+            });
+            obj.static_definitions.push(def);
+            let a = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            crate::game::layers::evaluate_layers(&mut state);
+            boards.push((
+                "command-zone opt-in prison, attacking",
+                state,
+                vec![(a, Some(AttackTarget::Player(PlayerId(1))))],
+                CombatTaxContext::Attacking,
+                false,
+            ));
+        }
+
+        // (6) HOSTILE CONTEXT SPLIT: a real `CantAttack` tax asked for a BLOCK
+        //     verdict. `combat_tax_relevant_kinds(Blocking)` excludes
+        //     `CantAttack`, so the gate suppresses — and so would the walk.
+        {
+            let mut state = setup();
+            let _prison = create_ghostly_prison(&mut state, PlayerId(1));
+            let b = create_creature(&mut state, PlayerId(1), "Blocker", 2, 2);
+            crate::game::layers::evaluate_layers(&mut state);
+            boards.push((
+                "ghostly prison, blocking",
+                state,
+                vec![(b, None)],
+                CombatTaxContext::Blocking,
+                true,
+            ));
+        }
+
+        // (7) The blocking-side positive: a real `CantBlock` tax.
+        {
+            let mut state = setup();
+            let _tax = add_unless_pay_static(
+                &mut state,
+                PlayerId(0),
+                "Block Tax",
+                StaticMode::CantBlock,
+                None,
+            );
+            let b = create_creature(&mut state, PlayerId(1), "Blocker", 2, 2);
+            crate::game::layers::evaluate_layers(&mut state);
+            boards.push((
+                "cant-block tax, blocking",
+                state,
+                vec![(b, None)],
+                CombatTaxContext::Blocking,
+                false,
+            ));
+        }
+
+        // (8) + (9) `CantAttackOrBlock` is the mode SHARED by both contexts — it
+        //     must admit on either side.
+        {
+            let mut state = setup();
+            let _tax = add_unless_pay_static(
+                &mut state,
+                PlayerId(1),
+                "Both-Sides Tax",
+                StaticMode::CantAttackOrBlock,
+                None,
+            );
+            let a = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            crate::game::layers::evaluate_layers(&mut state);
+            boards.push((
+                "cant-attack-or-block tax, attacking",
+                state,
+                vec![(a, Some(AttackTarget::Player(PlayerId(1))))],
+                CombatTaxContext::Attacking,
+                false,
+            ));
+        }
+        {
+            let mut state = setup();
+            let _tax = add_unless_pay_static(
+                &mut state,
+                PlayerId(0),
+                "Both-Sides Tax",
+                StaticMode::CantAttackOrBlock,
+                None,
+            );
+            let b = create_creature(&mut state, PlayerId(1), "Blocker", 2, 2);
+            crate::game::layers::evaluate_layers(&mut state);
+            boards.push((
+                "cant-attack-or-block tax, blocking",
+                state,
+                vec![(b, None)],
+                CombatTaxContext::Blocking,
+                false,
+            ));
+        }
+
+        // Non-vacuity anchors for the loop below: the matrix must actually
+        // contain boards on BOTH sides of the gate, and boards that really do
+        // produce a tax. Without these, "gated == ungated" would be satisfied by
+        // a matrix of nine identical empty boards.
+        assert_eq!(boards.len(), 9, "matrix size drifted");
+        assert_eq!(
+            boards.iter().filter(|b| b.4).count(),
+            3,
+            "matrix must exercise the short-circuit"
+        );
+        assert_eq!(
+            boards.iter().filter(|b| !b.4).count(),
+            6,
+            "matrix must exercise the fall-through"
+        );
+
+        let mut taxed_rows = 0usize;
+        for (name, state, creatures, context, gate_short_circuits) in boards {
+            // Control arm: the pre-change code path. `all_present` makes the gate
+            // unconditionally fall through to the exact walk.
+            let mut ungated = state.clone();
+            ungated.static_mode_presence = StaticModePresence::all_present();
+
+            crate::game::perf_counters::reset();
+            let gated_result = compute_combat_tax(&state, &creatures, context.clone());
+            let gated_scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+            crate::game::perf_counters::reset();
+            let ungated_result = compute_combat_tax(&ungated, &creatures, context);
+            let ungated_scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+            assert_eq!(
+                gated_result, ungated_result,
+                "{name}: the O(1) gate changed the verdict"
+            );
+            assert_eq!(
+                ungated_scans, 1,
+                "{name}: the control arm must always reach the exact walk"
+            );
+            assert_eq!(
+                gated_scans,
+                u64::from(!gate_short_circuits),
+                "{name}: gate short-circuit expectation"
+            );
+            if gated_result.is_some() {
+                taxed_rows += 1;
+            }
+        }
+
+        // Non-vacuity: if no row produced a tax, `gated == ungated` would only
+        // ever be comparing `None == None`.
+        assert_eq!(
+            taxed_rows, 5,
+            "the matrix must contain boards that really do quote a tax"
+        );
+    }
+
+    /// Manual scaling profile for the enumeration seam this gate addresses, and
+    /// the honest record of what it does NOT address. Run with:
+    ///
+    /// `cargo test -p phase-engine --lib attack_candidate_enumeration_scaling_profile -- --ignored --nocapture`
+    ///
+    /// `candidate_actions` at declare-attackers on a go-wide, tax-free board.
+    /// Median of three runs each, unoptimized `dev` profile, one developer
+    /// machine — the SCAN COUNTS are exact and deterministic, the wall times are
+    /// indicative only:
+    ///
+    /// ```text
+    ///          without the gate        with the gate
+    ///   N=100  5.95 ms /  200 scans    4.25 ms / 0 scans
+    ///   N=200  20.9 ms /  400 scans    14.5 ms / 0 scans
+    ///   N=400  80.5 ms /  800 scans    55.0 ms / 0 scans
+    ///   N=800   320 ms / 1600 scans     226 ms / 0 scans
+    /// ```
+    ///
+    /// The gate removes the 2N full board walks entirely (~30% of enumeration
+    /// wall time across this range) but the curve is STILL quadratic: the
+    /// residual is `validate_declaration_core`, which `complete_one` runs once
+    /// per proposal and which calls `validate_attackers` +
+    /// `validate_per_defender_attacker_caps`, each of which rescans the board.
+    /// Timed separately at N=800 those two loops cost ~76 ms + ~137 ms, i.e.
+    /// essentially all of the remaining ~226 ms. Hoisting them out of the
+    /// per-proposal loop in `complete_attacker_proposals` is a separate change.
+    ///
+    /// Measured and NOT worth doing: the `Vec::contains` over `valid_attacker_ids`
+    /// in `ai_support::cheap_reject_candidate`'s `DeclareAttackers` arm. It runs
+    /// 2N membership scans over an N-element `Vec`; at N=800 that is 1.4 ms
+    /// against 140 s for the full `validated_candidate_actions` pass (the
+    /// `SimulationFilter` clone-and-apply dominates by five orders of magnitude)
+    /// and 0.7% of the 208 ms generation-only pass. A set lookup there would be
+    /// unmeasurable.
+    #[test]
+    #[ignore = "perf benchmark; run manually"]
+    fn attack_candidate_enumeration_scaling_profile() {
+        use std::time::Instant;
+
+        for n in [100usize, 200, 400, 800] {
+            let (state, _ids) = go_wide_declare_attackers_state(n);
+            let valid = get_valid_attacker_ids(&state);
+
+            crate::game::perf_counters::reset();
+            let t = Instant::now();
+            let candidates = crate::ai_support::candidate_actions(&state);
+            let gen = t.elapsed();
+            let scans = crate::game::perf_counters::snapshot().static_full_scans;
+
+            let t = Instant::now();
+            for &id in &valid {
+                let _ = validate_attackers(&state, &[id]);
+            }
+            let attackers_dt = t.elapsed();
+            let t = Instant::now();
+            for &id in &valid {
+                let _ = validate_per_defender_attacker_caps(
+                    &state,
+                    &[(id, AttackTarget::Player(PlayerId(1)))],
+                );
+            }
+            let caps_dt = t.elapsed();
+
+            println!(
+                "N={n:4} candidates={:4} candidate_actions={gen:>11.3?} combat_tax_scans={scans:5} \
+                 | residual: validate_attackers x{n}={attackers_dt:>11.3?} \
+                 per_defender_caps x{n}={caps_dt:>11.3?}",
+                candidates.len()
+            );
+        }
+    }
+
+    /// CR 604.1: the O(1) presence gate must cover every `StaticMode`
+    /// `combat_tax_mode_matches` admits, in BOTH contexts — otherwise the
+    /// short-circuit in `compute_combat_tax` would silently drop a real tax.
+    ///
+    /// EXHAUSTIVE, not by example. `combat_tax_relevant_modes` is the single
+    /// authority: `combat_tax_mode_matches` is membership in it, so iterating it
+    /// iterates every mode that predicate can possibly admit. Adding a mode to
+    /// the authority array extends this loop automatically; there is no second
+    /// list to forget.
+    #[test]
+    fn combat_tax_presence_kinds_cover_every_matched_mode() {
+        use crate::types::game_state::CombatTaxContext;
+
+        for context in [CombatTaxContext::Attacking, CombatTaxContext::Blocking] {
+            let modes = combat_tax_relevant_modes(&context);
+            let kinds = combat_tax_relevant_kinds(&context);
+
+            let mut checked = 0usize;
+            for mode in modes {
+                assert!(
+                    combat_tax_mode_matches(mode, &context),
+                    "{context:?}: {mode:?} is in the authority array but combat_tax_mode_matches rejects it"
+                );
+                assert!(
+                    kinds.contains(&mode.kind()),
+                    "{context:?}: {mode:?} is taxed but its kind is absent from the O(1) presence gate — the gate would drop a real tax"
+                );
+                checked += 1;
+            }
+
+            // Non-vacuity. The fixed-size `[StaticMode; 2]` signature makes an
+            // empty axis unrepresentable today, so this guard is for the day the
+            // authority becomes a slice or a `Vec`: an empty one would make the
+            // loop above assert nothing while still passing.
+            assert_eq!(
+                checked,
+                modes.len(),
+                "{context:?}: the authority axis must not be empty"
+            );
+            assert!(
+                checked >= 2,
+                "{context:?}: both taxed modes must be checked"
+            );
+        }
+    }
+
+    /// Policy lock for the array the test above iterates. Exhaustive coverage is
+    /// worthless if the array silently grows to "every mode" (the gate would then
+    /// admit every board) or loses a side (the gate would then be unsound for a
+    /// mode the walk still matches). Pins the exact taxable set per CR 508.1c
+    /// (attacking) and CR 509.1b (blocking), including the cross-context
+    /// exclusions that make the two contexts distinct.
+    #[test]
+    fn combat_tax_authority_is_exactly_the_cant_attack_and_cant_block_modes() {
+        use crate::types::game_state::CombatTaxContext;
+
+        assert_eq!(
+            combat_tax_relevant_modes(&CombatTaxContext::Attacking),
+            &[StaticMode::CantAttack, StaticMode::CantAttackOrBlock],
+        );
+        assert_eq!(
+            combat_tax_relevant_modes(&CombatTaxContext::Blocking),
+            &[StaticMode::CantBlock, StaticMode::CantAttackOrBlock],
+        );
+
+        // Cross-context exclusions: `CantBlock` must not tax an attack and
+        // `CantAttack` must not tax a block, and neither excluded discriminant
+        // may appear in the other side's presence gate.
+        assert!(!combat_tax_mode_matches(
+            &StaticMode::CantBlock,
+            &CombatTaxContext::Attacking
+        ));
+        assert!(!combat_tax_relevant_kinds(&CombatTaxContext::Attacking)
+            .contains(&StaticModeKind::CantBlock));
+        assert!(!combat_tax_mode_matches(
+            &StaticMode::CantAttack,
+            &CombatTaxContext::Blocking
+        ));
+        assert!(!combat_tax_relevant_kinds(&CombatTaxContext::Blocking)
+            .contains(&StaticModeKind::CantAttack));
+
+        // A sibling combat static an `unless` tail can reach but which is NOT
+        // taxed — proves the gate is not trivially "every kind".
+        for context in [CombatTaxContext::Attacking, CombatTaxContext::Blocking] {
+            assert!(!combat_tax_mode_matches(
+                &StaticMode::CantBeBlocked,
+                &context
+            ));
+            assert!(!combat_tax_relevant_kinds(&context).contains(&StaticModeKind::CantBeBlocked));
+        }
     }
 
     fn setup() -> GameState {

@@ -325,6 +325,13 @@ pub(crate) fn record_post_apply_uncached_source_collection() {
 /// O(battlefield) `.any()` behind the O(1) `static_kind_present(IgnoreHexproof)`
 /// presence index — so on a board with zero functioning `IgnoreHexproof` statics this
 /// counter stays at 0 across an entire target enumeration.
+///
+/// Also incremented by `combat::compute_combat_tax` once per admitted call — i.e.
+/// once per real `battlefield ∪ command_zone` tax sweep, AFTER its O(1)
+/// `static_kind_present(CantAttack / CantBlock / CantAttackOrBlock)` gate. Attack
+/// candidate enumeration asks for a tax verdict once per proposed (attacker,
+/// target) pairing, so on a board with no combat-tax static this counter stays at
+/// 0 across the whole enumeration instead of reaching 2N.
 pub fn record_static_full_scan() {
     with_mut(|s| s.static_full_scans += 1);
 }
