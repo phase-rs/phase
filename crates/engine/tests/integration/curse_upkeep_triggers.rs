@@ -46,10 +46,14 @@ const CURSE_OF_OBLIVION: &str =
 // constant previously held text that matches no printed card, so the test below
 // asserted a trigger shape this card does not have.
 //
-// KNOWN GAP: the "other than that player" exclusion in the target phrase is not
-// yet modelled — the parsed target filter still admits the enchanted player. The
-// trigger SHAPE asserted here (an upkeep trigger on the enchanted player's
-// upkeep, CR 503.1) is unaffected by that gap.
+// KNOWN GAP (issue #8581): the "other than that player" exclusion in the
+// target phrase has no player-scoped counterpart to `FilterProp::Another`
+// yet, so the parser fails closed instead of fabricating a wrong filter --
+// the Draw ability lowers to `Effect::Unimplemented` (see
+// `curse_of_surveillance_target_exclusion_fails_closed` in
+// curse_of_thirst_attached_count.rs). The trigger SHAPE asserted here (an
+// upkeep trigger on the enchanted player's upkeep, CR 503.1) is unaffected
+// by that gap.
 const CURSE_OF_SURVEILLANCE: &str =
     "At the beginning of enchanted player's upkeep, any number of target players other than that player each draw cards equal to the number of Curses attached to that player.";
 
