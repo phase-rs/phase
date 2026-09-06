@@ -90,9 +90,18 @@ pub fn resolve(
     state.next_object_id += 1;
 
     // CR 205.3m: the live creature-type list the CR 707.9 subtype exceptions
-    // resolve against. Cloned before the `state.objects` borrow below, mirroring
-    // `token_copy`'s own loop-invariant clone at its call site.
-    let all_creature_types = state.all_creature_types.clone();
+    // resolve against. Read only by the `RemoveAllSubtypes` / `SetCardTypes`
+    // arms, and `additional_modifications` is empty for all but a handful of
+    // copy effects in the corpus — so this is computed only when a copy
+    // exception actually exists (CLAUDE.md: perform calculations only when
+    // needed). The clone (rather than a borrow) is required because
+    // `state.objects` is mutably borrowed by the `insert` below; unlike
+    // `token_copy`'s call site there is no loop here to hoist it out of.
+    let all_creature_types = if additional_modifications.is_empty() {
+        Vec::new()
+    } else {
+        state.all_creature_types.clone()
+    };
 
     // CR 707.10: A spell copy is itself a spell on the stack. Ability stack
     // entries are objects too, but this engine does not store GameObjects for

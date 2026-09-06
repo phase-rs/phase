@@ -106,8 +106,9 @@ use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Sup
 /// the shared authority for "split mixed-case text at a lowercase separator",
 /// rather than re-deriving byte offsets here.
 ///
-/// Returns `None` when the clause carries no except tail, so callers can leave
-/// their original text untouched.
+/// Returns `None` when the clause carries no except tail, **or when the tail's
+/// body grammar read nothing** — see the non-empty guard below. Callers leave
+/// their original text untouched in both cases.
 pub(crate) fn split_except_clause<'a>(
     text: &'a str,
     lower: &str,
@@ -125,6 +126,21 @@ pub(crate) fn split_except_clause<'a>(
     // carry the leading separator, so hand it the lowercase tail measured from
     // the boundary rather than the post-separator remainder.
     let (_, modifications) = parse_except_clause(lower.get(head.len()..)?, card_name, ctx)?;
+    // CR 707.9a: `parse_except_clause` is fail-soft by contract — it skips a body
+    // it cannot read and still returns `Some`, so an unreadable body yields an
+    // EMPTY vec rather than `None`. Splitting on that would hand the caller a
+    // shortened head and silently discard the tail, converting an honest parser
+    // gap into an invisible one (no `Effect::unimplemented` marker is emitted on
+    // this path). Decline instead, so the caller keeps its original text and the
+    // gap stays exactly as visible as it was before this seam existed.
+    //
+    // Fork ("Copy target instant or sorcery spell, except that the copy is red")
+    // is the live case: `that the copy is red` matches no body arm, so consuming
+    // the tail would change the text `parse_target` sees and silently alter
+    // Fork's legal-target filter as a ride-along.
+    if modifications.is_empty() {
+        return None;
+    }
     Some((head, modifications))
 }
 
@@ -3225,6 +3241,54 @@ mod tests {
         assert!(
             split_except_clause(text, &text.to_lowercase(), "Card", &ParseContext::default())
                 .is_none()
+        );
+    }
+
+    /// CR 707.9a: an except tail whose body the grammar cannot read must be
+    /// DECLINED, not consumed. `parse_except_clause` is fail-soft by contract
+    /// (it skips unreadable bodies and still returns `Some`), so without the
+    /// non-empty guard this helper would hand the caller a shortened head and
+    /// discard the tail with no `Effect::unimplemented` marker — converting a
+    /// visible parser gap into a silent one.
+    ///
+    /// Fork is the live case: `"except that the copy is red"` uses a `that `
+    /// subject that matches no body arm. Consuming it would change the text
+    /// `parse_target` receives and silently alter Fork's legal-target filter as
+    /// a ride-along in an unrelated PR. (Fork's own `SetColor { Red }` exception
+    /// stays unimplemented on purpose — `", except that"` appears on exactly one
+    /// card in the corpus, so a `that`-prefix arm would be a special case.)
+    ///
+    /// REACH-GUARD: the paired positive proves the decline comes from the
+    /// empty-body guard and not from the separator probe failing to find the
+    /// tail at all — same head, same separator, a body the grammar CAN read.
+    #[test]
+    fn split_except_clause_declines_unreadable_body_but_accepts_readable_one() {
+        let unreadable = "target instant or sorcery spell, except that the copy is red";
+        assert!(
+            split_except_clause(
+                unreadable,
+                &unreadable.to_lowercase(),
+                "Fork",
+                &ParseContext::default()
+            )
+            .is_none(),
+            "an unreadable except body must leave the caller's text intact"
+        );
+
+        let readable = "target instant or sorcery spell, except the copy isn't legendary";
+        let (head, mods) = split_except_clause(
+            readable,
+            &readable.to_lowercase(),
+            "Card",
+            &ParseContext::default(),
+        )
+        .expect("reach-guard: a readable body at the same separator must still split");
+        assert_eq!(head, "target instant or sorcery spell");
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
         );
     }
 }

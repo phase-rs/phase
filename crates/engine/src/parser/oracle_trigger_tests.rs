@@ -32310,4 +32310,5 @@ fn tawnos_the_toymaker_copy_is_an_artifact() {
             core_type: crate::types::card_type::CoreType::Artifact,
         }]
     );
+    assert_no_unimplemented(execute.as_ref());
 }
