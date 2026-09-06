@@ -52,6 +52,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import { useGameStore } from "../gameStore";
 import { processRemoteUpdate } from "../../game/dispatch";
 import { P2PGuestAdapter, P2PHostAdapter } from "../../adapter/p2p-adapter";
 import type { DraftPlayerView, SeatPublicView } from "../../adapter/draft-adapter";
@@ -65,10 +66,19 @@ const commanderSeatDecks = vi.fn<
   (view: DraftPlayerView, localSeat: number) => Promise<CommanderSeatDecks>
 >();
 const sendCommanderLaunches = vi.fn();
-/** The LOCAL-game payload, used only above the P2P seat ceiling. */
+/**
+ * The LOCAL-game payload, used only above the P2P seat ceiling.
+ *
+ * Built from `deckFor`, the same fixture every other deck in this file uses, so
+ * it carries the real `DraftDeckPayload` shape (`main_deck`/`sideboard`/
+ * `commander`). An ad-hoc literal here would type-check — `vi.fn` infers its
+ * return rather than checking it against the adapter's signature — while
+ * letting the stash assertion below pass on a shape `GameProvider` could never
+ * read.
+ */
 const podCommanderDeckPayload = vi.fn(async () => ({
-  player: { main: ["Sol Ring"], commanders: ["Ur-Dragon"] },
-  opponent: { main: ["Llanowar Elves"], commanders: ["Omnath"] },
+  player: deckFor(0),
+  opponent: deckFor(1),
   ai_decks: [],
   draft_set_codes: ["CMR"],
 }));
@@ -134,6 +144,16 @@ const transport = vi.hoisted(() => {
     hostRoomGate: null as Promise<void> | null,
     /** When set, `joinRoom` parks on it after logging the call. */
     joinRoomGate: null as Promise<void> | null,
+    /**
+     * When set, the guest's `getSnapshot` parks on it.
+     *
+     * That is the ONLY window in which an abort can land after
+     * `installMatchRuntime` has committed the adapter into `useGameStore` but
+     * before `throwIfAborted()` observes it — `installMatchRuntime` awaits this
+     * fetch, then commits synchronously, and the abort check is the next
+     * statement. `joinRoomGate` parks far too early to reach it.
+     */
+    guestSnapshotGate: null as Promise<void> | null,
     /**
      * The seat the host assigns this guest, emitted during the bring-up.
      * DELIBERATELY NOT 2: `installJoinedPod`'s default `localSeat` is 2 and is
@@ -290,7 +310,10 @@ vi.mock("../../adapter/p2p-adapter", () => ({
         emit({ type: "playerIdentity", playerId: transport.control.assignedSeat });
         return { log_entries: [] };
       }),
-      getSnapshot: vi.fn(async () => transport.snapshot),
+      getSnapshot: vi.fn(async () => {
+        if (transport.control.guestSnapshotGate) await transport.control.guestSnapshotGate;
+        return transport.snapshot;
+      }),
       dispose: transport.guestDispose,
     };
   }),
@@ -522,6 +545,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     transport.control.parkHostRoom = false;
     transport.control.hostRoomGate = null;
     transport.control.joinRoomGate = null;
+    transport.control.guestSnapshotGate = null;
     transport.control.assignedSeat = 1;
     transport.startPregameGame.mockResolvedValue({ log_entries: [] });
   });
@@ -708,7 +732,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     // stashed where the game route reads it.
     expect(podCommanderDeckPayload).toHaveBeenCalledTimes(1);
     const gameId = target.slice("/game/".length, target.indexOf("?"));
-    expect(sessionStorage.getItem(`phase:draft-deck:${gameId}`)).toContain("Sol Ring");
+    expect(sessionStorage.getItem(`phase:draft-deck:${gameId}`)).toContain("Commander 0");
     // No banner: this is a supported outcome, not a degraded one.
     expect(useMultiplayerDraftStore.getState().error).toBeNull();
     // NONE of the peer-to-peer bring-up is entered.
@@ -1265,6 +1289,61 @@ describe("multiplayerDraftStore Commander launch", () => {
     // own dial cannot be mistaken for the launch's. A still-claimed slot would
     // refuse this press at the guard and leave the log empty.
     expect(transport.joinRoomCalls).toHaveLength(1);
+  });
+
+  /**
+   * The abort arrives LATE — after the bring-up has already committed itself to
+   * `useGameStore`, which the row above cannot reach because it parks in
+   * `joinRoom`, several awaits earlier.
+   *
+   * `installMatchRuntime` awaits a snapshot fetch and then commits
+   * synchronously, so a cancel landing during that fetch leaves the runtime
+   * installed and `throwIfAborted()` throwing immediately afterwards. The catch
+   * disposes the adapter, but `set({ matchAdapter })` never ran — and
+   * `disposeMatchAdapter`'s entire body is fenced on that field. So nothing
+   * `leave`, `reset` or `endCommanderSession` can do will ever reach the
+   * committed runtime: it is a DISPOSED adapter parked under a live
+   * `draft-match` game id.
+   */
+  it("releases a runtime the aborted join had already committed", async () => {
+    await installJoinedPod(commanderView(4, { humanSeats: [1, 2, 3] }));
+    capturedDraftGuestListener?.({ type: "commanderLaunch", launch: commanderLaunchFor(2) });
+
+    // Every game id the store passes through, so the assertions below can tell
+    // "cleaned up after installing" from "never installed at all". Without this
+    // control the final `toBeNull()` pair passes vacuously on any join that
+    // aborts EARLY, and the row would go green with the fix reverted.
+    const installedGameIds: Array<string | null> = [];
+    const unsubscribe = useGameStore.subscribe((state) => installedGameIds.push(state.gameId));
+
+    let openGate!: () => void;
+    transport.control.guestSnapshotGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+
+    const parked = useMultiplayerDraftStore.getState().joinCommanderGame(navigate);
+    // try/finally for the same reason the pending-flag row uses one: the gate is
+    // a bare promise the fake awaits without consulting the abort signal, so an
+    // assertion throwing in here would strand this join forever, still holding
+    // the module-local in-flight slot, and red every later case in the file.
+    try {
+      await vi.waitFor(() => expect(transport.guestInstances).toHaveLength(1));
+      // The pod is left while the snapshot fetch is still in flight.
+      await useMultiplayerDraftStore.getState().leave(false);
+    } finally {
+      openGate();
+      await parked;
+      unsubscribe();
+    }
+
+    // The control: the runtime really was committed before the abort was seen.
+    expect(installedGameIds).toContain("game-1");
+    // ...and nothing is left holding it. Both fields, because `adapter` alone
+    // would stay null if the commit had written only `gameId`.
+    expect(useGameStore.getState().adapter).toBeNull();
+    expect(useGameStore.getState().gameId).toBeNull();
+    // The user left the pod; they must not be dropped into the game regardless.
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   /**

@@ -1174,12 +1174,45 @@ function activePhaseForDraftViewStatus(status: DraftPlayerView["status"]): Activ
 }
 
 /**
- * Dispose the active match adapter (P2PHostAdapter or P2PGuestAdapter).
+ * Release the game-store runtime installed by `installMatchRuntime`, but only
+ * while `adapter` is still the adapter sitting in `useGameStore`.
+ *
+ * The identity guard is the whole point. A later bring-up may already have
+ * committed its own adapter under a new game id, and an unconditional clear
+ * would blank that live game on behalf of a dead one.
  *
  * Documented exemption from the `commitEngineSnapshot` single-writer invariant:
  * this is a teardown clear, not a live-game commit. It has no snapshot to gate
  * on, and any subsequent live commit arrives newest-by-construction (a fresh
  * post-init fetch), so it cannot be resurrected by a stale pair.
+ */
+function clearInstalledGameRuntime(adapter: unknown): void {
+  if (!adapter || useGameStore.getState().adapter !== adapter) return;
+  useGameStore.setState({
+    gameId: null,
+    gameState: null,
+    events: [],
+    eventHistory: [],
+    logHistory: [],
+    nextLogSeq: 0,
+    adapter: null,
+    waitingFor: null,
+    legalActions: [],
+    autoPassRecommended: false,
+    endContinuousEffectOffers: [],
+    spellCosts: {},
+    legalActionsByObject: {},
+    activationBlockReasons: {},
+    stateHistory: [],
+    turnCheckpoints: [],
+  });
+}
+
+/**
+ * Dispose the active match adapter (P2PHostAdapter or P2PGuestAdapter).
+ *
+ * Documented exemption from the `commitEngineSnapshot` single-writer invariant:
+ * see `clearInstalledGameRuntime`, which performs the game-store half.
  */
 function disposeMatchAdapter(set: SetFn): void {
   const state = useMultiplayerDraftStore.getState();
@@ -1187,26 +1220,7 @@ function disposeMatchAdapter(set: SetFn): void {
   if (state.matchAdapter) {
     const adapter = state.matchAdapter as { dispose?: () => void };
     adapter.dispose?.();
-    if (useGameStore.getState().adapter === state.matchAdapter) {
-      useGameStore.setState({
-        gameId: null,
-        gameState: null,
-        events: [],
-        eventHistory: [],
-        logHistory: [],
-        nextLogSeq: 0,
-        adapter: null,
-        waitingFor: null,
-        legalActions: [],
-        autoPassRecommended: false,
-        endContinuousEffectOffers: [],
-        spellCosts: {},
-        legalActionsByObject: {},
-        activationBlockReasons: {},
-        stateHistory: [],
-        turnCheckpoints: [],
-      });
-    }
+    clearInstalledGameRuntime(state.matchAdapter);
     set({
       matchAdapter: null,
       matchPairing: null,
@@ -2250,8 +2264,20 @@ export const useMultiplayerDraftStore = create<
       // its Peer and listeners can be released. Before the constructor, the
       // bare `JoinResult` owns the Peer instead — the mirror of the launch's
       // `handle.adapter` / `host` split.
-      if (matchAdapter) matchAdapter.dispose();
-      else join?.destroyPeer();
+      if (matchAdapter) {
+        matchAdapter.dispose();
+        // `installMatchRuntime` may ALREADY have committed this adapter into
+        // `useGameStore` before `throwIfAborted()` fired — it awaits a snapshot
+        // fetch, which is exactly the window a cancel lands in. `set({
+        // matchAdapter })` never ran on this path and `disposeMatchAdapter`'s
+        // whole body is fenced on that field, so this is the only place the
+        // committed runtime can be released. Left behind it is a DISPOSED
+        // adapter sitting under a live `draft-match` game id that no later
+        // `leave`/`reset`/`endCommanderSession` can reach.
+        clearInstalledGameRuntime(matchAdapter);
+      } else {
+        join?.destroyPeer();
+      }
       // A cancelled join is a user action, not a failure. `commanderLaunch`
       // deliberately stays set on BOTH arms: the invitation is still open and
       // the seat can still be taken.
