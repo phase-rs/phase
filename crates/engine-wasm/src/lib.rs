@@ -519,9 +519,11 @@ enum AiProposalSubmission {
 /// owns the state/contract decision that must be identical for browser and
 /// native regression coverage.
 enum AiProposalApplication {
-    Applied {
+    AppliedStackPass {
         result: Box<engine::types::game_state::ActionResult>,
-        verified_stack_pass: bool,
+    },
+    AppliedAction {
+        result: Box<engine::types::game_state::ActionResult>,
     },
     Stale,
     Rejected {
@@ -556,9 +558,11 @@ fn apply_ai_action_proposal_inner(
         apply_interaction_with_rejection(state, actor, contract.semantic_owner, action)
     };
     match applied {
-        Ok(result) => AiProposalApplication::Applied {
+        Ok(result) if verified_stack_pass => AiProposalApplication::AppliedStackPass {
             result: Box::new(result),
-            verified_stack_pass,
+        },
+        Ok(result) => AiProposalApplication::AppliedAction {
+            result: Box::new(result),
         },
         Err(rejection) => AiProposalApplication::Rejected { rejection },
     }
@@ -612,10 +616,7 @@ mod ai_proposal_submission_tests {
 
         assert!(matches!(
             apply_ai_action_proposal_inner(&mut state, &contract, player, GameAction::PassPriority),
-            AiProposalApplication::Applied {
-                verified_stack_pass: true,
-                ..
-            }
+            AiProposalApplication::AppliedStackPass { .. }
         ));
         assert_eq!(
             state
@@ -3437,15 +3438,13 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     match with_state_mut(|state| {
         apply_ai_action_proposal_inner(state, &proposal.contract, actor, action.clone())
     }) {
-        Ok(AiProposalApplication::Applied {
-            result,
-            verified_stack_pass,
-        }) => {
-            if verified_stack_pass {
-                record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
-            } else {
-                record_replay_action(false, actor, action);
-            }
+        Ok(AiProposalApplication::AppliedStackPass { result }) => {
+            record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
+            invalidate_ai_proposals();
+            to_js(&AiProposalSubmission::Applied { result })
+        }
+        Ok(AiProposalApplication::AppliedAction { result }) => {
+            record_replay_action(false, actor, action);
             invalidate_ai_proposals();
             to_js(&AiProposalSubmission::Applied { result })
         }
