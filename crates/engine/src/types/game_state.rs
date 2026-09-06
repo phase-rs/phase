@@ -804,17 +804,28 @@ impl NamedChoiceSource {
     /// moved to a public zone as part of its own resolution, the still-pending
     /// resolution may find that successor. A later same-id object cannot match
     /// the relatch's original/current incarnation pair.
+    ///
+    /// CR 614.12a: an entry replacement's required choice is made before the
+    /// permanent enters, so the "exact object" a persisting as-enters choice must
+    /// bind to can still be a liminal projection rather than a stored object —
+    /// hence the [`GameState::entering_or_live_object`] read here and the
+    /// matching [`GameState::chosen_attributes_mut`] write below. The relatch
+    /// branch stays `objects`-only: CR 400.7j is about a source that has already
+    /// MOVED between zones, which an entrant that has not yet entered cannot have
+    /// done.
     pub fn source_mut_exact_for_resolution<'a>(
         &self,
         state: &'a mut GameState,
-    ) -> Option<&'a mut GameObject> {
+    ) -> Option<&'a mut Vec<ChosenAttribute>> {
         let context = self.context.as_ref()?;
         let identity = &context.identity;
         let object_id = identity.reference.object_id;
-        let is_exact = state.objects.get(&object_id).is_some_and(|object| {
-            ObjectIncarnationRef::from_object(object) == identity.reference
-                && object.zone == identity.expected_zone
-        });
+        let is_exact = state
+            .entering_or_live_object(object_id)
+            .is_some_and(|object| {
+                ObjectIncarnationRef::from_object(object) == identity.reference
+                    && object.zone == identity.expected_zone
+            });
         let is_resolution_successor =
             state
                 .resolution_source_relatch
@@ -828,7 +839,7 @@ impl NamedChoiceSource {
                             .is_some_and(|object| object.incarnation == relatch.current_incarnation)
                 });
         (is_exact || is_resolution_successor)
-            .then(|| state.objects.get_mut(&object_id))
+            .then(|| state.chosen_attributes_mut(object_id))
             .flatten()
     }
 }
@@ -16906,6 +16917,14 @@ impl TokenProjection {
     pub fn set_tapped(&mut self, tapped: bool) {
         self.0.tapped = tapped;
     }
+
+    /// CR 607.2d + CR 614.12a: an entry replacement that requires a choice makes
+    /// that choice BEFORE the permanent enters, so the answer has to land on the
+    /// entrant while it is still a projection. Narrow for the same reason
+    /// [`TokenProjection::set_tapped`] is: one field, not the whole object.
+    pub fn chosen_attributes_mut(&mut self) -> &mut Vec<ChosenAttribute> {
+        &mut self.0.chosen_attributes
+    }
 }
 
 /// CR 614.12: the entrant of a liminal (decided-but-not-yet-entered) projection.
@@ -16955,6 +16974,16 @@ impl LiminalEntrant {
     /// witness rather than by trusting a flag on the projected object.
     pub fn is_token_projection(&self) -> bool {
         matches!(self, Self::Token(_))
+    }
+
+    /// CR 607.2d + CR 614.12a: the entrant's chosen-attribute list, so a
+    /// persisting as-enters choice binds to the projection that is about to
+    /// become the permanent. See [`TokenProjection::chosen_attributes_mut`].
+    pub fn chosen_attributes_mut(&mut self) -> &mut Vec<ChosenAttribute> {
+        match self {
+            Self::Token(token) => token.chosen_attributes_mut(),
+            Self::Card(object) => &mut object.chosen_attributes,
+        }
     }
 
     /// CR 614.1c: settle the entrant's tapped state before it enters.
@@ -23847,6 +23876,105 @@ impl GameState {
     pub fn set_match_config(&mut self, config: MatchConfig) {
         self.match_config = config;
         self.loop_detection = config.loop_detection;
+    }
+
+    /// CR 614.12: the object `id` names — "the characteristics of the permanent
+    /// as it would exist on the battlefield" — including an entrant whose entry
+    /// has been decided but has not yet committed.
+    ///
+    /// Single authority for the objects-vs-liminal precedence. A liminal entry is
+    /// deliberately absent from `objects` while its own entry replacements run, so
+    /// a seam that reads `objects` alone is blind to every entering token and to
+    /// the CR 701.42 meld result. The liminal projection wins where both exist:
+    /// for a meld the object still stored under that id is the entrant's PRE-entry
+    /// self (the exiled front-face component), which is not what CR 614.12 asks
+    /// about.
+    ///
+    /// This replaces three hand-rolled copies of the same lookup
+    /// (`filter::entering_object_projection`,
+    /// `zone_pipeline::entering_object_projection`, and
+    /// `engine_replacement::apply_post_replacement_effect`'s inline dual lookup).
+    /// `engine_replacement::copy_effect_for_source` still branches on
+    /// `liminal_entries` itself: it is not this lookup, because the two branches
+    /// search different ability sets (an entrant's own replacement definitions
+    /// versus `functioning_abilities::active_replacements`, which additionally
+    /// filters phased-out and non-emblem command-zone sources).
+    ///
+    /// Reach for this in any seam that resolves an ability's `source_id` during an
+    /// entry chain.
+    pub fn entering_or_live_object(&self, id: ObjectId) -> Option<&GameObject> {
+        self.liminal_entries
+            .get(&id)
+            .map(|entry| entry.object.projected())
+            .or_else(|| self.objects.get(&id))
+    }
+
+    /// CR 607.2d: the chosen-attribute list of the object `id` names, with the
+    /// same liminal precedence as [`GameState::entering_or_live_object`].
+    ///
+    /// Deliberately narrower than a `&mut GameObject`: an entering token is stored
+    /// as a [`TokenProjection`], whose whole purpose is to keep the CR 111.1
+    /// is-a-token witness out of a caller's reach. A persisting `Effect::Choose`
+    /// ("As this ~ enters, choose a colour", Tribute's CR 702.104a opponent
+    /// choice) needs exactly this one list and nothing else, so this is the whole
+    /// mutable surface it gets. Attributes written here survive the entry:
+    /// `token::commit_liminal_token_entry_with_post_actions` inserts the
+    /// projection itself into `objects`.
+    pub fn chosen_attributes_mut(&mut self, id: ObjectId) -> Option<&mut Vec<ChosenAttribute>> {
+        if let Some(entry) = self.liminal_entries.get_mut(&id) {
+            return Some(entry.object.chosen_attributes_mut());
+        }
+        self.objects
+            .get_mut(&id)
+            .map(|object| &mut object.chosen_attributes)
+    }
+
+    /// CR 614.1c + CR 122.6a: schedule counters onto a TOKEN entrant whose entry
+    /// has been decided but has not yet committed, so they are placed AS it enters
+    /// rather than added to it afterwards.
+    ///
+    /// Returns `false` when `id` names no such entrant, which is the caller's
+    /// signal to take its ordinary live-object path.
+    ///
+    /// The distinction is not bookkeeping. CR 702.104a's tribute counters, and
+    /// every other "as it enters" counter, are placed as part of the entry event,
+    /// so they must go through the entry's own CR 614.1a replacement pass —
+    /// Doubling Season, Corpsejack Menace, Hardened Scales all apply to them.
+    /// Adding them after the commit instead would be a second, separate event
+    /// that those replacements have already declined to modify, and would let the
+    /// permanent exist for an observable instant without the counters it entered
+    /// with (CR 704.5f decides a 0/0 entrant on exactly that instant).
+    ///
+    /// # Why only a token entrant
+    ///
+    /// CR 111.1: a token entrant "is a marker used to represent any permanent
+    /// that isn't represented by a card" and, until this entry commits, it sits in
+    /// no zone — there is no object under its id at all, so an ordinary counter
+    /// addition would find nothing and silently drop the counters. The other
+    /// entrant kind, the CR 701.42 meld result, is card-backed: the id still names
+    /// a real object (the entrant's pre-entry self), an ordinary addition reaches
+    /// it, and `meld::commit_meld_battlefield` does not consume
+    /// `LiminalEntry::enter_with_counters` at all — so redirecting a meld here
+    /// would be the very silent drop this exists to prevent. The stored CR 111.1
+    /// witness answers which kind this is, rather than a flag to be trusted.
+    pub fn schedule_entry_counters(
+        &mut self,
+        id: ObjectId,
+        counter_type: CounterType,
+        count: u32,
+    ) -> bool {
+        let Some(entry) = self
+            .liminal_entries
+            .get_mut(&id)
+            .filter(|entry| entry.object.is_token_projection())
+        else {
+            return false;
+        };
+        // The commit folds this list into the entry's counter pass in order, so
+        // appending is what puts these counters after any the creating effect
+        // already specified — CR 702.104a's "an ADDITIONAL N +1/+1 counters".
+        entry.enter_with_counters.push((counter_type, count));
+        true
     }
 
     /// Returns the current timestamp and increments for next use.

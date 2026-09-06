@@ -291,7 +291,7 @@ pub(crate) fn bind_named_choice(
         // chosen ability is independently readable by the `AddChosenKeyword`
         // plural grant. The single-keyword path (count == 1, and every other
         // choice type) produces a single attribute, byte-identical to before.
-        if let Some(obj) = source.source_mut_exact_for_resolution(state) {
+        if let Some(chosen_attributes) = source.source_mut_exact_for_resolution(state) {
             let attrs = chosen_attributes_for_choice(choice_type, choice);
             if !attrs.is_empty() {
                 // CR 608.2d: A keyword choice represents the CURRENT answer set,
@@ -311,7 +311,7 @@ pub(crate) fn bind_named_choice(
                 // CardName, Label, …) is untouched so RemoveChosenKeyword/Urborg
                 // and the anchor-word/Morophon cards keep accumulating per their
                 // own rules.
-                apply_choice_attributes(&mut obj.chosen_attributes, choice_type, choice);
+                apply_choice_attributes(chosen_attributes, choice_type, choice);
                 // CR 607.2d + CR 613.1: Persisted ETB/modal choices (card name,
                 // creature type, card type, color, etc.) can gate
                 // source-dependent continuous or rule effects. Layer evaluation
@@ -410,10 +410,15 @@ pub(crate) fn named_choice_authority(
         return (None, persist_player);
     }
 
+    // CR 614.12a: a persisting as-enters choice ("As this ~ enters, choose a
+    // colour"; Tribute's CR 702.104a opponent choice) resolves while its source is
+    // a LIMINAL entrant — decided, but not yet in `state.objects`. Reading
+    // `objects` alone yielded no context, so `NamedChoiceSource` came back `None`,
+    // the prompt was raised unbound, and the answer persisted nowhere: every copy
+    // token of such a permanent entered having forgotten its own entry choice.
     let context = ability.trigger_source.clone().or_else(|| {
         state
-            .objects
-            .get(&ability.source_id)
+            .entering_or_live_object(ability.source_id)
             .map(|source| crate::game::triggers::trigger_source_context_for_latch(state, source))
     });
     let binding = if persist && persist_player.is_none() {

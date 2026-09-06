@@ -565,3 +565,156 @@ fn create_token_copy_from_pool_instant_sorcery_guard() {
         "CR 111.5: a token that's a copy of an instant/sorcery is not created"
     );
 }
+
+// ─────────── the Momir emblem copying an "as enters" creature (CR 614.12a) ───────────
+
+/// A synthetic Tribute creature face, built the way the production pipeline
+/// builds one: the printed keyword plus `synthesize_tribute_intrinsics`, which
+/// is what turns `Keyword::Tribute(N)` into the CR 702.104a `Moved` replacement
+/// chain (`Choose { Opponent, persist } -> Tribute`).
+fn tribute_creature_face(name: &str, mana_value: u32, tribute: u32) -> CardFace {
+    let mut face = creature_face(name, mana_value);
+    face.keywords
+        .push(engine::types::keywords::Keyword::Tribute(tribute));
+    engine::database::synthesis::synthesize_tribute_intrinsics(&mut face);
+    face
+}
+
+/// CR 614.12a + CR 702.104a: the Momir emblem's `CreateTokenCopyFromPool` is a
+/// SECOND entry into the liminal copy seam, distinct from the `CopyTokenOf` route
+/// covered in `rules::tribute`. When the pool creature carries an "as enters"
+/// replacement, the emblem's token must still run that chain and still enter.
+///
+/// This is the reported reproduction, reduced: a Momir game whose emblem copies a
+/// Tribute creature. Before the fix the entry paused on the CR 702.104a opponent
+/// choice, nothing consumed `pending_liminal_entry_resume` for that prompt kind,
+/// and the token was never created — leaving a stranded id that the visible game
+/// log rendered as `(unknown #N)`.
+#[test]
+fn momir_emblem_copying_tribute_creature_runs_entry_chain_and_enters() {
+    let mut state = GameState::new(FormatConfig::momir(), 2, 42);
+    state.phase = Phase::PreCombatMain;
+    state.turn_number = 2;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+
+    let mut by_mv: BTreeMap<i32, Vec<String>> = BTreeMap::new();
+    by_mv.insert(3, vec!["Tribute Beast".to_string()]);
+    let mut faces = std::collections::HashMap::new();
+    faces.insert(
+        "tribute beast".to_string(),
+        tribute_creature_face("Tribute Beast", 3, 2),
+    );
+    state.momir_pool = by_mv;
+    state.momir_pool_faces = Arc::new(faces);
+
+    let emblem_id = engine::game::effects::create_emblem::grant_emblem(
+        &mut state,
+        P0,
+        Vec::new(),
+        Vec::new(),
+        vec![momir_emblem_ability()],
+    );
+    let card = fund_and_card(&mut state, 3);
+
+    let before = state.clone();
+    let mut runner = GameRunner::from_state(state);
+    let mut events = Vec::new();
+
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: emblem_id,
+            ability_index: 0,
+        })
+        .expect("activating the Momir emblem must be accepted");
+    events.extend(result.events.iter().cloned());
+
+    // Drive the activation and the entry chain the token's copied Tribute raises.
+    let mut saw_opponent_choice = false;
+    let mut saw_tribute_choice = false;
+    for _ in 0..48 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::ChooseXValue { .. } => GameAction::ChooseX { value: 3 },
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                ..
+            } => GameAction::SelectCards { cards: vec![card] },
+            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+            // CR 702.104a stage 1: the token's controller chooses an opponent.
+            WaitingFor::NamedChoice { player, .. } => {
+                assert_eq!(*player, P0, "the copy's controller chooses the opponent");
+                saw_opponent_choice = true;
+                GameAction::ChooseOption {
+                    choice: PlayerId(1).0.to_string(),
+                }
+            }
+            // CR 702.104a stage 2: that opponent decides pay-or-decline.
+            WaitingFor::TributeChoice { player, count, .. } => {
+                assert_eq!(*player, PlayerId(1), "the chosen opponent decides");
+                assert_eq!(*count, 2, "Tribute N is copied with the creature");
+                saw_tribute_choice = true;
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected WaitingFor during the Momir entry chain: {other:?}"),
+        };
+        let result = runner.act(action).expect("driving the entry chain");
+        events.extend(result.events.iter().cloned());
+    }
+
+    assert!(
+        saw_opponent_choice,
+        "CR 702.104a: the copied Tribute must ask its controller to choose an opponent"
+    );
+    assert!(
+        saw_tribute_choice,
+        "CR 702.104a: the chosen opponent must be prompted pay-or-decline"
+    );
+
+    let tokens: Vec<&engine::game::game_object::GameObject> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| o.is_token)
+        .collect();
+    assert_eq!(
+        tokens.len(),
+        1,
+        "the emblem's copy of an as-enters creature must actually enter the battlefield"
+    );
+    assert_eq!(
+        tokens[0]
+            .counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(2),
+        "CR 702.104a: paid tribute puts N +1/+1 counters on the entering token"
+    );
+    assert!(
+        runner.state().liminal_entries.is_empty(),
+        "no entry may be left stranded in `liminal_entries`"
+    );
+
+    // The reported symptom itself: `log::resolve_object_name` falls back to
+    // `(unknown #N)` for an id in neither `state.objects` nor `state.lki_cache`,
+    // which is exactly what a stranded liminal entry is.
+    let rendered = format!(
+        "{:?}",
+        engine::game::log::resolve_log_entries(&events, &before, runner.state())
+    );
+    // REACH GUARD for the negative assertion below: an empty log, or one that
+    // never cites the token, would satisfy `!contains("(unknown #")` for the
+    // wrong reason. Pin that the log was actually produced AND actually names
+    // this entrant before asserting how it names it.
+    assert!(
+        rendered.contains("Tribute Beast"),
+        "the log must cite the entering token by name, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("(unknown #"),
+        "the visible game log must name every object it cites, got: {rendered}"
+    );
+}

@@ -7696,6 +7696,26 @@ pub(super) fn resume_pending_continuation_if_priority(
                 effects::resume_resolution_frames(state, events);
             }
         }
+        // CR 614.12a + CR 111.1: An entry replacement's required choices are made
+        // BEFORE the permanent enters, so a liminal entry whose "as enters" chain
+        // paused on a prompt is owed its commit the moment — and only the moment —
+        // every one of those choices has been answered. Placed after the ordinary
+        // continuation drains above (including the deferred-life re-drain) because
+        // those are what run the REST of that chain: Tribute's CR 702.104a
+        // pay-or-decline stage resolves there, and a chain that raises a further
+        // prompt leaves `waiting_for` non-`Priority` so this gate holds the commit
+        // back on its own. Placed BEFORE the phase-transition and cost-move
+        // resumes below because those observe the board, and a permanent whose
+        // entry has been decided must exist before anything can observe it.
+        // Inert unless a `Token` resume with a live liminal entry is parked.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::life_safety::observe_boundary_carrier(state);
+            if let Some(waiting_for) =
+                super::engine_replacement::resume_pending_liminal_token_entry(state, events)
+            {
+                state.waiting_for = waiting_for;
+            }
+        }
         // CR 614.6 + CR 500.5: An interactive cross-event substitute may be
         // the child that suspended the APNAP phase-transition drain. Resume
         // that typed owner only after the post-replacement frame has

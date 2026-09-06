@@ -2507,11 +2507,7 @@ fn entering_object_projection(
     state: &GameState,
     object_id: &ObjectId,
 ) -> Option<crate::game::game_object::GameObject> {
-    state
-        .liminal_entries
-        .get(object_id)
-        .map(|entry| entry.object.projected().clone())
-        .or_else(|| state.objects.get(object_id).cloned())
+    state.entering_or_live_object(*object_id).cloned()
 }
 
 pub fn matches_target_filter_on_battlefield_entry(
