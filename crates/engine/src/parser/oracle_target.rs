@@ -398,9 +398,14 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
 /// sacrifice it to pay the cost of its activated ability"; Gut, True Soul Zealot
 /// (2022-06-10): "If Gut somehow becomes an artifact, you may sacrifice it to its
 /// own ability." Stamping `FilterProp::Another` onto the right leg would make an
-/// artifact-ified source unable to pay with itself (`game::filter` enforces
-/// `Another` as `record.object_id != source.id`), which is reachable in play via
-/// Liquimetal Coating / Mycosynth Lattice / Karn, Silver Golem, and via Enchanted
+/// artifact-ified source unable to pay with itself: the sacrifice-cost path runs
+/// `find_eligible_sacrifice_targets` -> `matches_target_filter` ->
+/// `matches_filter_prop`, whose `Another` arm reduces to
+/// `!source_is_current_object(state, source, object_id)` here, because
+/// `FilterContext::from_source` leaves `recipient_id` unset. (The
+/// `record.object_id != source.id` form is the zone-change-record matcher, a
+/// different path.) Reachable in play via Liquimetal Coating or Mycosynth Lattice
+/// — both literally "in addition to its/their other types" — and via Enchanted
 /// Evening for the enchantment leg.
 ///
 /// The caller must therefore apply any `another`/`other` scoping to `base` BEFORE

@@ -137,14 +137,17 @@ fn mold_folk_still_pays_its_cost_by_sacrificing_a_creature() {
 /// and may be sacrificed to its own ability.
 ///
 /// This is the discriminating case for the `Another` scoping, and it is reachable
-/// in real games — Liquimetal Coating, Mycosynth Lattice and Karn, Silver Golem
-/// all turn a creature into an artifact.
+/// in real games — Liquimetal Coating and Mycosynth Lattice both make a creature
+/// an artifact "in addition to its other types". (Not Karn, Silver Golem: that
+/// one targets a NONcreature artifact and makes it a creature, the opposite
+/// direction.)
 ///
 /// GUARD-FAILING: distribute `FilterProp::Another` onto the article-led right leg
 /// (i.e. fold the union *before* applying `another`, as an earlier revision did)
-/// and `game::filter`'s `Another => record.object_id != source.id` rejects the
-/// source, the cost becomes unpayable with nothing else on the battlefield, and
-/// the activation is refused.
+/// and the source matches neither leg — `matches_filter_prop`'s `Another` arm
+/// resolves to `!source_is_current_object(..)` on this path — so
+/// `find_eligible_sacrifice_targets` returns nothing, the cost is unpayable with
+/// nothing else on the battlefield, and the activation is refused.
 #[test]
 fn mold_folk_may_sacrifice_itself_once_it_is_an_artifact() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -152,9 +155,17 @@ fn mold_folk_may_sacrifice_itself_once_it_is_an_artifact() {
     // Set as a fixture rather than parsed from a type-granting card: the subject
     // here is the COST FILTER, and routing through a continuous effect would put
     // the layer system in the path of a test that is not about it.
+    // `as_artifact` REPLACES the creature type; `as_creature` puts it back
+    // idempotently and re-syncs the base types, so the fixture is an artifact
+    // CREATURE — the "in addition to its other types" state Liquimetal Coating and
+    // Mycosynth Lattice produce, and the shape Street Urchin's own 2022-06-10
+    // ruling describes ("If your commander is an artifact creature, you may
+    // sacrifice it to pay the cost of this ability"). A pure artifact would
+    // discriminate the same way but leave the both-types arm unexercised.
     let source = {
         let mut b = scenario.add_creature_from_oracle(P0, "Mold Folk", 1, 1, MOLD_FOLK);
         b.as_artifact();
+        b.as_creature();
         b.id()
     };
     scenario.with_mana_pool(
@@ -167,18 +178,6 @@ fn mold_folk_may_sacrifice_itself_once_it_is_an_artifact() {
         )],
     );
     let mut runner = scenario.build();
-    // `CardBuilder::as_artifact` REPLACES the creature type; restore it so the
-    // fixture is an artifact CREATURE — the "in addition to its other types" state
-    // Liquimetal Coating / Mycosynth Lattice / Karn, Silver Golem actually produce,
-    // and the shape Street Urchin's own 2022-06-10 ruling describes ("If your
-    // commander is an artifact creature, you may sacrifice it to pay the cost of
-    // this ability"). A pure artifact would discriminate the same way but would
-    // leave the production-reachable both-types arm unexercised.
-    {
-        let obj = runner.state_mut().objects.get_mut(&source).unwrap();
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.base_card_types = obj.card_types.clone();
-    }
 
     let core = &runner.state().objects[&source].card_types.core_types;
     assert!(
