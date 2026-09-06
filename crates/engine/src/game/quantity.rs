@@ -2160,13 +2160,19 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
             base.saturating_pow(exp)
         }
         // CR 107.1c + CR 608.2d: Generic resolvers see UpTo transparently as
-        // its upper bound — the 4 effect-specific resolvers (Draw,
-        // Sacrifice, Discard, SearchLibrary) peel the wrapper via
-        // `QuantityExpr::peel_up_to` to extract the "may pick fewer" flag
-        // before reaching arithmetic. Treating it transparently here keeps
-        // legacy serde round-trips correct and makes accidental composition
-        // (e.g., `DivideRounded { inner: UpTo { max: ... } }`) collapse to a
-        // sensible bound rather than panicking.
+        // its upper bound. Extracting the "may pick fewer" permission is the
+        // caller's job, via `QuantityExpr::peel_up_to`, BEFORE the count reaches
+        // arithmetic — this fold returns an `i32` and structurally cannot carry
+        // the flag. Enumerating the resolvers that do so here has already gone
+        // stale once (the pre-#8543 list named `Draw`, which did not peel, and
+        // omitted several that did), so grep for the callers instead:
+        //
+        //     grep -rn "\.peel_up_to()" crates/engine/src/
+        //
+        // Treating it transparently here keeps legacy serde round-trips correct
+        // and makes accidental composition (e.g.,
+        // `DivideRounded { inner: UpTo { max: ... } }`) collapse to a sensible
+        // bound rather than panicking.
         QuantityExpr::UpTo { max } => recurse(max),
         // "The difference between A and B" is an unsigned-magnitude Oracle
         // templating convention — it has no dedicated Comprehensive Rules
@@ -4377,24 +4383,24 @@ fn resolve_ref(
         // resolution-precedence ordered:
         //
         //   1. `current_trigger_match_count` — the filtered subject count of a
-        //      batched trigger ("one or more <FILTER> <verb>"), set by
-        //      `stack::resolve_top` for the resolution. This is the canonical
-        //      "that many" for Ur-Dragon-style batched triggers; without it
-        //      the `extract_amount_from_event` cascade below falls through to
-        //      0 on `AttackersDeclared` and similar batched events.
+        // batched trigger ("one or more <FILTER> <verb>"), set by
+        // `stack::resolve_top` for the resolution. This is the canonical
+        // "that many" for Ur-Dragon-style batched triggers; without it
+        // the `extract_amount_from_event` cascade below falls through to
+        // 0 on `AttackersDeclared` and similar batched events.
         //   2. CR 706.4: `die_result_this_resolution` — die results recorded
-        //      earlier in THIS resolution (no results table) outrank the
-        //      triggering event's own amount, so "roll one or more dice.
-        //      <effect> equal to the result(s)" consumes the roll total, not
-        //      the combat damage / life change that triggered it.
+        // earlier in THIS resolution (no results table) outrank the
+        // triggering event's own amount, so "roll one or more dice.
+        // <effect> equal to the result(s)" consumes the roll total, not
+        // the combat damage / life change that triggered it.
         //   3. `last_effect_counts_by_player` — APNAP per-player counts from
-        //      the preceding effect in the same resolution.
+        // the preceding effect in the same resolution.
         //   4. `extract_amount_from_event(current_trigger_event)` — scalar
-        //      events with an inherent amount (damage dealt, life changed,
-        //      cards drawn, counters added/removed, die rolls).
+        // events with an inherent amount (damage dealt, life changed,
+        // cards drawn, counters added/removed, die rolls).
         //   5. `last_effect_count` / `last_effect_amount` — sub_ability
-        //      continuation fallbacks (e.g. "discard up to N, then draw that
-        //      many"; "dealt excess damage this way, add that much {R}").
+        // continuation fallbacks (e.g. "discard up to N, then draw that
+        // many"; "dealt excess damage this way, add that much {R}").
         //   6. `0` — undefined.
         QuantityRef::EventContextAmount => state
             // CR 614.1a: Moonlit-scoped "that many" copy count — highest priority,
@@ -5500,7 +5506,10 @@ fn damage_record_source_matches(
     matches_target_filter_on_damage_record_source(state, record, filter, ctx)
 }
 
-fn damage_record_matches_kind(
+/// CR 120.2a + CR 120.2b: does a damage record fall in the requested damage
+/// class? Single authority shared by the quantity/player-scope damage readers
+/// and `filter::matches_filter_prop`'s `DealtDamageThisTurn` arms.
+pub(crate) fn damage_record_matches_kind(
     record: &crate::types::game_state::DamageRecord,
     damage_kind: crate::types::ability::DamageKindFilter,
 ) -> bool {
@@ -6113,7 +6122,13 @@ fn resolve_counters_on_scope(
         ObjectScope::AmassedArmy => ability
             .and_then(|ability| ability.amassed_army_object.as_ref())
             .map(|snapshot| {
-                let live = state.objects.get(&snapshot.object_id);
+                // CR 400.7: the LIVE read is gated on the captured incarnation —
+                // an Army that changed zones and returned is a new object. The
+                // LKI fallbacks below are deliberately ungated (CR 608.2h: they
+                // report the departed Army's recorded counters).
+                let live = snapshot
+                    .live_object_id(state)
+                    .and_then(|id| state.objects.get(&id));
                 let on_battlefield =
                     live.is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
                 if on_battlefield {
@@ -6121,11 +6136,20 @@ fn resolve_counters_on_scope(
                         .map(|obj| counter_count_from_map(&obj.counters, counter_type))
                         .unwrap_or(0);
                 }
+                // CR 608.2h + CR 400.7: departure-time counters for THIS
+                // incarnation. The id-keyed `state.lki_cache` is overwritten on
+                // every departure, so it would report a later incarnation's
+                // counters once the referent has departed again; qualify by the
+                // captured incarnation and fall back to the binding-time
+                // snapshot only when no versioned record exists.
                 state
-                    .lki_cache
+                    .lki_by_incarnation
                     .get(&snapshot.object_id)
+                    .and_then(|history| history.get(&snapshot.incarnation))
                     .map(|lki| counter_count_from_map(&lki.counters, counter_type))
-                    .unwrap_or_else(|| counter_count_from_map(&snapshot.lki.counters, counter_type))
+                    .unwrap_or_else(|| {
+                        counter_count_from_map(&snapshot.lki.counters, counter_type)
+                    })
             })
             .unwrap_or(0),
         _ => object_for_scope(state, scope, ctx, targets)
@@ -6485,13 +6509,13 @@ where
         // object previously referred to by that ability's cost OR trigger
         // condition still affects it. Resolved (first match wins) via:
         //   1. `cost_paid_object` — canonical activated/cast sacrifice-cost
-        //      referent (Greater Good).
+        // referent (Greater Good).
         //   2. `effect_context_object` — effect-driven sacrifices captured
-        //      mid-resolution (Fire Lord Ozai, The Meep, Venom, Broadside
-        //      Bombardiers).
+        // mid-resolution (Fire Lord Ozai, The Meep, Venom, Broadside
+        // Bombardiers).
         //   3. trigger-event source — the object named by this ability's
-        //      trigger condition (Hamletback Goliath, Conclave Mentor), live
-        //      object then LKI for dies/leaves-battlefield triggers.
+        // trigger condition (Hamletback Goliath, Conclave Mentor), live
+        // object then LKI for dies/leaves-battlefield triggers.
         // CR 608.2k pins true cost/trigger referents; CR 608.2c makes a
         // same-resolution effect referent more specific than the trigger source
         // once the first slot is absent. Exact parity with the
@@ -6567,8 +6591,22 @@ where
         ObjectScope::AmassedArmy => ability
             .and_then(|a| a.amassed_army_object.as_ref())
             .and_then(|snapshot| {
-                read_object_pt_by_id(state, snapshot.object_id, &obj_extract, &lki_extract)
-                    .or_else(|| lki_extract(&snapshot.lki))
+                // CR 400.7 + CR 608.2h: same ladder as the sibling `AmassedArmy`
+                // counter and mana-value readers — the live rung is gated on the
+                // captured incarnation, and the LKI rung is qualified by that
+                // same incarnation rather than the id-keyed `state.lki_cache`,
+                // which `zones.rs` overwrites on every departure. Threading the
+                // incarnation into `read_object_pt_by_id_for_incarnation` gets
+                // both, plus its documented legacy-save handling. The
+                // binding-time `snapshot.lki` remains the last resort.
+                read_object_pt_by_id_for_incarnation(
+                    state,
+                    snapshot.object_id,
+                    Some(snapshot.incarnation),
+                    &obj_extract,
+                    &lki_extract,
+                )
+                .or_else(|| lki_extract(&snapshot.lki))
             })
             .unwrap_or(0),
         // CR 608.2c: An anaphoric pronoun ("its power"). Shares the
@@ -6778,15 +6816,15 @@ fn resolve_object_mana_value(
         // CR 608.2k + CR 400.7j + CR 701.21a: The "cost-paid object" mana
         // value resolves (first match wins) via:
         //   1. `cost_paid_object` — canonical activated/cast-cost referent
-        //      (Food Chain, Burnt Offering, Dark Confidant).
+        // (Food Chain, Burnt Offering, Dark Confidant).
         //   2. `effect_context_object` — when a `Sacrifice` *effect* (not a
-        //      cost) appears mid-resolution (Birthing Ritual: "you may
-        //      sacrifice a creature. If you do, ..., where X is 1 plus the
-        //      sacrificed creature's mana value"), the sacrificed permanent is
-        //      captured into `effect_context_object` by the `EffectZoneChoice`
-        //      handler.
+        // cost) appears mid-resolution (Birthing Ritual: "you may
+        // sacrifice a creature. If you do, ..., where X is 1 plus the
+        // sacrificed creature's mana value"), the sacrificed permanent is
+        // captured into `effect_context_object` by the `EffectZoneChoice`
+        // handler.
         //   3. trigger-event source — the object named by this ability's
-        //      trigger condition, live object then LKI.
+        // trigger condition, live object then LKI.
         // Exact parity with the `resolve_object_pt` `CostPaidObject` arm.
         ObjectScope::CostPaidObject => ability
             .and_then(|a| a.cost_paid_object.as_ref())
@@ -6817,18 +6855,36 @@ fn resolve_object_mana_value(
         ObjectScope::AmassedArmy => ability
             .and_then(|a| a.amassed_army_object.as_ref())
             .map(|snapshot| {
-                state
-                    .objects
-                    .get(&snapshot.object_id)
+                // CR 400.7: gate the LIVE read on the captured incarnation, as
+                // the sibling `AmassedArmy` counter and P/T readers above do —
+                // an Army that changed zones and returned is a new object at
+                // the same storage id. CR 608.2h keeps both LKI fallbacks
+                // ungated so a departed Army still reports its recorded mana
+                // value.
+                snapshot
+                    .live_object_id(state)
+                    .and_then(|id| state.objects.get(&id))
                     .map(|obj| {
                         u32_to_i32_saturating(
                             obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
                         )
                     })
+                    // CR 608.2h + CR 400.7: departure-time LKI for THIS
+                    // incarnation. CR 608.2h wants the object "as it most
+                    // recently existed", so the departure record is the right
+                    // source — but `state.lki_cache` is keyed by `ObjectId`
+                    // alone and `zones.rs` overwrites it on every departure, so
+                    // reading it unqualified would report a LATER incarnation:
+                    // the very object the gate above just rejected. Qualify the
+                    // lookup by the captured incarnation, exactly as
+                    // `read_object_pt_by_id` does, and fall back to the
+                    // binding-time snapshot only when no versioned record
+                    // exists.
                     .or_else(|| {
                         state
-                            .lki_cache
+                            .lki_by_incarnation
                             .get(&snapshot.object_id)
+                            .and_then(|history| history.get(&snapshot.incarnation))
                             .map(|lki| u32_to_i32_saturating(lki.mana_value))
                     })
                     .unwrap_or_else(|| u32_to_i32_saturating(snapshot.lki.mana_value))
@@ -6840,12 +6896,12 @@ fn resolve_object_mana_value(
         // such instruction exists, fall back to the trigger-condition referent
         // (slot 2) then the cost referent (slot 3). Resolution order:
         //   1. `effect_context_object` — the earlier-instruction referent
-        //      (revealed card / moved card / effect-sacrificed creature). This
-        //      is the CR 608.2c anaphoric binding for the reveal class (Dark
-        //      Confidant, #511).
+        // (revealed card / moved card / effect-sacrificed creature). This
+        // is the CR 608.2c anaphoric binding for the reveal class (Dark
+        // Confidant, #511).
         //   2. trigger-event source — the CR 608.2k trigger-condition referent
-        //      (#512: "When this creature dies, ... its mana value"), live
-        //      object then LKI.
+        // (#512: "When this creature dies, ... its mana value"), live
+        // object then LKI.
         //   3. `cost_paid_object` — the CR 608.2k cost referent, last resort.
         // The arm differs from `CostPaidObject` only in slot priority:
         // instruction-order (608.2c) first, vs. cost referent (608.2k) first.
@@ -16902,6 +16958,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         let power = resolve_quantity_with_targets(
             &state,
@@ -17051,6 +17108,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         let resolved = resolve_quantity_with_targets(
             &state,
@@ -17131,6 +17189,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         assert!(
             ability.cost_paid_object.is_none(),
@@ -17210,6 +17269,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         assert!(
             ability.cost_paid_object.is_none(),
@@ -17275,6 +17335,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         };
         // Both fields set, with DIFFERENT mana values so the winning path is
         // observable.
@@ -17337,6 +17398,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectManaValue {
@@ -17392,6 +17454,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7));
         ability.set_cost_paid_object_recursive(snapshot("Cost Paid", 3));
@@ -17470,6 +17533,7 @@ mod tests {
                 is_suspected: false,
                 attachments: Vec::new(),
             },
+            incarnation: 0,
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7, 2));
         ability.set_cost_paid_object_recursive(snapshot("Cost Paid", 3, 3));
@@ -19259,6 +19323,180 @@ mod tests {
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999)),
             1,
             "two discarded creatures share one card type -> 1 token, not 2"
+        );
+    }
+
+    /// CR 400.7 + CR 608.2h: The `AmassedArmy` mana-value ladder must gate only
+    /// its LIVE first rung on the captured incarnation. An Army that left and
+    /// returned under the same storage id is a new object, so the live read is
+    /// skipped and the reader falls through to the recorded LKI mana value —
+    /// it must NOT report the returned object's live mana value.
+    ///
+    /// Paired with `amassed_army_mana_value_reads_live_object_when_current`,
+    /// which drives the same fixture down the live rung.
+    #[test]
+    fn amassed_army_mana_value_falls_back_to_lki_after_round_trip() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let army = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Army".to_string(),
+            Zone::Battlefield,
+        );
+        // Live MV 7 vs. recorded LKI MV 2 — the two rungs are distinguishable,
+        // so the assertion below cannot pass by reading the wrong one.
+        state.objects.get_mut(&army).expect("army exists").mana_cost = ManaCost::generic(7);
+
+        let army_obj = state.objects.get(&army).expect("army exists");
+        let incarnation_before = army_obj.incarnation;
+        let mut lki = army_obj.snapshot_for_mana_spent();
+        lki.mana_value = 2;
+        let snapshot = CostPaidObjectSnapshot::capture(army_obj, lki);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::AmassedArmy,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+        ability.set_amassed_army_object_recursive(snapshot);
+
+        // CR 400.7: battlefield -> graveyard -> battlefield, same storage id.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, army, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, army, Zone::Battlefield, &mut events);
+
+        // Give the NEW incarnation a live mana value held by neither recorded
+        // source: the departure populated `lki_cache` with the pre-move MV 7 and
+        // the snapshot LKI holds 2, so only an UNGATED live read can yield 11.
+        // Without this the live value would coincide with the cache value and
+        // the assertion would pass whether or not the guard exists.
+        state.objects.get_mut(&army).expect("army exists").mana_cost = ManaCost::generic(11);
+
+        let returned = state.objects.get(&army).expect("row survives the move");
+        assert!(
+            returned.incarnation > incarnation_before,
+            "fixture reach-guard: the round trip must bump the incarnation ({} -> {})",
+            incarnation_before,
+            returned.incarnation
+        );
+        assert_eq!(
+            returned
+                .mana_cost
+                .mana_value_with_x(returned.zone, returned.cost_x_paid),
+            11,
+            "fixture reach-guard: the returned object reads MV 11 live, a value in neither the LKI cache (7) nor the snapshot LKI (2)"
+        );
+
+        // Depart a SECOND time with yet another distinct value. `state.lki_cache`
+        // is keyed by `ObjectId` alone and is overwritten on every departure, so
+        // it now holds 13 - a later incarnation's value the snapshot never named.
+        // Only the captured `snapshot.lki` yields 2; the live object (11) and the
+        // cache (13) are both wrong answers, so this pins the fallback rung too.
+        state.objects.get_mut(&army).expect("army exists").mana_cost = ManaCost::generic(13);
+        let mut second_departure = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, army, Zone::Graveyard, &mut second_departure);
+        assert_eq!(
+            state.lki_cache.get(&army).map(|lki| lki.mana_value),
+            Some(13),
+            "fixture reach-guard: the second departure must overwrite the id-keyed LKI cache with the later incarnation's value"
+        );
+
+        let ctx = QuantityContext {
+            entering: None,
+            source: ObjectId(99),
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+        };
+        let got =
+            resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
+
+        assert_ne!(
+            got, 11,
+            "CR 400.7: the returned Army is a new object, so the LIVE rung must be skipped — reporting 11 would mean the guard let a new incarnation through"
+        );
+        assert_ne!(
+            got, 13,
+            "CR 400.7: state.lki_cache now describes a LATER incarnation, so reporting 13 would leak the very object the incarnation gate just rejected"
+        );
+        assert_eq!(
+            got, 7,
+            "CR 608.2h + CR 400.7: the reader must report THIS incarnation's              departure-time LKI (7) - not the live object (11), and not the              id-keyed cache entry the second departure overwrote with 13.              CR 608.2h wants the object \"as it most recently existed\", so              departure-time is correct and the binding-time snapshot (2) is not."
+        );
+    }
+
+    /// CR 608.2h: Paired positive for
+    /// `amassed_army_mana_value_falls_back_to_lki_after_round_trip`. Identical
+    /// fixture, but the Army never departs, so the LIVE rung is reached and
+    /// reports MV 7 rather than the recorded 2.
+    #[test]
+    fn amassed_army_mana_value_reads_live_object_when_current() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let army = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Army".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&army).expect("army exists").mana_cost = ManaCost::generic(7);
+
+        let army_obj = state.objects.get(&army).expect("army exists");
+        let mut lki = army_obj.snapshot_for_mana_spent();
+        lki.mana_value = 2;
+        let snapshot = CostPaidObjectSnapshot::capture(army_obj, lki);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::AmassedArmy,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+        ability.set_amassed_army_object_recursive(snapshot);
+
+        let ctx = QuantityContext {
+            entering: None,
+            source: ObjectId(99),
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+        };
+        let got =
+            resolve_object_mana_value(&state, ObjectScope::AmassedArmy, ctx, &[], Some(&ability));
+
+        assert_eq!(
+            got, 7,
+            "an undeparted Army still reads its LIVE mana value (7), proving the negative above is not vacuous"
         );
     }
 }

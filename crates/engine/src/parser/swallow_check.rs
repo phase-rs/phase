@@ -33,11 +33,10 @@ use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
     ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
-    DoubleTarget, Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint,
-    OpponentMayScope, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, UnlessPayScaling,
+    Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope,
+    ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -2654,16 +2653,7 @@ fn detect_dynamic_qty(
     // "the number of" dynamic marker IS represented by the effect itself — the
     // DynamicQty warning would be a false positive.
     if cleaned_has_only_counter_multiplier_dynamic(cleaned)
-        && evidence.any_effect(|e| {
-            matches!(
-                e,
-                Effect::MultiplyCounter { .. }
-                    | Effect::Double {
-                        target_kind: DoubleTarget::Counters { .. },
-                        ..
-                    }
-            )
-        })
+        && evidence.any_effect(|e| e.is_counter_multiplication())
     {
         return;
     }
@@ -4661,7 +4651,7 @@ fn detect_duration_this_turn(
         matches!(
             x,
             FilterProp::WasDealtDamageThisTurn
-                | FilterProp::DealtDamageThisTurn
+                | FilterProp::DealtDamageThisTurn { .. }
                 | FilterProp::EnteredThisTurn
                 | FilterProp::ZoneChangedThisTurn { .. }
                 | FilterProp::AttackedThisTurn { .. }
@@ -10224,8 +10214,8 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// with the sibling `enters_with_finality_this_way_is_only_if_marker` detector
     /// this fix mirrors, not a new gap this fix introduces). It instead uses CR
     /// 614.1c's own bare first template ("[This permanent] enters with . . ."),
-    /// which is structurally distinct from the
-    /// rider grammar and has no carrier of any kind in this fixture's evidence.
+    /// which is structurally distinct from the rider grammar and has no carrier of
+    /// any kind in this fixture's evidence.
     #[test]
     fn replacement_carrier_scoping_ignores_a_second_enters_with_clause_in_the_same_unit() {
         use crate::types::ability::{CardPlayMode, StaticDefinition};

@@ -47,6 +47,7 @@ use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::ControlFlow;
 
 const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
     "TokenFidelity:PartialMissingAbilities";
@@ -318,6 +319,57 @@ pub struct GapDetail {
     /// The Oracle text fragment that produced this gap.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_text: Option<String>,
+}
+
+/// Internal, canonical coverage gap. The public JSON remains the historical
+/// `GapDetail` shape; this type makes every coverage consumer derive its
+/// result from the same merged view of analysis gaps, parse-tree gaps, and
+/// parser warnings.
+#[derive(Debug, Clone)]
+struct CoverageGap {
+    handler: String,
+    source_text: Option<String>,
+}
+
+fn merge_coverage_gaps(
+    analysis_handlers: &[String],
+    parse_tree_gaps: Vec<GapDetail>,
+    warnings: &[OracleDiagnostic],
+) -> Vec<CoverageGap> {
+    let mut by_handler: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for handler in analysis_handlers {
+        by_handler.entry(handler.clone()).or_insert(None);
+    }
+    for gap in parse_tree_gaps {
+        let entry = by_handler.entry(gap.handler).or_insert(None);
+        if entry.is_none() {
+            *entry = gap.source_text;
+        }
+    }
+    for warning in warnings {
+        if let Some(handler) = parse_warning_gap_label(warning) {
+            let entry = by_handler.entry(handler).or_insert(None);
+            if entry.is_none() {
+                *entry = Some(warning.to_string());
+            }
+        }
+    }
+    by_handler
+        .into_iter()
+        .map(|(handler, source_text)| CoverageGap {
+            handler,
+            source_text,
+        })
+        .collect()
+}
+
+fn public_gap_details(gaps: &[CoverageGap]) -> Vec<GapDetail> {
+    gaps.iter()
+        .map(|gap| GapDetail {
+            handler: gap.handler.clone(),
+            source_text: gap.source_text.clone(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -979,12 +1031,28 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(format!("{prefix} {name}{suffix}"));
             }
-            // Both damage-role filters share this human coverage label (the AST
-            // variant carries the source-vs-recipient distinction); keeping the
-            // passive label unchanged avoids a cosmetic coverage-diff on every
-            // existing "was dealt damage this turn" card.
-            FilterProp::WasDealtDamageThisTurn | FilterProp::DealtDamageThisTurn => {
-                parts.push("dealt damage this turn".into())
+            // The passive filter keeps the bare label (the AST variant carries
+            // the source-vs-recipient distinction), so every existing "was dealt
+            // damage this turn" card produces no cosmetic coverage-diff. The
+            // active-voice arm below reports the label only when unrestricted,
+            // for the same reason.
+            FilterProp::WasDealtDamageThisTurn => parts.push("dealt damage this turn".into()),
+            // CR 120.2a + CR 120.1: the active-voice filter reports its damage
+            // class and recipient so a restricted clause is distinguishable from
+            // the bare one in coverage output. The unrestricted form keeps the
+            // shared label, so existing cards produce no coverage diff.
+            FilterProp::DealtDamageThisTurn { kind, recipient } => {
+                let class = match kind {
+                    crate::types::ability::DamageKindFilter::Any => "damage",
+                    crate::types::ability::DamageKindFilter::CombatOnly => "combat damage",
+                    crate::types::ability::DamageKindFilter::NoncombatOnly => "noncombat damage",
+                };
+                parts.push(match recipient {
+                    None => format!("dealt {class} this turn"),
+                    Some(player) => {
+                        format!("dealt {class} to {} this turn", fmt_player_filter(player))
+                    }
+                })
             }
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
             FilterProp::ControlledContinuouslySinceTurnBegan => {
@@ -5150,64 +5218,50 @@ pub fn build_parse_details(
 
     // Activated/spell abilities
     for def in face.abilities.iter() {
-        items.push(build_ability_item(def));
+        items.push(build_ability_item(
+            def,
+            trigger_registry,
+            static_registry,
+            TokenStaticTraversal::Include,
+        ));
     }
 
     // Triggers
     for trig in &face.triggers {
-        items.push(build_trigger_item(trig, trigger_registry));
+        items.push(build_trigger_item(
+            trig,
+            trigger_registry,
+            static_registry,
+            TokenStaticTraversal::Include,
+        ));
     }
 
     // Static abilities
     for stat in &face.static_abilities {
-        let mode_supported =
-            static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode);
-        let mut children = Vec::new();
-        for modif in &stat.modifications {
-            match modif {
-                ContinuousModification::GrantTrigger { trigger } => {
-                    children.push(build_trigger_item(trigger, trigger_registry));
-                }
-                ContinuousModification::GrantAbility { definition } => {
-                    children.push(build_ability_item(definition));
-                }
-                ContinuousModification::GrantReplacement { replacement } => {
-                    if let Some(execute) = &replacement.execute {
-                        children.push(build_ability_item(execute));
-                    }
-                }
-                _ => {}
-            }
-        }
-        items.push(ParsedItem {
-            category: ParseCategory::Static,
-            label: format!("{}", stat.mode),
-            source_text: stat.description.clone(),
-            supported: mode_supported,
-            details: static_details(stat),
-            children,
-        });
+        items.push(build_static_item(
+            stat,
+            trigger_registry,
+            static_registry,
+            TokenStaticTraversal::Include,
+        ));
     }
 
     // Replacement effects
     for repl in &face.replacements {
         let mut children = Vec::new();
         let mut execute_supported = true;
-        if let Some(execute) = &repl.execute {
-            let item = build_ability_item(execute);
-            execute_supported = item.is_fully_supported();
-            children.push(item);
-        }
-        if let ReplacementMode::Optional {
-            decline: Some(decline),
-        } = &repl.mode
-        {
-            let item = build_ability_item(decline);
+        visit_replacement_ability_payloads(repl, |token_static_traversal, payload| {
+            let item = build_ability_item(
+                payload,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+            );
             if !item.is_fully_supported() {
                 execute_supported = false;
             }
             children.push(item);
-        }
+        });
         items.push(ParsedItem {
             category: ParseCategory::Replacement,
             label: format!("{}", repl.event),
@@ -5243,6 +5297,8 @@ pub fn build_parse_details(
 fn build_trigger_item(
     trig: &TriggerDefinition,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
 ) -> ParsedItem {
     // CR 603.8: StateCondition triggers use the priority pipeline, not the
     // event-based trigger registry — they are supported.
@@ -5251,7 +5307,12 @@ fn build_trigger_item(
             || matches!(&trig.mode, TriggerMode::StateCondition));
     let mut children = Vec::new();
     if let Some(execute) = &trig.execute {
-        children.push(build_ability_item(execute));
+        children.push(build_ability_item(
+            execute,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ));
     }
     ParsedItem {
         category: ParseCategory::Trigger,
@@ -5265,7 +5326,66 @@ fn build_trigger_item(
 
 /// Build a `ParsedItem` for a single `AbilityDefinition`, recursing into
 /// sub-abilities and modal abilities.
-fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
+#[derive(Copy, Clone)]
+enum TokenStaticTraversal {
+    /// Normal abilities and executable payloads expose token-carried statics.
+    Include,
+    /// Replacement declines retain their historical coverage boundary.
+    Exclude,
+}
+
+impl TokenStaticTraversal {
+    fn includes(self) -> bool {
+        matches!(self, Self::Include)
+    }
+}
+
+/// Visit every executable body owned by a replacement definition. A replacement
+/// decline intentionally retains the token-static exclusion boundary, so all
+/// coverage consumers use the same traversal semantics.
+fn visit_replacement_ability_payloads(
+    replacement: &ReplacementDefinition,
+    mut visit: impl FnMut(TokenStaticTraversal, &AbilityDefinition),
+) {
+    if let Some(execute) = &replacement.execute {
+        visit(TokenStaticTraversal::Include, execute);
+    }
+    match &replacement.mode {
+        ReplacementMode::Optional {
+            decline: Some(decline),
+        }
+        | ReplacementMode::MayCost {
+            decline: Some(decline),
+            ..
+        } => visit(TokenStaticTraversal::Exclude, decline),
+        ReplacementMode::Mandatory
+        | ReplacementMode::Optional { decline: None }
+        | ReplacementMode::MayCost { decline: None, .. } => {}
+    }
+}
+
+/// Visit executable payloads carried by an effect-owned replacement.
+///
+/// `AddTargetReplacement` registers the inner replacement for a later event,
+/// but its `execute` and decline bodies remain part of the parsed card's
+/// coverage surface. Delegate to the replacement visitor so its mode-specific
+/// token-static traversal stays identical to top-level and granted
+/// replacements.
+fn visit_effect_replacement_ability_payloads(
+    effect: &Effect,
+    visit: impl FnMut(TokenStaticTraversal, &AbilityDefinition),
+) {
+    if let Effect::AddTargetReplacement { replacement, .. } = effect {
+        visit_replacement_ability_payloads(replacement, visit);
+    }
+}
+
+fn build_ability_item(
+    def: &AbilityDefinition,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+) -> ParsedItem {
     let label = match &*def.effect {
         Effect::Unimplemented { name, .. } => name.clone(),
         Effect::GenericEffect {
@@ -5304,21 +5424,58 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
 
     // Sub-ability chain
     if let Some(sub) = &def.sub_ability {
-        children.push(build_ability_item(sub));
+        children.push(build_ability_item(
+            sub,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ));
     }
 
     // Else-ability chain (CR 608.2c: "Otherwise" branches)
     if let Some(else_ab) = &def.else_ability {
-        children.push(build_ability_item(else_ab));
+        children.push(build_ability_item(
+            else_ab,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ));
     }
 
     // Modal abilities
     for mode_ability in &def.mode_abilities {
-        children.push(build_ability_item(mode_ability));
+        children.push(build_ability_item(
+            mode_ability,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ));
     }
 
+    append_effect_static_carrier_items(
+        &def.effect,
+        trigger_registry,
+        static_registry,
+        token_static_traversal,
+        &mut children,
+    );
+
+    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
+        children.push(build_ability_item(
+            payload,
+            trigger_registry,
+            static_registry,
+            payload_traversal,
+        ));
+    });
+
     visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-        children.push(build_ability_item(payload));
+        children.push(build_ability_item(
+            payload,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ));
     });
 
     ParsedItem {
@@ -5329,6 +5486,157 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
         details,
         children,
     }
+}
+
+/// Build a `ParsedItem` for a single `StaticDefinition`, including executable
+/// children granted by the static. This is shared by printed static abilities
+/// and static abilities carried by token-creation effects.
+fn build_static_item(
+    stat: &StaticDefinition,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+) -> ParsedItem {
+    let mode_supported =
+        static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode);
+    let mut children = Vec::new();
+    for modification in &stat.modifications {
+        append_modification_payload_items(
+            modification,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            &mut children,
+        );
+    }
+    ParsedItem {
+        category: ParseCategory::Static,
+        label: format!("{}", stat.mode),
+        source_text: stat.description.clone(),
+        supported: mode_supported,
+        details: static_details(stat),
+        children,
+    }
+}
+
+fn append_modification_payload_items(
+    modification: &ContinuousModification,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+    children: &mut Vec<ParsedItem>,
+) {
+    match modification {
+        ContinuousModification::GrantTrigger { trigger } => children.push(build_trigger_item(
+            trigger,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        )),
+        ContinuousModification::GrantAbility { definition } => children.push(build_ability_item(
+            definition,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        )),
+        ContinuousModification::GrantReplacement { replacement } => {
+            visit_replacement_ability_payloads(replacement, |payload_traversal, payload| {
+                children.push(build_ability_item(
+                    payload,
+                    trigger_registry,
+                    static_registry,
+                    payload_traversal,
+                ));
+            });
+        }
+        // `build_static_item` uses StaticDefinition's existing granted-static
+        // walker recursively, rather than flattening its definition here.
+        ContinuousModification::GrantStaticAbility { definition } => {
+            children.push(build_static_item(
+                definition,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+            ))
+        }
+        _ => {}
+    }
+}
+
+/// Append parse-tree children carried by an effect rather than by its ordinary
+/// ability-chain fields. Keeping these carriers in one facade prevents the
+/// coverage tree from losing semantics that the runtime preserves on a token,
+/// emblem, or counter rider.
+fn append_effect_static_carrier_items(
+    effect: &Effect,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+    children: &mut Vec<ParsedItem>,
+) {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            for stat in static_abilities {
+                children.push(build_static_item(
+                    stat,
+                    trigger_registry,
+                    static_registry,
+                    token_static_traversal,
+                ));
+            }
+        }
+        Effect::Token {
+            static_abilities, ..
+        } if token_static_traversal.includes() => {
+            for stat in static_abilities {
+                children.push(build_static_item(
+                    stat,
+                    trigger_registry,
+                    static_registry,
+                    token_static_traversal,
+                ));
+            }
+        }
+        Effect::Counter {
+            source_rider: Some(CounterSourceRider::LosesAbilities { static_def, .. }),
+            ..
+        } => children.push(build_static_item(
+            static_def,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        )),
+        Effect::CreateEmblem { statics, triggers } => {
+            for stat in statics {
+                children.push(build_static_item(
+                    stat,
+                    trigger_registry,
+                    static_registry,
+                    token_static_traversal,
+                ));
+            }
+            for trigger in triggers {
+                children.push(build_trigger_item(
+                    trigger,
+                    trigger_registry,
+                    static_registry,
+                    token_static_traversal,
+                ));
+            }
+        }
+        _ => {}
+    }
+    visit_effect_modification_carriers(effect, |modification| {
+        append_modification_payload_items(
+            modification,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            children,
+        );
+    });
 }
 
 /// Build `ParsedItem` nodes for ability costs, only emitting items for
@@ -6093,13 +6401,25 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         let parse_details = build_parse_details(face, &trigger_registry, &static_registry);
 
         // Check abilities
-        check_abilities(&face.abilities, &mut missing);
+        check_abilities(
+            &face.abilities,
+            &trigger_registry,
+            &static_registry,
+            TokenStaticTraversal::Include,
+            &mut missing,
+        );
 
         // Check additional cost
         check_additional_cost(&face.additional_cost, &mut missing);
 
         // Check triggers
-        check_triggers(&face.triggers, &trigger_registry, &mut missing);
+        check_triggers(
+            &face.triggers,
+            &trigger_registry,
+            &static_registry,
+            TokenStaticTraversal::Include,
+            &mut missing,
+        );
 
         // Check keywords
         check_keywords(&face.keywords, &mut missing);
@@ -6109,11 +6429,17 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             &face.static_abilities,
             &trigger_registry,
             &static_registry,
+            TokenStaticTraversal::Include,
             &mut missing,
         );
 
         // Check replacements
-        check_replacements(&face.replacements, &mut missing);
+        check_replacements(
+            &face.replacements,
+            &trigger_registry,
+            &static_registry,
+            &mut missing,
+        );
 
         // Validate subtype references in AddSubtype modifications against
         // the printed-corpus lexicon. Catches parser misfires where English
@@ -6128,15 +6454,24 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         // a corresponding parse item. Uses the parse tree computed above.
         check_silent_drops(&face.oracle_text, &parse_details, &mut missing);
 
-        let supported_before_parse_warnings = missing.is_empty();
+        // The public result, summary counters, and warning rollup all derive
+        // from this one canonical gap set. `missing` captures analysis-only
+        // findings (for example resolver features), while the tree contributes
+        // the most specific Oracle source text for representable failures.
+        let gaps_before_parse_warnings =
+            merge_coverage_gaps(&missing, extract_gap_details(&parse_details), &[]);
+        let supported_before_parse_warnings = gaps_before_parse_warnings.is_empty();
+        let gaps = merge_coverage_gaps(
+            &missing,
+            extract_gap_details(&parse_details),
+            &face.parse_warnings,
+        );
+        let supported = gaps.is_empty();
+        let gap_details = public_gap_details(&gaps);
+        let gap_count = gap_details.len();
 
-        // Check parse warnings
-        check_parse_warnings(&face.parse_warnings, &mut missing);
-
-        let supported = missing.is_empty();
-
-        for m in &missing {
-            *freq.entry(m.clone()).or_default() += 1;
+        for gap in &gaps {
+            *freq.entry(gap.handler.clone()).or_default() += 1;
         }
 
         let legal_formats: Vec<&'static str> = LegalityFormat::ALL
@@ -6164,17 +6499,6 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             }
         }
 
-        let mut gap_details = extract_gap_details(&parse_details);
-        // Append parse-warning gaps so they appear in per-card gap reporting.
-        for warning in &face.parse_warnings {
-            if let Some(handler) = parse_warning_gap_label(warning) {
-                gap_details.push(GapDetail {
-                    handler,
-                    source_text: Some(warning.to_string()),
-                });
-            }
-        }
-        let gap_count = gap_details.len();
         for warning in &face.parse_warnings {
             let (category, pattern) = parse_warning_pattern(warning, face.oracle_text.as_deref());
             parse_warning_patterns
@@ -6510,6 +6834,19 @@ pub fn card_face_has_unimplemented_parts(face: &CardFace) -> bool {
 }
 
 fn static_has_unimplemented_parts(def: &StaticDefinition) -> bool {
+    let mut has_unimplemented_parts = false;
+    let _ = def.walk_self_and_granted(&mut |static_def| {
+        has_unimplemented_parts |= static_definition_has_unimplemented_parts(static_def);
+        if has_unimplemented_parts {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    has_unimplemented_parts
+}
+
+fn static_definition_has_unimplemented_parts(def: &StaticDefinition) -> bool {
     // Coverage-tooling detail (not a game rule): recurse through And/Or/Not —
     // a parser fallback that wraps an unparsed `unless` clause as
     // `Not(Unrecognized)` is a top-level `Not`, not a top-level `Unrecognized`,
@@ -6518,22 +6855,35 @@ fn static_has_unimplemented_parts(def: &StaticDefinition) -> bool {
     def.condition
         .as_ref()
         .is_some_and(StaticCondition::contains_unrecognized)
-        || def
-            .modifications
-            .iter()
-            .any(|modification| match modification {
-                ContinuousModification::GrantAbility { definition } => {
-                    ability_definition_has_unimplemented_parts(definition)
-                }
-                ContinuousModification::GrantTrigger { trigger } => {
-                    trigger_has_unimplemented_parts(trigger)
-                }
-                ContinuousModification::GrantReplacement { replacement } => replacement
-                    .execute
-                    .as_deref()
-                    .is_some_and(ability_definition_has_unimplemented_parts),
-                _ => false,
-            })
+        || def.modifications.iter().any(|modification| {
+            modification_has_unimplemented_parts(modification, TokenStaticTraversal::Include)
+        })
+}
+
+fn modification_has_unimplemented_parts(
+    modification: &ContinuousModification,
+    token_static_traversal: TokenStaticTraversal,
+) -> bool {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            ability_definition_has_unimplemented_parts(definition, token_static_traversal)
+        }
+        ContinuousModification::GrantTrigger { trigger } => {
+            trigger_has_unimplemented_parts(trigger)
+        }
+        ContinuousModification::GrantReplacement { replacement } => {
+            let mut has_unimplemented_parts = false;
+            visit_replacement_ability_payloads(replacement, |payload_traversal, payload| {
+                has_unimplemented_parts |=
+                    ability_definition_has_unimplemented_parts(payload, payload_traversal);
+            });
+            has_unimplemented_parts
+        }
+        ContinuousModification::GrantStaticAbility { definition } => {
+            static_has_unimplemented_parts(definition)
+        }
+        _ => false,
+    }
 }
 
 /// Returns the list of unsupported handler labels for a card face (e.g.
@@ -6544,16 +6894,34 @@ pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
     let static_registry = build_static_registry();
     let mut missing = Vec::new();
     check_keywords(&face.keywords, &mut missing);
-    check_abilities(&face.abilities, &mut missing);
-    check_triggers(&face.triggers, &trigger_registry, &mut missing);
+    check_abilities(
+        &face.abilities,
+        &trigger_registry,
+        &static_registry,
+        TokenStaticTraversal::Include,
+        &mut missing,
+    );
+    check_triggers(
+        &face.triggers,
+        &trigger_registry,
+        &static_registry,
+        TokenStaticTraversal::Include,
+        &mut missing,
+    );
     check_statics(
         &face.static_abilities,
         &trigger_registry,
         &static_registry,
+        TokenStaticTraversal::Include,
         &mut missing,
     );
     check_additional_cost(&face.additional_cost, &mut missing);
-    check_replacements(&face.replacements, &mut missing);
+    check_replacements(
+        &face.replacements,
+        &trigger_registry,
+        &static_registry,
+        &mut missing,
+    );
     missing
 }
 
@@ -6565,19 +6933,39 @@ pub fn build_parse_details_for_face(face: &CardFace) -> Vec<ParsedItem> {
     build_parse_details(face, &trigger_registry, &static_registry)
 }
 
-fn check_abilities(abilities: &[AbilityDefinition], missing: &mut Vec<String>) {
+fn check_abilities(
+    abilities: &[AbilityDefinition],
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+    missing: &mut Vec<String>,
+) {
     for def in abilities {
-        collect_ability_missing_parts(def, missing);
+        collect_ability_missing_parts(
+            def,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
     }
 }
 
 fn check_triggers(
     triggers: &[TriggerDefinition],
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
     missing: &mut Vec<String>,
 ) {
     for def in triggers {
-        check_trigger(def, trigger_registry, missing);
+        check_trigger(
+            def,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
     }
 }
 
@@ -6601,55 +6989,136 @@ fn check_statics(
     statics: &[StaticDefinition],
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
     missing: &mut Vec<String>,
 ) {
     for def in statics {
-        if !static_registry.contains_key(&def.mode) && !is_data_carrying_static(&def.mode) {
-            let label = format!("Static:{}", def.mode);
+        check_static_tree(
+            def,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
+    }
+}
+
+fn check_static_tree(
+    root: &StaticDefinition,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+    missing: &mut Vec<String>,
+) {
+    let _ = root.walk_self_and_granted(&mut |def| {
+        check_static_definition(
+            def,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
+        ControlFlow::Continue(())
+    });
+}
+
+fn check_static_definition(
+    def: &StaticDefinition,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+    missing: &mut Vec<String>,
+) {
+    if !static_registry.contains_key(&def.mode) && !is_data_carrying_static(&def.mode) {
+        let label = format!("Static:{}", def.mode);
+        if !missing.contains(&label) {
+            missing.push(label);
+        }
+    }
+    // Flag unrecognized conditions — these represent parser gaps where
+    // the condition text wasn't decomposed into typed building blocks.
+    // Recurse through And/Or/Not (`contains_unrecognized`/`unrecognized_texts`)
+    // so a nested `Not(Unrecognized)` fallback (e.g. an unbindable
+    // recipient-scoped `unless` gate) is labeled instead of silently
+    // passing as supported.
+    if let Some(condition) = &def.condition {
+        for text in condition.unrecognized_texts() {
+            let label = format!("Static:Unrecognized({})", truncate_label(text, 60));
             if !missing.contains(&label) {
                 missing.push(label);
             }
         }
-        // Flag unrecognized conditions — these represent parser gaps where
-        // the condition text wasn't decomposed into typed building blocks.
-        // Recurse through And/Or/Not (`contains_unrecognized`/`unrecognized_texts`)
-        // so a nested `Not(Unrecognized)` fallback (e.g. an unbindable
-        // recipient-scoped `unless` gate) is labeled instead of silently
-        // passing as supported.
-        if let Some(condition) = &def.condition {
-            for text in condition.unrecognized_texts() {
-                let label = format!("Static:Unrecognized({})", truncate_label(text, 60));
-                if !missing.contains(&label) {
-                    missing.push(label);
-                }
-            }
+    }
+    for modification in &def.modifications {
+        collect_modification_missing_parts(
+            modification,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
+    }
+}
+
+fn collect_modification_missing_parts(
+    modification: &ContinuousModification,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+    missing: &mut Vec<String>,
+) {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => collect_ability_missing_parts(
+            definition,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        ),
+        ContinuousModification::GrantTrigger { trigger } => check_trigger(
+            trigger,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        ),
+        ContinuousModification::GrantReplacement { replacement } => {
+            visit_replacement_ability_payloads(replacement, |payload_traversal, payload| {
+                collect_ability_missing_parts(
+                    payload,
+                    trigger_registry,
+                    static_registry,
+                    payload_traversal,
+                    missing,
+                );
+            });
         }
-        for modification in &def.modifications {
-            match modification {
-                ContinuousModification::GrantAbility { definition } => {
-                    collect_ability_missing_parts(definition, missing);
-                }
-                ContinuousModification::GrantTrigger { trigger } => {
-                    check_trigger(trigger, trigger_registry, missing);
-                }
-                ContinuousModification::GrantReplacement { replacement } => {
-                    if let Some(execute) = &replacement.execute {
-                        collect_ability_missing_parts(execute, missing);
-                    }
-                }
-                _ => {}
-            }
-        }
+        ContinuousModification::GrantStaticAbility { definition } => check_static_tree(
+            definition,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        ),
+        _ => {}
     }
 }
 
 fn check_trigger(
     trigger: &TriggerDefinition,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
     missing: &mut Vec<String>,
 ) {
     if let Some(execute) = &trigger.execute {
-        collect_ability_missing_parts(execute, missing);
+        collect_ability_missing_parts(
+            execute,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
     }
     // CR 603.8: StateCondition triggers are handled by the priority pipeline
     // (check_state_triggers), not the event-based trigger registry. They are supported.
@@ -6672,18 +7141,22 @@ fn truncate_label(text: &str, max: usize) -> &str {
     }
 }
 
-fn check_replacements(replacements: &[ReplacementDefinition], missing: &mut Vec<String>) {
+fn check_replacements(
+    replacements: &[ReplacementDefinition],
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    missing: &mut Vec<String>,
+) {
     for def in replacements {
-        if let Some(execute) = &def.execute {
-            collect_ability_missing_parts(execute, missing);
-        }
-
-        if let ReplacementMode::Optional {
-            decline: Some(decline),
-        } = &def.mode
-        {
-            collect_ability_missing_parts(decline, missing);
-        }
+        visit_replacement_ability_payloads(def, |token_static_traversal, payload| {
+            collect_ability_missing_parts(
+                payload,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+                missing,
+            );
+        });
 
         if let Some(ReplacementCondition::Unrecognized { ref text }) = def.condition {
             let label = format!("Replacement:Unrecognized({})", truncate_label(text, 60));
@@ -6718,28 +7191,20 @@ fn collect_valid_subtypes(card_db: &CardDatabase) -> HashSet<String> {
 /// modification so callers can inspect or validate the payload.
 fn visit_face_modifications(face: &CardFace, visit: &mut impl FnMut(&ContinuousModification)) {
     for ability in face.abilities.iter() {
-        visit_ability_modifications(ability, visit);
+        visit_ability_modifications(ability, TokenStaticTraversal::Include, visit);
     }
     for stat in &face.static_abilities {
-        for m in &stat.modifications {
-            visit(m);
-        }
+        visit_static_modifications(stat, visit);
     }
     for trigger in &face.triggers {
         if let Some(execute) = &trigger.execute {
-            visit_ability_modifications(execute, visit);
+            visit_ability_modifications(execute, TokenStaticTraversal::Include, visit);
         }
     }
     for replacement in &face.replacements {
-        if let Some(execute) = &replacement.execute {
-            visit_ability_modifications(execute, visit);
-        }
-        if let ReplacementMode::Optional {
-            decline: Some(decline),
-        } = &replacement.mode
-        {
-            visit_ability_modifications(decline, visit);
-        }
+        visit_replacement_ability_payloads(replacement, |token_static_traversal, payload| {
+            visit_ability_modifications(payload, token_static_traversal, visit);
+        });
     }
 }
 
@@ -7083,35 +7548,129 @@ fn visit_direct_effect_ability_payloads<'a>(
 }
 
 /// Recursively visit modifications inside an ability's effect graph.
-/// Descends into `GenericEffect.static_abilities` (the typical carrier of
-/// continuous modifications emitted from animations), sub-abilities, and
-/// modal branches. Non-`GenericEffect` effects don't carry modifications.
+/// Descends into static carriers, direct effect modification carriers,
+/// sub-abilities, and modal branches.
 fn visit_ability_modifications(
     def: &AbilityDefinition,
+    token_static_traversal: TokenStaticTraversal,
     visit: &mut impl FnMut(&ContinuousModification),
 ) {
-    if let Effect::GenericEffect {
-        static_abilities, ..
-    } = &*def.effect
-    {
-        for stat in static_abilities {
-            for m in &stat.modifications {
-                visit(m);
-            }
-        }
-    }
+    visit_effect_static_carrier_modifications(&def.effect, token_static_traversal, visit);
+    visit_effect_modification_carriers(&def.effect, |modification| {
+        visit_modification_and_granted_static_modifications(modification, visit);
+    });
     if let Some(sub) = &def.sub_ability {
-        visit_ability_modifications(sub, visit);
+        visit_ability_modifications(sub, token_static_traversal, visit);
     }
     if let Some(else_ab) = &def.else_ability {
-        visit_ability_modifications(else_ab, visit);
+        visit_ability_modifications(else_ab, token_static_traversal, visit);
     }
     for mode_ability in &def.mode_abilities {
-        visit_ability_modifications(mode_ability, visit);
+        visit_ability_modifications(mode_ability, token_static_traversal, visit);
     }
-    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-        visit_ability_modifications(payload, visit);
+    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
+        visit_ability_modifications(payload, payload_traversal, visit);
     });
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        visit_ability_modifications(payload, token_static_traversal, visit);
+    });
+}
+
+/// Visit a direct modification and, for a static grant, its nested static
+/// definitions through the canonical static walker.
+fn visit_modification_and_granted_static_modifications(
+    modification: &ContinuousModification,
+    visit: &mut impl FnMut(&ContinuousModification),
+) {
+    visit(modification);
+    if let ContinuousModification::GrantStaticAbility { definition } = modification {
+        visit_static_modifications(definition, visit);
+    }
+}
+
+/// Visit modifications stored directly on an effect rather than in a
+/// `StaticDefinition`. Keep every `Vec<ContinuousModification>` carrier here
+/// so projection, support, gap, feature, and lexicon coverage cannot each
+/// accidentally omit a distinct effect shape.
+fn visit_effect_modification_carriers(
+    effect: &Effect,
+    mut visit: impl FnMut(&ContinuousModification),
+) {
+    let mut visit_all = |modifications: &[ContinuousModification]| {
+        for modification in modifications {
+            visit(modification);
+        }
+    };
+    match effect {
+        Effect::CopySpell {
+            additional_modifications,
+            ..
+        }
+        | Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        }
+        | Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } => visit_all(additional_modifications),
+        Effect::ReturnAsAura { grants, .. } => visit_all(grants),
+        Effect::AddPendingEntersModifications { modifications } => visit_all(modifications),
+        Effect::EachPlayerCopyChosen {
+            copy_modifications, ..
+        } => visit_all(copy_modifications),
+        _ => {}
+    }
+}
+
+fn visit_static_modifications(
+    root: &StaticDefinition,
+    visit: &mut impl FnMut(&ContinuousModification),
+) {
+    let _ = root.walk_self_and_granted(&mut |stat| {
+        for modification in &stat.modifications {
+            visit(modification);
+        }
+        ControlFlow::Continue(())
+    });
+}
+
+fn visit_effect_static_carrier_modifications(
+    effect: &Effect,
+    token_static_traversal: TokenStaticTraversal,
+    visit: &mut impl FnMut(&ContinuousModification),
+) {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            for stat in static_abilities {
+                visit_static_modifications(stat, visit);
+            }
+        }
+        Effect::Token {
+            static_abilities, ..
+        } if token_static_traversal.includes() => {
+            for stat in static_abilities {
+                visit_static_modifications(stat, visit);
+            }
+        }
+        Effect::Counter {
+            source_rider: Some(CounterSourceRider::LosesAbilities { static_def, .. }),
+            ..
+        } => visit_static_modifications(static_def, visit),
+        Effect::CreateEmblem { statics, triggers } => {
+            for stat in statics {
+                visit_static_modifications(stat, visit);
+            }
+            for trigger in triggers {
+                if let Some(execute) = &trigger.execute {
+                    visit_ability_modifications(execute, token_static_traversal, visit);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Validate every `AddSubtype` modification on the face against the lexicon
@@ -7193,35 +7752,10 @@ fn check_resolver_features(face: &CardFace, missing: &mut Vec<String>) {
     }
 }
 
-/// Parse warnings indicate Oracle text the parser accepted but did not faithfully
-/// represent, so the card has silently incorrect behavior at runtime:
-///
-/// - `TargetFallback` — degraded targeting (`TargetFilter::Any` instead of a
-///   specific filter).
-/// - `SwallowedClause` — a load-bearing clause (condition, duration, optional,
-///   activation limit, dynamic quantity, replacement, APNAP ordering) was
-///   dropped from the AST while the surrounding ability still parsed. The
-///   swallow-check detectors fire only when the marker phrase is present AND
-///   the AST has no representation for it, so a fired warning is an unrepresented
-///   clause, not detector noise. Folding these into the supported predicate
-///   stops coverage from marking such cards green (umbrella issue #2243; per
-///   detector: #2229–#2241).
-/// - `CascadeLoss` — a cascade slot was populated but did not land on the final
-///   ability definition, so the parsed card is missing load-bearing behavior.
-///
+/// Returns the canonical coverage gap label for diagnostics that prove a
+/// semantically load-bearing clause was not represented in the parsed AST.
 /// `IgnoredRemainder` stays informational because it can be parser-internal
 /// trivia rather than a demonstrated missing semantic clause.
-fn check_parse_warnings(warnings: &[OracleDiagnostic], missing: &mut Vec<String>) {
-    for warning in warnings {
-        let Some(label) = parse_warning_gap_label(warning) else {
-            continue;
-        };
-        if !missing.contains(&label) {
-            missing.push(label);
-        }
-    }
-}
-
 fn parse_warning_gap_label(warning: &OracleDiagnostic) -> Option<String> {
     match warning {
         OracleDiagnostic::TargetFallback { context, .. } => {
@@ -7240,56 +7774,96 @@ fn parse_warning_gap_label(warning: &OracleDiagnostic) -> Option<String> {
 }
 
 fn ability_definitions_have_unimplemented_parts(abilities: &[AbilityDefinition]) -> bool {
-    abilities
-        .iter()
-        .any(ability_definition_has_unimplemented_parts)
+    abilities.iter().any(|ability| {
+        ability_definition_has_unimplemented_parts(ability, TokenStaticTraversal::Include)
+    })
 }
 
 fn trigger_has_unimplemented_parts(trigger: &TriggerDefinition) -> bool {
-    trigger
-        .execute
-        .as_ref()
-        .is_some_and(|execute| ability_definition_has_unimplemented_parts(execute))
+    trigger.execute.as_ref().is_some_and(|execute| {
+        ability_definition_has_unimplemented_parts(execute, TokenStaticTraversal::Include)
+    })
 }
 
 fn replacement_has_unimplemented_parts(replacement: &ReplacementDefinition) -> bool {
-    replacement
-        .execute
-        .as_ref()
-        .is_some_and(|execute| ability_definition_has_unimplemented_parts(execute))
-        || matches!(
-            &replacement.mode,
-            ReplacementMode::Optional {
-                decline: Some(decline),
-            } if ability_definition_has_unimplemented_parts(decline)
-        )
+    let mut has_unimplemented_parts = false;
+    visit_replacement_ability_payloads(replacement, |token_static_traversal, payload| {
+        has_unimplemented_parts |=
+            ability_definition_has_unimplemented_parts(payload, token_static_traversal);
+    });
+    has_unimplemented_parts
 }
 
-fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
+fn ability_definition_has_unimplemented_parts(
+    def: &AbilityDefinition,
+    token_static_traversal: TokenStaticTraversal,
+) -> bool {
     matches!(*def.effect, Effect::Unimplemented { .. })
         || def
             .cost
             .as_ref()
             .is_some_and(ability_cost_has_unimplemented_parts)
-        || def
-            .sub_ability
-            .as_ref()
-            .is_some_and(|sub| ability_definition_has_unimplemented_parts(sub))
-        || def
-            .else_ability
-            .as_ref()
-            .is_some_and(|else_ability| ability_definition_has_unimplemented_parts(else_ability))
+        || def.sub_ability.as_ref().is_some_and(|sub| {
+            ability_definition_has_unimplemented_parts(sub, token_static_traversal)
+        })
+        || def.else_ability.as_ref().is_some_and(|else_ability| {
+            ability_definition_has_unimplemented_parts(else_ability, token_static_traversal)
+        })
         || def
             .mode_abilities
             .iter()
-            .any(ability_definition_has_unimplemented_parts)
+            .any(|mode| ability_definition_has_unimplemented_parts(mode, token_static_traversal))
+        || effect_static_carriers_have_unimplemented_parts(&def.effect, token_static_traversal)
         || {
             let mut has_unimplemented_parts = false;
-            visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-                has_unimplemented_parts |= ability_definition_has_unimplemented_parts(payload);
+            visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
+                has_unimplemented_parts |=
+                    ability_definition_has_unimplemented_parts(payload, payload_traversal);
             });
             has_unimplemented_parts
         }
+        || {
+            let mut has_unimplemented_parts = false;
+            visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+                has_unimplemented_parts |=
+                    ability_definition_has_unimplemented_parts(payload, token_static_traversal);
+            });
+            has_unimplemented_parts
+        }
+}
+
+fn effect_static_carriers_have_unimplemented_parts(
+    effect: &Effect,
+    token_static_traversal: TokenStaticTraversal,
+) -> bool {
+    let statics_have_unimplemented_parts = match effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().any(static_has_unimplemented_parts),
+        Effect::Token {
+            static_abilities, ..
+        } => {
+            token_static_traversal.includes()
+                && static_abilities.iter().any(static_has_unimplemented_parts)
+        }
+        Effect::Counter {
+            source_rider: Some(CounterSourceRider::LosesAbilities { static_def, .. }),
+            ..
+        } => static_has_unimplemented_parts(static_def),
+        Effect::CreateEmblem { statics, triggers } => {
+            statics.iter().any(static_has_unimplemented_parts)
+                || triggers.iter().any(trigger_has_unimplemented_parts)
+        }
+        _ => false,
+    };
+    statics_have_unimplemented_parts || {
+        let mut has_unimplemented_parts = false;
+        visit_effect_modification_carriers(effect, |modification| {
+            has_unimplemented_parts |=
+                modification_has_unimplemented_parts(modification, token_static_traversal);
+        });
+        has_unimplemented_parts
+    }
 }
 
 fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
@@ -7315,7 +7889,13 @@ fn ability_cost_has_unimplemented_parts(cost: &AbilityCost) -> bool {
     }
 }
 
-fn collect_ability_missing_parts(def: &AbilityDefinition, missing: &mut Vec<String>) {
+fn collect_ability_missing_parts(
+    def: &AbilityDefinition,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+    missing: &mut Vec<String>,
+) {
     if let Effect::Unimplemented { name, .. } = &*def.effect {
         let label = format!("Effect:{name}");
         if !missing.contains(&label) {
@@ -7328,19 +7908,126 @@ fn collect_ability_missing_parts(def: &AbilityDefinition, missing: &mut Vec<Stri
     }
 
     if let Some(sub_ability) = &def.sub_ability {
-        collect_ability_missing_parts(sub_ability, missing);
+        collect_ability_missing_parts(
+            sub_ability,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
     }
 
     if let Some(else_ability) = &def.else_ability {
-        collect_ability_missing_parts(else_ability, missing);
+        collect_ability_missing_parts(
+            else_ability,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
     }
 
     for mode_ability in &def.mode_abilities {
-        collect_ability_missing_parts(mode_ability, missing);
+        collect_ability_missing_parts(
+            mode_ability,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
     }
 
+    collect_effect_static_carrier_missing_parts(
+        &def.effect,
+        trigger_registry,
+        static_registry,
+        token_static_traversal,
+        missing,
+    );
+
+    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
+        collect_ability_missing_parts(
+            payload,
+            trigger_registry,
+            static_registry,
+            payload_traversal,
+            missing,
+        );
+    });
+
     visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-        collect_ability_missing_parts(payload, missing);
+        collect_ability_missing_parts(
+            payload,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
+    });
+}
+
+fn collect_effect_static_carrier_missing_parts(
+    effect: &Effect,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+    missing: &mut Vec<String>,
+) {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => check_statics(
+            static_abilities,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        ),
+        Effect::Token {
+            static_abilities, ..
+        } if token_static_traversal.includes() => check_statics(
+            static_abilities,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        ),
+        Effect::Counter {
+            source_rider: Some(CounterSourceRider::LosesAbilities { static_def, .. }),
+            ..
+        } => check_static_tree(
+            static_def,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        ),
+        Effect::CreateEmblem { statics, triggers } => {
+            check_statics(
+                statics,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+                missing,
+            );
+            check_triggers(
+                triggers,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+                missing,
+            );
+        }
+        _ => {}
+    }
+    visit_effect_modification_carriers(effect, |modification| {
+        collect_modification_missing_parts(
+            modification,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+            missing,
+        );
     });
 }
 
@@ -7639,20 +8326,14 @@ fn strip_parenthesized_reminder(line: &str) -> String {
     result
 }
 
-/// Count effective parsed items, recursively counting children for
-/// modal/choose nodes (which represent multiple Oracle lines as one node).
+/// Count parse-tree roots that represent independent Oracle lines.
+///
+/// Children record semantics nested inside the same printed ability: a trigger
+/// execute body, an otherwise branch, a token-carried static, or a granted
+/// ability. They must not increase this count, or a supported nested detail
+/// could mask a different Oracle line that the parser silently dropped.
 fn count_effective_parsed_items(items: &[ParsedItem]) -> usize {
-    let mut count = 0;
-    for item in items {
-        if item.children.is_empty() {
-            count += 1;
-        } else {
-            // A modal/choose parent + its children count as 1 + children
-            // (the header is the parent, each bullet is a child)
-            count += 1 + item.children.len();
-        }
-    }
-    count
+    items.len()
 }
 
 /// Find Oracle text lines that have no corresponding parsed item by
@@ -7853,7 +8534,12 @@ fn is_card_supported(
 ) -> bool {
     // Check abilities
     for def in face.abilities.iter() {
-        if !is_ability_supported(def) {
+        if !is_ability_supported(
+            def,
+            trigger_registry,
+            static_registry,
+            TokenStaticTraversal::Include,
+        ) {
             return false;
         }
     }
@@ -7865,23 +8551,40 @@ fn is_card_supported(
             return false;
         }
         if let Some(execute) = &trig.execute {
-            if !is_ability_supported(execute) {
+            if !is_ability_supported(
+                execute,
+                trigger_registry,
+                static_registry,
+                TokenStaticTraversal::Include,
+            ) {
                 return false;
             }
         }
     }
     // Check statics
     for stat in &face.static_abilities {
-        if !is_static_supported(stat, trigger_registry, static_registry) {
+        if !is_static_supported(
+            stat,
+            trigger_registry,
+            static_registry,
+            TokenStaticTraversal::Include,
+        ) {
             return false;
         }
     }
     // Check replacements
     for repl in &face.replacements {
-        if let Some(execute) = &repl.execute {
-            if !is_ability_supported(execute) {
-                return false;
-            }
+        let mut replacement_supported = true;
+        visit_replacement_ability_payloads(repl, |token_static_traversal, payload| {
+            replacement_supported &= is_ability_supported(
+                payload,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+            );
+        });
+        if !replacement_supported {
+            return false;
         }
     }
     // Check keywords
@@ -7897,33 +8600,92 @@ fn is_static_supported(
     stat: &StaticDefinition,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+) -> bool {
+    let mut supported = true;
+    let _ = stat.walk_self_and_granted(&mut |static_def| {
+        supported = is_static_definition_supported(
+            static_def,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        );
+        if supported {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    });
+    supported
+}
+
+fn is_static_definition_supported(
+    stat: &StaticDefinition,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
 ) -> bool {
     (static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode))
         && !stat
             .condition
             .as_ref()
             .is_some_and(StaticCondition::contains_unrecognized)
-        && stat
-            .modifications
-            .iter()
-            .all(|modification| match modification {
-                ContinuousModification::GrantAbility { definition } => {
-                    is_ability_supported(definition)
-                }
-                ContinuousModification::GrantTrigger { trigger } => {
-                    is_trigger_supported(trigger, trigger_registry)
-                }
-                ContinuousModification::GrantReplacement { replacement } => replacement
-                    .execute
-                    .as_deref()
-                    .is_none_or(is_ability_supported),
-                _ => true,
-            })
+        && stat.modifications.iter().all(|modification| {
+            modification_is_supported(
+                modification,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+            )
+        })
+}
+
+fn modification_is_supported(
+    modification: &ContinuousModification,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+) -> bool {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => is_ability_supported(
+            definition,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ),
+        ContinuousModification::GrantTrigger { trigger } => is_trigger_supported(
+            trigger,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ),
+        ContinuousModification::GrantReplacement { replacement } => {
+            let mut supported = true;
+            visit_replacement_ability_payloads(replacement, |payload_traversal, payload| {
+                supported &= is_ability_supported(
+                    payload,
+                    trigger_registry,
+                    static_registry,
+                    payload_traversal,
+                );
+            });
+            supported
+        }
+        ContinuousModification::GrantStaticAbility { definition } => is_static_supported(
+            definition,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ),
+        _ => true,
+    }
 }
 
 fn is_trigger_supported(
     trigger: &TriggerDefinition,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
 ) -> bool {
     if matches!(&trigger.mode, TriggerMode::Unknown(_))
         || (!trigger_registry.contains_key(&trigger.mode)
@@ -7931,37 +8693,140 @@ fn is_trigger_supported(
     {
         return false;
     }
-    trigger.execute.as_deref().is_none_or(is_ability_supported)
+    trigger.execute.as_deref().is_none_or(|execute| {
+        is_ability_supported(
+            execute,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        )
+    })
 }
 
 /// Check if an ability definition tree has any Unimplemented effects.
-fn is_ability_supported(def: &AbilityDefinition) -> bool {
+fn is_ability_supported(
+    def: &AbilityDefinition,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+) -> bool {
     if matches!(&*def.effect, Effect::Unimplemented { .. }) {
         return false;
     }
     if let Some(sub) = &def.sub_ability {
-        if !is_ability_supported(sub) {
+        if !is_ability_supported(
+            sub,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ) {
             return false;
         }
     }
     if let Some(else_ab) = &def.else_ability {
-        if !is_ability_supported(else_ab) {
+        if !is_ability_supported(
+            else_ab,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ) {
             return false;
         }
     }
     for mode_ab in &def.mode_abilities {
-        if !is_ability_supported(mode_ab) {
+        if !is_ability_supported(
+            mode_ab,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        ) {
             return false;
         }
     }
+    if !effect_static_carriers_are_supported(
+        &def.effect,
+        trigger_registry,
+        static_registry,
+        token_static_traversal,
+    ) {
+        return false;
+    }
     let mut supported = true;
+    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
+        supported &= is_ability_supported(
+            payload,
+            trigger_registry,
+            static_registry,
+            payload_traversal,
+        );
+    });
     visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-        supported &= is_ability_supported(payload);
+        supported &= is_ability_supported(
+            payload,
+            trigger_registry,
+            static_registry,
+            token_static_traversal,
+        );
     });
     if !supported {
         return false;
     }
     true
+}
+
+fn effect_static_carriers_are_supported(
+    effect: &Effect,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    token_static_traversal: TokenStaticTraversal,
+) -> bool {
+    let statics_supported = |statics: &[StaticDefinition]| {
+        statics.iter().all(|stat| {
+            is_static_supported(
+                stat,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+            )
+        })
+    };
+
+    let static_carriers_supported = match effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => statics_supported(static_abilities),
+        Effect::Token {
+            static_abilities, ..
+        } => !token_static_traversal.includes() || statics_supported(static_abilities),
+        Effect::Counter {
+            source_rider: Some(CounterSourceRider::LosesAbilities { static_def, .. }),
+            ..
+        } => statics_supported(std::slice::from_ref(static_def.as_ref())),
+        Effect::CreateEmblem { statics, triggers } => {
+            statics_supported(statics)
+                && triggers.iter().all(|trigger| {
+                    is_trigger_supported(
+                        trigger,
+                        trigger_registry,
+                        static_registry,
+                        token_static_traversal,
+                    )
+                })
+        }
+        _ => true,
+    };
+    static_carriers_supported && {
+        let mut supported = true;
+        visit_effect_modification_carriers(effect, |modification| {
+            supported &= modification_is_supported(
+                modification,
+                trigger_registry,
+                static_registry,
+                token_static_traversal,
+            );
+        });
+        supported
+    }
 }
 
 /// Whether the resolver currently handles a given parsed feature.
@@ -8042,24 +8907,16 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
         extract_ability_features(def, features);
     }
     for trig in &face.triggers {
-        if let Some(execute) = &trig.execute {
-            extract_ability_features(execute, features);
-        }
-        // Trigger-level condition (intervening-if)
-        if trig.condition.is_some() {
-            emit_structural(features, StructuralFeature::TriggerCondition);
-        }
+        extract_trigger_features(trig, features, TokenStaticTraversal::Include);
     }
     for repl in &face.replacements {
-        if let Some(execute) = &repl.execute {
-            extract_ability_features(execute, features);
-        }
+        visit_replacement_ability_payloads(repl, |token_static_traversal, payload| {
+            extract_ability_features_with_token_statics(payload, features, token_static_traversal);
+        });
     }
-    // Static abilities with conditions
+    // Static abilities and all definitions they grant.
     for stat in &face.static_abilities {
-        if let Some(ref cond) = stat.condition {
-            extract_static_condition_features(cond, features);
-        }
+        extract_static_features(stat, features, TokenStaticTraversal::Include);
     }
     if face.additional_cost.is_some() {
         emit_structural(features, StructuralFeature::AdditionalCost);
@@ -8119,6 +8976,14 @@ fn extract_ability_features(
     def: &AbilityDefinition,
     features: &mut HashMap<String, FeatureSupport>,
 ) {
+    extract_ability_features_with_token_statics(def, features, TokenStaticTraversal::Include);
+}
+
+fn extract_ability_features_with_token_statics(
+    def: &AbilityDefinition,
+    features: &mut HashMap<String, FeatureSupport>,
+    token_static_traversal: TokenStaticTraversal,
+) {
     // Condition
     if let Some(ref cond) = def.condition {
         emit_structural(features, StructuralFeature::Condition);
@@ -8130,7 +8995,7 @@ fn extract_ability_features(
     // Else ability
     if let Some(ref else_ab) = def.else_ability {
         emit_structural(features, StructuralFeature::ElseAbility);
-        extract_ability_features(else_ab, features);
+        extract_ability_features_with_token_statics(else_ab, features, token_static_traversal);
     }
 
     // Repeat-for
@@ -8185,13 +9050,113 @@ fn extract_ability_features(
 
     // Recurse into sub-abilities
     if let Some(ref sub) = def.sub_ability {
-        extract_ability_features(sub, features);
+        extract_ability_features_with_token_statics(sub, features, token_static_traversal);
     }
     for mode_ab in &def.mode_abilities {
-        extract_ability_features(mode_ab, features);
+        extract_ability_features_with_token_statics(mode_ab, features, token_static_traversal);
     }
+    extract_effect_static_carrier_features(&def.effect, features, token_static_traversal);
+    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
+        extract_ability_features_with_token_statics(payload, features, payload_traversal);
+    });
     visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-        extract_ability_features(payload, features);
+        extract_ability_features_with_token_statics(payload, features, token_static_traversal);
+    });
+}
+
+fn extract_static_features(
+    root: &StaticDefinition,
+    features: &mut HashMap<String, FeatureSupport>,
+    token_static_traversal: TokenStaticTraversal,
+) {
+    let _ = root.walk_self_and_granted(&mut |stat| {
+        if let Some(condition) = &stat.condition {
+            extract_static_condition_features(condition, features);
+        }
+        for modification in &stat.modifications {
+            extract_modification_features(modification, features, token_static_traversal);
+        }
+        ControlFlow::Continue(())
+    });
+}
+
+fn extract_modification_features(
+    modification: &ContinuousModification,
+    features: &mut HashMap<String, FeatureSupport>,
+    token_static_traversal: TokenStaticTraversal,
+) {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            extract_ability_features_with_token_statics(
+                definition,
+                features,
+                token_static_traversal,
+            );
+        }
+        ContinuousModification::GrantTrigger { trigger } => {
+            extract_trigger_features(trigger, features, token_static_traversal);
+        }
+        ContinuousModification::GrantReplacement { replacement } => {
+            visit_replacement_ability_payloads(replacement, |payload_traversal, payload| {
+                extract_ability_features_with_token_statics(payload, features, payload_traversal);
+            });
+        }
+        ContinuousModification::GrantStaticAbility { definition } => {
+            extract_static_features(definition, features, token_static_traversal);
+        }
+        _ => {}
+    }
+}
+
+fn extract_trigger_features(
+    trigger: &TriggerDefinition,
+    features: &mut HashMap<String, FeatureSupport>,
+    token_static_traversal: TokenStaticTraversal,
+) {
+    if let Some(execute) = &trigger.execute {
+        extract_ability_features_with_token_statics(execute, features, token_static_traversal);
+    }
+    if trigger.condition.is_some() {
+        emit_structural(features, StructuralFeature::TriggerCondition);
+    }
+}
+
+fn extract_effect_static_carrier_features(
+    effect: &Effect,
+    features: &mut HashMap<String, FeatureSupport>,
+    token_static_traversal: TokenStaticTraversal,
+) {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            for stat in static_abilities {
+                extract_static_features(stat, features, token_static_traversal);
+            }
+        }
+        Effect::Token {
+            static_abilities, ..
+        } if token_static_traversal.includes() => {
+            for stat in static_abilities {
+                extract_static_features(stat, features, token_static_traversal);
+            }
+        }
+        Effect::Counter {
+            source_rider: Some(CounterSourceRider::LosesAbilities { static_def, .. }),
+            ..
+        } => extract_static_features(static_def, features, token_static_traversal),
+        Effect::CreateEmblem { statics, triggers } => {
+            for stat in statics {
+                extract_static_features(stat, features, token_static_traversal);
+            }
+            for trigger in triggers {
+                extract_trigger_features(trigger, features, token_static_traversal);
+            }
+        }
+        _ => {}
+    }
+    visit_effect_modification_carriers(effect, |modification| {
+        extract_modification_features(modification, features, token_static_traversal);
     });
 }
 
@@ -12158,7 +13123,7 @@ mod tests {
         let details = |zone: Option<Zone>| -> Vec<(String, String)> {
             let mut def = AbilityDefinition::new(AbilityKind::Activated, graveyard_self_return());
             def.activation_zone = zone;
-            build_ability_item(&def).details
+            build_test_ability_item(&def).details
         };
 
         // (1) `None` — the CR 113.6 battlefield default. No zone key emitted.
@@ -12759,7 +13724,7 @@ mod tests {
                 flipper: TargetFilter::Controller,
             },
         );
-        let item = build_ability_item(&def);
+        let item = build_test_ability_item(&def);
         assert!(
             item.children
                 .iter()
@@ -13116,9 +14081,8 @@ mod tests {
             "APNAP",
             "Repeat the following process for each opponent in turn order.",
         )];
-        let mut missing = Vec::new();
-        check_parse_warnings(&warnings, &mut missing);
-        assert_eq!(missing, vec!["Swallow:APNAP"]);
+        let gaps = merge_coverage_gaps(&[], vec![], &warnings);
+        assert_eq!(gaps[0].handler, "Swallow:APNAP");
     }
 
     #[test]
@@ -13129,9 +14093,8 @@ mod tests {
                 "If foo, draw a card.",
             ),
         ];
-        let mut missing = Vec::new();
-        check_parse_warnings(&warnings, &mut missing);
-        assert_eq!(missing, vec!["Swallow:Condition_If"]);
+        let gaps = merge_coverage_gaps(&[], vec![], &warnings);
+        assert_eq!(gaps[0].handler, "Swallow:Condition_If");
     }
 
     #[test]
@@ -13143,9 +14106,8 @@ mod tests {
                 line_index: 0,
             },
         ];
-        let mut missing = Vec::new();
-        check_parse_warnings(&warnings, &mut missing);
-        assert_eq!(missing, vec!["ParseWarning:cascade-loss:Condition"]);
+        let gaps = merge_coverage_gaps(&[], vec![], &warnings);
+        assert_eq!(gaps[0].handler, "ParseWarning:cascade-loss:Condition");
     }
 
     #[test]
@@ -13157,9 +14119,8 @@ mod tests {
                 line_index: 0,
             },
         ];
-        let mut missing = Vec::new();
-        check_parse_warnings(&warnings, &mut missing);
-        assert!(missing.is_empty());
+        let gaps = merge_coverage_gaps(&[], vec![], &warnings);
+        assert!(gaps.is_empty());
     }
 
     /// CR 903.3d: the Lieutenant STATIC's `Unhandled` coverage tag is a
@@ -13351,20 +14312,19 @@ mod tests {
     /// The label format is a contract: parser tests in `oracle.rs` grep for
     /// exactly `"Swallow:{detector}"`, so this locks it.
     #[test]
-    fn check_parse_warnings_flags_swallowed_clause() {
+    fn merge_coverage_gaps_flags_swallowed_clause() {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Condition_If",
             "if you control a creature, …",
         )];
-        let mut missing = Vec::new();
-        check_parse_warnings(&warnings, &mut missing);
-        assert_eq!(missing, vec!["Swallow:Condition_If".to_string()]);
+        let gaps = merge_coverage_gaps(&[], vec![], &warnings);
+        assert_eq!(gaps[0].handler, "Swallow:Condition_If");
     }
 
     /// Multiple swallowed clauses sharing a detector collapse to one gap label,
     /// matching the dedupe semantics of the existing `ParseWarning:*` arms.
     #[test]
-    fn check_parse_warnings_dedupes_same_detector() {
+    fn merge_coverage_gaps_dedupes_same_detector() {
         let warnings = vec![
             OracleDiagnostic::swallowed_clause(
                 "DynamicQty",
@@ -13372,9 +14332,9 @@ mod tests {
             ),
             OracleDiagnostic::swallowed_clause("DynamicQty", "equal to that card's mana value"),
         ];
-        let mut missing = Vec::new();
-        check_parse_warnings(&warnings, &mut missing);
-        assert_eq!(missing, vec!["Swallow:DynamicQty".to_string()]);
+        let gaps = merge_coverage_gaps(&[], vec![], &warnings);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].handler, "Swallow:DynamicQty");
     }
 
     /// CR 608.2d: A swallowed `Optional_YouMay` clause must demote the card
@@ -13382,28 +14342,26 @@ mod tests {
     /// the regression contract for issue #2277 — dropped `you may` optional
     /// sub-effects must not be counted as supported.
     #[test]
-    fn check_parse_warnings_flags_optional_you_may() {
+    fn merge_coverage_gaps_flags_optional_you_may() {
         let warnings = vec![OracleDiagnostic::swallowed_clause(
             "Optional_YouMay",
             "you may reveal that card and put it into your hand",
         )];
-        let mut missing = Vec::new();
-        check_parse_warnings(&warnings, &mut missing);
-        assert_eq!(missing, vec!["Swallow:Optional_YouMay".to_string()]);
+        let gaps = merge_coverage_gaps(&[], vec![], &warnings);
+        assert_eq!(gaps[0].handler, "Swallow:Optional_YouMay");
     }
 
     /// `CascadeLoss` means a cascade slot was parsed but did not land on the
     /// final ability definition, so it must demote coverage.
     #[test]
-    fn check_parse_warnings_flags_cascade_loss() {
+    fn merge_coverage_gaps_flags_cascade_loss() {
         let warnings = vec![OracleDiagnostic::CascadeLoss {
             slot: CascadeSlot::Condition,
             effect_name: "DrawCards".into(),
             line_index: 0,
         }];
-        let mut missing = Vec::new();
-        check_parse_warnings(&warnings, &mut missing);
-        assert_eq!(missing, vec!["ParseWarning:cascade-loss:Condition"]);
+        let gaps = merge_coverage_gaps(&[], vec![], &warnings);
+        assert_eq!(gaps[0].handler, "ParseWarning:cascade-loss:Condition");
     }
 
     #[test]
@@ -13494,6 +14452,643 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    fn build_test_ability_item(def: &AbilityDefinition) -> ParsedItem {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+        build_ability_item(
+            def,
+            &trigger_registry,
+            &static_registry,
+            TokenStaticTraversal::Include,
+        )
+    }
+
+    fn test_ability_is_supported(def: &AbilityDefinition) -> bool {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+        is_ability_supported(
+            def,
+            &trigger_registry,
+            &static_registry,
+            TokenStaticTraversal::Include,
+        )
+    }
+
+    fn collect_test_ability_missing_parts(def: &AbilityDefinition, missing: &mut Vec<String>) {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+        collect_ability_missing_parts(
+            def,
+            &trigger_registry,
+            &static_registry,
+            TokenStaticTraversal::Include,
+            missing,
+        );
+    }
+
+    fn token_ability_with_static(static_ability: StaticDefinition) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Coverage Token".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![static_ability],
+                enter_with_counters: vec![],
+            },
+        )
+    }
+
+    fn token_trigger_with_static(static_ability: StaticDefinition) -> TriggerDefinition {
+        TriggerDefinition::new(TriggerMode::ChangesZone)
+            .execute(token_ability_with_static(static_ability))
+            .description("When this creature enters".to_string())
+    }
+
+    fn coverage_result_for_face(face: CardFace) -> CardCoverageResult {
+        let card_name = face.name.clone();
+        let mut export = serde_json::Map::new();
+        export.insert(
+            card_name.to_lowercase(),
+            serde_json::to_value(face).expect("test face should serialize"),
+        );
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+            .expect("test export should deserialize");
+        analyze_coverage(&db)
+            .cards
+            .into_iter()
+            .find(|card| card.card_name == card_name)
+            .expect("coverage should include test card")
+    }
+
+    #[test]
+    fn token_static_is_projected_and_preserves_full_coverage() {
+        let mut face = make_face();
+        face.name = "Supported Token Static".to_string();
+        face.abilities.push(token_ability_with_static(
+            StaticDefinition::new(StaticMode::MustAttack)
+                .affected(TargetFilter::SelfRef)
+                .description("This token attacks each combat if able.".to_string()),
+        ));
+
+        let token = build_parse_details_for_face(&face)
+            .into_iter()
+            .find(|item| item.category == ParseCategory::Ability && item.label == "Token")
+            .expect("token ability should be projected");
+        let must_attack = token
+            .children
+            .iter()
+            .find(|item| item.category == ParseCategory::Static && item.label == "MustAttack")
+            .expect("token static should be a nested parse item");
+        assert!(must_attack.supported);
+        assert!(
+            must_attack
+                .details
+                .iter()
+                .any(|(key, value)| key == "affects" && value == "self"),
+            "the token static's SelfRef scope must be visible in coverage details: {must_attack:?}"
+        );
+        assert!(
+            card_face_gaps(&face).is_empty(),
+            "a supported token static must not create a coverage gap"
+        );
+
+        let card = coverage_result_for_face(face);
+        assert!(card.supported);
+        assert!(card.gap_details.is_empty());
+    }
+
+    #[test]
+    fn token_static_child_does_not_mask_a_separate_silent_drop() {
+        let mut face = make_face();
+        face.abilities.push(token_ability_with_static(
+            StaticDefinition::new(StaticMode::MustAttack)
+                .affected(TargetFilter::SelfRef)
+                .description("This token attacks each combat if able.".to_string()),
+        ));
+
+        let parse_details = build_parse_details_for_face(&face);
+        assert_eq!(
+            count_effective_parsed_items(&parse_details),
+            1,
+            "a token's nested static is detail for its creation line, not a second line"
+        );
+
+        let mut missing = Vec::new();
+        check_silent_drops(
+            &Some(
+                "Create a 1/1 creature token that attacks each combat if able.\n\
+                 This line was silently dropped."
+                    .to_string(),
+            ),
+            &parse_details,
+            &mut missing,
+        );
+        assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
+    }
+
+    #[test]
+    fn serialized_sentry_coverage_keeps_the_void_must_attack_static() {
+        // The real Oracle parse and CardDatabase serialization exceed libtest's
+        // default stack in debug builds. Give this integration-shaped coverage
+        // regression a bounded explicit stack rather than relying on the test
+        // runner's process-wide RUST_MIN_STACK setting.
+        std::thread::Builder::new()
+            .name("sentry-coverage".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                const NAME: &str = "The Sentry, Golden Guardian";
+                const ORACLE: &str = "Flying, vigilance, indestructible\nWhen The Sentry enters, target opponent creates The Void, a legendary 5/5 black Horror Villain creature token with flying, indestructible, and \"The Void attacks each combat if able.\"";
+
+        // This is the current AtomicCards Oracle record, parsed and then
+        // serialized through CardDatabase just as coverage-report consumes it.
+        // Keeping the real record here guards the otherwise easy-to-miss gap
+        // between a correct token AST and an incomplete coverage projection.
+        let parsed = crate::parser::parse_oracle_text(
+            ORACLE,
+            NAME,
+            &[],
+            &["Creature".to_string()],
+            &["Angel".to_string()],
+        );
+        let mut face = make_face();
+        face.name = NAME.to_string();
+        face.oracle_text = Some(ORACLE.to_string());
+        face.keywords = parsed.extracted_keywords;
+        face.abilities = parsed.abilities;
+        face.triggers = parsed.triggers;
+        face.static_abilities = parsed.statics;
+        face.replacements = parsed.replacements;
+        face.modal = parsed.modal;
+        face.additional_cost = parsed.additional_cost;
+        face.strive_cost = parsed.strive_cost;
+        face.casting_restrictions = parsed.casting_restrictions;
+        face.casting_options = parsed.casting_options;
+        face.solve_condition = parsed.solve_condition;
+        face.parse_warnings = parsed.parse_warnings;
+
+        let card = coverage_result_for_face(face);
+        let trigger = card
+            .parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Trigger)
+            .expect("The Sentry's ETB trigger should be visible to coverage");
+        let token = trigger
+            .children
+            .iter()
+            .find(|item| item.category == ParseCategory::Ability && item.label == "Token")
+            .expect("The Void token should be nested under the ETB trigger");
+        let must_attack = token
+            .children
+            .iter()
+            .find(|item| item.category == ParseCategory::Static && item.label == "MustAttack")
+            .expect("The Void's forced-attack static must be shown in coverage data");
+        assert!(must_attack.supported);
+                assert!(must_attack
+                    .details
+                    .iter()
+                    .any(|(key, value)| key == "affects" && value == "self"));
+            })
+            .expect("Sentry coverage thread starts")
+            .join()
+            .expect("Sentry coverage thread completes");
+    }
+
+    #[test]
+    fn unsupported_token_static_is_a_nested_coverage_gap() {
+        let mut face = make_face();
+        face.name = "Unsupported Token Static".to_string();
+        face.abilities.push(token_ability_with_static(
+            StaticDefinition::new(StaticMode::Other("FutureTokenStatic".to_string()))
+                .affected(TargetFilter::SelfRef),
+        ));
+
+        let gaps = card_face_gaps(&face);
+        assert_eq!(gaps, vec!["Static:FutureTokenStatic".to_string()]);
+
+        let card = coverage_result_for_face(face);
+        assert!(!card.supported);
+        assert_eq!(card.gap_details.len(), 1);
+        assert_eq!(card.gap_details[0].handler, "Static:FutureTokenStatic");
+        let token = card
+            .parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Ability && item.label == "Token")
+            .expect("token ability should be projected");
+        assert!(
+            token.children.iter().any(|item| {
+                item.category == ParseCategory::Static
+                    && item.label == "FutureTokenStatic"
+                    && !item.supported
+            }),
+            "the unsupported token static must be visible as the parse-tree child that produces the gap: {token:?}"
+        );
+    }
+
+    #[test]
+    fn granted_static_is_recursively_projected_and_counted_as_a_gap() {
+        let nested = StaticDefinition::new(StaticMode::Other("FutureGrantedStatic".to_string()));
+        let parent = StaticDefinition::new(StaticMode::MustAttack).modifications(vec![
+            ContinuousModification::GrantStaticAbility {
+                definition: Box::new(nested),
+            },
+        ]);
+        let mut face = make_face();
+        face.static_abilities.push(parent);
+
+        assert_eq!(
+            card_face_gaps(&face),
+            vec!["Static:FutureGrantedStatic".to_string()]
+        );
+        let parent = build_parse_details_for_face(&face)
+            .into_iter()
+            .find(|item| item.category == ParseCategory::Static && item.label == "MustAttack")
+            .expect("printed parent static should be projected");
+        assert!(parent.children.iter().any(|item| {
+            item.category == ParseCategory::Static
+                && item.label == "FutureGrantedStatic"
+                && !item.supported
+        }));
+    }
+
+    #[test]
+    fn canonical_gap_merge_keeps_analysis_and_warning_findings_in_one_result() {
+        let analysis = vec!["ResolverFeature:static_condition:Future".to_string()];
+        let tree = vec![GapDetail {
+            handler: "Static:FutureStatic".to_string(),
+            source_text: Some("This token has a future static.".to_string()),
+        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "Condition_If",
+            "If a condition is met, do something.",
+        )];
+
+        let gaps = merge_coverage_gaps(&analysis, tree, &warnings);
+        let public = public_gap_details(&gaps);
+        assert_eq!(gaps.len(), 3);
+        assert_eq!(public.len(), 3);
+        assert!(public.iter().any(|gap| {
+            gap.handler == "Static:FutureStatic"
+                && gap.source_text.as_deref() == Some("This token has a future static.")
+        }));
+        assert!(public
+            .iter()
+            .any(|gap| gap.handler == "Swallow:Condition_If"));
+    }
+
+    #[test]
+    fn every_non_token_static_carrier_projects_its_static_child() {
+        let static_def = || {
+            StaticDefinition::new(StaticMode::MustAttack)
+                .affected(TargetFilter::SelfRef)
+                .description("This permanent attacks each combat if able.".to_string())
+        };
+        let definitions = [
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![static_def()],
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Counter {
+                    target: TargetFilter::Any,
+                    source_rider: Some(CounterSourceRider::LosesAbilities {
+                        static_def: Box::new(static_def()),
+                        duration: Box::new(Duration::UntilHostLeavesPlay),
+                    }),
+                    countered_spell_zone: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateEmblem {
+                    statics: vec![static_def()],
+                    triggers: vec![token_trigger_with_static(static_def())],
+                },
+            ),
+        ];
+
+        for definition in definitions {
+            let item = build_test_ability_item(&definition);
+            assert!(item.children.iter().any(|child| {
+                child.category == ParseCategory::Static
+                    && child.label == "MustAttack"
+                    && child.supported
+            }));
+            assert!(test_ability_is_supported(&definition));
+        }
+    }
+
+    #[test]
+    fn token_static_coverage_traverses_trigger_execute() {
+        let supported_static = StaticDefinition::new(StaticMode::MustAttack)
+            .affected(TargetFilter::SelfRef)
+            .description("This token attacks each combat if able.".to_string());
+        let mut supported_face = make_face();
+        supported_face.name = "Supported Trigger Token Static".to_string();
+        supported_face
+            .triggers
+            .push(token_trigger_with_static(supported_static));
+
+        let supported_card = coverage_result_for_face(supported_face);
+        assert!(supported_card.supported);
+        assert!(supported_card.gap_details.is_empty());
+        let supported_trigger = supported_card
+            .parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Trigger)
+            .expect("trigger should be projected");
+        let supported_token = supported_trigger
+            .children
+            .iter()
+            .find(|item| item.category == ParseCategory::Ability && item.label == "Token")
+            .expect("trigger execute should project its token ability");
+        let supported_must_attack = supported_token
+            .children
+            .iter()
+            .find(|item| item.category == ParseCategory::Static && item.label == "MustAttack")
+            .expect("token static should remain nested below trigger execute");
+        assert!(supported_must_attack.supported);
+        assert!(supported_must_attack
+            .details
+            .iter()
+            .any(|(key, value)| key == "affects" && value == "self"));
+
+        let mut unsupported_face = make_face();
+        unsupported_face.name = "Unsupported Trigger Token Static".to_string();
+        unsupported_face.triggers.push(token_trigger_with_static(
+            StaticDefinition::new(StaticMode::Other("FutureTokenStatic".to_string()))
+                .affected(TargetFilter::SelfRef),
+        ));
+
+        assert_eq!(
+            card_face_gaps(&unsupported_face),
+            vec!["Static:FutureTokenStatic".to_string()]
+        );
+
+        let unsupported_card = coverage_result_for_face(unsupported_face);
+        assert!(!unsupported_card.supported);
+        assert_eq!(unsupported_card.gap_details.len(), 1);
+        assert_eq!(
+            unsupported_card.gap_details[0].handler,
+            "Static:FutureTokenStatic"
+        );
+        let unsupported_trigger = unsupported_card
+            .parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Trigger)
+            .expect("trigger should be projected");
+        let unsupported_token = unsupported_trigger
+            .children
+            .iter()
+            .find(|item| item.category == ParseCategory::Ability && item.label == "Token")
+            .expect("trigger execute should project its token ability");
+        assert!(unsupported_token.children.iter().any(|item| {
+            item.category == ParseCategory::Static
+                && item.label == "FutureTokenStatic"
+                && !item.supported
+        }));
+    }
+
+    #[test]
+    fn replacement_declines_exclude_token_static_coverage() {
+        let invalid_subtype = "CoverageDeclineOnlySubtype".to_string();
+        let parser_misfire = format!("ParserMisfire:InvalidSubtype({invalid_subtype})");
+        let token_static =
+            StaticDefinition::new(StaticMode::Other("FutureTokenStatic".to_string()))
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![
+                    ContinuousModification::AddSubtype {
+                        subtype: invalid_subtype,
+                    },
+                    ContinuousModification::GrantAbility {
+                        definition: Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::unimplemented(
+                                "future_token_static_payload",
+                                "unsupported payload",
+                            ),
+                        )),
+                    },
+                ]);
+        let decline =
+            token_ability_with_static(token_static).condition(AbilityCondition::HasMaxSpeed);
+
+        let mut included_face = make_face();
+        included_face.abilities.push(decline.clone());
+        let mut included_missing = Vec::new();
+        check_subtype_lexicon(&included_face, &HashSet::new(), &mut included_missing);
+        assert_eq!(
+            included_missing,
+            vec![parser_misfire.clone()],
+            "ordinary ability traversal must still inspect token-carried modifications"
+        );
+
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+        assert!(is_ability_supported(
+            &decline,
+            &trigger_registry,
+            &static_registry,
+            TokenStaticTraversal::Exclude,
+        ));
+        assert!(!is_ability_supported(
+            &decline,
+            &trigger_registry,
+            &static_registry,
+            TokenStaticTraversal::Include,
+        ));
+        assert!(!ability_definition_has_unimplemented_parts(
+            &decline,
+            TokenStaticTraversal::Exclude,
+        ));
+        assert!(ability_definition_has_unimplemented_parts(
+            &decline,
+            TokenStaticTraversal::Include,
+        ));
+
+        for (label, mode) in [
+            (
+                "optional",
+                ReplacementMode::Optional {
+                    decline: Some(Box::new(decline.clone())),
+                },
+            ),
+            (
+                "may-cost",
+                ReplacementMode::MayCost {
+                    cost: AbilityCost::Tap,
+                    decline: Some(Box::new(decline.clone())),
+                },
+            ),
+        ] {
+            let mut face = make_face();
+            face.replacements
+                .push(ReplacementDefinition::new(ReplacementEvent::Draw).mode(mode.clone()));
+
+            let mut subtype_missing = Vec::new();
+            check_subtype_lexicon(&face, &HashSet::new(), &mut subtype_missing);
+            assert!(
+                subtype_missing.is_empty(),
+                "{label} decline token statics must not leak {parser_misfire}"
+            );
+
+            let mut effect_owned_face = make_face();
+            effect_owned_face.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(
+                        ReplacementDefinition::new(ReplacementEvent::Draw).mode(mode.clone()),
+                    ),
+                    target: TargetFilter::Any,
+                },
+            ));
+            let mut effect_owned_subtype_missing = Vec::new();
+            check_subtype_lexicon(
+                &effect_owned_face,
+                &HashSet::new(),
+                &mut effect_owned_subtype_missing,
+            );
+            assert!(
+                effect_owned_subtype_missing.is_empty(),
+                "effect-owned {label} decline token statics must not leak {parser_misfire}"
+            );
+
+            let replacement = build_parse_details_for_face(&face)
+                .into_iter()
+                .find(|item| item.category == ParseCategory::Replacement)
+                .expect("replacement should be projected");
+            let projected_decline = replacement
+                .children
+                .iter()
+                .find(|item| item.category == ParseCategory::Ability && item.label == "Token")
+                .expect("replacement decline should remain projected");
+            assert!(
+                projected_decline.children.is_empty(),
+                "{label} decline bodies must retain their pre-token-static parse projection"
+            );
+            assert!(card_face_gaps(&face).is_empty(), "{label} decline gaps");
+            assert!(
+                !card_face_has_unimplemented_parts(&face),
+                "{label} decline unimplemented-parts coverage"
+            );
+
+            let card = coverage_result_for_face(face);
+            assert!(card.supported, "{label} decline support");
+            assert!(card.gap_details.is_empty(), "{label} decline gap details");
+
+            let mut features = HashMap::new();
+            extract_card_features(
+                &CardFace {
+                    replacements: vec![
+                        ReplacementDefinition::new(ReplacementEvent::Draw).mode(mode)
+                    ],
+                    ..make_face()
+                },
+                &mut features,
+            );
+            assert_eq!(
+                features.get("condition:HasMaxSpeed"),
+                Some(&FeatureSupport::Handled),
+                "{label} decline features must be traversed"
+            );
+        }
+    }
+
+    #[test]
+    fn add_target_replacement_payloads_reach_every_coverage_consumer() {
+        let execute = token_ability_with_static(
+            StaticDefinition::new(StaticMode::MustAttack)
+                .affected(TargetFilter::SelfRef)
+                .description("This token attacks each combat if able.".to_string()),
+        );
+        let decline = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(
+                "add_target_replacement_decline",
+                "unsupported replacement decline",
+            ),
+        )
+        .condition(AbilityCondition::HasMaxSpeed);
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddTargetReplacement {
+                replacement: Box::new(
+                    ReplacementDefinition::new(ReplacementEvent::Draw)
+                        .execute(execute)
+                        .mode(ReplacementMode::MayCost {
+                            cost: AbilityCost::Tap,
+                            decline: Some(Box::new(decline)),
+                        }),
+                ),
+                target: TargetFilter::Any,
+            },
+        );
+
+        let projected = build_test_ability_item(&definition);
+        let token = projected
+            .children
+            .iter()
+            .find(|child| child.category == ParseCategory::Ability && child.label == "Token")
+            .expect("the replacement execute payload should be projected");
+        assert!(token.children.iter().any(|child| {
+            child.category == ParseCategory::Static
+                && child.label == "MustAttack"
+                && child.supported
+                && child
+                    .details
+                    .iter()
+                    .any(|(key, value)| key == "affects" && value == "self")
+        }));
+        assert!(projected.children.iter().any(|child| {
+            child.category == ParseCategory::Ability
+                && child.label == "add_target_replacement_decline"
+                && !child.supported
+        }));
+
+        let expected_gap = "Effect:add_target_replacement_decline".to_string();
+        let mut missing = Vec::new();
+        collect_test_ability_missing_parts(&definition, &mut missing);
+        assert_eq!(missing, vec![expected_gap.clone()]);
+        assert!(ability_definition_has_unimplemented_parts(
+            &definition,
+            TokenStaticTraversal::Include,
+        ));
+        assert!(!test_ability_is_supported(&definition));
+
+        let mut face = make_face();
+        face.abilities.push(definition.clone());
+        assert_eq!(card_face_gaps(&face), vec![expected_gap.clone()]);
+        assert!(card_face_has_unimplemented_parts(&face));
+
+        let card = coverage_result_for_face(face);
+        assert!(!card.supported);
+        assert_eq!(card.gap_details.len(), 1);
+        assert_eq!(card.gap_details[0].handler, expected_gap);
+
+        let mut features = HashMap::new();
+        extract_ability_features(&definition, &mut features);
+        assert_eq!(
+            features.get("condition:HasMaxSpeed"),
+            Some(&FeatureSupport::Handled),
+            "the effect-owned replacement decline must reach feature extraction"
+        );
     }
 
     fn delayed_trigger_payload(effect: Effect) -> AbilityDefinition {
@@ -13659,7 +15254,7 @@ mod tests {
                 visited.push((actual_edge, name.clone()));
             });
             let expected_names: Vec<_> = visited.iter().map(|(_, name)| name.clone()).collect();
-            let projected = build_ability_item(&definition);
+            let projected = build_test_ability_item(&definition);
             assert_eq!(
                 projected
                     .children
@@ -13669,8 +15264,11 @@ mod tests {
                 expected_names,
                 "the parse-details report must project every direct payload"
             );
-            assert!(ability_definition_has_unimplemented_parts(&definition));
-            assert!(!is_ability_supported(&definition));
+            assert!(ability_definition_has_unimplemented_parts(
+                &definition,
+                TokenStaticTraversal::Include,
+            ));
+            assert!(!test_ability_is_supported(&definition));
             for (_, name) in &visited {
                 assert!(ability_tree_any(&definition, &|payload| {
                     matches!(payload.effect.as_ref(), Effect::Unimplemented { name: payload_name, .. } if payload_name == name)
@@ -13678,7 +15276,7 @@ mod tests {
             }
 
             let mut missing = Vec::new();
-            collect_ability_missing_parts(&definition, &mut missing);
+            collect_test_ability_missing_parts(&definition, &mut missing);
             let expected_gaps: Vec<_> = visited
                 .iter()
                 .map(|(_, name)| format!("Effect:{name}"))
@@ -13735,9 +15333,12 @@ mod tests {
         let mut visited = Vec::new();
         visit_direct_effect_ability_payloads(&empty.effect, |edge, _| visited.push(edge));
         assert!(visited.is_empty());
-        assert!(build_ability_item(&empty).children.is_empty());
-        assert!(!ability_definition_has_unimplemented_parts(&empty));
-        assert!(is_ability_supported(&empty));
+        assert!(build_test_ability_item(&empty).children.is_empty());
+        assert!(!ability_definition_has_unimplemented_parts(
+            &empty,
+            TokenStaticTraversal::Include,
+        ));
+        assert!(test_ability_is_supported(&empty));
 
         let supported = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -13752,10 +15353,13 @@ mod tests {
                 )],
             },
         );
-        assert!(is_ability_supported(&supported));
-        assert!(!ability_definition_has_unimplemented_parts(&supported));
+        assert!(test_ability_is_supported(&supported));
+        assert!(!ability_definition_has_unimplemented_parts(
+            &supported,
+            TokenStaticTraversal::Include,
+        ));
         let mut missing = Vec::new();
-        collect_ability_missing_parts(&supported, &mut missing);
+        collect_test_ability_missing_parts(&supported, &mut missing);
         assert!(missing.is_empty());
     }
 
@@ -13781,12 +15385,61 @@ mod tests {
             },
         );
         let mut subtypes = Vec::new();
-        visit_ability_modifications(&definition, &mut |modification| {
-            if let ContinuousModification::AddSubtype { subtype } = modification {
-                subtypes.push(subtype.clone());
-            }
-        });
+        visit_ability_modifications(
+            &definition,
+            TokenStaticTraversal::Include,
+            &mut |modification| {
+                if let ContinuousModification::AddSubtype { subtype } = modification {
+                    subtypes.push(subtype.clone());
+                }
+            },
+        );
         assert_eq!(subtypes, vec!["Wizard"]);
+    }
+
+    #[test]
+    fn return_as_aura_grants_reach_every_coverage_consumer() {
+        let decline = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("aura_decline", "unsupported optional replacement decline"),
+        )
+        .condition(AbilityCondition::HasMaxSpeed);
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ReturnAsAura {
+                enchant_filter: TargetFilter::Any,
+                grants: vec![ContinuousModification::GrantReplacement {
+                    replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Draw).mode(
+                        ReplacementMode::Optional {
+                            decline: Some(Box::new(decline)),
+                        },
+                    )),
+                }],
+            },
+        );
+
+        let projected = build_test_ability_item(&definition);
+        assert_eq!(projected.children.len(), 1);
+        assert_eq!(projected.children[0].label, "aura_decline");
+
+        let mut missing = Vec::new();
+        collect_test_ability_missing_parts(&definition, &mut missing);
+        assert_eq!(missing, vec!["Effect:aura_decline"]);
+        assert!(!test_ability_is_supported(&definition));
+
+        let mut face = make_face();
+        face.abilities.push(definition.clone());
+        assert_eq!(card_face_gaps(&face), vec!["Effect:aura_decline"]);
+        assert!(card_face_has_unimplemented_parts(&face));
+
+        let mut features = HashMap::new();
+        extract_ability_features(&definition, &mut features);
+        assert_eq!(
+            features.get("condition:HasMaxSpeed"),
+            Some(&FeatureSupport::Handled),
+            "the optional decline must use its own excluded-token traversal without \
+             skipping its ordinary structural features"
+        );
     }
 
     #[test]
@@ -13795,7 +15448,7 @@ mod tests {
             "delayed_payload",
             "unsupported delayed effect",
         ));
-        let projected = build_ability_item(&unsupported);
+        let projected = build_test_ability_item(&unsupported);
         assert_eq!(
             projected.children.len(),
             1,
@@ -14082,15 +15735,27 @@ mod tests {
             .unwrap();
 
         assert!(!card.supported);
-        assert_eq!(card.gap_count, 1);
-        assert_eq!(card.gap_details[0].handler, "Swallow:Condition_If");
+        // The swallowed-clause diagnostic is the specific reason the parser
+        // lost semantics, while the silent-drop audit independently records
+        // that the entire Oracle line has no parse-tree representation. Keep
+        // both in the canonical gap set rather than allowing one coverage
+        // consumer to hide the other.
+        assert_eq!(card.gap_count, 2);
+        assert!(card
+            .gap_details
+            .iter()
+            .any(|gap| gap.handler == "Swallow:Condition_If"));
+        assert!(card
+            .gap_details
+            .iter()
+            .any(|gap| gap.handler == "SilentDrop:0_of_1"));
         let top_gap = summary
             .top_gaps
             .iter()
             .find(|gap| gap.handler == "Swallow:Condition_If")
             .unwrap();
         assert_eq!(top_gap.total_count, 1);
-        assert_eq!(top_gap.single_gap_cards, 1);
+        assert_eq!(top_gap.single_gap_cards, 0);
         assert!(top_gap.single_gap_by_format.is_empty());
         assert_eq!(top_gap.oracle_patterns.len(), 1);
         assert_eq!(top_gap.oracle_patterns[0].count, 1);
@@ -14099,7 +15764,9 @@ mod tests {
             vec!["Alpha".to_string()]
         );
         assert!(top_gap.independence_ratio.is_none());
-        assert!(top_gap.co_occurrences.is_empty());
+        assert!(top_gap.co_occurrences.iter().any(|co_occurrence| {
+            co_occurrence.handler == "SilentDrop:0_of_1" && co_occurrence.shared_cards == 1
+        }));
     }
 
     #[test]
@@ -14413,7 +16080,7 @@ mod tests {
             },
         );
 
-        let item = build_ability_item(&def);
+        let item = build_test_ability_item(&def);
         assert_eq!(item.label, "MustBeBlocked");
         assert!(item
             .details
@@ -14463,7 +16130,7 @@ mod tests {
             },
         );
 
-        let item = build_ability_item(&def);
+        let item = build_test_ability_item(&def);
         assert_eq!(item.label, "grant Flying, grant Haste");
     }
 
@@ -16654,7 +18321,12 @@ mod tests {
             .description("must be blocked by a Dalek if able".to_string());
 
         assert!(
-            !is_static_supported(&residual, &trigger_registry, &static_registry),
+            !is_static_supported(
+                &residual,
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
             "an Unimplemented-carrying GrantAbility residual must be unsupported"
         );
 
@@ -16670,7 +18342,12 @@ mod tests {
             }])
             .description("first strike".to_string());
         assert!(
-            is_static_supported(&supported, &trigger_registry, &static_registry),
+            is_static_supported(
+                &supported,
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
             "a plain keyword-grant continuous static must be supported"
         );
     }
@@ -16696,7 +18373,12 @@ mod tests {
         });
 
         assert!(
-            !is_static_supported(&def, &trigger_registry, &static_registry),
+            !is_static_supported(
+                &def,
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
             "a CantUntap static gated on Not(Unrecognized) must be reported \
              unsupported, not silently accepted as fully parsed"
         );
@@ -16710,7 +18392,12 @@ mod tests {
                 condition: Box::new(StaticCondition::HasEnduringStory),
             });
         assert!(
-            is_static_supported(&supported, &trigger_registry, &static_registry),
+            is_static_supported(
+                &supported,
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
             "Not(HasEnduringStory) must remain supported"
         );
     }

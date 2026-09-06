@@ -16,8 +16,9 @@ use engine::ai_support::{
     PaymentContinuationBatchStatus, PaymentContinuationState,
 };
 use engine::game::combat::AttackTarget;
-use engine::game::engine::{apply_for_simulation, EngineError};
+use engine::game::engine::{apply_interaction_for_simulation, EngineError};
 use engine::game::priority;
+use engine::game::turn_control;
 use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
 use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
@@ -205,7 +206,7 @@ pub fn project_to(
             });
         }
 
-        let (actor, action, is_policy_choice, witnessed_successor) =
+        let (seat, action, is_policy_choice, witnessed_successor) =
             resolve_choice(&state, ai_player, target_opponent)?;
         if is_policy_choice {
             choice_count += 1;
@@ -214,7 +215,16 @@ pub fn project_to(
         if let Some(successor) = witnessed_successor {
             state = successor;
         } else {
-            apply_for_simulation(&mut state, actor, action).map_err(BailReason::EngineRejected)?;
+            // CR 723.5: while controlling another player, the controller makes
+            // that player's choices, so the seat holding the decision and the
+            // player authorized to submit it are different players. Dispatch as
+            // the submitter, but keep the seat as the decision owner: CR 723.3
+            // leaves the seat's objects its own, and `semantic_owner` is what
+            // the reducer keys them to. Same split
+            // `auto_play::run_ai_actions_with_limit` applies to live play.
+            let submitter = turn_control::authorized_submitter_for_player(&state, seat);
+            apply_interaction_for_simulation(&mut state, submitter, seat, action)
+                .map_err(BailReason::EngineRejected)?;
         }
 
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -330,8 +340,13 @@ fn capture_snapshots(
 }
 
 /// Pick a legal action for the currently-waiting player based on projection
-/// policy. Returns `(actor, action, is_policy_choice)` where `is_policy_choice`
-/// flags non-trivial policy decisions that increment `choice_count`.
+/// policy. Returns `(seat, action, is_policy_choice, witnessed_successor)`.
+/// `seat` is the semantic decision owner and NOT the authorized submitter —
+/// under CR 723.5 turn control they differ, and this function's attacker-policy
+/// branch compares it against `target_opponent` in its seat role. The caller
+/// derives the submitter at its dispatch. `is_policy_choice` flags non-trivial
+/// policy decisions that increment `choice_count`; `witnessed_successor` is a
+/// pre-applied payment-continuation state that bypasses that dispatch.
 fn resolve_choice(
     state: &GameState,
     ai_player: PlayerId,
@@ -735,7 +750,7 @@ pub fn threat_velocity(
 /// horizon*, so `project_to` short-circuits at the `Confidence::Exact` branch
 /// above and never enters its loop. The states built here are deliberately the
 /// opposite class: they are NOT at a horizon on entry, so the loop runs real
-/// `apply_for_simulation` dispatches and returns
+/// `apply_interaction_for_simulation` dispatches and returns
 /// `Confidence::Approximated { choice_count >= 1 }` — the witness that the loop
 /// ran rather than the short-circuit.
 ///

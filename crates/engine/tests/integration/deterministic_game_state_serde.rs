@@ -393,13 +393,12 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "remote_type_layer_recipients",
         "card_face_registry",
         "meld_pair_registry",
-        "momir_pool_faces",
         "pending_taps_for_mana_overrides",
         "combat_prevention_tally",
     ] {
         let shape = match field {
             "remote_type_layer_recipients" => "im::HashSet",
-            "card_face_registry" | "meld_pair_registry" | "momir_pool_faces" => "Arc<HashMap>",
+            "card_face_registry" | "meld_pair_registry" => "Arc<HashMap>",
             "combat_prevention_tally" => "Option<HashMap>",
             "static_gate_truth" => "im::HashMap",
             _ => "HashMap",

@@ -1,9 +1,9 @@
 //! Issue #7923 — a leading duration must govern EVERY conjunct it prefixes.
 //!
-//! CR 611.2a read with CR 608.2c: a
-//! stated duration "lasts as long as stated by the spell or ability creating it",
-//! and its scope is settled by reading the WHOLE printed text and applying the
-//! rules of English. Two structurally distinct seams:
+//! CR 611.2a read with CR 608.2c: a stated duration "lasts as long as stated by
+//! the spell or ability creating it", and its scope is settled by reading the
+//! WHOLE printed text and applying the rules of English. Two structurally
+//! distinct seams:
 //!
 //! * **U1** — a stated duration must reach every GOVERNED link of the
 //!   `sub_ability` chain a clause's own recognizer built

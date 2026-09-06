@@ -229,8 +229,75 @@ pub fn resolve(
         return Ok(completed_result(0));
     }
 
+    // CR 608.2k: `CostPaidObject` ("the sacrificed/exiled creature") is an
+    // untargeted back-reference naming ONE specific object -- the one this
+    // ability's own cost or an earlier instruction in this same resolution
+    // referred to. It is NOT a chosen target, so it must not be resolved by
+    // the generic inheritance path below: `effect_object_targets`' catch-all
+    // `_ =>` arm returns EVERY object in the inherited target list for any
+    // filter other than `SpecificObject` / `ParentTargetSlot`, and
+    // `can_inherit_parent_targets` (effects/mod.rs) does not exclude this
+    // filter. A stack-timed `Sacrifice { target: CostPaidObject }`
+    // sub-ability therefore inherited the parent's live object targets and
+    // sacrificed an unrelated permanent.
+    //
+    // Resolve through `crate::game::targeting::resolved_targets`, the single
+    // documented authority for this filter (the `cost_paid_object` ->
+    // `effect_context_object` ladder), shared with the identity arm in
+    // `game/filter.rs` and the `ObjectScope::CostPaidObject` arm in
+    // `game/quantity.rs`. Calling that chokepoint instead of re-reading the
+    // two fields keeps a single authority for the binding.
+    //
+    // CR 400.7: the incarnation check lives in that chokepoint, not here.
+    // `resolved_targets` resolves each ladder rung through
+    // `CostPaidObjectSnapshot::live_object_id`, which compares the epoch
+    // captured at binding time against the live object, so a referent that
+    // left and returned under the same storage id yields nothing. Do NOT add
+    // a local staleness guard here: `ResolvedAbility::target_pin_is_current`
+    // in particular fails OPEN when no ordinary target pin was recorded, and
+    // a `CostPaidObject` referent never has one, so it passed for free and
+    // validated nothing (#8265 review; fixed upstream by #8277/#8278).
+    //
+    // CR 701.21a: "A player can't sacrifice something that isn't a permanent."
+    // If the referent is absent (never bound) or has departed the battlefield
+    // (including a same-id return, which CR 400.7 makes a new object), this
+    // effect is a HARD no-op. It must NOT fall through to the untargeted
+    // battlefield pool below, which resolves a player scope and would make the
+    // controller sacrifice a DIFFERENT permanent they control. Mirrors the
+    // `stale_parent_target_slot` early return further down, including its
+    // `EffectResolved` emission.
+    let cost_paid_referent = if matches!(filter, TargetFilter::CostPaidObject) {
+        let referent = crate::game::targeting::resolved_targets(ability, filter, state)
+            .into_iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            });
+        let Some(referent) = referent else {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        };
+        Some(referent)
+    } else {
+        None
+    };
+
     let live_targets = ability.live_object_targets(state);
-    let mut targeted_objects = if matches!(
+    let mut targeted_objects = if let Some(referent) = cost_paid_referent {
+        // CR 608.2k: the resolved back-reference IS the whole subject set;
+        // never widen it with inherited targets.
+        vec![referent]
+    } else if matches!(
         sacrifice_controller_scope(filter),
         Some(ControllerRef::ParentTargetController)
     ) {
@@ -263,6 +330,62 @@ pub fn resolve(
             subject: None,
         });
         return Ok(completed_result(0));
+    }
+
+    // CR 701.21a: "To sacrifice a permanent, its controller moves it from the
+    // battlefield directly to its owner's graveyard." Sacrifice is
+    // unconditionally battlefield-only — this module never inspects `InZone`,
+    // because no zone other than the battlefield can host a sacrifice.
+    //
+    // CR 115.1: an effect's targets are only those its own filter declares.
+    // A non-anaphoric sacrifice filter (Victimize's `Sacrifice a creature`,
+    // whose filter carries no controller clause) inherits the PARENT
+    // instruction's object targets — for Victimize, two creature cards in a
+    // GRAVEYARD. Those cards are not targets of the sacrifice and are not on
+    // the battlefield, yet their presence makes `targeted_objects` non-empty,
+    // which suppresses the untargeted-pool branch below while the targeted
+    // loop then skips every one of them on its `zone != Battlefield` guard.
+    // The result is a silently vacuous sacrifice (#7898).
+    //
+    // Safety: because sacrifice is battlefield-only, this retain can only drop
+    // objects the targeted loop below would have skipped anyway. Its sole
+    // behavioral effect is letting a fully-emptied set fall through to the
+    // untargeted pool, which is exactly what the `triggers.rs` Sacrifice
+    // carve-out intends.
+    //
+    // Anaphoric shapes are excluded deliberately: `ParentTarget` /
+    // `ParentTargetSlot` are explicit back-references (Animate Dead's "that
+    // creature's controller sacrifices it") carrying bespoke downstream
+    // handling — the stale-slot no-op directly above, and the controller
+    // exemption further below that lets the OBJECT'S OWN controller do the
+    // sacrificing. Routing an emptied anaphoric set into the untargeted pool
+    // would instead make the ABILITY'S controller sacrifice an arbitrary
+    // creature of their own, which CR 701.21a does not sanction.
+    //
+    // `CostPaidObject` is excluded for the same reason, and its exclusion is
+    // structural rather than incidental. It is the CR 608.2k back-reference to
+    // the one object this ability's cost or an earlier instruction named, and
+    // it is now bound ABOVE by the `resolved_targets` chokepoint, which already
+    // proved the referent is on the battlefield or took the hard-no-op early
+    // return. Letting it reach this retain could therefore only ever empty a
+    // set that the guard above guarantees is non-empty; if that invariant were
+    // ever broken, the emptied set would fall into the untargeted pool below
+    // and make the controller sacrifice an arbitrary permanent of their own,
+    // which CR 701.21a does not sanction for a named referent. Excluding it
+    // makes that fallthrough unreachable by construction instead of by
+    // argument.
+    if !matches!(
+        filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::CostPaidObject
+    ) {
+        targeted_objects.retain(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone == Zone::Battlefield)
+        });
     }
 
     if targeted_objects.is_empty() {
@@ -516,8 +639,8 @@ mod tests {
     use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, AggregateFunction, Comparator, ControllerRef, Effect, FilterProp,
-        ObjectProperty, PtStat, PtValueScope, QuantityRef, TargetFilter, TypedFilter,
+        AbilityKind, AggregateFunction, Comparator, ControllerRef, CostPaidObjectSnapshot, Effect,
+        FilterProp, ObjectProperty, PtStat, PtValueScope, QuantityRef, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -1928,6 +2051,464 @@ mod tests {
             "the mandatory-sacrifice IfYouDo rider must create the token \
              (battlefield went from {tokens_before} to {})",
             state.battlefield.len()
+        );
+    }
+
+    /// Build the LKI carcass a `CostPaidObjectSnapshot` carries. The fields are
+    /// irrelevant to these tests (the binding is by `object_id`), but the
+    /// snapshot type requires them.
+    fn cost_paid_lki(name: &str, controller: PlayerId) -> crate::types::game_state::LKISnapshot {
+        crate::types::game_state::LKISnapshot {
+            name: name.to_string(),
+            token_image_ref: None,
+            power: Some(2),
+            toughness: Some(2),
+            base_power: Some(2),
+            base_toughness: Some(2),
+            mana_value: 2,
+            controller,
+            owner: controller,
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            chosen_attributes: Vec::new(),
+            counters: std::collections::HashMap::new(),
+            tapped: false,
+            is_suspected: false,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn make_battlefield_creature(
+        state: &mut GameState,
+        card: u64,
+        name: &str,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        id
+    }
+
+    /// A `Sacrifice { target: CostPaidObject }` whose referent is bound through
+    /// the canonical ladder, carrying an *inherited live parent target*
+    /// alongside it. This is the shape that distinguishes the two bindings:
+    /// `ability.targets` holds a live, unrelated permanent that the generic
+    /// `effect_object_targets` catch-all arm would return verbatim.
+    fn make_cost_paid_sacrifice(
+        source: ObjectId,
+        controller: PlayerId,
+        inherited_parent_target: ObjectId,
+        cost_paid: Option<(ObjectId, u64)>,
+        effect_context: Option<(ObjectId, u64)>,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::CostPaidObject,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            // CR 115.1: an inherited parent target, propagated onto this
+            // sub-ability by `should_propagate_parent_targets` because
+            // `can_inherit_parent_targets` does not exclude `CostPaidObject`.
+            vec![TargetRef::Object(inherited_parent_target)],
+            source,
+            controller,
+        );
+        ability.cost_paid_object = cost_paid.map(|(id, incarnation)| CostPaidObjectSnapshot {
+            object_id: id,
+            lki: cost_paid_lki("Cost Paid Creature", controller),
+            incarnation,
+        });
+        ability.effect_context_object =
+            effect_context.map(|(id, incarnation)| CostPaidObjectSnapshot {
+                object_id: id,
+                lki: cost_paid_lki("Context Creature", controller),
+                incarnation,
+            });
+        ability
+    }
+
+    /// CR 400.7: bind a referent at the incarnation it currently has, the way a
+    /// production cost-payment seam does via `CostPaidObjectSnapshot::capture`.
+    /// Callers that need a PRE-departure binding must call this BEFORE moving
+    /// the object, otherwise they record the post-move epoch and any staleness
+    /// assertion built on it passes vacuously.
+    fn bind_at_current_incarnation(state: &GameState, id: ObjectId) -> (ObjectId, u64) {
+        (
+            id,
+            state
+                .objects
+                .get(&id)
+                .expect("referent must exist when it is bound")
+                .incarnation,
+        )
+    }
+
+    /// CR 608.2k + CR 701.21a: a stack-timed `Sacrifice { target:
+    /// CostPaidObject }` whose referent has DEPARTED the battlefield must be a
+    /// HARD no-op. It must not sacrifice the live parent target it inherited,
+    /// and it must not fall through to the untargeted battlefield pool and make
+    /// the controller sacrifice one of their own permanents.
+    ///
+    /// Before the fix, `CostPaidObject` reached the catch-all `_ =>` arm of
+    /// `effect_object_targets` (effects/mod.rs), which returns EVERY object in
+    /// the inherited target list for any filter but `SpecificObject` /
+    /// `ParentTargetSlot` — so `bystander` was sacrificed.
+    #[test]
+    fn cost_paid_object_sacrifice_ignores_inherited_parent_target_when_referent_departed() {
+        let mut state = GameState::new_two_player(42);
+
+        // The cost-paid referent: created on the battlefield, then moved to the
+        // graveyard so it has DEPARTED before this effect resolves.
+        let departed = make_battlefield_creature(&mut state, 1, "Departed Referent", PlayerId(0));
+        // The inherited live parent target — an UNRELATED permanent that must
+        // survive. Controlled by the ability controller so the wrong outcome is
+        // fully legal for the resolver and only the binding distinguishes right
+        // from wrong.
+        let bystander = make_battlefield_creature(&mut state, 2, "Innocent Bystander", PlayerId(0));
+        // A third permanent so an untargeted-pool fallthrough would have a
+        // non-degenerate pool to choose from.
+        let spare = make_battlefield_creature(&mut state, 3, "Spare Permanent", PlayerId(0));
+
+        // Depart the referent through the real engine zone move (CR 400.7),
+        // not a hand-poked field, so the departure is exactly what production
+        // produces.
+        let mut setup_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, departed, Zone::Graveyard, &mut setup_events);
+
+        let source = make_battlefield_creature(&mut state, 4, "Sacrifice Source", PlayerId(0));
+        let ability = make_cost_paid_sacrifice(
+            source,
+            PlayerId(0),
+            bystander,
+            Some(bind_at_current_incarnation(&state, departed)),
+            None,
+        );
+
+        let before: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Reach guard (no vacuous negative): the effect really ran this
+        // resolver and reported a completed zero-sacrifice result, rather than
+        // short-circuiting somewhere upstream.
+        assert!(
+            result.is_some(),
+            "the departed-referent path must complete synchronously, not park on a choice"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Sacrifice,
+                    ..
+                }
+            )),
+            "the hard no-op must still emit EffectResolved, mirroring the \
+             stale-parent-slot early return; events = {events:?}"
+        );
+
+        // THE DEFECT: the inherited live parent target must NOT be sacrificed.
+        assert!(
+            state.battlefield.contains(&bystander),
+            "a departed CostPaidObject referent must never sacrifice the \
+             inherited live parent target (CR 608.2k names one specific object)"
+        );
+        assert!(
+            state.battlefield.contains(&spare),
+            "a departed CostPaidObject referent must not fall through to the \
+             untargeted battlefield pool (CR 701.21a)"
+        );
+        assert_eq!(
+            state.battlefield.iter().copied().collect::<Vec<_>>(),
+            before,
+            "a departed CostPaidObject referent is a hard no-op: the \
+             battlefield must be unchanged"
+        );
+    }
+
+    /// The positive twin: when the `cost_paid_object` referent is still a
+    /// battlefield permanent, THAT object is sacrificed — and only it, even
+    /// though a live inherited parent target is present and would be returned
+    /// by the generic inheritance arm.
+    #[test]
+    fn cost_paid_object_sacrifice_sacrifices_referent_not_inherited_parent_target() {
+        let mut state = GameState::new_two_player(42);
+
+        let referent = make_battlefield_creature(&mut state, 1, "Cost Paid Referent", PlayerId(0));
+        let bystander = make_battlefield_creature(&mut state, 2, "Innocent Bystander", PlayerId(0));
+        let spare = make_battlefield_creature(&mut state, 3, "Spare Permanent", PlayerId(0));
+        let source = make_battlefield_creature(&mut state, 4, "Sacrifice Source", PlayerId(0));
+
+        let ability = make_cost_paid_sacrifice(
+            source,
+            PlayerId(0),
+            bystander,
+            Some(bind_at_current_incarnation(&state, referent)),
+            None,
+        );
+
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            result.is_some(),
+            "a present referent resolves synchronously"
+        );
+        assert!(
+            !state.battlefield.contains(&referent),
+            "the cost-paid referent must be the sacrificed object (CR 608.2k)"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&referent),
+            "CR 701.21a: sacrifice moves the permanent to its owner graveyard"
+        );
+        // Discrimination: the inherited parent target and the spare survive, so
+        // this is not a test that merely counts one sacrifice.
+        assert!(
+            state.battlefield.contains(&bystander),
+            "the inherited live parent target must not be sacrificed"
+        );
+        assert!(
+            state.battlefield.contains(&spare),
+            "no other permanent may be sacrificed"
+        );
+    }
+
+    /// The `effect_context_object` rung of the same canonical ladder
+    /// (`cost_paid_object` then `effect_context_object`, targeting.rs). A
+    /// departed slot-2 referent is equally a hard no-op, proving the fix binds
+    /// through the full documented ladder rather than only the first slot.
+    #[test]
+    fn cost_paid_object_sacrifice_effect_context_rung_departed_is_a_no_op() {
+        let mut state = GameState::new_two_player(42);
+
+        let departed = make_battlefield_creature(&mut state, 1, "Departed Context", PlayerId(0));
+        let bystander = make_battlefield_creature(&mut state, 2, "Innocent Bystander", PlayerId(0));
+        let source = make_battlefield_creature(&mut state, 3, "Sacrifice Source", PlayerId(0));
+
+        let mut setup_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, departed, Zone::Graveyard, &mut setup_events);
+
+        // No `cost_paid_object` — slot 2 only, exercising the `.or(...)` rung.
+        let ability = make_cost_paid_sacrifice(
+            source,
+            PlayerId(0),
+            bystander,
+            None,
+            Some(bind_at_current_incarnation(&state, departed)),
+        );
+
+        let before: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.battlefield.iter().copied().collect::<Vec<_>>(),
+            before,
+            "a departed effect-context referent is a hard no-op too"
+        );
+        assert!(
+            state.battlefield.contains(&bystander),
+            "the inherited live parent target must survive the slot-2 path"
+        );
+    }
+
+    /// The present-referent twin of the slot-2 rung: proves the
+    /// `effect_context_object` fallback is genuinely load-bearing and that the
+    /// no-op above is not simply "slot 2 is never read".
+    #[test]
+    fn cost_paid_object_sacrifice_effect_context_rung_present_is_sacrificed() {
+        let mut state = GameState::new_two_player(42);
+
+        let referent = make_battlefield_creature(&mut state, 1, "Context Referent", PlayerId(0));
+        let bystander = make_battlefield_creature(&mut state, 2, "Innocent Bystander", PlayerId(0));
+        let source = make_battlefield_creature(&mut state, 3, "Sacrifice Source", PlayerId(0));
+
+        let ability = make_cost_paid_sacrifice(
+            source,
+            PlayerId(0),
+            bystander,
+            None,
+            Some(bind_at_current_incarnation(&state, referent)),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&referent),
+            "the effect-context referent must be sacrificed when still present"
+        );
+        assert!(
+            state.battlefield.contains(&bystander),
+            "the inherited live parent target must not be sacrificed"
+        );
+    }
+
+    /// Absence, as distinct from departure: neither ladder slot is bound at
+    /// all. The effect must still be a hard no-op rather than inheriting the
+    /// live parent target or scanning the battlefield pool.
+    #[test]
+    fn cost_paid_object_sacrifice_unbound_referent_is_a_no_op() {
+        let mut state = GameState::new_two_player(42);
+
+        let bystander = make_battlefield_creature(&mut state, 1, "Innocent Bystander", PlayerId(0));
+        let spare = make_battlefield_creature(&mut state, 2, "Spare Permanent", PlayerId(0));
+        let source = make_battlefield_creature(&mut state, 3, "Sacrifice Source", PlayerId(0));
+
+        let ability = make_cost_paid_sacrifice(source, PlayerId(0), bystander, None, None);
+
+        let before: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.battlefield.iter().copied().collect::<Vec<_>>(),
+            before,
+            "an unbound CostPaidObject referent sacrifices nothing"
+        );
+        assert!(
+            state.battlefield.contains(&bystander) && state.battlefield.contains(&spare),
+            "neither the inherited parent target nor the untargeted pool may be used"
+        );
+    }
+
+    /// CR 400.7 LEAVE-AND-RETURN, SAME STORAGE ID. The referent departs the
+    /// battlefield and comes BACK before this sub-ability resolves, so the
+    /// engine reuses its `ObjectId` while `incarnation` advances. The returned
+    /// permanent is a NEW object that the cost-paid reference no longer names,
+    /// so the sacrifice must be a hard no-op -- it must sacrifice neither the
+    /// new incarnation nor the inherited live parent target, and must not fall
+    /// through to the untargeted battlefield pool.
+    ///
+    /// This is the case the departed-only tests above cannot reach: they leave
+    /// the referent in the graveyard, where a bare `ObjectId` comparison
+    /// already fails for the unrelated reason that it is not on the
+    /// battlefield. Only a return under the same id distinguishes an identity
+    /// check from a zone check.
+    ///
+    /// NON-VACUITY: the binding is taken BEFORE the round trip, and the test
+    /// asserts the incarnation actually advanced. Binding after the return
+    /// would record the new epoch and the assertion would hold no matter what
+    /// the resolver did.
+    #[test]
+    fn cost_paid_object_sacrifice_ignores_same_id_return_of_departed_referent() {
+        let mut state = GameState::new_two_player(42);
+
+        let referent = make_battlefield_creature(&mut state, 1, "Round Tripper", PlayerId(0));
+        let bystander = make_battlefield_creature(&mut state, 2, "Innocent Bystander", PlayerId(0));
+        let spare = make_battlefield_creature(&mut state, 3, "Spare Permanent", PlayerId(0));
+
+        // Bind while the referent is still the object the cost paid for.
+        let bound = bind_at_current_incarnation(&state, referent);
+        let incarnation_at_binding = bound.1;
+
+        // Round trip through the real engine zone mover (CR 400.7), so the
+        // returned permanent is a genuinely new object rather than a poked
+        // field. Two moves, so the epoch advances twice.
+        let mut setup_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, referent, Zone::Graveyard, &mut setup_events);
+        crate::game::zones::move_to_zone(
+            &mut state,
+            referent,
+            Zone::Battlefield,
+            &mut setup_events,
+        );
+
+        // REACH-GUARDS: the round trip really happened, the storage id really
+        // was reused, and the epoch really moved. Without these the test could
+        // pass on a fixture that never departed at all.
+        assert!(
+            state.battlefield.contains(&referent),
+            "fixture intent: the referent must be back on the battlefield"
+        );
+        let incarnation_after_return = state
+            .objects
+            .get(&referent)
+            .expect("the returned object keeps its storage id")
+            .incarnation;
+        assert!(
+            incarnation_after_return > incarnation_at_binding,
+            "fixture intent: the round trip must advance the incarnation              (bound at {incarnation_at_binding}, now {incarnation_after_return});              otherwise this test cannot discriminate identity from zone"
+        );
+
+        let source = make_battlefield_creature(&mut state, 4, "Sacrifice Source", PlayerId(0));
+        let ability = make_cost_paid_sacrifice(source, PlayerId(0), bystander, Some(bound), None);
+
+        let before: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Positive reach-guard: the resolver ran to completion rather than
+        // bailing out somewhere upstream of the branch under test.
+        assert!(
+            result.is_some(),
+            "reach-guard: the sacrifice effect must have resolved"
+        );
+
+        // CR 400.7: the returned permanent is a new object, so it is NOT the
+        // cost-paid referent and must survive.
+        assert!(
+            state.battlefield.contains(&referent),
+            "the returned same-id object is a NEW object (CR 400.7) and must not be sacrificed"
+        );
+        // CR 608.2k: the inherited parent target is not this effect's subject.
+        assert!(
+            state.battlefield.contains(&bystander),
+            "the inherited live parent target must not be sacrificed"
+        );
+        // CR 701.21a: no fallthrough to the untargeted battlefield pool.
+        assert!(
+            state.battlefield.contains(&spare),
+            "a stale referent must not fall through to the untargeted pool"
+        );
+        let after: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        assert_eq!(before, after, "the whole effect must be a hard no-op");
+    }
+
+    /// POSITIVE TWIN of the leave-and-return case. Identical fixture and
+    /// identical binding, except the referent never moves -- so the epoch it
+    /// was bound at is still current and it IS sacrificed. Without this pair
+    /// the negative above would also pass if the branch simply never
+    /// sacrificed anything.
+    #[test]
+    fn cost_paid_object_sacrifice_sacrifices_referent_that_never_left() {
+        let mut state = GameState::new_two_player(42);
+
+        let referent = make_battlefield_creature(&mut state, 1, "Round Tripper", PlayerId(0));
+        let bystander = make_battlefield_creature(&mut state, 2, "Innocent Bystander", PlayerId(0));
+        let spare = make_battlefield_creature(&mut state, 3, "Spare Permanent", PlayerId(0));
+
+        let bound = bind_at_current_incarnation(&state, referent);
+
+        let source = make_battlefield_creature(&mut state, 4, "Sacrifice Source", PlayerId(0));
+        let ability = make_cost_paid_sacrifice(source, PlayerId(0), bystander, Some(bound), None);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&referent),
+            "a referent still at its bound incarnation must be sacrificed"
+        );
+        assert!(
+            state.battlefield.contains(&bystander) && state.battlefield.contains(&spare),
+            "only the referent may be sacrificed"
         );
     }
 }

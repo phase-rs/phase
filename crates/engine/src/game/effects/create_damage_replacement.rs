@@ -309,8 +309,13 @@ pub fn resolve(
         if shield.valid_card.is_none() {
             shield.valid_card = Some(TargetFilter::SelfRef);
         }
+        // CR 611.2c + CR 613.1: the recipient-hosted shield is stored on its host so
+        // the pipeline can find it, but it is not one of that host's
+        // characteristics, so the CR 613.1 reseed must carry it. CR 702.26b: the
+        // per-arm phasing decision is "keep the gate, vacuous" here — the host IS
+        // the damage recipient, and a phased-out permanent cannot be dealt damage.
         if let Some(obj) = state.objects.get_mut(&host_id) {
-            obj.replacement_definitions.push(shield);
+            obj.install_resolution_replacement(shield);
         }
     } else {
         let is_permanent_on_battlefield = state
@@ -318,17 +323,55 @@ pub fn resolve(
             .get(&ability.source_id)
             .is_some_and(|obj| obj.zone == Zone::Battlefield);
         if is_permanent_on_battlefield {
+            // CR 611.2c + CR 613.1: this arm stays OBJECT-hosted deliberately (see
+            // the registry note in the `else` below), but it is still routed through
+            // the resolution-install authority so a Beacon-of-Destiny-class redirect
+            // shield survives a layer pass. It still dies with its host's zone
+            // change, and CR 702.26b still gates it off while the host is phased
+            // out: for a `SourceObject` recipient that is vacuous
+            // (`redirect_recipient_is_legal` requires a battlefield permanent), and
+            // for `Controller` / `AttachedToSource` recipients it is a PRE-EXISTING
+            // CR 113.7a divergence that cannot be fixed without the registry move
+            // the sentinel-blind `resolve_redirect_recipient` forbids.
             if let Some(obj) = state.objects.get_mut(&ability.source_id) {
-                obj.replacement_definitions.push(shield);
+                obj.install_resolution_replacement(shield);
             }
         } else {
-            // CR 109.4 + CR 614.1a: Anchor the installing controller so a
+            // CR 109.4 + CR 113.8 + CR 614.1a: Anchor the installing controller so a
             // controller-relative `damage_source_filter` (e.g. Desperate Gambit's
             // chosen "source you control" recheck) matches under the sentinel host.
-            if shield.source_controller.is_none() {
-                shield.source_controller = Some(ability.controller);
-            }
-            state.pending_damage_replacements.push(shield);
+            // Delegated to the one floating-install authority so this file and
+            // `prevent_damage.rs` cannot drift.
+            //
+            // `anchor_zones` is EMPTY, and that is structural, not incidental: this
+            // arm is only being refactored onto the authority, it moves NO shield.
+            // Every shield reaching it was already registry-hosted before the
+            // authority existed (including one from a Command-zone source, which the
+            // `Zone::Battlefield`-only fork above also routes here), so anchoring any
+            // of them would be an unmeasured behavior change on a pre-existing
+            // population -- over-matching, the inverse of the under-matching the
+            // anchor exists to fix.
+            //
+            // CR 113.7a: the battlefield arm above deliberately stays object-hosted
+            // and is NOT moved here. `replacement.rs::redirect_damage_event` passes
+            // `rid.source` to `resolve_redirect_recipient`, which has no
+            // `ObjectId(0)` sentinel arm: `DamageRedirectTarget::Controller` would
+            // look up the sentinel in `state.objects` and find nothing,
+            // `SourceObject` would build `TargetRef::Object(ObjectId(0))` and be
+            // rejected by `redirect_recipient_is_legal`, and `AttachedToSource`
+            // resolves `attached_to` live and is not concretizable at install time at
+            // all. That is an `rid.source` (storage-discriminator) failure, which the
+            // `source_object` host anchor does not address -- the anchor supplies the
+            // HOST identity, not the registry-vs-object storage route. The battlefield
+            // arm's layer-fragility is fixed instead by installing through
+            // `GameObject::install_resolution_replacement` (CR 611.2c).
+            crate::game::effects::install_floating_damage_replacement(
+                state,
+                shield,
+                ability.controller,
+                ability.source_id,
+                &[],
+            );
         }
     }
 
@@ -541,6 +584,182 @@ mod tests {
             "second event must NOT be doubled (one-shot consumed)"
         );
         assert_eq!(state.players[1].life, 11);
+    }
+
+    /// CR 611.2c + CR 613.1 + CR 614.9 (issue #8485, matrix row 19): a
+    /// BATTLEFIELD-SOURCED redirection shield still redirects after a layer pass.
+    ///
+    /// This arm is deliberately left OBJECT-hosted — `resolve_redirect_recipient`
+    /// reads `rid.source`, and it has no `ObjectId(0)` sentinel arm, so moving it to
+    /// the floating registry would silently no-op `DamageRedirectTarget::
+    /// {Controller, SourceObject, AttachedToSource}`. But object-hosting made it
+    /// layer-fragile, which is what routing through
+    /// `GameObject::install_resolution_replacement` fixes (CR 611.2c: the shield is
+    /// not one of the source's characteristics, so the CR 613.1 reseed carries it).
+    ///
+    /// The named redirect suites do not cover this arm: `veteran_bodyguard_tap_
+    /// redirect.rs` is a printed static (base-seeded) and `heroic_sacrifice_
+    /// redirect.rs` is instant-sourced (already registry-hosted).
+    ///
+    /// Revert-failing against C2: without the authority the shield is gone after the
+    /// pass and the damage lands on the original recipient.
+    #[test]
+    fn battlefield_sourced_redirect_survives_a_layer_pass() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_creature(&mut state, PlayerId(0), "Redirector");
+        let victim = create_creature(&mut state, PlayerId(1), "Victim");
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                redirect_lifetime: RedirectionLifetime::OneOpportunity,
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_amount: None,
+                redirect_object_filter: None,
+                recipient_object_filter: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            state.objects[&source].replacement_definitions[0].is_resolution_installed(),
+            "CR 611.2c: the battlefield arm is object-hosted but resolution-stamped"
+        );
+
+        // CR 613.1: a layer pass between install and use.
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&source].replacement_definitions.len(),
+            1,
+            "the redirect shield must survive the CR 613.1 reset"
+        );
+
+        let ctx = deal_damage::DamageContext::from_source(&state, source).unwrap();
+        deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(victim),
+            4,
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.objects[&victim].damage_marked, 0,
+            "CR 614.9: the damage is still redirected after the pass"
+        );
+        assert_eq!(state.players[0].life, 16);
+
+        // NEGATIVE SIBLING (CR 614.9): once the SOURCE is gone the object-hosted
+        // shield correctly stops applying — this arm is host-bound by design.
+        let mut state2 = GameState::new_two_player(42);
+        let source2 = create_creature(&mut state2, PlayerId(0), "Redirector");
+        let victim2 = create_creature(&mut state2, PlayerId(1), "Victim");
+        let ability2 = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                redirect_lifetime: RedirectionLifetime::OneOpportunity,
+                source_filter: None,
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_amount: None,
+                redirect_object_filter: None,
+                recipient_object_filter: None,
+            },
+            vec![],
+            source2,
+            PlayerId(0),
+        );
+        resolve(&mut state2, &ability2, &mut Vec::new()).unwrap();
+        crate::game::zones::move_to_zone(&mut state2, source2, Zone::Graveyard, &mut Vec::new());
+        let ctx2 = deal_damage::DamageContext::from_source(&state2, victim2).unwrap();
+        deal_damage::apply_damage_to_target(
+            &mut state2,
+            &ctx2,
+            TargetRef::Object(victim2),
+            4,
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            state2.players[0].life, 20,
+            "a host-bound redirect does nothing once its host left the battlefield"
+        );
+    }
+
+    /// CR 615.7 + CR 611.2c (issue #8485, matrix row 20): a `Next(n)` redirection
+    /// shield's DEPLETION survives a layer pass. This is the property dual-write
+    /// cannot deliver — two copies plus mutable state means the pristine base twin
+    /// is re-seeded over the depleted live one on every pass.
+    #[test]
+    fn redirect_shield_depletion_survives_a_layer_pass() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_creature(&mut state, PlayerId(0), "Redirector");
+        let victim = create_creature(&mut state, PlayerId(1), "Victim");
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                redirect_lifetime: RedirectionLifetime::OneOpportunity,
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_amount: None,
+                redirect_object_filter: None,
+                recipient_object_filter: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        // Reach-guard: the first event IS redirected.
+        let ctx = deal_damage::DamageContext::from_source(&state, source).unwrap();
+        deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(victim),
+            2,
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(state.players[0].life, 18);
+        assert!(state.objects[&source].replacement_definitions[0].is_consumed);
+
+        // CR 613.1: the pass must not refill the spent one-shot.
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            state.objects[&source].replacement_definitions[0].is_consumed,
+            "CR 615.3: a layer pass must not un-spend the shield"
+        );
+
+        let ctx = deal_damage::DamageContext::from_source(&state, source).unwrap();
+        deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(victim),
+            2,
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[0].life, 18,
+            "the second event is NOT redirected"
+        );
+        assert_eq!(state.objects[&victim].damage_marked, 2);
     }
 
     /// CR 614.9: A redirection one-shot redirects the recipient (here to the

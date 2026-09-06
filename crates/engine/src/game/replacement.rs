@@ -105,6 +105,52 @@ pub(crate) fn replacement_source_player(obj: &GameObject) -> PlayerId {
     obj.controller_or_owner()
 }
 
+/// CR 109.5: the player "you" and "your" refer to inside a replacement effect's
+/// `execute` / `decline` chain — the controller of the object whose ability is
+/// doing the replacing, never the controller of the object the replaced event
+/// happens to affect.
+///
+/// Single authority for that question. `apply_single_replacement` reads it both
+/// to build the applier's `FilterContext` and to stamp
+/// [`PostReplacementDrain::controller`], so the gate that decides whether a
+/// replacement applies and the rider that runs afterwards can never disagree
+/// about who "you" is.
+///
+/// CR 608.2h: read the source the same way `replacement_definition_for_id` and
+/// `apply_single_replacement` read it — liminal entry first (a replacement on a
+/// permanent that is itself mid-entry), then live state — falling back to the
+/// install-time stamp (`source_controller`), which is the only answer available
+/// for a global install (`rid.source == ObjectId(0)`, no object to read).
+///
+/// Deliberately snapshot-at-apply-time rather than look-up-at-drain-time.
+/// CR 704.3: every applicable state-based action is performed simultaneously as
+/// a single event, so a shield that dies alongside the creature it is replacing
+/// is still on the battlefield when its replacement applies. This call therefore
+/// always answers; a drain-time lookup would run after the shield was gone and
+/// answer nothing at all.
+///
+/// Behavior change riding inside this de-duplication, called out rather than
+/// left to be discovered: the inline derivation this replaces read the
+/// `controller` field directly, while [`replacement_source_player`] reads
+/// `controller_or_owner()`. The two answers differ for a replacement source
+/// outside the battlefield and the stack, where CR 108.4a gives the card no
+/// controller and directs an effect asking for one to use the owner instead —
+/// so the new reading is the CR-correct one, not merely the shorter one.
+fn replacement_ability_controller(
+    state: &GameState,
+    rid: ReplacementId,
+    repl_def: &ReplacementDefinition,
+) -> PlayerId {
+    state
+        .liminal_entries
+        .get(&rid.source)
+        .map(|entry| entry.object.projected())
+        .or_else(|| state.objects.get(&rid.source))
+        .map(replacement_source_player)
+        .or(repl_def.source_controller)
+        .unwrap_or(state.active_player)
+}
+
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
     ReplacementId {
         source: object_id,
@@ -720,6 +766,7 @@ fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
     source: ObjectId,
+    controller: Option<PlayerId>,
     applied: HashSet<AppliedReplacementKey>,
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
@@ -731,6 +778,18 @@ fn stash_post_replacement_continuation(
             applied,
             event_source,
             event_target,
+            // CR 109.5: "you" in the continuation is the REPLACING ability's
+            // controller. Carried beside `source` rather than derived from it,
+            // because `source` is the affected object on every zone-change
+            // path.
+            //
+            // Passed through as an `Option` rather than unwrapped at the call
+            // sites: `None` is the drain's own encoding of "no replacing object
+            // to speak of", which `apply_post_replacement_effect` answers by
+            // falling back to the AFFECTED object's controller. Substituting
+            // `active_player` here would stamp a confident wrong answer in
+            // place of that fallback.
+            controller,
         },
         ResidentDrainPolicy::KeepResident,
     );
@@ -979,10 +1038,18 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                     // lookup stays aligned.
                     p.candidates
                         .iter()
-                        .map(|rid| ReplacementCandidateSummary {
-                            source_id: rid.source,
-                            source_name: name_of(rid.source),
-                            description: replacement_choice_label_for_rid(state, *rid),
+                        .map(|rid| {
+                            // CR 616.1 + CR 113.7a (issue #8485): label the option
+                            // with the shield's HOST, not with the `ObjectId(0)`
+                            // storage sentinel, which has no name. Display only —
+                            // `rid` itself is unchanged and is what
+                            // `handle_replacement_choice` resolves.
+                            let display = replacement_choice_display_source(state, *rid);
+                            ReplacementCandidateSummary {
+                                source_id: display,
+                                source_name: name_of(display),
+                                description: replacement_choice_label_for_rid(state, *rid),
+                            }
                         })
                         .collect()
                 };
@@ -1304,6 +1371,63 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
     }
 }
 
+/// CR 616.1 (issue #8485): sentinel-aware definition lookup for the CR 616.1
+/// replacement-choice PROMPT. **Display only.**
+///
+/// Mirrors the `rid.source == ObjectId(0)` dispatch that every runtime shield
+/// reader in this file already performs (`shield_kind_for_rid`,
+/// `consume_prevention_shield`, `update_redirection_shield`, ...): the sentinel
+/// selects `state.pending_damage_replacements`, anything else selects that
+/// object's own `replacement_definitions`. `rid.index` indexes whichever store
+/// `rid.source` selected — that pairing is NOT changed here or anywhere else.
+///
+/// `replacement_definition_for_id` (the rules-side authority, which also runs the
+/// CR 121.2 draw-scope `debug_assert!`) deliberately keeps its object-only lookup;
+/// this is a separate, narrower question asked only while building a
+/// `WaitingFor::ReplacementChoice` payload.
+fn replacement_choice_definition(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<&ReplacementDefinition> {
+    if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    }
+}
+
+/// CR 616.1 + CR 113.7a (issue #8485): the object a CR 616.1 replacement-choice
+/// option should be LABELLED with. **Display only — this is presentation, not
+/// rules.**
+///
+/// `ReplacementId::source` remains the STORAGE discriminator everywhere else in
+/// this file: it routes ~14 consumers to `state.pending_damage_replacements` (the
+/// `ObjectId(0)` sentinel) rather than to `state.objects`, and it is never used as
+/// a display anchor again after this function.
+///
+/// Why this is needed: `find_applicable_replacements` can offer a registry-hosted
+/// shield as a CR 616.1 candidate, and a registry entry's `rid.source` IS the
+/// sentinel, which has no entry in `state.objects` (CR 109.4). The prompt therefore
+/// rendered an empty source name. Issue #8485 moves every SOURCE-scoped resolution
+/// shield (Maze of Ith, Circle of Protection, Mercenaries) into that registry, so a
+/// prompt that used to name the permanent would have gone blank — and CR 616.1 asks
+/// the affected player to CHOOSE among applicable effects, which they can only do if
+/// the options are distinguishable.
+///
+/// CR 113.7a: `source_object` is the host identity the shield carries precisely
+/// because the sentinel host cannot supply it, so it is the correct display anchor.
+/// A shield created by a resolving instant never had a host, keeps
+/// `source_object: None`, and falls back to `rid.source` — reproducing today's
+/// behavior (empty name) exactly, rather than naming some unrelated object.
+fn replacement_choice_display_source(state: &GameState, rid: ReplacementId) -> ObjectId {
+    replacement_choice_definition(state, rid)
+        .and_then(|def| def.source_object)
+        .unwrap_or(rid.source)
+}
+
 fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> String {
     if is_compleated_replacement(rid) {
         return "Compleated: enter with fewer loyalty counters".to_string();
@@ -1337,10 +1461,12 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
         Some(ShieldCounterReplacementKind::Damage) => {
             "Prevent damage with shield counter".to_string()
         }
-        None => state
-            .objects
-            .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        // CR 616.1 (issue #8485): read the definition through the sentinel-aware
+        // lookup so a REGISTRY-hosted shield describes itself instead of falling
+        // through to the bare "Replacement effect" placeholder. The object-only
+        // lookup this replaces returned `None` for every `rid.source ==
+        // ObjectId(0)` candidate. Display only.
+        None => replacement_choice_definition(state, rid)
             .map(replacement_choice_label)
             .unwrap_or_else(|| "Replacement effect".to_string()),
     }
@@ -7470,6 +7596,12 @@ pub fn find_applicable_replacements(
             }
 
             if let Some(handler) = registry.get(&repl_def.event) {
+                // CR 113.7a: the shield's HOST identity. `ReplacementId.source` stays the
+                // `ObjectId(0)` storage discriminator; this is the object the shield's
+                // host-relative filters, exclusions and conditions refer to. Parity rule:
+                // every argument position that `object_replacement_candidate_applies` fills
+                // with `obj.id`, this scan fills with `source_host`.
+                let source_host = repl_def.source_object.unwrap_or(ObjectId(0));
                 if let ProposedEvent::Damage { .. } = event {
                     // CR 615.3: Check combat scope, target filters, and source filters.
                     // CR 614.1a: Damage source filter — matches the damage *source* object
@@ -7487,9 +7619,9 @@ pub fn find_applicable_replacements(
                             // resolves; otherwise fall back to the bare source context.
                             let ctx = match repl_def.source_controller {
                                 Some(pid) => {
-                                    FilterContext::from_source_with_controller(ObjectId(0), pid)
+                                    FilterContext::from_source_with_controller(source_host, pid)
                                 }
-                                None => FilterContext::from_source(state, ObjectId(0)),
+                                None => FilterContext::from_source(state, source_host),
                             };
                             if !matches_target_filter(state, *source_id, sf, &ctx) {
                                 continue;
@@ -7519,7 +7651,7 @@ pub fn find_applicable_replacements(
                                 tf,
                                 target,
                                 source_controller,
-                                ObjectId(0),
+                                source_host,
                                 state,
                             ) {
                                 continue;
@@ -7540,24 +7672,25 @@ pub fn find_applicable_replacements(
                     // this pending-registry path never needed to read it —
                     // silently turning a scoped shield into a blanket one for
                     // the FIRST instant/sorcery-sourced population recipient.
-                    // Player-target damage events are unaffected: a card-shaped
-                    // filter has no player to check against (mirrors why
-                    // `damage_target_filter` above is the player-side gate).
+                    //
+                    // CR 109.1: `valid_card` is an OBJECT recipient filter, and a
+                    // player is not an object. The object scan already refuses a player-target
+                    // damage event here (`replacement_valid_card_matches` falls through to
+                    // `event.affected_object_id()`, which is `None` for
+                    // `Damage { target: TargetRef::Player(_) }`). This scan used to SKIP the gate
+                    // in that case, so a registry shield scoped to "creatures" also prevented
+                    // damage dealt to players. Delegating to the one authority removes the
+                    // divergence in both directions and inherits its Connive / ChangeZone /
+                    // TokenEntry handling.
                     if let Some(ref vc) = repl_def.valid_card {
-                        if let ProposedEvent::Damage {
-                            target: TargetRef::Object(obj_id),
-                            ..
-                        } = event
-                        {
-                            let ctx = match repl_def.source_controller {
-                                Some(pid) => {
-                                    FilterContext::from_source_with_controller(ObjectId(0), pid)
-                                }
-                                None => FilterContext::from_source(state, ObjectId(0)),
-                            };
-                            if !matches_target_filter(state, *obj_id, vc, &ctx) {
-                                continue;
+                        let ctx = match repl_def.source_controller {
+                            Some(pid) => {
+                                FilterContext::from_source_with_controller(source_host, pid)
                             }
+                            None => FilterContext::from_source(state, source_host),
+                        };
+                        if !replacement_valid_card_matches(repl_def, event, state, vc, &ctx) {
+                            continue;
                         }
                     }
                     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
@@ -7569,7 +7702,7 @@ pub fn find_applicable_replacements(
                         if !evaluate_replacement_condition(
                             cond,
                             source_controller,
-                            ObjectId(0),
+                            source_host,
                             state,
                             event.affected_object_id(),
                             event,
@@ -7637,7 +7770,7 @@ pub fn find_applicable_replacements(
                     if !apply_state_level_gates(
                         repl_def,
                         event,
-                        ObjectId(0),
+                        source_host,
                         source_controller,
                         state,
                     ) {
@@ -7646,7 +7779,7 @@ pub fn find_applicable_replacements(
                 }
                 // Verify the handler matcher still matches (DamageDone for damage
                 // entries, ChangeZone for zone-redirect entries).
-                if (handler.matcher)(event, ObjectId(0), state) {
+                if (handler.matcher)(event, source_host, state) {
                     candidates.push(rid);
                 }
             }
@@ -8465,6 +8598,12 @@ fn apply_single_replacement(
             .or_else(|| state.objects.get(&rid.source))
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
+    // CR 109.5: snapshot the replacing ability's controller HERE, while
+    // `repl_def_ref`'s borrow is still live. The stash sites below run after the
+    // applier has taken `&mut state`, so they cannot re-read the definition —
+    // and a `PlayerId` is exactly what they need, not the definition itself.
+    let ability_controller =
+        repl_def_ref.map(|def| replacement_ability_controller(state, rid, def));
 
     // Extract replacement metadata before mutably borrowing state for the applier.
     // CR 614.1c: ProposedEvent modifiers (enter_tapped, ETB counters, zone redirect)
@@ -8481,15 +8620,7 @@ fn apply_single_replacement(
     let (event_key, modifiers, mandatory_post_effect, consume_on_apply, entry_copy) =
         match repl_def_ref {
             Some(repl_def) => {
-                let replacement_controller = if rid.source == ObjectId(0) {
-                    repl_def.source_controller.unwrap_or(state.active_player)
-                } else {
-                    state
-                        .objects
-                        .get(&rid.source)
-                        .map(|obj| obj.controller)
-                        .unwrap_or(state.active_player)
-                };
+                let replacement_controller = replacement_ability_controller(state, rid, repl_def);
                 // CR 614.12a + CR 707.2: only ChangeZone entry-copy shields
                 // (Mystic Reflection) precompute the copy payload into the
                 // event. Moved self-replacements still drain as post-effects so
@@ -9008,10 +9139,10 @@ fn apply_single_replacement(
                     // CR 614.13 + CR 608.2c: stash the AFFECTED object of the
                     // (possibly modified) event as the continuation source, so a
                     // scoped-player execute (Land Equilibrium's "that player …
-                    // sacrifices a land": `ControllerRef::You` bound via the entering
-                    // land's resulting controller) keys off the entering object, not
-                    // the replacement's own source. For a self-scoped replacement
-                    // (`valid_card: SelfRef`, the Devour family) these coincide.
+                    // sacrifices a land", lowered to `ControllerRef::ScopedPlayer`)
+                    // keys off the entering object, not the replacement's own
+                    // source. For a self-scoped replacement (`valid_card: SelfRef`,
+                    // the Devour family) these coincide.
                     //
                     // NOTE: for battlefield-ENTRY drains this is defensive alignment
                     // rather than the sole binding — the land-play epilogue
@@ -9022,10 +9153,19 @@ fn apply_single_replacement(
                     // drain time. The stashed source is observable only on the
                     // `TokenEntry` drain path, which does not clear it. See the
                     // implementation report's Part 3 finding.
+                    //
+                    // CR 109.5: the affected object answers "that permanent" and
+                    // "that player"; it never answers "you". The replacing
+                    // ability's controller therefore rides along in its own slot,
+                    // untouched by the zone-change clear above (issue #7086: Head
+                    // of the Hunt's "When you do, create a … Wolf" created the
+                    // token for the opponent whose creature died, because the
+                    // continuation had no handle on its own controller).
                     stash_post_replacement_continuation(
                         state,
                         post,
                         new_event.affected_object_id().unwrap_or(rid.source),
+                        ability_controller,
                         replacement_applied.clone(),
                         None,
                         // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
@@ -9065,6 +9205,12 @@ fn apply_single_replacement(
                         state,
                         post,
                         rid.source,
+                        // CR 109.5: same authority as the Modified arm — the
+                        // prevention rider's "you" is the shield's controller.
+                        // Here `source` is already the shield, so this agrees
+                        // with the pre-existing derivation rather than changing
+                        // it.
+                        ability_controller,
                         replacement_applied.clone(),
                         proposed_damage_source,
                         proposed_event_target.clone(),
@@ -10236,17 +10382,26 @@ fn continue_replacement_impl(
         // per-source bookkeeping is needed here.
 
         // Extract the accept/decline effects before applying
-        let (accept_effect, decline_effect, may_cost) = replacement_definition_for_id(state, rid)
-            .map(|repl| {
-                let accept = repl.execute.clone();
-                let decline = replacement_mode_decline_cloned(&repl.mode);
-                let may_cost = match &repl.mode {
-                    ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
-                    ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
-                };
-                (accept, decline, may_cost)
-            })
-            .unwrap_or((None, None, None));
+        // CR 109.5: capture the replacing ability's controller alongside its
+        // branches, from the same definition read — the accept/decline
+        // continuation installed below is text on THIS object, so its "you" is
+        // this object's controller, not the affected object's.
+        let (accept_effect, decline_effect, may_cost, branch_controller) =
+            replacement_definition_for_id(state, rid)
+                .map(|repl| {
+                    let accept = repl.execute.clone();
+                    let decline = replacement_mode_decline_cloned(&repl.mode);
+                    let may_cost = match &repl.mode {
+                        ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
+                        ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
+                    };
+                    // Same authority the mandatory path uses, so an optional
+                    // replacement's accept/decline rider and a mandatory one's
+                    // execute rider can never disagree about who "you" is.
+                    let controller = replacement_ability_controller(state, rid, repl);
+                    (accept, decline, may_cost, Some(controller))
+                })
+                .unwrap_or((None, None, None, None));
 
         // CR 614.12a: on accept, pay the MayCost (skipped on a paid resume). A
         // `PausedForChoice` outcome means the payment surfaced an interactive
@@ -10416,6 +10571,10 @@ fn continue_replacement_impl(
                         applied: proposed.applied_set().clone(),
                         event_source: None,
                         event_target: None,
+                        // CR 109.5: same split as the mandatory stash — the
+                        // zone-change drain rebinds `source` to the entering /
+                        // moving object, so the branch's "you" needs its own slot.
+                        controller: branch_controller,
                     },
                     ResidentDrainPolicy::Replace,
                 );
@@ -20780,41 +20939,79 @@ mod tests {
         );
     }
 
+    /// CR 109.1 (issue #8485): a card-shaped `valid_card` recipient
+    /// filter must REFUSE a player-target damage event on the global store, exactly
+    /// as it already did on the per-object store.
+    ///
+    /// STRENGTHENED, not relaxed. This test previously asserted the opposite —
+    /// that the pending scan skipped the `valid_card` gate entirely whenever the
+    /// damage recipient was a player, so a shield reading "prevent all damage that
+    /// would be dealt to CREATURES this turn" (Blinding Fog class: `valid_card:
+    /// Some(Typed(creature))` with `damage_target_filter: None`) also prevented
+    /// damage dealt to players. CR 109.1 enumerates what an object is — "an ability
+    /// on the stack, a card, a copy of a card, a token, a spell, a permanent, or an
+    /// emblem" — and a player is not one of them, so a card-shaped recipient filter
+    /// cannot match a player.
+    /// The object scan has always refused this (`replacement_valid_card_matches`
+    /// falls through to `event.affected_object_id()`, which is `None` for
+    /// `Damage { target: TargetRef::Player(_) }`, then `.unwrap_or(false)`); the
+    /// pending scan now delegates to that same authority, so the two agree.
+    ///
+    /// This mattered because Unit A of #8485 moves every source-scoped shield from
+    /// a battlefield permanent onto the pending store: without the consolidation, a
+    /// "damage to creatures" shield would have newly started preventing damage to
+    /// players the moment it moved.
     #[test]
-    fn global_store_damage_path_ignores_valid_card_filter_for_player_targets() {
-        // A card-shaped `valid_card` recipient filter has no player to check
-        // against, so it must remain a no-op for a PLAYER-target damage
-        // event — the generalized scan must still prevent damage dealt to a
-        // player even though the shield's `valid_card` is creature-shaped.
-        // CR 608.2c + CR 615.1a (issue #6682): `valid_card` IS now enforced
-        // on this path for OBJECT-target damage events (see
-        // `find_applicable_replacements`'s dedicated `valid_card` gate,
-        // covered by `game::effects::prevent_damage::tests`'s tracked-set
-        // recipient tests) — this test pins the complementary player-target
-        // case, where the gate correctly does not apply.
+    fn global_store_valid_card_gate_refuses_a_player_target_damage_event() {
         let registry = build_replacement_registry();
         let mut state = GameState::new_two_player(42);
-        // Global prevention shield carrying a typed recipient valid_card filter
-        // that the damage target will NOT match.
+        // A creature that the OBJECT-target reach-guard below can match, so the
+        // negative half is not vacuously satisfied by the shield being inert.
+        let mut creature = GameObject::new(
+            ObjectId(51),
+            CardId(3),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        creature.card_types.core_types = vec![CoreType::Creature];
+        state.objects.insert(ObjectId(51), creature);
+        // Global prevention shield carrying a typed recipient valid_card filter.
         let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
             .prevention_shield(PreventionAmount::Next(2))
             .valid_card(TargetFilter::Typed(TypedFilter::creature()));
         state.pending_damage_replacements.push(shield);
-        let event = ProposedEvent::Damage {
+
+        // Positive reach-guard: the shield IS a candidate for a matching OBJECT
+        // recipient, proving the gate is reached and the shield is otherwise live.
+        let object_event = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(51)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &object_event, &registry),
+            vec![ReplacementId {
+                source: ObjectId(0),
+                index: 0
+            }],
+            "reach-guard: a creature-shaped valid_card must still match a creature"
+        );
+
+        // CR 109.1: the player-target event is refused.
+        let player_event = ProposedEvent::Damage {
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
             is_combat: false,
             applied: HashSet::new(),
         };
-        let candidates = find_applicable_replacements(&state, &event, &registry);
-        assert_eq!(
-            candidates,
-            vec![ReplacementId {
-                source: ObjectId(0),
-                index: 0
-            }],
-            "damage prevention shield must remain a candidate despite a non-matching valid_card recipient filter"
+        assert!(
+            find_applicable_replacements(&state, &player_event, &registry).is_empty(),
+            "CR 109.1: a player is not an object, so a card-shaped recipient filter \
+             must not match a player-target damage event"
         );
     }
 

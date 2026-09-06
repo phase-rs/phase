@@ -28,6 +28,7 @@ import {
   type DraftReconnectRejectionKind,
 } from "../network/draftProtocol";
 import type {
+  DraftCommanderLaunch,
   DraftMatchLaunch,
   DraftMatchSettlement,
   DraftP2PMessage,
@@ -67,6 +68,7 @@ export type DraftGuestEvent =
   | { type: "matchSettlementAcknowledged"; matchId: string; receiptId: string; revision: number }
   | { type: "timerSync"; remainingMs: number }
   | { type: "matchStart"; launch: DraftMatchLaunch }
+  | { type: "commanderLaunch"; launch: DraftCommanderLaunch }
   | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
   | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
@@ -685,6 +687,11 @@ export class P2PDraftGuest {
           type: "matchStart",
           launch: msg.launch,
         });
+        break;
+      }
+
+      case "draft_commander_launch": {
+        this.emit({ type: "commanderLaunch", launch: msg.launch });
         break;
       }
 

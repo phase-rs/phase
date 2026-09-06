@@ -47,6 +47,57 @@ fn maybe_drain_each_player_copy_chosen(state: &mut GameState, events: &mut Vec<G
     }
 }
 
+/// CR 608.3a / CR 608.3c + CR 400.7d + CR 616.1f: complete a permanent spell's
+/// parked resolution frame once the child stack its own entry raised has retired.
+///
+/// The parked frame is that child's structural PARENT, so it becomes the active
+/// frame only here — after this resume's drain stages have settled. `subject` is
+/// the object whose replacement this resume answered; the frame completes only
+/// when it is that same object's, so an unrelated parked spell is never touched.
+/// `active_spell_resolution` stays top-only: this reads the frame the drain just
+/// exposed and never reaches through a live child. This function is the SINGLE
+/// settle authority for that completion — call sites add no `Priority` guard of
+/// their own.
+///
+/// This mirrors the existing completion authority at the ZoneChange Execute site
+/// below, which cannot serve the counter path: it runs before the counter drain
+/// and keys on `zone_change_object_id`, which is `None` when the resumed event is
+/// an AddCounter.
+///
+/// KNOWN RESIDUAL — do not "fix" it here (measured):
+/// On a Devour-shape entrant (CR 702.82a/c) the counter drain exposes the entry's
+/// CR 614.13a eligibility snapshot, not the parent, so this helper correctly
+/// no-ops and the entry strands exactly as it does without this change. Retiring
+/// that snapshot here removes the strand and VIOLATES CR 614.13a: the snapshot is
+/// the eligible-pool filter in `game::effects::sacrifice` (`is_none_or` — vacuous
+/// once cleared), and the sacrifice that consumes it has not run at this program
+/// point, so the devourer becomes legal fodder for its own Devour. Measured on
+/// both arms. The blocking shape is `[PostReplacement(sacrifice, Ready),
+/// SpellResolution(parent), ChangeZone(snapshot)]`, in which
+/// `ResolutionStack::active_post_replacement_parent_slot` — top, or exactly one
+/// below — cannot resolve, so neither the sacrifice nor the snapshot's own
+/// retirement authority can run while the parent sits between them. The fix is an
+/// ordering change at the capture site in `stack.rs`, not a retirement call here.
+fn finish_spell_resolution_exposed_by_child(
+    state: &mut GameState,
+    subject: Option<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    if !state
+        .active_spell_resolution()
+        .is_some_and(|ctx| Some(ctx.object_id) == subject)
+    {
+        return;
+    }
+    let ctx = state
+        .take_active_spell_resolution()
+        .expect("matching spell-resolution frame was checked above");
+    apply_pending_spell_resolution(state, &ctx, events);
+}
+
 /// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
 /// sacrifice replacement — a `Moved` (ETB-style) event whose post-effect is a
 /// `Sacrifice` over a `Typed`/`Any` scope filter (the chooser-driven "sacrifice
@@ -239,6 +290,16 @@ fn handle_replacement_choice_inner(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.sacrifice_provenance);
+    // CR 122.1 + CR 616.1f: the object whose counter placement this resume answers.
+    // Captured here, with the file's other `parked_*` reads, because
+    // `continue_replacement` below consumes the pending record. The Execute arm's
+    // own `zone_change_object_id` cannot serve: it is `None` on the counter path
+    // (the Execute payload is an AddCounter event, not a ZoneChange) and it is
+    // out of scope in the Prevented arm.
+    let parked_affected_object_id = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.proposed.affected_object_id());
     // A replacement-paused zone move belongs to its logical owner by both the
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
@@ -1226,6 +1287,24 @@ fn handle_replacement_choice_inner(
             // advances the typed phase owner exactly once.
             if matches!(waiting_for, WaitingFor::Priority { .. }) {
                 state.waiting_for = waiting_for;
+
+                // CR 608.3a + CR 616.1f: the parked entry context is the structural PARENT
+                // of every drain stage above. Complete it only once they have all retired
+                // and it owns the top — after the counter/batch/copy-token/continuation
+                // stages, and before the shared continuation boundary, which must not
+                // observe a frame no priority-time drain is allowed to touch.
+                //
+                // Placed AFTER the line above, deliberately: this arm reconciles
+                // `state.waiting_for` with its arm-local ONLY there, and three stages
+                // between the counter drain and this block assign a returned value
+                // straight into the arm-local (the deferred-step-trigger resume, the cost
+                // move resume, and the interrupted cost payment). Before that line the
+                // helper's `state.waiting_for` guard would be reading a value stale by up
+                // to three stages; after it, the guard reads this arm's settled
+                // authority. The helper's own guard remains the single settle authority —
+                // this call site adds none.
+                finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
+
                 super::engine::resume_pending_continuation_if_priority(state, events)?;
                 waiting_for = state.waiting_for.clone();
             }
@@ -1404,6 +1483,10 @@ fn handle_replacement_choice_inner(
                 // CR 101.4 + CR 616.1: resume an `EachPlayerCopyChosen` walk whose
                 // counter placement was prevented — advance to the next player.
                 maybe_drain_each_player_copy_chosen(state, events);
+                // Same position as the Execute arm's call in program terms: this block
+                // RETURNS at the next line, so "after every drain of this arm" and "here"
+                // are the same point.
+                finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
                 return Ok(state.waiting_for.clone());
             }
             if pending_was_counter_move {
@@ -2194,7 +2277,10 @@ fn finish_copy_target_choice_entry(
         if let Some(waiting_for) = apply_post_replacement_effect(
             state,
             &choice,
-            Some(source_id),
+            // CR 109.5: a self-scoped "as this enters, choose …" replacement is
+            // text on the entering permanent itself, so its controller already
+            // IS the affected object's controller — no override needed.
+            ContinuationSubjects::affected_only(Some(source_id)),
             None,
             Some(&ReplacementEvent::Moved),
             HashSet::new(),
@@ -2451,6 +2537,40 @@ fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&Abi
         })
 }
 
+/// CR 109.5 + CR 614.6: the two referents a post-replacement continuation
+/// resolves against, which are NOT the same object and must not be derived from
+/// one another.
+///
+/// * `affected` — the object the modified event acted on: the entering permanent
+///   for an ETB replacement, the moving object for a zone change, the dying
+///   creature for a "would die, … instead". It answers `SelfRef`, "that
+///   permanent", and (via its controller) "that player".
+/// * `controller` — the controller of the object whose ability did the
+///   replacing. It answers "you". `None` on install paths with no replacing
+///   object (combat-prevention riders, the ready-continuation helpers, test
+///   fixtures), where the affected object's controller remains the fallback.
+///
+/// Bundled rather than passed as two loose `Option`s so a future caller cannot
+/// supply one and silently inherit the other from the wrong side of the split —
+/// the exact defect issue #7086 was.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ContinuationSubjects {
+    pub affected: Option<ObjectId>,
+    pub controller: Option<PlayerId>,
+}
+
+impl ContinuationSubjects {
+    /// The affected object alone, with "you" left to fall back to its
+    /// controller. Correct exactly when the replacing object IS the affected
+    /// object — every self-scoped replacement (`valid_card: SelfRef`).
+    pub fn affected_only(affected: Option<ObjectId>) -> Self {
+        Self {
+            affected,
+            controller: None,
+        }
+    }
+}
+
 /// Apply a post-replacement side effect after a zone change has been executed.
 /// Used by Optional replacements (e.g., shock lands: pay life on accept, tap on decline).
 /// CR 707.9: For "enter as a copy" replacements, sets up CopyTargetChoice instead of
@@ -2458,7 +2578,7 @@ fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&Abi
 pub(super) fn apply_post_replacement_effect(
     state: &mut GameState,
     effect_def: &AbilityDefinition,
-    object_id: Option<ObjectId>,
+    subjects: ContinuationSubjects,
     // CR 400.7d: for AmountSpentToCastSource ceilings the entering object's
     // cast-payment stamp is authoritative — this spell-resolution context is
     // intentionally unused (issue #6440). Kept so call sites stay stable.
@@ -2467,9 +2587,13 @@ pub(super) fn apply_post_replacement_effect(
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let ContinuationSubjects {
+        affected: object_id,
+        controller: replacement_controller,
+    } = subjects;
     // Dual objects→liminal lookup (same as source identity): also yields the
     // entering object's cast-payment stamp for copy MV ceilings.
-    let (source_id, controller, mana_spent_stamp) = object_id
+    let (source_id, affected_controller, mana_spent_stamp) = object_id
         .and_then(|obj_id| {
             state
                 .objects
@@ -2489,6 +2613,37 @@ pub(super) fn apply_post_replacement_effect(
                 })
         })
         .unwrap_or((ObjectId(0), state.active_player, 0));
+
+    // CR 109.5 + CR 614.6: `source_id` above is the object the modified event
+    // AFFECTED — the entering permanent for an ETB replacement, the dying
+    // creature for a "would die, … instead" one. It is the right referent for
+    // the continuation's `SelfRef` / "that permanent" anaphors, and it is the
+    // WRONG answer for "you": a replacement effect is text on the replacing
+    // object, so "you" is that object's controller. Splitting the two is the
+    // whole point of the drain carrying its own controller (issue #7086 — Head
+    // of the Hunt's Wolf was created for the opponent whose creature died).
+    //
+    // The affected object's controller does not go away; it moves to
+    // `scoped_player`, which is where every "that player" reference already
+    // reads it from (`ControllerRef::ScopedPlayer`,
+    // `filter::scoped_player_or_controller`, `sacrifice::resolve_sacrifice_scope`).
+    // Because every one of those readers is a `scoped_player.unwrap_or(controller)`
+    // fallback, and because a SELF-scoped replacement has
+    // `affected_controller == replacement_controller` anyway, this split is a
+    // no-op everywhere except a third-party replacement's "you".
+    let controller = replacement_controller.unwrap_or(affected_controller);
+
+    // …and for that reason the slot is populated ONLY when the two genuinely
+    // differ. `scoped_player` means "a subject distinct from you"; writing the
+    // controller into it when there is no such subject is not merely redundant,
+    // it is a false signal. `effects/choose.rs::named_choice_authority` reads a
+    // populated `scoped_player` as the marker of a per-player fan-out and
+    // reroutes a persisting `Labeled` answer off the source object onto the
+    // chooser — its own comment records that doing so for a single-chooser card
+    // "breaks any object-scoped reader". Glacierwood Siege's "As this
+    // enchantment enters, choose Temur or Sultai" is exactly that shape, and it
+    // reaches this function as a self-scoped replacement continuation.
+    let distinct_scoped_player = (affected_controller != controller).then_some(affected_controller);
 
     // CR 614.1c: Walk past modifier-only effects (Tap/Untap/PutCounter/ChangeZone)
     // in the sub_ability chain to find the real work. Composable replacements like
@@ -2526,6 +2681,9 @@ pub(super) fn apply_post_replacement_effect(
                 .collect::<Vec<_>>();
             let mut resolved =
                 build_resolved_from_def_with_targets(real_work, source_id, controller, targets);
+            if let Some(scoped) = distinct_scoped_player {
+                resolved.set_scoped_player_recursive(scoped);
+            }
             resolved.set_replacement_applied_recursive(replacement_applied);
             return resolve_post_replacement_chain(state, &resolved, events);
         } else {
@@ -2588,6 +2746,14 @@ pub(super) fn apply_post_replacement_effect(
     };
     let mut resolved =
         build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    // CR 109.5: "that player" / "its controller" — the player the replaced
+    // event acted on, bound only when that is somebody other than "you" (see
+    // `distinct_scoped_player` above). Applied to the whole chain so a rider
+    // several links down ("… then sacrifices a land of their choice") still
+    // names them.
+    if let Some(scoped) = distinct_scoped_player {
+        resolved.set_scoped_player_recursive(scoped);
+    }
     resolved.set_replacement_applied_recursive(replacement_applied);
     resolve_post_replacement_chain(state, &resolved, events)
 }
@@ -2706,6 +2872,10 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // `Resolved` carries captured targets (prevention follow-ups); `Template` is an
     // AST that resolves against `source` for ETB / Optional accept.
     let source = state.post_replacement_source().or(object_id);
+    // CR 109.5: read BEFORE `begin_post_replacement_dispatch` takes the
+    // continuation, exactly like `source` above — the resident accessor is a
+    // read of the same drain entry.
+    let replacement_controller = state.post_replacement_controller();
     let replacement_applied = state
         .active_post_replacement_drains_mut()
         .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
@@ -2727,7 +2897,10 @@ pub(crate) fn apply_pending_post_replacement_effect(
         PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
             state,
             &effect_def,
-            source,
+            ContinuationSubjects {
+                affected: source,
+                controller: replacement_controller,
+            },
             spell_resolution,
             event.as_ref(),
             replacement_applied,
@@ -6618,7 +6791,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &template,
-            Some(dralnu),
+            ContinuationSubjects::affected_only(Some(dralnu)),
             None,
             Some(&ReplacementEvent::DealtDamage),
             Default::default(),
@@ -6680,7 +6853,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &template,
-            Some(devourer),
+            ContinuationSubjects::affected_only(Some(devourer)),
             None,
             Some(&ReplacementEvent::Moved),
             Default::default(),
@@ -7872,7 +8045,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &mockingbird_become_copy(),
-            Some(mockingbird),
+            ContinuationSubjects::affected_only(Some(mockingbird)),
             Some(&hostile_ctx),
             None,
             Default::default(),
@@ -7928,7 +8101,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &mockingbird_become_copy(),
-            Some(mockingbird),
+            ContinuationSubjects::affected_only(Some(mockingbird)),
             Some(&hostile_ctx),
             None,
             Default::default(),
@@ -7998,7 +8171,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &mockingbird_become_copy(),
-            Some(liminal_id),
+            ContinuationSubjects::affected_only(Some(liminal_id)),
             None,
             None,
             Default::default(),
@@ -8031,7 +8204,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &clone_become_copy(),
-            Some(clone),
+            ContinuationSubjects::affected_only(Some(clone)),
             Some(&chord_like_spell_resolution(ObjectId(1), 5)),
             None,
             Default::default(),
@@ -8423,10 +8596,13 @@ mod tests {
         );
 
         let mut events = Vec::new();
+        // Self-scoped ETB replacement: the land is both the affected object and
+        // the replacing ability's source, so `affected_only` keeps "you" on the
+        // land's controller (P1), not `state.active_player` (P0).
         let waiting = apply_post_replacement_effect(
             &mut state,
             &effect_def,
-            Some(land),
+            ContinuationSubjects::affected_only(Some(land)),
             None,
             None,
             HashSet::new(),

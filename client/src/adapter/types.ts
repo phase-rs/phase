@@ -4589,3 +4589,266 @@ export function supportsServerRewind(
     && (adapter as Partial<ServerRewindCapability>).supportsServerRewind === true
     && typeof (adapter as Partial<ServerRewindCapability>).sendRequestTakeback === "function";
 }
+
+// ── Tournament organizer (lobby protocol 4) ──────────────────────────────
+//
+// Token-free mirrors of the tournament wire surface served by
+// `crates/lobby-broker`. Every type below is a projection the broker populates
+// and the client only reads; snake_case field names are the wire names
+// verbatim, with no camelCase translation layer.
+//
+// Deliberately absent, because the broker is the sole authority for each:
+// standings arrive pre-ranked and are never re-sorted here, pairings arrive in
+// generation order, and arity/bracket legality is validated server-side only.
+
+/**
+ * Seats at one pairing. Mirrors `crates/lobby-broker/src/tournament.rs:83-85`,
+ * which carries `#[serde(try_from = "u8", into = "u8")]` — so it crosses the
+ * wire as a **bare number**, never a wrapper object. `2` is head-to-head; `4`
+ * is the standard Commander pod. Alias-as-documentation, the same convention
+ * `ObjectId`/`PlayerId` use above: TypeScript erases it, and the `2..=128`
+ * validation lives in `MatchArity::new` on the broker.
+ */
+export type MatchArity = number;
+
+/**
+ * Stable, tournament-scoped pairing identity. Mirrors
+ * `crates/lobby-broker/src/tournament.rs:330` (`pub type PairingId = u32`) — a
+ * monotonic counter, not a re-derivable index into `pairings`.
+ */
+export type PairingId = number;
+
+/**
+ * Match-point scoring. Mirrors `crates/lobby-broker/src/tournament.rs:153-159`,
+ * whose `#[serde(try_from/into = "RawScoringPolicy")]` boundary makes the wire
+ * shape a **flat** three-field object rather than a tagged wrapper.
+ */
+export interface ScoringPolicy {
+  win_points: number;
+  draw_points: number;
+  loss_points: number;
+}
+
+/**
+ * Mirrors `crates/lobby-broker/src/tournament.rs:265-295`. `Completed` means
+ * every pairing that exists has a resolved outcome — NOT that every scheduled
+ * round was played; `Abandoned` (7-day inactivity) may still hold pending
+ * pairings. Clients render the two distinctly for exactly that reason.
+ */
+export type TournamentStatus =
+  | "Registration"
+  | "InProgress"
+  | "Completed"
+  | "Abandoned";
+
+/** Mirrors `crates/lobby-broker/src/tournament.rs:316-320`. */
+export type BracketShape = "Swiss" | "SingleElimination";
+
+/**
+ * The reported content of a *played* pairing. Mirrors the externally-tagged
+ * `crates/lobby-broker/src/tournament.rs:336-348`. `game_wins` is keyed by
+ * `player_key`, and is empty for a pod (arity > 2) because pods are single-game
+ * per MSTR; at head-to-head it carries the completed-Bo3 tally.
+ */
+export type PodOutcome =
+  | { Decisive: { winner: string; game_wins: Record<string, number> } }
+  | "Draw";
+
+/**
+ * A pairing's resolved outcome. Mirrors the externally-tagged
+ * `crates/lobby-broker/src/tournament.rs:355-367`.
+ *
+ * `Reported` is a **newtype** variant wrapping {@link PodOutcome}, so a
+ * reported decisive result is nested twice on the wire —
+ * `{"Reported":{"Decisive":{…}}}` — never flattened to
+ * `{"Reported":{"winner":…}}`. Keeping the nesting is what makes "a bye, a
+ * forfeit and a reported result are mutually exclusive" a compile-time fact
+ * here as much as it is in Rust.
+ */
+export type PairingOutcome =
+  | "Bye"
+  | { Forfeit: { winner: string } }
+  | { Reported: PodOutcome };
+
+/**
+ * The computed tiebreak axes for one player, in the order they rank. Mirrors
+ * `crates/lobby-broker/src/tournament.rs:714-726` — externally-tagged struct
+ * variants, so the arm name selects a *different field set*, not merely a
+ * label. `HeadToHead` is MTR §3.1's order; `Multiplayer` is MSTR's.
+ */
+export type Tiebreaks =
+  | {
+      HeadToHead: {
+        opponents_match_win_pct: number;
+        game_win_pct: number;
+        opponents_game_win_pct: number;
+      };
+    }
+  | {
+      Multiplayer: {
+        match_win_pct: number;
+        opponents_avg_match_points: number;
+        opponents_match_win_pct: number;
+      };
+    };
+
+/**
+ * One row of the computed standings. Mirrors
+ * `crates/lobby-broker/src/tournament.rs:756-768`. Every field is derived
+ * server-side from the pairing history and arrives **already ranked** — the
+ * client renders `standings` in array order and never re-sorts or re-ranks.
+ * `matches_played` excludes byes (they are counted in `byes`) so the MSTR
+ * match-win-percentage denominator stays correct.
+ */
+export interface TournamentStanding {
+  player_key: string;
+  display_name: string;
+  dropped: boolean;
+  match_points: number;
+  matches_played: number;
+  byes: number;
+  tiebreaks: Tiebreaks;
+}
+
+/**
+ * One entrant, as any client may see them — the token-free half of
+ * `TournamentPlayer`. Mirrors `crates/lobby-broker/src/protocol.rs:473-478`.
+ */
+export interface PlayerSummary {
+  player_key: string;
+  display_name: string;
+  dropped: boolean;
+}
+
+/**
+ * One pairing with its seats resolved to full {@link PlayerSummary}s. Mirrors
+ * `crates/lobby-broker/src/protocol.rs:496-503`.
+ *
+ * Named `TournamentPairingView`, not `PairingView`: `adapter/draft-adapter.ts`
+ * already exports an incompatible `PairingView` (the draft pod's
+ * `seat_a`/`seat_b` shape) consumed across the draft surface. The two are
+ * unrelated types from different crates and must not be conflated.
+ *
+ * `players` is a list, not a pair: the same shape carries a head-to-head
+ * pairing (2 seats), a full or short pod (up to `arity`), and a bye (1 seat).
+ * `outcome` is emitted with **no** `skip_serializing_if`, so a pending pairing
+ * arrives as an explicit `"outcome": null`.
+ */
+export interface TournamentPairingView {
+  id: PairingId;
+  round: number;
+  players: PlayerSummary[];
+  outcome: PairingOutcome | null;
+}
+
+/**
+ * One row of the tournament list. Mirrors
+ * `crates/lobby-broker/src/protocol.rs:507-528`.
+ */
+export interface TournamentSummary {
+  code: string;
+  name: string;
+  arity: MatchArity;
+  bracket: BracketShape;
+  status: TournamentStatus;
+  /**
+   * **Active** entrants — `TournamentMeta::active_player_count`
+   * (`crates/lobby-broker/src/protocol.rs:538`), NOT `players.length`. A
+   * dropped entrant is counted in {@link TournamentView.players} but not here,
+   * so rendering this as a total entrant count is wrong by exactly the number
+   * of drops.
+   */
+  player_count: number;
+  current_round: number;
+  /**
+   * The scheduled length, resolved server-side through
+   * `TournamentMeta::total_rounds`. `current_round < total_rounds` is a legal
+   * shape for a `Completed` event — an organizer may stop early.
+   */
+  total_rounds: number;
+  created_at: number;
+}
+
+/**
+ * The full detail view of one tournament. Mirrors
+ * `crates/lobby-broker/src/protocol.rs:556-562`.
+ *
+ * `players` and `pairings` are full histories, never filtered subsets: dropped
+ * players stay listed (their `dropped` flag is the distinction to render) and
+ * every round's pairings stay present, because the standings are only
+ * interpretable against the history that produced them.
+ */
+export interface TournamentView {
+  summary: TournamentSummary;
+  players: PlayerSummary[];
+  pairings: TournamentPairingView[];
+  standings: TournamentStanding[];
+}
+
+/**
+ * `LobbyServerMessage::TournamentCreated`'s payload
+ * (`crates/lobby-broker/src/protocol.rs:830-834`). A point reply only —
+ * `organizer_token` is minted here and is never broadcast.
+ */
+export interface TournamentCreatedReply {
+  code: string;
+  organizer_token: string;
+  view: TournamentView;
+}
+
+/**
+ * `LobbyServerMessage::TournamentJoined`'s payload
+ * (`crates/lobby-broker/src/protocol.rs:837-841`). A point reply only —
+ * `player_token` is minted here and is never broadcast.
+ */
+export interface TournamentJoinedReply {
+  code: string;
+  player_token: string;
+  view: TournamentView;
+}
+
+/**
+ * `LobbyServerMessage::TournamentUpdate`'s payload
+ * (`crates/lobby-broker/src/protocol.rs:844-847`). Both the `GetTournament`
+ * point reply and the broadcast every mutating handler fans out — the wire
+ * carries no discriminator between the two beyond `code`. See the module
+ * header of `services/tournamentClient.ts`.
+ */
+export interface TournamentUpdateReply {
+  code: string;
+  view: TournamentView;
+}
+
+/**
+ * `LobbyServerMessage::TournamentActionAck`'s payload
+ * (`crates/lobby-broker/src/protocol.rs`). The requester-only acknowledgement of
+ * one gated tournament action.
+ *
+ * `request_id` is the correlator this client minted and the broker echoed —
+ * `TournamentRequestId` is `#[serde(transparent)]` over a `u64`, so it arrives
+ * as a plain number. It identifies a **request**, never a requester, and is
+ * never an authority: the organizer/player token remains the only permission.
+ *
+ * Carries no token. Unlike `TournamentCreated` / `TournamentJoined` this point
+ * reply mints nothing — the caller already holds the credential that authorized
+ * the action.
+ */
+export interface TournamentActionAckReply {
+  request_id: number;
+  code: string;
+  view: TournamentView;
+}
+
+/**
+ * `LobbyServerMessage::TournamentActionRejected`'s payload
+ * (`crates/lobby-broker/src/protocol.rs`). The requester-only refusal of one
+ * gated tournament action, carrying the same correlator the request did.
+ *
+ * One refusal shape rather than a rejected/failed pair: the lobby draws no
+ * distinction between kinds of refusal — every one is prose from the broker's
+ * single `fn error` — so `message` is that text verbatim. No token, no view.
+ */
+export interface TournamentActionRejectedReply {
+  request_id: number;
+  message: string;
+}

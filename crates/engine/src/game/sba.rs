@@ -44,6 +44,18 @@ fn live_battlefield_object_mut<'a>(
     })
 }
 
+/// CR 205.3q + CR 310.3: does this permanent have the Siege battle type?
+/// ("Battles have a unique subtype, called a battle type.")
+///
+/// Single authority for the Siege test inside this state-based-action sweep, so
+/// the CR 704.5v zero-defense deferral and the CR 310.12a protector-legality
+/// rule can never disagree about what a Siege is. Reads the layer-derived
+/// `card_types` rather than `base_card_types`, so a type-changing effect that
+/// grants or removes the Siege battle type is honored.
+fn has_siege_type(obj: &crate::game::game_object::GameObject) -> bool {
+    obj.card_types.subtypes.iter().any(|s| s == "Siege")
+}
+
 /// CR 704.4: state-based actions pay no attention to what happens during the
 /// resolution of a spell or ability. An entry that is mid-resolution — parked on
 /// a CR 616.1 replacement-ordering choice, or on a CR 303.4f Aura-host choice —
@@ -240,9 +252,10 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 return;
             }
 
-            // CR 704.5v + CR 310.7: If a battle has defense 0 and isn't the source of an
-            // ability that has triggered but not yet left the stack, it's put into its
-            // owner's graveyard.
+            // CR 704.5v + CR 310.7: a Siege with defense 0 that isn't the source of an
+            // ability that has triggered but not yet left the stack is put into its
+            // owner's graveyard. CR 704.5w + CR 310.8: a non-Siege battle with defense 0
+            // is put into its owner's graveyard with no such deferral.
             check_zero_defense(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
                 return;
@@ -1771,9 +1784,24 @@ fn check_zero_loyalty(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
-/// CR 704.5v + CR 310.7: A battle with defense 0 is put into its owner's graveyard,
-/// unless it's the source of an ability that has triggered but not yet left the
-/// stack (e.g., the Siege's victory trigger).
+/// CR 704.5v + CR 704.5w: a battle with defense 0 is put into its owner's
+/// graveyard. The rule is split across two sub-rules by battle type, and only
+/// the Siege half carries a trigger-on-stack deferral:
+///
+/// > 704.5v If a Siege battle has defense 0 and it isn't the source of an
+/// > ability that has triggered but not yet left the stack, it's put into its
+/// > owner's graveyard.
+///
+/// > 704.5w If a non-Siege battle has defense 0, it's put into its owner's
+/// > graveyard.
+///
+/// CR 310.12b is why the carve-out is Siege-shaped: a Siege's intrinsic "when
+/// the last defense counter is removed from this permanent, exile it, then you
+/// may cast it transformed without paying its mana cost" has to find its source
+/// still on the battlefield when it resolves. A battle with any other battle
+/// type has no such intrinsic, so CR 704.5w grants it no deferral — it is put
+/// into its owner's graveyard immediately, even with one of its own triggered
+/// abilities still on the stack.
 fn check_zero_defense(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -1796,8 +1824,14 @@ fn check_zero_defense(
             if obj.defense.unwrap_or(0) != 0 {
                 return false;
             }
-            // CR 310.7: Don't SBA-destroy while one of this battle's triggered
-            // abilities is still on the stack (mirrors CR 714.4 Saga deferral).
+            // CR 704.5w: a non-Siege battle has no trigger-on-stack deferral —
+            // it dies now.
+            if !has_siege_type(obj) {
+                return true;
+            }
+            // CR 704.5v: a Siege is spared while one of its own abilities has
+            // triggered but not yet left the stack (mirrors the CR 714.4 Saga
+            // deferral), so its CR 310.12b victory trigger can resolve.
             let ability_on_stack = state.stack.iter().any(|entry| {
                 matches!(
                     &entry.kind,
@@ -1993,7 +2027,7 @@ fn check_battle_protector(
             continue;
         };
         let controller = battle.controller;
-        let is_siege = battle.card_types.subtypes.iter().any(|s| s == "Siege");
+        let is_siege = has_siege_type(battle);
         let protector = battle.protector();
 
         // Legal protectors for a Siege are opponents of the controller (CR 310.12a).

@@ -220,7 +220,37 @@ pub fn resolve(
     // destroy to the source, and there is no pool fallback below this loop —
     // substitution alone is sufficient and no early return is needed.
     // Bound before the loop: `destroy_single_object` takes `&mut GameState`.
-    let live_targets = ability.live_object_targets(state);
+    //
+    // CR 603.2 + CR 608.2k: an untargeted object anaphor on a triggered ability
+    // ("whenever ... is dealt damage, destroy IT") names an object carried by the
+    // trigger EVENT, not a target the controller chose, so `ability.targets` is
+    // empty and reading it alone destroys nothing. Resolve those referents
+    // through the shared `resolved_targets` authority, which handles every pure
+    // event-context filter uniformly via `is_pure_event_context_filter`.
+    //
+    // Deliberately the SHARED predicate rather than a handler-local
+    // `matches!(.., TriggeringSource | ..)` list: three such lists already exist
+    // (`effect.rs` covers only `TriggeringSource`; `change_zone.rs` and
+    // `attach.rs` cover `TriggeringSource | AttachedTo`) and they have diverged,
+    // because an omitted member is not a compile error — it degrades silently
+    // into "this effect does nothing". Routing through the single authority means
+    // a future event-context variant is picked up here for free.
+    //
+    // Gated on `ability.targets.is_empty()` so a genuinely targeted destroy still
+    // affects exactly the chosen targets (CR 608.2b).
+    let target_filter = match &ability.effect {
+        Effect::Destroy { target, .. } => Some(target),
+        _ => None,
+    };
+    let live_targets = match target_filter {
+        Some(filter)
+            if ability.targets.is_empty()
+                && crate::game::targeting::is_pure_event_context_filter(filter) =>
+        {
+            crate::game::targeting::resolved_targets(ability, filter, state)
+        }
+        _ => ability.live_object_targets(state),
+    };
     for target in &live_targets {
         if let TargetRef::Object(obj_id) = target {
             match destroy_single_object(state, *obj_id, ability.source_id, cant_regenerate, events)

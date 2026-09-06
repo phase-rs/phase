@@ -5972,11 +5972,39 @@ pub enum FilterProp {
     /// scanning `state.damage_dealt_this_turn` for a record whose `source_id`
     /// is this object.
     ///
-    /// Parameterization note: these two form a damage-role pair. If a third
-    /// damage-role filter appears (e.g. "dealt combat damage this turn"), fold
-    /// the pair into `DamageThisTurn { role: {Dealt, Received}, combat_only }`
-    /// per the /add-engine-variant sibling-cluster threshold.
-    DealtDamageThisTurn,
+    /// CR 608.2i: a look-back predicate — the record ledger is authoritative, so
+    /// a source that has since left the battlefield or changed characteristics
+    /// still matches. CR 514.2 clears the ledger, scoping it to the turn.
+    ///
+    /// Parameterized along the two axes the printed clause varies on, rather
+    /// than grown as siblings (`DealtCombatDamageThisTurn`,
+    /// `DealtDamageToYouThisTurn`, …):
+    ///
+    /// - `kind` (CR 120.2a / CR 120.2b) restricts to combat or noncombat damage.
+    /// - `recipient` (CR 120.1 "Objects can deal damage to … players") restricts
+    ///   WHO the damage was dealt to. `None` leaves the recipient unconstrained
+    ///   (Red Guardian's bare "dealt damage this turn").
+    ///
+    /// Covers "that dealt damage to you this turn" (Reciprocate, Retaliate,
+    /// Spear of Heliod, Giltspire Avenger, Otherworldly Escort) and
+    /// "that dealt combat damage to you this turn" (Witch-king of Angmar).
+    ///
+    /// The object-recipient forms ("that dealt damage to it this turn", Brine
+    /// Hag / Giant Albatross) are a THIRD axis and deliberately not modeled
+    /// here: they resolve against the trigger's event context, not a player
+    /// scope. Widen `recipient` to an object-or-player reference when that class
+    /// is built, rather than adding a sibling variant.
+    DealtDamageThisTurn {
+        /// CR 120.2a / CR 120.2b: which damage class counts. `Any` (the default,
+        /// and what a bare unit-variant record deserializes to) accepts both.
+        #[serde(default)]
+        kind: DamageKindFilter,
+        /// CR 120.1: the required damage recipient, as a player scope resolved
+        /// against the ability's controller ("to you" → `PlayerFilter::Controller`).
+        /// `None` = any recipient, preserving the unparameterized semantics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient: Option<PlayerFilter>,
+    },
     /// CR 400.7: Object entered the battlefield during this turn.
     /// Checks `entered_battlefield_turn == Some(current_turn)`.
     EnteredThisTurn,
@@ -8960,10 +8988,133 @@ pub enum UntilCondition {
 /// CR 117.1 + CR 400.7j + CR 608.2k: Public characteristics of an object paid
 /// as a cost for the resolving spell or ability. Effects can later refer to
 /// that object even after the cost moved it to a public zone.
+///
+/// CR 400.7 + CR 608.2k: `incarnation` is the referent's
+/// `GameObject::incarnation` at binding time. CR 608.2k keeps the reference
+/// alive across *characteristic* changes, but an object that changes zones
+/// becomes a new object (CR 400.7) that the reference must no longer name.
+/// Because the engine reuses `ObjectId` as stable storage identity, the id
+/// alone cannot distinguish "still the bound object" from "a new object at the
+/// same id"; the incarnation epoch is what separates them. Consumers that act
+/// on the *live* object (identity reads) must gate on
+/// [`CostPaidObjectSnapshot::is_current`]. Consumers that read the frozen
+/// `lki` are unaffected — LKI is the departed object's recorded state and is
+/// incarnation-safe by construction (CR 608.2h).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostPaidObjectSnapshot {
     pub object_id: ObjectId,
     pub lki: LKISnapshot,
+    /// CR 400.7: incarnation epoch captured at binding time. Legacy saves that
+    /// predate this field deserialize to [`LEGACY_INCARNATION`], which can
+    /// never equal a live object's incarnation, so such records are treated as
+    /// stale (fail-closed) rather than silently naming a new object.
+    #[serde(default = "legacy_incarnation")]
+    pub incarnation: u64,
+}
+
+/// Serde default for [`CostPaidObjectSnapshot::incarnation`] on pre-migration
+/// saves. Mirrors `ObjectIncarnationRefCompat`'s legacy arm
+/// (`types/identifiers.rs`): a record written before the incarnation was
+/// captured cannot prove which incarnation it bound, so it is pinned to a
+/// sentinel that never matches a live object.
+fn legacy_incarnation() -> u64 {
+    crate::types::identifiers::LEGACY_INCARNATION
+}
+
+impl CostPaidObjectSnapshot {
+    /// CR 400.7j + CR 608.2k: Capture the cost-paid referent from a
+    /// live object, pinning its current incarnation. The single construction
+    /// seam for production binding sites, so no seam can forget the epoch.
+    pub fn capture(object: &crate::game::game_object::GameObject, lki: LKISnapshot) -> Self {
+        Self {
+            object_id: object.id,
+            lki,
+            incarnation: object.incarnation,
+        }
+    }
+
+    /// CR 608.2c + CR 608.2h + CR 400.7: Bind a referent whose object has
+    /// already left the zone the parent instruction moved it from, so its
+    /// characteristics come from last known information rather than a live
+    /// read. The object row survives the move with its incarnation already
+    /// bumped (`game/zones.rs`), so `state_incarnation` is that post-move
+    /// epoch: the reference names the object as the parent instruction left
+    /// it, and goes stale if it moves again.
+    ///
+    /// Returns a snapshot pinned to [`LEGACY_INCARNATION`] when the row is
+    /// gone entirely (ceased to exist), which no live object can match.
+    pub fn capture_departed(
+        state: &crate::types::game_state::GameState,
+        object_id: ObjectId,
+        lki: LKISnapshot,
+    ) -> Self {
+        let incarnation = state
+            .objects
+            .get(&object_id)
+            .map_or(crate::types::identifiers::LEGACY_INCARNATION, |object| {
+                object.incarnation
+            });
+        Self {
+            object_id,
+            lki,
+            incarnation,
+        }
+    }
+
+    /// CR 400.7: True when this snapshot still names the live object it was
+    /// bound to. False when the referent left and returned (a new object at the
+    /// same storage id), when it is gone entirely, or when the record is a
+    /// pre-migration save with no captured incarnation.
+    ///
+    /// This is a strict full-pair compare and is deliberately NOT
+    /// `ResolvedAbility::target_pin_is_current`, which fails *open* when no pin
+    /// is recorded — a `CostPaidObject` referent never has an ordinary target
+    /// pin, so that check would pass for free.
+    pub fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        crate::types::identifiers::ObjectIncarnationRef::of(self.object_id, self.incarnation)
+            .is_current(state)
+    }
+
+    /// CR 400.7 + CR 608.2k: Re-pin this snapshot to the referent's CURRENT
+    /// incarnation, keeping the characteristics captured at binding time.
+    ///
+    /// Cost-payment seams necessarily capture the referent BEFORE the cost moves
+    /// it (the `lki` must record its pre-move characteristics — CR 608.2h), but
+    /// that move is the cost's own and must NOT invalidate the reference: CR
+    /// 608.2k exists so an effect can still refer to the object its cost moved.
+    /// Re-pinning once the cost's moves are complete makes the pin mean "this
+    /// object, as the cost left it", so only a LATER zone change reads as stale.
+    ///
+    /// Deliberately re-reads the live incarnation rather than assuming a fixed
+    /// increment: a cost move may be redirected by a replacement effect or pass
+    /// through more than one zone, so the delta is not reliably one.
+    ///
+    /// Leaves the pin untouched when the object no longer exists — the recorded
+    /// epoch then still cannot match any live object, which is the correct
+    /// fail-closed reading.
+    pub fn repin_to_current_incarnation(&mut self, state: &crate::types::game_state::GameState) {
+        if let Some(object) = state.objects.get(&self.object_id) {
+            self.incarnation = object.incarnation;
+        }
+    }
+
+    /// CR 400.7 + CR 608.2k: The single authority for resolving this snapshot to
+    /// a LIVE object id. Yields the id only while the snapshot still names the
+    /// object it was bound to; a referent that left (with or without returning
+    /// under the same storage id) yields `None`, and there is deliberately NO
+    /// fallback to a same-id object.
+    ///
+    /// Every live-object consumer of a `CostPaidObject` / `AmassedArmy`
+    /// referent must resolve through here rather than reading `object_id`
+    /// directly, so the identity rule has one implementation instead of one per
+    /// call site.
+    ///
+    /// This is NOT for readers of the frozen `lki`: CR 608.2h requires those to
+    /// keep reporting the departed object's recorded characteristics, so they
+    /// read `self.lki` and never call this.
+    pub fn live_object_id(&self, state: &crate::types::game_state::GameState) -> Option<ObjectId> {
+        self.is_current(state).then_some(self.object_id)
+    }
 }
 
 /// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): The mana type(s) spent to
@@ -14947,8 +15098,8 @@ pub enum Effect {
     /// of a creature card chosen from a format-defined pool whose mana value
     /// satisfies `mv <comparator> mv_bound`. The canonical card is the Momir
     /// Basic emblem ("Create a token that's a copy of a creature card with mana
-    /// value X chosen at random"). The pool is the engine's creature corpus
-    /// (`GameState::momir_pool` / `momir_pool_faces`). `selection` chooses how a
+    /// value X chosen at random"). The pool is the engine's creature corpus,
+    /// drawn from `GameState::card_db` at resolution time. `selection` chooses how a
     /// candidate is picked from the matching set: `Random` (CR 701.9a is the
     /// discard keyword action; the random *selection* here is analogous to the
     /// random-choice idiom) or `Chosen`. Built as a reusable primitive so the
@@ -18661,6 +18812,77 @@ impl TargetFilter {
         )
     }
 
+    /// CR 115.10a + CR 608.2d: True when this filter DESCRIBES a population that
+    /// a resolver may enumerate against the live board — the non-targeted
+    /// counterpart of a chosen target (CR 115.10a: being affected by a spell or
+    /// ability does not make an object a target unless it is identified by the
+    /// word "target"; CR 608.2d: an untargeted choice is made while the effect is
+    /// applied).
+    ///
+    /// POSITIVE and FAIL-CLOSED by design. A mass resolver that keys off "the
+    /// filter is not one of these bad shapes" is one unhandled shape away from a
+    /// battlefield-wide sweep: `TargetFilter::Any` matches every object
+    /// (the `TargetFilter::Any => true` arm of `game::filter::filter_inner_for_
+    /// object`), and so does a CONTENTLESS `Typed` — with empty `type_filters`
+    /// and `properties` and no `controller`, the type loop iterates nothing, the
+    /// controller check is skipped on `None`, and `properties.iter().all(..)` is
+    /// vacuously true. Those two shapes are what the parser emits for a recipient
+    /// phrase it could not classify AT ALL, so both must be refused here, and any
+    /// variant added later must be refused until someone opts it in.
+    ///
+    /// SCOPE — what this does NOT do. It refuses a recipient that parses to a
+    /// CONTENTLESS `Typed` or to `Any`. It does NOT refuse a PARTIALLY classified
+    /// recipient, and it is not a correctness check on the filter's CONTENT.
+    /// Measured examples that answer TRUE here and still resolve against a wrong
+    /// population: "each permanent that isn't a creature you control" parses to
+    /// `Typed{[Permanent], controller: None}` and "each creature and each
+    /// planeswalker you control" to `Typed{[Creature], controller: None}` — both
+    /// enumerate BOTH players' permanents; "each Spider you control and each
+    /// legendary creature you control" parses to `Typed{[Spider], You}`, silently
+    /// dropping its second conjunct. Those are pre-existing recipient misparses
+    /// (see `docs/parser-misparse-backlog.md` root cause 6 and the repeated-`each`
+    /// class), not defects of this predicate. The contract is "this filter names
+    /// SOME population", never "this filter names the RIGHT population".
+    ///
+    /// `Or`/`And` require EVERY leg to qualify — one contentless leg inside an
+    /// `Or` matches everything, so `any` (which the parse-time shape check
+    /// `oracle_target::target_filter_has_meaningful_content` uses for a
+    /// different question) would be unsound for a sweep gate.
+    ///
+    /// `Not` admits a COMPLEMENT population ("every non-creature"). That is the
+    /// one arm where "every leg enumerable" is not the same as "bounded
+    /// description"; it is kept for uniformity with `Or`/`And` rather than
+    /// silently defaulted to `false`. No counter-multiplication parse path
+    /// produces a top-level `Not` (the recipient comes from `parse_target`), so
+    /// a future consumer must re-argue this arm rather than inherit it.
+    ///
+    /// ZONE CAVEAT: this answers "is it a describable population", not "which
+    /// zone". A zone-qualified filter such as "each creature in your graveyard"
+    /// (`Typed{[Creature], You, InZone(Graveyard)}`) answers TRUE here, but a
+    /// caller that enumerates only `battlefield_phased_in_ids()` will resolve it
+    /// to nothing — which is exactly today's `MultiplyCounter` tier behaviour, so
+    /// it is no regression. Callers that must honour the zone should follow
+    /// `game::effects::resolved_battlefield_object_ids`, which reads
+    /// [`TargetFilter::extract_in_zone`].
+    ///
+    /// Deterministic anaphors (`SelfRef`, `TriggeringSource`, `ParentTarget`,
+    /// `TrackedSet`, ...) are NOT populations; they answer `false` here and are
+    /// resolved by their own tiers. Callers that accept both ask
+    /// `is_context_ref() || names_enumerable_population()`.
+    pub fn names_enumerable_population(&self) -> bool {
+        match self {
+            TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                !filters.is_empty()
+                    && filters
+                        .iter()
+                        .all(TargetFilter::names_enumerable_population)
+            }
+            TargetFilter::Not { filter } => filter.names_enumerable_population(),
+            _ => false,
+        }
+    }
+
     /// CR 115.1a + CR 109.5: Returns true when this filter's TARGET SLOT holds a
     /// player rather than an object — "target player", "target opponent", a
     /// snapshotted specific player.
@@ -18928,6 +19150,29 @@ impl Effect {
             }
             _ => {}
         }
+    }
+
+    /// CR 701.10e: true for the two effects that express "double the number of
+    /// counters on ..." — the typed form (`MultiplyCounter`, "+1/+1 counters")
+    /// and the untyped form (`Double { DoubleTarget::Counters }`, "each kind of
+    /// counter"). Both carry the multiplier intrinsically in the resolver
+    /// ("give as many of those counters as already present"), never as a
+    /// `QuantityExpr`, and both share `counters::nontargeted_counter_population_ids`
+    /// for the non-targeted population tier. Their targeted/anaphoric recipients
+    /// are resolved on separate paths: `MultiplyCounter` through
+    /// `counters::resolve_defined_or_targets`, `Double { Counters }` through
+    /// `effects::double::resolve_object_targets` → `targeting::resolved_targets`.
+    /// Single authority for that pair so the swallow detector and the
+    /// multi-target fixup cannot drift apart.
+    pub(crate) fn is_counter_multiplication(&self) -> bool {
+        matches!(
+            self,
+            Effect::MultiplyCounter { .. }
+                | Effect::Double {
+                    target_kind: DoubleTarget::Counters { .. },
+                    ..
+                }
+        )
     }
 
     pub fn target_filter(&self) -> Option<&TargetFilter> {
@@ -27329,6 +27574,39 @@ pub enum PostReplacementContinuation {
     Resolved(Box<ResolvedAbility>),
 }
 
+/// CR 611.2c vs CR 613.1: where a `ReplacementDefinition` on an object came from.
+///
+/// CR 613.1 determines the values of an object's CHARACTERISTICS, starting from
+/// the printed card — so the layer engine reseeds `replacement_definitions` from
+/// `base_replacement_definitions` every pass. CR 611.2c settles that a prevention
+/// shield is not one of those characteristics; its example says so outright:
+/// "An effect that reads 'Prevent all damage creatures would deal this turn'
+/// doesn't modify any object's characteristics, so it's modifying the rules of
+/// the game."
+///
+/// A continuous effect created by the RESOLUTION of a spell or ability (CR 611.2a)
+/// is merely STORED on a host object so the replacement pipeline can find it. It
+/// lasts as long as the ability stated (CR 611.2a) and ends when it is used up or
+/// its duration expires (CR 615.3) — not at the next layer pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ReplacementOrigin {
+    /// A printed/copiable characteristic (CR 613.1), or a per-pass static
+    /// derivation. Reset away and re-derived by every layer pass.
+    #[default]
+    Characteristic,
+    /// A continuous effect created by resolution (CR 611.2a). Survives the
+    /// CR 613.1 reset; removed only by an expiry prune or a zone change.
+    Resolution,
+}
+
+impl ReplacementOrigin {
+    /// `skip_serializing_if` predicate: the default origin emits no key, so every
+    /// pre-existing serialized `ReplacementDefinition` is byte-identical.
+    pub fn is_characteristic(&self) -> bool {
+        matches!(self, ReplacementOrigin::Characteristic)
+    }
+}
+
 /// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementDefinition {
@@ -27513,6 +27791,83 @@ pub struct ReplacementDefinition {
     /// as before (every object-attached replacement; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
+    /// CR 113.7a + CR 109.1: Installing SOURCE anchor for global pending damage
+    /// replacements whose filters, conditions, or exclusions are HOST-RELATIVE.
+    ///
+    /// The object half of `source_controller` (directly above), added for the same
+    /// reason and by the same mechanism. Global replacements live in
+    /// `pending_damage_replacements` under the sentinel `ObjectId(0)`, which has no
+    /// entry in `state.objects`, so every host-relative reference silently
+    /// mis-resolves there: `TargetFilter::SelfRef` in `damage_source_filter`
+    /// (Mercenaries, "the next time THIS CREATURE would deal damage to you"),
+    /// `SourceExclusion::Exclude` in `DamageTargetFilter::PlayerOrPermanentsControlledBy`
+    /// ("you and OTHER permanents you control"), `DamageTargetPlayerScope::SourceChosenPlayer`,
+    /// and every `ReplacementCondition` that reads its source object.
+    ///
+    /// CR 113.7a: "Once activated or triggered, an ability exists on the stack
+    /// independently of its source. Destruction or removal of the source after that
+    /// time won't affect the ability. ... if the source is no longer in the zone
+    /// it's expected to be in at that time, its last known information is used."
+    /// The effect is independent of its source but still REFERS to it, so the
+    /// reference must be carried rather than dropped.
+    ///
+    /// NOT last-known information, despite the clause the quote above ends on.
+    /// This field carries an ID, not a snapshot of the object's characteristics:
+    /// once the anchored object is gone, `state.objects.get(anchor)` is `None`, so
+    /// IDENTITY comparisons keep working on the id alone (`TargetFilter::SelfRef`
+    /// -> `object_matches_trigger_source`; `SourceExclusion::Exclude`'s
+    /// `*oid != repl_source`) while PROPERTY-READING filters and conditions fail
+    /// CLOSED. The CR 113.7a quote is cited here for its source-independence half;
+    /// implementing LKI itself is out of scope and is not claimed.
+    ///
+    /// Set at install time by `effects::install_floating_damage_replacement`, and
+    /// ONLY when the source is an object in the zone set that caller passed as
+    /// `anchor_zones` -- which is exactly the zone set THAT CALLER used to decide
+    /// object-hosting before the authority existed: `Zone::Battlefield` for
+    /// `prevent_damage::resolve`'s untargeted branch, `Zone::Battlefield |
+    /// Zone::Command` for `push_player_scoped_shield`, and EMPTY for
+    /// `create_damage_replacement`'s already-registry arm. A shield created by a
+    /// resolving instant never had a host, so it has no host identity to anchor and
+    /// keeps `None`; so does an untargeted shield from a Command-zone emblem, which
+    /// that branch already routed to the registry before this field existed.
+    /// `None` therefore reproduces the pre-anchor sentinel behavior exactly, for
+    /// every replacement that existed before this field.
+    ///
+    /// Consumed by the pending scan in `game::replacement::find_applicable_replacements`,
+    /// which fills with `source_object.unwrap_or(ObjectId(0))` every argument
+    /// position that `object_replacement_candidate_applies` fills with `obj.id`.
+    /// `ReplacementId::source` is NOT this field: it stays `ObjectId(0)`, because it
+    /// is the STORAGE discriminator that routes ~14 downstream consumers to the
+    /// registry rather than to `state.objects`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_object: Option<ObjectId>,
+    /// CR 611.2a + CR 611.2c + CR 613.1: provenance of this definition — a printed
+    /// characteristic (or per-pass derived grant) versus a continuous effect
+    /// created by the resolution of a spell or ability. See [`ReplacementOrigin`].
+    ///
+    /// Stamped ONLY by `GameObject::install_resolution_replacement`, which is the
+    /// single authority for resolution-time object installs; every parser/printed
+    /// construction leaves the `Characteristic` default. Read by
+    /// `game_object::reseed_replacements_carrying_resolution_effects` (the CR 613.1
+    /// carry-over) and `layers::settle_resolution_replacements_to_tail`.
+    ///
+    /// `origin` participates in the derived `PartialEq`, and that is LOAD-BEARING.
+    /// `layers.rs` dedups both per-pass derivation sites by whole-definition
+    /// structural equality over the LIVE set (the Riot as-enters derivation and the
+    /// `ContinuousModification::GrantReplacement` arm, both
+    /// `replacement_definitions.iter_all().any(|r| r == &replacement)`). Without
+    /// `origin` in that comparison, a CARRIED resolution shield could compare equal
+    /// to a per-pass derived grant and SUPPRESS it — the grant would silently stop
+    /// being installed while its static was still active. The dual consequence is
+    /// accepted deliberately: in the structurally-identical-but-for-`origin` case
+    /// the dedup necessarily leaves TWO entries. In practice `expiry` already
+    /// discriminates (a resolution shield carries `Some(..)`, a derived grant
+    /// `None`), so that case is synthetic; the hostile fixture
+    /// `carried_resolution_def_does_not_suppress_an_identical_derived_grant`
+    /// (`layers.rs`) pins it anyway. `source_object` (directly above) joins
+    /// `PartialEq` on exactly the same terms.
+    #[serde(default, skip_serializing_if = "ReplacementOrigin::is_characteristic")]
+    pub origin: ReplacementOrigin,
     /// CR 614.1a: For `AddCounter` replacements, whether `valid_player` scopes by
     /// the counter *recipient* (default — prevention/affected-controller doublers)
     /// or by the *actor* putting the counters (Vorinclex/Halving Season, per the
@@ -27618,6 +27973,8 @@ impl ReplacementDefinition {
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            source_object: None,
+            origin: ReplacementOrigin::Characteristic,
             counter_replacement_subject: CounterReplacementSubject::Recipient,
         }
     }
@@ -27720,6 +28077,14 @@ impl ReplacementDefinition {
             self.stamp_default_turn_expiry();
         }
         self
+    }
+
+    /// CR 611.2a + CR 611.2c: was this definition created by the RESOLUTION of a
+    /// spell or ability (rather than being a printed characteristic or a per-pass
+    /// derived grant)? Such a definition is carried across the CR 613.1 layer
+    /// reset by `game_object::reseed_replacements_carrying_resolution_effects`.
+    pub fn is_resolution_installed(&self) -> bool {
+        self.origin == ReplacementOrigin::Resolution
     }
 
     pub fn combat_scope(mut self, scope: CombatDamageScope) -> Self {
@@ -29934,6 +30299,27 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 400.7 + CR 608.2k: Re-pin this ability's (and every sub/else branch's)
+    /// cost-paid referent to its current incarnation, once the cost's own object
+    /// moves are complete. Mirrors `set_cost_paid_object_recursive`'s traversal.
+    ///
+    /// See `CostPaidObjectSnapshot::repin_to_current_incarnation`: the cost's own
+    /// move must not make the reference stale, only a later one.
+    pub fn repin_cost_paid_object_recursive(
+        &mut self,
+        state: &crate::types::game_state::GameState,
+    ) {
+        if let Some(snapshot) = self.cost_paid_object.as_mut() {
+            snapshot.repin_to_current_incarnation(state);
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.repin_cost_paid_object_recursive(state);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.repin_cost_paid_object_recursive(state);
+        }
+    }
+
     /// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): Stamp this activation's
     /// noted-mana-payment snapshot across this ability and every sub/else
     /// branch — mirrors `set_cost_paid_object_recursive`. Necessary because
@@ -30360,6 +30746,43 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// Issue #8485: `origin` and `source_object` are additive and wire-compatible.
+    ///
+    /// Both carry `#[serde(default, skip_serializing_if = ..)]`, so a plain printed
+    /// definition emits NEITHER key (every existing serialized state, including
+    /// `card-data.json`, stays byte-identical) and an old payload carrying neither
+    /// loads as `Characteristic` / `None`.
+    #[test]
+    fn replacement_origin_and_source_object_are_wire_compatible() {
+        let plain =
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone);
+        let json = serde_json::to_string(&plain).expect("serializes");
+        assert!(
+            !json.contains("origin"),
+            "a Characteristic def must emit no `origin` key: {json}"
+        );
+        assert!(
+            !json.contains("source_object"),
+            "an unanchored def must emit no `source_object` key: {json}"
+        );
+
+        // An old payload with neither key loads as Characteristic / None.
+        let loaded: ReplacementDefinition = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(loaded.origin, ReplacementOrigin::Characteristic);
+        assert_eq!(loaded.source_object, None);
+        assert!(!loaded.is_resolution_installed());
+
+        // A Resolution def with an anchor round-trips faithfully.
+        let mut stamped = plain.clone();
+        stamped.origin = ReplacementOrigin::Resolution;
+        stamped.source_object = Some(ObjectId(42));
+        let round_tripped: ReplacementDefinition =
+            serde_json::from_str(&serde_json::to_string(&stamped).expect("serializes"))
+                .expect("deserializes");
+        assert_eq!(round_tripped, stamped);
+        assert!(round_tripped.is_resolution_installed());
+    }
 
     #[test]
     fn attach_target_bindings_keep_spell_context_construction_and_wire_shape_stable() {

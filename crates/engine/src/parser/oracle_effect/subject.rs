@@ -2071,14 +2071,14 @@ fn try_parse_subject_restriction_clause(
         // ties the prohibition to the target's tap state. Without that suffix the
         // window is UNSTATED here, and it must stay `None`.
         //
-        // CR 611.2a: this value lands on BOTH the
-        // embedded `GenericEffect.duration` and the clause CARRIER below, so an
-        // injected `UntilEndOfTurn` default made both indistinguishable from a
-        // printed window and `with_clause_chain_duration` / `apply_duration_to_effect`
-        // declined to distribute the enclosing sentence's window into either.
-        // Measured: Dovin Baan, Edifice of Authority and Mythos of Vadrok print
-        // "until your next turn" on the head and had this prohibition end a full turn
-        // early. Emitting verbatim lets the head window reach it; the resolver
+        // CR 611.2a: this value lands on BOTH the embedded `GenericEffect.duration`
+        // and the clause CARRIER below, so an injected `UntilEndOfTurn` default made
+        // both indistinguishable from a printed window and
+        // `with_clause_chain_duration` / `apply_duration_to_effect` declined to
+        // distribute the enclosing sentence's window into either. Measured: Dovin
+        // Baan, Edifice of Authority and Mythos of Vadrok print "until your next turn"
+        // on the head and had this prohibition end a full turn early. Emitting
+        // verbatim lets the head window reach it; the resolver
         // (`game/effects/effect.rs`) remains the single authority for the fallback
         // when nothing is printed anywhere.
         let duration = tapped_bound_prohibition_duration(&lower);

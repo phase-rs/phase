@@ -1,13 +1,12 @@
 //! `FixedDeckKeepMulligan` — force-keep for engine-supplied fixed decks.
 //!
-//! CR 103.5: a player mulligans to find a
-//! workable opening hand. That premise assumes a varied deck where some hands
-//! are better than others. The Momir family of formats inverts it: the engine
-//! supplies a fixed 60-card all-basic-land deck (`FormatConfig::
-//! supplies_fixed_deck`) and the entire game plan is the command-zone emblem
-//! (`{X}, Discard a card: create a random creature token`). Every legal hand is
-//! seven lands, and one seven-land hand is as good as any other — there is
-//! nothing to mulligan *toward*.
+//! CR 103.5: a player mulligans to find a workable opening hand. That premise
+//! assumes a varied deck where some hands are better than others. The Momir
+//! family of formats inverts it: the engine supplies a fixed 60-card
+//! all-basic-land deck (`FormatConfig:: supplies_fixed_deck`) and the entire
+//! game plan is the command-zone emblem (`{X}, Discard a card: create a random
+//! creature token`). Every legal hand is seven lands, and one seven-land hand
+//! is as good as any other — there is nothing to mulligan *toward*.
 //!
 //! Without this force-keep, the deck-agnostic `KeepablesByLandCount` policy
 //! reads an all-land / no-spell hand as unkeepable, force-mulligans every

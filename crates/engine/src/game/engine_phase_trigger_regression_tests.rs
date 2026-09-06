@@ -3505,7 +3505,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let waiting_for = engine_replacement::apply_post_replacement_effect(
         &mut state,
         &effect_def,
-        Some(source_id),
+        engine_replacement::ContinuationSubjects::affected_only(Some(source_id)),
         None,
         None,
         Default::default(),

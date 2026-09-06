@@ -907,7 +907,17 @@ pub fn activate_mana_ability(
             "Phased-out permanents cannot activate abilities (CR 702.26b)".to_string(),
         ));
     }
-    if source.controller != player {
+    // CR 602.2 + CR 108.4a: the executor counterpart of the readiness gate in
+    // `mana_ability_ready_without_simulation_gated`. `GameAction::ActivateAbility`
+    // on a mana ability is routed straight here by `engine.rs` rather than through
+    // `casting::handle_activate_ability`, so this is where a directly-submitted
+    // mana activation is actually authorized and it must apply the same rule.
+    // CR 108.4: a card in a hand, graveyard, library or exile is neither a
+    // permanent nor a spell and so has no controller; CR 108.4a directs the ask to
+    // its owner. `controller_or_owner` is the single authority for that selection
+    // and keeps the CR 109.4c command-zone emblem on its controller. This runs
+    // ahead of the `activation_zone` check below, so it sees every zone.
+    if source.controller_or_owner() != player {
         return Err(EngineError::NotYourPriority);
     }
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
@@ -1511,10 +1521,10 @@ pub fn handle_exile_for_mana_ability(
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the cost-paid object's public
     // characteristics before it leaves its zone.
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
 
     let mut updated = pending.clone();
@@ -1558,10 +1568,10 @@ pub fn handle_sacrifice_for_mana_ability(
     }
 
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
 
     let mut updated = pending.clone();
@@ -1760,8 +1770,19 @@ fn mana_ability_ready_without_simulation_gated(
     if !obj.detained_by.is_empty() {
         return false;
     }
-    // CR 602.2a: Only the controller may activate the ability.
-    if obj.controller != player {
+    // CR 602.2: "Only an object's controller (or its owner, if it doesn't have a
+    // controller) can activate its activated ability unless the object specifically
+    // says otherwise." CR 108.4: a card is not a permanent or spell — and so has no
+    // controller — in a hand, graveyard, library or exile, and CR 108.4a directs
+    // anything asking for that controller to use the owner instead. This gate admits
+    // those zones (`activation_zone`, checked just below), so it must ask for the
+    // permission reference point rather than a raw `.controller`.
+    //
+    // `GameObject::controller_or_owner` is the single authority for that selection.
+    // Routing through it rather than swapping in `.owner` is what keeps the command
+    // zone correct: CR 109.4c makes an emblem an object that DOES have a controller
+    // while sitting in the command zone, and the helper carries that exception.
+    if obj.controller_or_owner() != player {
         return false;
     }
     // CR 113.6 + CR 113.6b: A permanent's abilities function only on the battlefield by
@@ -4746,10 +4767,10 @@ fn prepare_deterministic_exile_cost_selection(
         ));
     }
     let captured = chosen.first().and_then(|id| {
-        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
-            object_id: *id,
-            lki: obj.snapshot_for_mana_spent(),
-        })
+        state
+            .objects
+            .get(id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
     });
     let mut updated = pending.clone();
     updated.chosen_exiled = chosen;
@@ -14072,6 +14093,7 @@ mod tests {
         ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
             object_id: paid.id,
             lki: paid.snapshot_for_mana_spent(),
+            incarnation: 0,
         });
 
         let resolved = resolve_quantity_with_targets(
