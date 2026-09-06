@@ -106,6 +106,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  49 — ReplacementCondition.FirstTokenCreationEachTurn moved its required
+ *       player field to an optional active_player_req, and CopyTargetPurpose
+ *       gained a CopyTokenSource variant. Both are one-way parse breaks: the
+ *       condition's player field was REQUIRED through v48, so a v48 peer hits a
+ *       missing-field error, and the purpose tag is externally tagged, so a v48
+ *       peer hits an unknown-variant error on CopyTokenSource. Bumped in
+ *       lockstep with PROTOCOL_VERSION 66.
  *  48 — Retroactive bump for two new-tag changes that landed without one.
  *       #8501 added Effect.OpenBoosterPack and the BoosterPack arms of
  *       OutsideGameChoiceSource / OutsideGameSelection (adjacently-tagged, so
@@ -342,7 +349,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 48 as const;
+export const WIRE_PROTOCOL_VERSION = 49 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

@@ -25695,13 +25695,18 @@ pub enum ReplacementCondition {
     /// shared `GameState::players_who_created_token_this_turn` primitive: it is
     /// consumed by the first token the controller creates this turn, so a source
     /// that enters mid-turn AFTER an earlier creation does NOT fire (official
-    /// ruling). `player` carries the reusable you/opponent axis (`ControllerRef`),
-    /// mirroring the other controller-relative conditions; the eval arm ignores it
-    /// because ownership is enforced by the replacement's `token_owner_scope`, but
-    /// keeping the field preserves the you/opponent axis for a future
-    /// opponent-scoped "first time an opponent would create…" variant (which would
-    /// also parameterize the eval's player resolution) rather than adding a sibling.
-    FirstTokenCreationEachTurn { player: ControllerRef },
+    /// ruling). `active_player_req` optionally scopes the window to whose turn it is
+    /// (CR 102.1: the active player is the player whose turn it is): `None` = any
+    /// turn (Moonlit Meditation's bare "each turn"); `Some(You)` = the controller's
+    /// own turns only ("during each of your turns"). The orthogonal WHOSE-TOKENS
+    /// axis is owned by the replacement's `token_owner_scope`, which is why there is
+    /// no second `ControllerRef` here: the window key is the event's creating player
+    /// (`players_who_created_token_this_turn`), which is a `PlayerId`, not a
+    /// `ControllerRef`.
+    FirstTokenCreationEachTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_player_req: Option<ControllerRef>,
+    },
     /// CR 121.1 + CR 504.1 + CR 614.6: "except the first one you draw in each
     /// of your draw steps" — the replacement applies to every card-draw EXCEPT
     /// the draw step's mandatory first draw (the active player's CR 504.1
@@ -28347,7 +28352,9 @@ pub struct LatchedCopiableSnapshot {
 /// enter-as-a-copy waits) resolves the entering object into a copy of the
 /// chosen permanent. `PersistChosenAttribute` (Metamorphic Alteration) latches
 /// the chosen permanent's copiable values onto the source Aura and installs a
-/// copy effect on the Aura's enchanted host instead.
+/// copy effect on the Aura's enchanted host instead. `CopyTokenSource` (Esix,
+/// Fractal Bloom) uses the chosen permanent as the copy SOURCE for a token-creation
+/// substitution, transforming nothing and latching nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
 pub enum CopyTargetPurpose {
@@ -28360,6 +28367,11 @@ pub enum CopyTargetPurpose {
     /// latched and applied to a *separate* recipient (the source Aura's host)
     /// rather than to the entering object. Metamorphic Alteration.
     PersistChosenAttribute,
+    /// CR 707.1 + CR 614.1a: the chosen permanent is the **copy source** for a
+    /// token-creation substitution — the replacement creates that many tokens
+    /// that are copies of it (Esix, Fractal Bloom). Unlike `BecomeCopy`, nothing
+    /// is transformed; unlike `PersistChosenAttribute`, nothing is latched.
+    CopyTokenSource,
 }
 
 /// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a

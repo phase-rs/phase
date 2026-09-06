@@ -9609,7 +9609,7 @@ fn parse_first_time_token_copy_of_host_replacement(
         ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
             .condition(ReplacementCondition::FirstTokenCreationEachTurn {
-                player: ControllerRef::You,
+                active_player_req: None,
             })
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,

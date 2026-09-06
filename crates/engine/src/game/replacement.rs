@@ -6489,11 +6489,16 @@ fn evaluate_replacement_condition(
         // you create for the rest of the turn." CR 614.5: the substitute copies don't
         // reopen the window — replacement re-entry is already suppressed by the
         // applied-set check before this condition is reached, so counting the copies
-        // in the per-player set is harmless. `token_owner_scope(You)` constrains the
-        // event's creator to `controller`, so `player` need not be re-resolved here.
-        ReplacementCondition::FirstTokenCreationEachTurn { player: _ } => !state
-            .players_who_created_token_this_turn
-            .contains(&controller),
+        // in the per-player set is harmless. CR 102.1: the optional turn-scope gate
+        // (`Some(You)` = the controller's own turns only) is delegated to
+        // `replacement_active_player_matches`, which returns `true` for `None` — the
+        // unqualified "each turn" window.
+        ReplacementCondition::FirstTokenCreationEachTurn { active_player_req } => {
+            replacement_active_player_matches(active_player_req.clone(), state, controller)
+                && !state
+                    .players_who_created_token_this_turn
+                    .contains(&controller)
+        }
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.
