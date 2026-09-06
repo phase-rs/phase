@@ -1910,13 +1910,24 @@ impl GameObject {
                             Arc::make_mut(&mut self.base_static_definitions).push(synthetic);
                         }
                         // CR 113.3a + CR 113.3b: the quoted body classified to a
-                        // full spell/activated ability (Agent of Raffine's "You
-                        // may spend mana as though it were mana of any color to
-                        // cast this spell.") rather than a bare keyword or
-                        // restriction static. Mirrors the NON-perpetual layer-6
-                        // `GrantAbility` apply (`game/layers.rs`): push onto
-                        // BOTH the live `abilities` (so a from-hand cast sees
-                        // it immediately — this grant typically lands on a
+                        // full spell/activated ability -- Topsoil Turner's "{T}:
+                        // Add {G}{G}." and Ethereal Grasp's "{8}: Untap this
+                        // creature." (both CR 113.3b activated abilities: a cost
+                        // and an effect) reach here. A quoted body that instead
+                        // reads as a STATIC (CR 113.3d) but was misclassified by
+                        // `classify_quoted_inner`'s spell/activated fallback --
+                        // Agent of Raffine's "You may spend mana as though it
+                        // were mana of any color to cast this spell.", a
+                        // `GenericEffect`-wrapped static smuggled in as a
+                        // costless spell-kind body -- never reaches this arm:
+                        // `PerpetualGrantModification::try_from`
+                        // (`types/ability.rs`) rejects that shape upstream,
+                        // since this installer has no step that would extract
+                        // the nested static into `static_definitions` /
+                        // `base_static_definitions`. Mirrors the NON-perpetual
+                        // layer-6 `GrantAbility` apply (`game/layers.rs`): push
+                        // onto BOTH the live `abilities` (so a from-hand cast
+                        // sees it immediately — this grant typically lands on a
                         // card sitting in hand, not on the battlefield, so
                         // there is no layer pass to populate it from base) and
                         // `base_abilities` (so it survives the battlefield

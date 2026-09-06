@@ -619,6 +619,198 @@ mod tests {
         );
     }
 
+    /// Runtime regression (PR #8494 Blocker 2, matthewevans): Agent of
+    /// Raffine's exact granted body -- verified against MTGJSON's
+    /// `AtomicCards.json` -- "{2}, {T}: Choose target opponent. Conjure a
+    /// duplicate of the top card of their library into your hand. It
+    /// perpetually gains \"You may spend mana as though it were mana of any
+    /// color to cast this spell.\" Then they exile the top card of their
+    /// library face down." routes its quoted grant body through
+    /// `classify_quoted_inner`'s CR 113.3a + CR 113.3b fallback to
+    /// `GrantAbility` wrapping `Effect::GenericEffect { static_abilities:
+    /// [SpendManaAsAnyColor { spell_filter: None, .. }], target:
+    /// Some(Controller), .. }`. Before this fix,
+    /// `PerpetualGrantModification::try_from`'s `GrantAbility` arm rejected
+    /// only an `Effect::Unimplemented`-bearing tree (Blocker 1); a
+    /// `GenericEffect` is not `Unimplemented`, so it was ACCEPTED -- a green
+    /// `Effect::ApplyPerpetual` that pushed the whole granted
+    /// `AbilityDefinition` onto the conjured duplicate's
+    /// `abilities`/`base_abilities` (wrongly board-wide in scope, AND never
+    /// even checked: `static_abilities.rs`'s
+    /// `player_can_spend_as_any_color_for_spell_object` only ever scans
+    /// `game_active_statics` -- battlefield + command zone -- never hand or
+    /// the stack, per CR 113.6e the very zones this self-cast concession
+    /// would need to function in).
+    ///
+    /// Drives the REAL resolvers end to end: a real `Effect::Conjure`
+    /// (mirroring `perpetual_grant_after_conjure_installs_on_conjured_object_not_source`
+    /// above) produces the actual duplicate object with a real `{U}` mana
+    /// cost copied from the duplicated card, the real parser classifies the
+    /// exact quoted grant text, and -- matching production
+    /// (`effects/mod.rs` dispatches `Effect::ApplyPerpetual` to
+    /// `perpetual::resolve` and treats `Effect::Unimplemented` as a no-op,
+    /// per `effects/mod.rs`'s `Effect::Unimplemented` arm) -- whatever the
+    /// parse produces is applied (or not) exactly as a real game would. The
+    /// duplicate is then CAST for real with only off-color mana in the pool.
+    ///
+    /// Mutation-tested: reverting the `types/ability.rs` gate makes
+    /// `parse_effect` return `Effect::ApplyPerpetual` again, so this test's
+    /// `match` takes the "install the modification" arm, the duplicate
+    /// receives the extra granted ability, and the first assertion below
+    /// (no extra ability on the duplicate) fails.
+    #[test]
+    fn perpetual_grant_ability_rejects_agent_of_raffine_spend_any_color_to_cast_this_spell() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::ability::{ConjureCard, ConjureSource};
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::CastPaymentMode;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let source_id = create_object(
+            &mut scenario.state,
+            CardId(1),
+            PlayerId(0),
+            "Agent of Raffine".to_string(),
+            Zone::Battlefield,
+        );
+        // The card Agent of Raffine's ability duplicates -- a real object so
+        // the conjured copy inherits a genuine mana cost.
+        let filler_id = create_object(
+            &mut scenario.state,
+            CardId(2),
+            PlayerId(1),
+            "Filler Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let filler = scenario.state.objects.get_mut(&filler_id).unwrap();
+            filler.card_types.core_types.push(CoreType::Creature);
+            filler.base_card_types = filler.card_types.clone();
+            let cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+            filler.mana_cost = cost.clone();
+            // `Effect::Conjure`'s duplicate snapshot reads INTRINSIC copiable
+            // values (`printed_cards::intrinsic_copiable_values`), which pulls
+            // `base_mana_cost`, not the live `mana_cost` -- both must be set
+            // or the conjured duplicate inherits the (unset, zero) default
+            // cost instead of the filler's real {U}.
+            filler.base_mana_cost = cost;
+        }
+
+        let conjure_ability = ResolvedAbility::new(
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    source: ConjureSource::Duplicate {
+                        duplicate_of: TargetFilter::SpecificObject { id: filler_id },
+                    },
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                }],
+                destination: Zone::Hand,
+                tapped: false,
+                library_position: None,
+                library_players: None,
+            },
+            vec![TargetRef::Object(filler_id)],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::conjure::resolve(&mut scenario.state, &conjure_ability, &mut events)
+            .unwrap();
+
+        let duplicate_id = *scenario
+            .state
+            .last_created_token_ids
+            .first()
+            .expect("Conjure must publish the conjured object as the chain-created referent");
+        let abilities_before = scenario.state.objects[&duplicate_id].abilities.len();
+
+        // MTGJSON AtomicCards.json (verified 2026-09-06): Agent of Raffine's
+        // exact granted quoted body.
+        let granted_text =
+            "you may spend mana as though it were mana of any color to cast this spell.";
+        let sentence = format!("that card perpetually gains \"{granted_text}\"");
+        let effect = crate::parser::oracle_effect::parse_effect(&sentence);
+
+        match effect {
+            Effect::Unimplemented { .. } => {
+                // Fail-closed: nothing is installed, matching production (the
+                // whole clause never reaches Effect::ApplyPerpetual).
+            }
+            Effect::ApplyPerpetual { modification, .. } => {
+                // Pre-fix behavior: install exactly as
+                // effects/perpetual.rs::resolve would for this modification.
+                scenario
+                    .state
+                    .objects
+                    .get_mut(&duplicate_id)
+                    .unwrap()
+                    .apply_perpetual_modification(&modification, &[]);
+            }
+            other => panic!("expected ApplyPerpetual or Unimplemented, got {other:?}"),
+        }
+
+        {
+            let duplicate = scenario.state.objects.get(&duplicate_id).unwrap();
+            assert_eq!(
+                duplicate.abilities.len(),
+                abilities_before,
+                "the conjured duplicate must receive no extra granted ability -- \
+                 Agent of Raffine's mana concession must fail closed, not install \
+                 a board-wide, never-checked no-op ability"
+            );
+            assert!(
+                duplicate.perpetual_mods.is_empty(),
+                "the conjured duplicate must record no perpetual modification"
+            );
+        }
+
+        // Cast the actual recipient object with only off-color (Green) mana
+        // in the pool. `CastPaymentMode::Auto` requires
+        // `can_pay_cost_after_auto_tap` to prove the pool actually covers the
+        // {U} cost before the cast is allowed to proceed at all
+        // (`casting_costs.rs`); with only Green available it cannot, and the
+        // action is rejected outright. If the (rejected) grant had somehow
+        // leaked an any-color concession, {U} would be payable with only
+        // Green in the pool and this cast would succeed; an honest failure
+        // here proves no false green.
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![ManaUnit::new(
+                ManaType::Green,
+                ObjectId(9_999),
+                false,
+                vec![],
+            )],
+        );
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&duplicate_id].card_id;
+        let result = runner.act(GameAction::CastSpell {
+            object_id: duplicate_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        });
+        assert!(
+            result.is_err(),
+            "casting the conjured duplicate with only off-color mana must fail -- \
+             no any-color concession may have leaked from the rejected grant, got {:?}",
+            result
+        );
+        assert_eq!(
+            runner.state().objects[&duplicate_id].zone,
+            Zone::Hand,
+            "a rejected cast must leave the card in hand, not on the stack"
+        );
+    }
+
     #[test]
     fn perpetual_grant_keywords_parent_target_uses_stationed_event() {
         use crate::types::ability::TargetFilter;
