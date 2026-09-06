@@ -6549,7 +6549,9 @@ fn damage_any_target_legal_targets(
 /// optional, and additional-cost-paid clauses retain their announced targets
 /// (CR 601.2c / CR 603.3d).
 fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
-    matches!(&sub.condition, Some(AbilityCondition::WhenYouDo))
+    sub.condition
+        .as_ref()
+        .is_some_and(AbilityCondition::has_when_you_do_marker)
         || matches!(
             &sub.condition,
             Some(AbilityCondition::AdditionalCostPaidInstead) if !sub.context.additional_cost_paid

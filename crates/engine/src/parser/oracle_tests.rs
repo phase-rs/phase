@@ -16235,21 +16235,35 @@ fn earthbender_ascension_landfall_chain() {
         def.effect,
     );
 
-    // Node 2: PutCounter(P1P1, 1, Typed(creature+You)), condition = QuantityCheck(quest >= 4)
+    // Node 2: PutCounter(P1P1, 1, Typed(creature+You)), condition = the
+    // reflexive marker plus QuantityCheck(quest >= 4).
     let node2 = def
         .sub_ability
         .as_ref()
         .expect("should have node 2 (P1P1 counter)");
+    let Some(AbilityCondition::And { conditions }) = &node2.condition else {
+        panic!(
+            "Node 2 must keep both the reflexive marker and quest gate, got {:?}",
+            node2.condition
+        );
+    };
     assert!(
-        matches!(
-            &node2.condition,
-            Some(AbilityCondition::QuantityCheck {
+        node2
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker),
+        "Node 2 must remain a separate reflexive trigger"
+    );
+    assert!(
+        conditions.iter().any(|condition| matches!(
+            condition,
+            AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref { qty: QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(counter_type) } },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
-            }) if *counter_type == crate::types::counter::CounterType::Generic("quest".to_string())
-        ),
-        "Node 2 condition should be QuantityCheck(quest >= 4), got {:?}",
+            } if *counter_type == crate::types::counter::CounterType::Generic("quest".to_string())
+        )),
+        "Node 2 condition should retain QuantityCheck(quest >= 4), got {:?}",
         node2.condition,
     );
     match &*node2.effect {
@@ -16294,6 +16308,60 @@ fn earthbender_ascension_landfall_chain() {
         }
         other => panic!("Node 3 should be GenericEffect(trample), got {other:?}"),
     }
+}
+
+/// SHAPE — CR 603.12 + CR 608.2c: the reflexive marker and its ordinary
+/// graveyard threshold are distinct facts. The marker creates the separate
+/// trigger; the quantity check remains on that trigger for resolution.
+#[test]
+fn a_sigil_of_myrkul_keeps_reflexive_marker_and_graveyard_guard() {
+    use crate::types::ability::{
+        AbilityCondition, Comparator, CountScope, QuantityExpr, QuantityRef, TypeFilter, ZoneRef,
+    };
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, mill a card. When you do, if there are four or more creature cards in your graveyard, put a +1/+1 counter on target creature you control and it gains deathtouch until end of turn.",
+        "A-Sigil of Myrkul",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("the beginning-of-combat trigger must parse");
+    assert!(
+        matches!(*execute.effect, Effect::Mill { .. }),
+        "the antecedent mill must remain the parent instruction"
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("the counter rider must remain attached to the mill");
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::when_you_do_with_guard(
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            },
+        )),
+        "the rider must be a CR 603.12 reflexive trigger with its own CR 608.2c guard"
+    );
+    assert!(
+        matches!(*rider.effect, Effect::PutCounter { .. }),
+        "the guarded reflexive body must still reach the +1/+1 instruction"
+    );
 }
 
 #[test]

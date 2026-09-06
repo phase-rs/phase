@@ -22015,7 +22015,7 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
         if let Some(cond) = prev.condition.as_ref() {
             if skip_first_conditional && !skipped_conditional {
                 skipped_conditional = true;
-            } else if *cond != AbilityCondition::WhenYouDo {
+            } else if !cond.has_when_you_do_marker() {
                 return false;
             }
         }
@@ -22164,7 +22164,7 @@ fn chain_prior_referent_is_created_token(clauses: &[ClauseIr]) -> bool {
         if prev
             .condition
             .as_ref()
-            .is_some_and(|c| !c.is_affirmative_reflexive_gate())
+            .is_some_and(|c| !c.has_when_you_do_marker() && !c.is_affirmative_reflexive_gate())
         {
             return false;
         }
@@ -22266,7 +22266,7 @@ fn chain_source_becomes_attachment(clauses: &[ClauseIr]) -> bool {
         if prev
             .condition
             .as_ref()
-            .is_some_and(|c| !c.is_affirmative_reflexive_gate())
+            .is_some_and(|c| !c.has_when_you_do_marker() && !c.is_affirmative_reflexive_gate())
         {
             return false;
         }
@@ -34877,7 +34877,7 @@ pub(crate) fn parse_effect_chain_ir(
                 _ => (None, text),
             };
         let (if_you_do, text) = if condition.is_none() {
-            strip_if_you_do_conditional(&text)
+            strip_if_you_do_conditional_with_context(&text, ctx)
         } else {
             (None, text)
         };
@@ -34997,12 +34997,11 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             (None, text)
         };
-        let condition = condition
+        let guard_condition = condition
             .or(counter_cond)
             .or(mv_cond)
             .or(superlative_target_cond)
             .or(target_supertype_cond)
-            .or(if_you_do)
             .or(cast_from_zone)
             .or(card_type_cond)
             .or(property_cond)
@@ -35010,6 +35009,16 @@ pub(crate) fn parse_effect_chain_ir(
             .or(turn_cond)
             .or(keyword_instead_cond)
             .or(suffix_cond);
+        let condition = match (if_you_do, guard_condition) {
+            (Some(reflexive), Some(guard)) if reflexive.has_when_you_do_marker() => {
+                Some(reflexive.with_when_you_do_guard(guard))
+            }
+            // Preserve the established specialized-condition precedence for
+            // non-marker reflexive connectors (for example "if they don't").
+            (_, Some(guard)) => Some(guard),
+            (Some(reflexive), None) => Some(reflexive),
+            (None, None) => None,
+        };
         // CR 608.2c + CR 608.2d: When NO typed condition matched any pass above,
         // fall back to a structural-only strip that removes an unrepresentable
         // `If <X>, ` head ONLY when the body begins with `"you may "`. This

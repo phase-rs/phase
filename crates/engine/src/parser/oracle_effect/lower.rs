@@ -3231,11 +3231,9 @@ pub(super) fn relink_gated_token_referent_consumers(defs: &mut [AbilityDefinitio
         else {
             continue;
         };
-        if !defs[publisher]
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::is_affirmative_reflexive_gate)
-        {
+        if !defs[publisher].condition.as_ref().is_some_and(|condition| {
+            condition.has_when_you_do_marker() || condition.is_affirmative_reflexive_gate()
+        }) {
             continue;
         }
         if !gated_instruction_reaches(&defs[publisher..i]) {
@@ -3499,11 +3497,9 @@ pub(super) fn clone_would_transplant_gated_referent(
     else {
         return false;
     };
-    if !defs[publisher]
-        .condition
-        .as_ref()
-        .is_some_and(AbilityCondition::is_affirmative_reflexive_gate)
-    {
+    if !defs[publisher].condition.as_ref().is_some_and(|condition| {
+        condition.has_when_you_do_marker() || condition.is_affirmative_reflexive_gate()
+    }) {
         return false;
     }
     let mut probe = defs.to_vec();

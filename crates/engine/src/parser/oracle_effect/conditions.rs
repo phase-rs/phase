@@ -1030,6 +1030,36 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     (None, text.to_string())
 }
 
+/// CR 603.12 + CR 608.2c: A reflexive connector can introduce a separate
+/// triggered ability whose body is also guarded by an ordinary resolution-time
+/// condition: "When you do, if <condition>, <body>." Keep the creation marker
+/// and the guard as a flat root `And`, so the runtime can materialize the
+/// reflexive trigger first and then evaluate the guard on that stack object.
+///
+/// The general conditional parser is deliberately conservative. If it cannot
+/// represent the guard, it returns the original remainder untouched; downstream
+/// specialized strippers (for example counter thresholds) still get their
+/// established chance to parse it, and a genuinely unsupported guard reaches
+/// the normal `Unimplemented` diagnostic path instead of being swallowed.
+pub(super) fn strip_if_you_do_conditional_with_context(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (Option<AbilityCondition>, String) {
+    let (condition, remainder) = strip_if_you_do_conditional(text);
+    let Some(condition) = condition else {
+        return (None, remainder);
+    };
+    if !condition.has_when_you_do_marker() {
+        return (Some(condition), remainder);
+    }
+
+    let (guard, body) = strip_leading_general_conditional(&remainder, ctx);
+    match guard {
+        Some(guard) => (Some(condition.with_when_you_do_guard(guard)), body),
+        None => (Some(condition), remainder),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum UnlessSuffixStrip {
     Absent,
@@ -8644,6 +8674,19 @@ mod tests {
             assert_eq!(&condition, expected, "condition mismatch for {input:?}");
             assert_eq!(rest, "draw a card", "rest mismatch for {input:?}");
         }
+    }
+
+    #[test]
+    fn reflexive_connector_keeps_an_unrecognized_following_guard_unconsumed() {
+        let text = "When you do, if the moon is blue, draw a card";
+        let (condition, body) =
+            strip_if_you_do_conditional_with_context(text, &mut ParseContext::default());
+
+        assert_eq!(condition, Some(AbilityCondition::WhenYouDo));
+        assert_eq!(
+            body, "if the moon is blue, draw a card",
+            "an unsupported guard must continue to the strict normal parse path"
+        );
     }
 
     #[test]

@@ -2454,9 +2454,7 @@ fn try_begin_deferred_else_branch_target_selection(
 /// Every OTHER chain condition — `EffectOutcome`, `QuantityCheck`, intervening
 /// `if` gates — is left intact and is still re-checked at resolution (CR 603.4).
 fn consume_reflexive_creation_gate(ability: &mut ResolvedAbility) {
-    if ability.condition == Some(AbilityCondition::WhenYouDo) {
-        ability.condition = None;
-    }
+    AbilityCondition::take_when_you_do_marker(&mut ability.condition);
     if let Some(sub) = ability.sub_ability.as_deref_mut() {
         consume_reflexive_creation_gate(sub);
     }
@@ -2481,10 +2479,10 @@ fn build_reflexive_pending_trigger(
     // consume below strips only `WhenYouDo`, so a `QuantityCheck` survives onto
     // the stack object and is re-checked at resolution per CR 603.4.
     debug_assert!(
-        matches!(
-            ability.condition,
-            Some(AbilityCondition::WhenYouDo) | Some(AbilityCondition::QuantityCheck { .. })
-        ),
+        ability.condition.as_ref().is_some_and(|condition| {
+            condition.has_when_you_do_marker()
+                || matches!(condition, AbilityCondition::QuantityCheck { .. })
+        }),
         "build_reflexive_pending_trigger requires a WhenYouDo or QuantityCheck gate"
     );
     consume_reflexive_creation_gate(&mut ability);
@@ -2557,7 +2555,10 @@ fn try_materialize_reflexive_trigger_inner(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<bool, EffectError> {
-    let creates_reflexive_trigger = reflexive.condition == Some(AbilityCondition::WhenYouDo);
+    let creates_reflexive_trigger = reflexive
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::has_when_you_do_marker);
     if !creates_reflexive_trigger && !reflexive.targets.is_empty() {
         return Ok(false);
     }
@@ -3939,7 +3940,7 @@ fn condition_depends_on_result_object(condition: &AbilityCondition) -> bool {
 /// (`IfYouDo` / composite `Or{[IfYouDo,…]}`). Predicate helper, not rule code.
 fn sub_ability_is_reflexive(sub: &ResolvedAbility) -> bool {
     match &sub.condition {
-        Some(AbilityCondition::WhenYouDo) => true,
+        Some(condition) if condition.has_when_you_do_marker() => true,
         Some(condition) => condition_depends_on_effect_performed(condition),
         None => false,
     }
@@ -3947,7 +3948,7 @@ fn sub_ability_is_reflexive(sub: &ResolvedAbility) -> bool {
 
 fn sub_ability_target_belongs_to_reflexive_context(sub: &ResolvedAbility) -> bool {
     match &sub.condition {
-        Some(AbilityCondition::WhenYouDo) => true,
+        Some(condition) if condition.has_when_you_do_marker() => true,
         Some(condition) => {
             condition_depends_on_effect_performed(condition)
                 || condition_depends_on_zone_change_this_way(condition)
@@ -6758,7 +6759,7 @@ fn when_you_do_mandatory_parent_did_nothing(
     parent: &ResolvedAbility,
     parent_events: &[GameEvent],
 ) -> bool {
-    matches!(condition, AbilityCondition::WhenYouDo)
+    condition.has_when_you_do_marker()
         && !parent.optional
         && !parent.context.optional_effect_performed
         && !effect_manages_own_outcome_flag(&parent.effect)
@@ -8103,10 +8104,11 @@ pub(crate) fn is_repeated_optional_payment(ability: &ResolvedAbility) -> bool {
     ability.optional
         && is_synchronous_mana_pay_cost(&ability.effect)
         && matches!(ability.repeat_for, Some(QuantityExpr::Fixed { .. }))
-        && ability
-            .sub_ability
-            .as_ref()
-            .is_some_and(|sub| sub.condition == Some(AbilityCondition::WhenYouDo))
+        && ability.sub_ability.as_ref().is_some_and(|sub| {
+            sub.condition
+                .as_ref()
+                .is_some_and(AbilityCondition::has_when_you_do_marker)
+        })
 }
 
 /// CR 118.1: A `PayCost` whose cost is a pure, fully-static mana cost — the only
@@ -12164,10 +12166,9 @@ fn resolve_chain_body(
         // interactive `DiscardChoice`) carries its gate on `ability.condition`
         // itself, not as a parent's `sub_ability`. Mirror the reflexive target
         // selection path used for inline sub-chains.
-        if matches!(
-            condition,
-            AbilityCondition::WhenYouDo | AbilityCondition::QuantityCheck { .. }
-        ) && try_materialize_reflexive_trigger(state, ability, None, None, events, depth)?
+        if (condition.has_when_you_do_marker()
+            || matches!(condition, AbilityCondition::QuantityCheck { .. }))
+            && try_materialize_reflexive_trigger(state, ability, None, None, events, depth)?
         {
             return Ok(());
         }
@@ -13858,7 +13859,7 @@ fn resolve_chain_body(
                     || (matches!(ability.effect, Effect::Discard { .. } | Effect::DiscardCard { .. })
                         && condition_depends_on_graveyard_size(condition))
                     || condition_depends_on_last_created(condition)
-                    || matches!(condition, AbilityCondition::WhenYouDo)
+                    || condition.has_when_you_do_marker()
                     || (matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
                         && condition_depends_on_result_object(condition))
                     || condition_awaits_resolution_only_referent(condition, state, ability))
@@ -14053,17 +14054,17 @@ fn resolve_chain_body(
             }
 
             // CR 603.12: Deferred reflexive target selection for inline sub-chains.
-            if matches!(
-                condition,
-                AbilityCondition::WhenYouDo | AbilityCondition::QuantityCheck { .. }
-            ) && try_materialize_reflexive_trigger(
-                state,
-                sub,
-                Some(ability),
-                effect_context_object.as_ref(),
-                events,
-                depth,
-            )? {
+            if (condition.has_when_you_do_marker()
+                || matches!(condition, AbilityCondition::QuantityCheck { .. }))
+                && try_materialize_reflexive_trigger(
+                    state,
+                    sub,
+                    Some(ability),
+                    effect_context_object.as_ref(),
+                    events,
+                    depth,
+                )?
+            {
                 return Ok(());
             }
         }
