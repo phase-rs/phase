@@ -73,6 +73,7 @@ import type {
   TournamentSummary,
   TournamentView,
 } from "../../adapter/types";
+import { LOBBY_PROTOCOL_VERSION } from "../../adapter/ws-adapter";
 import {
   expectCatalogValuePresent,
   expectNoRawKeyPaths,
@@ -114,6 +115,7 @@ function makeFakeSocket() {
         buildCommit: "test",
         mode: "LobbyOnly" as const,
         protocolVersion: 14,
+        lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
       },
       ws,
       close: vi.fn(),
@@ -463,9 +465,15 @@ describe("TournamentPage gated actions render from the broadcast", () => {
       // page cannot satisfy the assertions below vacuously.
       expect(fake.tally(frame)).toBe(1);
 
-      // The `Error` frame settles the RPC `{ok:false}`.
+      // The correlated `TournamentActionRejected` (Phase B) settles the gated
+      // RPC `{ok:false}`; a bare `Error` no longer settles a correlated action.
+      const requestId = (fake.frame(frame)?.data as { request_id: number })
+        .request_id;
       await act(async () => {
-        fake.deliver("Error", { message: "broker said no" });
+        fake.deliver("TournamentActionRejected", {
+          request_id: requestId,
+          message: "broker said no",
+        });
       });
       await settle();
       expect(screen.getByRole("alert").textContent).toBe(
@@ -1039,11 +1047,17 @@ describe("TournamentPage concurrent action gating", () => {
     expect(start().textContent).toBe("Starting…");
     expect(start().disabled).toBe(true);
 
-    // Paired positive: once Start's OWN response settles, both controls come
-    // back. Without this, a page that could never re-enable anything would
-    // satisfy every assertion above.
+    // Paired positive: once Start's OWN response settles (its correlated
+    // `TournamentActionAck`), both controls come back. Without this, a page
+    // that could never re-enable anything would satisfy every assertion above.
     await act(async () => {
-      fake.deliver("TournamentUpdate", { code: "TOUR01", view: h2hView() });
+      fake.deliver("TournamentActionAck", {
+        request_id: (fake.frame("StartTournamentRound")?.data as {
+          request_id: number;
+        }).request_id,
+        code: "TOUR01",
+        view: h2hView(),
+      });
     });
     await settle();
     expect(start().disabled).toBe(false);
@@ -1114,10 +1128,16 @@ describe("TournamentPage concurrent action gating", () => {
     await settle();
     expect(fake.tally("ReportMatchResult")).toBe(0);
 
-    // Paired positive: the drop settles, and the same dialog becomes
-    // submittable — with the report frame going out for real.
+    // Paired positive: the drop settles (its correlated `TournamentActionAck`),
+    // and the same dialog becomes submittable — report frame going out for real.
     await act(async () => {
-      fake.deliver("TournamentUpdate", { code: "TOUR01", view: h2hView() });
+      fake.deliver("TournamentActionAck", {
+        request_id: (fake.frame("DropFromTournament")?.data as {
+          request_id: number;
+        }).request_id,
+        code: "TOUR01",
+        view: h2hView(),
+      });
     });
     await settle();
     const released = within(screen.getByRole("dialog")).getByRole("button", {
@@ -1213,24 +1233,27 @@ describe("TournamentPage :code navigation", () => {
 
     await user.click(screen.getByRole("button", { name: "End Tournament" }));
     await settle();
-    // Reach-guard: TOUR01's request really is in flight, so the `Error` frame
-    // below has something of TOUR01's to settle.
+    // Reach-guard: TOUR01's request really is in flight, so the rejection
+    // frame below has something of TOUR01's to settle.
     expect(fake.tally("EndTournament")).toBe(1);
 
     await navigateToCode(router, "TOUR02");
-    // Settle TOUR02's OWN seed before the shared `Error` frame goes out: an
-    // `Error` carries no correlator and settles every request in flight on the
-    // socket (`tournamentClient.ts` header, part 5), and a failure for TOUR02's
-    // seed would be a legitimate alert that masks what this test measures.
+    // Render TOUR02 from its broadcast so the page below is showing TOUR02.
+    // (TOUR01's rejection is now correlated to TOUR01's own request_id, so it
+    // cannot bleed onto TOUR02's in-flight seed — see `tournamentClient.ts`.)
     await act(async () => {
       fake.deliver("TournamentUpdate", { code: "TOUR02", view: h2hView("TOUR02") });
     });
     await settle();
     expect(screen.getByText("Event TOUR02")).toBeTruthy();
 
-    // TOUR01's rejection arrives now, against a page showing TOUR02.
+    // TOUR01's correlated rejection arrives now, against a page showing TOUR02.
     await act(async () => {
-      fake.deliver("Error", { message: "TOUR01 said no" });
+      fake.deliver("TournamentActionRejected", {
+        request_id: (fake.frame("EndTournament", 0)?.data as { request_id: number })
+          .request_id,
+        message: "TOUR01 said no",
+      });
     });
     await settle();
 
@@ -1244,7 +1267,11 @@ describe("TournamentPage :code navigation", () => {
     await settle();
     expect(fake.tally("EndTournament")).toBe(2);
     await act(async () => {
-      fake.deliver("Error", { message: "TOUR02 said no" });
+      fake.deliver("TournamentActionRejected", {
+        request_id: (fake.frame("EndTournament", 1)?.data as { request_id: number })
+          .request_id,
+        message: "TOUR02 said no",
+      });
     });
     await settle();
     expect(screen.getByRole("alert").textContent).toBe(
@@ -1365,11 +1392,16 @@ describe("TournamentPage :code navigation", () => {
     );
     expect(screen.getByRole("button", { name: "Ending…" })).toBeTruthy();
 
-    // TOUR01's stale action settles now. Code-scoped, so this frame answers
-    // TOUR01's request and leaves TOUR02's in flight — the tally below pins
-    // that, since a settled TOUR02 request would make the assertion vacuous.
+    // TOUR01's stale action settles now. Correlated to TOUR01's own End
+    // request, so it answers that request and leaves TOUR02's in flight — the
+    // assertions below pin that a settled TOUR02 request would make vacuous.
     await act(async () => {
-      fake.deliver("TournamentUpdate", { code: "TOUR01", view: h2hView("TOUR01") });
+      fake.deliver("TournamentActionAck", {
+        request_id: (fake.frame("EndTournament", 0)?.data as { request_id: number })
+          .request_id,
+        code: "TOUR01",
+        view: h2hView("TOUR01"),
+      });
     });
     await settle();
 
@@ -1380,7 +1412,12 @@ describe("TournamentPage :code navigation", () => {
     // control. Without it, a page that could never re-enable the button at all
     // would satisfy the two assertions above.
     await act(async () => {
-      fake.deliver("TournamentUpdate", { code: "TOUR02", view: h2hView("TOUR02") });
+      fake.deliver("TournamentActionAck", {
+        request_id: (fake.frame("EndTournament", 1)?.data as { request_id: number })
+          .request_id,
+        code: "TOUR02",
+        view: h2hView("TOUR02"),
+      });
     });
     await settle();
     expect(screen.getByRole("button", { name: "End Tournament" })).toBeTruthy();
@@ -1432,10 +1469,17 @@ describe("TournamentPage :code navigation", () => {
         .checked,
     ).toBe(true);
 
-    // TOUR01's stale report settles SUCCESSFULLY now — the `ok` branch is the
-    // one that clears `reporting`, so an unscoped clear fires here.
+    // TOUR01's stale report settles SUCCESSFULLY now — the `ok` branch (its
+    // correlated `TournamentActionAck`) is the one that clears `reporting`, so
+    // an unscoped clear would fire here.
     await act(async () => {
-      fake.deliver("TournamentUpdate", { code: "TOUR01", view: h2hView("TOUR01") });
+      fake.deliver("TournamentActionAck", {
+        request_id: (fake.frame("ReportMatchResult", 0)?.data as {
+          request_id: number;
+        }).request_id,
+        code: "TOUR01",
+        view: h2hView("TOUR01"),
+      });
     });
     await settle();
 
@@ -1459,7 +1503,13 @@ describe("TournamentPage :code navigation", () => {
     expect(sent.pairing_id).toBe(2);
     expect(sent.outcome.Decisive.winner).toBe("bob");
     await act(async () => {
-      fake.deliver("TournamentUpdate", { code: "TOUR02", view: tour02 });
+      fake.deliver("TournamentActionAck", {
+        request_id: (fake.frame("ReportMatchResult", 1)?.data as {
+          request_id: number;
+        }).request_id,
+        code: "TOUR02",
+        view: tour02,
+      });
     });
     await settle();
     expect(screen.queryByRole("dialog")).toBeNull();
