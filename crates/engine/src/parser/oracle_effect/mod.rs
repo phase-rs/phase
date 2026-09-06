@@ -34876,10 +34876,19 @@ pub(crate) fn parse_effect_chain_ir(
                 (Some(cond), Some(head)) => (difference_expr(cond), head.to_string()),
                 _ => (None, text),
             };
-        let (if_you_do, text) = if condition.is_none() {
-            strip_if_you_do_conditional_with_context(&text, ctx)
+        let (if_you_do, text, deferred_when_you_do_guard) = if condition.is_none() {
+            match strip_if_you_do_conditional_with_context(&text, ctx) {
+                conditions::ReflexiveConditionalStrip::Parsed {
+                    condition,
+                    remainder,
+                } => (condition, remainder, None),
+                conditions::ReflexiveConditionalStrip::DeferredWhenYouDoGuard {
+                    condition,
+                    remainder,
+                } => (Some(condition.clone()), remainder, Some(condition)),
+            }
         } else {
-            (None, text)
+            (None, text, None)
         };
         // CR 603.4 + CR 608.2c: Counter threshold condition — runs unconditionally
         // on the text output from strip_if_you_do_conditional. For compound
@@ -35009,6 +35018,21 @@ pub(crate) fn parse_effect_chain_ir(
             .or(turn_cond)
             .or(keyword_instead_cond)
             .or(suffix_cond);
+        // CR 603.12 + CR 608.2c: A `When you do, if <guard>, ...` rider is
+        // not equivalent to a bare reflexive trigger. The shared leading
+        // conditional parser deferred this guard so the specialized guard
+        // parsers above could claim it. If none did, fail closed before the
+        // optional-clause fallback can erase the guard and lower an
+        // unconditional reflexive body.
+        if deferred_when_you_do_guard.is_some() && guard_condition.is_none() {
+            unimplemented_clause(
+                &mut builder,
+                "when_you_do_guard",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         let condition = match (if_you_do, guard_condition) {
             (Some(reflexive), Some(guard)) if reflexive.has_when_you_do_marker() => {
                 Some(reflexive.with_when_you_do_guard(guard))

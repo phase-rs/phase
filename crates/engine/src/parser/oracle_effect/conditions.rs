@@ -1037,26 +1037,60 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
 /// reflexive trigger first and then evaluate the guard on that stack object.
 ///
 /// The general conditional parser is deliberately conservative. If it cannot
-/// represent the guard, it returns the original remainder untouched; downstream
-/// specialized strippers (for example counter thresholds) still get their
-/// established chance to parse it, and a genuinely unsupported guard reaches
-/// the normal `Unimplemented` diagnostic path instead of being swallowed.
+/// represent the guard, the deferred variant retains both the reflexive marker
+/// and the original remainder. Downstream specialized strippers (for example
+/// counter thresholds) still get their established chance to parse it; if they
+/// decline too, the chain parser emits an `Unimplemented` effect before an
+/// optional-clause fallback can discard the guard.
+pub(super) enum ReflexiveConditionalStrip {
+    Parsed {
+        condition: Option<AbilityCondition>,
+        remainder: String,
+    },
+    DeferredWhenYouDoGuard {
+        condition: AbilityCondition,
+        remainder: String,
+    },
+}
+
 pub(super) fn strip_if_you_do_conditional_with_context(
     text: &str,
     ctx: &mut ParseContext,
-) -> (Option<AbilityCondition>, String) {
+) -> ReflexiveConditionalStrip {
     let (condition, remainder) = strip_if_you_do_conditional(text);
     let Some(condition) = condition else {
-        return (None, remainder);
+        return ReflexiveConditionalStrip::Parsed {
+            condition: None,
+            remainder,
+        };
     };
     if !condition.has_when_you_do_marker() {
-        return (Some(condition), remainder);
+        return ReflexiveConditionalStrip::Parsed {
+            condition: Some(condition),
+            remainder,
+        };
     }
 
     let (guard, body) = strip_leading_general_conditional(&remainder, ctx);
     match guard {
-        Some(guard) => (Some(condition.with_when_you_do_guard(guard)), body),
-        None => (Some(condition), remainder),
+        Some(guard) => ReflexiveConditionalStrip::Parsed {
+            condition: Some(condition.with_when_you_do_guard(guard)),
+            remainder: body,
+        },
+        // A syntactically present leading guard must never be treated like an
+        // absent one. Keep it distinguishable until every specialized guard
+        // parser has declined, rather than letting `clause_shell` strip its
+        // optional body and turn the reflexive trigger unconditional.
+        None if split_leading_conditional(&remainder).is_some() => {
+            ReflexiveConditionalStrip::DeferredWhenYouDoGuard {
+                condition,
+                remainder,
+            }
+        }
+        None => ReflexiveConditionalStrip::Parsed {
+            condition: Some(condition),
+            remainder,
+        },
     }
 }
 
@@ -8677,16 +8711,20 @@ mod tests {
     }
 
     #[test]
-    fn reflexive_connector_keeps_an_unrecognized_following_guard_unconsumed() {
+    fn reflexive_connector_defers_an_unrecognized_following_guard() {
         let text = "When you do, if the moon is blue, draw a card";
-        let (condition, body) =
+        let stripped =
             strip_if_you_do_conditional_with_context(text, &mut ParseContext::default());
 
-        assert_eq!(condition, Some(AbilityCondition::WhenYouDo));
-        assert_eq!(
-            body, "if the moon is blue, draw a card",
-            "an unsupported guard must continue to the strict normal parse path"
-        );
+        let ReflexiveConditionalStrip::DeferredWhenYouDoGuard {
+            condition,
+            remainder,
+        } = stripped
+        else {
+            panic!("an unsupported guard must stay distinct from a bare reflexive marker");
+        };
+        assert_eq!(condition, AbilityCondition::WhenYouDo);
+        assert_eq!(remainder, "if the moon is blue, draw a card");
     }
 
     #[test]

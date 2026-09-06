@@ -16409,6 +16409,68 @@ fn guarded_clone_replacement_rider_keeps_reflexive_marker_and_guard() {
     );
 }
 
+/// CR 603.12 + CR 608.2c: an unmodeled guard between a reflexive connector
+/// and an optional body is not an optional bare `WhenYouDo` rider. Once every
+/// specialized guard parser has declined, retain it as an explicit gap rather
+/// than letting the optional-clause shell discard the guard.
+#[test]
+fn unmodeled_guarded_reflexive_optional_fails_closed() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    let def = parse_effect_chain(
+        "When you do, if the moon is full, you may draw a card",
+        AbilityKind::Spell,
+    );
+
+    let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
+        panic!(
+            "an unmodeled reflexive guard must not become an unconditional optional effect: {def:?}"
+        );
+    };
+    assert_eq!(name, "when_you_do_guard");
+    assert!(
+        description
+            .as_deref()
+            .is_some_and(|fragment| fragment.contains("if the moon is full")),
+        "the explicit gap must retain the unmodeled guard"
+    );
+    assert!(
+        !def.optional,
+        "the unmodeled reflexive rider must not retain an unconditional may-choice"
+    );
+}
+
+/// CR 614.1c + CR 603.12 + CR 608.2c: clone-replacement riders use the same
+/// effect-chain path. An unsupported guard must reject that rider rather than
+/// attaching an unconditional optional reflexive sub-ability to the replacement.
+#[test]
+fn unmodeled_guarded_clone_replacement_rider_stays_detached() {
+    let parsed = parse(
+        "You may have Guarded Clone enter as a copy of any creature on the battlefield. When you do, if the moon is full, you may draw a card.",
+        "Guarded Clone",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let replacement = parsed
+        .replacements
+        .first()
+        .expect("the clone replacement must still parse");
+    let execute = replacement
+        .execute
+        .as_deref()
+        .expect("the clone replacement must retain its execute definition");
+    assert!(
+        matches!(*execute.effect, Effect::BecomeCopy { .. }),
+        "the replacement's supported copy instruction must survive"
+    );
+    assert!(
+        execute.sub_ability.is_none(),
+        "the unsupported guard must not become an unconditional optional replacement rider"
+    );
+}
+
 #[test]
 fn semicolon_keyword_splitting_defender_reach() {
     let r = parse_with_keyword_names(
