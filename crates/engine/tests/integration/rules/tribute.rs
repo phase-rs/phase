@@ -393,6 +393,22 @@ fn copy_token_of_tribute_creature_declined_records_outcome_and_enters() {
             choice: P1.0.to_string(),
         })
         .expect("choose opponent");
+
+    // Pin that the decline below is answering the CR 702.104a prompt, addressed
+    // to the CHOSEN opponent — symmetric with the paid row. Without this the
+    // `.expect` alone would let a future regression that skips the prompt fail
+    // here as a harness error rather than as the rules defect it is.
+    match &runner.state().waiting_for {
+        WaitingFor::TributeChoice { player, count, .. } => {
+            assert_eq!(*player, P1, "the chosen opponent decides pay-or-decline");
+            assert_eq!(
+                *count, 2,
+                "Tribute N is copied with the creature (CR 707.2)"
+            );
+        }
+        other => panic!("expected TributeChoice, got {other:?}"),
+    }
+
     runner
         .act(GameAction::DecideOptionalEffect { accept: false })
         .expect("decline tribute");

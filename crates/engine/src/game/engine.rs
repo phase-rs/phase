@@ -7708,6 +7708,12 @@ pub(super) fn resume_pending_continuation_if_priority(
         // resumes below because those observe the board, and a permanent whose
         // entry has been decided must exist before anything can observe it.
         // Inert unless a `Token` resume with a live liminal entry is parked.
+        //
+        // `observe_boundary_carrier` for the same reason the seven sibling drains
+        // in this function call it: committing an entry can move life totals (an
+        // entering permanent's CR 603.6a observers), and CR 704.5a is settled
+        // against the carrier this boundary observes. It only ever sets, never
+        // clears, so calling it on the inert path costs nothing.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             super::life_safety::observe_boundary_carrier(state);
             if let Some(waiting_for) =

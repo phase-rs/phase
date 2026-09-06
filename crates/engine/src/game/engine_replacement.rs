@@ -3392,8 +3392,11 @@ pub fn find_copy_targets(
 ///
 /// # Scope
 ///
-/// Consumes only a `Token` resume whose liminal entry is still present — which
-/// covers all three producers, since every one of them records a `Token`. An
+/// Consumes only a `Token` resume whose liminal entry is still present. That
+/// covers the two producers that record one — `handle_replacement_choice_inner`'s
+/// `TokenEntry` arm and `token_copy::apply_copy_token_after_replacement_with_
+/// created_ids` — and NOT `zone_pipeline::deliver_zone_change`, which records a
+/// `Meld` and only for a `CopyTargetChoice` pause. See KNOWN RESIDUAL below. An
 /// entry already committed by `handle_copy_target_choice` is gone from
 /// `liminal_entries`, so the presence check makes a double-commit unrepresentable
 /// rather than merely unlikely.

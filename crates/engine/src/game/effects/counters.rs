@@ -212,7 +212,7 @@ pub fn add_counter_with_replacement(
     if count == 0 {
         return true;
     }
-    // CR 614.1c + CR 122.6a: an entrant whose entry has been decided but has not
+    // CR 614.1c + CR 122.6: an entrant whose entry has been decided but has not
     // yet committed is in `liminal_entries` and in no zone at all, so there is no
     // object here to put a counter on. Counters aimed at one belong to its ENTRY:
     // hand them to the entry so the commit places them as it enters, through the

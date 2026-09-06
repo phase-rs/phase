@@ -23936,14 +23936,28 @@ impl GameState {
     /// (`filter::entering_object_projection`,
     /// `zone_pipeline::entering_object_projection`, and
     /// `engine_replacement::apply_post_replacement_effect`'s inline dual lookup).
-    /// `engine_replacement::copy_effect_for_source` still branches on
-    /// `liminal_entries` itself: it is not this lookup, because the two branches
-    /// search different ability sets (an entrant's own replacement definitions
-    /// versus `functioning_abilities::active_replacements`, which additionally
-    /// filters phased-out and non-emblem command-zone sources).
-    ///
-    /// Reach for this in any seam that resolves an ability's `source_id` during an
+    /// Reach for it in any seam that resolves an ability's `source_id` during an
     /// entry chain.
+    ///
+    /// It is the single authority for *this* lookup, not for every consult of
+    /// `liminal_entries`. Three seams legitimately still branch themselves, and
+    /// are exceptions rather than misses:
+    ///
+    /// * `engine_replacement::copy_effect_for_source` — the two branches search
+    ///   different ability sets (an entrant's own replacement definitions versus
+    ///   `functioning_abilities::active_replacements`, which additionally filters
+    ///   phased-out and non-emblem command-zone sources), so there is no single
+    ///   `&GameObject` for it to read.
+    /// * `zone_pipeline::entering_aura_hosts` — liminal-first like this, but each
+    ///   branch dispatches to a DIFFERENT downstream function
+    ///   (`entering_aura_hosts_projected` versus `entering_aura_hosts_with(..,
+    ///   EnteringAuraEntrant::Stored)`), which a lookup returning one object
+    ///   cannot express.
+    /// * `filter::matches_target_filter_on_battlefield_entry`'s `ZoneChange` arm —
+    ///   NOT this precedence. It overlays the event's own `face_down_profile` /
+    ///   `enter_as_copy` first and falls back to `matches_target_filter` on the
+    ///   live object, consulting `liminal_entries` only in between; CR 708.10
+    ///   fixes that ordering, so do not "simplify" it to this helper.
     pub fn entering_or_live_object(&self, id: ObjectId) -> Option<&GameObject> {
         self.liminal_entries
             .get(&id)
@@ -23971,7 +23985,7 @@ impl GameState {
             .map(|object| &mut object.chosen_attributes)
     }
 
-    /// CR 614.1c + CR 122.6a: schedule counters onto a TOKEN entrant whose entry
+    /// CR 614.1c + CR 122.6: schedule counters onto a TOKEN entrant whose entry
     /// has been decided but has not yet committed, so they are placed AS it enters
     /// rather than added to it afterwards.
     ///
