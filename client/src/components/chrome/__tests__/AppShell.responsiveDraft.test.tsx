@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 
+import { useConnectivityStore } from "../../../stores/connectivityStore";
 import { AppShell } from "../AppShell";
 import {
   useDraftShellChrome,
@@ -66,6 +67,10 @@ function DraftChromeProbe() {
 }
 
 describe("AppShell responsive draft chrome", () => {
+  beforeEach(() => {
+    useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+  });
+
   afterEach(() => {
     cleanup();
     chromeControlProps.length = 0;
@@ -75,6 +80,8 @@ describe("AppShell responsive draft chrome", () => {
   });
 
   it("replaces phone navigation and socials with a top-row Home button", async () => {
+    useConnectivityStore.setState({ forcedOffline: true, browserOnline: true });
+
     render(
       <MemoryRouter initialEntries={["/draft"]}>
         <Routes>
@@ -110,6 +117,10 @@ describe("AppShell responsive draft chrome", () => {
     expect(shellSteps).toHaveTextContent("Draft");
     expect(shellSteps).toHaveClass("absolute", "inset-x-0", "z-0", "justify-center", "pointer-events-none");
     expect(screen.getByRole("link", { name: "Home" })).toHaveClass("relative", "z-10");
+    const offlineStatus = screen.getByRole("status");
+    expect(offlineStatus.previousElementSibling).toBe(phoneChromeRow);
+    expect(offlineStatus).toHaveClass("pointer-events-none", "relative");
+    expect(offlineStatus).not.toHaveClass("fixed");
     expect(screen.getByText("Draft")).toHaveAttribute("aria-current", "step");
     expect(screen.queryByTestId("social-bar")).not.toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Desktop navigation" })).not.toBeInTheDocument();

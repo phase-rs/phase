@@ -61,7 +61,6 @@ export function AppShell() {
   return (
     <ShellProvider value={true}>
       <DraftShellChromeProvider value={setDraftChromeConfig}>
-        <OfflineModeBadge />
         {/* The scene IS the relative root (matching how each page mounts it). NOTE:
           `.menu-scene` is unlayered CSS, which in Tailwind v4 outranks utilities,
           so it must not share an element with a conflicting position utility —
@@ -162,6 +161,7 @@ export function AppShell() {
                 <SocialBar />
               ) : null}
             </div>
+            <OfflineModeBadge />
             {/* Inner Suspense so a lazy route's load swaps ONLY the content area —
                 the rail/scene persist (true SPA feel). */}
             <main className={`shell-content min-h-0 min-w-0 flex-1 ${responsiveDraftChrome ? "overflow-hidden" : "max-[820px]:pb-[76px]"}`}>

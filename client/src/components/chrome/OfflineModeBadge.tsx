@@ -20,7 +20,7 @@ export function OfflineModeBadge() {
       role="status"
       aria-label={`${t("offlineBadge.label")}: ${reason}`}
       title={reason}
-      className="fixed left-1/2 top-[calc(env(safe-area-inset-top)+0.75rem)] z-50 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-amber-300/40 bg-slate-950/90 px-3 py-1.5 text-[11px] font-semibold text-amber-100 shadow-lg shadow-black/30 backdrop-blur-md"
+      className="pointer-events-none relative z-20 mx-auto mb-2 flex w-fit items-center gap-1.5 rounded-full border border-amber-300/40 bg-slate-950/90 px-3 py-1.5 text-[11px] font-semibold text-amber-100 shadow-lg shadow-black/30 backdrop-blur-md"
     >
       <span className="h-1.5 w-1.5 rounded-full bg-amber-300" aria-hidden />
       <span>{t("offlineBadge.label")}</span>
