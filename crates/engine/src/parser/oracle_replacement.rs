@@ -9617,13 +9617,13 @@ fn parse_static_copy_source(input: &str) -> OracleResult<'_, FirstTimeCopySource
 /// `sub_ability`.
 fn parse_chosen_copy_source(input: &str) -> OracleResult<'_, FirstTimeCopySource> {
     let (input, _) = tag("choose ").parse(input)?;
-    // `parse_type_phrase` is INFALLIBLE (`oracle_target.rs:2176` returns
+    // `parse_type_phrase_folding` is INFALLIBLE (`oracle_target.rs:2176` returns
     // `(TargetFilter, &str)`, falling back to `TargetFilter::Any`), so inside an
     // `alt` it has to be made to fail: a non-`Typed` result, or one that consumed
     // nothing, is a parse failure this arm can backtrack out of. This is the one
-    // position where `parse_type_phrase`'s article strip AND its
+    // position where `parse_type_phrase_folding`'s article strip AND its
     // `other than <self-ref>` suffix are both wanted (CR 201.5).
-    let (filter, rest) = parse_type_phrase(input);
+    let (filter, rest) = parse_type_phrase_folding(input);
     if rest.len() == input.len() {
         return Err(oracle_err(input));
     }
@@ -13133,7 +13133,7 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
 
-    /// V13 — building block: `parse_type_phrase`'s leading-article strip and its
+    /// V13 — building block: `parse_type_phrase_folding`'s leading-article strip and its
     /// `other than <self-ref>` suffix (CR 201.5) compose MID-STREAM, leaving the
     /// trailing conjunction for the caller's own combinator.
     ///
@@ -13148,11 +13148,11 @@ mod tests {
     #[test]
     fn type_phrase_composes_article_and_other_than_self_ref_mid_stream() {
         let tail = " and create that many tokens that are copies of that creature.";
-        // Bound to locals: `parse_type_phrase` returns a remainder borrowed from
+        // Bound to locals: `parse_type_phrase_folding` returns a remainder borrowed from
         // its input, so the input must outlive the assertions below.
         let with_article = format!("a creature other than ~{tail}");
         let without_article = format!("creature other than ~{tail}");
-        let (filter, remainder) = parse_type_phrase(&with_article);
+        let (filter, remainder) = parse_type_phrase_folding(&with_article);
 
         let TargetFilter::Typed(typed) = &filter else {
             panic!("expected a Typed filter, got {filter:?}");
@@ -13174,7 +13174,7 @@ mod tests {
 
         // Sibling control: the no-article form yields the IDENTICAL filter, so
         // the article path is purely additive rather than a separate grammar.
-        let (bare_filter, bare_remainder) = parse_type_phrase(&without_article);
+        let (bare_filter, bare_remainder) = parse_type_phrase_folding(&without_article);
         assert_eq!(
             bare_filter, filter,
             "the article is optional and changes nothing about the filter"
