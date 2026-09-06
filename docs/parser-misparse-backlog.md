@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4706
-- **Total card appearances across root causes:** 4739 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4699
+- **Total card appearances across root causes:** 4732 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -17,7 +17,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 329 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 233 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 6 | Disjunctive (or-list) collapsed to first branch | 226 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 209 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
@@ -2555,7 +2555,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (233 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (226 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2574,7 +2574,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ana Battlemage
 - Angel of Serenity
 - Angelic Intervention
-- Anje, Maid of Dishonor
 - Archangel of Wrath
 - Ashes of the Abhorrent
 - Ashling, Rimebound
@@ -2631,7 +2630,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Eclipsed Steppe
 - Eivor, Wolf-Kissed
 - Elenda, Saint of Dusk
-- Elite Headhunter
 - Elsewhere Flask
 - Eluge, the Shoreless Sea
 - Embrace Oblivion
@@ -2699,7 +2697,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Michelangelo, Improviser
 - Mindsparker
 - Mister Immortal
-- Mold Folk
 - Mythos of Nethroi
 - Nahiri, the Harbinger
 - Nashi, Searcher in the Dark
@@ -2742,10 +2739,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Shivan Sand-Mage
 - Shoreline Scout
 - Sidequest: Catch a Fish
-- Sivriss, Nightmare Speaker
-- Skophos Warleader
-- Skullport Merchant
-- Slaughter-Priest of Mogis
 - Sludge Titan
 - Sonar Strike
 - Songstitcher

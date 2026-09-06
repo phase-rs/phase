@@ -179,6 +179,9 @@ vi.mock("../../services/openPhaseSocket", () => ({
     serverInfo: { mode: "Full", protocolVersion: 14 },
     ws: (() => {
       const ws = {
+      // The hosting keepalive is guarded on `readyState === WebSocket.OPEN`;
+      // without this it would send nothing at all here.
+      readyState: 1,
       send: socketMocks.send,
       close: vi.fn(),
       onmessage: null,
@@ -987,6 +990,40 @@ describe("multiplayerStore", () => {
     );
   });
 
+  // `connectionMode` is the one persisted key whose ABSENCE is meaningful: it is
+  // the sentinel that means "never chosen", which is what lets the page fall back
+  // to deriving the mode from `hostingServer`. A junk value must therefore land on
+  // `null` and not merely survive the spread — if it did, a corrupted blob would
+  // read as a deliberate choice and permanently override the fallback.
+  it.each([
+    ["a junk string", "peer-to-peer"],
+    ["a non-string", 7],
+    ["null", null],
+  ])("hydrates %s connection mode as never-chosen", (_label, stored) => {
+    localStorage.setItem(
+      "phase-multiplayer",
+      JSON.stringify({ state: { connectionMode: stored }, version: 6 }),
+    );
+
+    act(() => useMultiplayerStore.persist.rehydrate());
+
+    expect(useMultiplayerStore.getState().connectionMode).toBeNull();
+  });
+
+  it.each(["server", "p2p"] as const)(
+    "hydrates a stored %s connection mode as a real choice",
+    (stored) => {
+      localStorage.setItem(
+        "phase-multiplayer",
+        JSON.stringify({ state: { connectionMode: stored }, version: 6 }),
+      );
+
+      act(() => useMultiplayerStore.persist.rehydrate());
+
+      expect(useMultiplayerStore.getState().connectionMode).toBe(stored);
+    },
+  );
+
   it("strips AI seats from team-based server host settings", async () => {
     useMultiplayerStore.getState().startHosting(
       hostingSettings({
@@ -1467,7 +1504,179 @@ describe("multiplayerStore", () => {
     ).rejects.toThrow("Host connection is not active.");
   });
 
+  // ── Hosting-socket keepalive ────────────────────────────────────────────
+
+  /** Ping frames seen on the shared hosting-socket send mock. */
+  function pingFrames(): { type: string }[] {
+    return socketMocks.send.mock.calls
+      .map((call) => JSON.parse(call[0] as string) as { type: string })
+      .filter((frame) => frame.type === "Ping");
+  }
+
+  async function startHostingOnFakeTimers(): Promise<void> {
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings(),
+      { main_deck: ["Forest"], sideboard: [], commander: [] },
+      HOST_URL,
+    );
+    // A microtask drain, not `waitFor`: see the re-dial case above for why
+    // `waitFor` cannot be used on a frozen clock.
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it("keeps the waiting host socket alive with an application ping", async () => {
+    vi.useFakeTimers();
+    try {
+      await startHostingOnFakeTimers();
+      // Reach guard: the setup frame proves the mock is the socket the store
+      // actually opened, so the count below is not measuring a detached mock.
+      expect(socketMocks.send).toHaveBeenCalled();
+      socketMocks.send.mockClear();
+
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(pingFrames().length).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops the host ping when its socket closes", async () => {
+    vi.useFakeTimers();
+    try {
+      await startHostingOnFakeTimers();
+      expect(socketMocks.send).toHaveBeenCalled();
+      const socket = socketMocks.currentWs;
+      socketMocks.send.mockClear();
+
+      // No `GameCreated` was emitted, so the close cannot start a re-dial
+      // whose fresh pinger would mask a leaked one.
+      socket?.onclose?.();
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(pingFrames()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves no pinger behind after the GameStarted handoff", async () => {
+    vi.useFakeTimers();
+    try {
+      await startHostingOnFakeTimers();
+      expect(socketMocks.send).toHaveBeenCalled();
+      socketMocks.send.mockClear();
+
+      // This arm closes the socket itself and raises no close event, so only
+      // an explicit stop in the arm can end the interval.
+      emitServerMessage("GameStarted", {});
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(pingFrames()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spares the replacement socket when a superseded socket closes late", async () => {
+    vi.useFakeTimers();
+    try {
+      await startHostingOnFakeTimers();
+      expect(socketMocks.send).toHaveBeenCalled();
+      const socketA = socketMocks.currentWs;
+      emitServerMessage("GameCreated", {
+        game_code: "ABCDE",
+        player_token: "host-token",
+        full_key: { game_code: "ABCDE", generation: 1 },
+      });
+
+      socketA?.onclose?.();
+      await vi.advanceTimersByTimeAsync(1000);
+      // Reach guard: the re-dial landed, so B is a different socket object.
+      expect(socketMocks.currentWs).not.toBe(socketA);
+      socketMocks.send.mockClear();
+
+      // A's late duplicate close must not reach B's interval.
+      socketA?.onclose?.();
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(pingFrames().length).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ── Multi-source subscription channels ──────────────────────────────────
+
+  /**
+   * Opens one subscription channel on `url` and hands back the fake socket the
+   * store dialed, so a caller can read its frames and fire its close listener.
+   */
+  async function subscribeOneSource(
+    url: string,
+  ): Promise<{ socket: ReturnType<typeof fakeSocket>; detach: (() => void) | null }> {
+    useMultiplayerStore.setState({
+      hostingServer: url,
+      userLobbySources: [{ url, name: "one.example", origin: "user" }],
+      sourceStatus: new Map(),
+    });
+    driveReconnect();
+    const dialed: ReturnType<typeof fakeSocket>[] = [];
+    vi.mocked(openPhaseSocket).mockImplementation(async (target: string) => {
+      const socket = fakeSocket(target);
+      dialed.push(socket);
+      return socket as unknown as Awaited<ReturnType<typeof openPhaseSocket>>;
+    });
+
+    const detach = await useMultiplayerStore.getState().subscribeLobby(() => {});
+    // Reach guard: this source's channel really opened, so the frame counts
+    // below are read off a socket the store owns rather than an unused fake.
+    const mine = dialed.filter((socket) => socket.url === url);
+    expect(mine).toHaveLength(1);
+    return { socket: mine[0], detach };
+  }
+
+  /** Ping frames seen on one subscription socket. */
+  function pingFramesOn(socket: ReturnType<typeof fakeSocket>): { type: string }[] {
+    return socket.ws.send.mock.calls
+      .map((call) => JSON.parse(call[0] as string) as { type: string })
+      .filter((frame) => frame.type === "Ping");
+  }
+
+  it("keeps the idle lobby-subscription socket alive with an application ping", async () => {
+    vi.useFakeTimers();
+    try {
+      const { socket, detach } = await subscribeOneSource("wss://one.example/ws");
+
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(pingFramesOn(socket).length).toBeGreaterThanOrEqual(2);
+      detach?.();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops the lobby-subscription ping when its socket closes", async () => {
+    vi.useFakeTimers();
+    try {
+      const { socket, detach } = await subscribeOneSource("wss://one.example/ws");
+      const closeHandler = socket.ws.addEventListener.mock.calls.find(
+        (call) => call[0] === "close",
+      )?.[1] as (() => void) | undefined;
+      // Reach guard: a stopper really was registered on this socket's close.
+      expect(closeHandler).toBeTypeOf("function");
+      socket.ws.send.mockClear();
+
+      closeHandler?.();
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(pingFramesOn(socket)).toHaveLength(0);
+      detach?.();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("keeps the healthy source's lobby when another source's handshake fails", async () => {
     const A = "wss://a.example/ws";

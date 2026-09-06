@@ -13,6 +13,63 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::triggers::AttackTargetFilter;
 
+/// CR 607.2d + CR 614.1c: only an as-enters replacement whose separate static
+/// reads `IsChosenCardType` is promoted from its locally-labeled list.
+#[test]
+fn constrained_card_type_static_relation_promotes_cloud_key_and_archon() {
+    let cases = [
+        (
+            "Cloud Key",
+            vec!["Artifact"],
+            "As Cloud Key enters, choose artifact, creature, enchantment, instant, or sorcery.\nSpells you cast of the chosen type cost {1} less to cast.",
+            vec![
+                CoreType::Artifact,
+                CoreType::Creature,
+                CoreType::Enchantment,
+                CoreType::Instant,
+                CoreType::Sorcery,
+            ],
+        ),
+        (
+            "Archon of Valor's Reach",
+            vec!["Creature"],
+            "As Archon of Valor's Reach enters the battlefield, choose artifact, enchantment, instant, sorcery, or planeswalker.\nPlayers can't cast spells of the chosen type.",
+            vec![
+                CoreType::Artifact,
+                CoreType::Enchantment,
+                CoreType::Instant,
+                CoreType::Sorcery,
+                CoreType::Planeswalker,
+            ],
+        ),
+        (
+            "Supplemental Type Choice",
+            vec!["Artifact"],
+            "As Supplemental Type Choice enters the battlefield, choose artifact or battle.\nSpells you cast of the chosen type cost {1} less to cast.",
+            vec![CoreType::Artifact, CoreType::Battle],
+        ),
+    ];
+    for (name, types, oracle, expected) in cases {
+        let types = types.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        let execute = parsed.replacements[0]
+            .execute
+            .as_deref()
+            .expect("as-enters replacement has an execute");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::CardType { options },
+                    persist: true,
+                    ..
+                } if options == &expected
+            ),
+            "{name} must promote only its proven choice domain"
+        );
+    }
+}
+
 #[test]
 fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
     let generic = lower_unsupported_node(&UnsupportedAbilityIr::unknown("unknown line"), 1);

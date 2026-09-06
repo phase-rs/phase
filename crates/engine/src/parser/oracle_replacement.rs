@@ -9568,31 +9568,128 @@ fn parse_optional_token_substitution_choice(
     )
 }
 
-/// CR 614.1a + CR 614.4: "The first time you would create one or more tokens each
-/// turn, you may instead create that many tokens that are copies of enchanted
-/// permanent." (Moonlit Meditation). A once-per-turn, per-source, optional
-/// `CreateToken` substitution whose copies are of the Aura's host
-/// (`TargetFilter::AttachedTo`). The specific "the first time … each turn"
-/// antecedent tag is why this must dispatch BEFORE
-/// `parse_optional_token_substitution_choice` (Jinnie "if you would create…") and
-/// the Doubling Season family ("if an effect would…") — it cannot steal either.
+/// The copy source of a first-time token substitution: a static filter
+/// (Moonlit Meditation's enchanted host) or a permanent chosen during
+/// resolution (Esix, Fractal Bloom). Typed rather than a bool, because the two
+/// arms build structurally different `execute` trees.
+enum FirstTimeCopySource {
+    Static(TargetFilter),
+    Chosen(TargetFilter),
+}
+
+/// The `CopyTokenOf` both Axis-B arms create. "That many" is
+/// `EventContextAmount` (the replaced event's `count`) and CR 111.2 puts the
+/// tokens under their creator's control; only the copy `target` differs
+/// between the arms, so factoring it here stops the two from drifting.
+fn copy_token_of(target: TargetFilter) -> Effect {
+    Effect::CopyTokenOf {
+        target,
+        owner: TargetFilter::Controller,
+        source_filter: None,
+        enters_attacking: false,
+        tapped: false,
+        count: QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+        extra_keywords: vec![],
+        additional_modifications: vec![],
+    }
+}
+
+/// Axis B, static arm: "create that many tokens that are copies of enchanted
+/// permanent" (Moonlit Meditation). The copy source is fixed by the card's own
+/// attachment, so resolution raises no choice.
+fn parse_static_copy_source(input: &str) -> OracleResult<'_, FirstTimeCopySource> {
+    let (input, _) = tag("create that many tokens that are copies of ").parse(input)?;
+    let (input, host) = alt((
+        value(TargetFilter::AttachedTo, tag("enchanted permanent")),
+        value(TargetFilter::AttachedTo, tag("enchanted creature")),
+        value(TargetFilter::AttachedTo, tag("enchanted artifact")),
+    ))
+    .parse(input)?;
+    Ok((input, FirstTimeCopySource::Static(host)))
+}
+
+/// Axis B, chosen arm: "choose a creature other than ~ and create that many
+/// tokens that are copies of that creature" (Esix, Fractal Bloom). The copy
+/// source is picked during resolution (CR 115.10a: a choice, not a target), so
+/// this arm lowers to `Effect::ChoosePermanent` with the copy as its
+/// `sub_ability`.
+fn parse_chosen_copy_source(input: &str) -> OracleResult<'_, FirstTimeCopySource> {
+    let (input, _) = tag("choose ").parse(input)?;
+    // `parse_type_phrase_folding` is INFALLIBLE (`oracle_target.rs:2176` returns
+    // `(TargetFilter, &str)`, falling back to `TargetFilter::Any`), so inside an
+    // `alt` it has to be made to fail: a non-`Typed` result, or one that consumed
+    // nothing, is a parse failure this arm can backtrack out of. This is the one
+    // position where `parse_type_phrase_folding`'s article strip AND its
+    // `other than <self-ref>` suffix are both wanted (CR 201.5).
+    let (filter, rest) = parse_type_phrase_folding(input);
+    if rest.len() == input.len() {
+        return Err(oracle_err(input));
+    }
+    let TargetFilter::Typed(typed) = filter else {
+        return Err(oracle_err(input));
+    };
+    let (rest, _) = tag(" and create that many tokens that are copies of that ").parse(rest)?;
+    // CR 707.1 + CR 201.5: "that creature" is an anaphor for the permanent just
+    // chosen. Same shape as `parse_definite_parent_reference`
+    // (`oracle_target.rs:1958-2013`): determiner (carried in the tag above) ->
+    // `parse_type_filter_word` -> agreement. Require the nouns to agree, so a
+    // disagreeing sentence fails the parse instead of silently binding the wrong
+    // subject; the compound-noun case ("that artifact creature") is refused here
+    // and again by the post-bridge remainder guard.
+    let (rest, anaphor) = parse_type_filter_word(rest)?;
+    if typed.type_filters.as_slice() != std::slice::from_ref(&anaphor) {
+        return Err(oracle_err(rest));
+    }
+    Ok((
+        rest,
+        FirstTimeCopySource::Chosen(TargetFilter::Typed(typed)),
+    ))
+}
+
+/// CR 614.1a + CR 614.4: the "the first time you would create one or more
+/// tokens" optional `CreateToken` substitution family, generalized along two
+/// independent axes.
+///
+/// Axis A — the window's turn scope. "each turn" leaves the window unscoped
+/// (Moonlit Meditation); "during each of your turns" restricts it to the
+/// controller's own turns (Esix, Fractal Bloom — CR 102.1: the active player is
+/// the player whose turn it is). Carried by
+/// `FirstTokenCreationEachTurn { active_player_req }`.
+///
+/// Axis B — where the copy source comes from. A STATIC filter fixed by the card
+/// ("copies of enchanted permanent" — Moonlit's Aura host,
+/// `TargetFilter::AttachedTo`), or a permanent CHOSEN during resolution
+/// ("choose a creature other than ~ … copies of that creature" — Esix), which
+/// lowers to `Effect::ChoosePermanent` carrying the copy as its `sub_ability`.
+///
+/// The specific "the first time …" antecedent tag is why this must dispatch
+/// BEFORE `parse_optional_token_substitution_choice` (Jinnie "if you would
+/// create…") and the Doubling Season family ("if an effect would…") — it cannot
+/// steal either.
 fn parse_first_time_token_copy_of_host_replacement(
     lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    let (host, remainder) = nom_on_lower(original_text, lower, |input| {
-        let (input, _) =
-            tag("the first time you would create one or more tokens each turn, ").parse(input)?;
-        let (input, _) =
-            tag("you may instead create that many tokens that are copies of ").parse(input)?;
-        let (input, host) = alt((
-            value(TargetFilter::AttachedTo, tag("enchanted permanent")),
-            value(TargetFilter::AttachedTo, tag("enchanted creature")),
-            value(TargetFilter::AttachedTo, tag("enchanted artifact")),
+    let ((active_player_req, source), remainder) = nom_on_lower(original_text, lower, |input| {
+        // Axis A — the window, nested under the one shared prefix.
+        let (input, _) = tag("the first time you would create one or more tokens ").parse(input)?;
+        // CR 102.1: the active player is the player whose turn it is, so
+        // "during each of your turns" scopes the window to the controller's own
+        // turns while a bare "each turn" leaves it unscoped.
+        let (input, active_player_req) = alt((
+            value(Some(ControllerRef::You), tag("during each of your turns")),
+            value(None, tag("each turn")),
         ))
         .parse(input)?;
+        let (input, _) = tag(", you may instead ").parse(input)?;
+
+        // Axis B — the copy source.
+        let (input, source) =
+            alt((parse_chosen_copy_source, parse_static_copy_source)).parse(input)?;
         let (input, _) = opt(char('.')).parse(input)?;
-        Ok((input, host))
+        Ok((input, (active_player_req, source)))
     })?;
 
     if !remainder.trim().is_empty() {
@@ -9605,27 +9702,32 @@ fn parse_first_time_token_copy_of_host_replacement(
     // affected object id, so a `valid_card` gate would be unsatisfiable. The
     // per-turn window is enforced by `FirstTokenCreationEachTurn`; "that many"
     // is `EventContextAmount` (the replaced event's `count`).
+    //
+    // Both Axis-B arms share all of that and differ only in how the copy source
+    // is determined, which is what makes their `execute` trees structurally
+    // different rather than merely differently parameterized.
+    let execute = match source {
+        FirstTimeCopySource::Static(host) => {
+            AbilityDefinition::new(AbilityKind::Spell, copy_token_of(host))
+        }
+        // CR 614.12a: the choice IS the post-replacement continuation; the copy
+        // rides as its `sub_ability`, so `apply_post_replacement_effect` raises
+        // the prompt and the answer handler resolves the tail against the
+        // chosen object.
+        FirstTimeCopySource::Chosen(filter) => {
+            AbilityDefinition::new(AbilityKind::Spell, Effect::ChoosePermanent { filter })
+                .sub_ability(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    copy_token_of(TargetFilter::Any),
+                ))
+        }
+    };
+
     Some(
         ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
-            .condition(ReplacementCondition::FirstTokenCreationEachTurn {
-                player: ControllerRef::You,
-            })
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::CopyTokenOf {
-                    target: host,
-                    owner: TargetFilter::Controller,
-                    source_filter: None,
-                    enters_attacking: false,
-                    tapped: false,
-                    count: QuantityExpr::Ref {
-                        qty: QuantityRef::EventContextAmount,
-                    },
-                    extra_keywords: vec![],
-                    additional_modifications: vec![],
-                },
-            ))
+            .condition(ReplacementCondition::FirstTokenCreationEachTurn { active_player_req })
+            .execute(execute)
             .mode(ReplacementMode::Optional { decline: None })
             .description(original_text.to_string()),
     )
@@ -13030,6 +13132,55 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+
+    /// V13 — building block: `parse_type_phrase_folding`'s leading-article strip and its
+    /// `other than <self-ref>` suffix (CR 201.5) compose MID-STREAM, leaving the
+    /// trailing conjunction for the caller's own combinator.
+    ///
+    /// This is the composition `parse_chosen_copy_source` rests on, tested at the
+    /// building-block level rather than through one card. The exact-remainder
+    /// assertion is the load-bearing half: a mass-type-union continuation that
+    /// swallowed " and create …" would still satisfy a `contains(Another)` check
+    /// and would silently leave the Axis-B tail `tag` with no input to match.
+    ///
+    /// This assertion was MEASURED green during planning; it is a regression lock
+    /// on an existing property, not an open question.
+    #[test]
+    fn type_phrase_composes_article_and_other_than_self_ref_mid_stream() {
+        let tail = " and create that many tokens that are copies of that creature.";
+        // Bound to locals: `parse_type_phrase_folding` returns a remainder borrowed from
+        // its input, so the input must outlive the assertions below.
+        let with_article = format!("a creature other than ~{tail}");
+        let without_article = format!("creature other than ~{tail}");
+        let (filter, remainder) = parse_type_phrase_folding(&with_article);
+
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected a Typed filter, got {filter:?}");
+        };
+        assert_eq!(
+            typed.type_filters,
+            vec![TypeFilter::Creature],
+            "the article is consumed and the noun reads as Creature"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Another),
+            "CR 201.5: `other than ~` must push FilterProp::Another, got {:?}",
+            typed.properties
+        );
+        assert_eq!(
+            remainder, tail,
+            "the trailing conjunction must survive intact for the caller's tag"
+        );
+
+        // Sibling control: the no-article form yields the IDENTICAL filter, so
+        // the article path is purely additive rather than a separate grammar.
+        let (bare_filter, bare_remainder) = parse_type_phrase_folding(&without_article);
+        assert_eq!(
+            bare_filter, filter,
+            "the article is optional and changes nothing about the filter"
+        );
+        assert_eq!(bare_remainder, tail);
+    }
 
     /// `take_damage_source_subject_clause` must stop at whichever terminator
     /// occurs EARLIEST in the text, not whichever is tried first. Regression

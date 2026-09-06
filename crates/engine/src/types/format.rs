@@ -847,6 +847,95 @@ impl GameFormat {
         }
     }
 
+    /// Whether this format's command zone is filled from the decklist's
+    /// `commander` slot — i.e. the zone holds a card that is part of the deck
+    /// proper and is therefore netted against the main deck.
+    ///
+    /// This is deliberately NOT `uses_commander`, and NOT
+    /// `FormatConfig::command_zone`. The three predicates answer different
+    /// questions and their answers genuinely differ:
+    ///
+    /// - `uses_commander` is `command_zone && commander_damage_threshold`, so
+    ///   it means "CR 903.10a commander damage applies". Tiny Leaders and
+    ///   Oathbreaker put a real card in the command zone but declare no
+    ///   damage threshold, so they answer `false` there while answering
+    ///   `true` here.
+    /// - `command_zone` is true for Archenemy (CR 904.3 + CR 904.4: the
+    ///   supplementary scheme deck, which remains in the command zone) and
+    ///   Momir (its emblem), whose zones hold no decklist card at all, so
+    ///   they answer `true` there while answering `false` here.
+    ///
+    /// The netting invariant is format-neutral: wherever a format designates a
+    /// decklist card for the command zone, that card is COUNTED IN that
+    /// format's deck, so a decklist naming it in both the command zone and the
+    /// main deck describes ONE physical card, not two. Only the deck size
+    /// differs per format, which is why this predicate cannot be phrased in
+    /// terms of any single count:
+    ///
+    /// - CR 903.5a — Commander: exactly 100 cards, INCLUDING its commander.
+    /// - CR 903.12d — Brawl: exactly 60 cards, including its commander
+    ///   (CR 903.12a makes Brawl a Commander variant, so CR 903.5's identity
+    ///   carries over with this size modification).
+    /// - CR 903.13f — Commander Draft: at least 60 with no maximum, otherwise
+    ///   following CR 903.5 deck construction.
+    /// - Tiny Leaders and Oathbreaker appear NOWHERE in the Comprehensive
+    ///   Rules — both are community/WPN formats, so their command-zone
+    ///   identity comes from their own rules documents (Oathbreaker RC: 60
+    ///   cards including the Oathbreaker and signature spell), not from
+    ///   CR 903. Do not annotate them with a CR number.
+    ///
+    /// `deck_validation`'s `CommandZoneNetting::NetAgainstMainDeck` call sites
+    /// are exactly the formats that answer `true` here, and `deck_loading`
+    /// reads this same predicate for both netting and command-zone placement —
+    /// a format that netted without placing would start the game a card short,
+    /// and one that placed without netting would start it a card long.
+    ///
+    /// Returns `Err` for `GameFormat::Custom` for the same reason
+    /// `uses_commander` does: a bare `GameFormat` carries no
+    /// `CustomFormatRules` to answer from, and `false` would be silently
+    /// wrong rather than a safe default.
+    pub fn command_zone_holds_decklist_commander(self) -> Result<bool, FormatConfigError> {
+        match self {
+            GameFormat::Commander
+            | GameFormat::DuelCommander
+            | GameFormat::PauperCommander
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl
+            | GameFormat::CommanderDraft
+            // Tiny Leaders and Oathbreaker seat a decklist card in the command
+            // zone without a commander-damage threshold, which is precisely the
+            // case `uses_commander` cannot express.
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker => Ok(true),
+            // Archenemy's scheme deck (CR 904.3: the supplementary deck;
+            // CR 904.4: its cards remain in the command zone) and Momir's
+            // emblem occupy a
+            // command zone that holds no decklist card, so there is nothing to
+            // net and nothing to place from the `commander` slot.
+            GameFormat::Archenemy
+            | GameFormat::Momir
+            | GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Planechase => Ok(false),
+            GameFormat::Custom(id) => Err(FormatConfigError(format!(
+                "command_zone_holds_decklist_commander cannot resolve ad-hoc Custom format {} — \
+                 a bare GameFormat carries no CustomFormatRules; decide from the resolved \
+                 FormatConfig (its command_zone and uses_commander fields) instead",
+                id.0
+            ))),
+        }
+    }
+
     /// Whether this format's deck is fixed by the format rules and supplied
     /// automatically by the engine — the player never builds or selects one.
     /// True only for Momir's Madness, whose deck is the fixed 60-card snow-basic
@@ -1679,6 +1768,44 @@ impl FormatConfig {
         }
     }
 
+    /// Whether this RESOLVED config's command zone is filled from the
+    /// decklist's `commander` slot — the netting/placement axis described on
+    /// [`GameFormat::command_zone_holds_decklist_commander`].
+    ///
+    /// This is the method consumers should call. The bare `GameFormat`
+    /// predicate cannot answer for `GameFormat::Custom`, because a bare format
+    /// carries no `CustomFormatRules`; this one resolves Custom from the rules
+    /// the config was actually built with.
+    ///
+    /// Custom is answered from `CommandZoneMode`, NOT from `uses_commander`.
+    /// `for_custom_rules` derives `uses_commander` from the declared
+    /// `commander_damage_threshold` alone, so a custom format shaped like
+    /// Oathbreaker or Tiny Leaders — `CommandZoneMode::Enabled` with a
+    /// `CommanderEligibilityRule` and NO damage threshold — has
+    /// `uses_commander: false` while still designating a decklist commander.
+    /// Falling back to `uses_commander` would strand that commander in the
+    /// library exactly the way the built-in formats did before this predicate
+    /// existed. Every `CommandZoneMode::Enabled` carries an
+    /// `eligibility_rule`, so an enabled custom command zone always designates
+    /// a decklist commander; `Disabled` never does.
+    pub fn command_zone_holds_decklist_commander(&self) -> bool {
+        match self.format {
+            GameFormat::Custom(_) => match self.custom_rules.as_deref() {
+                Some(rules) => matches!(
+                    rules.structural.command_zone_mode,
+                    CommandZoneMode::Enabled { .. }
+                ),
+                // A Custom config with no attached rules cannot be resolved;
+                // `command_zone` is the closest structural fact it still
+                // carries, and it is what `for_custom_rules` would have set.
+                None => self.command_zone,
+            },
+            format => format
+                .command_zone_holds_decklist_commander()
+                .expect("non-Custom formats always resolve"),
+        }
+    }
+
     /// Return a copy of this config with the sandbox capability enabled.
     /// Pure data transform; the resulting config is otherwise identical and
     /// keeps the same `GameFormat`, deck/seat/life rules, etc. Idempotent.
@@ -2294,6 +2421,248 @@ mod tests {
             FormatConfig::for_format(GameFormat::Premodern).unwrap(),
             FormatConfig::premodern()
         );
+    }
+
+    /// `command_zone_holds_decklist_commander` is a strictly weaker condition
+    /// than `uses_commander` (commander damage implies a decklist commander,
+    /// never the reverse) and strictly stronger than `command_zone` (a zone
+    /// can hold schemes or an emblem instead). Pinning both directions is what
+    /// keeps a future variant from being added to only one of the three.
+    #[test]
+    fn command_zone_holds_decklist_commander_sits_between_uses_commander_and_command_zone() {
+        for meta in GameFormat::registry() {
+            let holds = meta.format.command_zone_holds_decklist_commander().unwrap();
+            let config = &meta.default_config;
+
+            if config.uses_commander {
+                assert!(
+                    holds,
+                    "{:?}: commander damage (CR 903.10a) requires a decklist commander",
+                    meta.format
+                );
+            }
+            if holds {
+                assert!(
+                    config.command_zone,
+                    "{:?}: a decklist commander needs a command zone to sit in",
+                    meta.format
+                );
+            }
+        }
+    }
+
+    /// CR 903.5a: the formats that place a commander from the decklist are
+    /// exactly the formats that net that copy out of the main deck. This is the
+    /// list `game::deck_loading` gates BOTH netting and command-zone placement
+    /// on, and the list `game::deck_validation` passes
+    /// `CommandZoneNetting::NetAgainstMainDeck` for. Spelled out literally so
+    /// adding a variant to one side without the other fails here rather than
+    /// silently starting a game one card short or one card long.
+    /// A custom format shaped like Oathbreaker or Tiny Leaders — an enabled
+    /// command zone with an eligibility rule but NO commander-damage threshold
+    /// — still designates a decklist commander. `for_custom_rules` derives
+    /// `uses_commander` from the threshold alone, so reading that field would
+    /// answer `false` here and strand the commander in the library, which is
+    /// the same class of bug this predicate exists to prevent for the built-in
+    /// formats. Resolve Custom from `CommandZoneMode` instead.
+    #[test]
+    fn custom_command_zone_without_a_damage_threshold_still_holds_a_decklist_commander() {
+        use crate::types::custom_format::{
+            CommanderEligibilityRule, CustomFormatId, CustomFormatRules, LegacyRuleSet,
+            LegalityRules, StructuralRules,
+        };
+
+        let build = |command_zone_mode| {
+            let rules = CustomFormatRules {
+                id: CustomFormatId(4242),
+                structural: StructuralRules {
+                    starting_life: 20,
+                    min_players: 2,
+                    max_players: 4,
+                    deck_size: DeckSizeRule::Exactly(60),
+                    singleton: true,
+                    command_zone_mode,
+                    range_of_influence: None,
+                    team_based: false,
+                    sideboard_policy: SideboardPolicy::Forbidden,
+                    default_deck_copy_limit: DeckCopyLimit::UpTo(1),
+                },
+                legality: LegalityRules {
+                    legal_sets: None,
+                    banned: Vec::new(),
+                    restricted: Vec::new(),
+                    legacy: LegacyRuleSet::default(),
+                },
+            };
+            FormatConfig::for_custom_rules(&rules)
+        };
+
+        let oathbreaker_shaped = build(CommandZoneMode::Enabled {
+            commander_damage_threshold: None,
+            eligibility_rule: CommanderEligibilityRule::OathbreakerSignatureSpell,
+        });
+        // PREMISE: this is genuinely the threshold-less shape, so the assertion
+        // below is about the predicate rather than a trivially true case.
+        assert!(!oathbreaker_shaped.uses_commander);
+        assert!(oathbreaker_shaped.command_zone);
+        assert!(
+            oathbreaker_shaped.command_zone_holds_decklist_commander(),
+            "an enabled custom command zone designates a decklist commander              regardless of the commander-damage threshold"
+        );
+
+        // Control: a threshold-bearing custom command zone answers the same,
+        // so the predicate is not merely inverting `uses_commander`.
+        let commander_shaped = build(CommandZoneMode::Enabled {
+            commander_damage_threshold: Some(21),
+            eligibility_rule: CommanderEligibilityRule::Standard,
+        });
+        assert!(commander_shaped.uses_commander);
+        assert!(commander_shaped.command_zone_holds_decklist_commander());
+
+        // Control: a disabled custom command zone holds nothing, so nothing may
+        // be netted or placed.
+        let no_zone = build(CommandZoneMode::Disabled);
+        assert!(!no_zone.command_zone);
+        assert!(!no_zone.command_zone_holds_decklist_commander());
+    }
+
+    /// CR 903.5a: the formats that place a commander from the decklist are
+    /// exactly the formats that net that copy out of the main deck.
+    /// `game::deck_loading` gates BOTH netting and command-zone placement on
+    /// this predicate, and `game::deck_validation` passes
+    /// `CommandZoneNetting::NetAgainstMainDeck` for the same set. A format
+    /// netted there but not placed here starts the game a card short; one
+    /// placed but not netted starts it a card long.
+    ///
+    /// This SCANS `deck_validation.rs` rather than asserting a hardcoded list.
+    /// A hardcoded array cannot fail when a call site changes — flipping
+    /// `evaluate_tiny_leaders` to `CountVerbatim` would leave a list-based
+    /// test green while the loader and validator silently disagreed, which is
+    /// exactly the defect this predicate exists to prevent. Scanning the
+    /// source is the same technique `phase-ai`'s `score_contract_lint` uses to
+    /// pin a cross-file contract.
+    #[test]
+    fn command_zone_holds_decklist_commander_matches_the_validator_netting_set() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/game/deck_validation.rs"
+        ))
+        .expect("deck_validation.rs must be readable");
+
+        // Production code only: `#[cfg(test)]` fixtures call
+        // `combined_copy_counts` too, and those calls sit after the last
+        // `evaluate_*` function, so including them would attribute a netting
+        // mode to whatever helper happened to be declared last.
+        const TEST_MODULE_MARKER: &str = "\n#[cfg(test)]\n";
+        let production = source
+            .split_once(TEST_MODULE_MARKER)
+            .map_or(source.as_str(), |(before, _)| before);
+
+        // Map each `evaluate_*`/`quick_*` function to the netting mode its
+        // `combined_copy_counts` call passes, by walking the file and
+        // remembering the most recent `fn` header.
+        let mut current_fn: Option<&str> = None;
+        let mut netted: Vec<&str> = Vec::new();
+        let mut verbatim: Vec<&str> = Vec::new();
+        for line in production.lines() {
+            // Accept any visibility/qualifier prefix: `pub fn evaluate_…` and
+            // `pub(crate) fn …` are real headers in this file, and a bare
+            // `strip_prefix("fn ")` would skip them, silently attributing
+            // their call sites to whichever function was declared before.
+            if let Some(header) = line
+                .split_once("fn ")
+                .filter(|(before, _)| {
+                    before.is_empty()
+                        || before.split_whitespace().all(|w| {
+                            matches!(w, "pub" | "async" | "const" | "unsafe" | "extern")
+                                || w.starts_with("pub(")
+                        })
+                })
+                .map(|(_, rest)| rest)
+            {
+                current_fn = header.split('(').next();
+            }
+            let Some(name) = current_fn else { continue };
+            if line.contains("CommandZoneNetting::NetAgainstMainDeck")
+                && line.contains("combined_copy_counts(")
+            {
+                netted.push(name);
+            } else if line.contains("CommandZoneNetting::CountVerbatim")
+                && line.contains("combined_copy_counts(")
+            {
+                verbatim.push(name);
+            }
+        }
+
+        // PREMISE: the scan actually found call sites. Without this the whole
+        // test passes vacuously if the call shape is ever reformatted.
+        assert!(
+            netted.len() >= 5,
+            "expected to find the NetAgainstMainDeck call sites, found {netted:?} — \
+             has `combined_copy_counts` been reformatted? Update the scan."
+        );
+        assert!(
+            verbatim.len() >= 3,
+            "expected to find the CountVerbatim call sites, found {verbatim:?}"
+        );
+
+        // Every format whose validator nets must answer `true` here.
+        for fn_name in &netted {
+            let formats = formats_evaluated_by(fn_name);
+            assert!(
+                !formats.is_empty(),
+                "{fn_name} nets against the main deck but maps to no GameFormat — \
+                 add it to `formats_evaluated_by` so this invariant keeps covering it"
+            );
+            for format in formats {
+                assert!(
+                    format.command_zone_holds_decklist_commander().unwrap(),
+                    "{fn_name} passes NetAgainstMainDeck for {format:?}, so \
+                     command_zone_holds_decklist_commander must be true — otherwise \
+                     deck_loading leaves that commander in the library while the \
+                     validator has already netted it out"
+                );
+            }
+        }
+
+        // And every format counted verbatim must answer `false`, or netting
+        // would delete a library card from a format with no decklist commander.
+        for fn_name in &verbatim {
+            for format in formats_evaluated_by(fn_name) {
+                assert!(
+                    !format.command_zone_holds_decklist_commander().unwrap(),
+                    "{fn_name} counts {format:?} verbatim, so \
+                     command_zone_holds_decklist_commander must be false"
+                );
+            }
+        }
+    }
+
+    /// The `GameFormat`s each `deck_validation` entry point evaluates. Kept
+    /// beside the scan above so a new validator function fails loudly (empty
+    /// mapping) rather than being silently skipped.
+    fn formats_evaluated_by(fn_name: &str) -> Vec<GameFormat> {
+        match fn_name {
+            "evaluate_commander_with_format" | "quick_commander_check" => vec![
+                GameFormat::Commander,
+                GameFormat::DuelCommander,
+                GameFormat::PauperCommander,
+                GameFormat::CommanderDraft,
+            ],
+            "evaluate_brawl" => vec![GameFormat::Brawl, GameFormat::HistoricBrawl],
+            "evaluate_tiny_leaders" => vec![GameFormat::TinyLeaders],
+            "evaluate_oathbreaker" => vec![GameFormat::Oathbreaker],
+            "evaluate_archenemy" => vec![GameFormat::Archenemy],
+            "evaluate_planechase" => vec![GameFormat::Planechase],
+            "evaluate_constructed" => vec![
+                GameFormat::Standard,
+                GameFormat::Modern,
+                GameFormat::Legacy,
+                GameFormat::Vintage,
+                GameFormat::Pauper,
+            ],
+            _ => Vec::new(),
+        }
     }
 
     #[test]

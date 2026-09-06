@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
-use nom::character::complete::space1;
+use nom::character::complete::{multispace0, space1};
 use nom::combinator::{eof, map, not, opt, peek, success, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
@@ -384,6 +384,127 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
         }
     };
     (filter, &rest[consumed..])
+}
+
+/// CR 205.2a + CR 601.2h: Fold an INDEFINITE-ARTICLE-led right conjunct onto an
+/// already-parsed left conjunct — "another creature or an artifact"
+/// (Mold Folk's `{1}, Sacrifice another creature or an artifact:`).
+///
+/// Takes `base` and `rest` rather than parsing the phrase itself, and that split
+/// is LOAD-BEARING, not a style choice. In this surface "another" scopes only the
+/// LEFT conjunct: the right one carries its own determiner ("an"), so it is not
+/// "another artifact". Two official rulings say so — Elite Headhunter
+/// (2019-10-04): "If Elite Headhunter somehow becomes an artifact, you can
+/// sacrifice it to pay the cost of its activated ability"; Gut, True Soul Zealot
+/// (2022-06-10): "If Gut somehow becomes an artifact, you may sacrifice it to its
+/// own ability." Stamping `FilterProp::Another` onto the right leg would make an
+/// artifact-ified source unable to pay with itself: the sacrifice-cost path runs
+/// `find_eligible_sacrifice_targets` -> `matches_target_filter` ->
+/// `matches_filter_prop`, whose `Another` arm reduces to
+/// `!source_is_current_object(state, source, object_id)` here, because
+/// `FilterContext::from_source` leaves `recipient_id` unset. (The
+/// `record.object_id != source.id` form is the zone-change-record matcher, a
+/// different path.) Reachable in play via Liquimetal Coating or Mycosynth Lattice
+/// — both literally "in addition to its/their other types" — and via Enchanted
+/// Evening for the enchantment leg.
+///
+/// The caller must therefore apply any `another`/`other` scoping to `base` BEFORE
+/// folding. The distinction cannot be made from the folded shape: the
+/// article-LESS surface ("another creature or artifact") has no second determiner,
+/// so its "another" genuinely does scope both legs and the shared grammar
+/// distributes it across the `Or` it builds. Only the caller knows which surface
+/// it had — hence `base` arrives already scoped.
+///
+/// The shared grammar already unions the article-less surface:
+/// `parse_type_phrase_folding` turns "another creature or artifact" into
+/// `Or[Typed{Creature, Another}, Typed{Artifact, Another}]`. Only the article
+/// blocks it, and that refusal is DELIBERATE, not an oversight — see the bare
+/// `and`/`or` branch of `parse_type_phrase_folding_with_ctx`, which leaves the tail as
+/// remainder (pinned by
+/// `parse_type_phrase_leaves_article_led_or_rhs_as_remainder`) because the same
+/// surface appears mid-CLAUSE with a verb elided after the connector:
+///
+///   * "you control an artifact creature or a Plan"     (Doctor Doom)
+///   * "you control a land creature or a land entered the battlefield under your
+///     control this turn"                               (Earth Rumble Wrestlers)
+///
+/// WHY A WRAPPER RATHER THAN WIDENING THAT BRANCH — stated carefully, because the
+/// obvious argument is wrong. It is NOT that those two cards would break: the
+/// condition layer folds an article-led right-hand side itself
+/// (`oracle_nom::condition::parse_you_control_a`), so Doctor Doom already lowers
+/// to `IsPresent{Or[Typed{Artifact, Creature}, Typed{Subtype(Plan)}]}` — the very
+/// union a widened branch would have built one layer lower. Earth Rumble
+/// Wrestlers stays an honest `StaticCondition::Unrecognized` either way, because
+/// its trailing "entered the battlefield …" fails the full-consumption guard in
+/// `oracle_static::shared`, not because of anything this branch does.
+///
+/// The real reason is BLAST RADIUS. `parse_type_phrase_folding_with_ctx` is the shared
+/// entry point for target phrases, cost filters, trigger filters, keyword costs
+/// and condition subjects; widening it changes every one of those at once, and
+/// the pinning test above exists precisely to stop that happening casually. A
+/// COST, by contrast, has no verb to elide — the entire phrase is the filter — so
+/// its consumer can opt into the union reading on its own, and the measured
+/// effect stays the eight cost-position cards this change actually intends.
+/// The disambiguator is the consumer's intent, which is what a wrapper expresses
+/// and a widened branch cannot.
+/// Mirrors [`parse_target_with_disjunctive_restriction`] directly above: parse
+/// with the shared grammar, then fold a recognized remainder into a
+/// `TargetFilter::Or`.
+pub(crate) fn fold_article_led_type_union(base: TargetFilter, rest: &str) -> (TargetFilter, &str) {
+    // Only a plain typed left conjunct can grow a type union. An anaphor, a
+    // player filter or an already-built `Or` is returned untouched.
+    if !matches!(base, TargetFilter::Typed(_)) {
+        return (base, rest);
+    }
+    // The connector grammar is ASCII and byte-length preserving under
+    // `to_lowercase`, so the consumed count maps straight back onto `rest`.
+    let rest_lower = rest.to_lowercase();
+    let Some(consumed) = parse_article_led_type_union_connector(&rest_lower) else {
+        return (base, rest);
+    };
+    let (right, right_rest) = parse_type_phrase_folding(&rest[consumed..]);
+    // A right conjunct that carries no TYPE content is not treated as a union leg.
+    // Deliberately stricter than `target_filter_has_meaningful_content`: a bare
+    // "or a token" parses to `Typed{[], [Token]}`, which matches only tokens
+    // rather than every object, but it is a property-only leg the cost grammar
+    // has no corpus instance of, so this bails to today's behaviour rather than
+    // guessing. Widening to accept property-only legs needs its own measurement.
+    let TargetFilter::Typed(ref right_typed) = right else {
+        return (base, rest);
+    };
+    if right_typed.type_filters.is_empty() {
+        return (base, rest);
+    }
+    (
+        TargetFilter::Or {
+            filters: vec![base, right],
+        },
+        right_rest,
+    )
+}
+
+/// The connector of an article-led type union: `" or an "` / `" and/or a "`,
+/// returning the byte count consumed through the article. Requires a bare type
+/// word after the article and refuses the article-led BARE-card branch
+/// ("or a card with disturb" — Shipwreck Sifters), which is a
+/// keyword-membership disjunct folded at the trigger layer rather than a
+/// card-type union. `input` is already lowercased.
+fn parse_article_led_type_union_connector(input: &str) -> Option<usize> {
+    let total = input.len();
+    let (rest, _) = multispace0::<_, OracleError<'_>>(input).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("and/or "), tag("or ")))
+        .parse(rest)
+        .ok()?;
+    if is_article_led_bare_card(rest) {
+        return None;
+    }
+    let (after_article, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))
+        .parse(rest)
+        .ok()?;
+    if !starts_with_type_word(after_article) {
+        return None;
+    }
+    Some(total - after_article.len())
 }
 
 /// One disjunct of a heterogeneous relative-clause restriction (see
@@ -15567,6 +15688,115 @@ mod tests {
     }
 
     // ── Feature 1: starts_with_type_word guard ──
+
+    /// CR 205.2a: the opt-in wrapper unions an ARTICLE-LED right conjunct that
+    /// the shared grammar deliberately leaves as remainder. The article is the
+    /// only difference: `parse_type_phrase_folding` already unions the article-less
+    /// surface, so the two must agree leg-for-leg.
+    ///
+    /// Revert-failing: without the wrapper the phrase collapses to
+    /// `Typed{[Creature], Another}` and the whole `or an artifact` leg is lost.
+    #[test]
+    fn article_led_type_union_matches_the_article_less_surface() {
+        let (base_, tail_) = parse_target("target another creature or an artifact");
+        let (with_article, rest) = fold_article_led_type_union(base_, tail_);
+        let (without_article, _) = parse_target("target another creature or artifact");
+        assert_eq!(
+            rest.trim(),
+            "",
+            "the union must consume the whole phrase, got {rest:?}"
+        );
+
+        let TargetFilter::Or { filters } = &with_article else {
+            panic!("expected a two-leg Or union, got {with_article:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf,
+                other => panic!("each leg must be Typed, got {other:?}"),
+            })
+            .collect();
+        assert!(legs[0].type_filters.contains(&TypeFilter::Creature));
+        assert!(legs[1].type_filters.contains(&TypeFilter::Artifact));
+
+        // The article-less twin is the shape the shared grammar already builds;
+        // the wrapper must not invent a different one. `Another` distribution is
+        // the cost layer's job (`ensure_another_sacrifice_filter`), so compare
+        // only the type legs here.
+        let TargetFilter::Or {
+            filters: bare_legs, ..
+        } = &without_article
+        else {
+            panic!(
+                "reach-guard: the article-less surface must already union, got {without_article:?}"
+            );
+        };
+        let bare_types: Vec<_> = bare_legs
+            .iter()
+            .filter_map(|f| match f {
+                TargetFilter::Typed(tf) => Some(tf.type_filters.clone()),
+                _ => None,
+            })
+            .collect();
+        let article_types: Vec<_> = legs.iter().map(|tf| tf.type_filters.clone()).collect();
+        assert_eq!(
+            article_types, bare_types,
+            "article-led and article-less surfaces must union to the same type legs"
+        );
+    }
+
+    /// The wrapper is OPT-IN: it must not change what the shared grammar does.
+    /// `parse_target` keeps leaving the article-led tail as remainder, which is
+    /// what lets the condition layer fold an elided-verb clause one level up
+    /// (Earth Rumble Wrestlers' "you control a land creature or a land entered
+    /// the battlefield under your control this turn" is two conditions, not a type
+    /// union).
+    #[test]
+    fn article_led_type_union_is_opt_in_only() {
+        let (shared, rest) = parse_target("target another creature or an artifact");
+        assert!(
+            matches!(shared, TargetFilter::Typed(_)),
+            "the shared grammar must still collapse, got {shared:?}"
+        );
+        assert_eq!(
+            rest.trim(),
+            "or an artifact",
+            "and must still leave the tail as remainder for the condition layer"
+        );
+    }
+
+    /// CR 205.2a: the connector refuses shapes that are not card-TYPE unions.
+    /// Each negative is paired with the positive that proves the harness reaches
+    /// the wrapper at all.
+    #[test]
+    fn article_led_type_union_refuses_non_type_disjuncts() {
+        // Positive reach-guard, same test.
+        let (base_, tail_) = parse_target("target creature or an artifact");
+        let (ok, _) = fold_article_led_type_union(base_, tail_);
+        assert!(
+            matches!(ok, TargetFilter::Or { .. }),
+            "reach-guard: a real type union must still fold, got {ok:?}"
+        );
+
+        // A BARE-card right conjunct is a keyword-membership branch folded at the
+        // trigger layer (Shipwreck Sifters), never a type union.
+        let (base_, tail_) = parse_target("target creature or a card with disturb");
+        let (bare_card, _) = fold_article_led_type_union(base_, tail_);
+        assert!(
+            matches!(bare_card, TargetFilter::Typed(_)),
+            "an article-led bare-card disjunct must not union, got {bare_card:?}"
+        );
+
+        // A non-type word after the article is not a leg either.
+        let (base_, tail_) = parse_target("target creature or a player");
+        let (non_type, _) = fold_article_led_type_union(base_, tail_);
+        assert!(
+            !matches!(non_type, TargetFilter::Or { .. }),
+            "a non-type right conjunct must not union, got {non_type:?}"
+        );
+    }
 
     #[test]
     fn starts_with_type_word_core_types() {

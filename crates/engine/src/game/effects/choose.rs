@@ -5,7 +5,6 @@ use crate::types::ability::{
     ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind,
     PlayerChoiceDistinctness, ResolvedAbility, SeatDirection, TargetSelectionMode,
 };
-use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, NamedChoiceSource, NamedChoiceSourceBinding, TriggerSourceContext, WaitingFor,
@@ -622,16 +621,6 @@ const ODD_OR_EVEN: &[&str] = &["Odd", "Even"];
 
 const BASIC_LAND_TYPES: &[&str] = &["Plains", "Island", "Swamp", "Mountain", "Forest"];
 
-const CARD_TYPES: &[&str] = &[
-    "Artifact",
-    "Creature",
-    "Enchantment",
-    "Instant",
-    "Land",
-    "Planeswalker",
-    "Sorcery",
-];
-
 /// CR 205.3i: All land subtypes. Derived from `is_land_subtype()` in `types/card_type.rs`.
 const LAND_TYPES: &[&str] = &[
     "Cave",
@@ -702,18 +691,11 @@ fn compute_options(
         ChoiceType::OddOrEven => to_strings(ODD_OR_EVEN),
         // CR 305.6: The basic land types are Plains, Island, Swamp, Mountain, and Forest.
         ChoiceType::BasicLandType => to_strings(BASIC_LAND_TYPES),
-        // CR 205.2a: The card types are artifact, battle, conspiracy, creature,
-        // dungeon, enchantment, instant, land, phenomenon, plane, planeswalker,
-        // scheme, sorcery, kindred, and vanguard. `excluded` narrows the offered
-        // set (e.g. Archon of Valor's Reach restricts to artifact, enchantment,
-        // instant, sorcery, planeswalker by excluding creature and land).
-        ChoiceType::CardType { excluded } => CARD_TYPES
-            .iter()
-            .filter(|name| {
-                name.parse::<CoreType>()
-                    .is_ok_and(|core_type| !excluded.contains(&core_type))
-            })
-            .map(|name| name.to_string())
+        // CR 205.2a: exact listed choices preserve printed order; the empty
+        // form delegates to the engine's deliberately narrower generic policy.
+        ChoiceType::CardType { options } => ChoiceType::legal_card_type_options(options)
+            .into_iter()
+            .map(|card_type| card_type.to_string())
             .collect(),
         // CardName options are provided by the frontend from its local card database.
         // The engine sends an empty list to avoid serializing 30k+ names every state update.
@@ -932,6 +914,7 @@ fn keyword_choice_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -1302,20 +1285,23 @@ mod tests {
                 assert_eq!(options.len(), 7);
                 assert!(options.contains(&"Creature".to_string()));
                 assert!(options.contains(&"Instant".to_string()));
+                assert!(!options.contains(&"Battle".to_string()));
+                assert!(!options.contains(&"Kindred".to_string()));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
     }
 
-    // CR 205.2a: Archon of Valor's Reach restricts the card-type choice to
-    // "artifact, enchantment, instant, sorcery, or planeswalker" by excluding
-    // Creature and Land from the offered set.
+    // CR 205.2a: Archon of Valor's Reach uses its printed positive domain.
     #[test]
-    fn choose_card_type_excludes_restricted_types() {
+    fn choose_card_type_explicit_domain_excludes_restricted_types() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::card_type_excluding(vec![
-            CoreType::Creature,
-            CoreType::Land,
+        let ability = make_choose_ability(ChoiceType::card_type_from(vec![
+            CoreType::Artifact,
+            CoreType::Enchantment,
+            CoreType::Instant,
+            CoreType::Planeswalker,
+            CoreType::Sorcery,
         ]));
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -1328,6 +1314,32 @@ mod tests {
                 assert!(options.contains(&"Planeswalker".to_string()));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_explicit_card_types_preserves_source_order_and_domain() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::card_type_from(vec![
+            CoreType::Sorcery,
+            CoreType::Artifact,
+            CoreType::Creature,
+            CoreType::Enchantment,
+            CoreType::Instant,
+        ]));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(
+                    options,
+                    &["Sorcery", "Artifact", "Creature", "Enchantment", "Instant"]
+                );
+                assert!(!options.contains(&"Land".to_string()));
+                assert!(!options.contains(&"Planeswalker".to_string()));
+            }
+            other => panic!("Expected NamedChoice, got {other:?}"),
         }
     }
 
@@ -1892,6 +1904,57 @@ mod tests {
             "the game-selected player is bound into chosen_players"
         );
         assert!(state.last_named_choice.is_some());
+    }
+
+    #[test]
+    fn resolve_random_singleton_card_type_persists_without_prompting() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        state.objects.insert(
+            source_id,
+            crate::game::game_object::GameObject::new(
+                source_id,
+                crate::types::identifiers::CardId(100),
+                PlayerId(0),
+                "Source".to_string(),
+                crate::types::zones::Zone::Battlefield,
+            ),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::card_type_from(vec![CoreType::Artifact]),
+                persist: true,
+                selection: TargetSelectionMode::Random,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("random singleton choice resolves through the production chain");
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Choose,
+                        source_id: event_source,
+                        ..
+                    } if *event_source == source_id
+                )
+            }),
+            "the production resolver must publish the choice resolution"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
+            "random selection must never request a named choice"
+        );
+        assert_eq!(
+            state.objects[&source_id].chosen_card_type(),
+            Some(CoreType::Artifact)
+        );
     }
 
     #[test]

@@ -181,6 +181,9 @@ describe("MultiplayerPage host server", () => {
     // zustand actions are plain state fields, so `setState` swaps them.
     useMultiplayerStore.setState({
       hostingServer: URL_A,
+      // Reset per case: the mode is persisted store state now, so leg (ii)'s
+      // flip to P2P would otherwise leak into whatever runs after it.
+      connectionMode: null,
       userLobbySources: [],
       sourceStatus: new Map(),
       directorySources: [],

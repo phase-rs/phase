@@ -196,7 +196,7 @@ describe("HostSetup", () => {
     const user = userEvent.setup();
     seedCandidates();
 
-    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Host on" }));
     const options = screen.getAllByRole("option");
@@ -222,7 +222,7 @@ describe("HostSetup", () => {
     const onHost = vi.fn().mockResolvedValue(false);
     seedCandidates();
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     // Half ONE: the default skips both, so the best-scored USABLE server is
     // what an untouched form submits.
@@ -310,7 +310,7 @@ describe("HostSetup", () => {
       ),
     });
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Host on" }));
     // The preset renders as an ordinary unranked candidate — NOT as
@@ -362,7 +362,7 @@ describe("HostSetup", () => {
       }),
     });
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Host on" }));
     expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
@@ -378,7 +378,7 @@ describe("HostSetup", () => {
   it("renders no host-target picker in p2p mode", () => {
     seedCandidates();
 
-    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />);
 
     // Reach-guard FIRST: the form really mounted in p2p mode — its own submit
     // label, which server mode never renders — so the absence below is the
@@ -406,7 +406,7 @@ describe("HostSetup", () => {
       disabledDirectorySources: [],
     });
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     // Reach-guard: the form mounted with an empty candidate list, which is the
     // state the defect needs.
@@ -442,7 +442,7 @@ describe("HostSetup", () => {
     const onHost = vi.fn().mockResolvedValue(false);
     seedCandidates();
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     // Paired half ONE: submitting without touching the picker passes the
     // default, so the assertion below is not passing on a constant.
@@ -468,6 +468,7 @@ describe("HostSetup", () => {
         onHost={vi.fn()}
         onBack={vi.fn()}
         connectionMode="p2p"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -484,6 +485,7 @@ describe("HostSetup", () => {
         onHost={vi.fn()}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -495,7 +497,7 @@ describe("HostSetup", () => {
 
   describe.each(["server", "p2p"] as const)("accessible hosting options (%s mode)", (connectionMode) => {
     it("names every visible switch and associates only the sandbox help", () => {
-      render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} />);
+      render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
       const names = ["Start when full", "Sandbox Mode — allow debug actions", "Set password"];
       if (connectionMode === "server") names.unshift("List in lobby");
@@ -518,7 +520,7 @@ describe("HostSetup", () => {
     it("keeps the compact track inside a non-shrinking touch target", async () => {
       const user = userEvent.setup();
       const onHost = vi.fn();
-      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} />);
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
       for (const control of screen.getAllByRole("switch")) {
         // Happy DOM does not lay out CSS. Pin the sizing contract here; check
@@ -541,7 +543,7 @@ describe("HostSetup", () => {
     it("supports native Space and Enter without submitting until Host is activated", async () => {
       const user = userEvent.setup();
       const onHost = vi.fn();
-      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} />);
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
       if (connectionMode === "server") {
         const publicSwitch = screen.getByRole("switch", { name: "List in lobby" });
@@ -587,7 +589,7 @@ describe("HostSetup", () => {
     it("clears a password when its named switch is turned off", async () => {
       const user = userEvent.setup();
       const onHost = vi.fn();
-      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} />);
+      render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
       const passwordSwitch = screen.getByRole("switch", { name: "Set password" });
       await user.click(passwordSwitch);
@@ -615,7 +617,7 @@ describe("HostSetup", () => {
   it("updates switch names and sandbox help when the active locale changes", async () => {
     const user = userEvent.setup();
     i18n.addResourceBundle("de", "multiplayer", deMultiplayer, true, true);
-    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     const translations = [
       ["List in lobby", "In Lobby listen"],
@@ -643,8 +645,8 @@ describe("HostSetup", () => {
   });
 
   it("keeps sandbox descriptions associated with their own mounted form", () => {
-    const first = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" />);
-    const second = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+    const first = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+    const second = render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />);
 
     const descriptionIds = [first, second].map(({ container }) => {
       const control = within(container).getByRole("switch", { name: "Sandbox Mode — allow debug actions" });
@@ -666,6 +668,7 @@ describe("HostSetup", () => {
         onHost={onHost}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -694,6 +697,7 @@ describe("HostSetup", () => {
         onHost={onHost}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -715,6 +719,7 @@ describe("HostSetup", () => {
         onHost={onHost}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -763,6 +768,7 @@ describe("HostSetup", () => {
         onHost={onHost}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -789,6 +795,7 @@ describe("HostSetup", () => {
         onHost={vi.fn()}
         onBack={vi.fn()}
         connectionMode="server"
+        onConnectionModeChange={vi.fn()}
       />,
     );
 
@@ -809,7 +816,7 @@ describe("HostSetup", () => {
     const user = userEvent.setup();
     const onHost = vi.fn();
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     // Commander's 40 is already in the box, so entering a non-standard value
     // means emptying it first. A per-keystroke clamp used to refill the box
@@ -832,7 +839,7 @@ describe("HostSetup", () => {
     const user = userEvent.setup();
     const onHost = vi.fn();
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     const life = screen.getByLabelText("Starting Life");
     await user.clear(life);
@@ -899,7 +906,7 @@ describe("HostSetup", () => {
         });
 
         render(
-          <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} />,
+          <HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />,
         );
 
         // Reached the rendered form at all — i.e. the seat-ceiling lookup did
@@ -957,7 +964,7 @@ describe("HostSetup", () => {
       printing_fidelity: "NotApplicable",
     });
 
-    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" />);
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled();
 
@@ -1028,9 +1035,92 @@ describe("HostSetup", () => {
       printing_fidelity: "NotApplicable",
     });
 
-    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" />);
+    render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode="p2p" onConnectionModeChange={vi.fn()} />);
 
     expect(screen.queryByText(saved.name)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Use" })).not.toBeInTheDocument();
+  });
+
+  // ── Connection mode switch ──────────────────────────────────────────────
+
+  it("mirrors the connection switch and reports a change to the page", async () => {
+    const user = userEvent.setup();
+    const onConnectionModeChange = vi.fn();
+    render(
+      <HostSetup
+        onHost={vi.fn()}
+        onBack={vi.fn()}
+        connectionMode="server"
+        onConnectionModeChange={onConnectionModeChange}
+      />,
+    );
+
+    const group = screen.getByRole("group", { name: "Connection" });
+    expect(
+      within(group).getByRole("button", { name: "Official Server" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    // The server-only control is what the mode is currently buying.
+    expect(screen.getByText("List in lobby")).toBeInTheDocument();
+
+    await user.click(within(group).getByRole("button", { name: "P2P" }));
+
+    // The page owns the value, so the form reports and does not self-apply.
+    expect(onConnectionModeChange).toHaveBeenCalledWith("p2p");
+    expect(screen.getByText("List in lobby")).toBeInTheDocument();
+  });
+
+  /**
+   * The mode is mutable while this form is mounted and the form is not
+   * remounted on a change, so the mount-time seat clamp is not enough: before
+   * this, a Commander Draft table set to 8 seats in server mode kept
+   * submitting 8 after a flip to P2P while the seat picker rendered 3–6 with
+   * nothing selected — and the AI seat at index 7 rode along with it.
+   */
+  it("clamps seats, and the AI seats past them, when the mode drops the ceiling", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn();
+    const { rerender } = render(
+      <HostSetup
+        onHost={onHost}
+        onBack={vi.fn()}
+        connectionMode="server"
+        onConnectionModeChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Format" }));
+    await user.click(screen.getByRole("option", { name: "Commander Draft" }));
+    await user.click(screen.getByRole("button", { name: "8" }));
+    // Seat 8 (index 7) is an AI, so the clamp has to prune it rather than only
+    // lower the count — an unpruned seat is submitted via `effectiveAiSeats`.
+    const humans = screen.getAllByRole("button", { name: "Human" });
+    await user.click(humans[humans.length - 1]);
+
+    rerender(
+      <HostSetup
+        onHost={onHost}
+        onBack={vi.fn()}
+        connectionMode="p2p"
+        onConnectionModeChange={vi.fn()}
+      />,
+    );
+
+    // Said, not silent — and the number comes from `P2P_MAX_PEERS`.
+    expect(
+      screen.getByText(
+        "P2P tables seat at most 6 players, so the seat count is capped.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "8" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+
+    expect(onHost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        formatConfig: expect.objectContaining({ max_players: 6 }),
+        aiSeats: [],
+      }),
+      null,
+    );
   });
 });

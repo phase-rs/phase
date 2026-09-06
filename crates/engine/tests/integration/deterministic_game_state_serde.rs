@@ -6,7 +6,10 @@ use engine::game::combat::{
 use engine::game::dungeon::DungeonProgress;
 use engine::game::game_object::{BackFaceData, GameObject, ProtectionStartSnapshot};
 use engine::game::printed_cards::intrinsic_copiable_values;
-use engine::types::ability::{Effect, KeywordAction, ResolvedAbility, ThisWayCause};
+use engine::types::ability::{
+    ControllerRef, CopyTargetPurpose, Effect, KeywordAction, ReplacementCondition, ResolvedAbility,
+    ThisWayCause,
+};
 use engine::types::attribution::ObjectAttribution;
 use engine::types::card_type::CardType;
 use engine::types::definitions::Definitions;
@@ -2072,6 +2075,99 @@ fn declare_blockers_numeric_maps_round_trip_through_value_bare_raw_and_trusted()
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
     state.waiting_for = waiting;
     assert_waiting_round_trip_across_persistence_forms(state);
+}
+
+/// The `CopyTargetPurpose` wire surface.
+///
+/// **Discriminating half:** `CopyTokenSource` serializes under its
+/// `#[serde(tag = "type")]` tag and survives every persistence form. Removing
+/// the variant fails to compile, so this cannot pass on a tree without it.
+///
+/// **Not the discriminating half — a pre-existing-behaviour guard:** the
+/// `purpose`-less blob still loading as `BecomeCopy` passes *identically*
+/// before this change, because `#[serde(default)]` on the field and
+/// `#[default]` on `BecomeCopy` both already existed. It pins that back-compat
+/// against a future edit that moves `#[default]`; it demonstrates nothing this
+/// change added.
+#[test]
+fn copy_target_choice_purpose_round_trips_and_still_defaults_to_become_copy() {
+    let waiting = WaitingFor::CopyTargetChoice {
+        player: PlayerId(1),
+        source_id: ObjectId(7),
+        valid_targets: vec![ObjectId(9), ObjectId(8)],
+        max_mana_value: None,
+        purpose: CopyTargetPurpose::CopyTokenSource,
+    };
+    let value = waiting_value(&waiting);
+    assert_eq!(value["data"]["purpose"]["type"], "CopyTokenSource");
+
+    let mut without_purpose = value.clone();
+    without_purpose["data"]
+        .as_object_mut()
+        .expect("a CopyTargetChoice payload is a JSON object")
+        .remove("purpose");
+    let restored = serde_json::from_value::<WaitingFor>(without_purpose)
+        .expect("a purpose-less wait must still restore");
+    let WaitingFor::CopyTargetChoice { purpose, .. } = restored else {
+        panic!("a CopyTargetChoice blob must restore as CopyTargetChoice");
+    };
+    assert_eq!(purpose, CopyTargetPurpose::BecomeCopy);
+
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    state.waiting_for = waiting;
+    assert_waiting_round_trip_across_persistence_forms(state);
+}
+
+/// The `FirstTokenCreationEachTurn` turn-scope slot on the wire.
+///
+/// Three distinct properties, each with its own measured revert-failing edit:
+///
+/// - `Some(You)` round-trips with the key **present**. Removing the field
+///   fails to compile.
+/// - `None` **omits** the key entirely. This is the only guard on
+///   `skip_serializing_if = "Option::is_none"`: drop that attribute and this
+///   assertion alone reds with `"active_player_req": null`, while the other
+///   two stay green.
+/// - A payload carrying the superseded required `player` key still loads, with
+///   the unknown key ignored and the new field defaulting to `None`.
+///   **Measured** revert-failing property for that last one: it reds if the
+///   field is made non-`Option`, or if `deny_unknown_fields` is added to
+///   `ReplacementCondition`. It does **not** red on dropping
+///   `#[serde(default)]` — serde resolves a missing `Option<T>` to `None`
+///   regardless, so that attribute is carried for consistency with the three
+///   sibling `active_player_req` hosts rather than for back-compat.
+#[test]
+fn first_token_creation_each_turn_turn_scope_round_trips_and_reads_the_superseded_shape() {
+    let scoped = ReplacementCondition::FirstTokenCreationEachTurn {
+        active_player_req: Some(ControllerRef::You),
+    };
+    let scoped_value = serde_json::to_value(&scoped).expect("condition should serialize");
+    assert_eq!(
+        scoped_value,
+        serde_json::json!({"type": "FirstTokenCreationEachTurn", "active_player_req": "You"})
+    );
+    assert_eq!(
+        serde_json::from_value::<ReplacementCondition>(scoped_value)
+            .expect("the turn-scoped form must restore"),
+        scoped
+    );
+
+    let unscoped = ReplacementCondition::FirstTokenCreationEachTurn {
+        active_player_req: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&unscoped).expect("condition should serialize"),
+        serde_json::json!({"type": "FirstTokenCreationEachTurn"}),
+        "an absent turn scope must omit the key, not emit a null"
+    );
+
+    assert_eq!(
+        serde_json::from_value::<ReplacementCondition>(
+            serde_json::json!({"type": "FirstTokenCreationEachTurn", "player": "You"})
+        )
+        .expect("a payload in the superseded shape must still load"),
+        unscoped
+    );
 }
 
 #[test]
