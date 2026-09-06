@@ -1275,6 +1275,8 @@
   },
   "gameProvider": {
     "passwordPrompt": "Esta sala requiere una contraseña:",
+    "passwordPromptTitle": "Contraseña de la sala",
+    "passwordPromptConfirm": "Unirse",
     "toasts": {
       "connectionFailed": "La conexión falló. Reintenta o cambia el servidor en Ajustes.",
       "eliminatedSpectating": "Has sido eliminado. Ahora eres espectador."

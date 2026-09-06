@@ -1275,6 +1275,8 @@
   },
   "gameProvider": {
     "passwordPrompt": "Ten pokój wymaga hasła:",
+    "passwordPromptTitle": "Hasło pokoju",
+    "passwordPromptConfirm": "Dołącz",
     "toasts": {
       "connectionFailed": "Połączenie nie powiodło się. Spróbuj ponownie lub zmień serwer w Ustawieniach.",
       "eliminatedSpectating": "Zostałeś wyeliminowany. Teraz obserwujesz."

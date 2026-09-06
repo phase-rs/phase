@@ -1275,6 +1275,8 @@
   },
   "gameProvider": {
     "passwordPrompt": "Cette salle requiert un mot de passe :",
+    "passwordPromptTitle": "Mot de passe de la salle",
+    "passwordPromptConfirm": "Rejoindre",
     "toasts": {
       "connectionFailed": "Échec de la connexion. Réessayez ou changez de serveur dans les paramètres.",
       "eliminatedSpectating": "Vous avez été éliminé. Vous êtes désormais spectateur."

@@ -271,6 +271,8 @@
     "deckCheckFailedGeneric": "Falha na verificação do deck.",
     "failedToJoinDraft": "Falha ao entrar no pod de draft.",
     "passwordPrompt": "Esta sala requer uma senha:",
+    "passwordPromptTitle": "Senha da sala",
+    "passwordPromptConfirm": "Entrar",
     "joinErrorOutOfDateTitle": "Cliente desatualizado",
     "joinErrorRefresh": "Atualizar",
     "joinErrorCantJoinTitle": "Não é possível entrar nesta sala",

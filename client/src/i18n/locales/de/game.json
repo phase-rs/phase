@@ -1275,6 +1275,8 @@
   },
   "gameProvider": {
     "passwordPrompt": "Dieser Raum erfordert ein Passwort:",
+    "passwordPromptTitle": "Raumpasswort",
+    "passwordPromptConfirm": "Beitreten",
     "toasts": {
       "connectionFailed": "Verbindung fehlgeschlagen. Versuche es erneut oder ändere den Server in den Einstellungen.",
       "eliminatedSpectating": "Du bist ausgeschieden. Du schaust jetzt zu."

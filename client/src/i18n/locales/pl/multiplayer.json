@@ -271,6 +271,8 @@
     "deckCheckFailedGeneric": "Sprawdzanie talii nie powiodło się.",
     "failedToJoinDraft": "Nie udało się dołączyć do grupy draftu.",
     "passwordPrompt": "Ten pokój wymaga hasła:",
+    "passwordPromptTitle": "Hasło pokoju",
+    "passwordPromptConfirm": "Dołącz",
     "joinErrorOutOfDateTitle": "Klient nieaktualny",
     "joinErrorRefresh": "Odśwież",
     "joinErrorCantJoinTitle": "Nie można dołączyć do tego pokoju",

@@ -1275,6 +1275,8 @@
   },
   "gameProvider": {
     "passwordPrompt": "Questa stanza richiede una password:",
+    "passwordPromptTitle": "Password della stanza",
+    "passwordPromptConfirm": "Entra",
     "toasts": {
       "connectionFailed": "Connessione fallita. Riprova o cambia server nelle Impostazioni.",
       "eliminatedSpectating": "Sei stato eliminato. Ora sei in modalità spettatore."

@@ -1313,6 +1313,8 @@
   },
   "gameProvider": {
     "passwordPrompt": "This room requires a password:",
+    "passwordPromptTitle": "Room password",
+    "passwordPromptConfirm": "Join",
     "toasts": {
       "connectionFailed": "Connection failed. Retry or change server in Settings.",
       "eliminatedSpectating": "You have been eliminated. Now spectating."

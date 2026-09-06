@@ -271,6 +271,8 @@
     "deckCheckFailedGeneric": "La comprobación del mazo falló.",
     "failedToJoinDraft": "No se pudo unir al pod de draft.",
     "passwordPrompt": "Esta sala requiere una contraseña:",
+    "passwordPromptTitle": "Contraseña de la sala",
+    "passwordPromptConfirm": "Unirse",
     "joinErrorOutOfDateTitle": "Cliente desactualizado",
     "joinErrorRefresh": "Actualizar",
     "joinErrorCantJoinTitle": "No se puede unir a esta sala",

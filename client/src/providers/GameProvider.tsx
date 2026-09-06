@@ -1,4 +1,4 @@
-import { createContext, useEffect, useRef, type ReactNode } from "react";
+import { createContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
@@ -51,6 +51,7 @@ import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { loadDraftRun } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
+import { TextPromptDialog } from "../components/ui/TextPromptDialog";
 import {
   commitFullTerminalDelivery,
   loadFullTerminalDelivery,
@@ -641,6 +642,10 @@ export function GameProvider({
   onNoDeckRef.current = onNoDeck;
   onResumeResetRef.current = onResumeReset;
   tRef.current = t;
+
+  const [joinPasswordPromptOpen, setJoinPasswordPromptOpen] = useState(false);
+  const joinCodeRef = useRef(joinCode);
+  joinCodeRef.current = joinCode;
 
   useEffect(() => {
     if (mode !== "ai") return;
@@ -1365,22 +1370,7 @@ export function GameProvider({
             // We deliberately avoid putting the password in the URL: that
             // would land it in browser history and in outbound Referer
             // headers to any image CDN / Scryfall / analytics request.
-            const entered = window.prompt(tRef.current("gameProvider.passwordPrompt"));
-            if (entered && joinCode) {
-              window.sessionStorage.setItem(
-                `phase-join-password:${joinCode}`,
-                entered,
-              );
-              window.location.reload();
-            } else {
-              if (joinCode) {
-                window.sessionStorage.removeItem(
-                  `phase-join-password:${joinCode}`,
-                );
-              }
-              useMultiplayerStore.getState().setConnectionStatus("disconnected");
-              window.location.href = "/multiplayer";
-            }
+            setJoinPasswordPromptOpen(true);
           }
           if (event.type === "error" || event.type === "reconnectFailed") {
             useMultiplayerStore.getState().setConnectionStatus("disconnected");
@@ -1982,6 +1972,29 @@ export function GameProvider({
   return (
     <GameDispatchContext.Provider value={dispatchAction}>
       {children}
+      <TextPromptDialog
+        open={joinPasswordPromptOpen}
+        title={t("gameProvider.passwordPromptTitle")}
+        label={t("gameProvider.passwordPrompt")}
+        confirmLabel={t("gameProvider.passwordPromptConfirm")}
+        onConfirm={(entered) => {
+          setJoinPasswordPromptOpen(false);
+          const code = joinCodeRef.current;
+          if (code) {
+            window.sessionStorage.setItem(`phase-join-password:${code}`, entered);
+            window.location.reload();
+          }
+        }}
+        onCancel={() => {
+          setJoinPasswordPromptOpen(false);
+          const code = joinCodeRef.current;
+          if (code) {
+            window.sessionStorage.removeItem(`phase-join-password:${code}`);
+          }
+          useMultiplayerStore.getState().setConnectionStatus("disconnected");
+          window.location.href = "/multiplayer";
+        }}
+      />
     </GameDispatchContext.Provider>
   );
 }
