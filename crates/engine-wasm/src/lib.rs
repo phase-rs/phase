@@ -9,17 +9,16 @@ use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
     apply_ai_action_proposal, auto_pass_recommended, auto_pass_recommended_for_viewer,
-    end_continuous_effect_offers, legal_actions_for_viewer, legal_actions_full,
-    AiDecisionContract, AiProposalApplication,
+    end_continuous_effect_offers, legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
+    AiProposalApplication,
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 #[cfg(test)]
 use engine::game::engine::apply;
 use engine::game::engine::{
-    apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
-    resume_restored_stack_automation, RestoredStackAutomationOutcome,
-    RestoredStackAutomationPresentation,
+    apply_with_rejection, preflight_debug_action_with_rejection, resume_restored_stack_automation,
+    RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{
     bind_interaction_authority, preview_interaction, submit_interaction_with_rejection,
