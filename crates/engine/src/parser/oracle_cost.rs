@@ -1,5 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
+use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, map, opt, rest, value};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
@@ -764,12 +765,13 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             (1, stripped.to_string())
         };
         // CR 205.2a: a sacrifice cost's filter may be a TYPE UNION whose right
-        // conjunct leads with an indefinite article — "Sacrifice another creature
-        // or an artifact" (Mold Folk, Elite Headhunter), "... or an enchantment"
-        // (Slaughter-Priest of Mogis), "... or a Treasure" (Skullport Merchant).
-        // The shared grammar leaves that tail as remainder because the same
-        // surface is an elided-verb clause elsewhere; a cost has no verb to elide,
-        // so it opts into the union reading.
+        // conjunct leads with a determiner — "Sacrifice another creature or an
+        // artifact" (Mold Folk, Elite Headhunter), "... or an enchantment"
+        // (Slaughter-Priest of Mogis), "... or a Treasure" (Skullport Merchant),
+        // and the mirror image "an artifact or another creature" (Malevolent
+        // Noble). The shared grammar leaves that tail as remainder because the
+        // same surface is an elided-verb clause elsewhere; a cost has no verb to
+        // elide, so it opts into the union reading.
         //
         // ORDER IS LOAD-BEARING: `another` is applied to the LEFT conjunct and the
         // union is folded AFTER. In this surface "another" scopes only the left
@@ -781,48 +783,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // there `parse_target` has already built the `Or` itself and
         // `distribute_shared_properties` correctly reaches both legs, because that
         // phrase has no second determiner.
-        let filter = {
-            let phrase = format!("target {}", filter_text);
-            let (base, rest) = parse_target(&phrase);
-            let base = ensure_another_sacrifice_filter(base, &filter_text);
-            // FULL CONSUMPTION IS REQUIRED. A cost has nowhere to put a
-            // remainder, so anything the union leaves behind is a restriction
-            // that would silently vanish from the filter and WIDEN the set of
-            // permanents allowed to pay. Keep the folded union only when it
-            // consumed the whole phrase; otherwise fall back to the unfolded
-            // filter, which is the pre-existing and strictly narrower reading.
-            // The fold must account for the WHOLE phrase, and the two ways it can
-            // fail are not the same failure.
-            //
-            // `fold_article_led_type_union` builds an `Or` only when it actually
-            // fired; every decline path returns `(base, rest)` untouched. So:
-            //
-            //  * DECLINED — keep the base filter. That is byte-identical to the
-            //    behaviour before this guard, and it is the arm every shipping
-            //    sacrifice cost takes. `parse_target`'s own remainder stays
-            //    discarded here, a wider seam this deliberately does not open.
-            //  * FIRED but left a tail — the parser consumed a union leg and then
-            //    ran out of grammar, so it does not understand this cost. Emitting
-            //    the narrower filter would reject payments the card plainly allows
-            //    while still counting the card as SUPPORTED; an honest
-            //    `Unimplemented` keeps coverage truthful instead.
-            //
-            // No shipping card reaches the second arm: all eight cost-position
-            // union cards consume the whole phrase.
-            let base_was_typed = matches!(base, TargetFilter::Typed(_));
-            let unfolded = base.clone();
-            let (folded, folded_rest) = fold_article_led_type_union(base, rest);
-            let fold_fired = base_was_typed && matches!(folded, TargetFilter::Or { .. });
-            if fold_fired {
-                if !folded_rest.trim().is_empty() {
-                    return AbilityCost::Unimplemented {
-                        description: text.trim().to_string(),
-                    };
-                }
-                folded
-            } else {
-                unfolded
-            }
+        //
+        // A RIDER THE GRAMMAR CANNOT READ MAKES THE WHOLE COST DECLINE, because a
+        // cost has nowhere to put a remainder and a lost restriction WIDENS the
+        // set of permanents that may pay. `parse_sacrifice_cost_filter` carries
+        // that rule and the two measured exemptions that keep it narrow.
+        let Some(filter) = parse_sacrifice_cost_filter(&filter_text) else {
+            return AbilityCost::Unimplemented {
+                description: text.to_string(),
+            };
         };
         return AbilityCost::Sacrifice(SacrificeCost::count(filter, use_count));
     }
@@ -1654,6 +1623,164 @@ fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> Target
     distribute_shared_properties(filter, &[FilterProp::Another])
 }
 
+/// CR 601.2h + CR 602.2b: Build the object filter for a sacrifice cost from its
+/// noun phrase (article/count already stripped), or DECLINE by returning `None`
+/// when a restriction the grammar built a filter for would be LOST.
+///
+/// A cost has nowhere to put a remainder. Every other consumer of `parse_target`
+/// keeps parsing the tail — a duration, a trailing clause, the rest of a
+/// sentence — but the entire phrase here IS the filter, so a MODIFIER the
+/// grammar could not read is a restriction that silently vanishes. Dropping it
+/// does not fail safe: it WIDENS the set of permanents allowed to pay a cost
+/// whose printed text names fewer. CR 601.2h (via CR 602.2b, which extends the
+/// casting rules to an activated ability's cost) says the player pays the total
+/// cost and unpayable costs can't be paid; a filter wider than the text lets a
+/// payment through that the card never authorized. Transmutation Font
+/// ("Sacrifice three artifact tokens with different names") is the live case:
+/// the rider vanished and ANY three artifact tokens paid.
+///
+/// Declining makes the caller emit `AbilityCost::Unimplemented`, which
+/// `game::costs` turns into a payment failure, so the ability cannot be
+/// activated at all. That is a COVERAGE LOSS and deliberately so: the same trade
+/// the explicit-multi-count recovery branch in `fixup_bare_noun_continuations`
+/// already makes, where an unsupported rider "stays an honest `Unimplemented`
+/// rather than a false-green cost".
+///
+/// The riders this DOES read are the ones with a modeled filter home:
+/// a determiner-led type union (`fold_article_led_type_union`) and
+/// "attached to ~" (`fold_attached_to_source_rider`).
+///
+/// SCOPE — [`sacrifice_filter_lost_a_restriction`] carries the two exemptions and
+/// the measured reason each exists. Widening the decline past them is not a
+/// safe default: `AbilityCost::Unimplemented` is not inert on every cost
+/// channel, and the corpus proves it.
+fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
+    let phrase = format!("target {filter_text}");
+    let (base, rest) = parse_target(&phrase);
+    // ORDER IS LOAD-BEARING: `another` is applied to the LEFT conjunct and the
+    // union is folded AFTER — see `fold_article_led_type_union`'s doc comment for
+    // why an artifact-ified source may still pay the right conjunct of
+    // "another creature or an artifact".
+    let base = ensure_another_sacrifice_filter(base, filter_text);
+    // Keep the folded union only when the fold consumed what it read. A fold that
+    // stopped part-way is not evidence for the union reading, so fall back to the
+    // unfolded filter — which is strictly NARROWER, and a filter that is too
+    // narrow refuses a payment the card allows and surfaces as a visible refusal.
+    let base_was_typed = matches!(base, TargetFilter::Typed(_));
+    let unfolded = base.clone();
+    let (folded, folded_rest) = fold_article_led_type_union(base, rest);
+
+    // A fold that FIRED is held to full consumption, and that is a STRICTER rule
+    // than the clause-opener exemption below — deliberately so. Once the grammar
+    // has committed to the union reading it has claimed the whole phrase, so a
+    // leftover tail means it ran out of grammar mid-claim; "another creature or an
+    // artifact or a land" must not ship as `another creature` merely because its
+    // tail happens to open with "or ". `fold_article_led_type_union` builds an
+    // `Or` only when it fires — every decline path returns `(base, rest)`
+    // untouched — so this predicate separates the two exactly.
+    if base_was_typed && matches!(folded, TargetFilter::Or { .. }) {
+        return folded_rest.trim().is_empty().then_some(folded);
+    }
+
+    // The fold DECLINED, so the base filter stands and `rest` is whatever the
+    // shared grammar left. Consume the riders this cost channel understands, then
+    // decline only if what remains is a genuine lost restriction.
+    let (filter, tail) = fold_attached_to_source_rider(unfolded, rest);
+    (!sacrifice_filter_lost_a_restriction(&filter, tail)).then_some(filter)
+}
+
+/// Did the sacrifice-cost noun phrase leave behind text that is a LOST FILTER
+/// RESTRICTION — a modifier of the object the grammar already typed?
+///
+/// Only that case may decline. The rule is deliberately narrow, and both
+/// exemptions below were MEASURED against the whole corpus rather than reasoned
+/// about; the blunt "any remainder declines" rule regresses four shipping cards,
+/// three of them into a rules violation strictly worse than the seam being
+/// closed.
+///
+/// EXEMPTION 1 — a filter that carries no information at all
+/// (`TypedFilter::default()`: no type, no property, no controller). `parse_target`
+/// built nothing, so nothing was LOST FROM a filter; the whole phrase went
+/// unread. `TypedFilter::type_filters`' own documentation names that shape a
+/// defect at the branch that produced it. Declining here would be a different,
+/// pre-existing seam — the count-expression phrases the grammar cannot read at
+/// all ("one or more artifacts" — Radiant Lotus; "up to three permanents" —
+/// Baba Lysaga, Night Witch; "two +1/+1 counters" — Shichifukujin Dragon; "half
+/// the lands you control, rounded up" — Tectonic Split) — and closing it needs a
+/// count model this change does not add.
+///
+/// EXEMPTION 2 — a tail that opens a NEW CLAUSE (`,` `.` `;` or a leading
+/// conjunction) rather than modifying the noun. "sacrifice a creature, discard a
+/// card" (Dusk Mangler) and "sacrifice all permanents you control and discard
+/// your hand" (Kaervek's Spite) are a second COST, not a narrower object; a
+/// leading "or" is an alternative whose loss is a narrowing, which fails safe.
+/// This exemption is load-bearing, not cosmetic: `parse_additional_cost_line`
+/// answers `None` — NO ADDITIONAL COST AT ALL — as soon as a fragment is
+/// `Unimplemented`, so declining these makes the spell castable for FREE.
+/// Under-paying a second cost is a real defect, but it lives in the cost
+/// COMPOSITION seam, not in this filter, and the honest repair there is a
+/// `Required(Unimplemented)` at that call site.
+fn sacrifice_filter_lost_a_restriction(filter: &TargetFilter, tail: &str) -> bool {
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return false;
+    }
+    if matches!(filter, TargetFilter::Typed(tf) if *tf == TypedFilter::default()) {
+        return false;
+    }
+    let tail_lower = tail.to_lowercase();
+    let opens_new_clause = nom_on_lower(tail, &tail_lower, |i| {
+        value(
+            (),
+            alt((
+                tag(","),
+                tag("."),
+                tag(";"),
+                tag("and "),
+                tag("or "),
+                tag("then "),
+                tag("unless "),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some();
+    !opens_new_clause
+}
+
+/// CR 301.5 + CR 303.4: Consume the "attached to ~" rider on a sacrifice cost's
+/// object phrase and record it as `FilterProp::AttachedToSource`, whose matcher
+/// is "this object's `attached_to` field is the filter source".
+///
+/// Faunsbane Troll ("{1}, Sacrifice an Aura attached to this creature") and
+/// Ronin, Shadow Stalker ("{T}, Sacrifice an Equipment attached to Ronin") — the
+/// two corpus instances, and one shape after `normalize_card_name_refs` rewrites
+/// both self-references to `~`. Without the rider the filter is every Aura /
+/// every Equipment on the battlefield, so an Aura on an opponent's creature could
+/// pay Faunsbane Troll's cost.
+///
+/// Only a `Typed` filter can grow the property; an anaphor or an already-built
+/// `Or` is returned untouched, and the unconsumed tail then makes
+/// `parse_sacrifice_cost_filter` decline rather than guess. The referent grammar
+/// is deliberately just `~`: the recipient-anaphoric "attached to it" of
+/// `oracle_nom::quantity::parse_for_each_attached_to_source` has no recipient in
+/// a cost, and no corpus sacrifice cost uses it.
+fn fold_attached_to_source_rider(filter: TargetFilter, tail: &str) -> (TargetFilter, &str) {
+    if !matches!(filter, TargetFilter::Typed(_)) {
+        return (filter, tail);
+    }
+    let tail_lower = tail.to_lowercase();
+    let Some(((), rest)) = nom_on_lower(tail, &tail_lower, |i| {
+        preceded(multispace0, value((), tag("attached to ~"))).parse(i)
+    }) else {
+        return (filter, tail);
+    };
+    (
+        distribute_shared_properties(filter, &[FilterProp::AttachedToSource]),
+        rest,
+    )
+}
+
 /// CR 117.1 + CR 601.2b + CR 107.4a/107.4e/202.1: Parse Baron Helmut Zemo's
 /// Boast cost — "Exile any number of [color] cards from your graveyard with [N]
 /// or more [color] mana symbols among their mana costs" — into a standalone
@@ -2047,11 +2174,11 @@ mod tests {
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
-    /// CR 205.2a + CR 602.2b + CR 601.2h: a sacrifice cost whose filter is a TYPE
-    /// UNION with an article-led right conjunct keeps BOTH legs — "Sacrifice
-    /// another creature or an artifact" (Mold Folk, Sivriss, Elite Headhunter,
-    /// Street Urchin) and "... or an enchantment" (Skophos Warleader,
-    /// Slaughter-Priest of Mogis).
+    /// CR 205.2a + CR 601.2h: a sacrifice cost whose filter is a TYPE UNION with
+    /// an article-led right conjunct keeps BOTH legs — "Sacrifice another
+    /// creature or an artifact" (Mold Folk, Sivriss, Elite Headhunter, Street
+    /// Urchin) and "... or an enchantment" (Skophos Warleader, Slaughter-Priest
+    /// of Mogis).
     ///
     /// Revert-failing: before the cost parser opted into
     /// `fold_article_led_type_union` this collapsed to
@@ -2146,6 +2273,265 @@ mod tests {
         }
     }
 
+    /// A rider the grammar cannot read is DECLINED, and the two exemptions that
+    /// keep the decline narrow are pinned in the same test.
+    ///
+    /// A cost has nowhere to put a remainder: a MODIFIER left behind is a
+    /// restriction that silently vanishes from the filter, widening the set of
+    /// permanents that can pay it (CR 601.2h via CR 602.2b). Transmutation Font
+    /// ("Sacrifice three artifact tokens with different names") is the live case.
+    ///
+    /// The FOLD's own remainder is a separate source and keeps its pre-existing
+    /// treatment — fall back to the unfolded left conjunct, which is strictly
+    /// NARROWER. The error is asymmetric: a filter that is too narrow refuses a
+    /// payment the card allows and surfaces as a visible refusal, while one that
+    /// is too broad lets the cost be paid with a permanent the card never named.
+    ///
+    /// EXEMPTIONS, both measured against the whole corpus (a blunt "any remainder
+    /// declines" rule regresses four shipping cards, three of them into a rules
+    /// violation strictly worse than the seam being closed):
+    ///
+    ///   * a `TypedFilter::default()` filter — the grammar built NOTHING, so
+    ///     nothing was lost FROM a filter (Radiant Lotus, Baba Lysaga).
+    ///   * a tail that opens a new clause — a second COST, not a narrower object
+    ///     (Dusk Mangler, Kaervek's Spite). `parse_additional_cost_line` answers
+    ///     `None` — no additional cost at all — the moment a fragment is
+    ///     `Unimplemented`, so declining these makes the spell FREE.
+    ///
+    /// Revert-failing: drop the `sacrifice_filter_lost_a_restriction` call and
+    /// Transmutation Font's case folds back to a bare `Typed{[Artifact], [Token]}`
+    /// that admits three of ANY artifact token regardless of name. Drop either
+    /// exemption and the matching case below becomes `Unimplemented`.
+    #[test]
+    fn sacrifice_cost_declines_only_a_lost_filter_restriction() {
+        // Transmutation Font — the rider modifies a filter the grammar DID build,
+        // and it has no filter home, so the cost declines.
+        let font_text = "Sacrifice three artifact tokens with different names";
+        let font = parse_oracle_cost(font_text);
+        let AbilityCost::Unimplemented { description } = &font else {
+            panic!("an unreadable rider must stay an honest Unimplemented, got {font:?}");
+        };
+        assert_eq!(
+            description, font_text,
+            "the decline must carry the cost's own text"
+        );
+
+        // Discriminator for the case above: the rider-FREE twin still parses, so
+        // the assertion is about the rider and not about the branch being broken.
+        let plain = parse_oracle_cost("Sacrifice three artifact tokens");
+        let AbilityCost::Sacrifice(SacrificeCost {
+            target: plain_t,
+            requirement,
+        }) = &plain
+        else {
+            panic!("expected a Sacrifice cost, got {plain:?}");
+        };
+        assert_eq!(
+            requirement.fixed_count(),
+            Some(3),
+            "reach-guard: the rider-free twin keeps its count"
+        );
+        assert!(
+            matches!(plain_t, TargetFilter::Typed(tf)
+                if tf.type_filters == vec![TypeFilter::Artifact]
+                    && tf.properties == vec![FilterProp::Token]),
+            "reach-guard: only the RIDER is refused, not the noun phrase, got {plain_t:?}"
+        );
+
+        // EXEMPTION 1 — the grammar read nothing, so nothing was lost from a
+        // filter. Radiant Lotus and Baba Lysaga, Night Witch: count expressions
+        // this change does not model. Their pre-existing (wrong, vacuous) filter
+        // is left exactly as it was rather than traded for an Unimplemented.
+        for phrase in [
+            "Sacrifice one or more artifacts",
+            "Sacrifice up to three permanents",
+        ] {
+            let cost = parse_oracle_cost(phrase);
+            let AbilityCost::Sacrifice(SacrificeCost { target, .. }) = &cost else {
+                panic!("{phrase:?} must keep its pre-existing Sacrifice cost, got {cost:?}");
+            };
+            assert_eq!(
+                *target,
+                TargetFilter::Typed(TypedFilter::default()),
+                "{phrase:?} is the vacuous-filter seam, unchanged by this fix"
+            );
+        }
+
+        // EXEMPTION 2 — the tail opens a NEW CLAUSE, so it is a second cost and
+        // not a narrower object. `parse_additional_cost_line` hands
+        // `parse_single_cost` (NOT `parse_oracle_cost`, which would split the
+        // comma itself) exactly these two fragments — Dusk Mangler's "or"-split
+        // left leg and Kaervek's Spite's whole body — and drops the WHOLE
+        // additional cost the moment one comes back `Unimplemented`, which would
+        // make each spell castable for FREE.
+        for (fragment, expected_type) in [
+            ("sacrifice a creature, discard a card", TypeFilter::Creature),
+            (
+                "sacrifice all permanents you control and discard your hand",
+                TypeFilter::Permanent,
+            ),
+        ] {
+            let cost = parse_single_cost(fragment);
+            let AbilityCost::Sacrifice(SacrificeCost { target, .. }) = &cost else {
+                panic!("{fragment:?} must keep its Sacrifice cost, got {cost:?}");
+            };
+            let TargetFilter::Typed(tf) = target else {
+                panic!("expected a typed filter for {fragment:?}, got {target:?}");
+            };
+            assert_eq!(tf.type_filters, vec![expected_type], "{tf:?}");
+        }
+
+        // The FOLD's remainder is held to a STRICTER rule than the clause-opener
+        // exemption above, and the two must not be confused. Once the union grammar
+        // has FIRED it has claimed the whole phrase, so a leftover tail means it ran
+        // out of grammar mid-claim — "or a land" opening with "or " does not rescue
+        // it. This is the rule `sacrifice_cost_refuses_a_partially_consumed_union`
+        // pins, and it is why the exemption below is keyed on the fold having
+        // DECLINED rather than on the tail's first word alone.
+        let three_leg = parse_oracle_cost("Sacrifice another creature or an artifact or a land");
+        assert!(
+            matches!(three_leg, AbilityCost::Unimplemented { .. }),
+            "a fold that fired but left a tail must decline, got {three_leg:?}"
+        );
+
+        // The same tail shape after a DECLINED fold is exempt, which is the
+        // distinction under test: "or " opens an alternative clause, and losing an
+        // alternative narrows rather than widens.
+        let declined_with_or = parse_single_cost("sacrifice a creature or discard a card");
+        let AbilityCost::Sacrifice(SacrificeCost { target, .. }) = &declined_with_or else {
+            panic!("a declined fold with an alternative clause must keep its Sacrifice cost, got {declined_with_or:?}");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected the unfolded typed filter, got {target:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Creature],
+            "the declined fold keeps its own type leg: {tf:?}"
+        );
+
+        // Positive reach-guard: the fully consumed union still folds, so the
+        // assertion above is about REMAINDER and not about the fold being broken.
+        let ok = parse_oracle_cost("Sacrifice another creature or an artifact");
+        let AbilityCost::Sacrifice(SacrificeCost { target: ok_t, .. }) = &ok else {
+            panic!("expected a Sacrifice cost, got {ok:?}");
+        };
+        assert!(
+            matches!(ok_t, TargetFilter::Or { .. }),
+            "reach-guard: the fully consumed union must still fold, got {ok_t:?}"
+        );
+    }
+
+    /// CR 301.5 + CR 303.4 + CR 601.2h + CR 602.2b: the "attached to ~" rider on a
+    /// sacrifice cost survives into the filter as `FilterProp::AttachedToSource`.
+    ///
+    /// Faunsbane Troll ("{1}, Sacrifice an Aura attached to this creature") and
+    /// Ronin, Shadow Stalker ("{T}, Sacrifice an Equipment attached to Ronin") —
+    /// the corpus's only two instances, one shape after `normalize_card_name_refs`
+    /// rewrites both self-references to `~`.
+    ///
+    /// Revert-failing TWICE OVER, which is the point: drop
+    /// `fold_attached_to_source_rider` and the rider becomes an unconsumed
+    /// remainder on a filter that WAS built, so the decline turns each cost into
+    /// `Unimplemented`; drop `sacrifice_filter_lost_a_restriction` as well and the
+    /// property assertion fails against the bare `Typed{[Subtype(Aura)]}` that
+    /// shipped before this change, under which any Aura on the battlefield —
+    /// including one on an opponent's creature — could pay.
+    #[test]
+    fn sacrifice_cost_keeps_the_attached_to_source_rider() {
+        for (phrase, subtype) in [
+            ("Sacrifice an Aura attached to ~", "Aura"),
+            ("Sacrifice an Equipment attached to ~", "Equipment"),
+        ] {
+            let cost = parse_oracle_cost(phrase);
+            let AbilityCost::Sacrifice(SacrificeCost { target, .. }) = &cost else {
+                panic!("expected a Sacrifice cost for {phrase:?}, got {cost:?}");
+            };
+            let TargetFilter::Typed(tf) = target else {
+                panic!("expected a typed filter for {phrase:?}, got {target:?}");
+            };
+            assert_eq!(
+                tf.type_filters,
+                vec![TypeFilter::Subtype(subtype.to_string())],
+                "the rider must not disturb the noun phrase: {tf:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::AttachedToSource),
+                "{phrase:?} must restrict to attachments ON THE SOURCE, got {tf:?}"
+            );
+        }
+
+        // Discriminator: the rider-free twin must NOT grow the property, so the
+        // assertion above is about the rider and not about a blanket stamp.
+        let bare = parse_oracle_cost("Sacrifice an Aura");
+        let AbilityCost::Sacrifice(SacrificeCost { target: bare_t, .. }) = &bare else {
+            panic!("expected a Sacrifice cost, got {bare:?}");
+        };
+        let TargetFilter::Typed(bare_tf) = bare_t else {
+            panic!("expected a typed filter, got {bare_t:?}");
+        };
+        assert!(
+            !bare_tf.properties.contains(&FilterProp::AttachedToSource),
+            "a bare \"Sacrifice an Aura\" must stay unrestricted, got {bare_tf:?}"
+        );
+
+        // The referent grammar is deliberately just `~`: an unrecognized referent
+        // is an unread restriction on a filter that WAS built, so it declines
+        // rather than guessing.
+        let other = parse_oracle_cost("Sacrifice an Aura attached to target creature");
+        assert!(
+            matches!(&other, AbilityCost::Unimplemented { .. }),
+            "an unmodeled attachment referent must decline, got {other:?}"
+        );
+    }
+
+    /// CR 205.2a: the union's RIGHT conjunct may be determined by "another"
+    /// instead of an indefinite article — Malevolent Noble's
+    /// "{2}, Sacrifice an artifact or another creature", the mirror image of Mold
+    /// Folk's "another creature or an artifact".
+    ///
+    /// "another" is filter-BEARING where "a"/"an" are not, so the connector stops
+    /// before it and hands the word to `parse_type_phrase_folding`, the single
+    /// authority that turns it into `FilterProp::Another`. The asymmetry is
+    /// asserted directly below: the artifact leg (its own determiner is "an") must
+    /// NOT carry `Another`, while the creature leg must.
+    ///
+    /// Revert-failing: with the connector accepting only "a "/"an ", the fold
+    /// declines and "or another creature" is left unread — a leading-"or"
+    /// alternative, so the cost silently keeps a bare `Typed{[Artifact]}` and the
+    /// creature leg is unpayable.
+    #[test]
+    fn sacrifice_cost_unions_an_another_led_right_conjunct() {
+        let cost = parse_oracle_cost("Sacrifice an artifact or another creature");
+        let AbilityCost::Sacrifice(SacrificeCost { target, .. }) = &cost else {
+            panic!("expected a Sacrifice cost, got {cost:?}");
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("both legs must survive as a union, got {target:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf,
+                other => panic!("expected typed legs, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(legs[0].type_filters, vec![TypeFilter::Artifact], "{legs:?}");
+        assert_eq!(legs[1].type_filters, vec![TypeFilter::Creature], "{legs:?}");
+        assert!(
+            !legs[0].properties.contains(&FilterProp::Another),
+            "the artifact leg carries its own \"an\", so the source may pay with \
+             itself once it is an artifact: {:?}",
+            legs[0]
+        );
+        assert!(
+            legs[1].properties.contains(&FilterProp::Another),
+            "the creature leg's \"another\" must survive the fold: {:?}",
+            legs[1]
+        );
+    }
+
     /// The union is accepted ONLY when it consumes the whole cost phrase, and the
     /// two ways that can fail are deliberately NOT the same failure.
     ///
@@ -2189,9 +2575,17 @@ mod tests {
 
         // DECLINED: no article-led type connector at all, so the fold never fires
         // and the base filter is kept. This is the arm real cards take, and it must
-        // NOT be swept into the `Unimplemented` case above — Faunsbane Troll's own
-        // cost has exactly this shape.
-        let declined = parse_oracle_cost("Sacrifice an Aura attached to this creature");
+        // NOT be swept into the `Unimplemented` case above.
+        //
+        // The example moved: this case used to be Faunsbane Troll's "Sacrifice an
+        // Aura attached to this creature", chosen because it declined and kept a
+        // Sacrifice. That phrase is now the RIDER path — the restriction it was
+        // silently dropping is exactly the widening this seam now closes — so it is
+        // pinned by `sacrifice_cost_keeps_the_attached_to_source_rider` instead.
+        // Radiant Lotus is the replacement: a real shipping cost that declines, and
+        // it also pins the vacuous-filter exemption that keeps it out of the
+        // `Unimplemented` arm.
+        let declined = parse_oracle_cost("Sacrifice one or more artifacts");
         assert!(
             matches!(declined, AbilityCost::Sacrifice(_)),
             "a declined fold must keep its Sacrifice cost, got {declined:?}"

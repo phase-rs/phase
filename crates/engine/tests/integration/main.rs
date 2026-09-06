@@ -281,6 +281,7 @@ mod face_down_spell_cost_filter;
 mod fact_or_fiction_pile_separation;
 mod fantastic_four_bounded_loop;
 mod fateful_handoff_target_mana_value_draw;
+mod faunsbane_troll_sacrifice_attached_aura;
 mod favor_of_the_mighty_greatest_mana_value_protection;
 mod felisa_fang_of_silverquill;
 mod festival_of_embers_graveyard_additional_cost;
