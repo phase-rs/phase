@@ -1019,7 +1019,7 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
 fn reflexive_modal_connector(
     header: &ModalHeaderAst,
     ctx: &mut ParseContext,
-) -> Result<AbilityCondition, Effect> {
+) -> Result<AbilityCondition, Box<Effect>> {
     let (guard, _) = strip_leading_general_conditional(&header.raw, ctx);
     if let Some(guard) = guard {
         return Ok(AbilityCondition::when_you_do_with_guard(guard));
@@ -1030,10 +1030,10 @@ fn reflexive_modal_connector(
     // may become a bare `WhenYouDo`: lowering the second that way would make
     // an unsupported intervening-if condition silently permissive.
     if split_leading_conditional(&header.raw).is_some() {
-        return Err(Effect::unimplemented(
+        return Err(Box::new(Effect::unimplemented(
             "modal_reflexive_condition",
             &header.raw,
-        ));
+        )));
     }
 
     Ok(AbilityCondition::WhenYouDo)
@@ -1234,7 +1234,7 @@ pub(crate) fn lower_oracle_block_ir(
                             Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
                                 &header.raw,
                                 AbilityKind::Spell,
-                                parsed_clause(effect),
+                                parsed_clause(*effect),
                                 None,
                                 actor,
                                 true,
@@ -1552,7 +1552,7 @@ pub(crate) fn lower_oracle_block(
                 Err(effect) => {
                     for trigger in &mut triggers {
                         trigger.execute = Some(Box::new(
-                            AbilityDefinition::new(AbilityKind::Spell, effect.clone())
+                            AbilityDefinition::new(AbilityKind::Spell, effect.as_ref().clone())
                                 .description(header.raw.clone()),
                         ));
                     }
