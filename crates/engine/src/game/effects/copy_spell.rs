@@ -89,6 +89,11 @@ pub fn resolve(
     let copy_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
 
+    // CR 205.3m: the live creature-type list the CR 707.9 subtype exceptions
+    // resolve against. Cloned before the `state.objects` borrow below, mirroring
+    // `token_copy`'s own loop-invariant clone at its call site.
+    let all_creature_types = state.all_creature_types.clone();
+
     // CR 707.10: A spell copy is itself a spell on the stack. Ability stack
     // entries are objects too, but this engine does not store GameObjects for
     // activated/triggered ability entries; clone a GameObject only when the
@@ -121,6 +126,7 @@ pub fn resolve(
             &additional_modifications,
             starting_loyalty_from_casualty_sacrifice,
             top_entry.ability(),
+            &all_creature_types,
         );
         state.objects.insert(copy_id, copy_obj);
     }
@@ -297,48 +303,37 @@ pub fn resolve(
 }
 
 /// CR 707.9 + CR 707.2: Stamp copy exceptions onto a spell copy's GameObject at
-/// creation (Ob Nixilis: "the copy isn't legendary and has starting loyalty X").
+/// creation (Ob Nixilis: "the copy isn't legendary and has starting loyalty X";
+/// Iron Man, Bleeding Edge: "except the copy isn't legendary"; Tawnos, the
+/// Toymaker: "except the copy is an artifact in addition to its other types").
+///
+/// SINGLE AUTHORITY. The exception grammar is shared with token-copy
+/// (`Effect::CopyTokenOf`), so the *application* of the resulting
+/// `ContinuousModification`s is shared too:
+/// [`token_copy::apply_immediate_copy_token_modifications_to_object`] owns every
+/// variant and stamps both the live and the base store, which is exactly what a
+/// spell copy needs to survive the stack→token transition (CR 707.10f).
+///
+/// This previously re-implemented three variants (`RemoveSupertype`,
+/// `AddKeyword`, `GrantTrigger`) with a silent `_ => {}` catch-all, so a spell
+/// copy whose exception changed a TYPE or P/T — every "except the copy is a 1/1
+/// Spirit / is an artifact in addition to its other types" card — parsed
+/// correctly and was then dropped on the floor at resolution. The three
+/// re-implemented arms were behaviourally identical to the shared authority's,
+/// so delegating is a strict superset with no change for the cards that already
+/// worked.
 fn apply_spell_copy_modifications(
     copy_obj: &mut crate::game::game_object::GameObject,
     modifications: &[ContinuousModification],
     starting_loyalty_from_casualty_sacrifice: bool,
     source_ability: Option<&ResolvedAbility>,
+    all_creature_types: &[String],
 ) {
-    for modification in modifications {
-        match modification {
-            ContinuousModification::RemoveSupertype { supertype } => {
-                copy_obj.card_types.supertypes.retain(|s| s != supertype);
-                copy_obj
-                    .base_card_types
-                    .supertypes
-                    .retain(|s| s != supertype);
-            }
-            // CR 702.10a + CR 608.3f / CR 707.10f: "the copy gains haste" — a
-            // keyword granted to a spell copy must ride the copy through the
-            // stack→token transition. Stamp BOTH the live and base keyword store
-            // (mirroring RemoveSupertype), so it survives the layer reset when
-            // the copy resolves into a token permanent.
-            ContinuousModification::AddKeyword { keyword } => {
-                // allow-raw-authority: copy-construction — dedupe the detached stack-copy's OWN keyword store (characteristic snapshot, CR 707.10f), not an effective-keyword query.
-                if !copy_obj.keywords.contains(keyword) {
-                    copy_obj.keywords.push(keyword.clone());
-                }
-                // allow-raw-authority: same copy-construction snapshot — the base-store twin of the live stamp above.
-                if !copy_obj.base_keywords.contains(keyword) {
-                    copy_obj.base_keywords.push(keyword.clone());
-                }
-            }
-            // CR 603.1 + CR 604.1 + CR 608.3f / CR 707.10f: a triggered ability
-            // granted to the copy ("...\"At the beginning of the end step,
-            // sacrifice ~.\"") lands in the separate `trigger_definitions` store.
-            // Stamp base + live (mirroring blitz's dies-trigger seeding) so the
-            // trigger persists once the copy becomes a token permanent.
-            ContinuousModification::GrantTrigger { trigger } => {
-                copy_obj.push_printed_trigger((**trigger).clone());
-            }
-            _ => {}
-        }
-    }
+    super::token_copy::apply_immediate_copy_token_modifications_to_object(
+        copy_obj,
+        modifications,
+        all_creature_types,
+    );
     if starting_loyalty_from_casualty_sacrifice {
         if let Some(power) = source_ability
             .and_then(|a| a.cost_paid_object.as_ref())
