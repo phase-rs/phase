@@ -4,7 +4,7 @@
 //!
 //! Bug (pre-fix): the quantity phrase fell through to the
 //! `oracle_quantity::parse_quantity_ref_with_context` fallback, which calls
-//! `parse_type_phrase_with_ctx` and silently discards the unconsumed
+//! `parse_type_phrase_folding_with_ctx` and silently discards the unconsumed
 //! remainder. "differently named" was unrecognized, so the result was
 //! `QuantityRef::ObjectCount { filter: <empty Typed> }` — a filter that
 //! matches every battlefield permanent. With even a handful of permanents in

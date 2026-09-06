@@ -17858,9 +17858,9 @@ fn default_distinct_names() -> Vec<SharedQuality> {
 /// the current reading first, that collision can only ever mis-read a LEGACY
 /// payload, and no legacy writer emitted either shape here. The two legacy
 /// producers were `parse_number_of_distinct_colors_among_permanents_tail`
-/// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase`
+/// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase_folding`
 /// object filter) and `parse_for_each_distinct_colors_among_permanents`
-/// (`parse_type_phrase` only) — neither can yield a BARE `ExiledBySource` /
+/// (`parse_type_phrase_folding` only) — neither can yield a BARE `ExiledBySource` /
 /// `TrackedSet` filter.
 fn deserialize_distinct_colors_population<'de, D>(
     deserializer: D,

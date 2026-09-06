@@ -14,7 +14,7 @@ use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
-use super::oracle_target::{distribute_shared_properties, parse_target, parse_type_phrase};
+use super::oracle_target::{distribute_shared_properties, parse_target, parse_type_phrase_folding};
 use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_creature_subtype;
 use super::oracle_util::parse_mana_symbols;
@@ -335,7 +335,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 // `count: 1` + `parse_target` path dropped both. Scope the recovery
                 // to explicit counts >= 2 so single-object continuations keep their
                 // previous parse unchanged (this fix moves no parser surface outside
-                // the explicit-multi-count class). `parse_type_phrase` (the exile
+                // the explicit-multi-count class). `parse_type_phrase_folding` (the exile
                 // arm's own consumption-aware primitive) must consume the whole
                 // object phrase into a concrete filter, so an unsupported rider
                 // stays an honest `Unimplemented` rather than a false-green cost.
@@ -343,7 +343,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                     let filter_text = strip_count_article_prefix(rest.trim())
                         .trim_end_matches('.')
                         .trim();
-                    let (filter, remainder) = parse_type_phrase(filter_text);
+                    let (filter, remainder) = parse_type_phrase_folding(filter_text);
                     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
                         costs[i] = match verb {
                             PrecedingVerb::Sacrifice => {
@@ -472,7 +472,7 @@ fn parse_behold_cost(lower: &str) -> Option<AbilityCost> {
     )))
     .parse(filter_text.trim())
     .ok()?;
-    let (filter, remainder) = parse_type_phrase(filter_text);
+    let (filter, remainder) = parse_type_phrase_folding(filter_text);
     if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -538,8 +538,8 @@ fn parse_choose_or_reveal_behold_cost(lower: &str) -> Option<AbilityCost> {
     .parse(after_article)
     .ok()?;
 
-    let (choose_filter, choose_rem) = parse_type_phrase(choose_type_text.trim());
-    let (reveal_filter, reveal_rem) = parse_type_phrase(reveal_type_text.trim());
+    let (choose_filter, choose_rem) = parse_type_phrase_folding(choose_type_text.trim());
+    let (reveal_filter, reveal_rem) = parse_type_phrase_folding(reveal_type_text.trim());
     if !choose_rem.trim().is_empty()
         || !reveal_rem.trim().is_empty()
         || matches!(choose_filter, TargetFilter::Any)
@@ -953,7 +953,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
         // CR 107.3a + CR 118.8: "Exile X card(s) from your graveyard" — variable
         // count announced during casting (Harvest Pyre). Ordered before the typed
-        // `parse_type_phrase` arm, which cannot represent a bare zone with no filter.
+        // `parse_type_phrase_folding` arm, which cannot represent a bare zone with no filter.
         if let Some(((), rest_after_x)) =
             nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
         {
@@ -1004,7 +1004,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             .map(|(_, remaining)| remaining)
             .unwrap_or(rest);
         let filter_text = strip_count_article_prefix(filter_start);
-        let (filter, remainder) = parse_type_phrase(filter_text);
+        let (filter, remainder) = parse_type_phrase_folding(filter_text);
         if remainder.trim().is_empty() {
             let zone = extract_filter_zone(&filter);
             return AbilityCost::Exile {
@@ -1100,7 +1100,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             // The numeric branch does NOT consume "other" ("tap two other
             // untapped artifacts you control"): the `untapped ` tag fails on
             // the "other " lead, so the phrase reaches `parse_target` intact
-            // and `parse_type_phrase` supplies `FilterProp::Another` itself.
+            // and `parse_type_phrase_folding` supplies `FilterProp::Another` itself.
             // Nothing to re-apply here.
             (n, r, CountWord::Plain)
         } else {
@@ -1187,7 +1187,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         let (i, _) = tag("unattach ").parse(i)?;
         value((), alt((tag("an "), tag("a ")))).parse(i)
     }) {
-        let (filter, remainder) = parse_type_phrase(after_article);
+        let (filter, remainder) = parse_type_phrase_folding(after_article);
         let rem_lower = remainder.to_lowercase();
         if let Some(((), tail)) = nom_on_lower(remainder, &rem_lower, |i| {
             value((), preceded(tag(" from "), parse_cost_self_reference)).parse(i)
@@ -1484,7 +1484,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     })?;
 
     // Try parse_for_each_clause first (handles counters, player counts, hand size, etc.),
-    // then fall back to parse_type_phrase for standard object count patterns.
+    // then fall back to parse_type_phrase_folding for standard object count patterns.
     if let Ok((_, qty)) = nom_quantity::parse_for_each_clause_ref_complete(after_less) {
         return Some(CostReduction {
             mode,
@@ -1495,7 +1495,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     }
 
     // Parse the condition as a type phrase
-    let (filter, remainder) = parse_type_phrase(after_less);
+    let (filter, remainder) = parse_type_phrase_folding(after_less);
     if !remainder.trim().is_empty() {
         return None;
     }
@@ -1814,7 +1814,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter = if rem.trim().is_empty() {
         filter
     } else {
-        let (filter, _) = parse_type_phrase(filter_text);
+        let (filter, _) = parse_type_phrase_folding(filter_text);
         filter
     };
     let filter = match filter {
@@ -2075,7 +2075,7 @@ mod tests {
     #[test]
     fn cost_explicit_count_continuation_with_unmodeled_rider_stays_unimplemented() {
         // Terminal explicit-count guard: a "<N>=2 …" continuation whose object
-        // phrase carries an unmodeled rider that `parse_type_phrase` cannot fully
+        // phrase carries an unmodeled rider that `parse_type_phrase_folding` cannot fully
         // consume ("… that were dealt damage this turn") must stay honest
         // `Unimplemented` — it must NOT fall through to the count-1 fallback,
         // which would emit a broad supported cost that drops both the rider and
@@ -2400,7 +2400,7 @@ mod tests {
     ///
     /// The "two other untapped" row was already green before this fix: the
     /// numeric branch never consumes "other", so the phrase reaches
-    /// `parse_type_phrase` intact and it supplies the property. That row pins
+    /// `parse_type_phrase_folding` intact and it supplies the property. That row pins
     /// the path; it is not evidence for the fix.
     #[test]
     fn tap_cost_another_carries_the_source_exclusion() {
@@ -2498,7 +2498,7 @@ mod tests {
         // CR 701.3d + CR 608.2k: Captain America's Throw cost. The recipient
         // "from Captain America, First Avenger" is normalized to "from ~"
         // upstream by `normalize_card_name_refs`.
-        let (expected_filter, remainder) = super::parse_type_phrase("Equipment from ~");
+        let (expected_filter, remainder) = super::parse_type_phrase_folding("Equipment from ~");
         assert_eq!(remainder, " from ~");
         assert_eq!(
             parse_oracle_cost("Unattach an Equipment from ~"),
@@ -3409,7 +3409,7 @@ mod tests {
             } => {
                 assert_eq!(count, 1);
                 assert_eq!(filter.get_subtype(), Some("Forest"));
-                // "you control" must be captured — parse_type_phrase delegates to
+                // "you control" must be captured — parse_type_phrase_folding delegates to
                 // parse_controller_suffix which handles this suffix.
                 assert_eq!(filter.controller, Some(ControllerRef::You));
             }
