@@ -2072,6 +2072,53 @@ mod tests {
         }
     }
 
+    /// CR 205.3a: the article-led right conjunct may be a SUBTYPE rather than a
+    /// core type — "Sacrifice another creature or a Blood token" (Anje, Maid of
+    /// Dishonor) and "... or a Treasure" (Skullport Merchant). `starts_with_type_word`
+    /// already covers subtypes, so the same wrapper serves both axes; these two
+    /// cards were not predicted when the fix was scoped and were found by the
+    /// corpus parse-diff, so they are pinned rather than left implicit.
+    ///
+    /// Revert-failing: without the wrapper both collapse to
+    /// `Typed{[Creature], Another}` and the token leg is unpayable.
+    #[test]
+    fn sacrifice_cost_unions_an_article_led_subtype_conjunct() {
+        for (phrase, subtype) in [
+            ("Sacrifice another creature or a Blood token", "Blood"),
+            ("Sacrifice another creature or a Treasure", "Treasure"),
+        ] {
+            let cost = parse_oracle_cost(phrase);
+            let AbilityCost::Sacrifice(SacrificeCost { target, .. }) = &cost else {
+                panic!("expected a Sacrifice cost for {phrase:?}, got {cost:?}");
+            };
+            let TargetFilter::Or { filters } = target else {
+                panic!("{phrase:?} must union both legs, got {target:?}");
+            };
+            assert_eq!(filters.len(), 2, "{filters:?}");
+            let legs: Vec<&TypedFilter> = filters
+                .iter()
+                .map(|f| match f {
+                    TargetFilter::Typed(tf) => tf,
+                    other => panic!("each leg must be Typed, got {other:?}"),
+                })
+                .collect();
+            assert!(legs[0].type_filters.contains(&TypeFilter::Creature));
+            assert!(
+                legs[1]
+                    .type_filters
+                    .contains(&TypeFilter::Subtype(subtype.to_string())),
+                "the right leg must be the {subtype} subtype: {:?}",
+                legs[1].type_filters
+            );
+            for leg in &legs {
+                assert!(
+                    leg.properties.contains(&FilterProp::Another),
+                    "\"another\" must distribute to every leg: {leg:?}"
+                );
+            }
+        }
+    }
+
     /// The opt-in stays opt-in at the cost seam too: a sacrifice cost with a
     /// single filter is untouched, and an article-led BARE-card disjunct does not
     /// become a type union.
