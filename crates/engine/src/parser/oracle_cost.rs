@@ -2018,7 +2018,7 @@ mod tests {
     /// of Mogis).
     ///
     /// Revert-failing: before the cost parser opted into
-    /// `parse_target_with_article_led_type_union` this collapsed to
+    /// `fold_article_led_type_union` this collapsed to
     /// `Typed{[Creature], Another}` and the engine refused to let the controller
     /// sacrifice an artifact or enchantment to pay a cost the card allows.
     ///

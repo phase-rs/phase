@@ -10,7 +10,7 @@
 //! same surface is an elided-verb clause elsewhere ("you control a land creature
 //! or a land entered the battlefield under your control this turn", Earth Rumble Wrestlers). The
 //! sacrifice-cost parser now opts into the union reading via
-//! `parse_target_with_article_led_type_union`, so the cost's filter is
+//! `fold_article_led_type_union`, so the cost's filter is
 //! `Or[Creature+Another, Artifact]` rather than `Creature+Another` alone.
 //!
 //! Note the ASYMMETRY, which is the rules-load-bearing part: "another" scopes only
@@ -149,11 +149,9 @@ fn mold_folk_still_pays_its_cost_by_sacrificing_a_creature() {
 fn mold_folk_may_sacrifice_itself_once_it_is_an_artifact() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    // The source is an artifact creature, the state Liquimetal Coating / Mycosynth
-    // Lattice / Karn, Silver Golem all produce. Set as a fixture rather than
-    // parsed from a type-granting card: the subject here is the COST FILTER, and
-    // routing through a continuous effect would put the layer system in the path
-    // of a test that is not about it.
+    // Set as a fixture rather than parsed from a type-granting card: the subject
+    // here is the COST FILTER, and routing through a continuous effect would put
+    // the layer system in the path of a test that is not about it.
     let source = {
         let mut b = scenario.add_creature_from_oracle(P0, "Mold Folk", 1, 1, MOLD_FOLK);
         b.as_artifact();
@@ -169,13 +167,24 @@ fn mold_folk_may_sacrifice_itself_once_it_is_an_artifact() {
         )],
     );
     let mut runner = scenario.build();
+    // `CardBuilder::as_artifact` REPLACES the creature type; restore it so the
+    // fixture is an artifact CREATURE — the "in addition to its other types" state
+    // Liquimetal Coating / Mycosynth Lattice / Karn, Silver Golem actually produce,
+    // and the shape Street Urchin's own 2022-06-10 ruling describes ("If your
+    // commander is an artifact creature, you may sacrifice it to pay the cost of
+    // this ability"). A pure artifact would discriminate the same way but would
+    // leave the production-reachable both-types arm unexercised.
+    {
+        let obj = runner.state_mut().objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+    }
 
+    let core = &runner.state().objects[&source].card_types.core_types;
     assert!(
-        runner.state().objects[&source]
-            .card_types
-            .core_types
-            .contains(&CoreType::Artifact),
-        "reach-guard: the source must really be an artifact, or this proves nothing"
+        core.contains(&CoreType::Artifact) && core.contains(&CoreType::Creature),
+        "reach-guard: the source must be an artifact CREATURE, or this proves \
+         something narrower than the rulings describe: {core:?}"
     );
 
     // Nothing else is on the battlefield, so the ONLY legal payment is the source

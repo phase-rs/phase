@@ -410,11 +410,11 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
 /// distributes it across the `Or` it builds. Only the caller knows which surface
 /// it had — hence `base` arrives already scoped.
 ///
-/// The shared grammar already unions the article-less surface: `parse_type_phrase`
-/// turns "another creature or artifact" into
+/// The shared grammar already unions the article-less surface:
+/// `parse_type_phrase_folding` turns "another creature or artifact" into
 /// `Or[Typed{Creature, Another}, Typed{Artifact, Another}]`. Only the article
 /// blocks it, and that refusal is DELIBERATE, not an oversight — see the bare
-/// `and`/`or` branch of `parse_type_phrase_with_ctx`, which leaves the tail as
+/// `and`/`or` branch of `parse_type_phrase_folding_with_ctx`, which leaves the tail as
 /// remainder (pinned by
 /// `parse_type_phrase_leaves_article_led_or_rhs_as_remainder`) because the same
 /// surface appears mid-CLAUSE with a verb elided after the connector:
@@ -433,7 +433,7 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
 /// its trailing "entered the battlefield …" fails the full-consumption guard in
 /// `oracle_static::shared`, not because of anything this branch does.
 ///
-/// The real reason is BLAST RADIUS. `parse_type_phrase_with_ctx` is the shared
+/// The real reason is BLAST RADIUS. `parse_type_phrase_folding_with_ctx` is the shared
 /// entry point for target phrases, cost filters, trigger filters, keyword costs
 /// and condition subjects; widening it changes every one of those at once, and
 /// the pinning test above exists precisely to stop that happening casually. A
@@ -15686,7 +15686,7 @@ mod tests {
 
     /// CR 205.2a: the opt-in wrapper unions an ARTICLE-LED right conjunct that
     /// the shared grammar deliberately leaves as remainder. The article is the
-    /// only difference: `parse_type_phrase` already unions the article-less
+    /// only difference: `parse_type_phrase_folding` already unions the article-less
     /// surface, so the two must agree leg-for-leg.
     ///
     /// Revert-failing: without the wrapper the phrase collapses to
