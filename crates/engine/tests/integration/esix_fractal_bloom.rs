@@ -936,7 +936,7 @@ fn window_resets_on_the_controllers_next_turn_only() {
         "(a) the window is spent for the remainder of this turn"
     );
 
-    // (c) the opponent's turn: no prompt, and it must not spend P0's next window.
+    // (c) the opponent's turn: no prompt.
     cross_turn(&mut runner);
     assert_eq!(runner.state().active_player, P1);
     resolve_token_source(&mut runner, P0, THREE_SOLDIERS);
@@ -1001,9 +1001,7 @@ fn no_legal_copy_source_does_not_strand_the_game() {
         "the game must settle at Priority rather than strand; got {:?}",
         runner.state().waiting_for
     );
-    // CR 614.6: the event was replaced, so it never happens. The assertions
-    // above read only `waiting_for`, which cannot distinguish "zero tokens
-    // created" from "the three original Soldiers were created after all".
+    // CR 614.6: the event was replaced, so it never happens.
     let soldiers: Vec<&GameObject> = runner
         .state()
         .battlefield
