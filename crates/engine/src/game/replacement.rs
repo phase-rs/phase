@@ -766,7 +766,7 @@ fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
     source: ObjectId,
-    controller: PlayerId,
+    controller: Option<PlayerId>,
     applied: HashSet<AppliedReplacementKey>,
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
@@ -782,7 +782,14 @@ fn stash_post_replacement_continuation(
             // controller. Carried beside `source` rather than derived from it,
             // because `source` is the affected object on every zone-change
             // path.
-            controller: Some(controller),
+            //
+            // Passed through as an `Option` rather than unwrapped at the call
+            // sites: `None` is the drain's own encoding of "no replacing object
+            // to speak of", which `apply_post_replacement_effect` answers by
+            // falling back to the AFFECTED object's controller. Substituting
+            // `active_player` here would stamp a confident wrong answer in
+            // place of that fallback.
+            controller,
         },
         ResidentDrainPolicy::KeepResident,
     );
@@ -9084,7 +9091,7 @@ fn apply_single_replacement(
                         state,
                         post,
                         new_event.affected_object_id().unwrap_or(rid.source),
-                        ability_controller.unwrap_or(state.active_player),
+                        ability_controller,
                         replacement_applied.clone(),
                         None,
                         // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
@@ -9129,7 +9136,7 @@ fn apply_single_replacement(
                         // Here `source` is already the shield, so this agrees
                         // with the pre-existing derivation rather than changing
                         // it.
-                        ability_controller.unwrap_or(state.active_player),
+                        ability_controller,
                         replacement_applied.clone(),
                         proposed_damage_source,
                         proposed_event_target.clone(),
