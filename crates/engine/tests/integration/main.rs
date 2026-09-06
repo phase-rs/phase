@@ -1550,6 +1550,7 @@ mod where_x_coverage_runtime;
 mod where_x_quantity_channel_binds;
 mod where_x_totality_guard;
 mod will_cycle_duration_seam_b1;
+mod will_cycle_permission_b2;
 mod windfall_greatest_discard_aggregate;
 mod winding_way_reveal_partition_2931;
 mod witchs_oven_food_tokens;

@@ -5040,7 +5040,7 @@ fn graveyard_permission_sources(
         source_ids.extend(player_data.graveyard.iter().copied());
     }
 
-    source_ids
+    let mut sources: Vec<GraveyardPermissionSource<'_>> = source_ids
         .into_iter()
         .filter_map(|source_id| {
             let obj = state.objects.get(&source_id)?;
@@ -5081,7 +5081,71 @@ fn graveyard_permission_sources(
                 _ => None,
             })
         })
-        .collect()
+        .collect();
+
+    // CR 305.1 + CR 601.2a + CR 611.2c: the SECOND source class — a duration-bound
+    // permission installed by a resolving spell/ability rather than printed on a
+    // permanent (the Will cycle: "Until end of turn, you may play lands and cast
+    // spells from your graveyard"). It rides a `TransientContinuousEffect` because
+    // it modifies no characteristic and changes no controller, so per CR 611.2c it
+    // modifies the rules of the game and "can affect objects that weren't affected
+    // when that continuous effect began" — a card milled or discarded LATER this
+    // turn is covered. Reading the filter off the TCE here (rather than stamping it
+    // onto graveyard objects at resolution) is what keeps that set open.
+    //
+    // This is the same shape as `reduce_activated_ability_cost`'s TCE arm, and it
+    // deliberately does NOT consult the O(1) `static_mode_presence` index, which
+    // covers battlefield statics only — gating on it would make this permission
+    // invisible while every parser test still passed.
+    //
+    // The `UntilEndOfTurn` duration expires the TCE at cleanup via
+    // `prune_end_of_turn_effects` (CR 514.2), so no explicit clear is needed here.
+    for tce in &state.transient_continuous_effects {
+        // CR 109.5: "you" is the player who cast the spell / activated the ability,
+        // latched onto the TCE at install time — not the current controller of a
+        // source that may since have left the battlefield (Magus exiles itself as a
+        // cost). An opponent's graveyard is therefore unaffected.
+        if tce.controller != player {
+            continue;
+        }
+        for modification in &tce.modifications {
+            let ContinuousModification::AddStaticMode {
+                mode:
+                    StaticMode::GraveyardCastPermission {
+                        frequency,
+                        play_mode,
+                        graveyard_destination_replacement,
+                        extra_cost,
+                        ..
+                    },
+            } = modification
+            else {
+                continue;
+            };
+            if !graveyard_permission_play_mode_matches(*play_mode, play_mode_filter) {
+                continue;
+            }
+            // CR 110.4: a per-source frequency slot is keyed on `source_id`, but a
+            // TCE's `source_id` names an object that may have changed zones (CR
+            // 400.7) — so a non-`Unlimited` frequency would mis-track here. No card
+            // in this class prints one; fail loudly in debug rather than silently
+            // granting the wrong number of casts.
+            debug_assert!(
+                matches!(frequency, CastFrequency::Unlimited),
+                "transient GraveyardCastPermission with non-Unlimited frequency \
+                 {frequency:?}: per-source slot tracking keys on a stale source_id"
+            );
+            sources.push(GraveyardPermissionSource {
+                source_id: tce.source_id,
+                filter: &tce.affected,
+                frequency: *frequency,
+                graveyard_destination_replacement: *graveyard_destination_replacement,
+                extra_cost,
+            });
+        }
+    }
+
+    sources
 }
 
 fn graveyard_permission_play_mode_matches(

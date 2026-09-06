@@ -1460,8 +1460,33 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         ))
                         .parse(remainder_lower_for_loses.as_str())
                         .is_ok();
+                        // CR 305.1 + CR 601.2a + CR 611.2a: "you may play lands and
+                        // cast spells from your graveyard" (Yawgmoth's Will, Gaea's
+                        // Will, Magus of the Will) is ONE permission naming two
+                        // actions — playing a land is a special action (CR 305.1)
+                        // and casting is CR 601.2a, but a single grant covers both
+                        // and a single stated window scopes both. `"cast "` is a
+                        // clause starter, so the bare-and rule would otherwise cut
+                        // here and orphan "you may play lands" — a fragment the
+                        // CR 305.2a guard in `try_parse_cast_effect` then correctly
+                        // refuses, losing the whole permission.
+                        //
+                        // Anchored on the permission head to the LEFT of the "and"
+                        // plus a cast verb to the right: a card that merely mentions
+                        // playing a land before an unrelated "and cast ..." clause
+                        // does not match, because the left side must itself be the
+                        // "you may play ..." permission.
+                        let permission_two_verb_conjunct = {
+                            let head = before_lower.trim_end();
+                            let tail_lower = remainder_trimmed.to_ascii_lowercase();
+                            nom_primitives::scan_contains(head, "you may play")
+                                && alt((tag::<_, _, OracleError<'_>>("cast "), tag("play ")))
+                                    .parse(tail_lower.as_str())
+                                    .is_ok()
+                        };
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
+                        || permission_two_verb_conjunct
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
                         || prevent_then_put_continuation

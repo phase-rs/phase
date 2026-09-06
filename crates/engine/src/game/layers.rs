@@ -6880,10 +6880,21 @@ pub(crate) fn gather_transient_continuous_effects(
             // characteristic. Grafting it onto each affected object would let
             // `battlefield_active_statics` see it too and double-apply the
             // discount, so skip it here for the same reason.
+            //
+            // CR 305.1 + CR 601.2a + CR 611.2c: A transient
+            // `GraveyardCastPermission` (the Will cycle's "until end of turn, you
+            // may play lands and cast spells from your graveyard") is the same
+            // shape — read directly off the TCE by the single permission authority
+            // `casting::graveyard_permission_sources`, never a characteristic of a
+            // battlefield object. Its `affected` filter names GRAVEYARD cards, so
+            // feeding it into the object layer gather would stamp the permission
+            // onto unrelated battlefield permanents. Skip it for the same reason.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MayLookAtFaceDown | StaticMode::ReduceAbilityCost { .. },
+                    mode: StaticMode::MayLookAtFaceDown
+                        | StaticMode::ReduceAbilityCost { .. }
+                        | StaticMode::GraveyardCastPermission { .. },
                 }
             ) {
                 continue;

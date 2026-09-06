@@ -12,10 +12,13 @@
 //!   unstamped window is not "missing", it is PERMANENT, because CR 611.2a
 //!   makes an unstated duration last until the end of the game.
 //!
-//! **Honesty statement.** B1 makes ZERO cards supported. Yawgmoth's Will,
-//! Gaea's Will and Magus of the Will still parse to `Effect::Unimplemented`;
-//! `v5_will_cycle_cards_remain_honestly_unsupported` pins that as a REGRESSION
-//! GUARD, not as a discriminating test.
+//! **Honesty statement, AMENDED.** As written, B1 made ZERO cards supported --
+//! all three cards still parsed to `Effect::Unimplemented`, and the v5 row pinned
+//! that as a regression guard. The B2 permission work (`will_cycle_permission_b2`)
+//! has since made the permission half parse, so that row is now INVERTED and
+//! asserts the opposite verdict. B1's own contribution is unchanged and still
+//! exercised here: the leading-duration head (U1) and the antecedent-window
+//! `expiry` stamp on the graveyard-exile replacement (U2).
 //!
 //! **Stack size.** `parse_oracle_text` overflows the default 8 MB test stack
 //! and prints a convincing PARTIAL negative on the way down. Every body that
@@ -382,18 +385,22 @@ fn v4a_this_combat_window_stamps_end_of_combat() {
 }
 
 // ── V5 ────────────────────────────────────────────────────────────────────
-// **REGRESSION GUARD — NOT A DISCRIMINATING TEST.** These four assertions hold
-// identically before AND after U1/U2, by design: B1 makes zero cards supported.
-// The row exists to prove B1 did not accidentally start claiming coverage it
-// has not built. Both of its reach-guards are required, because every assertion
-// here is a negative.
+// **MULTI-AUTHORITY FIXTURE.** Three arrival shapes -- a bare sorcery, a sorcery
+// behind a Suspend line, and a creature's activated ability -- must reach the SAME
+// verdict, proving the outcome keys on the body rather than on `AbilityKind`, cost
+// presence, or line index.
+//
+// Assertion (i) was INVERTED when the B2 permission work landed: it formerly
+// asserted the cards were still `Unimplemented` (a regression guard for B1, which
+// made zero cards supported) and now asserts they are not. The replacement
+// assertions (iii) are B1's own and are unchanged.
 
 const YAWGMOTHS_WILL: &str = "Until end of turn, you may play lands and cast spells from your graveyard.\nIf a card would be put into your graveyard from anywhere this turn, exile that card instead.";
 const GAEAS_WILL: &str = "Suspend 4—{G}\nUntil end of turn, you may play lands and cast spells from your graveyard.\nIf a card would be put into your graveyard from anywhere this turn, exile that card instead.";
 const MAGUS_OF_THE_WILL: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
 
 #[test]
-fn v5_will_cycle_cards_remain_honestly_unsupported() {
+fn v5_will_cycle_permission_half_parses_on_every_arrival_shape() {
     // MULTI-AUTHORITY hostile fixture: three different arrival shapes — a bare
     // sorcery, a sorcery preceded by a Suspend line, and a creature's activated
     // ability. All three must yield the SAME verdict, proving the outcome keys
@@ -413,13 +420,18 @@ fn v5_will_cycle_cards_remain_honestly_unsupported() {
     ] {
         let parsed = parse_with_types(text, name, types);
 
-        // (i) coverage stays RED — the permission body is still unimplemented.
+        // (i) INVERTED by the B2 permission work. B1 left the permission body
+        // unimplemented and this assertion pinned that as honest. The permission
+        // half now parses (see `will_cycle_permission_b2.rs`), so the same
+        // multi-authority fixture asserts the OPPOSITE verdict: no card in the
+        // cycle may report an `Unimplemented` effect any more. Inverted rather
+        // than deleted, so the three arrival shapes stay pinned by one fixture.
         assert!(
-            parsed
+            !parsed
                 .abilities
                 .iter()
                 .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
-            "{name}: must still report an Unimplemented effect"
+            "{name}: permission half must no longer report an Unimplemented effect"
         );
         // (ii) B1 fabricates no emblem.
         assert!(

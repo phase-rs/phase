@@ -337,6 +337,46 @@ fn register_transient_effect(
         }
     }
 
+    // CR 611.2c + CR 305.1 + CR 601.2a: A duration-bound "you may play lands and
+    // cast spells from your graveyard" (Yawgmoth's Will, Gaea's Will, Magus of the
+    // Will). Like the two branches above, it is read DIRECTLY off the TCE by the
+    // single permission authority (`casting::graveyard_permission_sources`) and
+    // never grafted onto individual objects (`layers.rs` skips it).
+    //
+    // The permission modifies no characteristic and changes no controller, so per
+    // CR 611.2c it modifies the RULES OF THE GAME and "can affect objects that
+    // weren't affected when that continuous effect began" — a card put into the
+    // graveyard later this turn is castable. The filter must therefore ride on the
+    // TCE intact rather than be frozen to a `SpecificObject` set by the broadcast
+    // branch below, which would snapshot the graveyard at resolution and silently
+    // miss everything milled or discarded afterwards.
+    //
+    // CR 109.5: "you" is the player who activated the ability / controls the
+    // resolving spell; `ability.controller` latches it, and the reader gates on
+    // the TCE's controller so an opponent's graveyard is unaffected.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::GraveyardCastPermission { .. },
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            install_transient(
+                state,
+                end_permission,
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+            );
+            return;
+        }
+    }
+
     // CR 611.2c + CR 613.11 + CR 508.1d: A duration-bound combat REQUIREMENT
     // ("until your next turn, creatures your opponents control attack each
     // combat if able and attack a player other than you if able") modifies no

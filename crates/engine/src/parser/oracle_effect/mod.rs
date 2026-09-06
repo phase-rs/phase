@@ -4579,6 +4579,69 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
     })
 }
 
+/// CR 611.2a + CR 611.2c + CR 305.1 + CR 601.2a: "Until end of turn, you may play
+/// lands and cast spells from your graveyard." (Yawgmoth's Will, Gaea's Will,
+/// Magus of the Will.)
+///
+/// The sentence is ONE permission with two verbs, but the bare-`and` clause
+/// splitter licenses a split on `"cast "`, orphaning `"play lands"` — which the
+/// CR 305.2a guard in `try_parse_cast_effect` then correctly refuses. Recognizing
+/// the whole sentence HERE, upstream of that split, is what keeps the permission
+/// intact; neither the splitter's verb list nor the CR 305.2a guard is weakened.
+///
+/// CR 611.2c is the rule that shapes the runtime side: this grant modifies no
+/// characteristic and changes no controller, so it "modifies the rules of the
+/// game" and can affect objects that weren't affected when it began — a card put
+/// into the graveyard LATER this turn is covered. So the mode rides a
+/// duration-bound `TransientContinuousEffect` (via `AddStaticMode`, whose filter
+/// `register_transient_effect` keeps intact) and the affected set is re-evaluated
+/// per query, rather than being stamped onto a resolution-time snapshot of the
+/// graveyard's contents.
+///
+/// `AddStaticMode` rather than `GrantStaticAbility` because the latter anchors the
+/// grant to a host object via `affected: SelfRef`: Magus exiles itself as a cost
+/// and the Sorceries go to the graveyard, so `SelfRef` would name a departed host.
+fn try_parse_temporary_graveyard_play_permission(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    use crate::parser::oracle_nom::duration::parse_duration;
+
+    // Reuses the single duration grammar (`oracle_nom::duration::parse_duration`),
+    // in the same `terminated(..., tag(", "))` shape the static-line head uses, so
+    // the two heads cannot drift apart.
+    let (duration, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        terminated(parse_duration, tag::<_, _, OracleError<'_>>(", ")).parse(input)
+    })?;
+
+    let static_def = super::oracle_static::parse_static_line(rest_orig)?;
+    if !matches!(static_def.mode, StaticMode::GraveyardCastPermission { .. }) {
+        return None;
+    }
+
+    // The permission's own filter (which cards it covers) must survive onto the
+    // transient effect; `register_transient_effect` reads it from `affected`.
+    let affected = static_def.affected.clone()?;
+    let mode = static_def.mode.clone();
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
+            duration: Some(duration.clone()),
+            // No host object: the permission is player-scoped for its window, so it
+            // names no `target`. See the doc comment above on `AddStaticMode`.
+            target: None,
+            end_cost: None,
+        },
+        distribute: None,
+        multi_target: None,
+        duration: Some(duration),
+        sub_ability: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 /// CR 611.2a + CR 611.2c + CR 701.26a + CR 508.1f: "Until your next turn, those
 /// creatures can't become tapped unless they're being declared as attackers."
 /// (Ood Sphere's Red-Eye chaos trigger, second sentence.) A duration-bound
@@ -10021,6 +10084,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // the nearest opponent in the last chosen direction ..." (Teyo, Geometric
     // Tactician [−2]) — a duration-bound directional attack restriction.
     if let Some(clause) = try_parse_temporary_attack_only_neighbor(tp) {
+        return clause;
+    }
+
+    // CR 305.1 + CR 601.2a + CR 611.2c: "Until end of turn, you may play lands and
+    // cast spells from your graveyard" (the Will cycle) — one permission with two
+    // verbs. Must run BEFORE the bare-`and` clause split, which would otherwise
+    // orphan "play lands" into the CR 305.2a guard.
+    if let Some(clause) = try_parse_temporary_graveyard_play_permission(tp) {
         return clause;
     }
 
