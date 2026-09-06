@@ -1987,10 +1987,11 @@ fn handle_copy_token_source_choice(
     // `CopyTargetChoice`. But the copy-token batch can PARK mid-resolution and
     // raise its own question, and `resolve_ability_chain` returns
     // `Result<(), EffectError>` with no pause channel — `state.waiting_for` is
-    // the only signal it has. Four sites in `effects/token_copy.rs` write it:
-    // the outer `CreateToken` `NeedsChoice` arm, the per-token `TokenEntry`
-    // `NeedsChoice` arm, a nested post-replacement effect that parks a liminal
-    // entry resume, and a copied Aura token's `ReturnAsAuraTarget` host choice.
+    // the only signal it has. The sites in `effects/token_copy.rs` that write
+    // it include the outer `CreateToken` `NeedsChoice` arm, the per-token
+    // `TokenEntry` `NeedsChoice` arm, a nested post-replacement effect that
+    // parks a liminal entry resume, and a copied Aura token's
+    // `ReturnAsAuraTarget` host choice.
     // Forcing `Priority` here would swallow that prompt and strand the parked
     // batch behind it.
     //

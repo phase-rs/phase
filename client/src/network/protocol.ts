@@ -110,7 +110,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       player field to an optional active_player_req, and CopyTargetPurpose
  *       gained a CopyTokenSource variant. Both are one-way parse breaks: the
  *       condition's player field was REQUIRED through v48, so a v48 peer hits a
- *       missing-field error, and the purpose tag is externally tagged, so a v48
+ *       missing-field error, and the purpose tag is internally tagged, so a v48
  *       peer hits an unknown-variant error on CopyTokenSource. Bumped in
  *       lockstep with PROTOCOL_VERSION 66.
  *  48 — Retroactive bump for two new-tag changes that landed without one.
