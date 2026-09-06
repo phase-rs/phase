@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { LobbyGame } from "../../../adapter/types";
+import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../../config/multiplayerServer";
 import { LobbyView } from "../LobbyView";
 import { SERVER_PRESETS } from "../../../services/serverDetection";
 import type { DirectorySource } from "../../../services/serverDirectory";
@@ -438,7 +439,11 @@ describe("LobbyView", () => {
     const ambient = ambientFanOut();
     useMultiplayerStore.setState({
       userLobbySources: [SOURCE_A, SOURCE_B],
-      sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "open", 5]),
+      sourceStatus: statusRows(
+        [OFFICIAL_MULTIPLAYER_SERVER_URL, "open", 4],
+        [SOURCE_A.url, "open", 3],
+        [SOURCE_B.url, "open", 5],
+      ),
       subscribeLobby: vi.fn(async () => () => {}),
       subscribeAmbientLobby: ambient.subscribe,
     });
@@ -446,80 +451,73 @@ describe("LobbyView", () => {
     return ambient;
   }
 
-  it("does not add overlapping per-source connection counts", async () => {
+  it("uses the lobby broker as the online-population authority", async () => {
     renderTwoSources();
 
-    // Every lobby client subscribes to each enabled source, so these are
-    // overlapping cardinalities rather than disjoint populations. The largest
-    // live report is the de-duplicated aggregate estimate.
-    expect(await screen.findByText("5 online")).toBeInTheDocument();
-    expect(screen.queryByText("8 online")).not.toBeInTheDocument();
+    // The broker reports 4 while dedicated sources report 3 and 5. Neither
+    // summing (12) nor taking the largest local count (5) is the lobby total.
+    expect(await screen.findByText("4 online")).toBeInTheDocument();
+    expect(screen.queryByText("5 online")).not.toBeInTheDocument();
+    expect(screen.queryByText("12 online")).not.toBeInTheDocument();
   });
 
-  it("counts only the sources still being browsed", async () => {
+  it("does not change the lobby count when a dedicated source is removed", async () => {
     renderTwoSources();
 
-    // Reach-guard: B's larger count owns the estimate before the removal, so
-    // the assertion after it measures the drop and not an empty chip.
-    expect(await screen.findByText("5 online")).toBeInTheDocument();
+    expect(await screen.findByText("4 online")).toBeInTheDocument();
 
     act(() => {
       useMultiplayerStore.setState({ userLobbySources: [SOURCE_A] });
     });
 
-    // B's status row (and its count) survives until its channel closes; the
-    // chip must not keep counting a server nobody browses.
-    expect(await screen.findByText("3 online")).toBeInTheDocument();
-    expect(screen.queryByText("5 online")).not.toBeInTheDocument();
+    expect(await screen.findByText("4 online")).toBeInTheDocument();
   });
 
-  it("drops a source's count from the total once that source goes offline", async () => {
+  it("hides the count when the lobby broker goes offline", async () => {
     renderTwoSources();
 
-    // Reach-guard: B's larger count owns the estimate while both sources are
-    // open, so the assertion after the flap measures the drop.
-    expect(await screen.findByText("5 online")).toBeInTheDocument();
+    expect(await screen.findByText("4 online")).toBeInTheDocument();
 
     act(() => {
       useMultiplayerStore.setState({
-        // Leaving `"open"` rewrites the row without a count — exactly what
-        // the store does on the `"offline"` transition.
-        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "offline", null]),
+        sourceStatus: statusRows(
+          [OFFICIAL_MULTIPLAYER_SERVER_URL, "offline", null],
+          [SOURCE_A.url, "open", 3],
+          [SOURCE_B.url, "open", 5],
+        ),
       });
     });
 
-    // B is still a browsed source (the picker shows it, marked down), but it
-    // is delivering nothing — counting it would advertise players on a
-    // server shown as offline.
-    expect(await screen.findByText("3 online")).toBeInTheDocument();
-    expect(screen.queryByText("5 online")).not.toBeInTheDocument();
+    expect(screen.queryByText(/\d+ online/)).not.toBeInTheDocument();
   });
 
-  it("does not re-admit a source's old count when it reconnects without reporting", async () => {
-    // The state a flapped source spends the rest of the session in: back to
-    // `"open"`, on a NEW socket that has sent no `PlayerCount` yet. The old
-    // number must not come back — nothing live is backing it.
+  it("does not re-admit the broker's old count when it reconnects without reporting", async () => {
     renderTwoSources();
 
-    // Reach-guard: the pre-flap estimate is really 5, so the assertions below
-    // measure the count staying out and not an empty chip.
-    expect(await screen.findByText("5 online")).toBeInTheDocument();
+    expect(await screen.findByText("4 online")).toBeInTheDocument();
 
     act(() => {
       useMultiplayerStore.setState({
-        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "offline", null]),
+        sourceStatus: statusRows(
+          [OFFICIAL_MULTIPLAYER_SERVER_URL, "offline", null],
+          [SOURCE_A.url, "open", 3],
+          [SOURCE_B.url, "open", 5],
+        ),
       });
     });
-    expect(await screen.findByText("3 online")).toBeInTheDocument();
+    expect(screen.queryByText(/\d+ online/)).not.toBeInTheDocument();
 
     act(() => {
       useMultiplayerStore.setState({
-        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "open", null]),
+        sourceStatus: statusRows(
+          [OFFICIAL_MULTIPLAYER_SERVER_URL, "open", null],
+          [SOURCE_A.url, "open", 3],
+          [SOURCE_B.url, "open", 5],
+        ),
       });
     });
 
-    expect(await screen.findByText("3 online")).toBeInTheDocument();
-    expect(screen.queryByText("5 online")).not.toBeInTheDocument();
+    expect(screen.queryByText(/\d+ online/)).not.toBeInTheDocument();
   });
 
   it("keeps its ambient subscription across a source's connection flap", async () => {
@@ -535,12 +533,20 @@ describe("LobbyView", () => {
 
     act(() => {
       useMultiplayerStore.setState({
-        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "reconnecting", null]),
+        sourceStatus: statusRows(
+          [OFFICIAL_MULTIPLAYER_SERVER_URL, "open", 4],
+          [SOURCE_A.url, "open", 3],
+          [SOURCE_B.url, "reconnecting", null],
+        ),
       });
     });
     act(() => {
       useMultiplayerStore.setState({
-        sourceStatus: statusRows([SOURCE_A.url, "open", 3], [SOURCE_B.url, "open", null]),
+        sourceStatus: statusRows(
+          [OFFICIAL_MULTIPLAYER_SERVER_URL, "open", 4],
+          [SOURCE_A.url, "open", 3],
+          [SOURCE_B.url, "open", null],
+        ),
       });
     });
 

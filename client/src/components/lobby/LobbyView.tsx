@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { FormatGroup, GameFormat } from "../../adapter/types";
+import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { flagForServer, parseJoinCode } from "../../services/serverDetection";
 import { healthHint, refreshServerDirectory } from "../../services/serverDirectory";
@@ -412,29 +413,14 @@ export function LobbyView({
     });
   }, [entries, formatFilter, roomTypeFilter]);
 
-  // Every enabled source reports the number of WebSocket connections it sees,
-  // not identities that can be unioned across servers. The same player usually
-  // holds one lobby-broker socket and one or more dedicated-server sockets, so
-  // adding those cardinalities double-counts the overlapping population. Use
-  // the largest live count as the aggregate estimate instead. Two rules, both
-  // structural:
-  //   membership — selected from the CURRENT sources (as in `entries`), so a
-  //     source the user has removed leaves the estimate immediately;
-  //   liveness   — the count is read from that source's status row, which
-  //     the store rewrites on every connection state change and refills
-  //     only from a frame on the socket that is live now. A source that is
-  //     reconnecting, offline, or freshly re-opened without having reported
-  //     since therefore contributes nothing; there is no cached number here
-  //     that could outlive the socket that sent it.
-  const playerCount = useMemo(
-    () =>
-      sources.reduce(
-        (largest, source) =>
-          Math.max(largest, sourceStatus.get(source.url)?.playerCount ?? 0),
-        0,
-      ),
-    [sources, sourceStatus],
-  );
+  // The badge describes the shared online lobby, so its broker is the single
+  // population authority. Dedicated servers report their own WebSocket counts,
+  // which overlap with the broker population and with one another; neither a
+  // sum nor a maximum can recover a distinct-player count from those aggregate
+  // values. The status row is socket-generation scoped, so a disconnected or
+  // reconnecting broker contributes no stale count.
+  const playerCount =
+    sourceStatus.get(OFFICIAL_MULTIPLAYER_SERVER_URL)?.playerCount ?? 0;
 
   // Count-free by design: the picker lists each source with its own status,
   // which is where a number would be actionable.
