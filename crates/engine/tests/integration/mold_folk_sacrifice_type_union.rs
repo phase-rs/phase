@@ -28,6 +28,7 @@
 //! resolution) rather than asserting a parsed filter shape.
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
@@ -194,5 +195,75 @@ fn mold_folk_may_sacrifice_itself_once_it_is_an_artifact() {
         state.objects[&source].zone,
         Zone::Graveyard,
         "the source satisfies the article-led artifact leg and may pay with itself"
+    );
+}
+
+/// COVERAGE GUARD for `Another` on the LEFT (creature) leg.
+///
+/// The three tests above all pass even if `Another` is stripped from the creature
+/// leg: two of them submit a DIFFERENT permanent as the payment, and the third
+/// pays through the artifact leg, which never carried `Another` to begin with.
+/// Nothing above discriminates the property, so this drives the one case that
+/// does — Mold Folk alone on the battlefield as a plain, NON-artifact creature.
+///
+/// CR 601.2h: with no other permanent to sacrifice and the source excluded from
+/// the only leg it could match, the cost is unpayable — "Unpayable costs can't
+/// be paid" — so the activation cannot be completed, and CR 733.1 reverses the
+/// entire action, leaving the board exactly as it was.
+///
+/// Revert-failing: remove `FilterProp::Another` from the creature leg and the
+/// source satisfies that leg itself, the cost becomes payable, and the
+/// activation below is accepted instead of rejected.
+#[test]
+fn mold_folk_cannot_sacrifice_itself_while_it_is_only_a_creature() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Mold Folk", 1, 1, MOLD_FOLK)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+
+    let core = &runner.state().objects[&source].card_types.core_types;
+    assert!(
+        core.contains(&CoreType::Creature) && !core.contains(&CoreType::Artifact),
+        "reach-guard: the source must be a plain creature, or this tests the \
+         artifact leg instead of the creature leg: {core:?}"
+    );
+
+    // The mana is available and the ability is otherwise activatable, so the ONLY
+    // thing that can refuse this is the sacrifice filter excluding the source.
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: source,
+        ability_index: 0,
+    });
+    assert!(
+        result.is_err(),
+        "\"another\" must exclude the source from the creature leg, leaving the \
+         cost unpayable with nothing else on the battlefield, got {result:?}"
+    );
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&source].zone,
+        Zone::Battlefield,
+        "the refused activation must leave the source on the battlefield"
+    );
+    assert_eq!(
+        state.objects[&source]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "the ability must not have resolved"
     );
 }
