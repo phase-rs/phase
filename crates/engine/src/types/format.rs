@@ -607,12 +607,14 @@ pub const MAX_STARTING_LIFE: i32 = 1_000_000;
 ///   actually bounds it.
 ///
 /// Two more callers bound a `FormatConfig` before it ever reaches
-/// `deserialize`, closing the gap where a raw, not-yet-validated config
-/// could otherwise reach a live session: `engine-wasm`'s
-/// `format_config_for_custom_rules` (the resolver the frontend calls when a
-/// player selects a saved custom format out of localStorage) and
-/// `server-core`'s `SessionManager::create_game_n_players` (defense in depth
-/// alongside its existing `validate_for_player_count`/
+/// `deserialize`, each as defense in depth rather than a closing gate: a
+/// config that skipped this earlier check would still be caught by
+/// `deserialize` itself, but failing early here gives a readable
+/// lobby-level message instead of a raw `deserialize` error at game start.
+/// Namely, `engine-wasm`'s `format_config_for_custom_rules` (the resolver
+/// the frontend calls when a player selects a saved custom format out of
+/// localStorage) and `server-core`'s `SessionManager::create_game_n_players`
+/// (defense in depth alongside its existing `validate_for_player_count`/
 /// `reject_unimplemented_range_of_influence` calls).
 ///
 /// CR 103.4 licenses a VARIANT starting life total; it does not by itself

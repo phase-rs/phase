@@ -2705,9 +2705,10 @@ mod tests {
     /// count and range-of-influence but not `starting_life`, so a caller that
     /// builds its own `FormatConfig` (rather than deserializing one) could
     /// seat a game whose life total loses every seat at the very first
-    /// state-based-action check (CR 704.5a). All three production callers
-    /// today happen to pass a deserialized or registry-built config, but this
-    /// function's own visibility does not guarantee that.
+    /// state-based-action check (CR 704.5a). All three config-supplying
+    /// production callers today happen to pass a deserialized or
+    /// registry-built config, but this function's own visibility does not
+    /// guarantee that.
     #[test]
     fn create_game_rejects_starting_life_outside_bounds() {
         let mut mgr = SessionManager::new();

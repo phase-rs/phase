@@ -257,10 +257,13 @@ mod external_format_config_tests {
     /// `format_config_for_custom_rules` resolves a saved custom-format
     /// definition into a live `FormatConfig` for the "select a saved custom
     /// format" lobby action; `custom_rules` is user-editable localStorage
-    /// data with no other ingress check on `starting_life` before it reaches
-    /// a live session. `resolve_and_validate_custom_format_config` is the
-    /// resolve-plus-bound step behind the `#[wasm_bindgen]` shell (which
-    /// cannot be exercised natively — see its own doc comment).
+    /// data, so bounding `starting_life` here fails early with a readable
+    /// lobby-level message rather than a raw `FormatConfig::deserialize`
+    /// error at game start — defense in depth, since that `Deserialize`
+    /// remains the closing gate either way.
+    /// `resolve_and_validate_custom_format_config` is the resolve-plus-bound
+    /// step behind the `#[wasm_bindgen]` shell (which cannot be exercised
+    /// natively — see its own doc comment).
     #[test]
     fn resolve_and_validate_custom_format_config_rejects_starting_life_outside_bounds() {
         use engine::types::custom_format::{
@@ -1258,10 +1261,10 @@ pub fn custom_format_from_lobby_config(
 /// `starting_life` (CR 704.5a / CR 810.8c playability floor, and the engine's
 /// `MAX_STARTING_LIFE` overflow-safety ceiling) via
 /// `validate_starting_life_bounds`. `custom_rules` is user-editable
-/// localStorage data with no other ingress check on this field before it
-/// reaches a live session, so an out-of-bounds value must be caught here
-/// rather than surfacing as a raw, unreadable `FormatConfig::deserialize`
-/// error at game start.
+/// localStorage data, so this bound fails early with a readable lobby-level
+/// message rather than a raw `FormatConfig::deserialize` error at game
+/// start. It is defense in depth, not the sole check: `FormatConfig`'s own
+/// `Deserialize` (see below) remains the closing gate regardless.
 ///
 /// The frontend must call this rather than assembling a `FormatConfig` from the
 /// saved rules itself. `FormatConfig`'s own `Deserialize` re-derives the config
@@ -2502,9 +2505,22 @@ fn decode_and_rehydrate_restored_game_state(
             // time it is loaded — permanently bricking the save, and, since
             // this state is autosaved and broadcast to P2P guests, taking
             // them down with it. The residual risk of leaving this
-            // unvalidated is contained: it requires a hand-edited save, and
-            // the `restore_game_state` path is refused outright whenever
-            // `MULTIPLAYER_MODE` is set. Accepted as-is; untracked.
+            // unvalidated is reachable, not merely hypothetical — the same
+            // legacy-save framing `validate_for_player_count`'s own doc
+            // comment uses at `from_persisted`: e.g. a `CommanderDraft` save
+            // (registry range 3..=8) persisted with `player_count` 2 from
+            // before this bound existed on whichever path created it, no
+            // hand-editing required. `MULTIPLAYER_MODE` mitigates only the
+            // `restore_game_state` (undo) path, which refuses outright once
+            // the flag is set; it does not cover `resume_multiplayer_host_
+            // state`, whose own guard refuses only when the flag is ALREADY
+            // set and then sets it — the P2P host path, whose restored state
+            // is broadcast to guests, has no seat-count mitigation at all.
+            // One option this leaves unexplored: this closure takes a
+            // per-caller `|state|` hook (`restore_runtime`), so a bound
+            // could be applied on the `resume_multiplayer_host_state` path
+            // alone, leaving undo unaffected. Not implemented here. Accepted
+            // as-is; untracked.
             rehydrate_restored_state_from_card_db(state)?;
             // Combat declaration snapshots are display data derived from the rehydrated
             // live board. Rebuild them before this external state becomes interactive.
@@ -2729,6 +2745,63 @@ mod restored_card_db_requirements_tests {
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
+    }
+
+    /// Pins a deliberate NON-check at this closure, not a behavior: rounds
+    /// 4-6 tried, in turn, (a) a hard rejection of a persisted seat count
+    /// outside its format's registry range (reverted — it would strand
+    /// already-playable user-owned state, since this closure is the shared
+    /// body of `restore_game_state` undo/localStorage-save restore and
+    /// `resume_multiplayer_host_state` P2P host crash recovery) and (b) a
+    /// repair that widens the restored config's `min_players`/`max_players`
+    /// to admit the persisted seat count (also reverted — `min_players` is a
+    /// Locked row in `built_in_axes_no_looser_than_rules`, so a widened
+    /// config fails `FormatConfig::deserialize`'s own admission gate the
+    /// very next time it is loaded, permanently bricking the save). Neither
+    /// alternative survived review; this test fails if either is
+    /// re-introduced. `FormatConfig::commander_draft()` (registry range
+    /// 3..=8) persisted with 2 seats reproduces both hazards at once: a
+    /// hard-reject alternative would return `Err`, and a repair alternative
+    /// would leave `min_players` widened to 2, which is exactly the
+    /// condition under which `FormatConfig::deserialize` refuses to
+    /// round-trip the config (see `from_persisted_rejects_a_persisted_
+    /// player_count_outside_the_format_registry_range` and this closure's
+    /// own comment for the full history).
+    #[test]
+    fn decoded_restore_neither_rejects_nor_repairs_a_persisted_seat_count_outside_the_format_registry_range(
+    ) {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut state = GameState::new_two_player(17);
+        state.format_config = FormatConfig::commander_draft();
+        let json = serde_json::to_string(&state).unwrap();
+
+        let restored = decode_and_rehydrate_restored_game_state(&json, |_| {}).expect(
+            "2 seats against CommanderDraft's 3-8 registry range must not be hard-rejected \
+             (that is the reverted reject alternative)",
+        );
+        assert_eq!(
+            restored.state.players.len(),
+            2,
+            "the persisted seat count must pass through unchanged"
+        );
+        assert_eq!(
+            restored.state.format_config.min_players, 3,
+            "min_players must NOT widen to admit the persisted seat count — widening is the \
+             reverted repair alternative this test guards against"
+        );
+        assert!(
+            serde_json::from_str::<FormatConfig>(
+                &serde_json::to_string(&restored.state.format_config).unwrap()
+            )
+            .is_ok(),
+            "the restored config must still round-trip through FormatConfig's own Deserialize \
+             admission gate — this is exactly the property a re-introduced min_players-widening \
+             repair would violate, since a widened min_players fails the Locked-row check in \
+             built_in_axes_no_looser_than_rules on the very next load"
+        );
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
     }
 }
 
