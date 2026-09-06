@@ -1,7 +1,7 @@
 //! Runtime cast-pipeline coverage for the PRINTED chosen-colour object-filter
 //! qualifier — `<type-phrase> of the color of your choice` (CR 105.4).
 //!
-//! Before the fix, `parse_type_phrase_with_ctx` had a trailing chosen-TYPE
+//! Before the fix, `parse_type_phrase_folding_with_ctx` had a trailing chosen-TYPE
 //! qualifier arm but no chosen-COLOUR sibling, so the colour restriction was
 //! silently dropped: Wash Out returned EVERY permanent and Root Greevil
 //! destroyed EVERY enchantment. The fix adds the arm (gated on

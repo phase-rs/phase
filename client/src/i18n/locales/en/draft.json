@@ -591,6 +591,12 @@
   "podComplete": {
     "title": "Draft Complete",
     "launchCommanderGame": "Start Commander Game",
+    "launchLocalCommanderGame": "Start Local Commander Game",
+    "waitingForPlayers": "Waiting for players to join…",
+    "cancelCommanderLaunch": "Cancel Launch",
+    "joinCommanderGame": "Join Commander Game",
+    "joiningCommanderGame": "Joining — waiting for the other players…",
+    "seatCeiling": "This pod seats {{seats}} players; a peer-to-peer Commander game supports at most {{max}}. You will play this one locally against the engine, with every drafted deck.",
     "returnToMenu": "Return to Menu"
   },
   "podError": {

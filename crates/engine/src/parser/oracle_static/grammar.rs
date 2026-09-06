@@ -570,9 +570,9 @@ pub(crate) fn parse_must_be_blocked_by_quality(input: &str) -> OracleResult<'_, 
 /// CR 509.1c + CR 105.4: Lower a captured "<quality>" span (e.g.
 /// "a Dalek", "an Eldrazi", "a creature of the chosen color") to the blocker
 /// `TargetFilter`. Composes the SAME quality combinators `CantBeBlockedBy` uses
-/// (`parse_chosen_qualifier_subject`, then `parse_type_phrase`). Returns `None`
+/// (`parse_chosen_qualifier_subject`, then `parse_type_phrase_folding`). Returns `None`
 /// when the quality fails to constrain the blocker at all — either
-/// `TargetFilter::Any` or the empty `Typed` filter `parse_type_phrase` yields for
+/// `TargetFilter::Any` or the empty `Typed` filter `parse_type_phrase_folding` yields for
 /// an UNRECOGNIZED noun — so an unparseable requirement is never silently
 /// weakened to "any blocker satisfies".
 fn must_be_blocked_quality_to_filter(quality: &str) -> Option<TargetFilter> {
@@ -583,7 +583,7 @@ fn must_be_blocked_quality_to_filter(quality: &str) -> Option<TargetFilter> {
     let quality_lower = quality.to_lowercase();
     let quality_tp = TextPair::new(quality, &quality_lower);
     let filter = parse_chosen_qualifier_subject(&quality_tp).unwrap_or_else(|| {
-        let (f, _) = parse_type_phrase(&quality_lower);
+        let (f, _) = parse_type_phrase_folding(&quality_lower);
         f
     });
     filter_constrains_blocker(&filter).then_some(filter)
@@ -591,7 +591,7 @@ fn must_be_blocked_quality_to_filter(quality: &str) -> Option<TargetFilter> {
 
 /// CR 509.1c: Does `filter` actually narrow the set of legal blockers? An
 /// unconstrained filter — `TargetFilter::Any`, or an empty `Typed` carrying no
-/// type, property, or controller constraint (what `parse_type_phrase` returns for
+/// type, property, or controller constraint (what `parse_type_phrase_folding` returns for
 /// an unrecognized noun like "a splorf") — matches every blocker and therefore
 /// expresses no quality requirement. Lowering such a filter into a
 /// `MustBeBlocked { by }` would silently degrade "must be blocked by <X>" to
@@ -920,7 +920,7 @@ pub(crate) fn parse_enchanted_equipped_predicate(
             // `parse_static_line_inner`'s CantBeBlockedBy branch.
             let filter_text_tp = TextPair::new(filter_text, filter_text);
             let filter = parse_chosen_qualifier_subject(&filter_text_tp).unwrap_or_else(|| {
-                let (f, _) = parse_type_phrase(filter_text);
+                let (f, _) = parse_type_phrase_folding(filter_text);
                 f
             });
             if !matches!(filter, TargetFilter::Any) {
@@ -1962,7 +1962,7 @@ pub(crate) fn parse_basic_landwalk_qualifier(input: &str) -> OracleResult<'_, &'
 /// flag: when `true`, the caller restricts the static to
 /// `active_zones: [Graveyard]` (CR 113.6b — a zone-restricted ability functions
 /// only from the zones it names). A non-self-reference filter (e.g. a creature
-/// type) falls through to `parse_type_phrase` and is not zone-restricted here.
+/// type) falls through to `parse_type_phrase_folding` and is not zone-restricted here.
 pub(crate) fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, bool) {
     // The self-reference token `~` is substituted for type phrases ("this
     // creature", "this permanent", ...) by `normalize_self_references` before
@@ -1977,7 +1977,7 @@ pub(crate) fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, b
             return (TargetFilter::SelfRef, true);
         }
     }
-    let (filter, _) = parse_type_phrase(input);
+    let (filter, _) = parse_type_phrase_folding(input);
     (filter, false)
 }
 
@@ -2182,7 +2182,7 @@ fn parse_ordinal_word(i: &str) -> OracleResult<'_, u32> {
 /// Builds for the class, not the card. The subject decomposes into three
 /// independent axes, each parsed by a shared building block:
 ///   1. Pre-spell type qualifier ("non-Lemur creature spell with flying") — via
-///      `parse_type_phrase`, which preserves keyword qualifiers.
+///      `parse_type_phrase_folding`, which preserves keyword qualifiers.
 ///   2. Post-spell modifier ("with {X} in its mana cost", CR 107.3 + CR 202.1) —
 ///      via `oracle_trigger::parse_post_spell_modifier`, the same combinator the
 ///      paired "whenever you cast your first spell with {X}…" trigger uses.
@@ -2269,10 +2269,10 @@ pub(crate) fn parse_nth_qualified_spell_filter(lower: &str) -> NthQualifiedSpell
         .is_ok()
     {
         // CR 700.6: bare "historic" is a card-property adjective, not a type word.
-        // `parse_type_phrase` only emits `FilterProp::Historic` when a type word
+        // `parse_type_phrase_folding` only emits `FilterProp::Historic` when a type word
         // follows (oracle_target.rs), so the bare "historic spell" subject must
         // lower the property here. Covers every "first historic spell you cast …"
-        // grantor (Peri Brown class) without weakening the `parse_type_phrase`
+        // grantor (Peri Brown class) without weakening the `parse_type_phrase_folding`
         // guard, and benefits both the keyword-grant and cost-modifier callers.
         Some(TargetFilter::Typed(
             TypedFilter::card().properties(vec![FilterProp::Historic]),
@@ -2287,7 +2287,7 @@ pub(crate) fn parse_nth_qualified_spell_filter(lower: &str) -> NthQualifiedSpell
             TypedFilter::card().properties(vec![FilterProp::WasKicked]),
         ))
     } else {
-        let (filter, remainder) = parse_type_phrase(pre_type);
+        let (filter, remainder) = parse_type_phrase_folding(pre_type);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             Some(filter)
         } else {
@@ -2477,7 +2477,7 @@ pub(crate) fn parse_self_spell_target_cost_filter(lower: &str) -> Option<TargetF
     .ok()?;
 
     let target_text = target_text.trim().trim_end_matches('.');
-    let (target_filter, remainder) = parse_type_phrase(target_text);
+    let (target_filter, remainder) = parse_type_phrase_folding(target_text);
     if !remainder.trim().is_empty() || matches!(target_filter, TargetFilter::Any) {
         return None;
     }
@@ -2513,7 +2513,7 @@ pub(crate) fn parse_cost_modifier_target_filter(lower: &str) -> Option<TargetFil
         Some(TargetFilter::SelfRef)
     } else {
         parse_commander_subject_filter(target_text).or_else(|| {
-            let (filter, remainder) = parse_type_phrase(target_text);
+            let (filter, remainder) = parse_type_phrase_folding(target_text);
             if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
                 Some(filter)
             } else {

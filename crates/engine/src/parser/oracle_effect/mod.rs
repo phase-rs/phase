@@ -95,8 +95,8 @@ use super::oracle_quantity::{
 use super::oracle_target::{
     parse_definite_parent_reference, parse_event_context_ref, parse_fight_target, parse_target,
     parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
-    parse_type_phrase, parse_type_phrase_with_ctx, resolve_singular_exiled_card_target,
-    TargetSyntax,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    resolve_singular_exiled_card_target, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_count_expr, parse_creature_subtype,
@@ -1607,7 +1607,7 @@ fn parse_dealt_damage_this_way_dies_trigger(
     let (rest, _) = eof::<_, OracleError<'_>>.parse(rest).ok()?;
     debug_assert!(rest.is_empty());
 
-    let (valid_card, rem) = parse_type_phrase(subject);
+    let (valid_card, rem) = parse_type_phrase_folding(subject);
     if !rem.trim().is_empty() || matches!(valid_card, TargetFilter::Any) {
         ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized delayed damage subject".into(),
@@ -1879,7 +1879,7 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
 /// into a combined `TargetFilter`.
 ///
 /// The payload must contain the word "spell". Text before " spell" is parsed as a type
-/// phrase (`parse_type_phrase`); text after " spell" is parsed by
+/// phrase (`parse_type_phrase_folding`); text after " spell" is parsed by
 /// `oracle_trigger::parse_post_spell_modifier` (CR 107.3 + CR 202.1 — "with {X} in its
 /// mana cost"). When both shapes contribute a filter, the result is an `And` composition.
 ///
@@ -1908,7 +1908,7 @@ fn extract_when_next_spell_filter(payload: &str) -> Option<TargetFilter> {
     let type_filter = if pre.is_empty() {
         None
     } else {
-        let (filter, remainder) = super::oracle_target::parse_type_phrase(pre);
+        let (filter, remainder) = super::oracle_target::parse_type_phrase_folding(pre);
         if !remainder.trim().is_empty() {
             return None;
         }
@@ -2115,7 +2115,7 @@ fn try_parse_lose_control_delayed_trigger(
         .ok()?
     {
         (rest, Some(_)) => {
-            let (host, host_rest) = parse_type_phrase(rest);
+            let (host, host_rest) = parse_type_phrase_folding(rest);
             let (rest, _) = tag::<_, _, OracleError<'_>>(", ").parse(host_rest).ok()?;
             (rest, host)
         }
@@ -2504,10 +2504,10 @@ fn parse_reflexive_excess_damage_trigger(before_lower: &str) -> Option<TriggerDe
     let (rest, _) = tag::<_, _, OracleError<'_>>("excess damage is dealt to ")
         .parse(rest)
         .ok()?;
-    // Strip an optional leading "the " that `parse_type_phrase` does not fold.
+    // Strip an optional leading "the " that `parse_type_phrase_folding` does not fold.
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>("the ")).parse(rest).ok()?;
 
-    let (subject, tail) = parse_type_phrase(rest);
+    let (subject, tail) = parse_type_phrase_folding(rest);
     if !tail.trim().is_empty() {
         return None;
     }
@@ -4155,7 +4155,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     //
     // `filter_text` is the `take_until("spell")` capture — the spell-type
     // filter slice ("creature ", "instant or sorcery ", "noncreature ", …)
-    // fed to parse_type_phrase below. Preserving it is REQUIRED: dropping it
+    // fed to parse_type_phrase_folding below. Preserving it is REQUIRED: dropping it
     // regresses filtered next-spell grants to no filter. `scope` is the parsed
     // subject (you = Controller, they/that player = Target). `pair` keeps BOTH
     // the `take_until` slice and the `parse_next_spell_subject` output — unlike
@@ -4174,7 +4174,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     let type_prefix = if filter_text.is_empty() {
         None
     } else {
-        let (filter, _) = parse_type_phrase(filter_text);
+        let (filter, _) = parse_type_phrase_folding(filter_text);
         if matches!(filter, TargetFilter::Any) {
             None
         } else {
@@ -4819,7 +4819,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     let spell_filter = match spell_filter_text {
         None => None,
         Some(text) => {
-            let (filter, rem) = parse_type_phrase(text.trim());
+            let (filter, rem) = parse_type_phrase_folding(text.trim());
             if !rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
                 return None;
             }
@@ -4909,7 +4909,7 @@ fn parse_passive_cant_be_played_land_filter(before_played: &str) -> Option<Targe
     let type_text = strip_required_suffix(before_played, " lands")
         .or_else(|| strip_required_suffix(before_played, " land"))?;
 
-    let (filter, remainder) = parse_type_phrase(type_text);
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
     if !remainder.trim().is_empty() {
         return None;
     }
@@ -6479,6 +6479,32 @@ pub(crate) fn classify_and_parse_from_among_counter_list(
     parse_counter_choice_list_entries(ChoiceListShape::FromAmong, &items)
 }
 
+/// CR 122.1a + CR 122.1b: peel an unconditional counter conjunct off the front
+/// of a choice payload — "a +1/+1 counter and a counter from among <list>"
+/// (Elspeth Resplendent). Both halves already parse apart: the conjoined pair of
+/// FIXED kinds is `try_parse_put_counter_chain`'s grammar (Unexpected Fangs),
+/// and the list without a fixed conjunct is `try_parse_put_counter_choice`'s
+/// (Aragorn, Company Leader). Only the combination had no reader, so the whole
+/// clause fell to `Unimplemented`.
+///
+/// Deliberately narrow: the conjunct must be a COMPLETE counter noun phrase and
+/// the remainder must open the `from among` grammar. That second condition is
+/// what lets the caller admit a `FromAmong` list without the "your choice of "
+/// marker here and nowhere else — "from among" stays reserved everywhere the
+/// prefix is absent.
+fn peel_fixed_counter_conjunct(
+    choices: TextPair<'_>,
+) -> Option<((CounterType, QuantityExpr), TextPair<'_>)> {
+    let (fixed_tp, rest) = choices.split_around(" and ")?;
+    // Only a `from among` remainder may follow; `classify_counter_choice_list`
+    // strips the same tag again, so this reads it without consuming.
+    tag::<_, _, OracleError<'_>>("a counter from among ")
+        .parse(rest.lower)
+        .ok()?;
+    let fixed = parse_full_counter_noun(fixed_tp.lower)?;
+    Some((fixed, rest))
+}
+
 /// CR 122.1 + CR 122.1a + CR 122.1b: Parse shared-target counter choices of the form
 /// "put your choice of A counter-pattern, B counter-pattern, or C
 /// counter-pattern on TARGET" (N-ary branches).
@@ -6532,7 +6558,18 @@ fn try_parse_put_counter_choice(
     let after_choice = TextPair::new(after_choice_original, &tp.lower[consumed..]);
     let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
 
-    if !explicit_choice && split_bare_disjunctive_choice_list_items(choices_tp.lower).is_none() {
+    // The conjoined form carries its own marker ("... and a counter from among
+    // ..."), so it needs neither the explicit "your choice of " prefix nor the
+    // bare disjunctive shape the unmarked path otherwise demands.
+    let (fixed_conjunct, choices_tp) = match peel_fixed_counter_conjunct(choices_tp) {
+        Some((fixed, rest)) => (Some(fixed), rest),
+        None => (None, choices_tp),
+    };
+
+    if !explicit_choice
+        && fixed_conjunct.is_none()
+        && split_bare_disjunctive_choice_list_items(choices_tp.lower).is_none()
+    {
         return None;
     }
 
@@ -6540,10 +6577,11 @@ fn try_parse_put_counter_choice(
     // lists before branch reparsing. The unmarked bare form retains its
     // established shared-noun admission and adds only a full counter-noun
     // Distributed list (Dwarven Armorer's form); `from among` remains reserved
-    // for the explicit choice grammar.
+    // for the explicit choice grammar AND for the fixed-conjunct form guarded
+    // just below.
     let classified = classify_counter_choice_list(choices_tp.lower)?;
     let shape = classified.shape;
-    if !explicit_choice && matches!(shape, ChoiceListShape::FromAmong) {
+    if !explicit_choice && fixed_conjunct.is_none() && matches!(shape, ChoiceListShape::FromAmong) {
         return None;
     }
     let choice_items = original_counter_choice_list_items(shape, choices_tp)?;
@@ -6601,12 +6639,93 @@ fn try_parse_put_counter_choice(
     };
     let shared_multi_target = branch_clauses[0].0.multi_target.take();
 
+    // CR 115.6: "up to one target ..." may be announced with ZERO objects, so
+    // nothing ever fills the referent (CR 601.2c fixes only WHEN that count is
+    // announced). A bare `ParentTarget` in a choice branch does not express
+    // that: with no chosen object it falls back to the ability's own source
+    // (`effects::counters::resolve_defined_or_targets` — the arm serving a
+    // choice lifted under a `SelfRef` parent, where the source IS the printed
+    // recipient). Naming the parent's first SLOT instead resolves
+    // against the chain root and yields nothing when that slot took no object.
+    // Elspeth Resplendent reaches this through the conjoined form; Inspirit,
+    // Flagship Vessel prints the same optional slot without one, and its text
+    // ("up to one OTHER target artifact") excludes the source by name.
+    //
+    // The slot arm in `counters.rs` is deliberately NOT incarnation-pinned
+    // while the `ParentTarget` arm routes through `live_object_targets`, which
+    // is. That reads like a lost guard and is not one: `live_object_targets`
+    // consults `target_pin_is_current`, which reads `target_incarnations` —
+    // "pinned at DELAYED-TRIGGER creation", per the standing note at
+    // `ability_utils::target_filter_binds_prior_target`. (The setter's two other
+    // callers seed it for a ZoneChanged parent target and for a forwarded result
+    // context; neither printing here is either.) A target the player announces
+    // lands in the separate `selected_target_incarnations` instead,
+    // so for an activated ability and a beginning-of-combat trigger the
+    // `ParentTarget` arm was already vacuously unpinned. Nothing was traded
+    // away. Measured as well: blinking Elspeth's target in response leaves the
+    // returned incarnation counterless and never asks the branch question —
+    // there CR 608.2b removes the ability from the stack first.
+    //
+    // `max == 1` is part of the condition on purpose. `min == 0` alone also
+    // matches "up to two ..." and "any number of ...", and slot 0 would then
+    // silently drop every announced object but the first, which `ParentTarget`
+    // delivered in full. Those forms therefore keep the bare anaphor — and with
+    // it the same zero-target fallback onto the source that this change repairs
+    // for "up to one" — unless a fixed conjunct names the slot outright through
+    // the first disjunct. No printing carries either shape today, so both stay
+    // named rather than guessed at.
+    //
+    // Two further limits, both unreachable in the corpus and both named rather
+    // than papered over. `shared_multi_target` is this clause's own spec, so an
+    // optional slot inherited through an anaphor ("Choose up to one target
+    // creature. Put your choice of ... on it.") is invisible here; Elspeth
+    // escapes that only through the `fixed_conjunct` disjunct. And slot 0 is
+    // the counter clause's target only because it is the ability's sole
+    // targeting clause on both printings — a conjoined form placed after an
+    // earlier targeting clause would name that earlier target instead.
+    let names_optional_slot = fixed_conjunct.is_some()
+        || shared_multi_target.as_ref().is_some_and(|spec| {
+            matches!(spec.min, QuantityExpr::Fixed { value: 0 })
+                && matches!(spec.max, Some(QuantityExpr::Fixed { value: 1 }))
+        });
+
     let mut branches: Vec<AbilityDefinition> = Vec::with_capacity(branch_clauses.len());
     for (mut clause, description) in branch_clauses {
         clause.multi_target = None;
-        retarget_put_counter_to_parent(&mut clause.effect);
+        if names_optional_slot {
+            retarget_put_counter_to_parent_slot(&mut clause.effect, 0);
+        } else {
+            retarget_put_counter_to_parent(&mut clause.effect);
+        }
         let mut def = ability_definition_from_clause(AbilityKind::Spell, clause);
         def.description = Some(description);
+        // The conjoined form's printed ruling (Elspeth Resplendent, 2022-04-29):
+        // "its controller chooses …, then that counter and the +1/+1 counter are
+        // placed on the target creature at the same time." The choice therefore
+        // sits ABOVE both placements, and the unconditional counter rides INSIDE
+        // each branch — so no player decision separates the two, and the pair
+        // reaches one event batch, exactly as the printings that conjoin two
+        // fixed kinds already do. Placing the fixed counter above the choice
+        // instead splits the batch and fires a per-recipient watcher twice.
+        if let Some((counter_type, count)) = fixed_conjunct.clone() {
+            // The branch clause must not already carry a chain: the guard above
+            // only inspects `clause.effect`, and this assignment would swallow
+            // an addendum without a word.
+            debug_assert!(
+                def.sub_ability.is_none(),
+                "counter-choice branch already carries a chained sub-ability"
+            );
+            // Same recipient as the chosen half — see `names_optional_slot`.
+            let fixed = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target: TargetFilter::ParentTargetSlot { index: 0 },
+                },
+            );
+            def.sub_ability = Some(Box::new(fixed));
+        }
         branches.push(def);
     }
 
@@ -6625,6 +6744,15 @@ fn try_parse_put_counter_choice(
     clause.multi_target = shared_multi_target;
     clause.sub_ability = Some(Box::new(choice));
     Some(clause)
+}
+
+/// Rewrite a `PutCounter` effect to act on a specific parent target SLOT,
+/// preserving `counter_type` and `count`. Used where a bare parent anaphor
+/// would fall back to the ability's source if the slot took no object.
+fn retarget_put_counter_to_parent_slot(effect: &mut Effect, index: usize) {
+    if let Effect::PutCounter { target, .. } = effect {
+        *target = TargetFilter::ParentTargetSlot { index };
+    }
 }
 
 /// Rewrite a `PutCounter` effect to act on the parent clause's target
@@ -6751,7 +6879,7 @@ fn try_parse_choose_one_of_inline(
     // truncates the type phrase — "you may cast an instant" / "sorcery spell
     // ..." — and silently drops the cast-from-exile grant. `before_lower` and
     // `after_lower` are contiguous slices of `tp.lower` around the separator,
-    // so running the shared `parse_type_phrase` combinator from the last word
+    // so running the shared `parse_type_phrase_folding` combinator from the last word
     // of the left half scans straight across the " or " into the right half. If
     // it yields a multi-type `AnyOf`, the coordinator is part of the type list
     // and this is not a clause boundary. Reusing the filter combinator covers
@@ -7540,7 +7668,7 @@ fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEff
     let (rest, _) = nom_primitives::parse_article.parse(rest).ok()?;
     let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
     let (rest, _) = tag::<_, _, E>(" counter on ").parse(rest).ok()?;
-    let (target, rest) = parse_type_phrase(rest);
+    let (target, rest) = parse_type_phrase_folding(rest);
     if matches!(target, TargetFilter::Any) {
         return None;
     }
@@ -8388,7 +8516,7 @@ fn parse_controls_count_threshold<'a>(
     })
     .ok_or_else(|| oracle_err(input))?;
     let count = i32::try_from(count).map_err(|_| oracle_err(input))?;
-    let (filter, rest) = parse_type_phrase_with_ctx(after_verb, ctx);
+    let (filter, rest) = parse_type_phrase_folding_with_ctx(after_verb, ctx);
     // Honest-red guard, mirroring the sibling arms in
     // `parse_controls_permanent_object`: an unparsed type phrase must fail the
     // clause rather than produce a filter that matches everything.
@@ -13138,7 +13266,7 @@ fn try_parse_reveal_until_shares_creature_type(filter_text: &str) -> Option<Targ
         subject: Some(TargetFilter::AttachedTo),
         ..Default::default()
     };
-    let (filter, rem) = parse_type_phrase_with_ctx(filter_text, &mut ctx);
+    let (filter, rem) = parse_type_phrase_folding_with_ctx(filter_text, &mut ctx);
     if !rem.trim().is_empty() {
         return None;
     }
@@ -13534,7 +13662,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
                 let (i, _) = alt((tag("an "), tag("a "), tag("one "))).parse(i)?;
                 // CR 601.2a: the printed type-phrase ("instant or sorcery", a bare
                 // "spell") restricts WHICH exiled cards this single-use grant
-                // authorizes. `parse_type_phrase` maps a bare "spell" → `Card`; a
+                // authorizes. `parse_type_phrase_folding` maps a bare "spell" → `Card`; a
                 // typed phrase ("instant or sorcery") → the `AnyOf` type filter.
                 let (i, filter) = super::oracle_nom::target::parse_type_phrase.parse(i)?;
                 // A typed phrase ("instant or sorcery") is followed by the " spell"
@@ -14826,7 +14954,7 @@ fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
 /// Force a type-phrase filter's controller clause to "you control" so the
 /// `player_scope` driver scopes it to the iterating player. Balance's "lands
 /// they control" has the "they control" consumed by an outer `tag()`, so the
-/// inner `parse_type_phrase` sees only the bare type word.
+/// inner `parse_type_phrase_folding` sees only the bare type word.
 fn balance_filter_you_control(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
@@ -14864,7 +14992,7 @@ fn balance_filter_scoped_player(filter: &TargetFilter) -> TargetFilter {
 /// Arm B — Balance's first sentence: "each player chooses a number of
 /// [type-phrase] they control equal to [min-quantity], then
 /// sacrifices/discards the rest". The verb branch determines the clause type;
-/// the `[type-phrase]` is consumed by the nom-typed `parse_type_phrase`.
+/// the `[type-phrase]` is consumed by the nom-typed `parse_type_phrase_folding`.
 fn parse_balance_arm_b(input: &str) -> OracleResult<'_, (EqualizeVerb, TargetFilter)> {
     let (input, _) = tag("each player chooses a number of ").parse(input)?;
     let (input, filter) = super::oracle_nom::target::parse_type_phrase(input)?;
@@ -17623,7 +17751,7 @@ fn try_parse_verb_and_target<'a>(
 
     // Exile: infer origin zone from the primary target clause the target parser
     // consumed (see the `infer_origin_zone` call below) — NOT the bare remainder
-    // (parse_zone_suffix inside parse_type_phrase strips zone phrases off it) and
+    // (parse_zone_suffix inside parse_type_phrase_folding strips zone phrases off it) and
     // NOT the full post-verb text (a trailing compound conjunct would leak).
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
         value((), alt((tag("exile all "), tag("exile each ")))).parse(i)
@@ -24582,10 +24710,10 @@ fn parse_cast_quantifier_prefix(input: &str) -> OracleResult<'_, ()> {
 /// ```
 ///
 /// **Acceptance boundary.** Returns `Some` only when it consumed something
-/// `parse_type_phrase` demonstrably cannot: at least two legs (so a connector
+/// `parse_type_phrase_folding` demonstrably cannot: at least two legs (so a connector
 /// was consumed) OR a leading quantifier. A single leg with no quantifier is
 /// still rejected, exactly as before, so "a creature spell", "an artifact
-/// spell", and "an Aura spell" keep falling through to `parse_type_phrase`
+/// spell", and "an Aura spell" keep falling through to `parse_type_phrase_folding`
 /// byte-for-byte. That predicate, together with the mandatory head noun and the
 /// `separated_list1` (which yields zero legs when the clause opens on the head
 /// noun — "cast a spell from among them"), is the anti-swallow guard that keeps
@@ -24632,7 +24760,7 @@ fn parse_cast_type_list(rest: &str) -> Option<TargetFilter> {
 
     match legs.as_slice() {
         // CR 601.3: one leg with no quantifier is ordinary type-phrase
-        // territory — `parse_type_phrase` already handles it and can carry
+        // territory — `parse_type_phrase_folding` already handles it and can carry
         // controller/property legs this helper never builds. Reject, exactly as
         // before this helper was composed.
         [_single] if quantifier.is_none() => None,
@@ -24684,7 +24812,7 @@ fn cast_gate_names_a_card_type(filter: &TargetFilter) -> bool {
 /// Composes the two existing subject parsers in the same order the
 /// `has_from_among_cards_exiled_with_self` branch already uses:
 /// `parse_cast_type_list` first (it owns the multi-leg / quantified / subtype
-/// grammar `parse_type_phrase` does not), then `parse_type_phrase`.
+/// grammar `parse_type_phrase_folding` does not), then `parse_type_phrase_folding`.
 ///
 /// Returns `None` when the clause names no card type — "cast a spell from among
 /// them" (Aetherworks Marvel, Svella, Apex of Power) grants an unrestricted
@@ -24695,13 +24823,12 @@ fn cast_gate_names_a_card_type(filter: &TargetFilter) -> bool {
 /// colors", Perception Bobblehead's mana-value bound) also yield `None` so this
 /// helper never invents a type gate the Oracle text did not state.
 fn parse_cast_type_gate(rest: &str) -> Option<TargetFilter> {
-    let gate =
-        parse_cast_type_list(rest).or_else(|| {
-            match super::oracle_target::parse_type_phrase(rest).0 {
-                typed @ TargetFilter::Typed(_) => Some(typed),
-                _ => None,
-            }
-        })?;
+    let gate = parse_cast_type_list(rest).or_else(|| {
+        match super::oracle_target::parse_type_phrase_folding(rest).0 {
+            typed @ TargetFilter::Typed(_) => Some(typed),
+            _ => None,
+        }
+    })?;
     cast_gate_names_a_card_type(&gate).then_some(gate)
 }
 
@@ -25218,7 +25345,7 @@ fn ensure_exile_zone_on_cast_target(filter: &mut TargetFilter) {
 /// * `None` — anchor or "exiled this way" suffix not present.
 ///
 /// Composition mirrors `has_from_among_cards_exiled_with_self` (anchor
-/// strip) and `parse_cast_type_list` / `parse_type_phrase` (typed
+/// strip) and `parse_cast_type_list` / `parse_type_phrase_folding` (typed
 /// leg extraction).
 fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     type E<'a> = OracleError<'a>;
@@ -25247,10 +25374,10 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     // empty once the head noun is guarded out, so they stay bare.
     //
     // Then the post-article probe ("instant or sorcery cards"), then
-    // `parse_type_phrase` ("nonland cards", "creature cards").
+    // `parse_type_phrase_folding` ("nonland cards", "creature cards").
     let mut typed_filter = parse_cast_type_list(before_anchor)
         .or_else(|| parse_cast_type_list(after_article))
-        .unwrap_or_else(|| super::oracle_target::parse_type_phrase(after_article).0);
+        .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(after_article).0);
 
     // "the cards exiled this way" lifts a bare `Typed(Card)` leaf with no
     // further constraint — that's the structural "cards" anchor, not a
@@ -25413,7 +25540,7 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
         TargetFilter::Any
     } else {
         let phrase = format!("{type_text_orig} spells");
-        parse_type_phrase(&phrase).0
+        parse_type_phrase_folding(&phrase).0
     };
     if let TargetFilter::Typed(ref mut tf) = spell_filter {
         if tf.controller.is_none() {
@@ -25714,7 +25841,7 @@ fn parse_owned_plus_lesser_exiled_subject(i: &str) -> OracleResult<'_, ()> {
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
-///    without paying its mana cost" — target is built from `parse_type_phrase` +
+///    without paying its mana cost" — target is built from `parse_type_phrase_folding` +
 ///    origin-zone inference. CR 118.9 + CR 601.2a + CR 120.3.
 /// 3. Bare — fallback `TargetFilter::Any`.
 fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
@@ -26174,11 +26301,11 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // finds it documented rather than discovers it.
     if has_from_among_cards_exiled_with_self(rest) {
         // First try the composed type-list form ("an instant or sorcery
-        // spell ...") since `parse_type_phrase` doesn't handle connectors
-        // between bare core-type words. Then fall back to `parse_type_phrase`
+        // spell ...") since `parse_type_phrase_folding` doesn't handle connectors
+        // between bare core-type words. Then fall back to `parse_type_phrase_folding`
         // for single-type forms.
         let mut typed_filter = parse_cast_type_list(rest)
-            .unwrap_or_else(|| super::oracle_target::parse_type_phrase(rest).0);
+            .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(rest).0);
         let target = match typed_filter {
             TargetFilter::Typed(_) | TargetFilter::Or { .. } => {
                 // CR 406.1: source-linked exiled cards live in the Exile zone.
@@ -26270,15 +26397,15 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // Branch 2: constrained-filter form (Buster Sword, FIN equipment cycle).
     // CR 118.9 + CR 601.2a: "cast a <filter> spell [from <zone>] [with mana
     // value <bound>] without paying its mana cost" — extract the constraint
-    // by composing `parse_type_phrase` (handles "a [type-phrase]") with
+    // by composing `parse_type_phrase_folding` (handles "a [type-phrase]") with
     // origin-zone inference and a `with mana value` suffix scan over the
-    // remainder. The suffix scan is necessary because `parse_type_phrase`'s
+    // remainder. The suffix scan is necessary because `parse_type_phrase_folding`'s
     // own internal `parse_mana_value_suffix` call runs before `parse_zone_suffix`,
     // so for inputs of the form "spell from your hand with mana value ..."
     // the mana-value clause is past the type-phrase pos when reached.
     let cast_target_rest = strip_cast_target_prefix(rest);
     let mut filter = parse_cast_type_list(rest)
-        .unwrap_or_else(|| super::oracle_target::parse_type_phrase(cast_target_rest).0);
+        .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(cast_target_rest).0);
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);
         let alt_ability_cost = parse_alt_ability_cost_rider(lower);
@@ -28099,7 +28226,7 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
     }
     // "or <target>" — expand target to union: "creature or planeswalker",
     // "creature or blocking creature", "~ or enchanted creature", etc.
-    // Uses parse_target (not parse_type_phrase) to handle special patterns
+    // Uses parse_target (not parse_type_phrase_folding) to handle special patterns
     // like "enchanted creature" that aren't plain type phrases.
     if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(trimmed) {
         let (additional, type_rem) = parse_target(after_or);
@@ -28241,7 +28368,7 @@ fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
 
     // Try full type phrase parsing first — handles compound patterns like
     // "green or white creature", "nonland permanent", "spirit or arcane"
-    let (phrase_filter, phrase_rem) = parse_type_phrase(cleaned);
+    let (phrase_filter, phrase_rem) = parse_type_phrase_folding(cleaned);
     if !matches!(phrase_filter, TargetFilter::Any) && phrase_rem.trim().is_empty() {
         return phrase_filter;
     }
@@ -31780,7 +31907,7 @@ pub(crate) fn parse_each_player_copy_chosen_ir(
     ))
     .parse(i)
     .ok()?;
-    let (choose_filter, noun_rest) = parse_type_phrase(noun);
+    let (choose_filter, noun_rest) = parse_type_phrase_folding(noun);
     if !noun_rest.trim().is_empty() {
         return None;
     }
@@ -32572,11 +32699,11 @@ fn parse_exile_pile_shuffle_cloak_ir(
         return None;
     }
 
-    // Parse the filter phrase in its original case — `parse_type_phrase` folds
+    // Parse the filter phrase in its original case — `parse_type_phrase_folding` folds
     // "you control" into `ControllerRef::You` and "with disguise" into
     // `FilterProp::HasKeywordKind { Disguise }`. Require a full, non-`None` parse
     // so a partial match falls through to the generic pipeline.
-    let (filter, filter_rem) = parse_type_phrase(filter_tp.original.trim());
+    let (filter, filter_rem) = parse_type_phrase_folding(filter_tp.original.trim());
     if matches!(filter, TargetFilter::None) || !filter_rem.trim().is_empty() {
         return None;
     }
@@ -39207,7 +39334,7 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
     // Strip "with a single target" qualifier before parsing the type.
     let has_single_target = scan_contains_phrase(spell_phrase, "with a single target");
     // CR 115.9c: "that targets only [X]" is handled by parse_that_clause_suffix via
-    // parse_type_phrase, producing FilterProp::TargetsOnly — no manual stripping needed.
+    // parse_type_phrase_folding, producing FilterProp::TargetsOnly — no manual stripping needed.
     let spell_phrase_clean = spell_phrase.replace(" with a single target", "");
     let spell_phrase_clean = spell_phrase_clean.trim();
 

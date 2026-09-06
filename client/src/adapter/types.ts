@@ -2103,7 +2103,7 @@ export type WaitingFor =
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[]; kind?: ReplacementChoiceKind; last_applied_decides?: boolean } }
   | { type: "EntryControllerChoice"; data: { player: PlayerId; candidates: PlayerId[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
-  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" } } }
+  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" | "CopyTokenSource" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
@@ -4512,6 +4512,11 @@ export interface EngineAdapter {
   resumeRestoredGameState?(): Promise<RestoredGameStateResult | null>;
   /** Returns an opaque, exact member of the current engine-issued decision domain. */
   getAiActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
+  /**
+   * Returns an engine-issued tactical proposal without optional deep search.
+   * Used only to recover an AI seat whose normal proposal repeatedly failed.
+   */
+  getAiTacticalActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
   /** Applies a proposal only if its authority token and exact action remain current. */
   submitAiActionProposal?(proposal: AiActionProposal): Promise<AiProposalSubmission> | AiProposalSubmission;
   restoreState(state: PersistedGameState): void | Promise<void>;

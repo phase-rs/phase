@@ -12,7 +12,7 @@ use super::oracle_cost::parse_oracle_cost;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
 use super::oracle_quantity::parse_cda_quantity;
-use super::oracle_target::parse_type_phrase;
+use super::oracle_target::parse_type_phrase_folding;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
     AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount,
@@ -768,7 +768,7 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
                     .or(rest.strip_prefix("an "))
                     .unwrap_or(rest),
             ));
-        let (filter, _) = parse_type_phrase(after_count);
+        let (filter, _) = parse_type_phrase_folding(after_count);
         return Some(WardCost::Sacrifice { count, filter });
     }
 
@@ -1187,7 +1187,7 @@ fn parse_craft_materials(input: &str) -> Option<(&str, (TargetFilter, CostObject
     {
         return None;
     } else {
-        let (filter, rest) = parse_type_phrase(materials_text);
+        let (filter, rest) = parse_type_phrase_folding(materials_text);
         if !rest.trim().is_empty() {
             return None;
         }
@@ -1990,7 +1990,7 @@ fn parse_emerge_from_quality_keyword_line(text: &str) -> Option<(Keyword, &str)>
     let (after_prefix, _) = tag::<_, _, OracleError<'_>>("emerge from ")
         .parse(text)
         .ok()?;
-    let (sacrifice_filter, after_quality) = parse_type_phrase(after_prefix);
+    let (sacrifice_filter, after_quality) = parse_type_phrase_folding(after_prefix);
     if after_quality.len() == after_prefix.len() {
         return None;
     }
@@ -6048,7 +6048,7 @@ mod router_registry_tests {
         // "Champion an Elf", "Splice onto Arcane {G}", "Craft with Cave {5}{G}",
         // bare "Partner", "Bloodthirst 1" — so the mana-cost combinator cannot
         // measure where the parameter ends, and each needs its own
-        // remainder-preserving noun/filter sub-parser (`parse_type_phrase` already
+        // remainder-preserving noun/filter sub-parser (`parse_type_phrase_folding` already
         // returns a remainder and is the obvious substrate).
         //
         // Pinned as an EXACT set so the gate still bites: a NEW leaking family, or a

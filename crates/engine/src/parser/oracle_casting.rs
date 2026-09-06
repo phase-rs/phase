@@ -1759,7 +1759,7 @@ Trample";
 
     /// Issue #3677: Flare of Denial — "sacrifice a nontoken blue creature" must
     /// keep BOTH the `NonToken` negation and the `blue creature` type/color
-    /// filter. Before the fix to `parse_type_phrase`'s color-prefix scan (which
+    /// filter. Before the fix to `parse_type_phrase_folding`'s color-prefix scan (which
     /// only ran before the `non-` negation loop), the color and creature type
     /// were silently dropped, leaving a filter that matched any nontoken
     /// permanent — including a land — as a valid alternative-cost payment.

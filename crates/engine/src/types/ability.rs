@@ -17858,9 +17858,9 @@ fn default_distinct_names() -> Vec<SharedQuality> {
 /// the current reading first, that collision can only ever mis-read a LEGACY
 /// payload, and no legacy writer emitted either shape here. The two legacy
 /// producers were `parse_number_of_distinct_colors_among_permanents_tail`
-/// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase`
+/// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase_folding`
 /// object filter) and `parse_for_each_distinct_colors_among_permanents`
-/// (`parse_type_phrase` only) — neither can yield a BARE `ExiledBySource` /
+/// (`parse_type_phrase_folding` only) — neither can yield a BARE `ExiledBySource` /
 /// `TrackedSet` filter.
 fn deserialize_distinct_colors_population<'de, D>(
     deserializer: D,
@@ -25695,13 +25695,18 @@ pub enum ReplacementCondition {
     /// shared `GameState::players_who_created_token_this_turn` primitive: it is
     /// consumed by the first token the controller creates this turn, so a source
     /// that enters mid-turn AFTER an earlier creation does NOT fire (official
-    /// ruling). `player` carries the reusable you/opponent axis (`ControllerRef`),
-    /// mirroring the other controller-relative conditions; the eval arm ignores it
-    /// because ownership is enforced by the replacement's `token_owner_scope`, but
-    /// keeping the field preserves the you/opponent axis for a future
-    /// opponent-scoped "first time an opponent would create…" variant (which would
-    /// also parameterize the eval's player resolution) rather than adding a sibling.
-    FirstTokenCreationEachTurn { player: ControllerRef },
+    /// ruling). `active_player_req` optionally scopes the window to whose turn it is
+    /// (CR 102.1: the active player is the player whose turn it is): `None` = any
+    /// turn (Moonlit Meditation's bare "each turn"); `Some(You)` = the controller's
+    /// own turns only ("during each of your turns"). The orthogonal WHOSE-TOKENS
+    /// axis is owned by the replacement's `token_owner_scope`, which is why there is
+    /// no second `ControllerRef` here: the window key is the event's creating player
+    /// (`players_who_created_token_this_turn`), which is a `PlayerId`, not a
+    /// `ControllerRef`.
+    FirstTokenCreationEachTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_player_req: Option<ControllerRef>,
+    },
     /// CR 121.1 + CR 504.1 + CR 614.6: "except the first one you draw in each
     /// of your draw steps" — the replacement applies to every card-draw EXCEPT
     /// the draw step's mandatory first draw (the active player's CR 504.1
@@ -27574,6 +27579,39 @@ pub enum PostReplacementContinuation {
     Resolved(Box<ResolvedAbility>),
 }
 
+/// CR 611.2c vs CR 613.1: where a `ReplacementDefinition` on an object came from.
+///
+/// CR 613.1 determines the values of an object's CHARACTERISTICS, starting from
+/// the printed card — so the layer engine reseeds `replacement_definitions` from
+/// `base_replacement_definitions` every pass. CR 611.2c settles that a prevention
+/// shield is not one of those characteristics; its example says so outright:
+/// "An effect that reads 'Prevent all damage creatures would deal this turn'
+/// doesn't modify any object's characteristics, so it's modifying the rules of
+/// the game."
+///
+/// A continuous effect created by the RESOLUTION of a spell or ability (CR 611.2a)
+/// is merely STORED on a host object so the replacement pipeline can find it. It
+/// lasts as long as the ability stated (CR 611.2a) and ends when it is used up or
+/// its duration expires (CR 615.3) — not at the next layer pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ReplacementOrigin {
+    /// A printed/copiable characteristic (CR 613.1), or a per-pass static
+    /// derivation. Reset away and re-derived by every layer pass.
+    #[default]
+    Characteristic,
+    /// A continuous effect created by resolution (CR 611.2a). Survives the
+    /// CR 613.1 reset; removed only by an expiry prune or a zone change.
+    Resolution,
+}
+
+impl ReplacementOrigin {
+    /// `skip_serializing_if` predicate: the default origin emits no key, so every
+    /// pre-existing serialized `ReplacementDefinition` is byte-identical.
+    pub fn is_characteristic(&self) -> bool {
+        matches!(self, ReplacementOrigin::Characteristic)
+    }
+}
+
 /// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementDefinition {
@@ -27758,6 +27796,83 @@ pub struct ReplacementDefinition {
     /// as before (every object-attached replacement; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
+    /// CR 113.7a + CR 109.1: Installing SOURCE anchor for global pending damage
+    /// replacements whose filters, conditions, or exclusions are HOST-RELATIVE.
+    ///
+    /// The object half of `source_controller` (directly above), added for the same
+    /// reason and by the same mechanism. Global replacements live in
+    /// `pending_damage_replacements` under the sentinel `ObjectId(0)`, which has no
+    /// entry in `state.objects`, so every host-relative reference silently
+    /// mis-resolves there: `TargetFilter::SelfRef` in `damage_source_filter`
+    /// (Mercenaries, "the next time THIS CREATURE would deal damage to you"),
+    /// `SourceExclusion::Exclude` in `DamageTargetFilter::PlayerOrPermanentsControlledBy`
+    /// ("you and OTHER permanents you control"), `DamageTargetPlayerScope::SourceChosenPlayer`,
+    /// and every `ReplacementCondition` that reads its source object.
+    ///
+    /// CR 113.7a: "Once activated or triggered, an ability exists on the stack
+    /// independently of its source. Destruction or removal of the source after that
+    /// time won't affect the ability. ... if the source is no longer in the zone
+    /// it's expected to be in at that time, its last known information is used."
+    /// The effect is independent of its source but still REFERS to it, so the
+    /// reference must be carried rather than dropped.
+    ///
+    /// NOT last-known information, despite the clause the quote above ends on.
+    /// This field carries an ID, not a snapshot of the object's characteristics:
+    /// once the anchored object is gone, `state.objects.get(anchor)` is `None`, so
+    /// IDENTITY comparisons keep working on the id alone (`TargetFilter::SelfRef`
+    /// -> `object_matches_trigger_source`; `SourceExclusion::Exclude`'s
+    /// `*oid != repl_source`) while PROPERTY-READING filters and conditions fail
+    /// CLOSED. The CR 113.7a quote is cited here for its source-independence half;
+    /// implementing LKI itself is out of scope and is not claimed.
+    ///
+    /// Set at install time by `effects::install_floating_damage_replacement`, and
+    /// ONLY when the source is an object in the zone set that caller passed as
+    /// `anchor_zones` -- which is exactly the zone set THAT CALLER used to decide
+    /// object-hosting before the authority existed: `Zone::Battlefield` for
+    /// `prevent_damage::resolve`'s untargeted branch, `Zone::Battlefield |
+    /// Zone::Command` for `push_player_scoped_shield`, and EMPTY for
+    /// `create_damage_replacement`'s already-registry arm. A shield created by a
+    /// resolving instant never had a host, so it has no host identity to anchor and
+    /// keeps `None`; so does an untargeted shield from a Command-zone emblem, which
+    /// that branch already routed to the registry before this field existed.
+    /// `None` therefore reproduces the pre-anchor sentinel behavior exactly, for
+    /// every replacement that existed before this field.
+    ///
+    /// Consumed by the pending scan in `game::replacement::find_applicable_replacements`,
+    /// which fills with `source_object.unwrap_or(ObjectId(0))` every argument
+    /// position that `object_replacement_candidate_applies` fills with `obj.id`.
+    /// `ReplacementId::source` is NOT this field: it stays `ObjectId(0)`, because it
+    /// is the STORAGE discriminator that routes ~14 downstream consumers to the
+    /// registry rather than to `state.objects`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_object: Option<ObjectId>,
+    /// CR 611.2a + CR 611.2c + CR 613.1: provenance of this definition — a printed
+    /// characteristic (or per-pass derived grant) versus a continuous effect
+    /// created by the resolution of a spell or ability. See [`ReplacementOrigin`].
+    ///
+    /// Stamped ONLY by `GameObject::install_resolution_replacement`, which is the
+    /// single authority for resolution-time object installs; every parser/printed
+    /// construction leaves the `Characteristic` default. Read by
+    /// `game_object::reseed_replacements_carrying_resolution_effects` (the CR 613.1
+    /// carry-over) and `layers::settle_resolution_replacements_to_tail`.
+    ///
+    /// `origin` participates in the derived `PartialEq`, and that is LOAD-BEARING.
+    /// `layers.rs` dedups both per-pass derivation sites by whole-definition
+    /// structural equality over the LIVE set (the Riot as-enters derivation and the
+    /// `ContinuousModification::GrantReplacement` arm, both
+    /// `replacement_definitions.iter_all().any(|r| r == &replacement)`). Without
+    /// `origin` in that comparison, a CARRIED resolution shield could compare equal
+    /// to a per-pass derived grant and SUPPRESS it — the grant would silently stop
+    /// being installed while its static was still active. The dual consequence is
+    /// accepted deliberately: in the structurally-identical-but-for-`origin` case
+    /// the dedup necessarily leaves TWO entries. In practice `expiry` already
+    /// discriminates (a resolution shield carries `Some(..)`, a derived grant
+    /// `None`), so that case is synthetic; the hostile fixture
+    /// `carried_resolution_def_does_not_suppress_an_identical_derived_grant`
+    /// (`layers.rs`) pins it anyway. `source_object` (directly above) joins
+    /// `PartialEq` on exactly the same terms.
+    #[serde(default, skip_serializing_if = "ReplacementOrigin::is_characteristic")]
+    pub origin: ReplacementOrigin,
     /// CR 614.1a: For `AddCounter` replacements, whether `valid_player` scopes by
     /// the counter *recipient* (default — prevention/affected-controller doublers)
     /// or by the *actor* putting the counters (Vorinclex/Halving Season, per the
@@ -27863,6 +27978,8 @@ impl ReplacementDefinition {
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            source_object: None,
+            origin: ReplacementOrigin::Characteristic,
             counter_replacement_subject: CounterReplacementSubject::Recipient,
         }
     }
@@ -27965,6 +28082,14 @@ impl ReplacementDefinition {
             self.stamp_default_turn_expiry();
         }
         self
+    }
+
+    /// CR 611.2a + CR 611.2c: was this definition created by the RESOLUTION of a
+    /// spell or ability (rather than being a printed characteristic or a per-pass
+    /// derived grant)? Such a definition is carried across the CR 613.1 layer
+    /// reset by `game_object::reseed_replacements_carrying_resolution_effects`.
+    pub fn is_resolution_installed(&self) -> bool {
+        self.origin == ReplacementOrigin::Resolution
     }
 
     pub fn combat_scope(mut self, scope: CombatDamageScope) -> Self {
@@ -28227,7 +28352,9 @@ pub struct LatchedCopiableSnapshot {
 /// enter-as-a-copy waits) resolves the entering object into a copy of the
 /// chosen permanent. `PersistChosenAttribute` (Metamorphic Alteration) latches
 /// the chosen permanent's copiable values onto the source Aura and installs a
-/// copy effect on the Aura's enchanted host instead.
+/// copy effect on the Aura's enchanted host instead. `CopyTokenSource` (Esix,
+/// Fractal Bloom) uses the chosen permanent as the copy SOURCE for a token-creation
+/// substitution, transforming nothing and latching nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
 pub enum CopyTargetPurpose {
@@ -28240,6 +28367,11 @@ pub enum CopyTargetPurpose {
     /// latched and applied to a *separate* recipient (the source Aura's host)
     /// rather than to the entering object. Metamorphic Alteration.
     PersistChosenAttribute,
+    /// CR 707.1 + CR 614.1a: the chosen permanent is the **copy source** for a
+    /// token-creation substitution — the replacement creates that many tokens
+    /// that are copies of it (Esix, Fractal Bloom). Unlike `BecomeCopy`, nothing
+    /// is transformed; unlike `PersistChosenAttribute`, nothing is latched.
+    CopyTokenSource,
 }
 
 /// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a
@@ -30626,6 +30758,43 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// Issue #8485: `origin` and `source_object` are additive and wire-compatible.
+    ///
+    /// Both carry `#[serde(default, skip_serializing_if = ..)]`, so a plain printed
+    /// definition emits NEITHER key (every existing serialized state, including
+    /// `card-data.json`, stays byte-identical) and an old payload carrying neither
+    /// loads as `Characteristic` / `None`.
+    #[test]
+    fn replacement_origin_and_source_object_are_wire_compatible() {
+        let plain =
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone);
+        let json = serde_json::to_string(&plain).expect("serializes");
+        assert!(
+            !json.contains("origin"),
+            "a Characteristic def must emit no `origin` key: {json}"
+        );
+        assert!(
+            !json.contains("source_object"),
+            "an unanchored def must emit no `source_object` key: {json}"
+        );
+
+        // An old payload with neither key loads as Characteristic / None.
+        let loaded: ReplacementDefinition = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(loaded.origin, ReplacementOrigin::Characteristic);
+        assert_eq!(loaded.source_object, None);
+        assert!(!loaded.is_resolution_installed());
+
+        // A Resolution def with an anchor round-trips faithfully.
+        let mut stamped = plain.clone();
+        stamped.origin = ReplacementOrigin::Resolution;
+        stamped.source_object = Some(ObjectId(42));
+        let round_tripped: ReplacementDefinition =
+            serde_json::from_str(&serde_json::to_string(&stamped).expect("serializes"))
+                .expect("deserializes");
+        assert_eq!(round_tripped, stamped);
+        assert!(round_tripped.is_resolution_installed());
+    }
 
     #[test]
     fn attach_target_bindings_keep_spell_context_construction_and_wire_shape_stable() {

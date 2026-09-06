@@ -144,22 +144,35 @@ pub(crate) fn resolve_source_filter(
     }
 }
 
+/// CR 113.7a + CR 611.2a: install a player-scoped prevention shield ("prevent all
+/// damage that would be dealt to target player this turn").
+///
+/// Delegates to the one floating-install authority
+/// (`effects::install_floating_damage_replacement`). This function used to fork on
+/// storage -- object-hosted when the source was an object on the battlefield or in
+/// the command zone, registry-hosted otherwise -- which made the shield's lifetime
+/// an accident of the SOURCE'S zone and of the next CR 613.1 layer pass rather
+/// than of the stated duration. `Zone::Battlefield | Zone::Command` is exactly the
+/// pair this caller used for that fork, so it is passed through as THIS caller's
+/// `anchor_zones`: the population it newly moves is the population it anchors.
+///
+/// Incidental fix: the old registry arm pushed WITHOUT latching
+/// `source_controller`, so a controller-relative gate on a player-scoped shield
+/// resolved against `state.active_player`. The authority latches it
+/// unconditionally (CR 113.8).
 fn push_player_scoped_shield(
     state: &mut GameState,
+    controller: PlayerId,
     source_id: ObjectId,
     shield: ReplacementDefinition,
 ) {
-    let source_is_active_object = state
-        .objects
-        .get(&source_id)
-        .is_some_and(|obj| matches!(obj.zone, Zone::Battlefield | Zone::Command));
-    if source_is_active_object {
-        if let Some(obj) = state.objects.get_mut(&source_id) {
-            obj.replacement_definitions.push(shield);
-        }
-    } else {
-        state.pending_damage_replacements.push(shield);
-    }
+    crate::game::effects::install_floating_damage_replacement(
+        state,
+        shield,
+        controller,
+        source_id,
+        &[Zone::Battlefield, Zone::Command],
+    );
 }
 
 fn player_damage_filter(player: PlayerId) -> DamageTargetFilter {
@@ -263,14 +276,27 @@ fn typed_recipient_valid_card_filter(target: &TargetFilter) -> Option<TargetFilt
     }
 }
 
-/// CR 615: Prevent damage — creates a prevention shield on the source object.
+/// CR 615 + CR 611.2a: Prevent damage — creates a prevention shield.
 ///
-/// The shield is stored as a `ReplacementDefinition` with `ShieldKind::Prevention`
-/// on the source object's `replacement_definitions`. The `damage_done_applier`
-/// in `replacement.rs` consumes these shields when matching `ProposedEvent::Damage`.
+/// The shield is a `ReplacementDefinition` with `ShieldKind::Prevention` (or
+/// `PreventionOneShot`), and it lands in ONE of two stores, never both:
 ///
-/// Follows the same lifecycle as regeneration shields:
-/// 1. Created here → 2. Matched/applied in replacement pipeline → 3. Cleaned up at end of turn
+/// * RECIPIENT-scoped ("prevent the next N damage that would be dealt to target
+///   creature") -> the TARGET object's live `replacement_definitions`, installed
+///   through `GameObject::install_resolution_replacement` so the CR 613.1 layer
+///   reset carries it (CR 611.2c: a prevention effect is not a characteristic).
+///   It correctly dies when its host changes zones (CR 400.7).
+/// * SOURCE-scoped ("prevent all combat damage that would be dealt by that
+///   creature", Circle of Protection, Mercenaries) and PLAYER-scoped ->
+///   `state.pending_damage_replacements`, through the one authority
+///   `effects::install_floating_damage_replacement`. CR 113.7a: once activated,
+///   the ability -- and the continuous effect it created -- exists independently
+///   of its source, so the shield must not ride on the source permanent.
+///
+/// `damage_done_applier` in `replacement.rs` consumes shields from either store
+/// when matching `ProposedEvent::Damage`. Lifetime is CR 615.3 -- "until they're
+/// used up or their duration has expired" -- enforced by the three `turns.rs`
+/// prunes (cleanup, end-of-combat teardown, untap step), which key on `expiry`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -615,7 +641,13 @@ pub fn resolve(
                         object_shield.valid_card = Some(TargetFilter::SelfRef);
                     }
                     if let Some(obj) = state.objects.get_mut(obj_id) {
-                        obj.replacement_definitions.push(object_shield);
+                        // CR 611.2c + CR 613.1: install through the one
+                        // resolution-install authority so the CR 613.1 layer reseed
+                        // CARRIES this shield instead of wiping it. A prevention
+                        // effect is not an object characteristic (CR 611.2c), so a
+                        // layer pass has no authority to end it; a zone change
+                        // (CR 400.7) and the `expiry` prunes still do.
+                        obj.install_resolution_replacement(object_shield);
                     }
                 }
                 TargetRef::Player(player) => {
@@ -624,34 +656,47 @@ pub fn resolve(
                     let player_shield = shield
                         .clone()
                         .damage_target_filter(player_damage_filter(*player));
-                    push_player_scoped_shield(state, ability.source_id, player_shield);
+                    push_player_scoped_shield(
+                        state,
+                        ability.controller,
+                        ability.source_id,
+                        player_shield,
+                    );
                 }
             }
         }
     } else {
-        // CR 615.3: Untargeted prevention — attach to source if it's a permanent on the
-        // battlefield. Instants/sorceries on the Stack will be moved to graveyard/exile
-        // after resolution, so their shields must go to the global registry instead.
-        // find_applicable_replacements only scans Battlefield/Command zones for
-        // object-attached shields.
-        let is_permanent_on_battlefield = state
-            .objects
-            .get(&ability.source_id)
-            .is_some_and(|obj| obj.zone == Zone::Battlefield);
-        if is_permanent_on_battlefield {
-            if let Some(obj) = state.objects.get_mut(&ability.source_id) {
-                obj.replacement_definitions.push(shield);
-            }
-        } else {
-            // Source is on the Stack (instant/sorcery mid-resolution) or already left —
-            // store in game-state-level registry so it persists until end of turn.
-            // CR 109.4 + CR 614.1a: Anchor the installing controller so a
-            // controller-relative `damage_source_filter` matches under the sentinel host.
-            if shield.source_controller.is_none() {
-                shield.source_controller = Some(ability.controller);
-            }
-            state.pending_damage_replacements.push(shield);
-        }
+        // CR 113.7a + CR 611.2a + CR 615.3: Untargeted (SOURCE-scoped) prevention.
+        // This branch used to fork on storage -- object-hosted when
+        // `ability.source_id` was a permanent on the battlefield, registry-hosted
+        // otherwise. That made the shield a characteristic of its source: the
+        // CR 613.1 layer reset in `layers::seed_live_characteristics_from_base`
+        // wiped it on the next pass, and the source leaving the battlefield ended an
+        // effect that CR 113.7a says exists independently of it (issue #8485).
+        // Every such shield now goes to the floating registry through the one
+        // authority. `Zone::Battlefield` -- the exact predicate this branch used for
+        // the old storage fork -- is passed as THIS caller's `anchor_zones`, so the
+        // ANCHORED population is exactly the population this branch newly moves. An
+        // untargeted shield sourced from a Command-zone object (an emblem) was
+        // ALREADY registry-hosted here, so it stays unanchored and byte-identical to
+        // its pre-#8485 behavior.
+        //
+        // CR 113.7a: a host-relative reference in the shield survives the move
+        // because the authority latches the host IDENTITY on `source_object`, not
+        // because the filter is rewritten. Both shapes this branch can produce are
+        // covered: a `SelfRef` in `damage_source_filter` (the Mercenaries shape,
+        // arriving through `resolve_source_filter`'s `_ => filter.clone()` fallback)
+        // and a `SelfRef` in `valid_card` (the Gideon shape, through
+        // `typed_recipient_valid_card_filter`'s `filter @ TargetFilter::SelfRef`
+        // arm) are both resolved by the pending scan against that anchor, evaluating
+        // the identical AST under an identical `FilterContext` to the object scan.
+        crate::game::effects::install_floating_damage_replacement(
+            state,
+            shield,
+            ability.controller,
+            ability.source_id,
+            &[Zone::Battlefield],
+        );
     }
 
     events.push(GameEvent::EffectResolved {
@@ -738,8 +783,13 @@ mod tests {
         )
     }
 
+    /// CR 113.7a + CR 611.2a (issue #8485): an UNTARGETED (source-scoped)
+    /// prevention shield goes to the floating registry, not onto the source
+    /// permanent. Repointed from `prevent_all_creates_shield_on_source` and
+    /// STRENGTHENED with the two install-time anchors — the storage location
+    /// changed, no behavioral assertion was weakened.
     #[test]
-    fn prevent_all_creates_shield_on_source() {
+    fn prevent_all_creates_a_floating_shield_anchored_to_its_source() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -758,19 +808,31 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let obj = state.objects.get(&source).unwrap();
-        assert_eq!(obj.replacement_definitions.len(), 1);
+        assert!(
+            state
+                .objects
+                .get(&source)
+                .unwrap()
+                .replacement_definitions
+                .is_empty(),
+            "CR 113.7a: the shield must not ride on its source permanent"
+        );
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        let shield = &state.pending_damage_replacements[0];
         assert!(matches!(
-            obj.replacement_definitions[0].shield_kind,
+            shield.shield_kind,
             ShieldKind::Prevention {
                 amount: PreventionAmount::All
             }
         ));
-        assert_eq!(
-            obj.replacement_definitions[0].event,
-            ReplacementEvent::DamageDone
-        );
-        assert!(!obj.replacement_definitions[0].is_consumed);
+        assert_eq!(shield.event, ReplacementEvent::DamageDone);
+        assert!(!shield.is_consumed);
+        // CR 113.8: the installing controller is latched so a controller-relative
+        // gate resolves under the sentinel host.
+        assert_eq!(shield.source_controller, Some(PlayerId(0)));
+        // CR 113.7a: the host identity this branch used to store the shield on is
+        // carried on the definition instead.
+        assert_eq!(shield.source_object, Some(source));
     }
 
     /// CR 511.2 + CR 615 (issue #2924, Bug B): a `prevention_duration` of
@@ -824,11 +886,16 @@ mod tests {
             let mut events = Vec::new();
             resolve(&mut state, &ability, &mut events).unwrap();
 
-            let obj = state.objects.get(&source).unwrap();
-            assert_eq!(obj.replacement_definitions.len(), 1);
+            // CR 113.7a (issue #8485): an untargeted shield from a battlefield
+            // source now lives in the floating registry, anchored to that source.
+            assert_eq!(state.pending_damage_replacements.len(), 1);
             assert_eq!(
-                obj.replacement_definitions[0].expiry, expected_expiry,
+                state.pending_damage_replacements[0].expiry, expected_expiry,
                 "wrong shield expiry for prevention_duration {duration:?}"
+            );
+            assert_eq!(
+                state.pending_damage_replacements[0].source_object,
+                Some(source)
             );
         }
     }
@@ -863,17 +930,21 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let obj = state.objects.get(&source).unwrap();
-        assert_eq!(obj.replacement_definitions.len(), 1);
+        // CR 113.7a (issue #8485): untargeted => floating registry, anchored.
+        assert_eq!(state.pending_damage_replacements.len(), 1);
         assert!(
             matches!(
-                obj.replacement_definitions[0].shield_kind,
+                state.pending_damage_replacements[0].shield_kind,
                 ShieldKind::Prevention {
                     amount: PreventionAmount::Next(4)
                 }
             ),
             "dynamic Fixed(4) should resolve to a Next(4) shield, got {:?}",
-            obj.replacement_definitions[0].shield_kind
+            state.pending_damage_replacements[0].shield_kind
+        );
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(source)
         );
     }
 
@@ -1131,18 +1202,19 @@ mod tests {
             crate::types::actions::GameAction::ChooseDamageSource { source: red },
         )
         .expect("submit damage source choice");
-        // CR 615.3: the source (Circle of Protection) is a battlefield permanent,
-        // so the untargeted shield hosts on the source object, not the pending
-        // registry. Reach-guard: prove the shield was actually installed.
+        // CR 113.7a (issue #8485): the untargeted shield lives in the floating
+        // registry even though the source (Circle of Protection) is a battlefield
+        // permanent — the effect exists independently of its source. Reach-guard:
+        // prove the shield was actually installed, and that it carries the host
+        // anchor so its host-relative gates still resolve.
         assert_eq!(
-            state
-                .objects
-                .get(&cop)
-                .unwrap()
-                .replacement_definitions
-                .len(),
+            state.pending_damage_replacements.len(),
             1,
             "shield must exist before the recheck"
+        );
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(cop)
         );
 
         // CR 609.7b: chosen source becomes colorless before it deals damage.
@@ -1154,7 +1226,7 @@ mod tests {
         );
         // CR 609.7b: a shield that never matched must not be consumed.
         assert!(
-            !state.objects.get(&cop).unwrap().replacement_definitions[0].is_consumed,
+            !state.pending_damage_replacements[0].is_consumed,
             "a shield that never matched must not be consumed (CR 609.7b)"
         );
     }
@@ -1272,13 +1344,17 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let obj = state.objects.get(&source).unwrap();
+        // CR 113.7a (issue #8485): untargeted => floating registry, anchored.
         assert!(matches!(
-            obj.replacement_definitions[0].shield_kind,
+            state.pending_damage_replacements[0].shield_kind,
             ShieldKind::Prevention {
                 amount: PreventionAmount::Next(3)
             }
         ));
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(source)
+        );
     }
 
     /// CR 611.2a: a stated prevention window this seam cannot enforce must FAIL
@@ -1329,6 +1405,13 @@ mod tests {
             "CR 611.2a: the refused window must not be shortened to the \
              end-of-turn fallback"
         );
+        // Issue #8485: the untargeted branch now routes to the floating registry,
+        // so the object-store negative alone would be VACUOUS. Both stores must be
+        // empty for the refusal to mean anything.
+        assert!(
+            state.pending_damage_replacements.is_empty(),
+            "CR 611.2a: the refused window must not install a floating shield either"
+        );
 
         // Effect-level carrier, `GateControlled` class: the control wording earns
         // its gate only on the bare untap rider
@@ -1364,6 +1447,10 @@ mod tests {
             state.objects[&source].replacement_definitions.is_empty(),
             "CR 611.2a: the refused window must not install an ungated shield"
         );
+        assert!(
+            state.pending_damage_replacements.is_empty(),
+            "CR 611.2a: nor an ungated FLOATING shield (issue #8485)"
+        );
     }
 
     #[test]
@@ -1386,10 +1473,14 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let obj = state.objects.get(&source).unwrap();
+        // CR 113.7a (issue #8485): untargeted => floating registry, anchored.
         assert_eq!(
-            obj.replacement_definitions[0].combat_scope,
+            state.pending_damage_replacements[0].combat_scope,
             Some(CombatDamageScope::CombatOnly)
+        );
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(source)
         );
     }
 
@@ -1627,20 +1718,29 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // The shield rides on the source permanent, object-scoped — never in the
-        // global pending registry, which is the un-constrained Fog placement.
+        // CR 113.7a (issue #8485): the shield is source-scoped, so it lives in the
+        // floating registry — but it stays OBJECT-scoped, because the host identity
+        // travels with it on `source_object` and `valid_card: SelfRef` is evaluated
+        // against that anchor rather than being rewritten. Repointed from the
+        // pre-#8485 object-store assertion and strengthened with the anchor check;
+        // the un-constrained global Fog placement (no `valid_card` at all) is still
+        // excluded, now by the `valid_card` assertion below.
         assert!(
-            state.pending_damage_replacements.is_empty(),
-            "a SelfRef recipient is object-scoped, not a global Fog: {:?}",
-            state.pending_damage_replacements
+            state
+                .objects
+                .get(&gideon)
+                .unwrap()
+                .replacement_definitions
+                .is_empty(),
+            "CR 113.7a: the shield must not ride on its source permanent"
         );
-        let shield = state
-            .objects
-            .get(&gideon)
-            .unwrap()
-            .replacement_definitions
-            .last()
-            .expect("the shield hosts on the source");
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        let shield = &state.pending_damage_replacements[0];
+        assert_eq!(
+            shield.source_object,
+            Some(gideon),
+            "the SelfRef recipient filter resolves against this anchor"
+        );
         assert_eq!(shield.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(
             shield.damage_target_filter, None,
@@ -1879,11 +1979,13 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let shield = &state
-            .objects
-            .get(&pack_leader)
-            .unwrap()
-            .replacement_definitions[0];
+        // CR 113.7a (issue #8485): untargeted => floating registry, anchored.
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(pack_leader)
+        );
+        let shield = &state.pending_damage_replacements[0];
         assert_eq!(
             shield.valid_card,
             Some(TargetFilter::Typed(
@@ -2811,7 +2913,8 @@ mod tests {
             .sub_ability(put_counter_sub(source, SubAbilityLink::ContinuationStep));
             let mut events = Vec::new();
             resolve(&mut state, &ability, &mut events).unwrap();
-            let shield = &state.objects.get(&source).unwrap().replacement_definitions[0];
+            // CR 113.7a (issue #8485): untargeted => floating registry.
+            let shield = &state.pending_damage_replacements[0];
             assert!(
                 shield.runtime_execute.is_some(),
                 "a ContinuationStep rider must install as runtime_execute"
@@ -2837,11 +2940,852 @@ mod tests {
             .sub_ability(put_counter_sub(source, SubAbilityLink::SequentialSibling));
             let mut events = Vec::new();
             resolve(&mut state, &ability, &mut events).unwrap();
-            let shield = &state.objects.get(&source).unwrap().replacement_definitions[0];
+            // CR 113.7a (issue #8485): untargeted => floating registry.
+            let shield = &state.pending_damage_replacements[0];
             assert!(
                 shield.runtime_execute.is_none(),
                 "a SequentialSibling sub must NOT install as runtime_execute"
             );
         }
+    }
+
+    // ---- Issue #8485: CR 113.7a source-independence + the host-identity anchor ----
+
+    /// Install an untargeted (source-scoped) prevention shield from `source`.
+    fn install_untargeted_shield(
+        state: &mut GameState,
+        source: ObjectId,
+        controller: PlayerId,
+        target: TargetFilter,
+        damage_source_filter: Option<TargetFilter>,
+        amount: PreventionAmount,
+    ) {
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount,
+                amount_dynamic: None,
+                target,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter,
+                prevention_duration: None,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        resolve(state, &ability, &mut Vec::new()).expect("prevention resolves");
+    }
+
+    /// Deal `amount` noncombat damage from `source` to `target`, returning the
+    /// amount that actually landed. Drives the real replacement pipeline.
+    fn damage_landed(
+        state: &mut GameState,
+        source: ObjectId,
+        target: TargetRef,
+        amount: u32,
+    ) -> u32 {
+        let ctx = deal_damage::DamageContext::from_source(state, source).expect("damage context");
+        let mut events = Vec::new();
+        match deal_damage::apply_damage_to_target(state, &ctx, target, amount, false, &mut events)
+            .expect("damage resolves")
+        {
+            deal_damage::DamageResult::Applied(n) => n,
+            deal_damage::DamageResult::NeedsChoice => {
+                panic!("unexpected CR 616.1 replacement-choice park")
+            }
+        }
+    }
+
+    /// CR 113.7a (issue #8485, BL1): a HOST-RELATIVE damage-source filter must keep
+    /// matching after the shield is routed to the floating registry.
+    ///
+    /// Mercenaries — "{3}: The next time this creature would deal damage to you
+    /// this turn, prevent that damage." — lowers to `damage_source_filter:
+    /// Some(TargetFilter::SelfRef)` and takes the untargeted branch. Under the bare
+    /// `ObjectId(0)` sentinel, `filter.rs`'s `object_matches_trigger_source` would
+    /// compare the damage source against `ObjectId(0)` and never match, silently
+    /// deleting the shield. The `source_object` anchor supplies the host identity
+    /// the sentinel cannot, WITHOUT rewriting the filter — so the pending scan
+    /// evaluates the identical AST under an identical `FilterContext` to the object
+    /// scan.
+    ///
+    /// Revert-failing against A2(i)'s anchor threading: drop `source_host` from the
+    /// `damage_source_filter` context and leg (ii) fails.
+    #[test]
+    fn mercenaries_shaped_selfref_source_shield_still_matches_after_routing() {
+        let mut state = GameState::new_two_player(42);
+        let mercenaries = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mercenaries".to_string(),
+            Zone::Battlefield,
+        );
+        let twin = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mercenaries".to_string(),
+            Zone::Battlefield,
+        );
+
+        install_untargeted_shield(
+            &mut state,
+            mercenaries,
+            PlayerId(0),
+            TargetFilter::Any,
+            Some(TargetFilter::SelfRef),
+            PreventionAmount::All,
+        );
+
+        // (i) Reach-guard: exactly one registry entry, carrying the host anchor.
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(mercenaries),
+            "CR 113.7a: the host identity must travel with the shield"
+        );
+
+        // (ii) Damage dealt BY that permanent is prevented.
+        assert_eq!(
+            damage_landed(&mut state, mercenaries, TargetRef::Player(PlayerId(0)), 3),
+            0,
+            "\"this creature\" as the damage source must still resolve to the anchor"
+        );
+
+        // (iii) HOSTILE: a second, identical permanent's damage is NOT prevented.
+        // This is what separates the anchor from a blanket shield: the filter is
+        // evaluated, not ignored.
+        assert_eq!(
+            damage_landed(&mut state, twin, TargetRef::Player(PlayerId(0)), 3),
+            3,
+            "a different Mercenaries' damage must not be prevented by this shield"
+        );
+    }
+
+    /// CR 109.1 (issue #8485, BL1 second instance): the "you and OTHER permanents
+    /// you control" exclusion is HOST-RELATIVE and must survive routing.
+    ///
+    /// `untargeted_damage_filter` lowers
+    /// `TargetFilter::ControllerAndControlledPermanents { source_scope: Exclude }`
+    /// into `DamageTargetFilter::PlayerOrPermanentsControlledBy { source_scope:
+    /// Exclude }`, whose permanent leg is `*oid != repl_source`
+    /// (`replacement.rs`). Under the sentinel that comparison is inert — the shield
+    /// would start protecting its OWN host, the exact inverse of the printed "other"
+    /// article. Revert-failing against A2(i)'s `matches_damage_target_filter` anchor.
+    #[test]
+    fn other_permanents_exclusion_survives_routing() {
+        let mut state = GameState::new_two_player(42);
+        let wanderer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Wanderer".to_string(),
+            Zone::Battlefield,
+        );
+        let ally = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Ally".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        install_untargeted_shield(
+            &mut state,
+            wanderer,
+            PlayerId(0),
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: None,
+                source_scope: crate::types::ability::SourceExclusion::Exclude,
+            },
+            None,
+            PreventionAmount::All,
+        );
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(wanderer)
+        );
+
+        // Reach-guard: another permanent that player controls IS protected.
+        assert_eq!(
+            damage_landed(&mut state, attacker, TargetRef::Object(ally), 3),
+            0,
+            "the shield must protect other permanents its controller controls"
+        );
+        // CR 109.1: the HOST itself is excluded by the "other" article.
+        assert_eq!(
+            damage_landed(&mut state, attacker, TargetRef::Object(wanderer), 3),
+            3,
+            "CR 109.1: \"OTHER permanents you control\" must not cover the source"
+        );
+    }
+
+    /// CR 109.1 + CR 614.1a (issue #8485, migration hazard; settles U3): the pending
+    /// scan's `valid_card` gate now delegates to `replacement_valid_card_matches` —
+    /// the same authority the per-object scan uses — so the two agree for every
+    /// `ProposedEvent::Damage` shape, including the player-target case where they
+    /// previously diverged.
+    ///
+    /// A "prevent all damage that would be dealt to creatures this turn" shield
+    /// carries `valid_card: Some(Typed(creature))` and `damage_target_filter: None`.
+    /// Before the consolidation the pending scan SKIPPED the gate for a player
+    /// recipient, so moving such a shield to the registry would newly have made it
+    /// prevent damage dealt to players. This also corrects the pre-existing
+    /// instant-sourced (Blinding Fog class) case.
+    #[test]
+    fn pending_valid_card_gate_matches_the_object_path() {
+        let mut state = GameState::new_two_player(42);
+        let fog = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Blinding Fog".to_string(),
+            Zone::Battlefield,
+        );
+        let bear = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        install_untargeted_shield(
+            &mut state,
+            fog,
+            PlayerId(0),
+            TargetFilter::Typed(TypedFilter::creature()),
+            None,
+            PreventionAmount::All,
+        );
+        let shield = &state.pending_damage_replacements[0];
+        assert_eq!(
+            shield.valid_card,
+            Some(TargetFilter::Typed(TypedFilter::creature()))
+        );
+        assert_eq!(shield.damage_target_filter, None);
+
+        // Positive reach-guard: object damage matching the filter IS prevented.
+        assert_eq!(
+            damage_landed(&mut state, attacker, TargetRef::Object(bear), 3),
+            0
+        );
+        // CR 109.1: a player is not an object, so player damage is NOT prevented.
+        assert_eq!(
+            damage_landed(&mut state, attacker, TargetRef::Player(PlayerId(0)), 3),
+            3,
+            "CR 109.1: a card-shaped recipient filter must not cover a player"
+        );
+    }
+
+    /// CR 113.7a (issue #8485, MG-A; settles U7): the `source_object` anchor is
+    /// latched ONLY over each caller's OWN pre-existing object-hosting zone set, so
+    /// it is inert for every shield that was already registry-hosted before it
+    /// existed. Four legs.
+    ///
+    /// Legs (iii) and (iv) are the multi-authority pair: the SAME Command-zone
+    /// source anchors through `push_player_scoped_shield` (whose `anchor_zones` is
+    /// `[Battlefield, Command]`, the pair its old storage fork tested) but does NOT
+    /// anchor through `resolve`'s untargeted branch (whose `anchor_zones` is
+    /// `[Battlefield]` alone, the predicate ITS old fork tested). Revert-failing
+    /// against A3(b)'s per-caller slice: a single hardcoded `Battlefield | Command`
+    /// test would flip leg (iii) to `Some`, newly activating `SourceExclusion::
+    /// Exclude` and `DamageTargetPlayerScope::SourceChosenPlayer` on a population
+    /// that is already registry-hosted today — over-matching, the exact inverse of
+    /// the under-matching the anchor exists to fix.
+    #[test]
+    fn instant_sourced_shield_carries_no_source_object_anchor() {
+        // (i) A shield installed from a STACK source (instant mid-resolution).
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fog".to_string(),
+            Zone::Stack,
+        );
+        install_untargeted_shield(
+            &mut state,
+            spell,
+            PlayerId(0),
+            TargetFilter::Any,
+            None,
+            PreventionAmount::All,
+        );
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object, None,
+            "a shield created by a resolving instant never had a host to anchor"
+        );
+        // CR 113.8: the controller is latched regardless.
+        assert_eq!(
+            state.pending_damage_replacements[0].source_controller,
+            Some(PlayerId(0))
+        );
+
+        // (ii) Paired positive reach-guard: a BATTLEFIELD source does anchor, so
+        // leg (i) is not passing merely because the anchor path never fires.
+        let mut state = GameState::new_two_player(42);
+        let permanent = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Circle of Protection".to_string(),
+            Zone::Battlefield,
+        );
+        install_untargeted_shield(
+            &mut state,
+            permanent,
+            PlayerId(0),
+            TargetFilter::Any,
+            None,
+            PreventionAmount::All,
+        );
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(permanent)
+        );
+
+        // (iii) HOSTILE (MG-A): a COMMAND-zone source (an emblem) routed through
+        // `resolve`'s untargeted branch. That branch's old storage fork tested
+        // `Zone::Battlefield` ALONE, so a Command-zone source was ALREADY going to
+        // the registry unanchored — and must stay that way.
+        let mut state = GameState::new_two_player(42);
+        let emblem = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        install_untargeted_shield(
+            &mut state,
+            emblem,
+            PlayerId(0),
+            TargetFilter::Any,
+            None,
+            PreventionAmount::All,
+        );
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object, None,
+            "an emblem-sourced untargeted shield was already registry-hosted, so \
+             anchoring it would be an unmeasured behavior change"
+        );
+
+        // (iv) MULTI-AUTHORITY: the SAME Command-zone source, routed instead
+        // through `push_player_scoped_shield` (a PLAYER-targeted prevention), DOES
+        // anchor — because that caller genuinely hosted on Battlefield | Command.
+        let mut state = GameState::new_two_player(42);
+        let emblem = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Player,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            emblem,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut Vec::new()).expect("prevention resolves");
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(emblem),
+            "`push_player_scoped_shield`'s own zone set includes Command"
+        );
+        // Incidental fix pinned: the old registry arm of `push_player_scoped_shield`
+        // never latched `source_controller` (CR 113.8); the authority always does.
+        assert_eq!(
+            state.pending_damage_replacements[0].source_controller,
+            Some(PlayerId(0))
+        );
+    }
+
+    /// CR 702.26b + CR 113.7a (issue #8485, M6): a source-scoped shield survives its
+    /// SOURCE phasing out. CR 702.26b makes a phased-out PERMANENT nonexistent; it
+    /// says nothing about a continuous effect that already exists, and CR 113.7a
+    /// says the effect is independent of its source once the ability resolved. A
+    /// Circle of Protection whose controller phases it out mid-turn must not lose
+    /// the shield it already created.
+    ///
+    /// This is a DELIBERATE behavior change: object-hosted definitions are filtered
+    /// through `functioning_abilities::object_functions`, which returns false for a
+    /// phased-out permanent; the floating registry has no such gate.
+    #[test]
+    fn floating_shield_survives_its_source_phasing_out() {
+        let mut state = GameState::new_two_player(42);
+        let cop = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Circle of Protection".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        install_untargeted_shield(
+            &mut state,
+            cop,
+            PlayerId(0),
+            TargetFilter::Any,
+            None,
+            PreventionAmount::All,
+        );
+
+        // Positive reach-guard: the shield applies BEFORE the phase-out.
+        assert_eq!(
+            damage_landed(&mut state, attacker, TargetRef::Player(PlayerId(0)), 2),
+            0
+        );
+
+        state.objects.get_mut(&cop).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        assert!(state.objects[&cop].is_phased_out());
+
+        assert_eq!(
+            damage_landed(&mut state, attacker, TargetRef::Player(PlayerId(0)), 2),
+            0,
+            "CR 113.7a: the effect exists independently of its phased-out source"
+        );
+    }
+
+    /// CR 616.1 (issue #8485; settles U2): two applicable prevention shields on one
+    /// damage event — one object-hosted, one in the floating registry — prevent the
+    /// damage exactly ONCE, with no panic and no double-consume.
+    ///
+    /// OBSERVED VERDICT (this is the U2 measurement the plan asked to record, and it
+    /// contradicts the guess this test was first written with): the engine PARKS.
+    /// `apply_damage_to_target` returns `DamageResult::NeedsChoice` and
+    /// `state.waiting_for` becomes `WaitingFor::ReplacementChoice`, because CR 616.1
+    /// gives the AFFECTED player the choice of which applicable replacement to apply
+    /// first and `replacement_ordering_is_material` finds the order material for two
+    /// prevention shields on one damage event. It does NOT auto-resolve.
+    ///
+    /// That matters for Unit A specifically: the pending scan runs AFTER the
+    /// per-object walk in `find_applicable_replacements`, so moving a shield from
+    /// the object store to the registry changes the ORDER the two candidates are
+    /// offered in — and `PendingReplacement.candidates` parks those raw
+    /// `ReplacementId`s across a layer flush, which is exactly why Unit B's carried
+    /// entries are settled to the TAIL rather than inserted ahead of derived grants.
+    ///
+    /// The choice is submitted through the real production path
+    /// (`GameAction::ChooseReplacement` via `apply_as_current`), not by poking the
+    /// pipeline, so this covers the `WaitingFor` route rather than a helper.
+    #[test]
+    fn two_shields_on_one_damage_event_prevent_it_exactly_once() {
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shielded Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Shield Source".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Shield 1: object-hosted on the damage recipient (the targeted arm).
+        // Both shields are `Next(1)` against a 1-damage event: a `Prevention { All }`
+        // shield mutates nothing when it applies (it stays live for the rest of the
+        // turn), so it could not make "exactly once" observable at all. `Next(1)`
+        // depletes, and 1 damage is fully absorbed by the first shield to apply, so
+        // the CR 616.1 loop ends before the second becomes applicable again.
+        let targeted = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(1),
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(host)],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &targeted, &mut Vec::new()).expect("targeted shield resolves");
+        // Shield 2: source-scoped, in the floating registry (the untargeted arm).
+        install_untargeted_shield(
+            &mut state,
+            source,
+            PlayerId(0),
+            TargetFilter::Any,
+            None,
+            PreventionAmount::Next(1),
+        );
+
+        // Reach-guard: both stores really hold one shield each, so the CR 616.1
+        // competition below is not vacuous.
+        assert_eq!(state.objects[&host].replacement_definitions.len(), 1);
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        let object_before = format!("{:?}", state.objects[&host].replacement_definitions.first());
+        let registry_before = format!("{:?}", state.pending_damage_replacements.first());
+
+        let ctx = deal_damage::DamageContext::from_source(&state, attacker).expect("context");
+        let result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(host),
+            1,
+            false,
+            &mut Vec::new(),
+        )
+        .expect("damage resolves");
+        assert!(
+            matches!(result, deal_damage::DamageResult::NeedsChoice),
+            "U2 observation: the engine PARKS a CR 616.1 replacement choice here"
+        );
+        let WaitingFor::ReplacementChoice {
+            player,
+            candidate_count,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected a ReplacementChoice park, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            player,
+            PlayerId(0),
+            "CR 616.1: the AFFECTED object's controller chooses"
+        );
+        assert_eq!(candidate_count, 2, "both shields are offered");
+
+        // Submit the choice through the real action path.
+        state.priority_player = player;
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("submit the CR 616.1 replacement choice");
+
+        assert_eq!(
+            state.objects[&host].damage_marked, 0,
+            "the damage is prevented"
+        );
+        // CR 614.5: exactly ONE of the two shields absorbs the event — compared by
+        // whole-definition Debug so the assertion holds whether the applier records
+        // the use as `is_consumed` or as a decremented amount.
+        let object_changed =
+            format!("{:?}", state.objects[&host].replacement_definitions.first()) != object_before;
+        let registry_changed =
+            format!("{:?}", state.pending_damage_replacements.first()) != registry_before;
+        assert!(
+            object_changed != registry_changed,
+            "CR 614.5: exactly one shield may absorb one damage event \
+             (object_changed={object_changed}, registry_changed={registry_changed})"
+        );
+    }
+
+    /// CR 616.1 + CR 113.7a (issue #8485, R1): the CR 616.1 replacement-choice
+    /// PROMPT must name the permanent that created a registry-hosted shield.
+    ///
+    /// This is a regression THIS change would otherwise have introduced. Before
+    /// #8485 a Maze of Ith / Circle of Protection / Mercenaries shield was
+    /// object-hosted, so `ReplacementCandidateSummary` read `name_of(rid.source)`
+    /// and got the permanent's name. Unit A moves those shields into
+    /// `state.pending_damage_replacements`, whose `rid.source` is the `ObjectId(0)`
+    /// storage sentinel — which per CR 109.4 has no entry in `state.objects`, so the
+    /// name went blank and the description fell through to the bare "Replacement
+    /// effect" placeholder. That lands exactly where this change also makes CR 616.1
+    /// prompts newly appear (see
+    /// `two_shields_on_one_damage_event_prevent_it_exactly_once`), so a player could
+    /// be asked to choose between two indistinguishable options.
+    ///
+    /// `replacement_choice_display_source` / `replacement_choice_definition` in
+    /// `replacement.rs` resolve the DISPLAY anchor through the shield's CR 113.7a
+    /// `source_object`. `ReplacementId::source` is untouched as a storage
+    /// discriminator — `handle_replacement_choice` still resolves the raw `rid`.
+    ///
+    /// Revert-failing: revert either helper and the registry candidate's
+    /// `source_id` is `ObjectId(0)` with an empty `source_name`.
+    #[test]
+    fn replacement_choice_prompt_names_the_anchored_source_of_a_registry_shield() {
+        /// Build the two-competing-shields park and return the parked candidates.
+        /// `shield_source_zone` decides whether the registry shield is anchored:
+        /// `Battlefield` anchors it (issue #8485's moved population), `Stack` does
+        /// not (a resolving instant never had a host).
+        fn park_with_two_shields(
+            shield_source_zone: Zone,
+        ) -> (
+            GameState,
+            ObjectId,
+            ObjectId,
+            Vec<crate::types::game_state::ReplacementCandidateSummary>,
+        ) {
+            let mut state = GameState::new_two_player(42);
+            let host = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Shielded Creature".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&host).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.power = Some(2);
+                obj.toughness = Some(2);
+            }
+            let shield_source = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Circle of Protection".to_string(),
+                shield_source_zone,
+            );
+            let attacker = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(1),
+                "Attacker".to_string(),
+                Zone::Battlefield,
+            );
+
+            // Object-hosted shield on the recipient (the targeted arm).
+            let targeted = ResolvedAbility::new(
+                Effect::PreventDamage {
+                    amount: PreventionAmount::Next(1),
+                    amount_dynamic: None,
+                    target: TargetFilter::Any,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                },
+                vec![TargetRef::Object(host)],
+                shield_source,
+                PlayerId(0),
+            );
+            resolve(&mut state, &targeted, &mut Vec::new()).expect("targeted shield resolves");
+            // Registry-hosted shield (the untargeted arm).
+            install_untargeted_shield(
+                &mut state,
+                shield_source,
+                PlayerId(0),
+                TargetFilter::Any,
+                None,
+                PreventionAmount::Next(1),
+            );
+            assert_eq!(state.pending_damage_replacements.len(), 1);
+
+            let ctx = deal_damage::DamageContext::from_source(&state, attacker).expect("context");
+            let result = deal_damage::apply_damage_to_target(
+                &mut state,
+                &ctx,
+                TargetRef::Object(host),
+                1,
+                false,
+                &mut Vec::new(),
+            )
+            .expect("damage resolves");
+            assert!(
+                matches!(result, deal_damage::DamageResult::NeedsChoice),
+                "reach-guard: two applicable shields must park a CR 616.1 choice"
+            );
+            let WaitingFor::ReplacementChoice { candidates, .. } = state.waiting_for.clone() else {
+                panic!(
+                    "expected a ReplacementChoice park, got {:?}",
+                    state.waiting_for
+                );
+            };
+            assert_eq!(candidates.len(), 2, "both shields are offered");
+            (state, host, shield_source, candidates)
+        }
+
+        // POSITIVE: a battlefield source anchors, so the prompt names it.
+        let (state, host, cop, candidates) = park_with_two_shields(Zone::Battlefield);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(cop),
+            "reach-guard: this is the anchored (moved) population"
+        );
+        let registry_option = candidates
+            .iter()
+            .find(|c| c.source_id == cop)
+            .unwrap_or_else(|| {
+                panic!(
+                    "CR 616.1: the registry shield's option must name its host, got {candidates:?}"
+                )
+            });
+        assert_eq!(
+            registry_option.source_name, "Circle of Protection",
+            "CR 113.7a: the shield's host identity travels with it and names the option"
+        );
+        // The label site now reads the REGISTRY entry, so the option describes
+        // itself instead of falling through to the bare placeholder.
+        assert_eq!(
+            Some(registry_option.description.clone()),
+            state.pending_damage_replacements[0].description.clone(),
+            "the option's description must come from the registry entry itself"
+        );
+        // SIBLING: the object-hosted option is unaffected and still names its host.
+        let object_option = candidates
+            .iter()
+            .find(|c| c.source_id == host)
+            .expect("the object-hosted shield's option still names its host");
+        assert_eq!(object_option.source_name, "Shielded Creature");
+
+        // NEGATIVE SIBLING: a STACK-sourced shield has no host to anchor, so it
+        // degrades to today's behavior — the sentinel and an empty name — rather
+        // than panicking or naming some unrelated object.
+        let (state, host, _spell, candidates) = park_with_two_shields(Zone::Stack);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object, None,
+            "an instant-sourced shield carries no anchor"
+        );
+        let unanchored = candidates
+            .iter()
+            .find(|c| c.source_id == ObjectId(0))
+            .unwrap_or_else(|| {
+                panic!("the unanchored option keeps the sentinel, got {candidates:?}")
+            });
+        assert_eq!(
+            unanchored.source_name, "",
+            "no anchor means no name — it must not borrow another object's"
+        );
+        assert!(
+            candidates.iter().filter(|c| c.source_id == host).count() == 1,
+            "the unanchored option must not be mislabelled as the object-hosted one"
+        );
+    }
+
+    /// CR 113.8 + CR 109.5 + CR 611.2a (issue #8485, MG-B): a controller-relative
+    /// gate on a MOVED shield follows the INSTALLER, not the source permanent's live
+    /// controller.
+    ///
+    /// This is the second identity axis Unit A changes. The object scan computes
+    /// `replacement_source_player(obj)` — the host's LIVE controller, re-read every
+    /// pass — and never reads `source_controller`; the pending scan uses
+    /// `source_controller.unwrap_or(active_player)`, which the install authority now
+    /// always latches. CR 113.8: "The controller of an activated ability on the
+    /// stack is the player who activated it." CR 109.5: for an activated ability,
+    /// "you" is the player who activated the ability. CR 611.2a: the continuous
+    /// effect lasts as stated by the ability that created it, so its "you" is fixed
+    /// at resolution and does not follow the source permanent to a new controller.
+    ///
+    /// HOSTILE FIXTURE: the control change is the only input that separates the two
+    /// readings, and `state.active_player` is set to the NON-installer so the
+    /// `unwrap_or(active_player)` fallback is also discriminated.
+    /// Revert-failing against A3(a): without the latch, `source_controller` is
+    /// `None` and the gate drifts to whoever is active.
+    #[test]
+    fn controller_relative_gate_follows_the_installer_not_the_live_host_controller() {
+        let mut state = GameState::new_two_player(42);
+        // The NON-installer is active, so `unwrap_or(state.active_player)` would
+        // answer P1 if the latch were missing.
+        state.active_player = PlayerId(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Comeuppance".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        install_untargeted_shield(
+            &mut state,
+            source,
+            PlayerId(0),
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: None,
+                source_scope: crate::types::ability::SourceExclusion::Include,
+            },
+            None,
+            PreventionAmount::All,
+        );
+        // Reach-guard, and the pin that this IS the moved population.
+        let shield = &state.pending_damage_replacements[0];
+        assert_eq!(shield.source_controller, Some(PlayerId(0)));
+        assert_eq!(shield.source_object, Some(source));
+        assert!(matches!(
+            shield.damage_target_filter,
+            Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::Controller,
+                ..
+            })
+        ));
+
+        // CR 611.2c: change control of the SOURCE permanent (Threaten / Ray of
+        // Command) inside the shield's window.
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(1);
+
+        assert_eq!(
+            damage_landed(&mut state, attacker, TargetRef::Player(PlayerId(0)), 3),
+            0,
+            "CR 113.8: the shield still protects the player who activated the ability"
+        );
+        assert_eq!(
+            damage_landed(&mut state, attacker, TargetRef::Player(PlayerId(1)), 3),
+            3,
+            "the source's NEW controller does not inherit the shield"
+        );
     }
 }

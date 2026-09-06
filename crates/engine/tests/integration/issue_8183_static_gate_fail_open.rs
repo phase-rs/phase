@@ -78,7 +78,7 @@
 //!     share a creature type", CR 603.4) and **Synchronized Eviction** ("costs
 //!     {2} less to cast if you control at least two creatures that share a
 //!     creature type") both parsed, both reported as supported, and both were
-//!     WRONG: `parse_type_phrase` consumes the relative clause into a
+//!     WRONG: `parse_type_phrase_folding` consumes the relative clause into a
 //!     `FilterProp::SharesQuality { reference: None }`, which is a
 //!     group-SELECTION marker that `filter::evaluate_shares_quality` answers
 //!     TRUE for every object. Inside a `QuantityRef::ObjectCount` that silently

@@ -583,6 +583,12 @@
   "podComplete": {
     "title": "Draft completado",
     "launchCommanderGame": "Iniciar partida de Commander",
+    "launchLocalCommanderGame": "Iniciar partida de Commander local",
+    "waitingForPlayers": "Esperando a que se unan los jugadores…",
+    "cancelCommanderLaunch": "Cancelar inicio",
+    "joinCommanderGame": "Unirse a la partida de Commander",
+    "joiningCommanderGame": "Uniéndose: esperando a los demás jugadores…",
+    "seatCeiling": "Esta mesa tiene {{seats}} jugadores; una partida de Commander entre pares admite {{max}} como máximo. Jugarás esta partida localmente contra el motor, con todos los mazos drafteados.",
     "returnToMenu": "Volver al menú"
   },
   "podError": {
