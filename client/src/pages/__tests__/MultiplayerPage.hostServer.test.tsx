@@ -226,13 +226,16 @@ describe("MultiplayerPage host server", () => {
     renderPage();
     await screen.findByTestId("lobby");
 
-    // The production route into P2P host-setup with a NON-NULL anchor: the
-    // lobby's own "host a direct-code game" affordance, which flips the mode
-    // without touching `hostingServer`.
+    // The production route into P2P host-setup with a NON-NULL anchor: open
+    // Host Game from the lobby, then choose P2P on the screen that owns that
+    // choice. Neither step touches `hostingServer`.
     act(() => {
-      (harness.lobby!.onHostP2P as () => void)();
+      (harness.lobby!.onHostGame as () => void)();
     });
     await screen.findByTestId("host-setup");
+    act(() => {
+      (harness.hostSetup!.onConnectionModeChange as (m: string) => void)("p2p");
+    });
 
     await submitHostSetup(null);
 

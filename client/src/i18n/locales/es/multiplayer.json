@@ -180,7 +180,6 @@
     "createDraft": "Crear draft"
   },
   "lobbyView": {
-    "directConnection": "Conexión directa",
     "onlineLobby": "Sala de espera en línea",
     "online": "{{count}} en línea",
     "format": "Formato",
@@ -193,14 +192,10 @@
     "noFormatGames": "No hay partidas de {{format}} ahora mismo.",
     "noOpenGames": "No hay partidas abiertas ahora mismo.",
     "showAllFormats": "Mostrar todos los formatos",
-    "p2pNotice": "Modo peer-to-peer. Hospeda o únete directamente con un código de sala de 5 caracteres.",
-    "joinByCode": "Unirse por código",
     "joinATable": "Unirse a una mesa",
-    "p2pCodePlaceholder": "Introduce el código P2P de 5 caracteres",
     "serverCodePlaceholder": "Introduce el código o CÓDIGO@IP:PUERTO",
     "join": "Unirse",
     "host": "Hospedar",
-    "hostP2PDescription": "Crea una sala directa para un oponente.",
     "hostServerDescription": "Abre una sala y espera a los jugadores.",
     "hostDraft": "Hospedar draft",
     "hostGame": "Hospedar partida",

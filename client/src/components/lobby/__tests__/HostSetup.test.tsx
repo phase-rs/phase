@@ -462,7 +462,7 @@ describe("HostSetup", () => {
     await i18n.changeLanguage("en");
   });
 
-  it("uses P2P labeling/theme and hides server-only lobby listing in p2p mode", () => {
+  it("uses P2P labeling/theme and still offers the lobby listing in p2p mode", () => {
     render(
       <HostSetup
         onHost={vi.fn()}
@@ -475,7 +475,9 @@ describe("HostSetup", () => {
     // The screen heading now lives on the page shell (MultiplayerPage); the
     // form itself is distinguished by its P2P submit-button labeling.
     expect(screen.getByRole("button", { name: "Host P2P Game" })).toBeInTheDocument();
-    expect(screen.queryByText("List in lobby")).not.toBeInTheDocument();
+    // Listing is NOT server-only: a brokered P2P room is advertised in the
+    // public lobby, so the control that governs that has to be here too.
+    expect(screen.getByRole("switch", { name: "List in lobby" })).toBeInTheDocument();
     expect(screen.queryByText("P2P currently supports 2-player Standard.")).not.toBeInTheDocument();
   });
 
@@ -499,8 +501,15 @@ describe("HostSetup", () => {
     it("names every visible switch and associates only the sandbox help", () => {
       render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
-      const names = ["Start when full", "Sandbox Mode — allow debug actions", "Set password"];
-      if (connectionMode === "server") names.unshift("List in lobby");
+      // "List in lobby" is present in BOTH modes: a P2P room brokered by a
+      // `LobbyOnly` anchor is listed exactly as a server-run game is, so the
+      // opt-out has to be reachable from either transport.
+      const names = [
+        "List in lobby",
+        "Start when full",
+        "Sandbox Mode — allow debug actions",
+        "Set password",
+      ];
 
       expect(screen.getAllByRole("switch")).toHaveLength(names.length);
       for (const name of names) {
@@ -511,9 +520,6 @@ describe("HostSetup", () => {
           expect(control).not.toHaveAttribute("aria-describedby");
           expect(control).not.toHaveAccessibleDescription();
         }
-      }
-      if (connectionMode === "p2p") {
-        expect(screen.queryByRole("switch", { name: "List in lobby" })).not.toBeInTheDocument();
       }
     });
 
@@ -545,12 +551,12 @@ describe("HostSetup", () => {
       const onHost = vi.fn();
       render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
-      if (connectionMode === "server") {
-        const publicSwitch = screen.getByRole("switch", { name: "List in lobby" });
-        expect(publicSwitch).toBeChecked();
-        await user.click(publicSwitch);
-        expect(publicSwitch).not.toBeChecked();
-      }
+      // Checked by default in both modes — which is what the hidden P2P
+      // toggle used to submit with no way to change it.
+      const publicSwitch = screen.getByRole("switch", { name: "List in lobby" });
+      expect(publicSwitch).toBeChecked();
+      await user.click(publicSwitch);
+      expect(publicSwitch).not.toBeChecked();
 
       const startSwitch = screen.getByRole("switch", { name: "Start when full" });
       expect(startSwitch).toBeChecked();
@@ -579,7 +585,7 @@ describe("HostSetup", () => {
       }));
       expect(onHost).toHaveBeenCalledTimes(1);
       expect(onHost).toHaveBeenCalledWith(expect.objectContaining({
-        public: connectionMode === "p2p",
+        public: false,
         startWhenFull: false,
         password: "test-password",
         formatConfig: expect.objectContaining({ allow_debug_actions: true }),
@@ -1041,6 +1047,69 @@ describe("HostSetup", () => {
     expect(screen.queryByRole("button", { name: "Use" })).not.toBeInTheDocument();
   });
 
+  /**
+   * Hiding such a format from the PICKER is not enough: one already selected in
+   * server mode survives a flip to P2P, and a minimum above the ceiling cannot
+   * be clamped into range — only replaced. Without the guard, `maxPlayers` (6)
+   * falls below `formatConfig.min_players` (7), `Array.from` coerces the
+   * negative length to 0, and the seat picker renders EMPTY while Host submits
+   * a configuration the format itself rejects.
+   */
+  it("replaces a selected over-ceiling format when the mode flips to P2P", async () => {
+    const user = userEvent.setup();
+    const onHostSpy = vi.fn();
+    // Seeded through the store because the module-level `formatConfigForCustomRules`
+    // mock answers every saved format with a 2-player config — the "Use" flow
+    // therefore cannot produce an over-ceiling selection, while the store's
+    // `formatConfig` is exactly how a real one survives into this form.
+    useMultiplayerStore.setState({
+      formatConfig: {
+        ...FORMAT_DEFAULTS.Commander,
+        format: "Custom:0",
+        min_players: 7,
+        max_players: 8,
+      },
+    });
+
+    const { rerender } = render(
+      <HostSetup
+        onHost={onHostSpy}
+        onBack={vi.fn()}
+        connectionMode="server"
+        onConnectionModeChange={vi.fn()}
+      />,
+    );
+
+    // Reach-guard: the over-ceiling format really is in force, so the seats
+    // below are the guard's doing and not a form that never left its defaults.
+    expect(screen.getByRole("button", { name: "8" })).toBeInTheDocument();
+
+    rerender(
+      <HostSetup
+        onHost={onHostSpy}
+        onBack={vi.fn()}
+        connectionMode="p2p"
+        onConnectionModeChange={vi.fn()}
+      />,
+    );
+
+    // Replaced, not clamped: the seat range is Commander's 2–6. Without the
+    // guard this range is empty (6 − 7 + 1 = 0) and NO seat button renders.
+    expect(screen.getByRole("button", { name: "2" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "6" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "7" })).not.toBeInTheDocument();
+
+    // Seated at the REPLACEMENT's own minimum, not at the P2P ceiling: the
+    // seat clamp yields to the guard rather than overwriting what it set.
+    await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    expect(onHostSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        formatConfig: expect.objectContaining({ format: "Commander", max_players: 2 }),
+      }),
+      null,
+    );
+  });
+
   // ── Connection mode switch ──────────────────────────────────────────────
 
   it("mirrors the connection switch and reports a change to the page", async () => {
@@ -1059,7 +1128,7 @@ describe("HostSetup", () => {
     expect(
       within(group).getByRole("button", { name: "Official Server" }),
     ).toHaveAttribute("aria-pressed", "true");
-    // The server-only control is what the mode is currently buying.
+    // Listing is offered under both transports, so it must survive the flip.
     expect(screen.getByText("List in lobby")).toBeInTheDocument();
 
     await user.click(within(group).getByRole("button", { name: "P2P" }));

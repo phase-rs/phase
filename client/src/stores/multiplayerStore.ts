@@ -124,10 +124,12 @@ type ConnectionStatus = "disconnected" | "connecting" | "connected";
 type HostingStatus = "idle" | "connecting" | "waiting";
 
 /**
- * The transport a multiplayer session runs over: a dedicated server, or a
- * direct peer-to-peer mesh. The player picks it explicitly in the lobby's
- * connection switch, so it lives here rather than being derived from
- * {@link MultiplayerState.hostingServer}.
+ * The transport a HOSTED multiplayer session runs over: a dedicated server, or
+ * a direct peer-to-peer mesh. The player picks it explicitly on Host Game, so
+ * it lives here rather than being derived from
+ * {@link MultiplayerState.hostingServer}. Browsing and joining are NOT scoped
+ * by it — the lobby serves both transports and a join is routed by the shape
+ * of the code.
  */
 export type ConnectionMode = "server" | "p2p";
 
@@ -1162,15 +1164,17 @@ interface MultiplayerState {
    */
   hostingServer: string | null;
   /**
-   * The connection mode the player chose in the lobby's connection switch, or
-   * `null` when they have never chosen one. PERSISTED, so the choice survives
-   * a reload and the ordinary lobby → game → lobby round trip.
+   * The connection mode the player chose on Host Game, or `null` when they
+   * have never chosen one. PERSISTED, so the choice survives a reload and the
+   * ordinary lobby → game → lobby round trip.
    *
    * `null` is the load-bearing "absent" sentinel: `MultiplayerPage` falls back
    * to deriving the mode from {@link MultiplayerState.hostingServer} only
-   * while this is `null`, which is what lets a legacy blob with a `null`
-   * anchor still boot into P2P. A non-null initial would make "never chosen"
-   * indistinguishable from "chose server" and destroy that preference.
+   * while this is `null`. A non-null initial would make "never chosen"
+   * indistinguishable from "chose server" and destroy that preference. The
+   * page also converts a legacy `null` anchor — the old "None (P2P only)"
+   * pick — into an explicit `"p2p"` here as it seeds an anchor, so that
+   * preference outlives the derivation it used to depend on.
    */
   connectionMode: ConnectionMode | null;
   /** Hand-added lobby authorities. Persisted; built-in presets are derived

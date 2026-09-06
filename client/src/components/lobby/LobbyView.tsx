@@ -14,14 +14,12 @@ import {
   isLobbyEntryCompatible,
   lobbySources,
   useMultiplayerStore,
-  type ConnectionMode,
   type LobbyGameEntry,
   type LobbySource,
 } from "../../stores/multiplayerStore";
 import { assertNever } from "../../utils/assertNever";
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
-import { ConnectionModeSwitch } from "./ConnectionModeSwitch";
 import { GameListItem } from "./GameListItem";
 import type { LobbyGame } from "./GameListItem";
 import { ServerFlag } from "./ServerFlag";
@@ -29,8 +27,10 @@ import { ServerPicker } from "./ServerPicker";
 import { MenuSelect } from "../ui/MenuSelect";
 
 interface LobbyViewProps {
+  /** Open Host Game. The P2P / Official Server choice is made there, not here:
+   *  it configures a game being created, while this view only browses and
+   *  joins — both of which work identically under either transport. */
   onHostGame: () => void;
-  onHostP2P: () => void;
   onHostDraft?: () => void;
   /**
    * Called when the user elects to join a game. `origin` is the authority
@@ -50,11 +50,6 @@ interface LobbyViewProps {
   ) => void;
   /** Watch a live server game or draft without joining as a player. */
   onSpectate?: (code: string, origin: LobbySource | null, context?: LobbyGame) => void;
-  connectionMode?: ConnectionMode;
-  /** The page-level mode handler. Required, because an unwired switch would be
-   * a control that lies about what it does; the page owns the write so the
-   * anchor repair it performs is not duplicated per surface. */
-  onConnectionModeChange: (mode: ConnectionMode) => void;
   onServerOffline?: () => void;
 }
 
@@ -88,17 +83,12 @@ const ROOM_TYPE_FILTERS: { value: RoomTypeFilter; labelKey: string }[] = [
 
 export function LobbyView({
   onHostGame,
-  onHostP2P,
   onHostDraft,
   onJoinGame,
   onSpectate,
-  connectionMode,
-  onConnectionModeChange,
   onServerOffline,
 }: LobbyViewProps) {
   const { t } = useTranslation("multiplayer");
-  const isServer = connectionMode !== "p2p";
-  const isP2P = connectionMode === "p2p";
   const hostingServer = useMultiplayerStore((s) => s.hostingServer);
   const userLobbySources = useMultiplayerStore((s) => s.userLobbySources);
   const sourceStatus = useMultiplayerStore((s) => s.sourceStatus);
@@ -173,9 +163,6 @@ export function LobbyView({
   }, [formatFilter, setFormatConfig, onHostGame]);
 
   useEffect(() => {
-    // P2P mode uses a direct PeerJS code and has no lobby to subscribe to.
-    if (isP2P) return;
-
     let cancelled = false;
     let lobbyDetach: (() => void) | null = null;
 
@@ -252,16 +239,15 @@ export function LobbyView({
     };
     // Depends on the dialed set's MEMBERSHIP (`dialedSourceKey`), never on
     // `sourceStatus` — a status flap must not churn subscriptions.
-  }, [isP2P, dialedSourceKey, subscribeLobby, subscribeAmbientLobby, onServerOffline]);
+  }, [dialedSourceKey, subscribeLobby, subscribeAmbientLobby, onServerOffline]);
 
   useEffect(() => {
     // Not at app boot, for the same reason the subscription sockets are not: a
     // player who never opens multiplayer pays for nothing. Failures are silent
     // by contract — the lobby simply lists presets and hand-added sources. The
     // TTL in `serverDirectory.ts` is what makes a remount cheap.
-    if (isP2P) return;
     void refreshServerDirectory();
-  }, [isP2P]);
+  }, []);
 
   useEffect(() => {
     // A lobby left open in a background tab goes stale: the listing and each
@@ -270,7 +256,6 @@ export function LobbyView({
     // endpoint, because `refreshServerDirectory` self-guards on both its TTL
     // and its in-flight promise. A timer would fire in a backgrounded tab and
     // buy nothing this does not.
-    if (isP2P) return;
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") void refreshServerDirectory();
     };
@@ -278,7 +263,7 @@ export function LobbyView({
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [isP2P]);
+  }, []);
 
   /**
    * Each browsed source's raw score components, keyed by the CLIENT url a row
@@ -472,42 +457,29 @@ export function LobbyView({
     <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col gap-6 px-5 py-6">
       <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
-          {isP2P ? t("lobbyView.directConnection") : t("lobbyView.onlineLobby")}
+          {t("lobbyView.onlineLobby")}
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
-          {/* The mode switch sits with the server chip, not with the room-type
-              filter below: it governs which transport this client uses, not
-              which rows the list shows. */}
-          <span className="text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            {t("connectionMode.label")}
-          </span>
-          <ConnectionModeSwitch
-            value={isP2P ? "p2p" : "server"}
-            onChange={onConnectionModeChange}
-            size="sm"
-          />
-          {isServer && (
-            <button
-              type="button"
-              onClick={() => setServerPickerOpen(true)}
-              title={hostingServer ?? ""}
-              className="flex min-w-0 max-w-full items-center gap-1.5 rounded-[7px] border border-white/10 bg-black/25 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 backdrop-blur-sm transition-colors hover:border-white/20 hover:bg-white/5"
-            >
-              {serverFlag && (
-                <ServerFlag
-                  flag={serverFlag}
-                  className="h-2.5 w-auto shrink-0 rounded-[1px] ring-1 ring-black/20"
-                />
-              )}
-              <span className="truncate whitespace-nowrap">{serverHost}</span>
-            </button>
-          )}
-          {isServer && playerCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setServerPickerOpen(true)}
+            title={hostingServer ?? ""}
+            className="flex min-w-0 max-w-full items-center gap-1.5 rounded-[7px] border border-white/10 bg-black/25 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 backdrop-blur-sm transition-colors hover:border-white/20 hover:bg-white/5"
+          >
+            {serverFlag && (
+              <ServerFlag
+                flag={serverFlag}
+                className="h-2.5 w-auto shrink-0 rounded-[1px] ring-1 ring-black/20"
+              />
+            )}
+            <span className="truncate whitespace-nowrap">{serverHost}</span>
+          </button>
+          {playerCount > 0 && (
             <span className="rounded-[7px] border border-emerald-300/20 bg-emerald-500/15 px-2.5 py-0.5 text-xs font-medium text-emerald-200">
               {t("lobbyView.online", { count: playerCount })}
             </span>
           )}
-          {isServer && anyDegraded && (
+          {anyDegraded && (
             <button
               type="button"
               onClick={() => setServerPickerOpen(true)}
@@ -523,29 +495,27 @@ export function LobbyView({
           bar width) so the long format roster never covers the lobby form.
           Desktop keeps the anchored dropdown. min-h-44px + text-base meet the
           44/48px touch-target rule and prevent iOS focus-zoom. */}
-      {isServer && (
-        <div className="flex min-h-[44px] w-full items-center gap-2 self-stretch rounded-[10px] border border-white/10 bg-black/25 px-3 py-1 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm sm:w-auto sm:self-start">
-          <span className="shrink-0 text-[0.62rem] font-medium uppercase tracking-[0.18em] text-gray-500">
-            {t("lobbyView.format")}
-          </span>
-          <MenuSelect
-            ariaLabel={t("lobbyView.format")}
-            label={formatMenuLabel}
-            selectedValue={formatFilter ?? FILTER_ALL_SENTINEL}
-            items={[{ value: FILTER_ALL_SENTINEL, label: t("lobbyView.allFormats") }]}
-            groups={formatMenuGroups}
-            onSelect={(value) =>
-              setFormatFilter(
-                value === FILTER_ALL_SENTINEL ? null : (value as GameFormat),
-              )
-            }
-            wrapperClassName="min-w-0 flex-1 sm:min-w-[10rem]"
-            className="min-h-[44px] rounded-none border-0 bg-transparent px-0 py-1.5 text-base font-medium text-white shadow-none hover:bg-transparent focus-visible:ring-white/20"
-          />
-        </div>
-      )}
+      <div className="flex min-h-[44px] w-full items-center gap-2 self-stretch rounded-[10px] border border-white/10 bg-black/25 px-3 py-1 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm sm:w-auto sm:self-start">
+        <span className="shrink-0 text-[0.62rem] font-medium uppercase tracking-[0.18em] text-gray-500">
+          {t("lobbyView.format")}
+        </span>
+        <MenuSelect
+          ariaLabel={t("lobbyView.format")}
+          label={formatMenuLabel}
+          selectedValue={formatFilter ?? FILTER_ALL_SENTINEL}
+          items={[{ value: FILTER_ALL_SENTINEL, label: t("lobbyView.allFormats") }]}
+          groups={formatMenuGroups}
+          onSelect={(value) =>
+            setFormatFilter(
+              value === FILTER_ALL_SENTINEL ? null : (value as GameFormat),
+            )
+          }
+          wrapperClassName="min-w-0 flex-1 sm:min-w-[10rem]"
+          className="min-h-[44px] rounded-none border-0 bg-transparent px-0 py-1.5 text-base font-medium text-white shadow-none hover:bg-transparent focus-visible:ring-white/20"
+        />
+      </div>
 
-      {isServer && showRoomTypeFilter && (
+      {showRoomTypeFilter && (
         <div className="flex rounded-[10px] border border-white/10 bg-black/25 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
           {ROOM_TYPE_FILTERS.map((opt) => (
             <button
@@ -563,54 +533,46 @@ export function LobbyView({
         </div>
       )}
 
-      {isServer && (
-        <div className="w-full space-y-3">
-          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("lobbyView.openTables")}</div>
-          {filteredEntries.length === 0 ? (
-            <div className="flex flex-col items-center gap-3 rounded-[10px] border border-dashed border-white/10 bg-black/12 px-4 py-6 text-center backdrop-blur-sm">
-              <p className="text-sm text-gray-400">
-                {formatFilter
-                  ? t("lobbyView.noFormatGames", { format: formatFilter })
-                  : t("lobbyView.noOpenGames")}
-              </p>
-              {formatFilter && (
-                <button
-                  type="button"
-                  onClick={() => setFormatFilter(null)}
-                  className={menuButtonClass({ tone: "neutral", size: "sm" })}
-                >
-                  {t("lobbyView.showAllFormats")}
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
-              {filteredEntries.map((entry) => (
-                <GameListItem
-                  // Keyed by source too: `game_code` is unique per authority,
-                  // not across the merged multi-source list.
-                  key={`${entry.source.url}:${entry.game.game_code}`}
-                  entry={entry}
-                  onJoin={handleJoinFromList}
-                  compatible={isLobbyEntryCompatible(entry.game.host_build_commit)}
-                  hostGameCode={hostGameCode}
-                  healthHint={hintByUrl.get(entry.source.url) ?? null}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {isP2P && (
-        <div className="w-full rounded-[10px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-3 text-sm leading-6 text-cyan-100 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
-          {t("lobbyView.p2pNotice")}
-        </div>
-      )}
+      <div className="w-full space-y-3">
+        <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("lobbyView.openTables")}</div>
+        {filteredEntries.length === 0 ? (
+          <div className="flex flex-col items-center gap-3 rounded-[10px] border border-dashed border-white/10 bg-black/12 px-4 py-6 text-center backdrop-blur-sm">
+            <p className="text-sm text-gray-400">
+              {formatFilter
+                ? t("lobbyView.noFormatGames", { format: formatFilter })
+                : t("lobbyView.noOpenGames")}
+            </p>
+            {formatFilter && (
+              <button
+                type="button"
+                onClick={() => setFormatFilter(null)}
+                className={menuButtonClass({ tone: "neutral", size: "sm" })}
+              >
+                {t("lobbyView.showAllFormats")}
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
+            {filteredEntries.map((entry) => (
+              <GameListItem
+                // Keyed by source too: `game_code` is unique per authority,
+                // not across the merged multi-source list.
+                key={`${entry.source.url}:${entry.game.game_code}`}
+                entry={entry}
+                onJoin={handleJoinFromList}
+                compatible={isLobbyEntryCompatible(entry.game.host_build_commit)}
+                hostGameCode={hostGameCode}
+                healthHint={hintByUrl.get(entry.source.url) ?? null}
+              />
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="w-full space-y-3">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
-          {isP2P ? t("lobbyView.joinByCode") : t("lobbyView.joinATable")}
+          {t("lobbyView.joinATable")}
         </div>
         <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center">
           <input
@@ -618,8 +580,8 @@ export function LobbyView({
             value={joinCode}
             onChange={(e) => setJoinCode(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
-            placeholder={isP2P ? t("lobbyView.p2pCodePlaceholder") : t("lobbyView.serverCodePlaceholder")}
-            maxLength={isP2P ? 5 : 50}
+            placeholder={t("lobbyView.serverCodePlaceholder")}
+            maxLength={50}
             className="min-w-0 flex-1 rounded-[8px] border border-white/10 bg-black/25 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none backdrop-blur-sm focus:border-white/20"
           />
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto">
@@ -635,7 +597,7 @@ export function LobbyView({
             >
               {t("lobbyView.join")}
             </button>
-            {isServer && onSpectate && (
+            {onSpectate && (
               <button
                 type="button"
                 onClick={handleSpectateByCode}
@@ -658,7 +620,7 @@ export function LobbyView({
         <div className="min-w-0">
           <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("lobbyView.host")}</div>
           <div className="mt-1 text-sm text-slate-400">
-            {isP2P ? t("lobbyView.hostP2PDescription") : t("lobbyView.hostServerDescription")}
+            {t("lobbyView.hostServerDescription")}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -670,13 +632,12 @@ export function LobbyView({
               {t("lobbyView.hostDraft")}
             </button>
           )}
-          {/* One button; the mode switch above says which transport it opens,
-              and its tone follows that mode's accent. Each mode keeps its own
-              entry point: the server one seeds host-setup with the lobby's
-              active format filter, the P2P one does not. */}
+          {/* One entry point into Host Game, which is where the P2P /
+              Official Server choice is made. Seeds host-setup with the lobby's
+              active format filter on the way. */}
           <button
-            onClick={isP2P ? onHostP2P : handleHost}
-            className={menuButtonClass({ tone: isP2P ? "cyan" : "emerald", size: "md" })}
+            onClick={handleHost}
+            className={menuButtonClass({ tone: "emerald", size: "md" })}
           >
             {t("lobbyView.hostGame")}
           </button>
