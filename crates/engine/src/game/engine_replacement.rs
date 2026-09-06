@@ -2277,7 +2277,10 @@ fn finish_copy_target_choice_entry(
         if let Some(waiting_for) = apply_post_replacement_effect(
             state,
             &choice,
-            Some(source_id),
+            // CR 109.5: a self-scoped "as this enters, choose …" replacement is
+            // text on the entering permanent itself, so its controller already
+            // IS the affected object's controller — no override needed.
+            ContinuationSubjects::affected_only(Some(source_id)),
             None,
             Some(&ReplacementEvent::Moved),
             HashSet::new(),
@@ -2534,6 +2537,40 @@ fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&Abi
         })
 }
 
+/// CR 109.5 + CR 614.6: the two referents a post-replacement continuation
+/// resolves against, which are NOT the same object and must not be derived from
+/// one another.
+///
+/// * `affected` — the object the modified event acted on: the entering permanent
+///   for an ETB replacement, the moving object for a zone change, the dying
+///   creature for a "would die, … instead". It answers `SelfRef`, "that
+///   permanent", and (via its controller) "that player".
+/// * `controller` — the controller of the object whose ability did the
+///   replacing. It answers "you". `None` on install paths with no replacing
+///   object (combat-prevention riders, the ready-continuation helpers, test
+///   fixtures), where the affected object's controller remains the fallback.
+///
+/// Bundled rather than passed as two loose `Option`s so a future caller cannot
+/// supply one and silently inherit the other from the wrong side of the split —
+/// the exact defect issue #7086 was.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ContinuationSubjects {
+    pub affected: Option<ObjectId>,
+    pub controller: Option<PlayerId>,
+}
+
+impl ContinuationSubjects {
+    /// The affected object alone, with "you" left to fall back to its
+    /// controller. Correct exactly when the replacing object IS the affected
+    /// object — every self-scoped replacement (`valid_card: SelfRef`).
+    pub fn affected_only(affected: Option<ObjectId>) -> Self {
+        Self {
+            affected,
+            controller: None,
+        }
+    }
+}
+
 /// Apply a post-replacement side effect after a zone change has been executed.
 /// Used by Optional replacements (e.g., shock lands: pay life on accept, tap on decline).
 /// CR 707.9: For "enter as a copy" replacements, sets up CopyTargetChoice instead of
@@ -2541,7 +2578,7 @@ fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&Abi
 pub(super) fn apply_post_replacement_effect(
     state: &mut GameState,
     effect_def: &AbilityDefinition,
-    object_id: Option<ObjectId>,
+    subjects: ContinuationSubjects,
     // CR 400.7d: for AmountSpentToCastSource ceilings the entering object's
     // cast-payment stamp is authoritative — this spell-resolution context is
     // intentionally unused (issue #6440). Kept so call sites stay stable.
@@ -2550,9 +2587,13 @@ pub(super) fn apply_post_replacement_effect(
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let ContinuationSubjects {
+        affected: object_id,
+        controller: replacement_controller,
+    } = subjects;
     // Dual objects→liminal lookup (same as source identity): also yields the
     // entering object's cast-payment stamp for copy MV ceilings.
-    let (source_id, controller, mana_spent_stamp) = object_id
+    let (source_id, affected_controller, mana_spent_stamp) = object_id
         .and_then(|obj_id| {
             state
                 .objects
@@ -2572,6 +2613,37 @@ pub(super) fn apply_post_replacement_effect(
                 })
         })
         .unwrap_or((ObjectId(0), state.active_player, 0));
+
+    // CR 109.5 + CR 614.6: `source_id` above is the object the modified event
+    // AFFECTED — the entering permanent for an ETB replacement, the dying
+    // creature for a "would die, … instead" one. It is the right referent for
+    // the continuation's `SelfRef` / "that permanent" anaphors, and it is the
+    // WRONG answer for "you": a replacement effect is text on the replacing
+    // object, so "you" is that object's controller. Splitting the two is the
+    // whole point of the drain carrying its own controller (issue #7086 — Head
+    // of the Hunt's Wolf was created for the opponent whose creature died).
+    //
+    // The affected object's controller does not go away; it moves to
+    // `scoped_player`, which is where every "that player" reference already
+    // reads it from (`ControllerRef::ScopedPlayer`,
+    // `filter::scoped_player_or_controller`, `sacrifice::resolve_sacrifice_scope`).
+    // Because every one of those readers is a `scoped_player.unwrap_or(controller)`
+    // fallback, and because a SELF-scoped replacement has
+    // `affected_controller == replacement_controller` anyway, this split is a
+    // no-op everywhere except a third-party replacement's "you".
+    let controller = replacement_controller.unwrap_or(affected_controller);
+
+    // …and for that reason the slot is populated ONLY when the two genuinely
+    // differ. `scoped_player` means "a subject distinct from you"; writing the
+    // controller into it when there is no such subject is not merely redundant,
+    // it is a false signal. `effects/choose.rs::named_choice_authority` reads a
+    // populated `scoped_player` as the marker of a per-player fan-out and
+    // reroutes a persisting `Labeled` answer off the source object onto the
+    // chooser — its own comment records that doing so for a single-chooser card
+    // "breaks any object-scoped reader". Glacierwood Siege's "As this
+    // enchantment enters, choose Temur or Sultai" is exactly that shape, and it
+    // reaches this function as a self-scoped replacement continuation.
+    let distinct_scoped_player = (affected_controller != controller).then_some(affected_controller);
 
     // CR 614.1c: Walk past modifier-only effects (Tap/Untap/PutCounter/ChangeZone)
     // in the sub_ability chain to find the real work. Composable replacements like
@@ -2609,6 +2681,9 @@ pub(super) fn apply_post_replacement_effect(
                 .collect::<Vec<_>>();
             let mut resolved =
                 build_resolved_from_def_with_targets(real_work, source_id, controller, targets);
+            if let Some(scoped) = distinct_scoped_player {
+                resolved.set_scoped_player_recursive(scoped);
+            }
             resolved.set_replacement_applied_recursive(replacement_applied);
             return resolve_post_replacement_chain(state, &resolved, events);
         } else {
@@ -2671,6 +2746,14 @@ pub(super) fn apply_post_replacement_effect(
     };
     let mut resolved =
         build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
+    // CR 109.5: "that player" / "its controller" — the player the replaced
+    // event acted on, bound only when that is somebody other than "you" (see
+    // `distinct_scoped_player` above). Applied to the whole chain so a rider
+    // several links down ("… then sacrifices a land of their choice") still
+    // names them.
+    if let Some(scoped) = distinct_scoped_player {
+        resolved.set_scoped_player_recursive(scoped);
+    }
     resolved.set_replacement_applied_recursive(replacement_applied);
     resolve_post_replacement_chain(state, &resolved, events)
 }
@@ -2789,6 +2872,10 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // `Resolved` carries captured targets (prevention follow-ups); `Template` is an
     // AST that resolves against `source` for ETB / Optional accept.
     let source = state.post_replacement_source().or(object_id);
+    // CR 109.5: read BEFORE `begin_post_replacement_dispatch` takes the
+    // continuation, exactly like `source` above — the resident accessor is a
+    // read of the same drain entry.
+    let replacement_controller = state.post_replacement_controller();
     let replacement_applied = state
         .active_post_replacement_drains_mut()
         .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
@@ -2810,7 +2897,10 @@ pub(crate) fn apply_pending_post_replacement_effect(
         PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
             state,
             &effect_def,
-            source,
+            ContinuationSubjects {
+                affected: source,
+                controller: replacement_controller,
+            },
             spell_resolution,
             event.as_ref(),
             replacement_applied,
@@ -6701,7 +6791,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &template,
-            Some(dralnu),
+            ContinuationSubjects::affected_only(Some(dralnu)),
             None,
             Some(&ReplacementEvent::DealtDamage),
             Default::default(),
@@ -6763,7 +6853,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &template,
-            Some(devourer),
+            ContinuationSubjects::affected_only(Some(devourer)),
             None,
             Some(&ReplacementEvent::Moved),
             Default::default(),
@@ -7955,7 +8045,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &mockingbird_become_copy(),
-            Some(mockingbird),
+            ContinuationSubjects::affected_only(Some(mockingbird)),
             Some(&hostile_ctx),
             None,
             Default::default(),
@@ -8011,7 +8101,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &mockingbird_become_copy(),
-            Some(mockingbird),
+            ContinuationSubjects::affected_only(Some(mockingbird)),
             Some(&hostile_ctx),
             None,
             Default::default(),
@@ -8081,7 +8171,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &mockingbird_become_copy(),
-            Some(liminal_id),
+            ContinuationSubjects::affected_only(Some(liminal_id)),
             None,
             None,
             Default::default(),
@@ -8114,7 +8204,7 @@ mod tests {
         let waiting = apply_post_replacement_effect(
             &mut state,
             &clone_become_copy(),
-            Some(clone),
+            ContinuationSubjects::affected_only(Some(clone)),
             Some(&chord_like_spell_resolution(ObjectId(1), 5)),
             None,
             Default::default(),
@@ -8506,10 +8596,13 @@ mod tests {
         );
 
         let mut events = Vec::new();
+        // Self-scoped ETB replacement: the land is both the affected object and
+        // the replacing ability's source, so `affected_only` keeps "you" on the
+        // land's controller (P1), not `state.active_player` (P0).
         let waiting = apply_post_replacement_effect(
             &mut state,
             &effect_def,
-            Some(land),
+            ContinuationSubjects::affected_only(Some(land)),
             None,
             None,
             HashSet::new(),

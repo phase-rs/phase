@@ -105,6 +105,52 @@ pub(crate) fn replacement_source_player(obj: &GameObject) -> PlayerId {
     obj.controller_or_owner()
 }
 
+/// CR 109.5: the player "you" and "your" refer to inside a replacement effect's
+/// `execute` / `decline` chain — the controller of the object whose ability is
+/// doing the replacing, never the controller of the object the replaced event
+/// happens to affect.
+///
+/// Single authority for that question. `apply_single_replacement` reads it both
+/// to build the applier's `FilterContext` and to stamp
+/// [`PostReplacementDrain::controller`], so the gate that decides whether a
+/// replacement applies and the rider that runs afterwards can never disagree
+/// about who "you" is.
+///
+/// CR 608.2h: read the source the same way `replacement_definition_for_id` and
+/// `apply_single_replacement` read it — liminal entry first (a replacement on a
+/// permanent that is itself mid-entry), then live state — falling back to the
+/// install-time stamp (`source_controller`), which is the only answer available
+/// for a global install (`rid.source == ObjectId(0)`, no object to read).
+///
+/// Deliberately snapshot-at-apply-time rather than look-up-at-drain-time.
+/// CR 704.3: every applicable state-based action is performed simultaneously as
+/// a single event, so a shield that dies alongside the creature it is replacing
+/// is still on the battlefield when its replacement applies. This call therefore
+/// always answers; a drain-time lookup would run after the shield was gone and
+/// answer nothing at all.
+///
+/// Behavior change riding inside this de-duplication, called out rather than
+/// left to be discovered: the inline derivation this replaces read the
+/// `controller` field directly, while [`replacement_source_player`] reads
+/// `controller_or_owner()`. The two answers differ for a replacement source
+/// outside the battlefield and the stack, where CR 108.4a gives the card no
+/// controller and directs an effect asking for one to use the owner instead —
+/// so the new reading is the CR-correct one, not merely the shorter one.
+fn replacement_ability_controller(
+    state: &GameState,
+    rid: ReplacementId,
+    repl_def: &ReplacementDefinition,
+) -> PlayerId {
+    state
+        .liminal_entries
+        .get(&rid.source)
+        .map(|entry| entry.object.projected())
+        .or_else(|| state.objects.get(&rid.source))
+        .map(replacement_source_player)
+        .or(repl_def.source_controller)
+        .unwrap_or(state.active_player)
+}
+
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
     ReplacementId {
         source: object_id,
@@ -720,6 +766,7 @@ fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
     source: ObjectId,
+    controller: PlayerId,
     applied: HashSet<AppliedReplacementKey>,
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
@@ -731,6 +778,11 @@ fn stash_post_replacement_continuation(
             applied,
             event_source,
             event_target,
+            // CR 109.5: "you" in the continuation is the REPLACING ability's
+            // controller. Carried beside `source` rather than derived from it,
+            // because `source` is the affected object on every zone-change
+            // path.
+            controller: Some(controller),
         },
         ResidentDrainPolicy::KeepResident,
     );
@@ -8465,6 +8517,12 @@ fn apply_single_replacement(
             .or_else(|| state.objects.get(&rid.source))
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
+    // CR 109.5: snapshot the replacing ability's controller HERE, while
+    // `repl_def_ref`'s borrow is still live. The stash sites below run after the
+    // applier has taken `&mut state`, so they cannot re-read the definition —
+    // and a `PlayerId` is exactly what they need, not the definition itself.
+    let ability_controller =
+        repl_def_ref.map(|def| replacement_ability_controller(state, rid, def));
 
     // Extract replacement metadata before mutably borrowing state for the applier.
     // CR 614.1c: ProposedEvent modifiers (enter_tapped, ETB counters, zone redirect)
@@ -8481,15 +8539,7 @@ fn apply_single_replacement(
     let (event_key, modifiers, mandatory_post_effect, consume_on_apply, entry_copy) =
         match repl_def_ref {
             Some(repl_def) => {
-                let replacement_controller = if rid.source == ObjectId(0) {
-                    repl_def.source_controller.unwrap_or(state.active_player)
-                } else {
-                    state
-                        .objects
-                        .get(&rid.source)
-                        .map(|obj| obj.controller)
-                        .unwrap_or(state.active_player)
-                };
+                let replacement_controller = replacement_ability_controller(state, rid, repl_def);
                 // CR 614.12a + CR 707.2: only ChangeZone entry-copy shields
                 // (Mystic Reflection) precompute the copy payload into the
                 // event. Moved self-replacements still drain as post-effects so
@@ -9008,10 +9058,10 @@ fn apply_single_replacement(
                     // CR 614.13 + CR 608.2c: stash the AFFECTED object of the
                     // (possibly modified) event as the continuation source, so a
                     // scoped-player execute (Land Equilibrium's "that player …
-                    // sacrifices a land": `ControllerRef::You` bound via the entering
-                    // land's resulting controller) keys off the entering object, not
-                    // the replacement's own source. For a self-scoped replacement
-                    // (`valid_card: SelfRef`, the Devour family) these coincide.
+                    // sacrifices a land", lowered to `ControllerRef::ScopedPlayer`)
+                    // keys off the entering object, not the replacement's own
+                    // source. For a self-scoped replacement (`valid_card: SelfRef`,
+                    // the Devour family) these coincide.
                     //
                     // NOTE: for battlefield-ENTRY drains this is defensive alignment
                     // rather than the sole binding — the land-play epilogue
@@ -9022,10 +9072,19 @@ fn apply_single_replacement(
                     // drain time. The stashed source is observable only on the
                     // `TokenEntry` drain path, which does not clear it. See the
                     // implementation report's Part 3 finding.
+                    //
+                    // CR 109.5: the affected object answers "that permanent" and
+                    // "that player"; it never answers "you". The replacing
+                    // ability's controller therefore rides along in its own slot,
+                    // untouched by the zone-change clear above (issue #7086: Head
+                    // of the Hunt's "When you do, create a … Wolf" created the
+                    // token for the opponent whose creature died, because the
+                    // continuation had no handle on its own controller).
                     stash_post_replacement_continuation(
                         state,
                         post,
                         new_event.affected_object_id().unwrap_or(rid.source),
+                        ability_controller.unwrap_or(state.active_player),
                         replacement_applied.clone(),
                         None,
                         // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
@@ -9065,6 +9124,12 @@ fn apply_single_replacement(
                         state,
                         post,
                         rid.source,
+                        // CR 109.5: same authority as the Modified arm — the
+                        // prevention rider's "you" is the shield's controller.
+                        // Here `source` is already the shield, so this agrees
+                        // with the pre-existing derivation rather than changing
+                        // it.
+                        ability_controller.unwrap_or(state.active_player),
                         replacement_applied.clone(),
                         proposed_damage_source,
                         proposed_event_target.clone(),
@@ -10236,17 +10301,26 @@ fn continue_replacement_impl(
         // per-source bookkeeping is needed here.
 
         // Extract the accept/decline effects before applying
-        let (accept_effect, decline_effect, may_cost) = replacement_definition_for_id(state, rid)
-            .map(|repl| {
-                let accept = repl.execute.clone();
-                let decline = replacement_mode_decline_cloned(&repl.mode);
-                let may_cost = match &repl.mode {
-                    ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
-                    ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
-                };
-                (accept, decline, may_cost)
-            })
-            .unwrap_or((None, None, None));
+        // CR 109.5: capture the replacing ability's controller alongside its
+        // branches, from the same definition read — the accept/decline
+        // continuation installed below is text on THIS object, so its "you" is
+        // this object's controller, not the affected object's.
+        let (accept_effect, decline_effect, may_cost, branch_controller) =
+            replacement_definition_for_id(state, rid)
+                .map(|repl| {
+                    let accept = repl.execute.clone();
+                    let decline = replacement_mode_decline_cloned(&repl.mode);
+                    let may_cost = match &repl.mode {
+                        ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
+                        ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
+                    };
+                    // Same authority the mandatory path uses, so an optional
+                    // replacement's accept/decline rider and a mandatory one's
+                    // execute rider can never disagree about who "you" is.
+                    let controller = replacement_ability_controller(state, rid, repl);
+                    (accept, decline, may_cost, Some(controller))
+                })
+                .unwrap_or((None, None, None, None));
 
         // CR 614.12a: on accept, pay the MayCost (skipped on a paid resume). A
         // `PausedForChoice` outcome means the payment surfaced an interactive
@@ -10416,6 +10490,10 @@ fn continue_replacement_impl(
                         applied: proposed.applied_set().clone(),
                         event_source: None,
                         event_target: None,
+                        // CR 109.5: same split as the mandatory stash — the
+                        // zone-change drain rebinds `source` to the entering /
+                        // moving object, so the branch's "you" needs its own slot.
+                        controller: branch_controller,
                     },
                     ResidentDrainPolicy::Replace,
                 );

@@ -6,9 +6,6 @@
 //! (`momir_emblem_creates_creature_token_with_matching_mv`) would fail if the
 //! `CreateTokenCopyFromPool` resolver or the emblem grant were reverted.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-
 use engine::game::deck_loading::momir_emblem_ability;
 use engine::game::scenario::GameRunner;
 use engine::types::ability::{
@@ -59,18 +56,14 @@ fn momir_state(pool: &[(u32, &str)]) -> (GameState, ObjectId) {
     state.priority_player = P0;
     state.waiting_for = WaitingFor::Priority { player: P0 };
 
-    // Populate the Momir pool directly.
-    let mut by_mv: BTreeMap<i32, Vec<String>> = BTreeMap::new();
-    let mut faces = std::collections::HashMap::new();
-    for (mv, name) in pool {
-        by_mv.entry(*mv as i32).or_default().push(name.to_string());
-        faces.insert(name.to_lowercase(), creature_face(name, *mv));
-    }
-    for names in by_mv.values_mut() {
-        names.sort();
-    }
-    state.momir_pool = by_mv;
-    state.momir_pool_faces = Arc::new(faces);
+    // Install a card database holding exactly the declared creatures: the
+    // emblem draws from `GameState::card_db` at resolution, so this IS the
+    // candidate set.
+    let faces: Vec<CardFace> = pool
+        .iter()
+        .map(|(mv, name)| creature_face(name, *mv))
+        .collect();
+    crate::support::install_synthetic_card_db(&mut state, &faces);
 
     // Grant the Momir emblem to P0.
     let emblem_id = engine::game::effects::create_emblem::grant_emblem(
@@ -281,8 +274,8 @@ fn momir_emblem_is_sorcery_speed() {
 }
 
 /// Building-block test: the `CreateTokenCopyFromPool` primitive with
-/// `Comparator::LE` exercises the BTreeMap range path (distinct from Momir's
-/// EQ keyed lookup) and creates a creature token of MV <= bound.
+/// `Comparator::LE` exercises the inequality arm of `face_is_eligible`
+/// (distinct from Momir's own `EQ`) and creates a creature token of MV <= bound.
 #[test]
 fn create_token_copy_from_pool_le_bound_oko_style() {
     let (mut state, emblem_id) =
@@ -342,26 +335,18 @@ fn create_token_copy_from_pool_applies_type_filter() {
     let (mut state, emblem_id) = momir_state(&[]);
     // Seed a custom MV-3 pool: two Goblins and one Wizard, all at the same mana
     // value so the comparator alone cannot disambiguate them.
-    let mut by_mv: BTreeMap<i32, Vec<String>> = BTreeMap::new();
-    by_mv.insert(
-        3,
-        vec![
-            "Pool Goblin A".to_string(),
-            "Pool Goblin B".to_string(),
-            "Pool Wizard".to_string(),
-        ],
-    );
-    let mut faces = std::collections::HashMap::new();
-    for name in ["Pool Goblin A", "Pool Goblin B"] {
-        let mut face = creature_face(name, 3);
-        face.card_type.subtypes = vec!["Goblin".to_string()];
-        faces.insert(name.to_lowercase(), face);
-    }
+    let mut faces: Vec<CardFace> = ["Pool Goblin A", "Pool Goblin B"]
+        .into_iter()
+        .map(|name| {
+            let mut face = creature_face(name, 3);
+            face.card_type.subtypes = vec!["Goblin".to_string()];
+            face
+        })
+        .collect();
     let mut wizard = creature_face("Pool Wizard", 3);
     wizard.card_type.subtypes = vec!["Wizard".to_string()];
-    faces.insert("pool wizard".to_string(), wizard);
-    state.momir_pool = by_mv;
-    state.momir_pool_faces = Arc::new(faces);
+    faces.push(wizard);
+    crate::support::install_synthetic_card_db(&mut state, &faces);
 
     let effect = Effect::CreateTokenCopyFromPool {
         owner: TargetFilter::Controller,
@@ -491,28 +476,116 @@ fn grant_emblem_installs_command_zone_activated_ability() {
     );
 }
 
-/// MP serialization: the pool fields are `#[serde(skip)]` — they must not appear
-/// in the serialized form and are rebuilt on rehydrate.
+/// MP serialization: `GameState::card_db` is `#[serde(skip)]` — the draw source
+/// is a local handle to the loaded database, never shipped on the wire. A peer
+/// deserializes without it and must have it reinstalled before the emblem can
+/// create anything, which is why every build/restore path calls
+/// `install_card_db`.
 #[test]
-fn momir_pool_is_not_serialized() {
+fn card_db_handle_is_not_serialized() {
     let (state, _emblem) = momir_state(&[(3, "Hill Giant"), (5, "Air Elemental")]);
-    assert!(!state.momir_pool.is_empty(), "precondition: pool populated");
+    assert!(
+        state.card_db.is_some(),
+        "precondition: the draw source is installed"
+    );
 
     let json = serde_json::to_string(&state).expect("serialize Momir state");
     assert!(
-        !json.contains("momir_pool"),
-        "momir_pool / momir_pool_faces must be #[serde(skip)] and absent from the wire form"
+        !json.contains("card_db"),
+        "the card database handle must be #[serde(skip)] and absent from the wire form"
     );
 
     let de: GameState = serde_json::from_str(&json).expect("deserialize Momir state");
     assert!(
-        de.momir_pool.is_empty(),
-        "a deserialized peer starts with an empty pool (rebuilt on rehydrate)"
+        de.card_db.is_none(),
+        "a deserialized peer starts with no draw source until install_card_db runs"
     );
-    // format_config survives, so the peer knows to rebuild the Momir pool.
+    // format_config survives, so the peer knows it is still a Momir game.
     assert_eq!(
         de.format_config.format,
         engine::types::format::GameFormat::Momir
+    );
+}
+
+/// A Momir emblem resolved on a state with no installed database creates no
+/// token, rather than panicking or erroring out of a live game (CR 609.3).
+/// This is the failure mode `install_card_db` exists to prevent, pinned so it
+/// stays a loud no-op instead of becoming a crash.
+#[test]
+fn missing_card_db_creates_no_token() {
+    let (mut state, emblem_id) = momir_state(&[(3, "Hill Giant")]);
+    state.card_db = None;
+
+    let effect = Effect::CreateTokenCopyFromPool {
+        owner: TargetFilter::Controller,
+        type_filter: TargetFilter::Any,
+        mv: Comparator::EQ,
+        mv_bound: QuantityExpr::Fixed { value: 3 },
+        selection: CardSelectionMode::Random,
+        count: QuantityExpr::Fixed { value: 1 },
+        tapped: false,
+        enters_attacking: false,
+    };
+    let ability = ResolvedAbility::new(effect, vec![], emblem_id, P0);
+    let mut events = Vec::new();
+    engine::game::effects::create_token_copy_from_pool::resolve(&mut state, &ability, &mut events)
+        .expect("a missing draw source resolves as a no-op, never an error");
+
+    assert!(
+        !state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .any(|o| o.is_token),
+        "no database means no candidates, so no token"
+    );
+}
+
+/// Determinism: the draw walks the database's fixed scan order and consumes one
+/// RNG word, so two states with the same seed and the same database draw the
+/// same creature. This is what lets peers and replays agree without the
+/// candidate set ever being serialized.
+#[test]
+fn same_seed_and_database_draw_the_same_creature() {
+    let pool = &[
+        (3, "Hill Giant"),
+        (3, "Gray Ogre"),
+        (3, "Pool Wizard"),
+        (3, "Air Elemental"),
+    ];
+    let draw_once = || -> String {
+        let (mut state, emblem_id) = momir_state(pool);
+        let effect = Effect::CreateTokenCopyFromPool {
+            owner: TargetFilter::Controller,
+            type_filter: TargetFilter::Any,
+            mv: Comparator::EQ,
+            mv_bound: QuantityExpr::Fixed { value: 3 },
+            selection: CardSelectionMode::Random,
+            count: QuantityExpr::Fixed { value: 1 },
+            tapped: false,
+            enters_attacking: false,
+        };
+        let ability = ResolvedAbility::new(effect, vec![], emblem_id, P0);
+        let mut events = Vec::new();
+        engine::game::effects::create_token_copy_from_pool::resolve(
+            &mut state,
+            &ability,
+            &mut events,
+        )
+        .expect("draw resolves");
+        state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|o| o.is_token)
+            .expect("a token is created")
+            .name
+            .clone()
+    };
+    assert_eq!(
+        draw_once(),
+        draw_once(),
+        "the same seed over the same database must draw the same creature"
     );
 }
 
@@ -520,16 +593,11 @@ fn momir_pool_is_not_serialized() {
 #[test]
 fn create_token_copy_from_pool_instant_sorcery_guard() {
     let mut state = GameState::new(FormatConfig::momir(), 2, 42);
-    let mut faces = std::collections::HashMap::new();
     let mut sorcery_face = creature_face("Sorcery Sham", 3);
     sorcery_face.card_type.core_types = vec![CoreType::Sorcery];
     sorcery_face.power = None;
     sorcery_face.toughness = None;
-    faces.insert("sorcery sham".to_string(), sorcery_face);
-    let mut by_mv: BTreeMap<i32, Vec<String>> = BTreeMap::new();
-    by_mv.insert(3, vec!["Sorcery Sham".to_string()]);
-    state.momir_pool = by_mv;
-    state.momir_pool_faces = Arc::new(faces);
+    crate::support::install_synthetic_card_db(&mut state, &[sorcery_face]);
 
     let emblem_id = engine::game::effects::create_emblem::grant_emblem(
         &mut state,

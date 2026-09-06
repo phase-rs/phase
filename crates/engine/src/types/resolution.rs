@@ -4686,6 +4686,11 @@ impl LegacyReplacementTailsWire {
                         applied: self.post_replacement_applied,
                         event_source: self.post_replacement_event_source,
                         event_target: self.post_replacement_event_target,
+                        // The pre-fold split-slot wire shape predates the
+                        // CR 109.5 controller slot; a migrated drain falls back
+                        // to the affected object's controller, exactly as it did
+                        // before the field existed.
+                        controller: None,
                     },
                     ResidentDrainPolicy::Replace,
                 );

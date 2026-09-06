@@ -572,6 +572,18 @@ fn effect_benefit_value(
             resolve_quantity(state, amount, ai_player, source_id).max(0) as f64
                 * penalties.self_cost_pay_life_per_point,
         ),
+        // CR 707.2 + CR 202.3: a token copy of a creature card with the chosen
+        // mana value. Priced X-AGNOSTICALLY at one card-equivalent: at the
+        // activation decision the player has not announced X yet
+        // (`ResolvedAbility::chosen_x` is `None`, so the `Variable("X")` bound
+        // resolves to 0), and pricing a payoff off a placeholder zero would be
+        // worse than pricing it off its shape. One card in hand becomes one
+        // creature on the battlefield, so `SINGLE_CARD_VALUE` is the honest
+        // floor; how big that creature should be is the scheduling question,
+        // which `MomirCurvePolicy` owns.
+        Effect::CreateTokenCopyFromPool { .. } => {
+            (recipient == RecipientClass::AiOnly).then_some(SINGLE_CARD_VALUE)
+        }
         _ => None,
     }
 }
@@ -972,6 +984,17 @@ fn effect_triviality(
             save_shape_triviality(state, ai_player, source_id, effect)
         }
         // No modeled board impact at all — the honest third answer.
+        // CR 707.2 + CR 202.3: a token that's a copy of a creature card chosen
+        // at random from the whole corpus (the Momir's Madness emblem). It is a
+        // real permanent, not an absence of evidence — leaving it `Unmodeled`
+        // priced the payoff at zero and made `SelfCostValuePolicy` hard-veto
+        // every activation whose discard met `REAL_COST_FLOOR`, which is every
+        // activation. Only the controller's own token is a benefit here.
+        Effect::CreateTokenCopyFromPool { .. } => match recipient {
+            RecipientClass::AiOnly => EffectTriviality::NonTrivial,
+            RecipientClass::OpponentOnly => EffectTriviality::Trivial,
+            RecipientClass::Mixed => EffectTriviality::NonTrivial,
+        },
         _ => EffectTriviality::Unmodeled,
     }
 }

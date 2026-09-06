@@ -3271,6 +3271,7 @@ mod tests {
                 applied: HashSet::new(),
                 event_source: Some(c0),
                 event_target: None,
+                controller: None,
             },
             ResidentDrainPolicy::Replace,
         );
@@ -3317,6 +3318,7 @@ mod tests {
                 applied: HashSet::new(),
                 event_target: Some(TargetRef::Object(c1)),
                 event_source: None,
+                controller: None,
             },
             ResidentDrainPolicy::Replace,
         );

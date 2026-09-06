@@ -1668,6 +1668,14 @@ pub(crate) fn filter_prop_contains(
         FilterProp::AnyOf { props } => props.iter().any(|p| filter_prop_contains(p, leaf)),
         // CR 109.4: the object-axis crossing into the player axis.
         FilterProp::ControllerMatches { player } => player_filter_contains(player, leaf),
+        // CR 109.4 + CR 120.1: same object-axis-into-player-axis crossing. The
+        // recipient scope is an `Option<PlayerFilter>` that can itself nest a
+        // `TargetFilter` (e.g. `OpponentDealtDamage { source }`), so it must be
+        // routed rather than treated as a leaf. `None` = any recipient, which
+        // nests nothing.
+        FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
+            .as_ref()
+            .is_some_and(|scope| player_filter_contains(scope, leaf)),
         // Leaves: no nested `TargetFilter`. (Props carrying only a `QuantityExpr`
         // magnitude are leaves HERE by the scope rule documented on
         // `filter_contains` — the quantity authority classifies those.)
@@ -1737,7 +1745,6 @@ pub(crate) fn filter_prop_contains(
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -12052,6 +12059,17 @@ mod tests {
                     count: Box::new(QuantityExpr::Fixed { value: 1 }),
                 }),
             }],
+            // CR 120.1: the damage-recipient scope is the same object-axis ->
+            // player-axis crossing, and the player scope can nest a source
+            // filter of its own, so the anaphor must be seen through both hops.
+            vec![FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::Any,
+                recipient: Some(PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::Any,
+                    source: Some(Box::new(TargetFilter::LastCreated)),
+                    min_sources: 1,
+                }),
+            }],
         ] {
             assert!(
                 filter_contains_last_created(&typed(props.clone())),
@@ -12068,6 +12086,20 @@ mod tests {
             FilterProp::Token,
         ])));
         assert!(!filter_contains_last_created(&typed(Vec::new())));
+        // A recipient scope that nests nothing, and an absent one, must both
+        // stay unseen — the new arm routes a payload, it does not report one.
+        assert!(!filter_contains_last_created(&typed(vec![
+            FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::Any,
+                recipient: Some(PlayerFilter::OpponentLostLife),
+            },
+        ])));
+        assert!(!filter_contains_last_created(&typed(vec![
+            FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::Any,
+                recipient: None,
+            },
+        ])));
         // The `LastZoneChanged` twin shares the traversal, so it must see the
         // same nesting and not confuse the two ledgers.
         assert!(filter_contains_last_zone_changed(&typed(vec![

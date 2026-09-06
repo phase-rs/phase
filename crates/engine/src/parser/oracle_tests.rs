@@ -7611,18 +7611,21 @@ fn land_equilibrium_parses_chained_sacrifice_replacement() {
         .execute
         .as_ref()
         .expect("replacement execute (the sacrifice rider)");
-    // The sacrifice target is now derived from the parsed gate type rather than a
-    // hardcoded `TypedFilter::land()`. For Land Equilibrium's own Oracle text the
-    // derivation must be byte-identical to the previous hardcoded filter — a land
-    // controlled by the entering player (ControllerRef::You), with no extra
-    // properties leaked from the type-phrase parse.
+    // The sacrifice target is derived from the parsed gate type rather than a
+    // hardcoded `TypedFilter::land()`, and scoped to the SPECIFIC entering
+    // opponent — "that player … sacrifices a land of their choice" — via the
+    // same `ControllerRef::ScopedPlayer` reference the applicability gate's LHS
+    // uses. CR 109.5: it is emphatically NOT `ControllerRef::You`, which names
+    // Land Equilibrium's own controller; that spelling only ever resolved to the
+    // entering player because the post-replacement drain used to bind
+    // `ability.controller` to the affected object's controller (issue #7086).
     let Effect::Sacrifice { target, .. } = &*execute.effect else {
         panic!("execute must be a Sacrifice; got {:?}", execute.effect);
     };
     assert_eq!(
         *target,
-        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
-        "sacrifice target must be byte-identical to a You-controlled land filter"
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::ScopedPlayer)),
+        "sacrifice target must be a land controlled by the SCOPED (entering) player"
     );
 }
 

@@ -38,6 +38,16 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 65 — `DraftMatchStart` now announces the exact Full-session identity for
+///      the spawned match. Draft reconnect uses the authenticated draft seat
+///      to attach that socket to the same Full-session lifetime, and Full
+///      follow-up frames carry the identity needed to reject stale-generation
+///      traffic. `DraftMatchStart.full_key` is a non-optional new field, so
+///      this is a parse bump, not a capability bump. Authored against 64 and
+///      renumbered here: #8592 claimed 64 for the entry below while this
+///      branch was open, and `check-protocol-version.mjs` could not catch the
+///      collision because it enforces that the Rust and TS constants AGREE,
+///      not that the number is UNCLAIMED. Lobby messages are unchanged.
 /// 64 — Retroactive bump for two new-tag changes that landed under 62/63
 ///      WITHOUT their own bump. Both are one-way parse breaks by the rule
 ///      entries 46, 51 and 62 state ("no serde default can rescue an unknown
@@ -359,7 +369,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 64;
+pub const PROTOCOL_VERSION: u32 = 65;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1105,12 +1115,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 64);
+        assert_eq!(PROTOCOL_VERSION, 65);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
-        // which is what refuses an older full-game peer whose GameState cannot
-        // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 63);
+        // which refuses an older full-game peer that cannot preserve the exact
+        // Full-session identity across draft match attachment and follow-ups.
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 64);
     }
 
     #[test]

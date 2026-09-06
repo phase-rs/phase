@@ -945,10 +945,9 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 
     // Momir Basic: grant each player a game-start command-zone emblem carrying
     // the random-creature-token activated ability (CR 114.1 / CR 113.1b). The
-    // grant runs BEFORE `rehydrate_game_from_card_db` populates the Momir pool
-    // (in `load_and_hydrate_decks`); this ordering is correct ONLY because
-    // `grant_emblem` does not read `momir_pool` / `momir_pool_faces` — those are
-    // resolution-time-only reads inside the effect resolver.
+    // emblem's random creature is drawn from `GameState::card_db` when the
+    // ability RESOLVES, so this grant has no ordering dependency on the card
+    // database being installed yet.
     if state.format_config.format == crate::types::format::GameFormat::Momir {
         for i in 0..state.players.len() {
             let player = PlayerId(i as u8);
