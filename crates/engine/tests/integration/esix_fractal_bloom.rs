@@ -517,12 +517,28 @@ fn accept_creates_copies_of_the_chosen_creature() {
         );
         assert!(
             !has_subtype(copy, "Soldier"),
-            "the original token spec was REPLACED, not created alongside"
+            "each copy carries only the chosen creature's copiable subtypes"
         );
     }
     assert!(
         tokens_named(&runner, "Wrong Ox", P0).is_empty(),
         "the equally legal decoy that was NOT answered must not be copied"
+    );
+    // CR 614.6: a replaced event never happens. The loop above iterates the
+    // substitute copies, whose subtypes `set_copiable_subtype` hard-sets to
+    // Ox, so only a battlefield-wide scan separates "replaced" from "created
+    // alongside".
+    let soldiers: Vec<&GameObject> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| o.is_token && has_subtype(o, "Soldier"))
+        .collect();
+    assert!(
+        soldiers.is_empty(),
+        "the original token spec was REPLACED, not created alongside; got {:?}",
+        soldiers.iter().map(|o| o.name.clone()).collect::<Vec<_>>()
     );
 }
 
@@ -895,9 +911,7 @@ fn decline_keeps_the_original_tokens_and_consumes_the_window() {
 /// (a) a second creation on the same turn does not prompt;
 /// (b) after the controller's NEXT turn begins, it prompts again — the positive
 ///     reach-guard, and the assertion that reverts if the turn reset is removed;
-/// (c) a creation on the intervening OPPONENT's turn neither prompts nor
-///     consumes the controller's next-turn window. That is the multi-authority
-///     case: an opponent-turn creation must not be what spends the window.
+/// (c) a creation on the intervening OPPONENT's turn does not prompt.
 #[test]
 fn window_resets_on_the_controllers_next_turn_only() {
     let mut scenario = GameScenario::new();
@@ -986,6 +1000,21 @@ fn no_legal_copy_source_does_not_strand_the_game() {
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "the game must settle at Priority rather than strand; got {:?}",
         runner.state().waiting_for
+    );
+    // CR 614.6: the event was replaced, so it never happens. The assertions
+    // above read only `waiting_for`, which cannot distinguish "zero tokens
+    // created" from "the three original Soldiers were created after all".
+    let soldiers: Vec<&GameObject> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| o.is_token && has_subtype(o, "Soldier"))
+        .collect();
+    assert!(
+        soldiers.is_empty(),
+        "an empty copy pool creates no tokens, not the original spec; got {:?}",
+        soldiers.iter().map(|o| o.name.clone()).collect::<Vec<_>>()
     );
 }
 
@@ -1089,10 +1118,11 @@ fn install_doubling_season(state: &mut GameState, controller: PlayerId) -> Objec
 ///
 /// The substitute copies are themselves a token creation, so without the
 /// inherited applied set Esix would see them as a fresh `CreateToken` and
-/// re-prompt — compounding the copies. `set_replacement_applied_recursive` in
-/// `handle_copy_token_source_choice` is the SOLE carrier of that suppression on
-/// this route; drop it and the copy-source prompt count below exceeds 1 and/or
-/// the copy count compounds.
+/// re-prompt — compounding the copies. That applied set reaches the substitute
+/// batch through `state.post_replacement_token_choice_applied`: written by
+/// `continue_replacement_impl`'s copy-substitution branch, read by
+/// `token_copy::drain_copy_token_resolution` when it builds each batch's
+/// `ProposedEvent::CreateToken`.
 ///
 /// Multi-authority hostile fixture: Doubling Season is a DIFFERENT source's
 /// mandatory doubler. CR 614.5 suppresses only Esix's own re-entry, so Doubling

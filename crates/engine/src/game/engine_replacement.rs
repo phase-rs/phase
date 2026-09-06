@@ -1879,17 +1879,17 @@ fn handle_persist_chosen_attribute_choice(
 /// copy tail of a first-time token substitution whose copy source is chosen at
 /// resolution (Esix, Fractal Bloom).
 ///
-/// The `active_replacements` scan is THE ONLY route, not a preference over some
-/// other one. By the time this runs, the post-replacement drain has already
-/// moved its continuation out: `begin_dispatch` does
+/// The `active_replacements` scan re-derives the tail rather than reading a
+/// parked continuation, because by the time this runs the post-replacement
+/// drain has already moved its continuation out: `begin_dispatch` does
 /// `mem::replace(&mut drain.status, DrainStatus::Dispatching)` and hands the
 /// continuation to the caller, `DrainStatus::Paused` carries no payload, and
 /// `ready_continuation()` returns `None` for both `Dispatching` and `Paused`.
 /// There is no parked continuation left to read, so the tail is re-derived from
 /// the source's live replacements instead.
 ///
-/// The predicate goes through the single authority `ability_tree_copies_tokens`,
-/// so this cannot disagree with the `purpose` the raise site stamped.
+/// The predicate goes through `ability_tree_copies_tokens` — the same authority
+/// the raise site used to stamp `purpose`.
 fn copy_token_tail_for_source(
     state: &GameState,
     source_id: ObjectId,
@@ -1958,13 +1958,19 @@ fn handle_copy_token_source_choice(
         vec![TargetRef::Object(target_id)],
     );
     // CR 614.5: a replacement effect gets only one opportunity to affect an
-    // event. The substitute copies must not re-enter Esix's own replacement, so
-    // this resolution inherits the originating event's applied set. This scan
-    // route does not inherit the drain's `applied` set the way a parked
-    // continuation would, so THIS CALL IS THE SOLE CARRIER of that
-    // self-suppression — dropping it lets the copies re-prompt or compound.
-    // Stamped on the RESOLVED ability (the receiver `set_replacement_applied_
-    // recursive` is defined on), mirroring the raise site's own
+    // event. The substitute copies must not re-enter Esix's own replacement.
+    // The carrier of that self-suppression on this path is
+    // `state.post_replacement_token_choice_applied`:
+    // `token_copy::drain_copy_token_resolution` seeds each substitute batch's
+    // `applied` set from that state field, not from the resolved ability.
+    //
+    // This stamp is defensive and currently inert here. The tail is a leaf
+    // `Effect::CopyTokenOf` with no `sub_ability` / `else_ability`, so
+    // `set_replacement_applied_recursive` writes only the tail's own
+    // `replacement_applied`, which `token_copy::resolve` does not read. Kept
+    // because it is the shape the sibling post-replacement raise sites in this
+    // file use: stamped on the RESOLVED ability (the receiver
+    // `set_replacement_applied_recursive` is defined on), in the same
     // `build_resolved_from_def_with_targets` → stamp order.
     ability.set_replacement_applied_recursive(
         state
