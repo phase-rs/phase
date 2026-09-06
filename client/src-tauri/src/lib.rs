@@ -12,6 +12,8 @@ mod native_bridge;
 #[cfg(desktop)]
 mod native_engine;
 mod native_engine_contract;
+#[cfg(desktop)]
+mod update_authority;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // WebKitGTK's dmabuf renderer renders blank frames when the GPU import
@@ -48,7 +50,20 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        // The plugin stays registered everywhere so the `check()` command the
+        // web app calls always exists — an unregistered plugin rejects the
+        // call, and client/src/pwa/tauriUpdater.ts surfaces that rejection as a
+        // visible update error. Refusing the release instead resolves to "no
+        // update available", which that same lifecycle already treats as the
+        // quiet, healthy outcome.
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .default_version_comparator(|current, candidate| {
+                    update_authority::UpdateAuthority::detect()
+                        .should_install(&current, &candidate.version)
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             audio_probe::audio_boot_health,
@@ -268,6 +283,76 @@ mod tests {
         assert_eq!(window.height, 800.0);
         assert!(window.resizable);
         assert!(window.maximized);
+    }
+
+    /// `update_authority` reaches the running app through exactly one call: the
+    /// updater plugin's version comparator. Drop that call and the module still
+    /// compiles, its own unit tests still pass, and self-update is silently
+    /// restored inside the Flatpak sandbox, where `/app` is read-only. No test
+    /// of the module can observe that, so pin the wiring here — the same reason
+    /// the generated Android Gradle invariants are pinned below.
+    #[test]
+    fn updater_plugin_defers_to_the_update_authority() {
+        // Only the production half of this file, because the needles below are
+        // themselves string literals in this module: matching the whole file
+        // would match the test's own array and pass with the wiring deleted.
+        let source = include_str!("lib.rs")
+            .split("mod tests")
+            .next()
+            .expect("split always yields a first element");
+        for required in [
+            "tauri_plugin_updater::Builder::new()",
+            ".default_version_comparator(",
+            "update_authority::UpdateAuthority::detect()",
+            ".should_install(",
+        ] {
+            assert!(
+                source.contains(required),
+                "updater registration lost required invariant: {required}"
+            );
+        }
+    }
+
+    /// Flatpak keys the desktop entry, the icons and the AppStream component on
+    /// the app-id, and Tauri names the window's WM class from the identifier.
+    /// If the two drift the package still builds and installs, but launches
+    /// into an unmatched window with no icon, so pin them together.
+    #[test]
+    fn flatpak_manifest_app_id_matches_the_tauri_identifier() {
+        let identifier = serde_json::from_str::<tauri::Config>(include_str!("../tauri.conf.json"))
+            .unwrap()
+            .identifier;
+        let manifest = include_str!("../../../packaging/flatpak/rs.phase.app.yml");
+        assert!(
+            manifest
+                .lines()
+                .any(|line| line.trim() == format!("app-id: {identifier}")),
+            "packaging/flatpak/rs.phase.app.yml must declare app-id: {identifier}"
+        );
+        for asset in [
+            include_str!("../../../packaging/flatpak/rs.phase.app.desktop"),
+            include_str!("../../../packaging/flatpak/rs.phase.app.metainfo.xml"),
+        ] {
+            assert!(
+                asset.contains(&identifier),
+                "flatpak asset must reference the {identifier} app-id"
+            );
+        }
+        // Flatpak exports a desktop entry, an icon and a metainfo component only
+        // when each is installed under the app-id name, so the install
+        // destinations are the part that actually decides whether the launcher
+        // works. Declaring the right app-id while installing to the old file
+        // names silently exports nothing.
+        for destination in [
+            format!("{identifier}.desktop"),
+            format!("{identifier}.metainfo.xml"),
+            format!("{identifier}.png"),
+        ] {
+            assert!(
+                manifest.contains(&destination),
+                "rs.phase.app.yml must install {destination} for flatpak to export it"
+            );
+        }
     }
 
     #[test]

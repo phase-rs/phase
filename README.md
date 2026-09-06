@@ -133,8 +133,10 @@ cd client && pnpm install && pnpm dev # Start frontend
 WebKitGTK has no audio stack of its own — the desktop app's sound effects and
 music are GStreamer pipelines it assembles at runtime. The **AppImage bundles
 that runtime itself** (`bundle.linux.appimage.bundleMediaFramework`), so it
-needs nothing installed. The **`.deb` declares it** and apt pulls it in. Running
-from source, or repackaging for another distribution, needs these installed:
+needs nothing installed. The **`.deb` declares it** and apt pulls it in. The
+**Flatpak inherits it from `org.gnome.Platform`** (see [Flatpak](#flatpak)).
+Running from source, or repackaging for another distribution, needs these
+installed:
 
 ```bash
 sudo apt-get install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
@@ -150,6 +152,72 @@ Release-time verification that the shipped AppImage's bundled plugin set really
 resolves those elements is tracked separately, in
 [#8357](https://github.com/phase-rs/phase/issues/8357) — it lives in the release
 workflow, which is maintainer-owned.
+
+### Flatpak
+
+`packaging/flatpak/` holds a Flatpak manifest for the desktop shell and a
+`build-local.sh` that builds it from an already-released `.deb` or `.AppImage`:
+
+```bash
+./packaging/flatpak/build-local.sh --appimage ~/Downloads/Phase-Desktop-Linux-x86_64.AppImage --install
+```
+
+That needs a release whose shell already carries the update guard described
+below; the script refuses older artifacts rather than package them. Run
+`--help` for the full options.
+
+**Why a third Linux artifact.** The two existing ones each leave users out. The
+AppImage pegs a CPU core at idle on the NVIDIA proprietary driver, and the
+`.deb` installs cleanly only on Debian-family distributions — everyone else
+needs the AppImage or a conversion workaround. A Flatpak covers both gaps at
+once: it installs the same way on any distribution that has `flatpak`, and it
+inherits a working WebKitGTK and GStreamer stack from the runtime.
+
+It compiles nothing. Every library `phase-tauri` links against is already in
+`org.gnome.Platform//50`, so the script stages the exact binary from a release
+artifact — the packaged binary stays identical to the one `.deb`/`.AppImage`
+users run — and the package inherits the runtime's WebKitGTK and GStreamer
+plugin set instead of vendoring its own. Concretely, that buys three things —
+the first from the packaging format, the other two from that inheritance:
+
+- **Distribution coverage.** The `.deb` is Debian-family only. A Flatpak is the
+  one artifact that installs identically on Fedora, openSUSE, Arch, the
+  immutable/atomic desktops, and Debian/Ubuntu alike, without asking the user
+  to convert a package or fall back to the AppImage.
+- **NVIDIA idle CPU ([#8614](https://github.com/phase-rs/phase/issues/8614)).**
+  The AppImage's bundled, Ubuntu-built WebKitGTK burns close to a full core at
+  idle on the NVIDIA proprietary driver. Measured on the reporter's machine, the
+  Flatpak idles in the same range as a healthy host-WebKit build, while still
+  rendering on the NVIDIA driver rather than falling back to software. The root
+  cause is still unknown — this routes around the bug rather than fixing it, and
+  the measurement covers one machine, one driver version, and one distribution.
+  The AppImage is unaffected on other GPU stacks, so this is not a deprecation —
+  but **NVIDIA users are the ones to point here.**
+- **Audio ([#8615](https://github.com/phase-rs/phase/issues/8615)).** The
+  runtime supplies every element the section above lists, `avdec_aac` included,
+  from the base runtime rather than the optional
+  `org.freedesktop.Platform.codecs-extra` extension. (That is the decoder whose
+  absence makes the AppImage silent; end-to-end playback in the Flatpak has not
+  been verified. The AppImage-side fix is tracked separately.)
+
+A packaged shell must not self-update: `/app` is read-only and `flatpak update`
+owns upgrades. `client/src-tauri/src/update_authority.rs` detects the sandbox
+and declines every release the updater offers. That guard is compiled **into the
+shell binary**, so it only holds for artifacts built from a release that
+contains it — `build-local.sh` refuses to stage an older binary rather than
+produce a package that tries to rewrite its own read-only `/app`. Most releases
+do not touch the package at all: the shell is a thin bootstrap that loads the
+current web channel over the network, so web-app releases arrive without any
+package update.
+
+The package is X11-only — it pins `GDK_BACKEND=x11` and grants no Wayland
+socket, so a Wayland session needs Xwayland (the default nearly everywhere).
+
+CI does not build this package today, so there is no prebuilt Flatpak for users
+to install yet — the manifest and script are for local and manual builds. Adding
+a build step to the release workflow, which is maintainer-owned, is what would
+attach a `.flatpak` to each release and make this an artifact users can actually
+get.
 
 ### Android APKs
 
