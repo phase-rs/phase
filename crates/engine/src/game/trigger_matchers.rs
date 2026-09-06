@@ -781,8 +781,8 @@ fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
         // predicate ("deals damage to a player who has more life than you") is a
         // player recipient, never an object one. Decided, not defaulted: the
         // `_ => false` tail below would silently misclassify it as an object
-        // filter. Unreachable today — no printed card produces this shape — but
-        // pinned by a unit test so a future flip is deliberate.
+        // filter. Cartographer's Hawk exercises this event-time player-relative
+        // damage-recipient shape; the unit test keeps future changes deliberate.
         TargetFilter::PlayerMatching { .. } => true,
         _ => false,
     }
@@ -5411,8 +5411,8 @@ mod tests {
     /// predicate as a PLAYER recipient. Decided, not defaulted: the match ends
     /// in `_ => false`, so nothing but this pin records the decision.
     ///
-    /// Unreachable today (no printed card produces a `PlayerMatching` damage
-    /// recipient), which is precisely why it is pinned — a future flip must be
+    /// Cartographer's Hawk produces a `PlayerMatching` damage recipient for its
+    /// event-time player-relative trigger; this pin keeps future changes
     /// deliberate.
     #[test]
     fn player_matching_is_a_player_scope_damage_recipient() {

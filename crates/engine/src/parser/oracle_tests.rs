@@ -7,8 +7,8 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
-    PlayerRelation, SpellStackToGraveyardReplacement,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment,
+    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::triggers::AttackTargetFilter;
@@ -27220,6 +27220,194 @@ fn owlbear_cub_attacked_player_land_threshold_predicate_is_bound() {
     };
     assert!(typed.type_filters.contains(&TypeFilter::Land));
     assert_eq!(attack.condition, None);
+}
+
+/// Issue #8391 — Cartographer's Hawk's recipient-relative land comparison is
+/// part of the combat-damage event, not an intervening-if condition. The
+/// complete, verbatim Oracle text also pins the existing bounce/search chain.
+#[test]
+fn cartographers_hawk_damage_recipient_predicate_is_bound_to_the_event() {
+    let parsed = parse(
+        "Flying\nWhen this creature deals combat damage to a player who controls more lands than you, return it to its owner's hand. If you do, you may search your library for a Plains card, put it onto the battlefield tapped, then shuffle.",
+        "Cartographer's Hawk",
+        &[Keyword::Flying],
+        &["Creature"],
+        &["Bird"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Cartographer's Hawk must parse without an Unimplemented effect: {parsed:#?}"
+    );
+
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::DamageDone)
+        .expect("Cartographer's Hawk must retain its combat-damage trigger");
+    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(trigger.valid_source, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        trigger.condition, None,
+        "the event predicate is not CR 603.4"
+    );
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                comparator: Comparator::GT,
+                count: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Land).controller(ControllerRef::You),
+                        ),
+                    },
+                }),
+            }),
+        }),
+        "the damaged player must be compared with the trigger controller"
+    );
+
+    let bounce = trigger
+        .execute
+        .as_deref()
+        .expect("the trigger must retain its effect chain");
+    assert!(
+        matches!(
+            bounce.effect.as_ref(),
+            Effect::Bounce {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "Cartographer's Hawk must begin by returning itself: {bounce:#?}"
+    );
+    let search = bounce
+        .sub_ability
+        .as_deref()
+        .expect("the successful bounce must continue to the optional Plains search");
+    assert!(search.optional, "\"you may search\" must remain optional");
+    assert!(matches!(
+        search.effect.as_ref(),
+        Effect::SearchLibrary { .. }
+    ));
+    let put_plains = search
+        .sub_ability
+        .as_deref()
+        .expect("the search must continue to putting the chosen Plains onto the battlefield");
+    assert!(matches!(
+        put_plains.effect.as_ref(),
+        Effect::ChangeZone {
+            enter_tapped: crate::types::zones::EtbTapState::Tapped,
+            ..
+        }
+    ));
+    assert!(matches!(
+        put_plains
+            .sub_ability
+            .as_deref()
+            .map(|definition| definition.effect.as_ref()),
+        Some(Effect::Shuffle { .. })
+    ));
+}
+
+/// The generic subject-led and article/source-led production routes must emit
+/// the same relative-recipient filter. The negative rows ensure neither route
+/// silently degrades an unmodelled `who` clause to its broad player noun.
+#[test]
+fn damage_recipient_relative_predicates_have_route_parity_and_fail_closed() {
+    let expected = TargetFilter::PlayerMatching {
+        player: Box::new(PlayerFilter::ControlsCount {
+            relation: PlayerRelation::All,
+            filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            comparator: Comparator::GT,
+            count: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Land).controller(ControllerRef::You),
+                    ),
+                },
+            }),
+        }),
+    };
+    for (name, text) in [
+        (
+            "Generic Damage Recipient",
+            "Whenever ~ deals combat damage to a player who controls more lands than you, draw a card.",
+        ),
+        (
+            "Article Damage Recipient",
+            "Whenever a creature deals combat damage to a player who controls more lands than you, draw a card.",
+        ),
+    ] {
+        let parsed = parse(text, name, &[], &["Creature"], &[]);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::DamageDone)
+            .unwrap_or_else(|| panic!("{name} must parse as DamageDone: {parsed:#?}"));
+        assert_eq!(trigger.valid_target, Some(expected.clone()));
+        assert_eq!(trigger.condition, None);
+        assert!(
+            !parsed_has_unimplemented(&parsed),
+            "{name}: supported recipient predicate must not leave an Unimplemented effect: {parsed:#?}"
+        );
+    }
+
+    for (name, text) in [
+        (
+            "Unsupported generic recipient predicate",
+            "Whenever ~ deals combat damage to a player who has drawn three cards this turn, draw a card.",
+        ),
+        (
+            "Partial generic recipient predicate",
+            "Whenever ~ deals combat damage to a player who controls more lands than you and controls a Forest, draw a card.",
+        ),
+        (
+            "Opponent recipient predicate",
+            "Whenever a creature deals combat damage to an opponent who controls more lands than you, draw a card.",
+        ),
+    ] {
+        let parsed = parse(text, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .all(|trigger| matches!(trigger.mode, TriggerMode::Unknown(_))),
+            "{name}: an unmodelled recipient predicate must be terminally Unknown: {parsed:#?}"
+        );
+        assert!(
+            !parsed.triggers.iter().any(|trigger| {
+                trigger.mode == TriggerMode::DamageDone
+                    && matches!(
+                        trigger.valid_target,
+                        None | Some(TargetFilter::Player) | Some(TargetFilter::Typed(_))
+                    )
+            }),
+            "{name}: must not retain a broad damage-recipient filter: {parsed:#?}"
+        );
+    }
+
+    for (name, text) in [
+        (
+            "Plain player recipient",
+            "Whenever ~ deals combat damage to a player, draw a card.",
+        ),
+        (
+            "Plain opponent recipient",
+            "Whenever a creature deals combat damage to an opponent, draw a card.",
+        ),
+    ] {
+        let parsed = parse(text, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .any(|trigger| trigger.mode == TriggerMode::DamageDone),
+            "{name}: an unqualified recipient must remain supported: {parsed:#?}"
+        );
+    }
 }
 
 /// V11 — consume-on-success: a `who`-headed clause the predicate grammar cannot

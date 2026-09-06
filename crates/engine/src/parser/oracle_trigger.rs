@@ -10,7 +10,7 @@ use nom::Parser;
 use super::oracle_effect::conditions::source_saddled_filter;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
-    lower_effect_chain_ir, parse_attacked_player_relative_clause, parse_effect_chain_ir,
+    lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause,
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
 use super::oracle_ir::ast::parsed_clause;
@@ -10315,6 +10315,14 @@ fn make_base() -> TriggerDefinition {
         .trigger_zones(vec![Zone::Battlefield])
 }
 
+fn unknown_trigger_definition(description: &str) -> (TriggerMode, TriggerDefinition) {
+    let mode = TriggerMode::Unknown(description.to_string());
+    let mut def = make_base();
+    def.mode = mode.clone();
+    def.description = Some(description.to_string());
+    (mode, def)
+}
+
 /// CR 202.3 + CR 208.1: Spell-cast quality suffix comparing mana value and/or
 /// power/toughness against the source's chosen number (Talion class).
 fn parse_spell_chosen_number_quality(spell_clause: &str) -> Option<TypedFilter> {
@@ -11672,6 +11680,40 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
     .parse(rest)
 }
 
+/// CR 603.1 + CR 603.2: A relative clause in a damage trigger's recipient
+/// ("to a player who …") narrows the event's damaged player. It is evaluated
+/// while matching that event through `valid_target`, rather than installed as
+/// an intervening-if `condition` that CR 603.4 would re-check on resolution.
+fn parse_damage_player_relative_recipient<'a>(
+    after_damage: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, TargetFilter> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("to ").parse(after_damage.trim_start())?;
+    let (rest, relation) = value(PlayerRelation::All, tag("a player")).parse(rest)?;
+    let (rest, _) = space1.parse(rest)?;
+    let (rest, player) = parse_player_relative_clause(rest, relation, ctx)?;
+    let (rest, ()) = nom_primitives::peek_clause_terminator(rest)?;
+    Ok((
+        rest,
+        TargetFilter::PlayerMatching {
+            player: Box::new(player),
+        },
+    ))
+}
+
+/// Returns whether a recognized ordinary damage-recipient noun leaves a
+/// `who`-headed predicate that this route did not model. The zero-consumption
+/// peek makes that residual a terminal unknown rather than silently retaining
+/// the broad player filter.
+fn has_unmodelled_damage_recipient_predicate(after_damage: &str) -> bool {
+    let Ok((remainder, _)) = parse_damage_to_qualifier_with_rest(after_damage) else {
+        return false;
+    };
+    peek(preceded(space1, tag::<_, _, OracleError<'_>>("who ")))
+        .parse(remainder)
+        .is_ok()
+}
+
 /// CR 120.1 + CR 208.1 + CR 603.4: Parse the full Taii Wakeen recipient shape —
 /// `"to <object> equal to that <object>'s toughness|power"` — atomically. Only
 /// succeeds when an object recipient is immediately followed by the equal-to-P/T
@@ -12472,6 +12514,10 @@ fn try_parse_event(
                 scope: DamageAmountScope::PerSource,
             });
             def.valid_source = Some(subject.clone());
+            if let Ok((_, filter)) = parse_damage_player_relative_recipient(after_damage, ctx) {
+                def.valid_target = Some(filter);
+                return Some((TriggerMode::DamageDone, def));
+            }
             // CR 120.1 + CR 208.1 + CR 603.4: Taii Wakeen's damage==recipient-P/T
             // shape ("to <object> equal to that <object>'s toughness/power") is
             // tried first and atomically — it succeeds only when the object
@@ -12513,6 +12559,9 @@ fn try_parse_event(
                 // Ordinary player recipient ("to a player" / "to an opponent" /
                 // …) — unchanged from the pre-Taii behavior.
                 def.valid_target = Some(filter);
+            }
+            if has_unmodelled_damage_recipient_predicate(after_damage) {
+                return Some(unknown_trigger_definition(full_lower));
             }
             return Some((TriggerMode::DamageDone, def));
         }
@@ -12676,7 +12725,7 @@ fn try_parse_event(
                 // is a real clause boundary, checked with the shared
                 // `peek_clause_terminator` authority; anything else falls into
                 // the SAME declined branch as a total parse failure.
-                let modelled = parse_attacked_player_relative_clause(after_noun, relation, ctx)
+                let modelled = parse_player_relative_clause(after_noun, relation, ctx)
                     .ok()
                     .filter(|(remainder, _)| {
                         nom_primitives::peek_clause_terminator(remainder).is_ok()
@@ -14175,6 +14224,14 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
     def.mode = TriggerMode::DamageDone;
     def.damage_kind = damage_kind;
     def.valid_source = Some(source_filter);
+    let mut recipient_ctx = ParseContext::default();
+    if let Ok((_, filter)) =
+        parse_damage_player_relative_recipient(after_damage, &mut recipient_ctx)
+    {
+        def.valid_target = Some(filter);
+        def.damage_amount = threshold;
+        return Some((TriggerMode::DamageDone, def));
+    }
     // CR 120.1 + CR 208.1 + CR 603.4: Taii Wakeen's damage==recipient-P/T shape
     // ("to <object> equal to that <object>'s toughness/power"). Tried first and
     // atomically — succeeds only when an object recipient is immediately
@@ -14228,6 +14285,9 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
     // but is not one of this parser's recipient qualifiers, leave the line for
     // narrower parsers such as "a source deals damage to this creature".
     let valid_target = parse_damage_to_qualifier(after_damage);
+    if has_unmodelled_damage_recipient_predicate(after_damage) {
+        return Some(unknown_trigger_definition(lower));
+    }
     let has_recipient_tail = preceded(opt(space1), tag::<_, _, OracleError<'_>>("to "))
         .parse(after_damage)
         .is_ok();

@@ -148,7 +148,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Cantor of the Refrain
 - Captain America's Shield
 - Captain N'ghathrod
-- Cartographer's Hawk
 - Cathedral Membrane
 - Cemetery Prowler
 - Cephalid Shrine

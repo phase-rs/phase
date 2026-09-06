@@ -98,6 +98,7 @@ mod call_forth_tempest_and_rootha;
 mod captain_america_throw;
 mod captain_marvel_apex_avenger;
 mod carmen_cruel_skymarcher_counter_lookback_8160;
+mod cartographers_hawk_relative_damage_recipient;
 mod cascade_intervening_if_pipeline;
 mod case_solve_condition;
 mod cast_during_resolution_pipeline;

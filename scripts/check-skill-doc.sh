@@ -109,76 +109,82 @@ EOF
 # ---------------------------------------------------------------------------
 # (2) Documented anchor symbols exist in the documented files.
 #     Format: "<grep pattern>\t<file>"
+#     The pattern is an ERE, and every row anchors its symbol with a trailing
+#     \b. Unanchored, a bare name absorbs its own longer siblings
+#     (`pub fn parse_number` also matches `parse_number_or_x`; `fn parse_target`
+#     also matches `parse_target_with_ctx`), so a row keeps passing after the
+#     symbol it names has been renamed away -- the exact drift this invariant
+#     exists to catch.
 # ---------------------------------------------------------------------------
 while IFS=$'\t' read -r pat file; do
-  grep -q "$pat" "$file" || err "documented symbol missing: '$pat' in $file"
+  grep -qE "$pat" "$file" || err "documented symbol missing: '$pat' in $file"
 done <<'EOF'
-fn parse_oracle_text	crates/engine/src/parser/oracle.rs
-fn parse_oracle_ir	crates/engine/src/parser/oracle.rs
-fn lower_oracle_ir	crates/engine/src/parser/oracle.rs
-fn peel_clause	crates/engine/src/parser/clause_shell.rs
-struct ClauseContext	crates/engine/src/parser/clause_shell.rs
-fn is_static_pattern	crates/engine/src/parser/oracle_classifier.rs
-fn is_replacement_pattern	crates/engine/src/parser/oracle_classifier.rs
-fn dispatch_line_nom	crates/engine/src/parser/oracle_dispatch.rs
-fn parse_effect_chain	crates/engine/src/parser/oracle_effect/mod.rs
-fn parse_effect_clause	crates/engine/src/parser/oracle_effect/mod.rs
-fn parse_imperative_effect	crates/engine/src/parser/oracle_effect/mod.rs
-fn split_leading_conditional	crates/engine/src/parser/oracle_effect/conditions.rs
-fn strip_leading_general_conditional	crates/engine/src/parser/oracle_effect/conditions.rs
-fn static_condition_to_ability_condition	crates/engine/src/parser/oracle_effect/conditions.rs
-fn static_condition_to_trigger_condition	crates/engine/src/parser/oracle_trigger.rs
-fn static_condition_to_restriction_condition	crates/engine/src/parser/oracle_condition.rs
-fn parse_keyword_line_core	crates/engine/src/parser/oracle_keyword.rs
-fn parse_router_keyword_line	crates/engine/src/parser/oracle_keyword.rs
-fn parse_granted_keyword_fragment	crates/engine/src/parser/oracle_keyword.rs
-fn extract_granted_keyword_list	crates/engine/src/parser/oracle_keyword.rs
-fn is_keyword_cost_line	crates/engine/src/parser/oracle_keyword.rs
-ROUTER_KEYWORD_CASES	crates/engine/src/parser/oracle_keyword.rs
-KNOWN_NOUN_PARAM_LEAKS	crates/engine/src/parser/oracle_keyword.rs
-fn strip_trailing_duration	crates/engine/src/parser/oracle_effect/lower.rs
-fn strip_leading_duration	crates/engine/src/parser/oracle_effect/lower.rs
-fn parse_search_library_details	crates/engine/src/parser/oracle_effect/search.rs
-fn parse_seek_details	crates/engine/src/parser/oracle_effect/search.rs
-fn parse_search_destination	crates/engine/src/parser/oracle_effect/search.rs
-fn strip_subject_clause	crates/engine/src/parser/oracle_effect/subject.rs
-fn try_parse_subject_predicate_ast	crates/engine/src/parser/oracle_effect/subject.rs
-fn try_parse_targeted_controller_gain_life	crates/engine/src/parser/oracle_effect/subject.rs
-fn parse_imperative_family_ast	crates/engine/src/parser/oracle_effect/imperative.rs
-fn parse_numeric_imperative_ast	crates/engine/src/parser/oracle_effect/imperative.rs
-fn parse_zone_counter_ast	crates/engine/src/parser/oracle_effect/imperative.rs
-fn split_clause_sequence	crates/engine/src/parser/oracle_effect/sequence.rs
-fn parse_followup_continuation_ast	crates/engine/src/parser/oracle_effect/sequence.rs
-fn try_parse_token	crates/engine/src/parser/oracle_effect/token.rs
-fn parse_animation_spec	crates/engine/src/parser/oracle_effect/animation.rs
-fn try_parse_put_counter	crates/engine/src/parser/oracle_effect/counter.rs
-fn try_parse_add_mana_effect	crates/engine/src/parser/oracle_effect/mana.rs
-fn parse_target	crates/engine/src/parser/oracle_target.rs
-fn parse_type_phrase_folding(	crates/engine/src/parser/oracle_target.rs
-fn parse_type_phrase(	crates/engine/src/parser/oracle_nom/target.rs
-fn parse_number	crates/engine/src/parser/oracle_util.rs
-fn contains_possessive	crates/engine/src/parser/oracle_util.rs
-fn contains_object_pronoun	crates/engine/src/parser/oracle_util.rs
-fn match_phrase_variants	crates/engine/src/parser/oracle_util.rs
-fn parse_trigger_line	crates/engine/src/parser/oracle_trigger.rs
-fn parse_static_line	crates/engine/src/parser/oracle_static/mod.rs
-fn parse_static_line_inner	crates/engine/src/parser/oracle_static/dispatch.rs
-fn parse_static_line_multi	crates/engine/src/parser/oracle_static/shared.rs
-fn parse_continuous_modifications	crates/engine/src/parser/oracle_static/keyword_grant.rs
-fn strip_casting_prohibition_subject	crates/engine/src/parser/oracle_static/restriction.rs
-fn parse_replacement_line	crates/engine/src/parser/oracle_replacement.rs
-fn parse_inner_condition	crates/engine/src/parser/oracle_nom/condition.rs
-pub fn parse_duration	crates/engine/src/parser/oracle_nom/duration.rs
-pub fn parse_quantity_ref	crates/engine/src/parser/oracle_nom/quantity.rs
-pub fn parse_number	crates/engine/src/parser/oracle_nom/primitives.rs
-pub fn parse_number_or_x	crates/engine/src/parser/oracle_nom/primitives.rs
-pub fn parse_color	crates/engine/src/parser/oracle_nom/primitives.rs
-pub fn parse_mana_cost	crates/engine/src/parser/oracle_nom/primitives.rs
-pub fn scan_at_word_boundaries	crates/engine/src/parser/oracle_nom/primitives.rs
-fn oracle_err	crates/engine/src/parser/oracle_nom/error.rs
-pub type OracleError	crates/engine/src/parser/oracle_nom/error.rs
-pub type OracleResult	crates/engine/src/parser/oracle_nom/error.rs
-pub fn nom_on_lower	crates/engine/src/parser/oracle_nom/bridge.rs
+fn parse_oracle_text\b	crates/engine/src/parser/oracle.rs
+fn parse_oracle_ir\b	crates/engine/src/parser/oracle.rs
+fn lower_oracle_ir\b	crates/engine/src/parser/oracle.rs
+fn peel_clause\b	crates/engine/src/parser/clause_shell.rs
+struct ClauseContext\b	crates/engine/src/parser/clause_shell.rs
+fn is_static_pattern\b	crates/engine/src/parser/oracle_classifier.rs
+fn is_replacement_pattern\b	crates/engine/src/parser/oracle_classifier.rs
+fn dispatch_line_nom\b	crates/engine/src/parser/oracle_dispatch.rs
+fn parse_effect_chain\b	crates/engine/src/parser/oracle_effect/mod.rs
+fn parse_effect_clause\b	crates/engine/src/parser/oracle_effect/mod.rs
+fn parse_imperative_effect\b	crates/engine/src/parser/oracle_effect/mod.rs
+fn split_leading_conditional\b	crates/engine/src/parser/oracle_effect/conditions.rs
+fn strip_leading_general_conditional\b	crates/engine/src/parser/oracle_effect/conditions.rs
+fn static_condition_to_ability_condition\b	crates/engine/src/parser/oracle_effect/conditions.rs
+fn static_condition_to_trigger_condition\b	crates/engine/src/parser/oracle_trigger.rs
+fn static_condition_to_restriction_condition\b	crates/engine/src/parser/oracle_condition.rs
+fn parse_keyword_line_core\b	crates/engine/src/parser/oracle_keyword.rs
+fn parse_router_keyword_line\b	crates/engine/src/parser/oracle_keyword.rs
+fn parse_granted_keyword_fragment\b	crates/engine/src/parser/oracle_keyword.rs
+fn extract_granted_keyword_list\b	crates/engine/src/parser/oracle_keyword.rs
+fn is_keyword_cost_line\b	crates/engine/src/parser/oracle_keyword.rs
+const ROUTER_KEYWORD_CASES\b	crates/engine/src/parser/oracle_keyword.rs
+const KNOWN_NOUN_PARAM_LEAKS\b	crates/engine/src/parser/oracle_keyword.rs
+fn strip_trailing_duration\b	crates/engine/src/parser/oracle_effect/lower.rs
+fn strip_leading_duration\b	crates/engine/src/parser/oracle_effect/lower.rs
+fn parse_search_library_details\b	crates/engine/src/parser/oracle_effect/search.rs
+fn parse_seek_details\b	crates/engine/src/parser/oracle_effect/search.rs
+fn parse_search_destination\b	crates/engine/src/parser/oracle_effect/search.rs
+fn strip_subject_clause\b	crates/engine/src/parser/oracle_effect/subject.rs
+fn try_parse_subject_predicate_ast\b	crates/engine/src/parser/oracle_effect/subject.rs
+fn try_parse_targeted_controller_gain_life\b	crates/engine/src/parser/oracle_effect/subject.rs
+fn parse_imperative_family_ast\b	crates/engine/src/parser/oracle_effect/imperative.rs
+fn parse_numeric_imperative_ast\b	crates/engine/src/parser/oracle_effect/imperative.rs
+fn parse_zone_counter_ast\b	crates/engine/src/parser/oracle_effect/imperative.rs
+fn split_clause_sequence\b	crates/engine/src/parser/oracle_effect/sequence.rs
+fn parse_followup_continuation_ast\b	crates/engine/src/parser/oracle_effect/sequence.rs
+fn try_parse_token\b	crates/engine/src/parser/oracle_effect/token.rs
+fn parse_animation_spec\b	crates/engine/src/parser/oracle_effect/animation.rs
+fn try_parse_put_counter\b	crates/engine/src/parser/oracle_effect/counter.rs
+fn try_parse_add_mana_effect\b	crates/engine/src/parser/oracle_effect/mana.rs
+fn parse_target\b	crates/engine/src/parser/oracle_target.rs
+fn parse_type_phrase_folding\b	crates/engine/src/parser/oracle_target.rs
+fn parse_type_phrase\b	crates/engine/src/parser/oracle_nom/target.rs
+fn parse_number\b	crates/engine/src/parser/oracle_util.rs
+fn contains_possessive\b	crates/engine/src/parser/oracle_util.rs
+fn contains_object_pronoun\b	crates/engine/src/parser/oracle_util.rs
+fn match_phrase_variants\b	crates/engine/src/parser/oracle_util.rs
+fn parse_trigger_line\b	crates/engine/src/parser/oracle_trigger.rs
+fn parse_static_line\b	crates/engine/src/parser/oracle_static/mod.rs
+fn parse_static_line_inner\b	crates/engine/src/parser/oracle_static/dispatch.rs
+fn parse_static_line_multi\b	crates/engine/src/parser/oracle_static/shared.rs
+fn parse_continuous_modifications\b	crates/engine/src/parser/oracle_static/keyword_grant.rs
+fn strip_casting_prohibition_subject\b	crates/engine/src/parser/oracle_static/restriction.rs
+fn parse_replacement_line\b	crates/engine/src/parser/oracle_replacement.rs
+fn parse_inner_condition\b	crates/engine/src/parser/oracle_nom/condition.rs
+pub fn parse_duration\b	crates/engine/src/parser/oracle_nom/duration.rs
+pub fn parse_quantity_ref\b	crates/engine/src/parser/oracle_nom/quantity.rs
+pub fn parse_number\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub fn parse_number_or_x\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub fn parse_color\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub fn parse_mana_cost\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub fn scan_at_word_boundaries\b	crates/engine/src/parser/oracle_nom/primitives.rs
+fn oracle_err\b	crates/engine/src/parser/oracle_nom/error.rs
+pub type OracleError\b	crates/engine/src/parser/oracle_nom/error.rs
+pub type OracleResult\b	crates/engine/src/parser/oracle_nom/error.rs
+pub fn nom_on_lower\b	crates/engine/src/parser/oracle_nom/bridge.rs
 EOF
 
 # ---------------------------------------------------------------------------
