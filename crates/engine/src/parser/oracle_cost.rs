@@ -791,16 +791,34 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             // permanents allowed to pay. Keep the folded union only when it
             // consumed the whole phrase; otherwise fall back to the unfolded
             // filter, which is the pre-existing and strictly narrower reading.
-            // SCOPE: this gates the FOLD's remainder only. The same `else` arm is
-            // also taken when the fold DECLINES (a decline returns `(base, rest)`
-            // untouched), and that case is byte-identical to the behaviour before
-            // this guard — `parse_target`'s own remainder stays discarded there,
-            // a wider seam this deliberately does not open. No shipping card's
-            // parse changes: all eight cost-position union cards consume the whole
-            // phrase, so this guards a future surface rather than a live misparse.
+            // The fold must account for the WHOLE phrase, and the two ways it can
+            // fail are not the same failure.
+            //
+            // `fold_article_led_type_union` builds an `Or` only when it actually
+            // fired; every decline path returns `(base, rest)` untouched. So:
+            //
+            //  * DECLINED — keep the base filter. That is byte-identical to the
+            //    behaviour before this guard, and it is the arm every shipping
+            //    sacrifice cost takes. `parse_target`'s own remainder stays
+            //    discarded here, a wider seam this deliberately does not open.
+            //  * FIRED but left a tail — the parser consumed a union leg and then
+            //    ran out of grammar, so it does not understand this cost. Emitting
+            //    the narrower filter would reject payments the card plainly allows
+            //    while still counting the card as SUPPORTED; an honest
+            //    `Unimplemented` keeps coverage truthful instead.
+            //
+            // No shipping card reaches the second arm: all eight cost-position
+            // union cards consume the whole phrase.
+            let base_was_typed = matches!(base, TargetFilter::Typed(_));
             let unfolded = base.clone();
             let (folded, folded_rest) = fold_article_led_type_union(base, rest);
-            if folded_rest.trim().is_empty() {
+            let fold_fired = base_was_typed && matches!(folded, TargetFilter::Or { .. });
+            if fold_fired {
+                if !folded_rest.trim().is_empty() {
+                    return AbilityCost::Unimplemented {
+                        description: text.trim().to_string(),
+                    };
+                }
                 folded
             } else {
                 unfolded
@@ -2128,69 +2146,63 @@ mod tests {
         }
     }
 
-    /// The union is accepted ONLY when it consumes the whole cost phrase.
+    /// The union is accepted ONLY when it consumes the whole cost phrase, and the
+    /// two ways that can fail are deliberately NOT the same failure.
     ///
-    /// A cost has nowhere to put a remainder: whatever the fold leaves behind is
-    /// a restriction that would silently vanish from the filter, widening the set
-    /// of permanents that can pay it (CR 601.2h). The error is asymmetric, which
-    /// is why the fallback is the NARROW reading — a filter that is too narrow
-    /// refuses a payment the card allows and surfaces as a visible refusal, while
-    /// one that is too broad lets the cost be paid with a permanent the card
-    /// never named.
+    /// `fold_article_led_type_union` builds an `Or` only when it actually fired;
+    /// every decline path returns `(base, rest)` untouched. So a DECLINE keeps the
+    /// base filter — byte-identical to the behaviour before this guard, and the arm
+    /// every shipping sacrifice cost takes. But a fold that FIRES and still leaves a
+    /// tail means the parser consumed a union leg and then ran out of grammar:
+    /// emitting the narrower filter there would reject payments the card plainly
+    /// allows while still counting the card as SUPPORTED, so it yields an honest
+    /// `Unimplemented` instead (CR 601.2h — the cost is paid with permanents
+    /// matching the cost's filter, and a filter the parser could not finish reading
+    /// is not that filter).
     ///
-    /// SCOPE, precisely. This gate covers the FOLD's remainder only. The same
-    /// `else` arm is taken whenever `fold_article_led_type_union` DECLINES, because
-    /// a decline returns `(base, rest)` untouched — and that case is byte-identical
-    /// to the behaviour before this guard. `parse_target`'s own remainder is still
-    /// discarded there, exactly as it was; that is a wider seam this change
-    /// deliberately does not open.
+    /// No shipping card reaches the `Unimplemented` arm: all EIGHT cost-position
+    /// union cards (Anje, Elite Headhunter, Mold Folk, Sivriss, Skophos Warleader,
+    /// Skullport Merchant, Slaughter-Priest of Mogis, Street Urchin) consume the
+    /// whole phrase. The arm is live code all the same — `parse_type_phrase_folding`
+    /// readily leaves a tail ("or a land", ", then draw a card", "unless you pay
+    /// {1}"), each of which folds successfully with a non-empty remainder.
     ///
-    /// No shipping card's parse changes: all EIGHT cost-position union cards
-    /// (Anje, Elite Headhunter, Mold Folk, Sivriss, Skophos Warleader, Skullport
-    /// Merchant, Slaughter-Priest of Mogis, Street Urchin) consume the whole
-    /// phrase and keep their union. The guard is live code all the same —
-    /// `parse_type_phrase_folding` readily leaves a tail ("or a land",
-    /// ", then draw a card", "unless you pay {1}") — so it is not a dead conjunct.
-    ///
-    /// Revert-failing: drop the `folded_rest.trim().is_empty()` check and the
-    /// first case below folds to `Or[Creature+Another, Artifact]`, silently
-    /// dropping the third leg from a cost the parser never understood.
+    /// Revert-failing: drop the remainder check and the first case below becomes
+    /// `Or[Creature+Another, Artifact]`, a false-green cost that silently drops the
+    /// third leg. Collapse the two arms into one and the third case below regresses
+    /// from a working `Sacrifice` to `Unimplemented`.
     #[test]
     fn sacrifice_cost_refuses_a_partially_consumed_union() {
-        // A three-leg surface the grammar only half-consumes: the union stops
-        // after the artifact and leaves "or a land" behind.
-        let cost = parse_oracle_cost("Sacrifice another creature or an artifact or a land");
-        let AbilityCost::Sacrifice(SacrificeCost { target, .. }) = &cost else {
-            panic!("expected a Sacrifice cost, got {cost:?}");
-        };
-        // Pin the POSITIVE fallback shape rather than only "not an Or". The guard's
-        // whole justification is that the fallback is strictly NARROWER, so a
-        // fallback that had lost `Another`, or widened to a bare permanent, has to
-        // fail here too — `!matches!(.., Or)` would accept both.
-        let TargetFilter::Typed(tf) = target else {
-            panic!("the fallback must be the unfolded typed filter, got {target:?}");
-        };
-        assert_eq!(
-            tf.type_filters,
-            vec![TypeFilter::Creature],
-            "the fallback keeps only the left conjunct's type: {tf:?}"
-        );
+        // FIRED but incomplete: the union stops after the artifact and leaves
+        // "or a land" behind, so the cost is not understood.
+        let partial = parse_oracle_cost("Sacrifice another creature or an artifact or a land");
         assert!(
-            tf.properties.contains(&FilterProp::Another),
-            "the fallback must keep `another` from the left conjunct: {tf:?}"
+            matches!(partial, AbilityCost::Unimplemented { .. }),
+            "a fold that fired but left a tail must stay honestly unimplemented \
+             rather than ship a narrower cost, got {partial:?}"
         );
 
-        // Positive reach-guard, same test: the fully consumed surface still folds,
-        // so the assertion above is about REMAINDER and not about the fold being
+        // DECLINED: no article-led type connector at all, so the fold never fires
+        // and the base filter is kept. This is the arm real cards take, and it must
+        // NOT be swept into the `Unimplemented` case above — Faunsbane Troll's own
+        // cost has exactly this shape.
+        let declined = parse_oracle_cost("Sacrifice an Aura attached to this creature");
+        assert!(
+            matches!(declined, AbilityCost::Sacrifice(_)),
+            "a declined fold must keep its Sacrifice cost, got {declined:?}"
+        );
+
+        // Positive reach-guard: the fully consumed surface still folds to both legs,
+        // so the assertions above are about REMAINDER, not about the fold being
         // broken outright.
         let ok = parse_oracle_cost("Sacrifice another creature or an artifact");
         let AbilityCost::Sacrifice(SacrificeCost { target: ok_t, .. }) = &ok else {
             panic!("expected a Sacrifice cost, got {ok:?}");
         };
-        assert!(
-            matches!(ok_t, TargetFilter::Or { .. }),
-            "reach-guard: the fully consumed union must still fold, got {ok_t:?}"
-        );
+        let TargetFilter::Or { filters } = ok_t else {
+            panic!("reach-guard: the fully consumed union must still fold, got {ok_t:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
     }
 
     /// CR 205.3a: the article-led right conjunct may be a SUBTYPE rather than a
