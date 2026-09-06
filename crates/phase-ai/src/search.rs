@@ -35,7 +35,8 @@ use engine::types::zones::Zone;
 use crate::card_value::{cmp_keep, intrinsic_value, keep_key};
 use crate::cast_facts::cast_facts_for_action;
 use crate::combat_ai::{
-    choose_attackers_with_targets_with_profile, choose_blockers_with_profile, CombatLookahead,
+    choose_attackers_with_targets_with_profile_and_deadline, choose_blockers_with_profile,
+    CombatLookahead,
 };
 use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
@@ -2477,6 +2478,12 @@ pub(crate) fn score_candidates_with_session(
     config: &AiConfig,
     session: &Arc<AiSession>,
 ) -> Vec<(GameAction, f64)> {
+    // Attacker declarations are public-state tactical choices. Running K hidden
+    // information samples cannot improve them, but would multiply the bounded
+    // multiplayer comparison and make a singleton support drift.
+    if matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. }) {
+        return score_candidates_core(state, ai_player, config, session, None);
+    }
     let k = config.search.determinization_samples;
     if k == 0 {
         // Unchanged path: no determinization, no shared-deadline override.
@@ -3162,6 +3169,9 @@ fn score_candidates_core(
     let policies = PolicyRegistry::shared();
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
 
+    let mut services =
+        PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
+
     // Combat decisions bypass the candidate pipeline entirely — the combat AI
     // reads directly from game state and never uses generated candidates.
     // This must run before validation/gating, which can filter out all candidates
@@ -3171,19 +3181,18 @@ fn score_candidates_core(
         state.waiting_for,
         WaitingFor::DeclareAttackers { .. } | WaitingFor::DeclareBlockers { .. }
     ) {
-        let effective_profile = config.profile.with_strategy(&context.strategy);
+        let effective_profile = config.profile.with_strategy(&services.context.strategy);
         if let Some(action) = deterministic_combat_choice(
             state,
             ai_player,
             &effective_profile,
             Some(session.as_ref()),
+            Some(services.deadline),
         ) {
             return vec![(action, 1.0)];
         }
     }
 
-    let mut services =
-        PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
     let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
     let prepared = services.validate_prepared_candidates(state, prepared);
     let gated = gate_prepared_candidates(
@@ -4091,7 +4100,7 @@ pub(crate) fn deterministic_choice(
         ..
     } = &state.waiting_for
     {
-        let attacks = choose_attackers_with_targets_with_profile(
+        let attacks = choose_attackers_with_targets_with_profile_and_deadline(
             state,
             ai_player,
             &config.profile,
@@ -4099,6 +4108,7 @@ pub(crate) fn deterministic_choice(
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
             context.map(|c| c.session.as_ref()),
+            context.map(|c| c.deadline),
         );
         return Some(validated_declare_attackers(state, attacks));
     }
@@ -4149,6 +4159,7 @@ fn deterministic_combat_choice(
     ai_player: PlayerId,
     profile: &crate::config::AiProfile,
     session: Option<&AiSession>,
+    comparison_deadline: Option<engine::util::Deadline>,
 ) -> Option<GameAction> {
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
@@ -4156,7 +4167,7 @@ fn deterministic_combat_choice(
         ..
     } = &state.waiting_for
     {
-        let attacks = choose_attackers_with_targets_with_profile(
+        let attacks = choose_attackers_with_targets_with_profile_and_deadline(
             state,
             ai_player,
             profile,
@@ -4164,6 +4175,7 @@ fn deterministic_combat_choice(
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
             session,
+            comparison_deadline,
         );
         return Some(validated_declare_attackers(state, attacks));
     }
@@ -6772,6 +6784,42 @@ mod tests {
             cycling_score < pass_score,
             "the sole next planned land must wait: cycle={cycling_score}, pass={pass_score}"
         );
+    }
+
+    #[test]
+    fn attacker_declarations_bypass_hidden_information_sampling() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![
+                engine::game::combat::AttackTarget::Player(PlayerId(1)),
+                engine::game::combat::AttackTarget::Player(PlayerId(2)),
+            ],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        let session = AiSession::arc_from_game(&state);
+        let mut k0 = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(2);
+        k0.search.determinization_samples = 0;
+        let mut k3 = k0.clone();
+        k3.search.determinization_samples = 3;
+
+        let direct = score_candidates_with_session(&state, PlayerId(0), &k0, &session);
+        let sampled = score_candidates_with_session(&state, PlayerId(0), &k3, &session);
+
+        assert!(
+            matches!(
+                direct.as_slice(),
+                [(GameAction::DeclareAttackers { .. }, 1.0)]
+            ),
+            "reach guard: DeclareAttackers must use the specialized production path"
+        );
+        assert_eq!(sampled, direct, "K must not rescore attacker declarations");
     }
 
     #[test]
@@ -9796,6 +9844,33 @@ mod tests {
             "Should return DeclareAttackers, got {:?}",
             action
         );
+    }
+
+    #[test]
+    fn multiplayer_attack_choice_survives_engine_completion() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![
+                engine::game::combat::AttackTarget::Player(PlayerId(1)),
+                engine::game::combat::AttackTarget::Player(PlayerId(2)),
+            ],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let action =
+            choose_action(&state, PlayerId(0), &config, &mut rng).expect("DeclareAttackers action");
+
+        assert!(matches!(action, GameAction::DeclareAttackers { .. }));
+        engine::game::engine::apply_as_current(&mut state, action)
+            .expect("the engine must accept the AI's coherent target assignment");
     }
 
     /// Issue #1523 (p0 softlock): `validated_declare_attackers` must never

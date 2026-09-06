@@ -1,5 +1,6 @@
 use engine::game::players;
 use engine::types::card_type::CoreType;
+use engine::types::format::FormatTopology;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -339,7 +340,19 @@ pub fn threat_level_projected(
     let power = projection
         .map(|p| projected_power(&p.state, target))
         .unwrap_or(base_power);
-    let board_score = (creatures as f64 * 0.3 + power as f64 * 0.7).min(10.0) / 10.0;
+    let raw_board_strength = (creatures as f64 * 0.3 + power.max(0) as f64 * 0.7).max(0.0);
+    // In free-for-all, retain differences between developed boards instead of
+    // flattening every board above the old 10-point cap into the same threat.
+    // This is a bounded tactical calibration, not a rules valuation.
+    let board_score = if matches!(
+        state.format_config.topology(),
+        FormatTopology::IndividualSeats
+    ) && state.players.len() > 2
+    {
+        raw_board_strength / (raw_board_strength + 10.0)
+    } else {
+        raw_board_strength.min(10.0) / 10.0
+    };
 
     // Life ratio: higher life = more threatening
     let life_ratio = (target_player.life as f64 / starting_life).clamp(0.0, 2.0) / 2.0;
@@ -2269,6 +2282,23 @@ mod tests {
         state.players[1].life = 0;
         let weights = EvalWeights::default();
         assert_eq!(evaluate_state(&state, PlayerId(0), &weights), WIN_SCORE);
+    }
+
+    #[test]
+    fn multiplayer_threat_curve_remains_monotonic_above_old_board_cap() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        let at_old_cap = threat_level(&state, PlayerId(0), PlayerId(1));
+        for _ in 0..4 {
+            add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
+        }
+        let developed = threat_level(&state, PlayerId(0), PlayerId(1));
+        for _ in 0..8 {
+            add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
+        }
+        let overwhelming = threat_level(&state, PlayerId(0), PlayerId(1));
+
+        assert!(at_old_cap < developed && developed < overwhelming);
+        assert!(overwhelming.is_finite() && overwhelming <= 1.0);
     }
 
     #[test]
