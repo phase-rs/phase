@@ -58883,6 +58883,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another

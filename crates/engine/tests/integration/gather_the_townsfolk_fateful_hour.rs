@@ -1,4 +1,4 @@
-//! CR 702.33d-style token-count "instead" override, cross-line ability-word
+//! CR 111.1 + CR 608.2c-style token-count "instead" override, cross-line ability-word
 //! form (CR 614.15): Gather the Townsfolk's "Fateful hour — If you have 5 or
 //! less life, create five of those tokens instead."
 //!

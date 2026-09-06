@@ -21,11 +21,22 @@
 //! player, and the count is 0. The pure "zero Curses" case is covered instead
 //! by a building-block-level unit test on `FilterProp::AttachedToPlayer`
 //! directly in `crates/engine/src/game/filter.rs`.
+//!
+//! `curse_of_surveillance_target_exclusion_fails_closed` below pins a sibling
+//! parser-honesty regression on the same "Curses attached to a player" family:
+//! Curse of Surveillance's "any number of target players other than that
+//! player" (CR 115.1d) has no player-scoped counterpart to
+//! `FilterProp::Another` yet (issue #8581), and the parser must fail closed to
+//! `Effect::Unimplemented` rather than silently reporting a bare
+//! `target=player` filter — dropping the "other than that player" exclusion
+//! — as fully supported.
 
 use engine::game::effects::attach::attach_to_player;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
+use engine::parser::parse_oracle_text;
+use engine::types::ability::Effect;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -193,5 +204,50 @@ fn curse_of_thirst_excludes_curses_attached_to_a_different_player() {
         20,
         "P0 is not the enchanted player and Curse of Thirst does not target \
          them, so P0 must take no damage from this resolution"
+    );
+}
+
+/// Real Oracle text (verified against MTGJSON, printing PCY):
+///   "Enchant player
+///    At the beginning of enchanted player's upkeep, any number of target
+///    players other than that player each draw cards equal to the number of
+///    Curses attached to that player."
+const CURSE_OF_SURVEILLANCE: &str = "Enchant player
+At the beginning of enchanted player's upkeep, any number of target players other than that player each draw cards equal to the number of Curses attached to that player.";
+
+/// CR 115.1d (issue #8581): the "other than that player" exclusion has no
+/// player-scoped counterpart to `FilterProp::Another` yet. Before the
+/// fail-closed guard in `parser::oracle_effect::subject`, the coordinated
+/// player/opponent target arm in `parser::oracle_target` matched the bare
+/// "player" tag against the plural "players", left "other than that player"
+/// as an unconsumed remainder, and the "any number of target X" subject
+/// application silently discarded that remainder — producing a bare
+/// `target=player` filter and reporting the card as fully supported despite
+/// dropping the exclusion entirely. The card must now fail closed to
+/// `Effect::Unimplemented` instead.
+#[test]
+fn curse_of_surveillance_target_exclusion_fails_closed() {
+    let parsed = parse_oracle_text(
+        CURSE_OF_SURVEILLANCE,
+        "Curse of Surveillance",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string(), "Curse".to_string()],
+    );
+
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.execute.is_some())
+        .expect("Curse of Surveillance's upkeep trigger must parse");
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("the upkeep trigger must have an execute ability");
+
+    assert!(
+        matches!(&*execute.effect, Effect::Unimplemented { .. }),
+        "the 'other than that player' exclusion must fail closed to          Effect::Unimplemented, not silently succeed as a bare target=player          filter; got {:?}",
+        execute.effect
     );
 }

@@ -1618,7 +1618,7 @@ fn apply_self_replacement_override(
             inner: Box::new(condition),
         });
         let base = &mut result.abilities[base_pos];
-        // CR 614.15 + CR 702.33d: The override paragraph was lowered in
+        // CR 614.15 + CR 111.1 + CR 608.2c: The override paragraph was lowered in
         // isolation (its own single-ability `defs` slice), so
         // `oracle_effect::assembly`'s `resolve_those_tokens_anaphors` pass had
         // no antecedent to rewrite "create N of those tokens" against — the

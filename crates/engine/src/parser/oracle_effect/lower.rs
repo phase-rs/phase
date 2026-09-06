@@ -2902,7 +2902,7 @@ fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
     false
 }
 
-/// CR 702.33d + CR 608.2c: Resolve "create [N] of those tokens [instead]"
+/// CR 111.1 + CR 608.2c: Resolve "create [N] of those tokens [instead]"
 /// anaphoric clauses. The clause refers back to the previous def's token
 /// creation effect (either `Token` or `CopyTokenOf`) and reproduces it with
 /// a new count. We walk `defs` looking for an `Unimplemented` clause whose
@@ -2967,7 +2967,7 @@ pub(super) fn resolve_populated_unsuspect_anaphors(defs: &mut [AbilityDefinition
     }
 }
 
-/// CR 702.33d + CR 707.10: If `cur` is an `Unimplemented` "create N of those
+/// CR 111.1 + CR 707.10: If `cur` is an `Unimplemented` "create N of those
 /// tokens" anaphor, rewrite it as a clone of the `antecedent` token-creation
 /// effect with count set to N. No-op when the shapes don't match.
 ///
