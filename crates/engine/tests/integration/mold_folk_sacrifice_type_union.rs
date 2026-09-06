@@ -8,7 +8,7 @@
 //! The right conjunct of the union leads with an indefinite article, and the
 //! shared type-phrase grammar deliberately leaves that tail as remainder — the
 //! same surface is an elided-verb clause elsewhere ("you control a land creature
-//! or a land entered the battlefield this turn", Earth Rumble Wrestlers). The
+//! or a land entered the battlefield under your control this turn", Earth Rumble Wrestlers). The
 //! sacrifice-cost parser now opts into the union reading via
 //! `parse_target_with_article_led_type_union`, so the cost's filter is
 //! `Or[Creature+Another, Artifact+Another]` rather than `Creature+Another` alone.
@@ -118,6 +118,6 @@ fn mold_folk_still_pays_its_cost_by_sacrificing_a_creature() {
     assert_eq!(
         state.objects[&source].zone,
         Zone::Battlefield,
-        "CR 109.4: \"another\" excludes the source itself"
+        "\"another\" excludes the source itself"
     );
 }

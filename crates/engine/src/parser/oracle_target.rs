@@ -399,8 +399,11 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
 /// clause that the condition layer folds one level up:
 ///
 ///   * "you control an artifact creature or a Plan"                (a condition)
-///   * "you control a land creature or a land entered the battlefield this turn"
-///     (Earth Rumble Wrestlers — two separate conditions, NOT a type union)
+///   * "you control a land creature or a land entered the battlefield under your
+///     control this turn" (Earth Rumble Wrestlers — two separate conditions, NOT
+///     a type union; it lowers to an honest `StaticCondition::Unrecognized` that
+///     keeps the whole text, which widening the shared branch would turn into a
+///     silently wrong single condition)
 ///
 /// so the shared grammar must leave that tail as remainder, which
 /// `parse_type_phrase_leaves_article_led_or_rhs_as_remainder` pins.
@@ -15676,7 +15679,8 @@ mod tests {
     /// `parse_target` keeps leaving the article-led tail as remainder, which is
     /// what lets the condition layer fold an elided-verb clause one level up
     /// (Earth Rumble Wrestlers' "you control a land creature or a land entered
-    /// the battlefield this turn" is two conditions, not a type union).
+    /// the battlefield under your control this turn" is two conditions, not a type
+    /// union).
     #[test]
     fn article_led_type_union_is_opt_in_only() {
         let (shared, rest) = parse_target("target another creature or an artifact");

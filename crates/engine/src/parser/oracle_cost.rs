@@ -2055,8 +2055,11 @@ mod tests {
                 .collect();
             assert!(legs[0].type_filters.contains(&TypeFilter::Creature));
             assert!(legs[1].type_filters.contains(&right));
-            // CR 109.4: "another" scopes the whole choice, so it must reach BOTH
-            // legs — `ensure_another_sacrifice_filter` distributes it.
+            // "another" scopes the whole choice, so it must reach BOTH legs —
+            // `ensure_another_sacrifice_filter` distributes it. Deliberately no CR
+            // number: the rules text defines no "another" entry, and this repo treats
+            // a wrong citation as worse than none. `FilterProp::Another` is the
+            // engine's model of the source-exclusion the word carries.
             for leg in &legs {
                 assert!(
                     leg.properties.contains(&FilterProp::Another),
