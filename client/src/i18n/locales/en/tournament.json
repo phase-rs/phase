@@ -1,0 +1,148 @@
+{
+  "page": {
+    "eyebrow": "Tournaments",
+    "landingTitle": "Tournaments.",
+    "landingDescription": "Create a tournament, join with a code, or follow one already running.",
+    "detailDescription": "Tournament {{code}}",
+    "backToList": "All tournaments"
+  },
+  "labels": {
+    "code": "Code {{code}}",
+    "roundOf": "Round {{current}} of {{total}}",
+    "created": "Created {{date}}",
+    "organizer": "Organizer",
+    "entered": "Entered",
+    "spectating": "Spectating",
+    "dropped": "Dropped"
+  },
+  "status": {
+    "Registration": "Registration",
+    "InProgress": "In Progress",
+    "Completed": "Completed",
+    "Abandoned": "Abandoned"
+  },
+  "bracket": {
+    "Swiss": "Swiss",
+    "SingleElimination": "Single Elimination"
+  },
+  "arity": {
+    "headToHead": "Head-to-head",
+    "pod": "{{seats}}-player pods"
+  },
+  "list": {
+    "heading": "Open Tournaments",
+    "empty": "No tournaments right now.",
+    "loading": "Loading tournaments…",
+    "view": "View",
+    "entrants_one": "{{count}} entrant",
+    "entrants_few": "{{count}} entrants",
+    "entrants_many": "{{count}} entrants",
+    "entrants_other": "{{count}} entrants"
+  },
+  "create": {
+    "heading": "Create Tournament",
+    "nameLabel": "Tournament name",
+    "namePlaceholder": "Friday Night Magic",
+    "arityLabel": "Players per match",
+    "arityHint": "2 is head-to-head; 4 is a standard Commander pod.",
+    "bracketLabel": "Bracket",
+    "totalRoundsLabel": "Rounds",
+    "totalRoundsAuto": "Automatic",
+    "scoringLabel": "Match points",
+    "winPointsLabel": "Win",
+    "drawPointsLabel": "Draw",
+    "lossPointsLabel": "Loss",
+    "submit": "Create Tournament",
+    "submitting": "Creating…"
+  },
+  "join": {
+    "heading": "Join by Code",
+    "codeLabel": "Tournament code",
+    "codePlaceholder": "Enter tournament code",
+    "displayNameLabel": "Display name",
+    "displayNamePlaceholder": "Your name at the table",
+    "submit": "Join",
+    "submitting": "Joining…",
+    "joined": "You are entered in this tournament."
+  },
+  "detail": {
+    "loading": "Loading tournament…",
+    "organizerControls": "Organizer controls",
+    "startRound": "Start Round",
+    "startRoundBusy": "Starting…",
+    "endTournament": "End Tournament",
+    "endTournamentBusy": "Ending…",
+    "endTournamentConfirm": "End this tournament? Remaining rounds will not be played.",
+    "drop": "Drop",
+    "dropBusy": "Dropping…",
+    "dropConfirm": "Drop from this tournament? You cannot rejoin.",
+    "reportResult": "Report Result",
+    "yourPairing": "Your Match",
+    "noPairing": "You have no match this round."
+  },
+  "standings": {
+    "heading": "Standings",
+    "empty": "No standings yet.",
+    "rank": "#",
+    "player": "Player",
+    "matchPoints": "Points",
+    "matchPointsTitle": "Match points",
+    "matchesPlayed": "Played",
+    "matchesPlayedTitle": "Matches played, excluding byes",
+    "byes": "Byes",
+    "byesTitle": "Rounds received as a bye",
+    "tiebreaks": {
+      "headToHead": {
+        "opponentsMatchWinPct": "OMW%",
+        "opponentsMatchWinPctTitle": "Opponents' match-win percentage",
+        "gameWinPct": "GW%",
+        "gameWinPctTitle": "Game-win percentage",
+        "opponentsGameWinPct": "OGW%",
+        "opponentsGameWinPctTitle": "Opponents' game-win percentage"
+      },
+      "multiplayer": {
+        "matchWinPct": "MW%",
+        "matchWinPctTitle": "Match-win percentage",
+        "opponentsAvgMatchPoints": "OAMP",
+        "opponentsAvgMatchPointsTitle": "Opponents' average match points",
+        "opponentsMatchWinPct": "OMW%",
+        "opponentsMatchWinPctTitle": "Opponents' match-win percentage"
+      }
+    }
+  },
+  "pairings": {
+    "heading": "Pairings",
+    "empty": "No pairings yet.",
+    "round": "Round {{round}}",
+    "table": "Table {{id}}",
+    "pending": "Pending",
+    "versus": "vs"
+  },
+  "outcome": {
+    "bye": "Bye",
+    "forfeit": "Forfeit — {{winner}}",
+    "decisive": "{{winner}} won",
+    "draw": "Draw",
+    "gameWins": "{{name}} {{wins}}"
+  },
+  "report": {
+    "heading": "Report Result",
+    "winnerLabel": "Winner",
+    "drawOption": "Draw",
+    "gameWinsLabel": "Game wins",
+    "gameWinsFor": "Game wins for {{name}}",
+    "submit": "Submit Result",
+    "submitting": "Submitting…",
+    "cancel": "Cancel"
+  },
+  "errors": {
+    "notOrganizer": "You are not the organizer of this tournament.",
+    "notEntered": "You are not entered in this tournament.",
+    "serverRejected": "The server rejected that: {{message}}",
+    "timedOut": "The server did not respond. Try again.",
+    "connectionLost": "Lost connection to the lobby. Check your server address.",
+    "aborted": "That request was cancelled.",
+    "unsupported": "That request was sent, but this server is too old to confirm it. Check the tournament before trying again.",
+    "notFound": "No tournament with that code."
+  }
+}

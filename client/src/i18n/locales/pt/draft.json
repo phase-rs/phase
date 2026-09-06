@@ -583,6 +583,12 @@
   "podComplete": {
     "title": "Draft Concluído",
     "launchCommanderGame": "Iniciar Jogo Commander",
+    "launchLocalCommanderGame": "Iniciar Jogo Commander Local",
+    "waitingForPlayers": "Aguardando a entrada dos jogadores…",
+    "cancelCommanderLaunch": "Cancelar início",
+    "joinCommanderGame": "Entrar no Jogo Commander",
+    "joiningCommanderGame": "Entrando — aguardando os outros jogadores…",
+    "seatCeiling": "Esta mesa tem {{seats}} jogadores; um jogo Commander ponto a ponto suporta no máximo {{max}}. Você jogará este localmente contra o motor, com todos os decks draftados.",
     "returnToMenu": "Voltar ao Menu"
   },
   "podError": {

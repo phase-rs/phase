@@ -22,7 +22,7 @@ use super::primitives::{
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{
     parse_counter_suffix, parse_shared_quality, parse_shared_quality_clause,
-    parse_target_with_syntax, parse_type_phrase, TargetSyntax,
+    parse_target_with_syntax, parse_type_phrase_folding, TargetSyntax,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -469,7 +469,7 @@ fn parse_possessive_objects_they_control(input: &str) -> OracleResult<'_, Quanti
         ),
     ))
     .parse(rest)?;
-    let (mut filter, type_rest) = parse_type_phrase(type_phrase);
+    let (mut filter, type_rest) = parse_type_phrase_folding(type_phrase);
     if !type_rest.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -1061,7 +1061,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // CR 105.1 + CR 105.2: bare "colors among <filter>" — reached after a
         // parent has consumed "there are N " (Puca's Eye: "there are five colors
         // among permanents you control"). The tail combinator (`tag("colors
-        // among ") + parse_type_phrase`) is shared with the "the number of
+        // among ") + parse_type_phrase_folding`) is shared with the "the number of
         // colors among ..." path; registering it here makes it reachable in the
         // bare-suffix context too.
         parse_distinct_colors_among_tail,
@@ -1081,7 +1081,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // against the threshold. Counter-side counterpart to
         // `parse_distinct_colors_among_tail` immediately above: the tail
         // combinator (`tag("different kind") + tag(" of counter") + "on"/"among"
-        // + parse_type_phrase`) is shared with the "the number of different kinds
+        // + parse_type_phrase_folding`) is shared with the "the number of different kinds
         // of counters among ..." path (`parse_number_of_inner`, used by Perrie,
         // the Pulverizer); registering it here makes it reachable in the
         // bare-suffix context too, so `parse_there_are_conditions` can build a
@@ -1155,7 +1155,7 @@ fn parse_type_count_on_battlefield_with_boundary(
             }
         }
     };
-    let (filter, type_rest) = parse_type_phrase(type_text);
+    let (filter, type_rest) = parse_type_phrase_folding(type_text);
     if matches!(filter, TargetFilter::Any) || !type_rest.trim().is_empty() {
         return Err(oracle_err(input));
     }
@@ -1191,7 +1191,7 @@ fn parse_object_count_by_shared_quality(input: &str) -> OracleResult<'_, Quantit
     let (rest, quality) = parse_shared_quality(rest)?;
     let (rest, _) = tag(" in common").parse(rest)?;
 
-    let (filter, type_remainder) = parse_type_phrase(type_text.trim());
+    let (filter, type_remainder) = parse_type_phrase_folding(type_text.trim());
     if !type_remainder.trim().is_empty()
         || matches!(filter, TargetFilter::Any)
         || !quantity_filter_has_meaningful_content(&filter)
@@ -1430,14 +1430,14 @@ fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
     .parse(input)?;
     let type_text = rest.trim_end_matches('.').trim_end_matches(',');
-    let (filter, remainder) = parse_type_phrase(type_text);
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     }
-    // Map remainder back to original input slice — parse_type_phrase may have
+    // Map remainder back to original input slice — parse_type_phrase_folding may have
     // consumed from a trimmed copy, so use pointer arithmetic for the correct
     // byte offset.
     let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
@@ -1843,7 +1843,7 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
             ),
         ));
     }
-    let (filter, remainder) = parse_type_phrase(rest);
+    let (filter, remainder) = parse_type_phrase_folding(rest);
     let final_remainder = parse_cast_snapshot_suffix(remainder.trim_start())
         .ok()
         .and_then(|(snapshot_rest, _)| snapshot_rest.trim().is_empty().then_some(snapshot_rest))
@@ -2075,7 +2075,7 @@ fn parse_bare_mana_values_among_tail(input: &str) -> OracleResult<'_, QuantityRe
     let (rest, _) = tag("mana value").parse(input)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
     let (rest, _) = tag(" among ").parse(rest)?;
-    let (filter, remainder) = parse_type_phrase(rest);
+    let (filter, remainder) = parse_type_phrase_folding(rest);
     if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -2100,7 +2100,7 @@ fn parse_bare_mana_values_among_tail(input: &str) -> OracleResult<'_, QuantityRe
 fn parse_for_each_distinct_counter_kinds_among(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("kind of counter ").parse(input)?;
     let (rest, _) = alt((tag("on "), tag("among "))).parse(rest)?;
-    let (filter, remainder) = parse_type_phrase(rest);
+    let (filter, remainder) = parse_type_phrase_folding(rest);
     if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -2114,7 +2114,7 @@ fn parse_for_each_distinct_counter_kinds_among(input: &str) -> OracleResult<'_, 
 /// "the number of" → `QuantityRef::ObjectCountDistinct { filter, qualities: [Name] }`.
 ///
 /// Composes by delegating the inner type phrase to the shared
-/// `oracle_target::parse_type_phrase` so any combination of supertype, color,
+/// `oracle_target::parse_type_phrase_folding` so any combination of supertype, color,
 /// negation, type words, "tokens" property suffix, and controller suffix
 /// ("you control", "an opponent controls", etc.) flows through one parser —
 /// no per-card phrasing arms. The remainder must be empty (or only trailing
@@ -2133,7 +2133,7 @@ fn parse_for_each_distinct_counter_kinds_among(input: &str) -> OracleResult<'_, 
 fn parse_distinct_named_objects(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("differently named ").parse(input)?;
     let type_text = rest.trim_end_matches('.').trim_end_matches(',');
-    let (filter, remainder) = parse_type_phrase(type_text);
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
     if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -2212,7 +2212,7 @@ fn parse_controlled_object_count_extremum(input: &str) -> OracleResult<'_, Quant
         ),
     ))
     .parse(input)?;
-    let (filter, filter_remainder) = parse_type_phrase(type_text);
+    let (filter, filter_remainder) = parse_type_phrase_folding(type_text);
     if !filter_remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
         return Err(oracle_err(input));
     }
@@ -2359,14 +2359,14 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
 
 /// CR 201.2 + CR 109.2: Parse qualified controlled object counts like
 /// "permanents named Food Fight you control" or "other creature named Seven
-/// Dwarves you control". The named/card-quality parser (`parse_type_phrase`)
+/// Dwarves you control". The named/card-quality parser (`parse_type_phrase_folding`)
 /// owns the object description — type word plus any `other`/`named X`
 /// qualifier — and this quantity parser owns the trailing controller scope.
 /// Shared by the "the number of … you control" and "for each … you control"
 /// paths: a `named X` qualifier sits between the type word and the controller
 /// suffix, which the bare-`parse_type_filter_word` arms cannot reach.
 fn parse_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (mut filter, rest) = parse_type_phrase(input);
+    let (mut filter, rest) = parse_type_phrase_folding(input);
     if !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -2631,7 +2631,7 @@ enum TypePhraseGrammar {
     /// type lists (`parse_type_list`), no ownership / token / combat-relation
     /// grammar, fails with `Err`. The colours head reads with this.
     Strict,
-    /// [`crate::parser::oracle_target::parse_type_phrase`] — folds
+    /// [`crate::parser::oracle_target::parse_type_phrase_folding`] — folds
     /// `" and "` / `" and/or "` into type unions (`TYPE_SEPARATORS`) and carries
     /// ownership / token / combat-relation grammar. INFALLIBLE: on failure it
     /// yields an EMPTY `TypedFilter` plus the whole input — NOT
@@ -2981,7 +2981,7 @@ fn parse_objects_source(
     let type_text = input.trim_end_matches('.').trim_end_matches(',');
     let (filter, remainder) = match grammar {
         // `(filter, remainder)`, INFALLIBLE — never transpose with the Strict arm.
-        TypePhraseGrammar::Legacy => parse_type_phrase(type_text),
+        TypePhraseGrammar::Legacy => parse_type_phrase_folding(type_text),
         // `OracleResult` = `(remainder, filter)`.
         TypePhraseGrammar::Strict => {
             let (rem, filter) = super::target::parse_type_phrase(type_text)?;
@@ -3223,7 +3223,7 @@ fn parse_distinct_counter_kinds_among_tail(input: &str) -> OracleResult<'_, Quan
     let (rest, _) = opt(tag("s")).parse(rest)?;
     let (rest, _) = tag(" ").parse(rest)?;
     let (rest, _) = alt((tag("on "), tag("among "))).parse(rest)?;
-    let (filter, remainder) = parse_type_phrase(rest);
+    let (filter, remainder) = parse_type_phrase_folding(rest);
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -4670,7 +4670,7 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 fn parse_for_each_differently_named(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("differently named ").parse(input)?;
     let type_text = rest.trim_end_matches('.').trim_end_matches(',');
-    let (filter, remainder) = parse_type_phrase(type_text);
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
     if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -4700,7 +4700,7 @@ fn parse_distinct_quality_among_objects(input: &str) -> OracleResult<'_, Quantit
     let (rest, quality) = parse_shared_quality(rest)?;
     let (rest, _) = tag(" among ").parse(rest)?;
     let type_text = rest.trim_end_matches('.').trim_end_matches(',');
-    let (filter, remainder) = parse_type_phrase(type_text);
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
     if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -4728,7 +4728,7 @@ fn parse_distinct_quality_among_objects(input: &str) -> OracleResult<'_, Quantit
 // color among", so widening it would be an untested grammar change.
 fn parse_for_each_distinct_colors_among_permanents(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("color among ").parse(input)?;
-    let (filter, remainder) = parse_type_phrase(rest);
+    let (filter, remainder) = parse_type_phrase_folding(rest);
     if !remainder.trim().is_empty()
         || matches!(filter, TargetFilter::Any)
         || !quantity_filter_has_meaningful_content(&filter)
@@ -5098,7 +5098,7 @@ enum EnteredControlBinding {
 /// selects — see [`EnteredControlBinding`].
 fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, (type_text, binding)) = parse_entered_this_turn_clause(input)?;
-    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    let (filter, remainder) = parse_type_phrase_folding(type_text.trim());
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -5185,7 +5185,7 @@ fn parse_entry_event_controller(input: &str) -> OracleResult<'_, PlayerScope> {
 fn parse_tokens_created_this_turn_tail(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, type_text) = take_until(" you created this turn").parse(input)?;
     let (rest, _) = tag(" you created this turn").parse(rest)?;
-    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    let (filter, remainder) = parse_type_phrase_folding(type_text.trim());
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -5288,7 +5288,7 @@ pub(crate) fn parse_mana_from_source_spent_to_cast(input: &str) -> OracleResult<
 }
 
 pub(crate) fn parse_mana_source_filter(input: &str) -> OracleResult<'_, TargetFilter> {
-    let (source_filter, rest) = parse_type_phrase(input);
+    let (source_filter, rest) = parse_type_phrase_folding(input);
     if rest.len() == input.len() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -5911,7 +5911,7 @@ fn parse_number_of_creatures_died_this_turn(input: &str) -> OracleResult<'_, Qua
 fn parse_sacrificed_this_turn_filter(input: &str) -> OracleResult<'_, TargetFilter> {
     // CR 701.21a: sacrifice moves the permanent directly to its owner's graveyard
     // (not destroyed — bypasses indestructible and regeneration).
-    let (filter, rest) = parse_type_phrase(input);
+    let (filter, rest) = parse_type_phrase_folding(input);
     if !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -5988,7 +5988,7 @@ fn parse_number_of_cards_put_into_graveyard_from_anywhere_this_turn(
         terminated(take_until(singular), tag(singular)),
     ))
     .parse(input)?;
-    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    let (filter, leftover) = parse_type_phrase_folding(type_text.trim());
     if !leftover.trim().is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
             leftover,
@@ -6958,7 +6958,7 @@ mod tests {
     /// Tazri) must stay an HONEST GAP, never a confident count over an
     /// unrebindable sentinel.
     ///
-    /// MEASURED CORRECTION to the plan: neither `parse_type_phrase` carries the
+    /// MEASURED CORRECTION to the plan: neither `parse_type_phrase_folding` carries the
     /// anaphor grammar — that lives in `parse_target`, not in either type-phrase
     /// reader. Strict `Err`s on "those creatures"; Legacy returns an EMPTY
     /// `TypedFilter` plus the whole input. So both refuse, but by different
@@ -6983,7 +6983,7 @@ mod tests {
             super::super::target::parse_type_phrase("those creatures").is_err(),
             "Strict rejects an anaphor outright"
         );
-        let (legacy_filter, legacy_rest) = parse_type_phrase("those creatures");
+        let (legacy_filter, legacy_rest) = parse_type_phrase_folding("those creatures");
         assert_eq!(
             legacy_rest, "those creatures",
             "Legacy's infallible failure consumes nothing"

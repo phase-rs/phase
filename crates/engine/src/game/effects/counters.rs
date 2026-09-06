@@ -212,6 +212,21 @@ pub fn add_counter_with_replacement(
     if count == 0 {
         return true;
     }
+    // CR 614.1c + CR 122.6a: an entrant whose entry has been decided but has not
+    // yet committed is in `liminal_entries` and in no zone at all, so there is no
+    // object here to put a counter on. Counters aimed at one belong to its ENTRY:
+    // hand them to the entry so the commit places them as it enters, through the
+    // entry's own CR 614.1a replacement pass. Placing them here instead would
+    // silently drop them (`apply_counter_addition` finds no object), which is what
+    // made a token copy of a CR 702.104a Tribute creature enter with no counters
+    // even after its opponent paid.
+    //
+    // The redirect is safe against itself: the commit removes the liminal entry
+    // BEFORE it inserts the object and re-enters this function for those counters,
+    // so the second pass takes the ordinary live-object path below.
+    if state.schedule_entry_counters(object_id, counter_type.clone(), count) {
+        return true;
+    }
     let proposed = ProposedEvent::AddCounter {
         placement: CounterPlacement::Object {
             actor,

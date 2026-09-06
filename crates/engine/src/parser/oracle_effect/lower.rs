@@ -22,8 +22,8 @@ use super::super::oracle_quantity::{
     parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase,
-    parse_type_phrase_with_ctx,
+    parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -5484,7 +5484,7 @@ pub(super) fn strip_each_scope_who_didnt_verb_filter_this_way_subject(
         let (i, _) = alt((tag("didn't "), tag("did not "))).parse(i)?;
         let (i, _) = tag("discard ").parse(i)?;
         let (i, _) = alt((tag("a "), tag("an "))).parse(i)?;
-        let (filter, after_filter) = parse_type_phrase(i);
+        let (filter, after_filter) = parse_type_phrase_folding(i);
         if matches!(filter, TargetFilter::Any) {
             return Err(oracle_err(i));
         }
@@ -5676,7 +5676,7 @@ pub(super) fn rebind_subject_only_body_recipient(effect: &mut Effect) {
 ///   runtime by `player_control_count_compares`.
 ///
 /// The object sub-phrase ("an Elf", "a creature with power 4 or greater")
-/// delegates to the shared `parse_type_phrase_with_ctx` combinator — no bespoke
+/// delegates to the shared `parse_type_phrase_folding_with_ctx` combinator — no bespoke
 /// string matching. This is the DRY core shared by the "each opponent who
 /// controls …" subject path (`strip_controls_permanent_clause`) and the "the
 /// number of opponents who control …" quantity path (`oracle_quantity.rs`).
@@ -5700,7 +5700,7 @@ pub(crate) fn parse_controls_permanent_object<'a>(
         if let Some((type_text, comparative_remainder)) =
             split_once_on_lower(after_verb, &after_verb_lower, " than you")
         {
-            let (bare_filter, _) = parse_type_phrase_with_ctx(type_text, ctx);
+            let (bare_filter, _) = parse_type_phrase_folding_with_ctx(type_text, ctx);
             if matches!(bare_filter, TargetFilter::Any) {
                 return None;
             }
@@ -5740,7 +5740,7 @@ pub(crate) fn parse_controls_permanent_object<'a>(
         let (i, _) = alt((tag("controls the most "), tag("control the most "))).parse(i)?;
         Ok((i, ()))
     }) {
-        let (filter, remainder) = parse_type_phrase_with_ctx(after_verb, ctx);
+        let (filter, remainder) = parse_type_phrase_folding_with_ctx(after_verb, ctx);
         // Honest-red guard: reject Any / content-empty filters so a type phrase
         // that fails to parse stays Unimplemented rather than building a bogus
         // extremum. Both `filter` sides stay BARE (controller-less): the resolvers
@@ -5803,7 +5803,7 @@ pub(crate) fn parse_controls_permanent_object<'a>(
         .parse(i)
     })?;
     // The object sub-phrase is consumed by the shared type-phrase combinator.
-    let (filter, remainder) = parse_type_phrase_with_ctx(after_verb, ctx);
+    let (filter, remainder) = parse_type_phrase_folding_with_ctx(after_verb, ctx);
     if matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -7113,7 +7113,7 @@ pub(super) fn extract_double_counter_multi_target(text: &str) -> Option<MultiTar
 
 /// CR 115.1d + CR 122.1: Recover `MultiTargetSpec` for "remove … from each of
 /// any number of <type>". The imperative parser strips the distribution prefix
-/// so `parse_type_phrase` sees a bare filter; rebuild the spec from the
+/// so `parse_type_phrase_folding` sees a bare filter; rebuild the spec from the
 /// original text (parallel to `extract_switch_pt_multi_target`).
 pub(super) fn extract_remove_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();

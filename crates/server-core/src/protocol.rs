@@ -96,7 +96,9 @@ pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame, ServerErrorCode}
 // projection of its own domain types) and re-exported here, so the canonical
 // `ServerMessage` and the broker's `LobbyServerMessage` carry the identical
 // struct rather than two copies that could drift apart field by field.
-pub use lobby_broker::protocol::{PairingView, PlayerSummary, TournamentSummary, TournamentView};
+pub use lobby_broker::protocol::{
+    PairingView, PlayerSummary, TournamentRequestId, TournamentSummary, TournamentView,
+};
 // The domain types those views embed, re-exported for the same reason. All are
 // already `Serialize`/`Deserialize` — `MatchArity` and `ScoringPolicy` through
 // validated `try_from`/`into` boundaries, so a malformed value is refused at
@@ -544,23 +546,39 @@ pub enum ClientMessage {
     GetTournament {
         code: String,
     },
+    // The four GATED actions each mirror `lobby_broker`'s optional
+    // `request_id`, in the same position with the same serde attributes. The
+    // position is load-bearing, not cosmetic: serde emits struct-variant fields
+    // in declaration order, and `tournament_variants_survive_the_canonical_lobby_roundtrip`
+    // compares the two enums' serialized STRINGS, so a field that sits
+    // elsewhere in one mirror breaks the projection's wire compatibility.
     StartTournamentRound {
         code: String,
         organizer_token: String,
+        /// Mirrors [`lobby_broker::LobbyClientMessage::StartTournamentRound`]'s
+        /// correlator. `None` from a client that predates correlation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
     ReportMatchResult {
         code: String,
         pairing_id: PairingId,
         player_token: String,
         outcome: PodOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
     DropFromTournament {
         code: String,
         player_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
     EndTournament {
         code: String,
         organizer_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
 }
 
@@ -1001,6 +1019,21 @@ pub enum ServerMessage {
     },
     TournamentListUpdate {
         tournaments: Vec<TournamentSummary>,
+    },
+    /// Requester-only acknowledgement of one gated tournament action, carrying
+    /// the correlator the caller minted. Mirrors
+    /// [`lobby_broker::LobbyServerMessage::TournamentActionAck`]. Carries no
+    /// token: the caller already holds the one that authorized the action.
+    TournamentActionAck {
+        request_id: TournamentRequestId,
+        code: String,
+        view: TournamentView,
+    },
+    /// Requester-only refusal of one gated tournament action. Mirrors
+    /// [`lobby_broker::LobbyServerMessage::TournamentActionRejected`].
+    TournamentActionRejected {
+        request_id: TournamentRequestId,
+        message: String,
     },
 }
 

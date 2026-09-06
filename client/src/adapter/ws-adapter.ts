@@ -471,6 +471,20 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
+ * 5 — Request-correlated settlement for the four GATED tournament actions.
+ *     Two LobbyServerMessage variants added — TournamentActionAck and
+ *     TournamentActionRejected — which is what makes this bump mandatory. Both
+ *     are requester-only point replies carrying the client-minted request_id,
+ *     so a caller can tell its own outcome from an ambient TournamentUpdate for
+ *     the same tournament. StartTournamentRound, ReportMatchResult,
+ *     DropFromTournament and EndTournament each gain one optional request_id.
+ *     Purely ADDITIVE in both directions — an omitted correlator deserializes
+ *     to None and a present one is ignored by a v4 broker — so
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2.
+ *     Capability, not parseability, is what moves here: a pre-5 broker cannot
+ *     ANSWER a correlated action, which is what
+ *     MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK below exists to gate — separately,
+ *     and without evicting the session.
  * 4 — The tournament-organizer message set: seven LobbyClientMessage variants
  *     and five LobbyServerMessage variants. Purely ADDITIVE, so
  *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below deliberately stays at 2 — no
@@ -492,7 +506,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 4;
+export const LOBBY_PROTOCOL_VERSION = 5;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -505,6 +519,26 @@ export const LOBBY_PROTOCOL_VERSION = 4;
  * release used to strand every older desktop build.
  */
 export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 2;
+
+/**
+ * Lowest broker LOBBY_PROTOCOL_VERSION that can answer a gated tournament
+ * action with a `TournamentActionAck` / `TournamentActionRejected` frame.
+ *
+ * This is a FLOOR frozen at the version that introduced correlated tournament
+ * settlement, not a moving target. It must NOT be bumped when
+ * LOBBY_PROTOCOL_VERSION moves: a v6 or v7 broker still answers the ack, and
+ * raising this to match the current version would refuse every one of them and
+ * silently disable organizer actions against servers that work perfectly. For
+ * the same reason it must never be written as an expression over
+ * LOBBY_PROTOCOL_VERSION — `scripts/check-protocol-version.mjs` matches it only
+ * against a bare integer literal, so re-deriving it fails the cross-language
+ * gate rather than shipping that bug.
+ *
+ * Like {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL} there is deliberately NO
+ * ceiling. It moves only if a future version REMOVES the ack, which would be a
+ * breaking change requiring its own floor decision.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK = 5;
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {

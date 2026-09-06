@@ -77,7 +77,18 @@ pub fn resolve(
             .regeneration_shield();
 
         if let Some(obj) = state.objects.get_mut(&obj_id) {
-            obj.replacement_definitions.push(shield);
+            // CR 701.19a: "If the effect of a resolving spell or ability regenerates
+            // a permanent, it creates a replacement effect that protects the
+            // permanent the next time it would be destroyed THIS TURN." The shield's
+            // window is the turn, not the next layer pass — so it installs through
+            // the resolution-install authority, which the CR 613.1 reseed carries
+            // (CR 611.2c: it is not one of the permanent's characteristics).
+            //
+            // This is also why the shield must exist in exactly ONE store: the
+            // `destroy_applier` marks it `is_consumed` in place, and a second copy
+            // in base would be re-seeded over the consumed one on the next pass,
+            // producing infinite regeneration.
+            obj.install_resolution_replacement(shield);
         }
     }
 
@@ -96,6 +107,109 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+
+    /// CR 701.19a + CR 611.2c + CR 613.1 (issue #8485): a regeneration shield
+    /// survives a layer pass WITH its consumed state, so the permanent regenerates
+    /// EXACTLY ONCE.
+    ///
+    /// This is the anti-resurrection witness. It discriminates against the rejected
+    /// dual-write design: if the shield lived in BOTH `base_replacement_definitions`
+    /// and the live store, the CR 613.1 reseed would copy the pristine base twin
+    /// over the consumed live one and the creature would regenerate forever.
+    /// CR 701.19a: "it creates a replacement effect that protects the permanent the
+    /// next time it would be destroyed THIS TURN" — the next time, once.
+    ///
+    /// Revert-failing on two seams at once: revert C3 (the install authority) and
+    /// the shield is wiped by the first `evaluate_layers`, so the FIRST destroy
+    /// kills the creature; adopt dual-write and the SECOND destroy does not.
+    #[test]
+    fn regeneration_shield_survives_a_layer_pass_and_regenerates_exactly_once() {
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.base_characteristics_initialized = true;
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Regenerate {
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            bear,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            state.objects[&bear].replacement_definitions[0].is_resolution_installed(),
+            "CR 611.2c: the shield is stamped as resolution-created"
+        );
+
+        // CR 613.1: a layer pass between the regeneration and the destruction.
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].replacement_definitions.len(),
+            1,
+            "the shield must survive the reset"
+        );
+
+        // First destroy: survived (positive reach-guard), shield consumed.
+        let mut events = Vec::new();
+        crate::game::effects::destroy::destroy_single_object(
+            &mut state,
+            bear,
+            bear,
+            false,
+            &mut events,
+        );
+        assert_eq!(
+            state.objects[&bear].zone,
+            Zone::Battlefield,
+            "CR 701.19a: the first destruction is replaced by regeneration"
+        );
+        assert!(
+            state.objects[&bear].replacement_definitions[0].is_consumed,
+            "CR 615.3: the shield is used up"
+        );
+
+        // Second layer pass — the anti-resurrection step.
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        assert!(
+            state.objects[&bear].replacement_definitions[0].is_consumed,
+            "a layer pass must not resurrect a spent regeneration shield"
+        );
+
+        // Second destroy: the creature dies.
+        let mut events = Vec::new();
+        crate::game::effects::destroy::destroy_single_object(
+            &mut state,
+            bear,
+            bear,
+            false,
+            &mut events,
+        );
+        assert_eq!(
+            state.objects[&bear].zone,
+            Zone::Graveyard,
+            "CR 701.19a: the shield protects the permanent the NEXT time, once"
+        );
+    }
 
     #[test]
     fn regenerate_creates_shield_on_source() {

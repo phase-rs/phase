@@ -79,7 +79,7 @@ pub(crate) enum TriggerConditionScope {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ChosenColorQualifierScope {
     /// Default, and the value every `ParseContext::default()` carries — which
-    /// is every `parse_type_phrase` call site, by construction of the wrapper
+    /// is every `parse_type_phrase_folding` call site, by construction of the wrapper
     /// in `oracle_target.rs`. The printed form must NOT be consumed here.
     #[default]
     Unbound,

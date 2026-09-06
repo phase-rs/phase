@@ -2595,22 +2595,13 @@ pub(super) fn apply_post_replacement_effect(
     // entering object's cast-payment stamp for copy MV ceilings.
     let (source_id, affected_controller, mana_spent_stamp) = object_id
         .and_then(|obj_id| {
-            state
-                .objects
-                .get(&obj_id)
-                .or_else(|| {
-                    state
-                        .liminal_entries
-                        .get(&obj_id)
-                        .map(|entry| entry.object.projected())
-                })
-                .map(|obj| {
-                    (
-                        obj_id,
-                        super::replacement::replacement_source_player(obj),
-                        obj.mana_spent_to_cast_amount,
-                    )
-                })
+            state.entering_or_live_object(obj_id).map(|obj| {
+                (
+                    obj_id,
+                    super::replacement::replacement_source_player(obj),
+                    obj.mana_spent_to_cast_amount,
+                )
+            })
         })
         .unwrap_or((ObjectId(0), state.active_player, 0));
 
@@ -3355,6 +3346,103 @@ pub fn find_copy_targets(
         })
         .map(|(id, _)| *id)
         .collect()
+}
+
+/// CR 614.12a + CR 111.1: commit a liminal (decided-but-not-yet-entered) token
+/// entry whose "as enters" chain paused on a player prompt, once that prompt —
+/// and every continuation it spawned — has drained back to a priority boundary.
+///
+/// # The defect this exists to close
+///
+/// `GameState::pending_liminal_entry_resume` has three producers
+/// (`handle_replacement_choice_inner`'s `TokenEntry` arm,
+/// `zone_pipeline::deliver_zone_change`, and
+/// `token_copy::apply_copy_token_after_replacement_with_created_ids`) and, before
+/// this drain, exactly ONE consumer: `handle_copy_target_choice`. That handler
+/// answers `WaitingFor::CopyTargetChoice` only, so an entry whose chain paused on
+/// any other prompt was never resumed — `commit_liminal_copy_token_entry` was
+/// never reached, the entry stayed in `state.liminal_entries` for the rest of the
+/// game, and the permanent was never created at all.
+///
+/// That is not a narrow shape. CR 702.104a Tribute synthesizes
+/// `Choose { Opponent, persist } -> Tribute`, and `parse_as_enters_choose` gives
+/// the whole printed "As this ~ enters, choose a <named attribute>" class
+/// (Painter's Servant, the Thriving land cycle, the Khans Sieges, Anointed
+/// Peacekeeper) the same `Effect::Choose` post-replacement chain. Every one of
+/// them raises `WaitingFor::NamedChoice`, so every copy-token effect that copied
+/// one — `CopyTokenOf`, Embalm/Eternalize, populate, `CreateTokenCopyFromPool` —
+/// silently produced no token, and left a stranded id that the visible game log
+/// rendered as `(unknown #N)` (`log::resolve_object_name` consults `state.objects`
+/// and `state.lki_cache`, and a liminal entry is in neither).
+///
+/// # Why the boundary, and not each answer handler
+///
+/// The set of prompts an "as enters" chain can raise is open — it is whatever
+/// `apply_post_replacement_effect` dispatches into — so teaching each answer
+/// handler to resume would be a list that silently goes stale the next time an
+/// effect learns to pause. The priority boundary is the one place that already
+/// means "this action's chain has finished", which is exactly the CR 614.12a
+/// precondition for the entry to commit: the choices an entry replacement
+/// requires are made BEFORE the permanent enters, so the entry is owed the
+/// moment, and only the moment, that they are all answered. A chain that raises
+/// a further prompt (Tribute's pay-or-decline after its opponent choice) leaves
+/// `waiting_for` non-`Priority`, so the gate in
+/// `engine::resume_pending_continuation_if_priority` holds the commit back
+/// without this function needing to know that prompt exists.
+///
+/// # Scope
+///
+/// Consumes only a `Token` resume whose liminal entry is still present — which
+/// covers all three producers, since every one of them records a `Token`. An
+/// entry already committed by `handle_copy_target_choice` is gone from
+/// `liminal_entries`, so the presence check makes a double-commit unrepresentable
+/// rather than merely unlikely.
+///
+/// A `Meld` resume is left parked for `handle_copy_target_choice`, which owns the
+/// CR 701.42 completion (`commit_meld_battlefield` plus the deferred-meld
+/// epilogue) that this seam deliberately does not reimplement.
+///
+/// KNOWN RESIDUAL, stated rather than implied: the card-backed CR 701.42 path
+/// keeps the shape this function fixes for tokens. `zone_pipeline`'s producer
+/// records a `Meld` resume ONLY when the pause is a `CopyTargetChoice` (it is
+/// gated on exactly that variant), so a meld whose own as-enters chain paused on
+/// any other prompt records no resume at all and strands the same way a token
+/// used to. That is latent, not live — no printed meld result carries an
+/// "as this enters, choose" replacement — so it is left alone rather than fixed
+/// speculatively, but it is the same defect and closing it means giving
+/// `zone_pipeline` an unconditional producer plus a meld-aware drain here.
+///
+/// Returns the new pause when the commit itself pauses (a CR 616.1 ordering
+/// choice between two enter-with-counters replacements), otherwise `None`.
+pub(super) fn resume_pending_liminal_token_entry(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let is_resumable_token = matches!(
+        state.pending_liminal_entry_resume.as_ref(),
+        Some(crate::types::game_state::PendingLiminalEntryResume::Token { source_id, .. })
+            if state.liminal_entries.contains_key(source_id)
+    );
+    if !is_resumable_token {
+        return None;
+    }
+    let Some(crate::types::game_state::PendingLiminalEntryResume::Token { event, .. }) =
+        state.pending_liminal_entry_resume.take()
+    else {
+        unreachable!("the guard above matched a Token resume with a live liminal entry")
+    };
+
+    // The single authority the UNPAUSED path uses for exactly this step
+    // (`handle_replacement_choice_inner`'s `TokenEntry` arm): commit this entry,
+    // then continue the rest of the CR 707.2 copy batch and drain the pending
+    // copy-token resolution. Resuming through it is what makes a paused entry
+    // and an unpaused one converge on the same board.
+    if !crate::game::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
+        state, event, events,
+    ) {
+        return Some(state.waiting_for.clone());
+    }
+    (!matches!(state.waiting_for, WaitingFor::Priority { .. })).then(|| state.waiting_for.clone())
 }
 
 #[cfg(test)]

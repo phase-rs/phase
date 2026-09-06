@@ -18,7 +18,8 @@ use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_type_phrase, parse_type_phrase_with_ctx,
+    parse_target, parse_target_with_ctx, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx,
 };
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::lower::parse_for_each_multiplier_prefix;
@@ -1153,7 +1154,7 @@ pub(crate) fn normalize_counter_type(raw: &str) -> CounterType {
 
 /// CR 115.1d + CR 122.1: Strip the distribution prefix "each of any number of "
 /// from a remove-counter "from <objects>" clause. Returns the remainder for
-/// `parse_type_phrase` when the prefix was present (Garnet class — player
+/// `parse_type_phrase_folding` when the prefix was present (Garnet class — player
 /// chooses any number of matching permanents, not a "target" phrase).
 fn strip_remove_counter_each_of_any_number(input: &str) -> Option<&str> {
     let after_each_of = nom_on_lower(input, input, |i| value((), opt(tag("each of "))).parse(i))
@@ -1177,7 +1178,7 @@ fn strip_remove_counter_each_of_fixed_number(input: &str) -> Option<&str> {
 /// effect. The optional "each of any number of" prefix denotes a variable-count
 /// non-target distribution — strip it and parse the remainder as a type phrase
 /// instead of routing through `parse_target` (whose bare "each " arm would leave
-/// "of any number of …" for `parse_type_phrase` and collapse to `Any`).
+/// "of any number of …" for `parse_type_phrase_folding` and collapse to `Any`).
 fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
     if is_self_ref(text) {
         return TargetFilter::SelfRef;
@@ -1189,7 +1190,7 @@ fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> Tar
     if let Some(filter_text) = strip_remove_counter_each_of_any_number(text)
         .or_else(|| strip_remove_counter_each_of_fixed_number(text))
     {
-        let (t, _rem) = parse_type_phrase_with_ctx(filter_text, ctx);
+        let (t, _rem) = parse_type_phrase_folding_with_ctx(filter_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, filter_text);
         return t;
@@ -1790,7 +1791,7 @@ pub(super) fn try_parse_multiply_pt_effect(lower: &str, ctx: &mut ParseContext) 
     let ((), filter_text) = nom_on_lower(after_mode, after_mode, |i| {
         value((), alt((tag("each "), tag("all ")))).parse(i)
     })?;
-    let (target, _) = parse_type_phrase(filter_text);
+    let (target, _) = parse_type_phrase_folding(filter_text);
     Some(Effect::DoublePTAll {
         mode,
         target,

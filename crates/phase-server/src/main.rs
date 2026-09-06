@@ -4276,6 +4276,25 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
         L::TournamentListUpdate { tournaments } => {
             ServerMessage::TournamentListUpdate { tournaments }
         }
+        // The two correlated settlement replies. `request_id` is the same
+        // re-exported `TournamentRequestId` on both enums, so this stays a pure
+        // re-tag like every arm above it.
+        L::TournamentActionAck {
+            request_id,
+            code,
+            view,
+        } => ServerMessage::TournamentActionAck {
+            request_id,
+            code,
+            view,
+        },
+        L::TournamentActionRejected {
+            request_id,
+            message,
+        } => ServerMessage::TournamentActionRejected {
+            request_id,
+            message,
+        },
     }
 }
 
@@ -4407,34 +4426,55 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             display_name: display_name.clone(),
         },
         ClientMessage::GetTournament { code } => L::GetTournament { code: code.clone() },
+        // The four GATED actions FORWARD their correlator rather than dropping
+        // it. Binding it by name is compiler-forced; forwarding the bound value
+        // is not — `request_id: _` on the pattern plus `request_id: None` on the
+        // construction compiles perfectly and is exactly the bug: it would
+        // silently uncorrelate every request from a native `phase-server`
+        // client while the Cloudflare Worker path, which never re-tags, kept
+        // working. `tournament_variants_survive_the_canonical_lobby_roundtrip`
+        // is the guard, and it only bites because one fixture carries a real
+        // `Some(..)` — under `skip_serializing_if = "Option::is_none"` a
+        // forwarded `None` and a discarded one serialize identically.
         ClientMessage::StartTournamentRound {
             code,
             organizer_token,
+            request_id,
         } => L::StartTournamentRound {
             code: code.clone(),
             organizer_token: organizer_token.clone(),
+            request_id: *request_id,
         },
         ClientMessage::ReportMatchResult {
             code,
             pairing_id,
             player_token,
             outcome,
+            request_id,
         } => L::ReportMatchResult {
             code: code.clone(),
             pairing_id: *pairing_id,
             player_token: player_token.clone(),
             outcome: outcome.clone(),
+            request_id: *request_id,
         },
-        ClientMessage::DropFromTournament { code, player_token } => L::DropFromTournament {
+        ClientMessage::DropFromTournament {
+            code,
+            player_token,
+            request_id,
+        } => L::DropFromTournament {
             code: code.clone(),
             player_token: player_token.clone(),
+            request_id: *request_id,
         },
         ClientMessage::EndTournament {
             code,
             organizer_token,
+            request_id,
         } => L::EndTournament {
             code: code.clone(),
             organizer_token: organizer_token.clone(),
+            request_id: *request_id,
         },
         _ => return None,
     })
@@ -14492,7 +14532,7 @@ mod mode_gate_tests {
 
     use server_core::protocol::{
         BracketShape, MatchArity, PairingOutcome, PairingView, PlayerSummary, PodOutcome,
-        ScoringPolicy, TournamentStatus, TournamentSummary, TournamentView,
+        ScoringPolicy, TournamentRequestId, TournamentStatus, TournamentSummary, TournamentView,
     };
 
     fn tournament_client_frames() -> Vec<ClientMessage> {
@@ -14512,10 +14552,21 @@ mod mode_gate_tests {
             ClientMessage::GetTournament {
                 code: "TOUR01".into(),
             },
+            // Deliberately CORRELATED, and the only fixture here that is.
+            // `skip_serializing_if = "Option::is_none"` means a `None`
+            // correlator emits no key at all, so under an all-`None` table a
+            // projection that FORWARDED the field and one that DISCARDED it
+            // serialize to byte-identical strings — and
+            // `tournament_variants_survive_the_canonical_lobby_roundtrip`, whose
+            // whole job is to catch a dropped field, would pass either way.
+            // A real `Some(..)` is what makes that instrument fire.
             ClientMessage::StartTournamentRound {
                 code: "TOUR01".into(),
                 organizer_token: "org-tok".into(),
+                request_id: Some(TournamentRequestId(7)),
             },
+            // The remaining three stay uncorrelated, so the same pass also
+            // proves a pre-correlation frame still round-trips unchanged.
             ClientMessage::ReportMatchResult {
                 code: "TOUR01".into(),
                 pairing_id: 7,
@@ -14526,14 +14577,17 @@ mod mode_gate_tests {
                         .into_iter()
                         .collect(),
                 },
+                request_id: None,
             },
             ClientMessage::DropFromTournament {
                 code: "TOUR01".into(),
                 player_token: "player-tok".into(),
+                request_id: None,
             },
             ClientMessage::EndTournament {
                 code: "TOUR01".into(),
                 organizer_token: "org-tok".into(),
+                request_id: None,
             },
         ]
     }
@@ -14663,8 +14717,19 @@ mod mode_gate_tests {
             lobby_broker::LobbyServerMessage::TournamentListUpdate {
                 tournaments: vec![view.summary.clone()],
             },
+            // `TournamentRequestId` is one type re-exported by both crates, so
+            // the lobby literal and the canonical mirror name the same struct.
+            lobby_broker::LobbyServerMessage::TournamentActionAck {
+                request_id: TournamentRequestId(7),
+                code: "TOUR01".into(),
+                view: view.clone(),
+            },
+            lobby_broker::LobbyServerMessage::TournamentActionRejected {
+                request_id: TournamentRequestId(7),
+                message: "not the organizer".into(),
+            },
         ];
-        assert_eq!(messages.len(), 5, "every new server variant is covered");
+        assert_eq!(messages.len(), 7, "every new server variant is covered");
 
         for msg in messages {
             let expected = serde_json::to_string(&msg).expect("lobby form serializes");

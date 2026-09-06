@@ -34739,7 +34739,7 @@ fn effect_from_the_rubble_chosen_type_graveyard_target() {
 
 /// CR 115.2: An already zone-qualified reanimation target ("return target
 /// creature card from your graveyard to the battlefield") must NOT be
-/// re-scoped by the inferred-origin pass. `parse_type_phrase` already parses
+/// re-scoped by the inferred-origin pass. `parse_type_phrase_folding` already parses
 /// "from your graveyard" into `InZone { Graveyard }` plus a single owner
 /// scope on the filter's `controller` field, so the candidate filter must
 /// carry exactly one owner-`You` scope — guarding against the 905-card
@@ -35645,7 +35645,7 @@ fn passive_cant_be_cast_single_clause_has_no_land_sub_ability() {
 }
 
 /// Pattern-coverage companion: the land-play axis is not limited to "chosen
-/// name" — `parse_type_phrase` resolves any type-phrase subject, so a
+/// name" — `parse_type_phrase_folding` resolves any type-phrase subject, so a
 /// hypothetical type-scoped land-play ban parses the same way (building for
 /// the class, not the single card).
 #[test]
@@ -55060,7 +55060,7 @@ fn ogre_geargrabber_lose_control_stays_unimplemented() {
 /// regardless of its individual disguise cost.
 #[test]
 fn parse_type_phrase_creatures_you_control_with_disguise() {
-    let (filter, rem) = parse_type_phrase("creatures you control with disguise");
+    let (filter, rem) = parse_type_phrase_folding("creatures you control with disguise");
     assert!(
         rem.trim().is_empty(),
         "must fully consume, leftover: {rem:?}"
@@ -59348,7 +59348,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
 /// That `false` is a DATED POOL CENSUS, not a structural property, and the
 /// distinction matters enough to spell out. `FilterProp::IsChosenColor` is
 /// stamped by the printed-qualifier arm inside the GENERAL type-phrase parser
-/// (`parser/oracle_target.rs` `parse_type_phrase_with_ctx`), gated only on
+/// (`parser/oracle_target.rs` `parse_type_phrase_folding_with_ctx`), gated only on
 /// `ChosenColorQualifierScope::ChainBound` — which `oracle_effect/mod.rs` sets
 /// for EVERY chunk of EVERY chain. So the grammar does not forbid the prop from
 /// landing in a sibling mass-effect object filter: `ChangeZoneAll`, `PumpAll`,
@@ -59718,7 +59718,7 @@ fn anaphor_color_cards_are_unchanged_by_the_printed_qualifier_arm() {
 ///
 /// The fixture must be MULTI-CLAUSE: a single-clause refusal cannot reach the
 /// guard, because if the clause lowered to `Unimplemented` then
-/// `parse_type_phrase_with_ctx` generally never ran on it, so
+/// `parse_type_phrase_folding_with_ctx` generally never ran on it, so
 /// `printed_color_choice` is `None` and the injector's `Some(_) | None` arm is
 /// taken instead — indistinguishable from the guard firing. That same argument
 /// is why the guard's own negative arm (the CARRIER itself refused, so

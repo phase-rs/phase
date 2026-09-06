@@ -700,6 +700,28 @@ function commanderConfig(): FormatConfig {
   };
 }
 
+/**
+ * CR 903.13f: Commander Draft deck construction, which differs from Commander
+ * in the two ways that show here — at least 60 cards with no maximum (1), and
+ * any number of same-named cards from the drafted pool (2).
+ *
+ * Spelled out locally rather than imported: the real value lives in
+ * `FORMAT_DEFAULTS` (`stores/multiplayerStore.ts`), which this suite does not
+ * import and which is itself derived from the engine's format registry at
+ * runtime. What the cases below need from it is only that a `formatConfig` is
+ * present — that is what arms `validateGuestDeck` — and that its format is
+ * `CommanderDraft`.
+ */
+function commanderDraftConfig(): FormatConfig {
+  return {
+    ...commanderConfig(),
+    format: "CommanderDraft",
+    deck_size: { type: "Minimum", data: 60 },
+    singleton: false,
+    default_deck_copy_limit: { type: "Unlimited" },
+  };
+}
+
 function makeHost(playerCount: number, gracePeriodMs = 5_000, formatConfig?: FormatConfig) {
   const { peer, onGuestConnected, emitConnection } = createFakePeer();
   const hostDeck = {
@@ -969,6 +991,59 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     expect(mockInitializeHostGame).toHaveBeenCalledTimes(1);
     expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
+  });
+
+  /**
+   * CR 903.13f(3): a draft that contained Commander Masters boosters grants the
+   * partner ability, for deckbuilding purposes, to any card that can be a
+   * commander by itself whose color identity is one or fewer colors. The engine
+   * computes that grant from the deck payload's `draft_set_codes`.
+   *
+   * `startPregameGameInner` REBUILDS the deck payload field-by-field before
+   * `initializeMultiplayerHostGame`, so declaring the field on `DeckListPayload`
+   * is NOT sufficient on its own — an unnamed field is silently discarded and
+   * the grant vanishes with it. This row is red exactly when the reconstruction
+   * misses it, and green under the declaration alone would be the bug.
+   *
+   * BOTH codes, not one: the rule asks what the draft CONTAINED, so a mixed
+   * CMM+CLB draft that forwarded a single representative code could drop the
+   * very set the grant keys on.
+   */
+  it("carries the pod's draft set codes through the rebuilt payload to the engine", async () => {
+    const { peer, onGuestConnected } = createFakePeer();
+    const adapter = new P2PHostAdapter(
+      {
+        player: { main_deck: ["Mountain"], sideboard: [], commander: ["Human Legend"] },
+        opponent: { main_deck: ["Forest"], sideboard: [] },
+        ai_decks: [],
+        draft_set_codes: ["CMM", "CLB"],
+      },
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      commanderDraftConfig(),
+    );
+    await adapter.initialize();
+
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: { type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } } },
+      },
+    });
+    await adapter.startPregameGame();
+
+    // Reach guard: the payload really was built and handed to the engine, so an
+    // absent field below is a real omission rather than a dead harness.
+    expect(mockInitializeHostGame).toHaveBeenCalledTimes(1);
+    // The mock is declared parameterless, so its recorded args need a cast to
+    // be read at all — the same reason `nativeWebSocketMocks.onEvent`'s
+    // recorded handler is cast where it is read.
+    const [payload] = mockInitializeHostGame.mock.calls[0] as unknown as [
+      { draft_set_codes?: string[] },
+    ];
+    expect(payload.draft_set_codes).toEqual(["CMM", "CLB"]);
   });
 
   it("does not reinitialize the host during the lobby-to-game handoff", async () => {
@@ -1312,6 +1387,66 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       "HostHuman",
       "JoinedHuman",
     ]);
+  });
+
+  /**
+   * CR 903.13f(3): `commander_draft_partner_grant` computes the Commander
+   * Masters partner grant from the request's `draft_set_codes`. This gate KICKS
+   * a guest whose deck fails it, so a request that omits the field rejects a
+   * rules-legal two-commander deck and evicts the player.
+   *
+   * This asserts the REQUEST only, and is named for that. It cannot assert
+   * ADMISSION of a partner-granted deck: the wasm is mocked in this suite, so
+   * `commander_draft_partner_grant` never runs and the verdict here is
+   * whatever the mock was told to return.
+   *
+   * `objectContaining` on this NEW case only — the exact `toHaveBeenCalledWith`
+   * rows above stay exact. Their `makeHost` deck has no `draft_set_codes`, and
+   * `toHaveBeenCalledWith` compares with `toEqual` semantics, which ignores an
+   * `undefined` key; they would go red only if the host normalised the absent
+   * value to `null` or `[]`, which the passthrough deliberately does not do.
+   */
+  it("sends the host's draft set codes on the guest deck gate request", async () => {
+    mockEvaluateDeckFormatGate.mockResolvedValueOnce({ compatible: true, reasons: [] });
+    const { peer, onGuestConnected, emitConnection } = createFakePeer();
+    const adapter = new P2PHostAdapter(
+      {
+        player: { main_deck: ["Mountain"], sideboard: [], commander: ["Human Legend"] },
+        opponent: { main_deck: ["Forest"], sideboard: [] },
+        ai_decks: [],
+        draft_set_codes: ["CMM"],
+      },
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      commanderDraftConfig(),
+    );
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: {
+        player: {
+          main_deck: ["Plains"],
+          sideboard: [],
+          commander: ["Mono Red Legend", "Mono Blue Legend"],
+          companion: [],
+          signature_spell: [],
+        },
+      },
+    });
+    await flushPromises(20);
+
+    expect(mockEvaluateDeckFormatGate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commander: ["Mono Red Legend", "Mono Blue Legend"],
+        selected_format: "CommanderDraft",
+        draft_set_codes: ["CMM"],
+      }),
+    );
+    // Reach guard: the guest survived the gate, so the assertion above read a
+    // real request rather than one built on a path that then kicked.
+    expect(guest.open).toBe(true);
   });
 
   it("kicks a guest whose deck is for a Custom format the engine cannot evaluate", async () => {

@@ -583,6 +583,12 @@
   "podComplete": {
     "title": "Draft terminé",
     "launchCommanderGame": "Lancer la partie Commander",
+    "launchLocalCommanderGame": "Lancer une partie Commander locale",
+    "waitingForPlayers": "En attente des joueurs…",
+    "cancelCommanderLaunch": "Annuler le lancement",
+    "joinCommanderGame": "Rejoindre la partie Commander",
+    "joiningCommanderGame": "Connexion en cours — en attente des autres joueurs…",
+    "seatCeiling": "Cette table compte {{seats}} joueurs ; une partie Commander pair-à-pair en accepte {{max}} au maximum. Vous jouerez celle-ci en local contre le moteur, avec tous les decks draftés.",
     "returnToMenu": "Retour au menu"
   },
   "podError": {

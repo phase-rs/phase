@@ -11,7 +11,7 @@
 //!      form to an honest `Effect::Unimplemented`, so the trigger did nothing;
 //!   2. `Effect::Double { DoubleTarget::Counters }` had no battlefield-population
 //!      tier at all, so even a lowered effect would have doubled nothing; and
-//!   3. `parse_type_phrase_with_ctx`'s bare "and"/"or" branch rejected a
+//!   3. `parse_type_phrase_folding_with_ctx`'s bare "and"/"or" branch rejected a
 //!      supertype-led right conjunct, collapsing the population to
 //!      `Typed{[Subtype("Spider")]}` with NO controller — which both misses the
 //!      controller's legendary creatures and reaches across the table.

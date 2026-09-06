@@ -583,6 +583,12 @@
   "podComplete": {
     "title": "Draft abgeschlossen",
     "launchCommanderGame": "Commander-Spiel starten",
+    "launchLocalCommanderGame": "Lokales Commander-Spiel starten",
+    "waitingForPlayers": "Warten auf beitretende Spieler…",
+    "cancelCommanderLaunch": "Start abbrechen",
+    "joinCommanderGame": "Commander-Spiel beitreten",
+    "joiningCommanderGame": "Beitritt läuft – warten auf die anderen Spieler …",
+    "seatCeiling": "Dieser Pod hat {{seats}} Plätze; ein Peer-to-Peer-Commander-Spiel unterstützt höchstens {{max}}. Du spielst dieses Spiel lokal gegen die Engine – mit allen gedrafteten Decks.",
     "returnToMenu": "Zurück zum Menü"
   },
   "podError": {

@@ -2851,6 +2851,95 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
     })
 }
 
+/// CR 113.7a + CR 611.2a + CR 615.3: install a damage replacement created by the
+/// RESOLUTION of a spell or ability whose scope is its SOURCE rather than a
+/// recipient object.
+///
+/// The single authority for the SOURCE-SCOPED DAMAGE-SHIELD installs it owns —
+/// `prevent_damage`'s untargeted branch and player-scoped arm, and
+/// `create_damage_replacement`'s non-battlefield arm — so those cannot drift.
+///
+/// Scope of that claim, stated precisely: it is NOT the only writer to
+/// `state.pending_damage_replacements`. `add_target_replacement::resolve` still
+/// pushes raw at its `TargetFilter::None` global arm and its `TargetRef::Player`
+/// arm, and neither latches `source_controller`, so a controller-relative gate on
+/// those definitions falls back to `state.active_player` in the pending scan
+/// rather than to the installer (CR 113.8 / CR 109.5 would prefer the installer).
+/// That is PRE-EXISTING behavior, deliberately left alone by issue #8485 rather
+/// than changed late in that work, and this comment is its only record. Routing
+/// those two arms through this authority is the clean end state.
+///
+/// CR 113.7a: "Once activated or triggered, an ability exists on the stack
+/// independently of its source. Destruction or removal of the source after that
+/// time won't affect the ability." Hosting such a shield on the SOURCE permanent
+/// (which the pre-#8485 code did whenever the source happened to be a
+/// battlefield object) makes its lifetime an accident of the SOURCE'S ZONE
+/// rather than of the effect's stated duration (CR 611.2a), and subjects it to
+/// the CR 702.26b phased-out gate in `functioning_abilities::active_replacements`
+/// even though the effect is not the source's ability any more.
+///
+/// The floating registry is the engine's home for exactly this: it is not
+/// touched by the CR 613.1 layer reset, is not zone-gated, is mutated in place
+/// by the prevention appliers (all three of which dispatch on the `ObjectId(0)`
+/// sentinel), and is pruned on schedule by all three windows (`turns.rs`:
+/// cleanup, end-of-combat teardown, untap step) -- CR 615.3, "until they're used
+/// up or their duration has expired".
+///
+/// `anchor_zones` is the CALLER'S OWN pre-existing object-hosting zone set --
+/// the zones in which that caller stored the shield on its source before this
+/// authority existed. It is a caller parameter and not a constant because the
+/// two pre-existing forks disagree: `prevent_damage::resolve`'s untargeted
+/// branch tested `Zone::Battlefield` alone while `push_player_scoped_shield`
+/// tested `Zone::Battlefield | Zone::Command`. Handing each caller its own set
+/// is what makes the ANCHORED population exactly the population that caller
+/// newly moves, and leaves every shield that was ALREADY in the registry
+/// carrying `source_object: None` and today's sentinel semantics -- including an
+/// untargeted shield sourced from a Command-zone emblem. A single hardcoded
+/// `Battlefield | Command` test would newly anchor that emblem case and flip
+/// `SourceExclusion::Exclude`, `DamageTargetPlayerScope::SourceChosenPlayer`
+/// and every host-reading `ReplacementCondition` from inert to evaluated.
+/// The SHAPE mirrors the object scan's own `zones_to_scan`
+/// (`replacement.rs`) -- a zone set, checked with `contains`. That is a
+/// shape precedent only: `zones_to_scan` is a hardcoded local with no callers,
+/// so it is not itself an instance of per-caller parameterization. An EMPTY
+/// slice means "anchor nothing", which is correct for a caller that is only
+/// being refactored onto the authority and moves no shield at all.
+pub(crate) fn install_floating_damage_replacement(
+    state: &mut GameState,
+    mut shield: crate::types::ability::ReplacementDefinition,
+    controller: PlayerId,
+    source_id: ObjectId,
+    anchor_zones: &[Zone],
+) {
+    // CR 113.8 + CR 109.5: "The controller of an activated ability on the stack is
+    // the player who activated it"; CR 109.5's "you"/"your" clause says the same
+    // for an activated ability. Latch the installing controller so a
+    // controller-relative filter or condition resolves under the sentinel host,
+    // which per CR 109.4 has no controller of its own.
+    if shield.source_controller.is_none() {
+        shield.source_controller = Some(controller);
+    }
+    // CR 113.7a: anchor the host ONLY for a source that was actually
+    // hosting the shield before this authority existed -- i.e. an object in THIS
+    // CALLER'S `anchor_zones`. The two callers do not agree on that set (see the
+    // doc comment), so it must not be hardcoded here. A shield created by a
+    // resolving instant/sorcery never had a host, and neither did any shield this
+    // caller was ALREADY routing to the registry -- for `prevent_damage::resolve`'s
+    // untargeted branch that includes a Command-zone (emblem) source, which its
+    // `Battlefield`-only fork already sent here. Leaving all of those `None`
+    // reproduces today's sentinel semantics byte-for-byte for the entire
+    // pre-existing registry population.
+    if shield.source_object.is_none()
+        && state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| anchor_zones.contains(&obj.zone))
+    {
+        shield.source_object = Some(source_id);
+    }
+    state.pending_damage_replacements.push(shield);
+}
+
 enum OneSidedFightSubject {
     /// The parent chose this object; prepend it to restore the contract.
     Prepend(ObjectId),
@@ -10098,6 +10187,40 @@ fn perform_player_scope_sacrifices(
             for id in &completion.sacrificed {
                 causes.insert(*id, ThisWayCause::Sacrificed);
             }
+        }
+    }
+    // CR 118.12 + CR 608.2c + CR 609.3: "Sacrifice a creature. If you do, [rider]." — seed
+    // the performed-flag for a sacrifice that completed through the INTERACTIVE
+    // `EffectZoneChoice` path (Victimize, #7898).
+    //
+    // The mandatory-rider seed in `resolve_ability_with_events` decides the flag
+    // by scanning the LOCAL event slice for `PermanentSacrificed`. That works for
+    // the auto path (`sacrifice.rs`: `!up_to && eligible.len() <= count`), which
+    // sacrifices inline. But when the controller has more eligible creatures than
+    // the sacrifice needs, the resolver instead parks on
+    // `WaitingFor::EffectZoneChoice` and returns BEFORE anything is sacrificed —
+    // so that slice holds no `PermanentSacrificed` when the seed evaluates, the
+    // flag stays false, and the rider is silently skipped. In a real game that is
+    // the ordinary case (any caster controlling 2+ creatures), which made
+    // Victimize return nothing at all.
+    //
+    // The sacrifice is only actually known to have happened HERE, at the
+    // completion seam the resumed choice runs through, so the flag must be
+    // stamped onto the stashed continuation frame the same way
+    // `resolve_optional_effect_decision` (accepted "you may") and
+    // `finalize_discard_choice_completion` (an answered discard choice) do.
+    //
+    // Guarded on the completion LEDGER, not on the fact that the seam ran: a
+    // declined / empty selection sacrifices nothing, and CR 118.12 makes the
+    // dependent clause do nothing unless the preceding action occurred. This is
+    // deliberately independent of `cost_payment_failed_flag`, which the rider's
+    // own gate still checks separately.
+    if completion.propagate_parent_context && !completion.sacrificed.is_empty() {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame
+                .pending
+                .chain
+                .set_optional_effect_performed_recursive(true);
         }
     }
     if completion.propagate_parent_context {

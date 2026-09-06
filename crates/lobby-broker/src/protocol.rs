@@ -28,6 +28,24 @@ pub enum ServerErrorCode {
     DeckRejected,
 }
 
+/// Client-minted correlator for one gated tournament action. Opaque to the
+/// broker: minted by the caller, echoed on the reply, never stored.
+///
+/// It identifies a *request*, never a *requester* — authority remains the
+/// `organizer_token`/`player_token` in the payload, and this value must never be
+/// read as permission. It is not an idempotency token either: replaying the same
+/// id re-executes the action, exactly as `PreviewManaPayment`'s `request_id`
+/// does on the full-game surface.
+///
+/// A newtype rather than the bare `u64` its `server_core` siblings use, because
+/// `ReportMatchResult` already carries a [`crate::tournament::PairingId`] — a
+/// bare `u32` alias — and a second unlabelled integer on that signature is
+/// precisely the confusion the newtype idiom exists to prevent.
+/// `#[serde(transparent)]` keeps it wire-identical to a bare `u64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TournamentRequestId(pub u64);
+
 /// Wire-protocol version shared by the native server, client, and Cloudflare
 /// lobby Worker. Bump when any `ClientMessage` or `ServerMessage` variant is
 /// added, removed, renamed, or has a field type changed. Adding a new optional
@@ -396,6 +414,34 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 5 — Request-correlated settlement for the four GATED tournament actions.
+///     Two [`LobbyServerMessage`] variants are added — `TournamentActionAck`
+///     and `TournamentActionRejected` — which is the first of the four triggers
+///     listed above and is what makes this bump mandatory. Both are
+///     requester-only point replies carrying the [`TournamentRequestId`] the
+///     caller minted, so a caller can tell its own outcome from an ambient
+///     `TournamentUpdate` for the same tournament. `TournamentUpdate` itself is
+///     deliberately unchanged: it is fanned out to every subscriber, and a
+///     correlator on a broadcast would either be meaningless to all of them or
+///     force a second, differently-shaped frame for the acting client.
+///     `StartTournamentRound`, `ReportMatchResult`, `DropFromTournament` and
+///     `EndTournament` each gain one optional `request_id`, with the same
+///     `#[serde(default, skip_serializing_if = "Option::is_none")]` shape
+///     `ClientHello::lobby_protocol_version` already uses in this enum. Purely
+///     ADDITIVE in BOTH directions, which is why [`MIN_SUPPORTED_LOBBY_PROTOCOL`]
+///     does **not** move: an old frame omitting the field deserializes to
+///     `None` on a v5 broker, and a v5 frame carrying it deserializes cleanly on
+///     a v4 broker because neither enum sets `deny_unknown_fields`. A `None`
+///     correlator serializes to byte-identical output to today's, so an
+///     uncorrelated caller sees no change on the wire at all. Finally,
+///     [`PROTOCOL_VERSION`] does **not** move: no variant here carries
+///     `GameState` or `GameAction`, so the lobby number is the one that
+///     governs — the same rule the tournament set itself followed at 4, which
+///     added twelve variants across three crates and moved only this constant.
+///     (Written as one unbroken paragraph on purpose. A blank `///` line
+///     followed by this 4-space indentation is an indented CODE block to
+///     rustdoc, which then tries to compile the prose as a doctest — the
+///     latent defect entries 4 and 2 below already carry.)
 /// 4 — The tournament-organizer message set: seven [`LobbyClientMessage`]
 ///     variants (`CreateTournament`, `JoinTournament`, `GetTournament`,
 ///     `StartTournamentRound`, `ReportMatchResult`, `DropFromTournament`,
@@ -458,7 +504,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 4;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 5;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -823,6 +869,14 @@ pub enum LobbyClientMessage {
     StartTournamentRound {
         code: String,
         organizer_token: String,
+        /// This caller's [`TournamentRequestId`]. `None` from clients built
+        /// before the lobby correlated its gated actions; those are answered
+        /// exactly as before — broadcast only, no ack. Additive and optional,
+        /// so an older broker ignores it and an older client omits it — no
+        /// `PROTOCOL_VERSION` bump is required for either direction to keep
+        /// parsing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
     /// Player-gated: report a played pairing's result. The token must belong
     /// to a player seated in THIS pairing, not merely to some entrant.
@@ -831,17 +885,63 @@ pub enum LobbyClientMessage {
         pairing_id: crate::tournament::PairingId,
         player_token: String,
         outcome: crate::tournament::PodOutcome,
+        /// This caller's [`TournamentRequestId`]. See
+        /// [`LobbyClientMessage::StartTournamentRound`] — same additive,
+        /// optional shape, same `None`-means-uncorrelated meaning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
     /// Player-gated: drop the token's owner from the event.
     DropFromTournament {
         code: String,
         player_token: String,
+        /// This caller's [`TournamentRequestId`]. See
+        /// [`LobbyClientMessage::StartTournamentRound`] — same additive,
+        /// optional shape, same `None`-means-uncorrelated meaning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
     /// Organizer-gated: freeze the event as `Completed`.
     EndTournament {
         code: String,
         organizer_token: String,
+        /// This caller's [`TournamentRequestId`]. See
+        /// [`LobbyClientMessage::StartTournamentRound`] — same additive,
+        /// optional shape, same `None`-means-uncorrelated meaning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
+}
+
+impl LobbyClientMessage {
+    /// This frame's gated-action correlator, if it carries one.
+    ///
+    /// Exhaustive by construction — no wildcard arm — so a future gated variant
+    /// that forgets a correlator is visible here as a compile error rather than
+    /// silently uncorrelated. Every non-gated variant answers `None` because it
+    /// has no correlator to carry, which is the same answer a gated variant
+    /// sent by a pre-correlation client gives; the two are indistinguishable by
+    /// design, since both mean "there is nothing to correlate a reply to".
+    pub fn tournament_request_id(&self) -> Option<TournamentRequestId> {
+        match self {
+            Self::StartTournamentRound { request_id, .. }
+            | Self::ReportMatchResult { request_id, .. }
+            | Self::DropFromTournament { request_id, .. }
+            | Self::EndTournament { request_id, .. } => *request_id,
+            Self::ClientHello { .. }
+            | Self::SubscribeLobby
+            | Self::UnsubscribeLobby
+            | Self::CreateGameWithSettings { .. }
+            | Self::JoinGameWithPassword { .. }
+            | Self::LookupJoinTarget { .. }
+            | Self::Ping { .. }
+            | Self::UpdateLobbyMetadata { .. }
+            | Self::UnregisterLobby { .. }
+            | Self::CreateTournament { .. }
+            | Self::JoinTournament { .. }
+            | Self::GetTournament { .. } => None,
+        }
+    }
 }
 
 fn default_player_count() -> u8 {
@@ -963,6 +1063,33 @@ pub enum LobbyServerMessage {
     /// list-affecting change, and once on `SubscribeLobby`.
     TournamentListUpdate {
         tournaments: Vec<TournamentSummary>,
+    },
+    /// Requester-only acknowledgement of one gated tournament action. Carries
+    /// the [`TournamentRequestId`] the caller minted, so a caller can tell its
+    /// own outcome from an ambient `TournamentUpdate` for the same tournament —
+    /// which may come from another participant, from this caller's own
+    /// concurrent `GetTournament`, or from the reaper.
+    ///
+    /// Sent `ToSelf`, never fanned out: the correlator is meaningless to every
+    /// other subscriber. It carries **no token** — the caller already holds the
+    /// one that authorized the action — so unlike `TournamentCreated` /
+    /// `TournamentJoined` this point reply has nothing to leak.
+    TournamentActionAck {
+        request_id: TournamentRequestId,
+        code: String,
+        view: TournamentView,
+    },
+    /// Requester-only refusal of one gated tournament action, carrying the
+    /// caller's own [`TournamentRequestId`].
+    ///
+    /// One refusal shape, not the result/rejected/failed trio the full-game
+    /// surface uses: the lobby draws no distinction between an engine rejection
+    /// DTO and an operational failure — every refusal here is prose from one
+    /// `fn error` — so importing that split would be proliferation. Carries no
+    /// token and no view.
+    TournamentActionRejected {
+        request_id: TournamentRequestId,
+        message: String,
     },
 }
 
@@ -1092,8 +1219,8 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 4);
-        // Deliberately still 2, not 4: lobby versions 3 and 4 are purely
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 5);
+        // Deliberately still 2, not 5: lobby versions 3, 4 and 5 are purely
         // additive, so a version-2 client parses every frame it already
         // understood and is not evicted. See the constant's own changelog.
         assert_eq!(MIN_SUPPORTED_LOBBY_PROTOCOL, 2);
@@ -1233,12 +1360,21 @@ mod tests {
         }
     }
 
-    /// The tournament additions follow the existing `FormatConfig` capability
-    /// bump, so they consume the next independent lobby wire version.
+    /// The tournament wire surface spans TWO lobby versions: 4 introduced the
+    /// message set on top of the `FormatConfig` capability bump at 3, and 5
+    /// added request-correlated settlement for its four gated actions.
+    ///
+    /// This test's predecessor asserted the tournament set sat exactly ONE bump
+    /// past `FormatConfig` — a relationship that stopped being true the moment
+    /// correlation took 5. Retargeting its number alone would have left a test
+    /// whose name states a relationship it no longer checks, so the span is
+    /// what it pins now, and the name says so.
     #[test]
-    fn tournament_lobby_version_follows_the_format_config_bump() {
+    fn the_tournament_surface_spans_lobby_versions_four_and_five() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
-        assert_eq!(LOBBY_PROTOCOL_VERSION, PRE_TOURNAMENT_LOBBY_VERSION + 1);
+        const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
+        const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, CORRELATED_SETTLEMENT_LOBBY_VERSION);
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and
@@ -1278,6 +1414,27 @@ mod tests {
                 "EndTournament",
                 r#"{"type":"EndTournament","data":{"code":"TOUR01","organizer_token":"tok"}}"#,
             ),
+            // The four gated variants again, this time as a CORRELATED client
+            // sends them. Adding the correlator changes no tag, so nothing in
+            // `is_known_lobby_tag` moves — but a frame that parsed only in its
+            // uncorrelated shape would be a silent capability loss for exactly
+            // the four actions this correlator exists for.
+            (
+                "StartTournamentRound (correlated)",
+                r#"{"type":"StartTournamentRound","data":{"code":"TOUR01","organizer_token":"tok","request_id":42}}"#,
+            ),
+            (
+                "ReportMatchResult (correlated)",
+                r#"{"type":"ReportMatchResult","data":{"code":"TOUR01","pairing_id":0,"player_token":"tok","outcome":{"Decisive":{"winner":"key-a","game_wins":{"key-a":2,"key-b":1}}},"request_id":43}}"#,
+            ),
+            (
+                "DropFromTournament (correlated)",
+                r#"{"type":"DropFromTournament","data":{"code":"TOUR01","player_token":"tok","request_id":44}}"#,
+            ),
+            (
+                "EndTournament (correlated)",
+                r#"{"type":"EndTournament","data":{"code":"TOUR01","organizer_token":"tok","request_id":45}}"#,
+            ),
         ];
 
         for (tag, frame) in frames {
@@ -1303,6 +1460,10 @@ mod tests {
         }
     }
 
+    /// Every gated literal here carries `request_id: None` deliberately: this
+    /// test's subject is the PRE-correlation frame shape, and an uncorrelated
+    /// literal is the only honest fixture for it. The correlated shape has its
+    /// own round-trip in `correlated_gated_frames_round_trip_and_none_omits_the_key`.
     #[test]
     fn tournament_client_variants_round_trip_through_serde() {
         let messages = vec![
@@ -1324,20 +1485,24 @@ mod tests {
             LobbyClientMessage::StartTournamentRound {
                 code: "TOUR01".to_string(),
                 organizer_token: "tok".to_string(),
+                request_id: None,
             },
             LobbyClientMessage::ReportMatchResult {
                 code: "TOUR01".to_string(),
                 pairing_id: 7,
                 player_token: "tok".to_string(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             LobbyClientMessage::DropFromTournament {
                 code: "TOUR01".to_string(),
                 player_token: "tok".to_string(),
+                request_id: None,
             },
             LobbyClientMessage::EndTournament {
                 code: "TOUR01".to_string(),
                 organizer_token: "tok".to_string(),
+                request_id: None,
             },
         ];
 
@@ -1381,6 +1546,15 @@ mod tests {
             LobbyServerMessage::TournamentListUpdate {
                 tournaments: vec![view.summary.clone()],
             },
+            LobbyServerMessage::TournamentActionAck {
+                request_id: TournamentRequestId(7),
+                code: "TOUR01".to_string(),
+                view: view.clone(),
+            },
+            LobbyServerMessage::TournamentActionRejected {
+                request_id: TournamentRequestId(7),
+                message: "not the organizer".to_string(),
+            },
         ];
 
         for msg in messages {
@@ -1388,6 +1562,221 @@ mod tests {
             let back: LobbyServerMessage = serde_json::from_str(&json).expect("deserializes");
             assert_eq!(back, msg);
         }
+    }
+
+    /// The correlator's own wire shape, both halves of it.
+    ///
+    /// The `Some` half proves a correlated frame survives the two-stage parse
+    /// with its id intact. The `None` half is the one that keeps this change
+    /// additive in the outgoing direction: `skip_serializing_if` must keep the
+    /// key OFF the wire entirely, so an uncorrelated frame is byte-identical to
+    /// what a pre-correlation client already sends.
+    #[test]
+    fn correlated_gated_frames_round_trip_and_none_omits_the_key() {
+        let correlated = vec![
+            LobbyClientMessage::StartTournamentRound {
+                code: "TOUR01".to_string(),
+                organizer_token: "tok".to_string(),
+                request_id: Some(TournamentRequestId(42)),
+            },
+            LobbyClientMessage::ReportMatchResult {
+                code: "TOUR01".to_string(),
+                pairing_id: 7,
+                player_token: "tok".to_string(),
+                outcome: PodOutcome::Draw,
+                request_id: Some(TournamentRequestId(43)),
+            },
+            LobbyClientMessage::DropFromTournament {
+                code: "TOUR01".to_string(),
+                player_token: "tok".to_string(),
+                request_id: Some(TournamentRequestId(44)),
+            },
+            LobbyClientMessage::EndTournament {
+                code: "TOUR01".to_string(),
+                organizer_token: "tok".to_string(),
+                request_id: Some(TournamentRequestId(45)),
+            },
+        ];
+
+        for msg in correlated {
+            let json = serde_json::to_string(&msg).expect("serializes");
+            // `#[serde(transparent)]` — the correlator is a bare integer on the
+            // wire, not a wrapper object.
+            assert!(
+                json.contains(r#""request_id":4"#),
+                "the correlator must ride as a bare integer: {json}"
+            );
+            match parse_lobby_client_message(&json) {
+                ParsedFrame::Message(parsed) => {
+                    assert_eq!(
+                        serde_json::to_string(&*parsed).expect("re-serializes"),
+                        json,
+                        "the correlator did not survive the two-stage parse"
+                    );
+                    assert!(
+                        parsed.tournament_request_id().is_some(),
+                        "{json} parsed but lost its correlator"
+                    );
+                }
+                other => panic!("{json} did not round-trip: {other:?}"),
+            }
+        }
+
+        // The additivity half: `None` emits no key at all, so the bytes match
+        // what a pre-correlation client sends.
+        let uncorrelated = LobbyClientMessage::EndTournament {
+            code: "TOUR01".to_string(),
+            organizer_token: "tok".to_string(),
+            request_id: None,
+        };
+        let json = serde_json::to_string(&uncorrelated).expect("serializes");
+        assert_eq!(
+            json, r#"{"type":"EndTournament","data":{"code":"TOUR01","organizer_token":"tok"}}"#,
+            "an uncorrelated frame must be byte-identical to the pre-correlation shape"
+        );
+    }
+
+    /// A frame from a client that predates correlation parses, and parses as
+    /// UNCORRELATED — the property that lets a v5 broker keep answering a v4
+    /// client unchanged.
+    #[test]
+    fn a_pre_correlation_frame_parses_with_no_request_id() {
+        let old_shape =
+            r#"{"type":"StartTournamentRound","data":{"code":"TOUR01","organizer_token":"tok"}}"#;
+        match parse_lobby_client_message(old_shape) {
+            ParsedFrame::Message(msg) => match *msg {
+                LobbyClientMessage::StartTournamentRound { request_id, .. } => {
+                    assert_eq!(request_id, None)
+                }
+                other => panic!("expected StartTournamentRound, got {other:?}"),
+            },
+            other => panic!("a pre-correlation frame must still parse: {other:?}"),
+        }
+
+        // Reach-guard: the assertion above passes because of
+        // `#[serde(default)]`, not because this test is insensitive to a
+        // missing field. The same payload against a shape whose correlator is
+        // REQUIRED must fail — so `default` is load-bearing rather than
+        // incidental.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct RequiredCorrelator {
+            code: String,
+            organizer_token: String,
+            request_id: TournamentRequestId,
+        }
+        let data = r#"{"code":"TOUR01","organizer_token":"tok"}"#;
+        assert!(
+            serde_json::from_str::<RequiredCorrelator>(data).is_err(),
+            "the positive control must reject a frame with no correlator"
+        );
+        // And the same control ACCEPTS one that carries it, so it is not
+        // rejecting everything.
+        let correlated = r#"{"code":"TOUR01","organizer_token":"tok","request_id":42}"#;
+        assert!(serde_json::from_str::<RequiredCorrelator>(correlated).is_ok());
+    }
+
+    /// [`LobbyClientMessage::tournament_request_id`] is total and discriminating.
+    ///
+    /// The exhaustive match it is written as cannot be checked by the compiler
+    /// for CORRECTNESS — only for totality — so this pins that each gated
+    /// variant returns its own id while every other variant returns `None`.
+    #[test]
+    fn tournament_request_id_is_total_and_only_gated_variants_carry_one() {
+        let gated = [
+            LobbyClientMessage::StartTournamentRound {
+                code: "TOUR01".to_string(),
+                organizer_token: "tok".to_string(),
+                request_id: Some(TournamentRequestId(1)),
+            },
+            LobbyClientMessage::ReportMatchResult {
+                code: "TOUR01".to_string(),
+                pairing_id: 0,
+                player_token: "tok".to_string(),
+                outcome: PodOutcome::Draw,
+                request_id: Some(TournamentRequestId(2)),
+            },
+            LobbyClientMessage::DropFromTournament {
+                code: "TOUR01".to_string(),
+                player_token: "tok".to_string(),
+                request_id: Some(TournamentRequestId(3)),
+            },
+            LobbyClientMessage::EndTournament {
+                code: "TOUR01".to_string(),
+                organizer_token: "tok".to_string(),
+                request_id: Some(TournamentRequestId(4)),
+            },
+        ];
+        for (i, msg) in gated.iter().enumerate() {
+            assert_eq!(
+                msg.tournament_request_id(),
+                Some(TournamentRequestId(i as u64 + 1)),
+                "{msg:?} lost its correlator"
+            );
+        }
+
+        // Non-gated variants have no correlator to carry.
+        for msg in [
+            LobbyClientMessage::SubscribeLobby,
+            LobbyClientMessage::GetTournament {
+                code: "TOUR01".to_string(),
+            },
+            LobbyClientMessage::JoinTournament {
+                code: "TOUR01".to_string(),
+                player_key: "key-a".to_string(),
+                display_name: "Alice".to_string(),
+            },
+        ] {
+            assert_eq!(msg.tournament_request_id(), None, "{msg:?}");
+        }
+
+        // The discriminating case: `None` is NOT a blanket answer for "not
+        // gated" — a gated variant from a pre-correlation client answers `None`
+        // too, and it must, because there is genuinely nothing to correlate.
+        assert_eq!(
+            LobbyClientMessage::EndTournament {
+                code: "TOUR01".to_string(),
+                organizer_token: "tok".to_string(),
+                request_id: None,
+            }
+            .tournament_request_id(),
+            None
+        );
+    }
+
+    /// The two correlated settlement replies carry no token, so neither can
+    /// leak one — the same structural byte-level assertion
+    /// `broadcast_tournament_messages_never_carry_a_token` makes for the
+    /// fan-out variants, applied to the point replies that are NOT allowed the
+    /// exemption `TournamentCreated`/`TournamentJoined` hold.
+    #[test]
+    fn correlated_settlement_messages_never_carry_a_token() {
+        let meta = meta_fixture();
+        let view = TournamentView::from(&meta);
+        let replies = [
+            LobbyServerMessage::TournamentActionAck {
+                request_id: TournamentRequestId(7),
+                code: meta.code.clone(),
+                view: view.clone(),
+            },
+            LobbyServerMessage::TournamentActionRejected {
+                request_id: TournamentRequestId(7),
+                message: "not the organizer".to_string(),
+            },
+        ];
+
+        for msg in &replies {
+            let json = serde_json::to_string(msg).expect("serializes");
+            for secret in [ORGANIZER_SECRET, PLAYER_A_SECRET, PLAYER_B_SECRET] {
+                assert!(!json.contains(secret), "{json} leaked {secret}");
+            }
+        }
+
+        // Non-vacuity: the ack really did carry this tournament's populated
+        // view, so the leak assertion above ran against real content rather
+        // than an empty projection.
+        let ack_json = serde_json::to_string(&replies[0]).expect("serializes");
+        assert!(ack_json.contains("Alice") && ack_json.contains("Friday Night"));
     }
 
     /// The whole reason the view types exist. A structural assertion on the

@@ -8773,7 +8773,7 @@ fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
         ));
     }
 
-    let (filter, rest) = super::oracle_target::parse_type_phrase(descriptor);
+    let (filter, rest) = super::oracle_target::parse_type_phrase_folding(descriptor);
     if !rest.trim().is_empty() {
         return None;
     }

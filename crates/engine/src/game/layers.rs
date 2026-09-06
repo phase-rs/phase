@@ -2415,7 +2415,18 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // trigger copy-on-write via `Arc::make_mut`.
     obj.abilities = Arc::clone(&obj.base_abilities);
     obj.materialize_base_trigger_definitions();
-    obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
+    // CR 611.2c + CR 613.1: reseed the printed baseline, carrying resolution-created
+    // continuous effects across the reset. See
+    // `game_object::reseed_replacements_carrying_resolution_effects`. This single
+    // edit covers ALL THREE call sites of `seed_live_characteristics_from_base`:
+    // both `reset_recipient_to_base` reach paths (the full-board pass and the
+    // incremental flush) and the CR 613.2b Layer-1b face-down reseed, which calls
+    // this function directly rather than through `reset_recipient_to_base`.
+    obj.replacement_definitions =
+        crate::game::game_object::reseed_replacements_carrying_resolution_effects(
+            &obj.replacement_definitions,
+            &obj.base_replacement_definitions,
+        );
     obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
     obj.color = obj.base_color.clone();
     // Reset the display-identity pointer to its baseline; the Copy layer
@@ -3073,6 +3084,15 @@ pub fn evaluate_layers(state: &mut GameState) {
     // off. Production always rebuilds at the top (above) and never reaches here.
     if !rebuild_static_index_at_top() {
         crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+
+    // CR 616.1 + CR 613.1: settle carried resolution-created replacements behind
+    // this pass's derived grants, so the `base ++ derived` prefix stays
+    // index-stable for `PendingReplacement.candidates` / `AppliedReplacementKey`.
+    for &id in &bf_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            settle_resolution_replacements_to_tail(obj);
+        }
     }
 
     // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
@@ -4192,6 +4212,53 @@ pub fn flush_layers(state: &mut GameState) {
                 super::public_state::mark_public_state_all_dirty(state);
             }
         }
+    }
+}
+
+/// CR 616.1 + CR 613.1: put carried resolution-created replacements BEHIND the
+/// per-pass derived grants, reproducing the pre-#8485 live layout
+/// (`base ++ derived ++ runtime`) exactly.
+///
+/// `PendingReplacement.candidates` (`types/game_state.rs`) parks raw
+/// `ReplacementId { source, index }` values on `GameState` across a CR 616.1
+/// `WaitingFor::ReplacementChoice` prompt, and `engine::finish_action_boundary`
+/// -> `public_state::finalize_rules_state` -> `flush_layers` runs a layer pass
+/// in between; `ProposedEvent`'s `applied: HashSet<AppliedReplacementKey>` is
+/// keyed on the same `(source, index)` pair across the same park. Any placement
+/// that inserted carried entries AHEAD of the derived grants would shift every
+/// derived slot and mis-resolve both. Appending at the tail leaves the
+/// `base ++ derived` prefix index-stable, which is the layout the park already
+/// depends on today.
+///
+/// Idempotent and allocation-free unless the object holds a carried entry that
+/// is not already part of a contiguous tail — i.e. only when the host also
+/// received a per-pass derived grant this pass.
+fn settle_resolution_replacements_to_tail(obj: &mut crate::game::game_object::GameObject) {
+    let Some(first) = obj
+        .replacement_definitions
+        .iter_all()
+        .position(|d| d.is_resolution_installed())
+    else {
+        return;
+    };
+    if obj
+        .replacement_definitions
+        .iter_all()
+        .skip(first)
+        .all(|d| d.is_resolution_installed())
+    {
+        return;
+    }
+    let carried: Vec<crate::types::ability::ReplacementDefinition> = obj
+        .replacement_definitions
+        .iter_all()
+        .filter(|d| d.is_resolution_installed())
+        .cloned()
+        .collect();
+    obj.replacement_definitions
+        .retain(|d| !d.is_resolution_installed());
+    for def in carried {
+        obj.replacement_definitions.push(def);
     }
 }
 
@@ -5803,6 +5870,17 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     // CR 603.6a + CR 611.2e: Rebuild the TriggerIndex so the next event scan
     // sees the entered objects' (and any granted) trigger sets.
     crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+
+    // CR 616.1 + CR 613.1: same tail settle as the full pass (see
+    // `settle_resolution_replacements_to_tail`). `evaluate_layers` and
+    // `apply_layers_incremental` are the only two pass tails; the calls live
+    // inside them rather than in `flush_layers` because production also calls
+    // `evaluate_layers` directly from many sites.
+    for &id in &recipient_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            settle_resolution_replacements_to_tail(obj);
+        }
+    }
 
     // Test-only buggy end-of-pass static-index placement (see `evaluate_layers`).
     if !rebuild_static_index_at_top() {
@@ -8673,7 +8751,13 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::RemoveAllAbilities => {
                 Arc::make_mut(&mut obj.abilities).clear();
                 obj.trigger_definitions.clear();
-                obj.replacement_definitions.clear();
+                // CR 613.1f + CR 611.2c: Layer 6 removes the object's ABILITIES.
+                // A replacement created by the resolution of a spell or ability is
+                // not one of the object's abilities — and per CR 611.2c not one of
+                // its characteristics at all — so Humility does not end a
+                // prevention/regeneration shield already resolved onto this object.
+                obj.replacement_definitions
+                    .retain(|d| d.is_resolution_installed());
                 obj.static_definitions.clear();
                 obj.keywords.clear();
                 abilities_suppressed.insert(id);
@@ -9181,7 +9265,13 @@ fn set_land_subtype_replacing(obj: &mut crate::game::game_object::GameObject, su
     obj.card_types.subtypes.push(subtype);
     Arc::make_mut(&mut obj.abilities).clear();
     obj.trigger_definitions.clear();
-    obj.replacement_definitions.clear();
+    // CR 305.7: "It loses all abilities generated from its rules text... Note that
+    // this doesn't remove any abilities that were granted to the land by other
+    // effects." A resolution-created replacement is neither: CR 611.2c says it is
+    // not a characteristic of the object at all, so a Blood Moon-class subtype set
+    // must not end a shield already resolved onto this land.
+    obj.replacement_definitions
+        .retain(|d| d.is_resolution_installed());
     obj.static_definitions.clear();
     obj.keywords.clear();
 }
@@ -9571,6 +9661,480 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    // ---- Issue #8485: CR 611.2c / CR 613.1 resolution-shield durability ----
+
+    /// Build a resolution-created prevention shield with runtime state already
+    /// mutated: consumed once and depleted to `Next(1)`.
+    fn spent_resolution_shield() -> crate::types::ability::ReplacementDefinition {
+        let mut def =
+            crate::types::ability::ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(crate::types::ability::PreventionAmount::Next(1))
+                .expiry(crate::types::ability::RestrictionExpiry::EndOfTurn);
+        def.is_consumed = true;
+        def
+    }
+
+    fn printed_base_shield() -> crate::types::ability::ReplacementDefinition {
+        crate::types::ability::ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(crate::types::ability::PreventionAmount::All)
+    }
+
+    /// CR 611.2c + CR 613.1 (issue #8485): a `Resolution`-origin definition survives
+    /// the layer reset WITH its runtime state.
+    ///
+    /// CR 613.1 determines the values of an object's CHARACTERISTICS. CR 611.2c
+    /// settles that a prevention effect is not one — "An effect that reads 'Prevent
+    /// all damage creatures would deal this turn' doesn't modify any object's
+    /// characteristics, so it's modifying the rules of the game." So the CR 613.1
+    /// reseed must CARRY it, and carry the same single copy the appliers mutate
+    /// (CR 615.3 "used up", CR 615.7 depletion), never a pristine re-seeded twin.
+    ///
+    /// Revert-failing: undo the `seed_live_characteristics_from_base` carry-over and
+    /// the carried def is gone entirely.
+    #[test]
+    fn resolution_origin_replacement_survives_the_layer_reset_with_its_runtime_state() {
+        let mut state = setup();
+        let host = make_creature(&mut state, "Shield Host", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
+            obj.replacement_definitions = vec![printed_base_shield()].into();
+            obj.base_characteristics_initialized = true;
+            obj.install_resolution_replacement(spent_resolution_shield());
+        }
+        assert_eq!(state.objects[&host].replacement_definitions.len(), 2);
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let live = &state.objects[&host].replacement_definitions;
+        assert_eq!(
+            live.len(),
+            2,
+            "printed def reseeded, resolution def carried"
+        );
+        assert_eq!(
+            live[0],
+            printed_base_shield(),
+            "the printed def came from base"
+        );
+        let carried = &live[1];
+        assert!(carried.is_resolution_installed());
+        assert!(
+            carried.is_consumed,
+            "CR 615.3: the carried shield keeps its consumed state"
+        );
+        assert!(
+            matches!(
+                carried.shield_kind,
+                crate::types::ability::ShieldKind::Prevention {
+                    amount: crate::types::ability::PreventionAmount::Next(1)
+                }
+            ),
+            "CR 615.7: the carried shield keeps its depleted amount"
+        );
+    }
+
+    /// NEGATIVE SIBLING: the carry-over keys on the typed `origin` field, not on
+    /// "anything that happens to be in the live store". A `Characteristic`-origin
+    /// def pushed live-only is still reset away, exactly as before #8485.
+    #[test]
+    fn characteristic_origin_live_only_replacement_is_still_reset_away() {
+        let mut state = setup();
+        let host = make_creature(&mut state, "Host", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.base_characteristics_initialized = true;
+            obj.replacement_definitions.push(printed_base_shield());
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&host].replacement_definitions.is_empty(),
+            "a live-only Characteristic def must still be reset away"
+        );
+    }
+
+    /// NEGATIVE SIBLING: a base-only def is reseeded exactly once — the carry-over
+    /// must not duplicate it.
+    #[test]
+    fn base_only_replacement_is_not_duplicated_by_the_carry_over() {
+        let mut state = setup();
+        let host = make_creature(&mut state, "Host", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
+            obj.replacement_definitions = vec![printed_base_shield()].into();
+            obj.base_characteristics_initialized = true;
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&host].replacement_definitions.len(), 1);
+    }
+
+    /// CR 613.1a + CR 707.2 + CR 611.2c (issue #8485, MG2; settles U8): a Layer-1a
+    /// COPY effect must not destroy a carried resolution shield.
+    ///
+    /// CR 707.2 defines copiable values as "the values derived from the text printed
+    /// on the object" and closes "Other effects ..., status, counters, and stickers
+    /// are not copied." A shield created by a resolving spell or ability is not a
+    /// characteristic at all (CR 611.2c), so a Clone / Vesuvan / Mirrorweave /
+    /// Copy-Enchantment recipient keeps it.
+    ///
+    /// Driven through `evaluate_layers` with a real `ContinuousModification::
+    /// CopyValues`, NOT by calling `apply_copiable_values` directly — the point is
+    /// that the production path is closed. Revert-failing against B4.
+    #[test]
+    fn copy_effect_does_not_destroy_a_carried_resolution_shield() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let donor = make_creature(&mut state, "Donor", 7, 7, player);
+        let donor_values =
+            crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&donor]);
+        let recipient = make_creature(&mut state, "Recipient", 1, 1, player);
+        {
+            let obj = state.objects.get_mut(&recipient).unwrap();
+            obj.base_characteristics_initialized = true;
+            obj.install_resolution_replacement(spent_resolution_shield());
+        }
+        state.add_transient_continuous_effect(
+            recipient,
+            player,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: recipient },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(donor_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // Positive reach-guard: layer 1a really ran.
+        let obj = &state.objects[&recipient];
+        assert_eq!(obj.name, "Donor", "reach-guard: the copy effect applied");
+        assert_eq!(obj.power, Some(7));
+        assert_eq!(obj.toughness, Some(7));
+        // CR 611.2c: and the carried shield is still there, runtime state intact.
+        let carried = obj
+            .replacement_definitions
+            .iter_all()
+            .find(|d| d.is_resolution_installed())
+            .expect("CR 707.2: a copy effect may not remove a resolution shield");
+        assert!(carried.is_consumed);
+    }
+
+    /// CR 613.2b (issue #8485): the Layer-1b face-down reseed is the THIRD
+    /// `seed_live_characteristics_from_base` call site — it does not go through
+    /// `reset_recipient_to_base`. Exercise it rather than merely naming it.
+    #[test]
+    fn face_down_reseed_does_not_drop_a_carried_shield() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let fd = make_face_down(&mut state, player, FaceDownProfile::vanilla_2_2(), "Hidden");
+        state
+            .objects
+            .get_mut(&fd)
+            .unwrap()
+            .install_resolution_replacement(spent_resolution_shield());
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // Reach-guard: the face-down profile really was re-seeded this pass.
+        assert_eq!(state.objects[&fd].power, state.objects[&fd].base_power);
+        assert!(
+            state.objects[&fd]
+                .replacement_definitions
+                .iter_all()
+                .any(|d| d.is_resolution_installed()),
+            "the CR 613.2b Layer-1b reseed must carry the shield too"
+        );
+
+        // FACE-UP SIBLING: identical behavior, so the assertion is not an artifact
+        // of the face-down path.
+        let up = make_creature(&mut state, "Face Up", 2, 2, player);
+        state
+            .objects
+            .get_mut(&up)
+            .unwrap()
+            .install_resolution_replacement(spent_resolution_shield());
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(state.objects[&up]
+            .replacement_definitions
+            .iter_all()
+            .any(|d| d.is_resolution_installed()));
+    }
+
+    /// CR 616.1 (issue #8485; settles U4): carried resolution defs sort BEHIND the
+    /// per-pass derived grants, reproducing the pre-#8485 `base ++ derived` prefix
+    /// exactly so `PendingReplacement.candidates` and `AppliedReplacementKey` — both
+    /// keyed on `(source, index)` and both parked across a CR 616.1
+    /// `ReplacementChoice` prompt that runs a layer flush — stay index-stable.
+    ///
+    /// Revert-failing against `settle_resolution_replacements_to_tail`: without it
+    /// the carried def sits at index `len(base)`, shifting the derived grant.
+    #[test]
+    fn carried_resolution_defs_sort_after_derived_grants() {
+        let mut state = setup();
+        let host = make_creature(&mut state, "Host", 2, 2, PlayerId(0));
+        let granted = crate::types::ability::ReplacementDefinition::new(ReplacementEvent::GainLife);
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
+            obj.replacement_definitions = vec![printed_base_shield()].into();
+            obj.base_characteristics_initialized = true;
+            obj.install_resolution_replacement(spent_resolution_shield());
+        }
+        let grantor = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: host })
+                    .modifications(vec![ContinuousModification::GrantReplacement {
+                        replacement: Box::new(granted.clone()),
+                    }]),
+            );
+            obj.base_static_definitions = obj.static_definitions.as_slice().to_vec().into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let live = &state.objects[&host].replacement_definitions;
+        assert_eq!(live.len(), 3, "base ++ derived ++ carried");
+        assert_eq!(live[0], printed_base_shield(), "index 0: printed base");
+        assert_eq!(live[1], granted, "index 1: the per-pass derived grant");
+        assert!(
+            live[2].is_resolution_installed(),
+            "index 2: the carried resolution shield sorts to the tail"
+        );
+    }
+
+    /// M9 HOSTILE FIXTURE: `origin` participates in `PartialEq`, and that is what
+    /// keeps the two structural-equality dedups in this file honest — a carried
+    /// resolution def must never SUPPRESS a per-pass derived grant. The accepted
+    /// dual consequence is that the structurally-identical-but-for-`origin` pair
+    /// leaves TWO entries.
+    ///
+    /// Synthetic by construction: in practice `expiry` already discriminates (a
+    /// resolution shield carries `Some(..)`, a derived grant `None`), so this shape
+    /// does not arise from any card. It pins the coupling anyway.
+    #[test]
+    fn carried_resolution_def_does_not_suppress_an_identical_derived_grant() {
+        let mut state = setup();
+        let host = make_creature(&mut state, "Host", 2, 2, PlayerId(0));
+        // A def that IS structurally identical to the derived grant except for
+        // `origin` — so it must carry an expiry (the authority's fail-closed arm
+        // would otherwise refuse to stamp it) and the grant must carry the same one.
+        let granted = crate::types::ability::ReplacementDefinition::new(ReplacementEvent::GainLife)
+            .expiry(crate::types::ability::RestrictionExpiry::EndOfTurn);
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.base_characteristics_initialized = true;
+            obj.install_resolution_replacement(granted.clone());
+        }
+        let grantor = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: host })
+                    .modifications(vec![ContinuousModification::GrantReplacement {
+                        replacement: Box::new(granted.clone()),
+                    }]),
+            );
+            obj.base_static_definitions = obj.static_definitions.as_slice().to_vec().into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let live = &state.objects[&host].replacement_definitions;
+        assert_eq!(
+            live.len(),
+            2,
+            "the carried def must not suppress the derived grant"
+        );
+        assert!(
+            live.iter_all()
+                .any(|d| !d.is_resolution_installed() && *d == granted),
+            "the derived grant is still installed"
+        );
+        assert!(
+            live.iter_all().any(|d| d.is_resolution_installed()),
+            "and the carried resolution def is still present"
+        );
+    }
+
+    /// CR 305.7 + CR 611.2c (issue #8485): Blood Moon-class `SetBasicLandType`
+    /// removes the land's rules-text abilities; it does not end a continuous effect
+    /// that already resolved onto it.
+    ///
+    /// The CR 305.7 sibling of `humility_does_not_end_a_resolution_created_shield`.
+    /// `set_land_subtype_replacing` got the same
+    /// `.retain(|d| d.is_resolution_installed())` as the CR 613.1f
+    /// `RemoveAllAbilities` arm, but only the latter had a fixture — and this is the
+    /// path that hosts `add_target_replacement` riders on LANDS, so a regression
+    /// here would be silent. CR 305.7: "It loses all abilities generated from its
+    /// rules text... Note that this doesn't remove any abilities that were granted
+    /// to the land by other effects." A resolution-created replacement is neither:
+    /// CR 611.2c says it is not a characteristic of the object at all.
+    #[test]
+    fn blood_moon_does_not_end_a_resolution_created_shield() {
+        let mut state = setup();
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nonbasic Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Desert".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
+            obj.replacement_definitions = vec![printed_base_shield()].into();
+            obj.base_characteristics_initialized = true;
+            obj.install_resolution_replacement(spent_resolution_shield());
+        }
+        // Reach-guard: the printed def is present before the pass, so its removal
+        // below is an observed change rather than a vacuous absence.
+        assert!(state.objects[&land]
+            .replacement_definitions
+            .iter_all()
+            .any(|d| !d.is_resolution_installed()));
+
+        let blood_moon = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Blood Moon".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&blood_moon).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: land })
+                    .modifications(vec![ContinuousModification::SetBasicLandType {
+                        land_type: crate::types::ability::BasicLandType::Mountain,
+                    }]),
+            );
+            obj.base_static_definitions = obj.static_definitions.as_slice().to_vec().into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // Positive reach-guard: the subtype set really applied this pass.
+        assert!(
+            state.objects[&land]
+                .card_types
+                .subtypes
+                .contains(&"Mountain".to_string()),
+            "reach-guard: CR 305.7 subtype replacement must have run"
+        );
+        assert!(
+            !state.objects[&land]
+                .card_types
+                .subtypes
+                .contains(&"Desert".to_string()),
+            "CR 205.3i: the old land subtype is replaced"
+        );
+
+        let live = &state.objects[&land].replacement_definitions;
+        assert_eq!(
+            live.len(),
+            1,
+            "the printed rules-text def is removed, the resolution shield stays"
+        );
+        assert!(live[0].is_resolution_installed());
+        assert!(
+            live[0].is_consumed,
+            "CR 615.3: the carried shield keeps its runtime state through Blood Moon"
+        );
+    }
+
+    /// CR 613.1f + CR 611.2c (issue #8485): Humility-class `RemoveAllAbilities`
+    /// removes the object's ABILITIES; it does not end a continuous effect that
+    /// already resolved onto it. Paired positive reach-guard: the printed def
+    /// existed before the pass and IS removed.
+    #[test]
+    fn humility_does_not_end_a_resolution_created_shield() {
+        let mut state = setup();
+        let host = make_creature(&mut state, "Host", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
+            obj.replacement_definitions = vec![printed_base_shield()].into();
+            obj.base_characteristics_initialized = true;
+            obj.install_resolution_replacement(spent_resolution_shield());
+        }
+        // Reach-guard: the printed def is present before the pass.
+        assert!(state.objects[&host]
+            .replacement_definitions
+            .iter_all()
+            .any(|d| !d.is_resolution_installed()));
+
+        let humility = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Humility".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&humility).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: host })
+                    .modifications(vec![ContinuousModification::RemoveAllAbilities]),
+            );
+            obj.base_static_definitions = obj.static_definitions.as_slice().to_vec().into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let live = &state.objects[&host].replacement_definitions;
+        assert_eq!(
+            live.len(),
+            1,
+            "the printed def is removed, the shield stays"
+        );
+        assert!(live[0].is_resolution_installed());
+        assert!(live[0].is_consumed, "runtime state survives Humility too");
     }
 
     fn add_unspent_blue_mana(state: &mut GameState, player: PlayerId, count: usize) {

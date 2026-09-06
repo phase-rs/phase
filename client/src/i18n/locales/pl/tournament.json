@@ -1,0 +1,148 @@
+{
+  "page": {
+    "eyebrow": "Turnieje",
+    "landingTitle": "Turnieje.",
+    "landingDescription": "Utwórz turniej, dołącz za pomocą kodu lub śledź już trwający.",
+    "detailDescription": "Turniej {{code}}",
+    "backToList": "Wszystkie turnieje"
+  },
+  "labels": {
+    "code": "Kod {{code}}",
+    "roundOf": "Runda {{current}} z {{total}}",
+    "created": "Utworzono {{date}}",
+    "organizer": "Organizator",
+    "entered": "Zapisany",
+    "spectating": "Obserwujesz",
+    "dropped": "Wycofany"
+  },
+  "status": {
+    "Registration": "Zapisy",
+    "InProgress": "W trakcie",
+    "Completed": "Zakończony",
+    "Abandoned": "Porzucony"
+  },
+  "bracket": {
+    "Swiss": "Szwajcarski",
+    "SingleElimination": "Pojedyncza eliminacja"
+  },
+  "arity": {
+    "headToHead": "Jeden na jednego",
+    "pod": "Stoły po {{seats}} graczy"
+  },
+  "list": {
+    "heading": "Otwarte turnieje",
+    "empty": "Brak turniejów w tej chwili.",
+    "loading": "Wczytywanie turniejów…",
+    "view": "Zobacz",
+    "entrants_one": "{{count}} uczestnik",
+    "entrants_few": "{{count}} uczestnicy",
+    "entrants_many": "{{count}} uczestników",
+    "entrants_other": "{{count}} uczestnika"
+  },
+  "create": {
+    "heading": "Utwórz turniej",
+    "nameLabel": "Nazwa turnieju",
+    "namePlaceholder": "Friday Night Magic",
+    "arityLabel": "Graczy na mecz",
+    "arityHint": "2 to gra jeden na jednego; 4 to standardowy stół Commander.",
+    "bracketLabel": "Drabinka",
+    "totalRoundsLabel": "Rundy",
+    "totalRoundsAuto": "Automatycznie",
+    "scoringLabel": "Punkty meczowe",
+    "winPointsLabel": "Wygrana",
+    "drawPointsLabel": "Remis",
+    "lossPointsLabel": "Przegrana",
+    "submit": "Utwórz turniej",
+    "submitting": "Tworzenie…"
+  },
+  "join": {
+    "heading": "Dołącz przy użyciu kodu",
+    "codeLabel": "Kod turnieju",
+    "codePlaceholder": "Wpisz kod turnieju",
+    "displayNameLabel": "Nazwa wyświetlana",
+    "displayNamePlaceholder": "Twoje imię przy stole",
+    "submit": "Dołącz",
+    "submitting": "Dołączanie…",
+    "joined": "Jesteś zapisany do tego turnieju."
+  },
+  "detail": {
+    "loading": "Wczytywanie turnieju…",
+    "organizerControls": "Panel organizatora",
+    "startRound": "Rozpocznij rundę",
+    "startRoundBusy": "Rozpoczynanie…",
+    "endTournament": "Zakończ turniej",
+    "endTournamentBusy": "Kończenie…",
+    "endTournamentConfirm": "Zakończyć ten turniej? Pozostałe rundy nie zostaną rozegrane.",
+    "drop": "Wycofaj się",
+    "dropBusy": "Wycofywanie…",
+    "dropConfirm": "Wycofać się z tego turnieju? Nie będzie można wrócić.",
+    "reportResult": "Zgłoś wynik",
+    "yourPairing": "Twój mecz",
+    "noPairing": "Nie masz meczu w tej rundzie."
+  },
+  "standings": {
+    "heading": "Klasyfikacja",
+    "empty": "Brak klasyfikacji.",
+    "rank": "#",
+    "player": "Gracz",
+    "matchPoints": "Punkty",
+    "matchPointsTitle": "Punkty meczowe",
+    "matchesPlayed": "Rozegrane",
+    "matchesPlayedTitle": "Rozegrane mecze, bez wolnych losów",
+    "byes": "Wolne losy",
+    "byesTitle": "Rundy z wolnym losem",
+    "tiebreaks": {
+      "headToHead": {
+        "opponentsMatchWinPct": "OMW%",
+        "opponentsMatchWinPctTitle": "Procent wygranych meczów przeciwników",
+        "gameWinPct": "GW%",
+        "gameWinPctTitle": "Procent wygranych gier",
+        "opponentsGameWinPct": "OGW%",
+        "opponentsGameWinPctTitle": "Procent wygranych gier przeciwników"
+      },
+      "multiplayer": {
+        "matchWinPct": "MW%",
+        "matchWinPctTitle": "Procent wygranych meczów",
+        "opponentsAvgMatchPoints": "OAMP",
+        "opponentsAvgMatchPointsTitle": "Średnie punkty meczowe przeciwników",
+        "opponentsMatchWinPct": "OMW%",
+        "opponentsMatchWinPctTitle": "Procent wygranych meczów przeciwników"
+      }
+    }
+  },
+  "pairings": {
+    "heading": "Parowanie",
+    "empty": "Brak par.",
+    "round": "Runda {{round}}",
+    "table": "Stół {{id}}",
+    "pending": "Oczekuje",
+    "versus": "vs"
+  },
+  "outcome": {
+    "bye": "Wolny los",
+    "forfeit": "Walkower — {{winner}}",
+    "decisive": "Wygrał {{winner}}",
+    "draw": "Remis",
+    "gameWins": "{{name}} {{wins}}"
+  },
+  "report": {
+    "heading": "Zgłoś wynik",
+    "winnerLabel": "Zwycięzca",
+    "drawOption": "Remis",
+    "gameWinsLabel": "Wygrane gry",
+    "gameWinsFor": "Wygrane gry gracza {{name}}",
+    "submit": "Wyślij wynik",
+    "submitting": "Wysyłanie…",
+    "cancel": "Anuluj"
+  },
+  "errors": {
+    "notOrganizer": "Nie jesteś organizatorem tego turnieju.",
+    "notEntered": "Nie jesteś zapisany do tego turnieju.",
+    "serverRejected": "Serwer odrzucił żądanie: {{message}}",
+    "timedOut": "Serwer nie odpowiedział. Spróbuj ponownie.",
+    "connectionLost": "Utracono połączenie z lobby. Sprawdź adres serwera.",
+    "aborted": "To żądanie zostało anulowane.",
+    "unsupported": "Żądanie zostało wysłane, ale ten serwer jest zbyt stary, aby je potwierdzić. Sprawdź turniej przed ponowną próbą.",
+    "notFound": "Nie ma turnieju o tym kodzie."
+  }
+}

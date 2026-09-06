@@ -14,7 +14,7 @@
 //!      third-person `puts ` verb AND the `"a number of <type> counters on it
 //!      equal to <quantity>"` body (delegating to the shared
 //!      `parse_dynamic_counter_suffix_body`).
-//!   2. Parser — `parse_type_phrase_with_ctx` lowers
+//!   2. Parser — `parse_type_phrase_folding_with_ctx` lowers
 //!      `"creatures they controlled that were exiled this way"` into a
 //!      composite `And{Typed{Creature,ScopedPlayer}, ExiledBySource}` filter.
 //!   3. Engine — `QuantityRef::Aggregate{Power|Toughness}` falls back to the

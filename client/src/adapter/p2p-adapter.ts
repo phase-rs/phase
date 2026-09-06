@@ -183,6 +183,18 @@ interface DeckListPayload {
   ai_decks: DeckSeatPayload[];
   /** AI difficulty strings per seat. See `DeckList.ai_difficulties` in engine. */
   ai_difficulties?: string[];
+  /**
+   * Every set whose draft boosters this game's decks were drafted from, carried
+   * verbatim from the pod. CR 903.13f(3): a draft that contained Commander
+   * Masters boosters grants the partner ability, for deckbuilding purposes, to
+   * any card that can be a commander by itself whose color identity is one or
+   * fewer colors. A LIST because that rule asks about CONTAINMENT, so a
+   * mixed-set draft must carry every set it contained. Matches its sources
+   * (`DraftMatchDeckPayload.draft_set_codes`, `DraftPlayerView.draft_set_codes`)
+   * and the engine's tolerant deserializer, which reads absent, `null` and `[]`
+   * identically as constructed play (no grant).
+   */
+  draft_set_codes?: string[] | null;
 }
 
 /** The desktop host has already ensured this exact local phase-server binary
@@ -2009,6 +2021,15 @@ export class P2PHostAdapter implements EngineAdapter {
           commander: deck.commander ?? [],
           companion: deck.companion ?? [],
           signature_spell: deck.signature_spell ?? [],
+          // CR 903.13f(3): `commander_draft_partner_grant` computes the
+          // Commander Masters partner grant from exactly this field, so a
+          // request that omits it REJECTS a rules-legal two-commander deck and
+          // this gate kicks the guest. The host's own value travels as-is: no
+          // `?? []`, which would assert "the draft contained zero sets" where
+          // the host already knows the answer. (The engine reads absent, `null`
+          // and `[]` identically, so this is a contract-vocabulary choice, not
+          // a rules one.)
+          draft_set_codes: (this.hostDeckData as DeckListPayload).draft_set_codes,
           selected_format: this.formatConfig!.format,
         }) as { compatible: boolean; reasons: string[] };
 
@@ -2138,6 +2159,11 @@ export class P2PHostAdapter implements EngineAdapter {
         opponent: orderedOpponents[0],
         ai_decks: orderedOpponents.slice(1),
         ai_difficulties: orderedDifficulties,
+        // CR 903.13f(3): this payload is REBUILT field-by-field, so a field
+        // present on the constructor argument but not named here is silently
+        // discarded before it can reach the engine. Naming it is what carries
+        // the Commander Masters partner grant into the game.
+        draft_set_codes: hostDeck.draft_set_codes,
       };
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1

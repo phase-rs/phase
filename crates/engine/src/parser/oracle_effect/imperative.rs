@@ -58,9 +58,9 @@ use crate::types::zones::Zone;
 use super::super::oracle_target::{
     match_mass_union_separator, parse_anaphoric_target_ref, parse_definite_parent_reference,
     parse_event_context_ref, parse_fight_target, parse_mass_type_union, parse_target,
-    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, parse_type_phrase_with_ctx,
-    parse_word_bounded, resolve_pronoun_target, resolve_singular_exiled_card_target,
-    starts_with_type_word, TargetSyntax,
+    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, parse_word_bounded, resolve_pronoun_target,
+    resolve_singular_exiled_card_target, starts_with_type_word, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, merge_or_filters, parse_count_expr,
@@ -109,7 +109,7 @@ pub(crate) fn try_parse_activated_ability_cost_reduction_effect(
         return None;
     }
     // "artifact tokens you control" → Typed[Artifact, You, FilterProp::Token].
-    let (source_filter, _after) = parse_type_phrase_with_ctx(subject, ctx);
+    let (source_filter, _after) = parse_type_phrase_folding_with_ctx(subject, ctx);
     // CR 601.2f + CR 118.7: identical shape to Training Grounds' printed static
     // (dispatch.rs). `keyword: "activated"` matches every activated ability;
     // `exemption`/`activator`/`minimum_mana`/`dynamic_count` carry no clause on
@@ -1534,7 +1534,7 @@ fn parse_discard_unless_filter<'a>(
 /// Dokuchi Silencer ("you may discard a creature card") preserves the same
 /// filter data as cost-form discards like "Discard a creature card:".
 pub(crate) fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
-    let (filter, remainder) = parse_type_phrase(tail);
+    let (filter, remainder) = parse_type_phrase_folding(tail);
     let is_bare_card = matches!(
         &filter,
         TargetFilter::Typed(TypedFilter {
@@ -1652,7 +1652,7 @@ pub(super) fn parse_one_or_more_sacrifice(
     let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(
         strip_article(filter_text.trim_start()).trim_end_matches('.'),
     ));
-    let (mut target, remainder) = parse_type_phrase(target_text.trim());
+    let (mut target, remainder) = parse_type_phrase_folding(target_text.trim());
     if !remainder.trim().is_empty() || matches!(target, TargetFilter::Any) {
         return None;
     }
@@ -2243,7 +2243,7 @@ pub(super) fn parse_targeted_action_ast(
         // sibling `try_parse_verb_and_target` handler in `mod.rs`, which stamps
         // the same `InZone`/`Owned` constraints (e.g. Dance of the Manse's
         // graveyard-scoped "artifact and/or non-Aura enchantment cards"). Only
-        // stamp when `parse_type_phrase` did not already capture the origin zone
+        // stamp when `parse_type_phrase_folding` did not already capture the origin zone
         // itself ("... creature card from your graveyard" parses the zone + owner
         // inline) — re-stamping an already-zoned filter would double-scope it.
         let target = if target.extract_in_zone().is_none() {
@@ -3030,7 +3030,7 @@ pub(super) fn try_parse_multi_zone_player_exile(
             // owner-possessive + 2-zone-union structure parsed below is the rest of
             // the discriminator (CR 108.2 — cards in a player's zones).
             let (after_head, head) = take_until::<_, _, OracleError<'_>>(" from ").parse(input)?;
-            let (tf, head_rem) = parse_type_phrase(head);
+            let (tf, head_rem) = parse_type_phrase_folding(head);
             let TargetFilter::Typed(tf) = tf else {
                 return Err(oracle_err(head));
             };
@@ -3224,7 +3224,7 @@ fn try_parse_heterogeneous_chosen_exile(input: &str, ctx: &ParseContext) -> Opti
     )
     .parse(input)
     .ok()?;
-    let (mut hand_filter, hand_rem) = parse_type_phrase(hand_head.trim());
+    let (mut hand_filter, hand_rem) = parse_type_phrase_folding(hand_head.trim());
     if !hand_rem.trim().is_empty() || !matches!(hand_filter, TargetFilter::Typed(_)) {
         return None;
     }
@@ -4067,7 +4067,7 @@ fn parse_hand_reveal_target_and_card_filter(
             return (target, TargetFilter::Any);
         }
         let singular = format!("{} card", descriptor.trim());
-        let (filter, rem) = parse_type_phrase(&singular);
+        let (filter, rem) = parse_type_phrase_folding(&singular);
         if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
             return (target, filter);
         }
@@ -4097,7 +4097,7 @@ fn parse_hand_reveal_target_and_card_filter(
         .map(|(_, target)| target)
         .unwrap_or(TargetFilter::Any);
     let singular = format!("{} card", descriptor.trim());
-    let (filter, rem) = parse_type_phrase(&singular);
+    let (filter, rem) = parse_type_phrase_folding(&singular);
     if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
         (target, filter)
     } else {
@@ -4304,7 +4304,7 @@ fn try_parse_choose_and_verb_it_edict(rest_lower: &str) -> Option<ChooseImperati
     // Validate the captured phrase is a real object type with no leftover text —
     // keeps the recognizer precise so it never hijacks unrelated "choose a …"
     // bodies whose type phrase is junk or carries a trailing predicate.
-    let (filter, filter_rem) = parse_type_phrase(type_text);
+    let (filter, filter_rem) = parse_type_phrase_folding(type_text);
     if !filter_rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -6145,7 +6145,7 @@ pub(super) fn parse_utility_imperative_ast(
         let (input, attachment) = terminated(take_until(" from "), tag(" from ")).parse(input)?;
         Ok((input, attachment.to_string()))
     }) {
-        let (attachment, attachment_rem) = parse_type_phrase(attachment_text.trim());
+        let (attachment, attachment_rem) = parse_type_phrase_folding(attachment_text.trim());
         let (target, target_rem) = parse_target_with_ctx(target_text, ctx);
         if attachment_rem.trim().is_empty() && target_rem.trim().is_empty() {
             return Some(UtilityImperativeAst::UnattachAll { attachment, target });
@@ -9498,7 +9498,7 @@ pub(super) fn parse_exile_ast(
     )
         .parse(rest_lower)
     {
-        let (mut target, rem) = parse_type_phrase(filter_text.trim());
+        let (mut target, rem) = parse_type_phrase_folding(filter_text.trim());
         // `after_hand` is the parser remainder AFTER "from your hand": empty/"."
         // (no-tail case) or " with a number of … counters on it equal to …".
         let enter_with_counters = super::parse_with_counters_suffix(after_hand);
@@ -9537,7 +9537,7 @@ pub(super) fn parse_exile_ast(
     )
         .parse(rest_lower)
     {
-        let (target, rem) = parse_type_phrase(filter_text.trim());
+        let (target, rem) = parse_type_phrase_folding(filter_text.trim());
         let tail_clean = after_among.trim().trim_start_matches('.').trim(); // allow-noncombinator: punctuation cleanup after typed terminator
         if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_clean.is_empty() {
             return Some(ZoneCounterImperativeAst::Exile {
@@ -10449,14 +10449,14 @@ fn parse_behold_effect_ast(text: &str, lower: &str) -> Option<ImperativeFamilyAs
         .parse(rest_lower)
         .ok()?;
     // Map the consumed lowercase byte span back onto the original-case text so
-    // `parse_type_phrase` sees the properly-cased subtype (e.g. "Dragon").
+    // `parse_type_phrase_folding` sees the properly-cased subtype (e.g. "Dragon").
     let consumed = lower.len() - rest_lower.len();
     let rest_orig = text.get(consumed..)?;
     // CR 701.4a: bound the quality at sentence/reminder-text punctuation.
     let (_, filter_text) = take_till::<_, _, E<'_>>(|c| c == '.' || c == '(')
         .parse(rest_orig)
         .ok()?;
-    let (filter, remainder) = parse_type_phrase(filter_text.trim());
+    let (filter, remainder) = parse_type_phrase_folding(filter_text.trim());
     if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return None;
     }

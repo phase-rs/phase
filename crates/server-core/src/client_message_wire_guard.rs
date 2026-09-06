@@ -205,29 +205,40 @@ pub fn guard_client_message_before_dispatch(
             display_name,
         }),
         ClientMessage::GetTournament { code } => validate_get_tournament_fields(code),
+        // `request_id: _` on all four: the gated actions' correlator is an
+        // opaque echoed integer with no bounds to check, and binding it
+        // explicitly shows it was considered. `ReportMatchResult` gives up its
+        // `..` rest pattern for that: a rest pattern silently absorbs every
+        // future field, making this the one arm where a newly-added bounded
+        // field could slip past the guard without a compile error.
         ClientMessage::StartTournamentRound {
             code,
             organizer_token,
+            request_id: _,
         } => validate_start_tournament_round_fields(StartTournamentRoundFields {
             code,
             organizer_token,
         }),
         ClientMessage::ReportMatchResult {
             code,
+            pairing_id: _,
             player_token,
             outcome,
-            ..
+            request_id: _,
         } => validate_report_match_result_fields(ReportMatchResultFields {
             code,
             player_token,
             outcome,
         }),
-        ClientMessage::DropFromTournament { code, player_token } => {
-            validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token })
-        }
+        ClientMessage::DropFromTournament {
+            code,
+            player_token,
+            request_id: _,
+        } => validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token }),
         ClientMessage::EndTournament {
             code,
             organizer_token,
+            request_id: _,
         } => validate_end_tournament_fields(EndTournamentFields {
             code,
             organizer_token,
@@ -453,29 +464,37 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             display_name,
         }),
         ClientMessage::GetTournament { code } => validate_get_tournament_fields(code),
+        // `request_id: _` for the same reason as the dispatch guard above: the
+        // correlator carries no bound, and binding it explicitly here keeps the
+        // two guards reading identically.
         ClientMessage::StartTournamentRound {
             code,
             organizer_token,
+            request_id: _,
         } => validate_start_tournament_round_fields(StartTournamentRoundFields {
             code,
             organizer_token,
         }),
         ClientMessage::ReportMatchResult {
             code,
+            pairing_id: _,
             player_token,
             outcome,
-            ..
+            request_id: _,
         } => validate_report_match_result_fields(ReportMatchResultFields {
             code,
             player_token,
             outcome,
         }),
-        ClientMessage::DropFromTournament { code, player_token } => {
-            validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token })
-        }
+        ClientMessage::DropFromTournament {
+            code,
+            player_token,
+            request_id: _,
+        } => validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token }),
         ClientMessage::EndTournament {
             code,
             organizer_token,
+            request_id: _,
         } => validate_end_tournament_fields(EndTournamentFields {
             code,
             organizer_token,
@@ -821,6 +840,7 @@ mod tests {
                 ClientMessage::StartTournamentRound {
                     code: "TOUR01".into(),
                     organizer_token: long_token.clone(),
+                    request_id: None,
                 },
             ),
             (
@@ -830,6 +850,7 @@ mod tests {
                     pairing_id: 0,
                     player_token: long_token.clone(),
                     outcome: PodOutcome::Draw,
+                    request_id: None,
                 },
             ),
             (
@@ -837,6 +858,7 @@ mod tests {
                 ClientMessage::DropFromTournament {
                     code: "TOUR01".into(),
                     player_token: long_token.clone(),
+                    request_id: None,
                 },
             ),
             (
@@ -844,6 +866,7 @@ mod tests {
                 ClientMessage::EndTournament {
                     code: "TOUR01".into(),
                     organizer_token: long_token,
+                    request_id: None,
                 },
             ),
         ]
@@ -869,20 +892,24 @@ mod tests {
             ClientMessage::StartTournamentRound {
                 code: "TOUR01".into(),
                 organizer_token: "tok".into(),
+                request_id: None,
             },
             ClientMessage::ReportMatchResult {
                 code: "TOUR01".into(),
                 pairing_id: 0,
                 player_token: "tok".into(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             ClientMessage::DropFromTournament {
                 code: "TOUR01".into(),
                 player_token: "tok".into(),
+                request_id: None,
             },
             ClientMessage::EndTournament {
                 code: "TOUR01".into(),
                 organizer_token: "tok".into(),
+                request_id: None,
             },
         ]
     }
@@ -948,6 +975,7 @@ mod tests {
                 winner: "key-0".into(),
                 game_wins,
             },
+            request_id: None,
         };
 
         let err = guard_broker_projection_inbound(&msg).unwrap_err();
