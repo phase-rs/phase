@@ -648,6 +648,20 @@ class MediaPluginPackagingTests(unittest.TestCase):
                 r = t.run()
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_an_unreadable_install_verb_refuses_rather_than_crashing(self) -> None:
+        # `APT_INSTALL` matches `install\\b`, so this segment satisfies the
+        # regex and the head check while carrying no bare `install` token.
+        # Slicing on it would raise, and an uncaught traceback exits 1 -- the
+        # code reserved for a coverage gap, which the module's contract says
+        # must stay distinguishable from a refusal.
+        t = self.tree()
+        t.write_workflow(run=("sudo apt-get update\n"
+                              "sudo apt-get install-foo -y libgtk-3-dev"))
+        r = t.run()
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("cannot read as an install", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
     def test_an_apt_step_that_installs_nothing_refuses(self) -> None:
         # The step still exists, on the right job and the right arm, and runs
         # no `apt-get install`. Zero packages read out of it is not zero
@@ -823,6 +837,10 @@ class MediaPluginPackagingTests(unittest.TestCase):
         t = self.tree(); t.write_workflow(
             run="sudo apt-get update&&echo apt-get install -y libgtk-3-dev")
         cases["operator glued to a word"] = t.run()
+
+        t = self.tree(); t.write_workflow(
+            run="sudo apt-get update\nsudo apt-get install-foo -y libgtk-3-dev")
+        cases["unreadable install verb"] = t.run()
 
         t = self.tree(); t.write_workflow(
             run="sudo apt-get update\nif true; then sudo apt-get install -y x\nfi")

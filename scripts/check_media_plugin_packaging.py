@@ -418,6 +418,16 @@ def appimage_apt_packages() -> set[str]:
                               f"running it: {' '.join(segment)!r}. This gate "
                               "will not guess which packages such a command "
                               "installs")
+            # `APT_INSTALL` matches `install\b`, so a segment can satisfy the
+            # regex and the head check while carrying no bare `install` token
+            # -- `apt-get install-foo -y x`. Slicing on a missing token would
+            # raise, and an uncaught traceback exits 1, the code reserved for
+            # "a consumer is missing packages". An unreadable verb is a
+            # degraded read, so it refuses at 2 like every other one.
+            if "install" not in segment:
+                raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' has a "
+                              f"command this gate cannot read as an install: "
+                              f"{' '.join(segment)!r}")
             arguments = segment[segment.index("install") + 1:]
 
             for token in arguments:
