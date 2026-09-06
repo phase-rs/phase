@@ -126,84 +126,86 @@ export function GameListItem({
       disabled={disabled}
       title={disabledTitle}
       className={
-        "flex w-full items-center gap-3 rounded-[10px] border px-4 py-3 text-left shadow-[0_10px_26px_rgba(0,0,0,0.22)] backdrop-blur-sm transition-colors " +
+        "grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 rounded-[10px] border px-3 py-3 text-left shadow-[0_10px_26px_rgba(0,0,0,0.22)] backdrop-blur-sm transition-colors sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:px-4 " +
         (disabled
           ? "cursor-not-allowed border-white/6 bg-black/18 opacity-60"
           : "border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.055),rgba(0,0,0,0.18))] hover:border-white/20 hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.075),rgba(0,0,0,0.16))]")
       }
     >
-      {/* Format badge */}
-      <span className={`flex-shrink-0 rounded-[5px] border px-1.5 py-0.5 text-xs font-semibold ${badgeClass}`}>
-        {formatLabel}
-      </span>
+      <div className="col-span-2 flex min-w-0 flex-wrap items-center gap-1.5 sm:col-span-1 sm:flex-nowrap">
+        {/* Format badge */}
+        <span className={`flex-shrink-0 rounded-[5px] border px-1.5 py-0.5 text-xs font-semibold ${badgeClass}`}>
+          {formatLabel}
+        </span>
 
       {/* Draft badge — rendered when the lobby entry is a draft pod.
           Shows set code and draft kind for quick identification. */}
-      {game.draft_metadata && (
-        <span
-          className="flex-shrink-0 rounded-[5px] border border-purple-300/20 bg-purple-500/15 px-1.5 py-0.5 text-xs font-semibold text-purple-200"
-          title={t("gameListItem.draftBadgeTitle", {
-            kind: game.draft_metadata.draftKind,
-            setCode: game.draft_metadata.setCode,
-          })}
-        >
-          {t("gameListItem.draftBadge", { setCode: game.draft_metadata.setCode })}
-        </span>
-      )}
+        {game.draft_metadata && (
+          <span
+            className="flex-shrink-0 rounded-[5px] border border-purple-300/20 bg-purple-500/15 px-1.5 py-0.5 text-xs font-semibold text-purple-200"
+            title={t("gameListItem.draftBadgeTitle", {
+              kind: game.draft_metadata.draftKind,
+              setCode: game.draft_metadata.setCode,
+            })}
+          >
+            {t("gameListItem.draftBadge", { setCode: game.draft_metadata.setCode })}
+          </span>
+        )}
 
       {/* P2P badge — rendered only when the row is explicitly a P2P-brokered
           room. Using `=== true` rather than truthiness is deliberate: older
           server builds omit the field entirely, and treating `undefined` as
           "unknown" rather than "false" lets us default those rows to the
           server-run visual. */}
-      {game.is_p2p === true && (
-        <span
-          className="flex-shrink-0 rounded-[5px] border border-teal-300/20 bg-teal-500/15 px-1.5 py-0.5 text-xs font-semibold text-teal-200"
-          title={t("gameListItem.p2pBadgeTitle")}
-        >
-          P2P
-        </span>
-      )}
+        {game.is_p2p === true && (
+          <span
+            className="flex-shrink-0 rounded-[5px] border border-teal-300/20 bg-teal-500/15 px-1.5 py-0.5 text-xs font-semibold text-teal-200"
+            title={t("gameListItem.p2pBadgeTitle")}
+          >
+            P2P
+          </span>
+        )}
 
       {/* Sandbox badge — rendered when the host enabled debug actions for
           this game. Joiners should be warned this isn't a competitive match. */}
-      {game.is_sandbox === true && (
-        <span
-          className="flex-shrink-0 rounded-[5px] border border-amber-300/20 bg-amber-500/15 px-1.5 py-0.5 text-xs font-semibold text-amber-200"
-          title={t("gameListItem.sandboxBadgeTitle")}
-        >
-          SANDBOX
-        </span>
-      )}
+        {game.is_sandbox === true && (
+          <span
+            className="flex-shrink-0 rounded-[5px] border border-amber-300/20 bg-amber-500/15 px-1.5 py-0.5 text-xs font-semibold text-amber-200"
+            title={t("gameListItem.sandboxBadgeTitle")}
+          >
+            SANDBOX
+          </span>
+        )}
       {/* Origin badge — which authority listed this row. The merged list
           spans every enabled lobby source, so a row without its origin is
           ambiguous about which server the join will open on. */}
-      <span
-        className="flex-shrink-0 rounded-[5px] border border-sky-300/20 bg-sky-500/15 px-1.5 py-0.5 text-xs font-medium text-sky-200"
-        title={t("gameListItem.originTitle", { name: sourceLabel, kind: kindLabel }).trim()}
-      >
-        {sourceLabel}
-      </span>
+        <span
+          className="flex-shrink-0 rounded-[5px] border border-sky-300/20 bg-sky-500/15 px-1.5 py-0.5 text-xs font-medium text-sky-200"
+          title={t("gameListItem.originTitle", { name: sourceLabel, kind: kindLabel }).trim()}
+        >
+          {sourceLabel}
+        </span>
 
       {/* Health hint — how the listing server itself has been performing, as
           the directory's own evidence reads. A warning tone rather than the
           origin badge's neutral sky, because it is a caution about the row's
           authority and not a label for it. Absent when the parent computed no
           verdict, which includes every case with too little evidence. */}
-      {healthHint && (
-        <span
-          className="flex-shrink-0 rounded-[5px] border border-amber-300/25 bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-200"
-          title={
-            healthHint === "slow"
-              ? t("gameListItem.hintSlowTitle")
-              : t("gameListItem.hintUnreliableTitle")
-          }
-        >
-          {healthHint === "slow"
-            ? t("gameListItem.hintSlow")
-            : t("gameListItem.hintUnreliable")}
-        </span>
-      )}
+        {healthHint && (
+          <span
+            className="flex-shrink-0 rounded-[5px] border border-amber-300/25 bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-200"
+            title={
+              healthHint === "slow"
+                ? t("gameListItem.hintSlowTitle")
+                : t("gameListItem.hintUnreliableTitle")
+            }
+          >
+            {healthHint === "slow"
+              ? t("gameListItem.hintSlow")
+              : t("gameListItem.hintUnreliable")}
+          </span>
+        )}
+      </div>
 
       {/* Room title and metadata. When the host set an explicit room name
           we show it as the primary title and demote the host's player name
@@ -213,7 +215,7 @@ export function GameListItem({
         <p className="truncate text-sm font-medium text-gray-200">
           {game.room_name || game.host_name || t("gameListItem.anonymous")}
         </p>
-        <p className="text-xs text-gray-500">
+        <p className="truncate text-xs text-gray-500">
           {game.room_name && game.host_name && (
             <span className="mr-2 text-gray-400">
               {t("gameListItem.by", { name: game.host_name })}
@@ -229,43 +231,45 @@ export function GameListItem({
         </p>
       </div>
 
-      {/* Player count */}
-      {game.max_players != null && (
-        <span className="flex-shrink-0 text-xs text-gray-400">
-          {game.current_players ?? 1}/{game.max_players}
-        </span>
-      )}
+      <div className="flex shrink-0 items-center justify-end gap-2">
+        {/* Player count */}
+        {game.max_players != null && (
+          <span className="shrink-0 text-xs text-gray-400">
+            {game.current_players ?? 1}/{game.max_players}
+          </span>
+        )}
 
-      {/* Lock icon for password-protected games */}
-      {game.has_password && (
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 20 20"
-          fill="currentColor"
-          className="h-4 w-4 flex-shrink-0 text-amber-400"
-          aria-label={t("gameListItem.passwordProtected")}
+        {/* Lock icon for password-protected games */}
+        {game.has_password && (
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+            className="h-4 w-4 shrink-0 text-amber-400"
+            aria-label={t("gameListItem.passwordProtected")}
+          >
+            <path
+              fillRule="evenodd"
+              d="M10 1a4.5 4.5 0 0 0-4.5 4.5V9H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-.5V5.5A4.5 4.5 0 0 0 10 1Zm3 8V5.5a3 3 0 1 0-6 0V9h6Z"
+              clipRule="evenodd"
+            />
+          </svg>
+        )}
+
+        <span
+          className={
+            "shrink-0 rounded-[6px] px-3 py-1 text-xs font-medium transition-colors " +
+            (disabled ? "bg-gray-700 text-white" : "bg-emerald-600 text-white")
+          }
         >
-          <path
-            fillRule="evenodd"
-            d="M10 1a4.5 4.5 0 0 0-4.5 4.5V9H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-.5V5.5A4.5 4.5 0 0 0 10 1Zm3 8V5.5a3 3 0 1 0-6 0V9h6Z"
-            clipRule="evenodd"
-          />
-        </svg>
-      )}
+          {isCurrentPlayerHost ? t("gameListItem.hosting") : t("gameListItem.join")}
+        </span>
 
-      <span
-        className={
-          "flex-shrink-0 rounded-[6px] px-3 py-1 text-xs font-medium transition-colors " +
-          (disabled ? "bg-gray-700 text-gray-500" : "bg-emerald-600 text-white")
-        }
-      >
-        {isCurrentPlayerHost ? t("gameListItem.hosting") : t("gameListItem.join")}
-      </span>
-
-      {/* Game code badge */}
-      <span className="flex-shrink-0 rounded-[6px] border border-white/10 bg-black/25 px-2 py-0.5 font-mono text-xs tracking-wider text-emerald-300">
-        {game.game_code}
-      </span>
+        {/* Game code badge */}
+        <span className="shrink-0 rounded-[6px] border border-white/10 bg-black/25 px-2 py-0.5 font-mono text-xs tracking-wider text-emerald-300">
+          {game.game_code}
+        </span>
+      </div>
     </button>
   );
 }

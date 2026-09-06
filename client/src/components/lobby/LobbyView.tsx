@@ -444,7 +444,7 @@ export function LobbyView({
   const serverHost = (hostingServer ?? "").replace(/^wss?:\/\//, "").split("/")[0];
 
   return (
-    <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col gap-6 px-5 py-6">
+    <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col gap-6 px-3 py-6 sm:px-5">
       <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
           {t("lobbyView.onlineLobby")}
@@ -506,7 +506,7 @@ export function LobbyView({
       </div>
 
       {showRoomTypeFilter && (
-        <div className="flex rounded-[10px] border border-white/10 bg-black/25 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
+        <div className="grid grid-cols-2 rounded-[10px] border border-white/10 bg-black/25 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm sm:flex">
           {ROOM_TYPE_FILTERS.map((opt) => (
             <button
               key={opt.value}
@@ -543,7 +543,7 @@ export function LobbyView({
             )}
           </div>
         ) : (
-          <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
+          <div className="flex flex-col gap-2 min-[820px]:max-h-64 min-[820px]:overflow-y-auto">
             {filteredEntries.map((entry) => (
               <GameListItem
                 // Keyed by source too: `game_code` is unique per authority,
