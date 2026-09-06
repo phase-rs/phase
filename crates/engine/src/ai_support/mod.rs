@@ -55,8 +55,8 @@ pub use combat_withdrawal::{
     combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
 };
 pub use context::{
-    build_decision_context, build_decision_context_for_semantic_owner, AiDecisionContext,
-    AiDecisionContract,
+    apply_ai_action_proposal, build_decision_context, build_decision_context_for_semantic_owner,
+    AiDecisionContext, AiDecisionContract, AiProposalApplication,
 };
 pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,

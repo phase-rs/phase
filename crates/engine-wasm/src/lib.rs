@@ -8,8 +8,9 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
-    auto_pass_recommended, auto_pass_recommended_for_viewer, end_continuous_effect_offers,
-    legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
+    apply_ai_action_proposal, auto_pass_recommended, auto_pass_recommended_for_viewer,
+    end_continuous_effect_offers, legal_actions_for_viewer, legal_actions_full,
+    AiDecisionContract, AiProposalApplication,
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
@@ -512,137 +513,6 @@ enum AiProposalSubmission {
     Rejected {
         rejection: ActionRejection,
     },
-}
-
-/// Natively-testable core of the AI proposal submission boundary. The
-/// `wasm_bindgen` shell owns proposal-token lookup and serialization; this core
-/// owns the state/contract decision that must be identical for browser and
-/// native regression coverage.
-enum AiProposalApplication {
-    AppliedStackPass {
-        result: Box<engine::types::game_state::ActionResult>,
-    },
-    AppliedAction {
-        result: Box<engine::types::game_state::ActionResult>,
-    },
-    Stale,
-    Rejected {
-        rejection: ActionRejection,
-    },
-}
-
-fn apply_ai_action_proposal_inner(
-    state: &mut GameState,
-    contract: &AiDecisionContract,
-    actor: PlayerId,
-    action: GameAction,
-) -> AiProposalApplication {
-    // Classification lives in the engine (`verified_ai_stack_pass_player`),
-    // not in this adapter: it is the same call the callee gates on, so the
-    // two cannot disagree. CLAUDE.md — transport layers hold zero game logic.
-    let verified_stack_pass =
-        engine::game::engine::verified_ai_stack_pass_player(state, &action).is_some();
-    // Every proposal, including a stack recheck pass, is bound to the revision
-    // that issued it. Resolve All legitimately advances that revision while an
-    // AI proposal is in flight; report the old capability as stale so the
-    // controller re-queries instead of counting an ordinary race as an AI
-    // failure.
-    if !contract.permits(state, actor, &action) {
-        return AiProposalApplication::Stale;
-    }
-    let applied = if verified_stack_pass {
-        engine::game::engine::apply_verified_ai_priority_pass_with_rejection(
-            state, actor, contract, action,
-        )
-    } else {
-        apply_interaction_with_rejection(state, actor, contract.semantic_owner, action)
-    };
-    match applied {
-        Ok(result) if verified_stack_pass => AiProposalApplication::AppliedStackPass {
-            result: Box::new(result),
-        },
-        Ok(result) => AiProposalApplication::AppliedAction {
-            result: Box::new(result),
-        },
-        Err(rejection) => AiProposalApplication::Rejected { rejection },
-    }
-}
-
-#[cfg(test)]
-mod ai_proposal_submission_tests {
-    use super::*;
-    use engine::types::ability::{Effect, ResolvedAbility};
-    use engine::types::game_state::{
-        StackEntry, StackEntryKind, StackResolutionPolicy, WaitingFor,
-    };
-    use engine::types::identifiers::ObjectId;
-    use engine::types::phase::Phase;
-
-    fn priority_state(player: PlayerId) -> GameState {
-        let mut state = GameState::new_two_player(42);
-        state.phase = Phase::PreCombatMain;
-        state.active_player = player;
-        state.priority_player = player;
-        state.waiting_for = WaitingFor::Priority { player };
-        state
-    }
-
-    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
-        let object_id = ObjectId(id);
-        StackEntry {
-            id: object_id,
-            source_id: object_id,
-            controller,
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: object_id,
-                ability: Box::new(ResolvedAbility::new(
-                    Effect::NoOp,
-                    vec![],
-                    object_id,
-                    controller,
-                )),
-            },
-        }
-    }
-
-    #[test]
-    fn stack_pass_proposal_uses_the_verified_recheck_seam() {
-        let player = PlayerId(0);
-        let mut state = priority_state(player);
-        state
-            .stack
-            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
-        let contract = AiDecisionContract::issue(&state, player);
-
-        assert!(matches!(
-            apply_ai_action_proposal_inner(&mut state, &contract, player, GameAction::PassPriority),
-            AiProposalApplication::AppliedStackPass { .. }
-        ));
-        assert_eq!(
-            state
-                .stack_resolution_session
-                .as_ref()
-                .map(|session| session.policy),
-            Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
-        );
-    }
-
-    #[test]
-    fn stale_stack_pass_proposal_is_not_a_rejected_ai_decision() {
-        let player = PlayerId(0);
-        let mut state = priority_state(player);
-        state
-            .stack
-            .push_back(no_op_stack_entry(70_102, PlayerId(1)));
-        let contract = AiDecisionContract::issue(&state, player);
-        state.state_revision = state.state_revision.wrapping_add(1);
-
-        assert!(matches!(
-            apply_ai_action_proposal_inner(&mut state, &contract, player, GameAction::PassPriority),
-            AiProposalApplication::Stale
-        ));
-        assert!(state.stack_resolution_session.is_none());
-    }
 }
 
 /// Private WASM boundary outcome for expected engine rejections. Serialization
@@ -3436,17 +3306,21 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     };
 
     match with_state_mut(|state| {
-        apply_ai_action_proposal_inner(state, &proposal.contract, actor, action.clone())
+        apply_ai_action_proposal(state, &proposal.contract, actor, action.clone())
     }) {
         Ok(AiProposalApplication::AppliedStackPass { result }) => {
             record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
             invalidate_ai_proposals();
-            to_js(&AiProposalSubmission::Applied { result })
+            to_js(&AiProposalSubmission::Applied {
+                result: Box::new(result),
+            })
         }
         Ok(AiProposalApplication::AppliedAction { result }) => {
             record_replay_action(false, actor, action);
             invalidate_ai_proposals();
-            to_js(&AiProposalSubmission::Applied { result })
+            to_js(&AiProposalSubmission::Applied {
+                result: Box::new(result),
+            })
         }
         Ok(AiProposalApplication::Stale) => to_js(&AiProposalSubmission::Stale {
             reason: "decision_changed_or_action_outside_issued_bounds",
