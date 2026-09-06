@@ -5867,7 +5867,27 @@ pub(super) fn parse_utility_imperative_ast(
                 text: text.to_string(),
             }),
             "copy" => {
-                let rest_lower = &lower[lower.len() - rest.len()..];
+                // CR 707.9a + CR 707.10: peel a trailing "[,] except <body>"
+                // copy exception off the instruction BEFORE the copy source is
+                // parsed, so all three source sub-paths below (the
+                // "that spell or ability" anaphor, the exiled-card anaphor, and
+                // the general stack-object target) see a clean remainder and
+                // none of them has to know the except grammar. Iron Man,
+                // Bleeding Edge ("you may copy it, except the copy isn't
+                // legendary") is the canonical case; Donal, Herald of Wings,
+                // Jackal, Genius Geneticist, Storm of Saruman, Tawnos, the
+                // Toymaker, The Clone Saga, and The Sixth Doctor are the rest
+                // of the class. Body grammar is delegated to the shared
+                // `become_copy_except` authority — the same building block
+                // `BecomeCopy` and `CopyTokenOf` route through.
+                let rest_offset = text.len() - rest.len();
+                let card_name = ctx.card_name.clone().unwrap_or_default();
+                let (rest, additional_modifications) =
+                    match super::become_copy_except::split_except_clause(rest, &card_name, ctx) {
+                        Some((head, modifications)) => (head, modifications),
+                        None => (rest, Vec::new()),
+                    };
+                let rest_lower = &lower[rest_offset..rest_offset + rest.len()];
                 if tag::<_, _, OracleError<'_>>("that spell or ability")
                     .parse(rest_lower)
                     .is_ok()
@@ -5884,6 +5904,7 @@ pub(super) fn parse_utility_imperative_ast(
                     return Some(UtilityImperativeAst::Copy {
                         target: TargetFilter::TriggeringSource,
                         retarget,
+                        additional_modifications,
                     });
                 }
                 // CR 608.2k: an exile-cost anaphor ("exile a card, then copy the
@@ -5924,6 +5945,7 @@ pub(super) fn parse_utility_imperative_ast(
                                 TargetFilter::ExiledBySource,
                             ),
                             retarget,
+                            additional_modifications,
                         });
                     }
                 }
@@ -5971,7 +5993,11 @@ pub(super) fn parse_utility_imperative_ast(
                     assert_no_compound_remainder(_rem, text);
                     CopyRetargetPermission::KeepOriginalTargets
                 };
-                Some(UtilityImperativeAst::Copy { target, retarget })
+                Some(UtilityImperativeAst::Copy {
+                    target,
+                    retarget,
+                    additional_modifications,
+                })
             }
             _ => unreachable!(),
         };
@@ -6626,11 +6652,15 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             let (target, _) = parse_target(rest);
             Effect::Regenerate { target }
         }
-        UtilityImperativeAst::Copy { target, retarget } => Effect::CopySpell {
+        UtilityImperativeAst::Copy {
+            target,
+            retarget,
+            additional_modifications,
+        } => Effect::CopySpell {
             target,
             retarget,
             copier: None,
-            additional_modifications: Vec::new(),
+            additional_modifications,
             starting_loyalty_from_casualty_sacrifice: false,
         },
         UtilityImperativeAst::Transform { target, scope } => Effect::Transform { target, scope },
