@@ -40955,7 +40955,7 @@ fn perpetual_parser_maps_modify_cost() {
 
 /// Karlach, Tiefling Berserker cycle: "~ perpetually gains \"This creature
 /// can't block.\"" — `classify_quoted_inner` classifies the quoted body as
-/// `ContinuousModification::AddStaticMode { mode: CantBlock }` (CR 509.1a
+/// `ContinuousModification::AddStaticMode { mode: CantBlock }` (CR 509.1b
 /// blocking restriction), which the perpetual runtime installs directly
 /// (`GameObject::apply_perpetual_modification`'s `AddStaticMode` arm).
 #[test]
@@ -41047,7 +41047,8 @@ fn perpetual_grant_ability_rejects_unsupported_triggered_body() {
 /// recognizer: `oracle_static` only recognizes "enters tapped" as a rider on a
 /// host put-onto-battlefield effect (a token/create-and-put step), never as a
 /// freestanding sentence, so `classify_quoted_inner` falls through to its
-/// CR 113.3a + CR 113.3b `GrantAbility` catch-all, and `parse_quoted_ability`
+/// default `GrantAbility` catch-all (the tier reached when no
+/// static/trigger/keyword recognizer matches), and `parse_quoted_ability`
 /// has no handler for a bare "enters tapped" sentence either -- it lowers to
 /// `Effect::Unimplemented`. Before `PerpetualGrantModification::try_from`
 /// rejected an `Effect::Unimplemented`-bearing `GrantAbility` tree, this landed

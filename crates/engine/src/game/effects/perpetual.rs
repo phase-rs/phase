@@ -398,7 +398,7 @@ mod tests {
     }
 
     /// Karlach, Tiefling Berserker cycle shape: a quoted grant that classifies
-    /// to `AddStaticMode` (CR 509.1a "can't block") must install onto BOTH the
+    /// to `AddStaticMode` (CR 509.1b "can't block") must install onto BOTH the
     /// live `static_definitions` and the persistent `base_static_definitions`,
     /// mirroring `perpetual_grant_keywords_adds_to_object`.
     #[test]
@@ -626,8 +626,8 @@ mod tests {
     /// perpetually gains \"You may spend mana as though it were mana of any
     /// color to cast this spell.\" Then they exile the top card of their
     /// library face down." routes its quoted grant body through
-    /// `classify_quoted_inner`'s CR 113.3a + CR 113.3b fallback to
-    /// `GrantAbility` wrapping `Effect::GenericEffect { static_abilities:
+    /// `classify_quoted_inner`'s default `GrantAbility` fallback, wrapping
+    /// `Effect::GenericEffect { static_abilities:
     /// [SpendManaAsAnyColor { spell_filter: None, .. }], target:
     /// Some(Controller), .. }`. Before this fix,
     /// `PerpetualGrantModification::try_from`'s `GrantAbility` arm rejected

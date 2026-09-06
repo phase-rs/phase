@@ -37,7 +37,7 @@ use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 /// The Karlach/Agent of Raffine rider shape: a quoted body classifying to
-/// `AddStaticMode { CantBlock }` (CR 509.1a).
+/// `AddStaticMode { CantBlock }` (CR 509.1b).
 fn cant_block_grant() -> PerpetualModification {
     PerpetualModification::GrantAbility {
         modifications: vec![PerpetualGrantModification::AddStaticMode {

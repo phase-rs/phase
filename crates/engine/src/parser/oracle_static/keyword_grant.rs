@@ -1859,8 +1859,9 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
 ///   3. CR 113.3d + CR 604.1: static-line text ("enchanted creature gets +N/+M",
 ///      "creatures you control have ...") → one or more
 ///      `ContinuousModification::GrantStaticAbility` / `AddStaticMode`.
-///   4. CR 113.3a + CR 113.3b (fallback): spell/activated text →
-///      `GrantAbility` wrapping the parsed `AbilityDefinition`.
+///   4. Fallback (no static/trigger/keyword/replacement shape matched):
+///      parse the remaining text as an ability body → `GrantAbility`
+///      wrapping the parsed `AbilityDefinition`.
 ///
 /// Visibility: `pub(crate)` so external crate-local callers can reuse the
 /// canonical inner classifier without exposing the private
@@ -1977,7 +1978,8 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
         }];
     }
 
-    // CR 113.3a + CR 113.3b fallback: spell/activated text → GrantAbility.
+    // Fallback: no static/trigger/keyword/replacement shape matched above —
+    // parse the remaining text as an ability body and wrap it in GrantAbility.
     vec![ContinuousModification::GrantAbility {
         definition: Box::new(parse_quoted_ability(&ability_text)),
     }]

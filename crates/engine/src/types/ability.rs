@@ -13872,7 +13872,7 @@ pub enum PerpetualGrantModification {
     /// A bare evergreen/parameterized keyword ("~ has flying") — installed onto
     /// `keywords` + `base_keywords`.
     AddKeyword { keyword: Keyword },
-    /// A restriction/permission static ("~ can't block", CR 509.1a) — installed
+    /// A restriction/permission static ("~ can't block", CR 509.1b) — installed
     /// as a synthetic self-affecting `StaticDefinition` onto `static_definitions`
     /// + `base_static_definitions`.
     AddStaticMode {
@@ -13956,7 +13956,8 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // any color to cast this spell.\"" has no cost separator, so
             // `parse_quoted_ability` treats the whole quoted sentence as a
             // spell-like effect chain and `classify_quoted_inner` falls through
-            // its CR 113.3a + CR 113.3b fallback to `GrantAbility` wrapping
+            // its default `GrantAbility` fallback (no static/trigger/keyword
+            // recognizer matched), wrapping
             // `Effect::GenericEffect { static_abilities: [SpendManaAsAnyColor
             // { spell_filter: None, .. }], target: Some(Controller), .. }`.
             // Accepting it here would look green (`Effect::ApplyPerpetual`,
@@ -14059,7 +14060,7 @@ pub enum PerpetualModification {
     /// "You may spend mana as though it were mana of any color to cast this
     /// spell." (CR 609.4b: an any-color/type mana concession affects only how
     /// a cost is paid) or Karlach, Tiefling Berserker's returned creature
-    /// perpetually gaining "~ can't block." (CR 509.1a blocking restriction).
+    /// perpetually gaining "~ can't block." (CR 509.1b blocking restriction).
     ///
     /// Each quoted ability text is classified through the SAME single authority
     /// used by every other quoted-ability grant
