@@ -4638,7 +4638,7 @@ mod tests {
             &env,
         );
         assert!(
-            is_error(&refused) || error_reason(&refused).contains("Invalid organizer token"),
+            is_error(&refused) && error_reason(&refused).contains("Invalid organizer token"),
             "the rotated-away organizer secret must stop authorizing: {refused:?}"
         );
     }

@@ -418,13 +418,16 @@ export function arityLabel(arity: MatchArity): ArityLabel {
 /**
  * The scoring policy to **prefill** a creation form with, for a given arity.
  *
- * Prefill only. Mirrors `ScoringPolicy::default_for_arity`
- * (`crates/lobby-broker/src/tournament.rs:217-227`) because
- * `CreateTournament.scoring` is wire-mandatory and has no `#[serde(default)]`
- * (`crates/lobby-broker/src/protocol.rs:692`) and no RPC exposes the broker's
- * default. The organizer may edit the result and the broker validates it
- * (`ScoringPolicy::new` rejects `win_points == 0`), so drift here degrades a
- * default, never a guarantee.
+ * Prefill only, and — as of lobby protocol v6 — a KNOWN DUPLICATE of a value
+ * the engine now owns and exposes. `LobbyClientMessage::CreateTournament`'s
+ * `scoring` is now `Option<ScoringPolicy>` with `#[serde(default)]` (the broker
+ * applies `ScoringPolicy::default_for_arity` when it is omitted), and the
+ * resolved value comes back on `TournamentSummary::scoring`. Per this repo's
+ * display-layer rule, that duplicate must not drive game state: it survives
+ * here only to seed the *form control* before the organizer edits it, and
+ * should be removed — submit `scoring: null` and read the resolved value back
+ * off the wire — in the tournament client-consumption follow-up. Mirrors
+ * `ScoringPolicy::default_for_arity` (`crates/lobby-broker/src/tournament.rs`).
  *
  * Arity-dependent by design: a fixed 3/1/0 would silently give every pod
  * organizer MTR head-to-head scoring instead of MSTR pod scoring.
