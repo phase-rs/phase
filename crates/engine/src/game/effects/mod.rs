@@ -10100,7 +10100,7 @@ fn perform_player_scope_sacrifices(
             }
         }
     }
-    // CR 608.2c + CR 609.3: "Sacrifice a creature. If you do, [rider]." — seed
+    // CR 118.12 + CR 608.2c + CR 609.3: "Sacrifice a creature. If you do, [rider]." — seed
     // the performed-flag for a sacrifice that completed through the INTERACTIVE
     // `EffectZoneChoice` path (Victimize, #7898).
     //
@@ -10122,7 +10122,7 @@ fn perform_player_scope_sacrifices(
     // `finalize_discard_choice_completion` (an answered discard choice) do.
     //
     // Guarded on the completion LEDGER, not on the fact that the seam ran: a
-    // declined / empty selection sacrifices nothing, and CR 608.2c makes the
+    // declined / empty selection sacrifices nothing, and CR 118.12 makes the
     // dependent clause do nothing unless the preceding action occurred. This is
     // deliberately independent of `cost_payment_failed_flag`, which the rider's
     // own gate still checks separately.
