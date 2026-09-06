@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 205,
+      "date": "2026-09-06",
+      "title": "Tournament organizer is live",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Tournament Organizer is live: create or join an event, see standings and pairings, manage it as an organizer, and report results from Your Match\n• The Eternal Wanderer now completes all three printed abilities: a permanent returns at its owner’s next end step, only one creature can attack it each combat, and its -4 has each player keep their chosen creature\n• Ripple now reveals the top cards of your library, lets you choose whether to reveal, offers same-named free casts, and lets you order the rest on the bottom (Surging Flame, Surging Dementia, and the whole mechanic)\n• Momir Basic creates its random creature as the ability resolves, with the AI now making sensible curve plays\n• Ultimate Spider-Man doubles every kind of counter on your Spiders and legendary creatures\n\n🛠️ Cards That Now Work Right\n• Victimize now asks you to sacrifice from the correct pool, then returns the creatures you selected if you did\n• Wash Out returns only permanents of the color you chose; Thief of Sanity and Gonti now look through the opponent’s library their text names\n• Maze of Ith, regeneration, Fogs, and similar prevention effects stay active through layer updates instead of vanishing before damage\n• Bounty Board gives cards and life to the dead creature’s controller’s opponents, and “that creature’s power” and “dealt damage to you this turn” clauses keep the right creature and player\n• Token copies that make an as-enters choice now actually enter, including tribute and copied Painter’s Servant–style cards; Affinity for Elves counts Elves correctly\n\n⚔️ Combat & Gameplay\n• “Draw up to N cards” now lets the drawing player choose the number (Arcane Denial and the wider class), rather than always drawing the maximum\n• Spells and abilities retain their intended controller, targets, and resolution context through nested choices, zone changes, and replacement effects\n• A copied spell or ability’s “you” now correctly means the controller of the effect doing the replacing\n\n🖥️ Interface\n• The new Tournament pages are in the navigation, with event creation, joining, standings, pairings, organizer actions, and player result reporting\n\n🤖 AI\n• The AI can evaluate decisions while a player controls another player’s turn, and has sturdier priority recovery when it needs a tactical fallback\n\n🌐 Multiplayer\n• Commander Draft now launches one real multiplayer pod: every human seat joins the game rather than being replaced by bots\n• Draft-match handoff and reconnects authenticate and attach reliably, including when the full game is no longer resident",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1546064124025241680"
+    },
+    {
       "id": 204,
       "date": "2026-09-05",
       "title": "Booster Tutor opens a real pack",
