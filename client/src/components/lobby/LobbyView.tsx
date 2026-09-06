@@ -412,11 +412,14 @@ export function LobbyView({
     });
   }, [entries, formatFilter, roomTypeFilter]);
 
-  // Every enabled source reports its own online count; the chip shows the
-  // total reach of the lobby the user is browsing. Two rules, both
+  // Every enabled source reports the number of WebSocket connections it sees,
+  // not identities that can be unioned across servers. The same player usually
+  // holds one lobby-broker socket and one or more dedicated-server sockets, so
+  // adding those cardinalities double-counts the overlapping population. Use
+  // the largest live count as the aggregate estimate instead. Two rules, both
   // structural:
-  //   membership — summed over the CURRENT sources (as in `entries`), so a
-  //     source the user has removed leaves the total immediately;
+  //   membership — selected from the CURRENT sources (as in `entries`), so a
+  //     source the user has removed leaves the estimate immediately;
   //   liveness   — the count is read from that source's status row, which
   //     the store rewrites on every connection state change and refills
   //     only from a frame on the socket that is live now. A source that is
@@ -426,7 +429,8 @@ export function LobbyView({
   const playerCount = useMemo(
     () =>
       sources.reduce(
-        (sum, source) => sum + (sourceStatus.get(source.url)?.playerCount ?? 0),
+        (largest, source) =>
+          Math.max(largest, sourceStatus.get(source.url)?.playerCount ?? 0),
         0,
       ),
     [sources, sourceStatus],

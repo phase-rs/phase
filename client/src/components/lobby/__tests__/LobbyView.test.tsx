@@ -446,12 +446,22 @@ describe("LobbyView", () => {
     return ambient;
   }
 
+  it("does not add overlapping per-source connection counts", async () => {
+    renderTwoSources();
+
+    // Every lobby client subscribes to each enabled source, so these are
+    // overlapping cardinalities rather than disjoint populations. The largest
+    // live report is the de-duplicated aggregate estimate.
+    expect(await screen.findByText("5 online")).toBeInTheDocument();
+    expect(screen.queryByText("8 online")).not.toBeInTheDocument();
+  });
+
   it("counts only the sources still being browsed", async () => {
     renderTwoSources();
 
-    // Reach-guard: both counts really are in the total before the removal, so
+    // Reach-guard: B's larger count owns the estimate before the removal, so
     // the assertion after it measures the drop and not an empty chip.
-    expect(await screen.findByText("8 online")).toBeInTheDocument();
+    expect(await screen.findByText("5 online")).toBeInTheDocument();
 
     act(() => {
       useMultiplayerStore.setState({ userLobbySources: [SOURCE_A] });
@@ -460,15 +470,15 @@ describe("LobbyView", () => {
     // B's status row (and its count) survives until its channel closes; the
     // chip must not keep counting a server nobody browses.
     expect(await screen.findByText("3 online")).toBeInTheDocument();
-    expect(screen.queryByText("8 online")).not.toBeInTheDocument();
+    expect(screen.queryByText("5 online")).not.toBeInTheDocument();
   });
 
   it("drops a source's count from the total once that source goes offline", async () => {
     renderTwoSources();
 
-    // Reach-guard: both counts really are in the total while both sources are
+    // Reach-guard: B's larger count owns the estimate while both sources are
     // open, so the assertion after the flap measures the drop.
-    expect(await screen.findByText("8 online")).toBeInTheDocument();
+    expect(await screen.findByText("5 online")).toBeInTheDocument();
 
     act(() => {
       useMultiplayerStore.setState({
@@ -482,7 +492,7 @@ describe("LobbyView", () => {
     // is delivering nothing — counting it would advertise players on a
     // server shown as offline.
     expect(await screen.findByText("3 online")).toBeInTheDocument();
-    expect(screen.queryByText("8 online")).not.toBeInTheDocument();
+    expect(screen.queryByText("5 online")).not.toBeInTheDocument();
   });
 
   it("does not re-admit a source's old count when it reconnects without reporting", async () => {
@@ -491,9 +501,9 @@ describe("LobbyView", () => {
     // number must not come back — nothing live is backing it.
     renderTwoSources();
 
-    // Reach-guard: the pre-flap total is really 8, so the assertions below
+    // Reach-guard: the pre-flap estimate is really 5, so the assertions below
     // measure the count staying out and not an empty chip.
-    expect(await screen.findByText("8 online")).toBeInTheDocument();
+    expect(await screen.findByText("5 online")).toBeInTheDocument();
 
     act(() => {
       useMultiplayerStore.setState({
@@ -509,7 +519,7 @@ describe("LobbyView", () => {
     });
 
     expect(await screen.findByText("3 online")).toBeInTheDocument();
-    expect(screen.queryByText("8 online")).not.toBeInTheDocument();
+    expect(screen.queryByText("5 online")).not.toBeInTheDocument();
   });
 
   it("keeps its ambient subscription across a source's connection flap", async () => {
