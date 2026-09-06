@@ -64,6 +64,10 @@ async function completeHandshake(): Promise<MockWebSocket> {
   return ws;
 }
 
+function receive(ws: MockWebSocket, type: string, data: unknown): void {
+  ws.dispatchSynthetic("message", JSON.stringify({ type, data }));
+}
+
 /**
  * Starts observing `promise` immediately and returns a reader that yields the
  * rejection reason — or the string `"never settled"` if the promise is still
@@ -166,6 +170,8 @@ const viewerInteraction = {
 const objectActions: Record<string, ObjectAction[]> = {
   "42": [{ type: "PassPriority" }],
 };
+
+const FULL_KEY = { game_code: "GAME01", generation: 7 };
 
 describe("ServerDraftAdapter", () => {
   let adapter: ServerDraftAdapter;
@@ -313,6 +319,7 @@ describe("ServerDraftAdapter", () => {
           match_id: "r1-t0",
           round: 1,
           game_code: "GAME01",
+          full_key: FULL_KEY,
           player_token: "gametok",
           your_player: 0,
           opponent_name: "Bob",
@@ -323,6 +330,42 @@ describe("ServerDraftAdapter", () => {
     expect(adapter.currentPhase).toBe("match");
     expect(adapter.playerId).toBe(0);
     expect(adapter.currentMatchId).toBe("r1-t0");
+  });
+
+  it("reattaches once with the draft credential carried by DraftMatchStart", () => {
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    const matchStart = {
+      match_id: "r1-t0",
+      round: 1,
+      game_code: "GAME01",
+      full_key: FULL_KEY,
+      player_token: "match-draft-token",
+      your_player: 0,
+      opponent_name: "Bob",
+    };
+    ws.send.mockClear();
+
+    receive(ws, "DraftMatchStart", matchStart);
+
+    expect(ws.send).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({
+        type: "ReconnectDraft",
+        data: {
+          draft_code: "ABCD12",
+          player_token: "match-draft-token",
+        },
+      }),
+    );
+
+    ws.send.mockClear();
+    receive(ws, "DraftMatchStart", matchStart);
+
+    expect(ws.send).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "matchStarting", matchId: "r1-t0" }),
+    );
   });
 
   it("routes submitAction only during match phase", async () => {
@@ -368,6 +411,7 @@ describe("ServerDraftAdapter", () => {
           match_id: "r1-t0",
           round: 1,
           game_code: "GAME01",
+          full_key: FULL_KEY,
           player_token: "gametok",
           your_player: 0,
           opponent_name: "Bob",
@@ -400,6 +444,7 @@ describe("ServerDraftAdapter", () => {
           match_id: "r1-t0",
           round: 1,
           game_code: "GAME01",
+          full_key: FULL_KEY,
           player_token: "gametok",
           your_player: 0,
           opponent_name: "Bob",
@@ -434,12 +479,26 @@ describe("ServerDraftAdapter", () => {
           match_id: "r1-t0",
           round: 1,
           game_code: "GAME01",
+          full_key: FULL_KEY,
           player_token: "gametok",
           your_player: 0,
           opponent_name: "Bob",
         },
       }),
     );
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state: matchState("server-draft-started"),
+          your_player: 0,
+          full_key: FULL_KEY,
+        },
+      }),
+    );
+    listener.mockClear();
 
     ws.dispatchSynthetic(
       "message",
@@ -451,6 +510,7 @@ describe("ServerDraftAdapter", () => {
           log_entries: logEntries,
           legal_actions: [],
           auto_pass_recommended: false,
+          full_key: FULL_KEY,
         },
       }),
     );
@@ -471,10 +531,26 @@ describe("ServerDraftAdapter", () => {
     ws.dispatchSynthetic(
       "message",
       JSON.stringify({
+        type: "DraftMatchStart",
+        data: {
+          match_id: "r1-t0",
+          round: 1,
+          game_code: "GAME01",
+          full_key: FULL_KEY,
+          player_token: "gametok",
+          your_player: 0,
+          opponent_name: "Bob",
+        },
+      }),
+    );
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
         type: "GameStarted",
         data: {
           state,
           your_player: 0,
+          full_key: FULL_KEY,
           legal_actions_by_object: objectActions,
           viewer_interaction: viewerInteraction,
         },
@@ -491,10 +567,37 @@ describe("ServerDraftAdapter", () => {
     ws.dispatchSynthetic(
       "message",
       JSON.stringify({
+        type: "DraftMatchStart",
+        data: {
+          match_id: "r1-t0",
+          round: 1,
+          game_code: "GAME01",
+          full_key: FULL_KEY,
+          player_token: "gametok",
+          your_player: 0,
+          opponent_name: "Bob",
+        },
+      }),
+    );
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state: matchState("server-draft-started"),
+          your_player: 0,
+          full_key: FULL_KEY,
+        },
+      }),
+    );
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
         type: "StateUpdate",
         data: {
           state: matchState("server-draft-update"),
           events: [],
+          full_key: FULL_KEY,
           legal_actions_by_object: objectActions,
           viewer_interaction: viewerInteraction,
         },
@@ -507,6 +610,58 @@ describe("ServerDraftAdapter", () => {
     });
   });
 
+  it("accepts game frames only for the Full generation announced by the draft", async () => {
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    const staleKey = { game_code: "GAME01", generation: 6 };
+    receive(ws, "DraftMatchStart", {
+      match_id: "r1-t0",
+      round: 1,
+      game_code: "GAME01",
+      full_key: FULL_KEY,
+      player_token: "gametok",
+      your_player: 0,
+      opponent_name: "Bob",
+    });
+    receive(ws, "GameStarted", {
+      state: matchState("stale-start"),
+      your_player: 0,
+      full_key: staleKey,
+    });
+    await expect(adapter.getState()).rejects.toThrow("No game state available");
+
+    receive(ws, "GameStarted", {
+      state: matchState("current-start"),
+      your_player: 0,
+      full_key: FULL_KEY,
+    });
+    listener.mockClear();
+    receive(ws, "StateUpdate", {
+      state: matchState("stale-update"),
+      events: [],
+      full_key: staleKey,
+    });
+    receive(ws, "OpponentDisconnected", { grace_seconds: 30, full_key: staleKey });
+
+    await expect(adapter.getState()).resolves.toMatchObject({ label: "current-start" });
+    expect(listener).not.toHaveBeenCalled();
+
+    receive(ws, "StateUpdate", {
+      state: matchState("current-update"),
+      events: [],
+      full_key: FULL_KEY,
+    });
+    receive(ws, "OpponentDisconnected", { grace_seconds: 30, full_key: FULL_KEY });
+    receive(ws, "OpponentReconnected", { full_key: FULL_KEY });
+
+    await expect(adapter.getState()).resolves.toMatchObject({ label: "current-update" });
+    expect(listener).toHaveBeenCalledWith({
+      type: "opponentDisconnected",
+      graceSeconds: 30,
+    });
+    expect(listener).toHaveBeenCalledWith({ type: "opponentReconnected" });
+  });
+
   it("does not send ReportMatchResult on GameOver", () => {
     // Enter match phase.
     ws.dispatchSynthetic(
@@ -517,6 +672,7 @@ describe("ServerDraftAdapter", () => {
           match_id: "r1-t0",
           round: 1,
           game_code: "GAME01",
+          full_key: FULL_KEY,
           player_token: "gametok",
           your_player: 0,
           opponent_name: "Bob",
@@ -708,6 +864,7 @@ describe("ServerDraftAdapter", () => {
           match_id: "r1-t0",
           round: 1,
           game_code: "GAME01",
+          full_key: FULL_KEY,
           player_token: "gametok",
           your_player: 0,
           opponent_name: "Bob",
@@ -774,6 +931,7 @@ describe("ServerDraftAdapter", () => {
             match_id: "r1-t0",
             round: 1,
             game_code: "GAME01",
+            full_key: FULL_KEY,
             player_token: "gametok",
             your_player: 0,
             opponent_name: "Bob",

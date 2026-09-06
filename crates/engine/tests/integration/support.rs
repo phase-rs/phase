@@ -16,10 +16,11 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use engine::database::card_db::CardDatabase;
 use engine::game::triggers::trigger_source_context_for_latch;
+use engine::types::card::CardFace;
 use engine::types::game_state::{GameState, NamedChoiceSource, NamedChoiceSourceBinding};
 use engine::types::identifiers::ObjectId;
 use flate2::read::GzDecoder;
@@ -33,6 +34,32 @@ pub fn exact_named_choice_source(state: &GameState, object_id: ObjectId) -> Name
         context,
         NamedChoiceSourceBinding::ExactObjectAndResolution,
     )
+}
+
+/// Build a card database containing exactly `faces`, and install it on `state`
+/// as the resolution-time draw source.
+///
+/// CR 707.2 + CR 202.3: `Effect::CreateTokenCopyFromPool` (the Momir Basic
+/// emblem) draws its random creature from `GameState::card_db` at resolution,
+/// so a test that exercises it must install a database rather than pre-seeding
+/// a pool. Keeping the database tiny keeps the draw's candidate set exactly the
+/// faces the test declared.
+pub fn install_synthetic_card_db(state: &mut GameState, faces: &[CardFace]) -> Arc<CardDatabase> {
+    let export: Map<String, Value> = faces
+        .iter()
+        .map(|face| {
+            (
+                face.name.to_lowercase(),
+                serde_json::to_value(face).expect("CardFace serializes"),
+            )
+        })
+        .collect();
+    let db = Arc::new(
+        CardDatabase::from_json_str(&Value::Object(export).to_string())
+            .expect("synthetic export should parse"),
+    );
+    engine::game::install_card_db(state, Arc::clone(&db));
+    db
 }
 
 /// Path to the full parsed card-data export, relative to the engine crate root.

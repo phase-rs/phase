@@ -12571,11 +12571,21 @@ fn parse_opponent_put_land_sacrifice_replacement(
         active_player_req: None,
     };
 
-    // CR 701.21a: "sacrifices a land of their choice." `ControllerRef::You`
-    // resolves to the entering land's resulting controller because the
-    // post-replacement continuation is stashed with the ENTERING object as its
-    // source (see `apply_single_replacement`), NOT `ControllerRef::ParentTargetController`
-    // (which has no target context here and would never resolve).
+    // CR 701.21a + CR 109.5: "that player … sacrifices a land of their choice."
+    // The subject is *that player* — the specific opponent the gate was
+    // evaluated against — NOT "you". It is therefore
+    // `ControllerRef::ScopedPlayer`, the same reference the applicability gate's
+    // LHS above already uses, and the drain binds both from one place
+    // (`apply_post_replacement_effect` stamps `scoped_player` with the affected
+    // object's controller). `ControllerRef::You` would name Land Equilibrium's
+    // own controller, and `ControllerRef::ParentTargetController` has no target
+    // context here and would never resolve.
+    //
+    // Until issue #7086 this arm read `You` and relied on the drain binding
+    // `ability.controller` to the ENTERING object's controller — a coupling that
+    // simultaneously made every third-party replacement's genuine "you" rider
+    // (Head of the Hunt's Wolf token) resolve to the wrong player. Naming the
+    // reference correctly is what lets the drain name "you" correctly.
     //
     // KNOWN, ACCEPTED SCOPE LIMITATION (CR 614.13 / Gatherer ruling): Land
     // Equilibrium's official ruling states "it doesn't matter under whose control
@@ -12596,7 +12606,7 @@ fn parse_opponent_put_land_sacrifice_replacement(
             // derived from the parsed `type_filter` (not a hardcoded land), so a card
             // of this class with a different permanent noun stays consistent. For
             // Land Equilibrium this is byte-identical to `TypedFilter::land()`.
-            target: inject_controller(sacrifice_type_filter, ControllerRef::You),
+            target: inject_controller(sacrifice_type_filter, ControllerRef::ScopedPlayer),
             count: QuantityExpr::Fixed { value: 1 },
             min_count: 0,
         },

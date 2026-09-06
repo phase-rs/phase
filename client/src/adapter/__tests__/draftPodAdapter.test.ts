@@ -803,6 +803,53 @@ describe("DraftPodHostAdapter", () => {
     expect(adapter.status).toBe("matchInProgress");
   });
 
+  /**
+   * Step 2 shipped the `commanderLaunch` forwarding case with no runtime test,
+   * so its PURE RE-EMIT property was unpinned: a later edit adding
+   * `setStatus("matchInProgress")` would move the host off `CompleteView` and
+   * silently kill the launch-in-flight state and its Cancel control.
+   *
+   * GREEN ON ITS FIRST RUN, by design — the arm already exists, so this row
+   * PINS behaviour rather than driving it. Its discriminating power was proved
+   * with a MUTATION PROBE (temporarily add `this.setStatus("matchInProgress")`
+   * to the arm; this row reds) rather than a red-first cycle. The assertion is
+   * non-vacuous on the real adapter: the sibling `matchStart` arm one case
+   * above DOES call `setStatus("matchInProgress")`, so writing the forwarding
+   * case by copying it flips `adapter.status` here.
+   *
+   * A Set pool and `kind: "Premier"`, as every other row in this suite uses:
+   * `initialize`'s card-data fetch is gated on
+   * `poolInput.type === "Cube" || kind === "CommanderDraft"`, and the
+   * forwarding case is a bare `this.emit(...)` with no kind dependence, so this
+   * row needs no `stubCardDataFetch()`.
+   */
+  it("re-emits a commanderLaunch without writing pod status", async () => {
+    await adapter.initialize({
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+    });
+    const hostEventHandler = mockHostOnEvent.mock.calls[0][0];
+    // Captured, never hardcoded: the assertion is "unchanged across the call",
+    // not "equal to whatever status `initialize` happens to leave".
+    const statusBefore = adapter.status;
+    const launch = {
+      gameId: "11111111-2222-3333-4444-555555555555",
+      roomCode: "ABCDE-commander-11111111",
+      localDeck: { main_deck: ["Plains"], sideboard: [], commander: ["Kenrith, the Returned King"] },
+      playerCount: 4,
+      draftSetCodes: ["CMM"],
+    };
+
+    hostEventHandler({ type: "commanderLaunch", launch });
+
+    expect(events).toContainEqual({ type: "commanderLaunch", launch });
+    expect(adapter.status).toBe(statusBefore);
+  });
+
   it("cleans up on dispose", async () => {
     await adapter.initialize({
       poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },

@@ -583,6 +583,12 @@
   "podComplete": {
     "title": "Draft completato",
     "launchCommanderGame": "Avvia partita Commander",
+    "launchLocalCommanderGame": "Avvia partita Commander locale",
+    "waitingForPlayers": "In attesa che i giocatori si uniscano…",
+    "cancelCommanderLaunch": "Annulla avvio",
+    "joinCommanderGame": "Unisciti alla partita Commander",
+    "joiningCommanderGame": "Accesso in corso: in attesa degli altri giocatori…",
+    "seatCeiling": "Questo tavolo ha {{seats}} giocatori; una partita Commander peer-to-peer ne supporta al massimo {{max}}. Giocherai questa partita in locale contro il motore, con tutti i mazzi draftati.",
     "returnToMenu": "Torna al menu"
   },
   "podError": {

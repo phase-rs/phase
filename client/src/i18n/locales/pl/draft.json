@@ -583,6 +583,12 @@
   "podComplete": {
     "title": "Draft zakończony",
     "launchCommanderGame": "Rozpocznij grę Commander",
+    "launchLocalCommanderGame": "Rozpocznij lokalną grę Commander",
+    "waitingForPlayers": "Oczekiwanie na dołączenie graczy…",
+    "cancelCommanderLaunch": "Anuluj uruchomienie",
+    "joinCommanderGame": "Dołącz do gry Commander",
+    "joiningCommanderGame": "Dołączanie — oczekiwanie na pozostałych graczy…",
+    "seatCeiling": "Ten stół liczy {{seats}} graczy; gra Commander peer-to-peer obsługuje maksymalnie {{max}}. Zagrasz lokalnie przeciwko silnikowi, ze wszystkimi wydraftowanymi taliami.",
     "returnToMenu": "Powrót do menu"
   },
   "podError": {

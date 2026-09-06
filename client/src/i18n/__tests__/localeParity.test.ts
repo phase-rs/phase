@@ -134,23 +134,33 @@ const WORKSPACE_SHELL_KEYS = [
   "limitedDeck.landCount_other",
 ] as const;
 
-const FOUR_FORM_STEMS = [
-  "intro.quantity.packsOpened",
-  "intro.quantity.cardsContained",
-  "intro.quantity.packSizeEntry",
-  "intro.quantity.minimumDeckCards",
-  "intro.packPassing",
-  "sealedOpening.subtitle",
-  "workspace.count.deck",
-  "workspace.count.sideboard",
-  "workspace.sideboard.expand",
-  "workspace.pool.filter.combined",
-  "workspace.pool.filter.deck",
-  "workspace.pool.filter.sideboard",
-  "workspace.headers.accessible",
-  "limitedDeck.spellCount",
-  "limitedDeck.landCount",
-  "seat.activePackCount",
+/**
+ * Plural families that must carry all four Polish forms, paired with the
+ * namespace file each stem lives in. Polish is the locale whose grammar needs
+ * `_one`/`_few`/`_many`/`_other`, but i18next resolves plurals by looking up
+ * SUFFIXED keys and the key-parity case below is exact in both directions — so
+ * every catalog, English included, must carry all four. The loop runs over
+ * `[SOURCE, ...locales]` precisely so English is pinned too: key parity is
+ * English-driven and cannot catch an English family that was never authored.
+ */
+const FOUR_FORM_STEMS: ReadonlyArray<{ ns: string; stem: string }> = [
+  { ns: "draft.json", stem: "intro.quantity.packsOpened" },
+  { ns: "draft.json", stem: "intro.quantity.cardsContained" },
+  { ns: "draft.json", stem: "intro.quantity.packSizeEntry" },
+  { ns: "draft.json", stem: "intro.quantity.minimumDeckCards" },
+  { ns: "draft.json", stem: "intro.packPassing" },
+  { ns: "draft.json", stem: "sealedOpening.subtitle" },
+  { ns: "draft.json", stem: "workspace.count.deck" },
+  { ns: "draft.json", stem: "workspace.count.sideboard" },
+  { ns: "draft.json", stem: "workspace.sideboard.expand" },
+  { ns: "draft.json", stem: "workspace.pool.filter.combined" },
+  { ns: "draft.json", stem: "workspace.pool.filter.deck" },
+  { ns: "draft.json", stem: "workspace.pool.filter.sideboard" },
+  { ns: "draft.json", stem: "workspace.headers.accessible" },
+  { ns: "draft.json", stem: "limitedDeck.spellCount" },
+  { ns: "draft.json", stem: "limitedDeck.landCount" },
+  { ns: "draft.json", stem: "seat.activePackCount" },
+  { ns: "tournament.json", stem: "list.entrants" },
 ] as const;
 
 describe("locale parity", () => {
@@ -198,10 +208,10 @@ describe("locale parity", () => {
 
   it("keeps_all_plural_families_complete_in_every_locale", () => {
     for (const locale of [SOURCE, ...locales]) {
-      const target = load(locale, "draft.json");
-      for (const stem of FOUR_FORM_STEMS) {
+      for (const { ns, stem } of FOUR_FORM_STEMS) {
+        const target = load(locale, ns);
         for (const suffix of ["one", "few", "many", "other"]) {
-          expect(target[`${stem}_${suffix}`], `${locale}:${stem}_${suffix}`).toEqual(expect.any(String));
+          expect(target[`${stem}_${suffix}`], `${locale}:${ns}:${stem}_${suffix}`).toEqual(expect.any(String));
         }
       }
     }

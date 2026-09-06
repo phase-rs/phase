@@ -522,23 +522,31 @@ mod tests {
                 player_key: "key-a".into(),
                 display_name: "Alice".into(),
             },
+            // Uncorrelated fixtures: whether a gated frame WRITES is a property
+            // of the action, not of whether the caller asked to be told about
+            // it, so the correlator is irrelevant to this classification and
+            // `None` is the fixture that says so.
             LobbyClientMessage::StartTournamentRound {
                 code: "TOUR01".into(),
                 organizer_token: "tok".into(),
+                request_id: None,
             },
             LobbyClientMessage::ReportMatchResult {
                 code: "TOUR01".into(),
                 pairing_id: 0,
                 player_token: "tok".into(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
             },
             LobbyClientMessage::DropFromTournament {
                 code: "TOUR01".into(),
                 player_token: "tok".into(),
+                request_id: None,
             },
             LobbyClientMessage::EndTournament {
                 code: "TOUR01".into(),
                 organizer_token: "tok".into(),
+                request_id: None,
             },
         ];
         for msg in &mutating {

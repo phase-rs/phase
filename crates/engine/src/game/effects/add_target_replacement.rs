@@ -570,8 +570,16 @@ pub fn resolve(
                     // leave-play, host leave-play) remove this def on every
                     // CR 611.2b lapse, so base never accumulates a stale runtime
                     // rider. printed_cards.rs is the only intrinsic base-write
-                    // precedent; there is no additive-runtime base-push
-                    // precedent, so this exception is documented here.
+                    // precedent, and this is the only additive-runtime base push in
+                    // the tree, so the exception is documented here.
+                    //
+                    // Everything that is NOT one of these three classes now goes
+                    // through `GameObject::install_resolution_replacement` instead
+                    // (CR 611.2a) — the typed-provenance authority that survives the
+                    // CR 613.1 reset via the carried set rather than via a base copy.
+                    // The trio deliberately stays OUTSIDE it: a def that is both
+                    // base-resident and `Resolution`-stamped would be reseeded from
+                    // base AND carried from live, i.e. applied twice.
                     // A turn-bound die-exile rider must also survive a layer
                     // reset: a damaged creature can gain/lose characteristics
                     // or enter combat before it dies. Cleanup prunes this
@@ -609,10 +617,22 @@ pub fn resolve(
                         );
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         if install_to_base {
+                            // CR 611.2b / CR 702.84a: the three hand-audited durable
+                            // classes stay BASE-resident and are reseeded into live
+                            // by every CR 613.1 pass. They must NOT be stamped
+                            // `Resolution`: that would place them in base AND in the
+                            // carried set, and apply them twice.
                             std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
                                 .push(replacement.clone());
+                            obj.replacement_definitions.push(replacement);
+                        } else {
+                            // CR 611.2a: everything else is a resolution-created
+                            // continuous effect with a stated window. The authority
+                            // stamps it `Resolution` when it carries an enforceable
+                            // expiry, and fails closed (live-only, today's behavior)
+                            // when it does not.
+                            obj.install_resolution_replacement(replacement);
                         }
-                        obj.replacement_definitions.push(replacement);
                         attached += 1;
                     }
                 }
@@ -1076,6 +1096,123 @@ mod tests {
         assert!(
             state.objects.get(&target).unwrap().replacement_definitions[0].is_consumed,
             "one-shot rider must consume after applying"
+        );
+    }
+
+    /// CR 611.2b + CR 611.2a + CR 613.1 (issue #8485, matrix row 21): the C4
+    /// restructure — the three hand-audited DURABLE classes keep the base push and
+    /// must NOT be stamped `Resolution` (that would put them in base AND in the
+    /// carried set, applying them twice); everything else goes through
+    /// `GameObject::install_resolution_replacement` instead.
+    ///
+    /// MULTI-AUTHORITY HOSTILE FIXTURE: the SAME host carries both arms at once — a
+    /// `ControllerControlsSource`-gated durable rider and an ordinary end-of-turn
+    /// rider — so one object exercises both sides of the restructure and a
+    /// mis-routed arm cannot hide behind the other.
+    #[test]
+    fn controller_gated_rider_is_not_carried_twice_across_a_layer_pass() {
+        use crate::types::ability::Effect;
+
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Locked Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Master Thief".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .base_characteristics_initialized = true;
+
+        // ARM 1: the CR 611.2b durable class — a bare untap-prevention rider with a
+        // `WhileControllingHost` window, which `stamp_for_as_long_as_controlled_gate`
+        // turns into a `ControllerControlsSource` applicability gate.
+        let mut durable = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Untap)),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(host)],
+            source,
+            PlayerId(0),
+        );
+        durable.duration = Some(Duration::WhileControllingHost);
+        resolve(&mut state, &durable, &mut Vec::new()).unwrap();
+
+        // ARM 2: an ordinary end-of-turn rider on the SAME host.
+        let mut eot = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Graveyard);
+        eot.expiry = Some(RestrictionExpiry::EndOfTurn);
+        let transient = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(eot),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(host)],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &transient, &mut Vec::new()).unwrap();
+
+        {
+            let obj = &state.objects[&host];
+            assert_eq!(
+                obj.base_replacement_definitions.len(),
+                1,
+                "only the durable arm is base-written"
+            );
+            assert_eq!(obj.replacement_definitions.len(), 2);
+            let gated = obj
+                .replacement_definitions
+                .iter_all()
+                .find(|d| d.event == ReplacementEvent::Untap)
+                .expect("the gated rider is installed");
+            assert!(
+                !gated.is_resolution_installed(),
+                "CR 611.2b: a base-resident durable rider must stay `Characteristic`"
+            );
+            let carried = obj
+                .replacement_definitions
+                .iter_all()
+                .find(|d| d.event == ReplacementEvent::Moved)
+                .expect("the EOT rider is installed");
+            assert!(
+                carried.is_resolution_installed(),
+                "CR 611.2a: an ordinary turn-bound rider IS resolution-created"
+            );
+        }
+
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        let obj = &state.objects[&host];
+        assert_eq!(
+            obj.replacement_definitions
+                .iter_all()
+                .filter(|d| d.event == ReplacementEvent::Untap)
+                .count(),
+            1,
+            "the durable rider must be reseeded from base EXACTLY once, not \
+             reseeded AND carried"
+        );
+        assert_eq!(
+            obj.replacement_definitions
+                .iter_all()
+                .filter(|d| d.event == ReplacementEvent::Moved)
+                .count(),
+            1,
+            "the carried EOT rider survives the CR 613.1 reset"
         );
     }
 

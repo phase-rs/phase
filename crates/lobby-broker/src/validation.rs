@@ -453,9 +453,21 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
         M::GetTournament { code } => {
             validate_get_tournament_fields(code)?;
         }
+        // `request_id: _` on all four: the correlator is an opaque integer the
+        // broker echoes and never stores, so it has no bounds to check. Binding
+        // it explicitly is what shows the next reader it was considered here
+        // rather than overlooked.
+        //
+        // `ReportMatchResult` gives up its `..` rest pattern to say that: a
+        // rest pattern silently absorbs every future field, so this arm was the
+        // one place a newly-added bounded field could slip past validation
+        // without a compile error. Naming all five fields makes the next
+        // addition break here, which is the behavior the other three arms
+        // already had for free.
         M::StartTournamentRound {
             code,
             organizer_token,
+            request_id: _,
         } => {
             validate_start_tournament_round_fields(StartTournamentRoundFields {
                 code,
@@ -464,9 +476,10 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
         }
         M::ReportMatchResult {
             code,
+            pairing_id: _,
             player_token,
             outcome,
-            ..
+            request_id: _,
         } => {
             validate_report_match_result_fields(ReportMatchResultFields {
                 code,
@@ -474,12 +487,17 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
                 outcome,
             })?;
         }
-        M::DropFromTournament { code, player_token } => {
+        M::DropFromTournament {
+            code,
+            player_token,
+            request_id: _,
+        } => {
             validate_drop_from_tournament_fields(DropFromTournamentFields { code, player_token })?;
         }
         M::EndTournament {
             code,
             organizer_token,
+            request_id: _,
         } => {
             validate_end_tournament_fields(EndTournamentFields {
                 code,
@@ -771,12 +789,18 @@ mod tests {
         }
     }
 
+    /// Every fixture in this module is UNCORRELATED (`request_id: None`).
+    /// That is the honest shape here: validation is a field-bounds verdict and
+    /// the correlator is opaque to it, so a correlated frame is validated
+    /// identically and an uncorrelated literal keeps these tests measuring
+    /// bounds rather than correlation.
     fn report_with(code: &str, player_token: &str, outcome: PodOutcome) -> M {
         M::ReportMatchResult {
             code: code.to_string(),
             pairing_id: 0,
             player_token: player_token.to_string(),
             outcome,
+            request_id: None,
         }
     }
 
@@ -811,6 +835,7 @@ mod tests {
             M::StartTournamentRound {
                 code: "TOUR01".into(),
                 organizer_token: "tok".into(),
+                request_id: None,
             },
             report_with(
                 "TOUR01",
@@ -821,10 +846,12 @@ mod tests {
             M::DropFromTournament {
                 code: "TOUR01".into(),
                 player_token: "tok".into(),
+                request_id: None,
             },
             M::EndTournament {
                 code: "TOUR01".into(),
                 organizer_token: "tok".into(),
+                request_id: None,
             },
         ];
         for msg in valid {
@@ -879,10 +906,12 @@ mod tests {
             M::StartTournamentRound {
                 code: "TOUR01".into(),
                 organizer_token: long.clone(),
+                request_id: None,
             },
             M::EndTournament {
                 code: "TOUR01".into(),
                 organizer_token: long.clone(),
+                request_id: None,
             },
         ] {
             assert!(validate_lobby_message(&msg).is_err(), "{msg:?}");
@@ -897,6 +926,7 @@ mod tests {
             M::DropFromTournament {
                 code: "TOUR01".into(),
                 player_token: long.clone(),
+                request_id: None,
             },
         ] {
             assert!(validate_lobby_message(&msg).is_err(), "{msg:?}");

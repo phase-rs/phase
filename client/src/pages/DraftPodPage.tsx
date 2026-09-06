@@ -63,6 +63,7 @@ import { DialogShell } from "../components/modal/DialogShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import {
+  COMMANDER_P2P_SEAT_CEILING,
   draftPodScreen,
   DRAFT_OFFLINE_ERROR,
   intergamePromptKey,
@@ -1130,32 +1131,131 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
 function CompleteView({ onLeave }: { onLeave: () => void }) {
   const { t } = useTranslation("draft");
   const navigate = useNavigate();
-  // Three primitive selectors, matching this file's existing convention. The
-  // component reads state and dispatches; it derives nothing — the seat count
-  // the launch carries is read inside the store from `view.seats`.
+  // Primitive selectors, matching this file's existing convention. The
+  // component reads state and dispatches; it computes no game state. The seat
+  // count the LAUNCH carries is still read inside the store from `view.seats` —
+  // the read below is a transport-capability check against the store's own
+  // exported ceiling, not a game-state derivation.
   const view = useMultiplayerDraftStore((s) => s.view);
   const role = useMultiplayerDraftStore((s) => s.role);
+  const commanderLaunch = useMultiplayerDraftStore((s) => s.commanderLaunch);
   const launchCommanderGame = useMultiplayerDraftStore((s) => s.launchCommanderGame);
-  // The engine procedure authorizes this launch; the page must not infer it
-  // from a draft-kind label. Only the host holds the session the decks are
-  // assembled from.
-  const canLaunch = view?.launch_capability === "CommanderMultiplayer" && role === "host";
+  const joinCommanderGame = useMultiplayerDraftStore((s) => s.joinCommanderGame);
+  const cancelCommanderLaunch = useMultiplayerDraftStore((s) => s.cancelCommanderLaunch);
+  const joinPending = useMultiplayerDraftStore((s) => s.commanderJoinPending);
+  // Non-null exactly when this client may launch. The engine procedure
+  // authorizes it — the page must not infer it from a draft-kind label — and
+  // only the host holds the session the decks are assembled from. Carrying the
+  // VIEW rather than a boolean is what lets the seat-ceiling read below narrow
+  // without an optional chain, and keeps that read off every other role's path.
+  const launchableView =
+    view?.launch_capability === "CommanderMultiplayer" && role === "host" ? view : null;
+  // `commanderLaunch` is the store's ONLY observable of a launch. The host's is
+  // written by its own local emit on the FIRST iteration of
+  // `sendCommanderLaunches` — the host is pod seat 0, `liveSeatDecks` is built
+  // in `view.seats` order, and `sendToSeat`'s seat-0 arm turns that send into a
+  // local event. The loop is synchronous, so the position does not matter to
+  // behaviour; what matters is that the window between the CLICK and that write
+  // is the whole `hostRoom` round-trip, covered by the store's
+  // `commanderLaunchInFlight` re-entry guard rather than by this flag.
+  const launchInFlight = commanderLaunch !== null;
+  // The invitation IS the authorization: a guest holds a `commanderLaunch` only
+  // because this pod's host addressed one to its seat. Nothing here is derived
+  // from the pod view — the seat that joins arrives on the wire as
+  // `playerIdentity`.
+  const canJoin = role === "guest" && commanderLaunch !== null;
+  // D5. The pod can legally seat more players than the P2P transport carries
+  // (the engine's Commander Draft format allows eight, `P2PHostAdapter` throws
+  // above six), and `launchCommanderGame` refuses such a pod outright. Showing
+  // an enabled button whose only outcome is an error banner is the worse
+  // failure, so the refusal is stated up front instead.
+  const seatCount = launchableView?.seats.length ?? 0;
+  const overSeatCeiling = seatCount > COMMANDER_P2P_SEAT_CEILING;
+  // Only an IN-FLIGHT launch disables the button. Being over the transport's
+  // seat ceiling does not: such a pod still has a playable outcome (a local
+  // game against the engine, every drafted deck included), so the ceiling
+  // changes WHICH game the button starts, not whether it starts one. Disabling
+  // it here is what left 7- and 8-seat pods with no way to play at all.
+  // One source for the two places a disabled button has to say so — the
+  // attribute the browser enforces and the class that shows it.
+  const launchDisabled = launchInFlight;
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 py-8">
       {/* `launchCommanderGame` reports a payload refusal by writing `error` and
           NOT navigating, so without this banner that failure is invisible and
           the launch button reads as dead. Same placement as the other phase
-          views (`PairingPhaseView`, `MatchInProgressView`, ...). */}
+          views (`PairingPhaseView`, `MatchInProgressView`, ...).
+
+          It is also the whole recovery path for a join that dials a room the
+          host has already cancelled: `cancelCommanderLaunch` tears the game
+          room down but reaches only sessions on the GAME adapter, so a guest
+          that never pressed Join keeps its `commanderLaunch` and its Join
+          button. That press rejects on a dead Peer and lands here. Nothing
+          latches — the store clears its in-flight handle in a `finally` and
+          deliberately leaves `commanderLaunch` set — so the guest can dismiss
+          this banner and press Join again once the host relaunches (a relaunch
+          overwrites `commanderLaunch` on the pod wire), or leave below. */}
       <PodErrorBanner />
       <h1 className="menu-display text-3xl text-white">{t("podComplete.title")}</h1>
       <FormatStandings />
-      {canLaunch && (
-        <button
-          onClick={() => void launchCommanderGame(navigate)}
-          className={menuButtonClass({ tone: "indigo", size: "md" })}
-        >
-          {t("podComplete.launchCommanderGame")}
-        </button>
+      {launchableView && (
+        <div className="flex w-full flex-col items-center gap-3">
+          {launchInFlight && (
+            // `role="status"` — a polite live region, because the launch button
+            // goes disabled in the same render and a screen-reader user who
+            // just pressed it would otherwise be told nothing. Styled as this
+            // file's passive waiting prose (`RoundCompleteView`).
+            <p role="status" className="text-center text-sm text-white/50">
+              {t("podComplete.waitingForPlayers")}
+            </p>
+          )}
+          <button
+            onClick={() => void launchCommanderGame(navigate)}
+            disabled={launchDisabled}
+            className={menuButtonClass({ tone: "indigo", size: "md", disabled: launchDisabled })}
+          >
+            {overSeatCeiling
+              ? t("podComplete.launchLocalCommanderGame")
+              : t("podComplete.launchCommanderGame")}
+          </button>
+          {overSeatCeiling && (
+            <p className="max-w-md text-center text-sm text-white/50">
+              {t("podComplete.seatCeiling", { seats: seatCount, max: COMMANDER_P2P_SEAT_CEILING })}
+            </p>
+          )}
+          {launchInFlight && (
+            <button
+              onClick={() => void cancelCommanderLaunch()}
+              className={menuButtonClass({ tone: "neutral", size: "sm" })}
+            >
+              {t("podComplete.cancelCommanderLaunch")}
+            </button>
+          )}
+        </div>
+      )}
+      {canJoin && (
+        // The guest's mirror of the host's waiting block above, deliberately
+        // the same shape. The join parks until every live seat has joined AND
+        // the host starts the game, so without this the button is
+        // indistinguishable from a dead one for minutes — which is the very
+        // complaint this whole change exists to answer.
+        <div className="flex w-full flex-col items-center gap-3">
+          {joinPending && (
+            // `role="status"`, as the host's is: the button goes disabled in
+            // the same render, so a screen-reader user who just pressed it
+            // would otherwise be told nothing at all.
+            <p role="status" className="text-center text-sm text-white/50">
+              {t("podComplete.joiningCommanderGame")}
+            </p>
+          )}
+          <button
+            onClick={() => void joinCommanderGame(navigate)}
+            disabled={joinPending}
+            className={menuButtonClass({ tone: "indigo", size: "md", disabled: joinPending })}
+          >
+            {t("podComplete.joinCommanderGame")}
+          </button>
+        </div>
       )}
       <button
         onClick={onLeave}
