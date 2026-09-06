@@ -2279,12 +2279,12 @@ fn record_active_effect_collection() {
 }
 
 #[cfg(test)]
-fn reset_active_effect_collection_count() {
+pub(crate) fn reset_active_effect_collection_count() {
     ACTIVE_EFFECT_COLLECTION_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(test)]
-fn active_effect_collection_count() -> usize {
+pub(crate) fn active_effect_collection_count() -> usize {
     ACTIVE_EFFECT_COLLECTION_COUNT.with(core::cell::Cell::get)
 }
 

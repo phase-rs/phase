@@ -1702,7 +1702,7 @@ fn check_world_rule(
             obj.card_types
                 .supertypes
                 .contains(&Supertype::World)
-                .then_some((*id, world_acquisition_timestamp(state, obj)))
+                .then(|| (*id, world_acquisition_timestamp(state, obj)))
         })
         .collect();
 
@@ -3000,6 +3000,83 @@ mod tests {
             crate::game::perf_counters::snapshot().static_full_scans,
             0,
             "absent LegendRuleDoesntApply statics must skip the exact check_static_ability scan"
+        );
+    }
+
+    /// CR 704.5k: the world rule needs `world_acquisition_timestamp` only for
+    /// permanents that actually HAVE the world supertype. On a board with none —
+    /// which is almost every board — its cost must not scale with the board.
+    ///
+    /// `bool::then_some` takes a VALUE, so the eager form evaluated the timestamp
+    /// for every permanent before the `contains(&Supertype::World)` result was
+    /// consulted. For a non-printed-world object that call falls past its fast
+    /// path into `layers::collect_shared_active_continuous_effects`, which walks
+    /// every static-effect source and allocates a fresh Vec of the whole board's
+    /// effects — so a world-free board paid one full effect collection PER
+    /// PERMANENT on every SBA pass. The CR 704.5k arity gate (`worlds.len() < 2`)
+    /// sits after that cost and so could not prevent it.
+    ///
+    /// This matters well beyond the world rule: `check_state_based_actions` runs
+    /// on every priority grant, after every stack resolution, in the combat-damage
+    /// loop, and inside every simulated candidate action.
+    ///
+    /// The assertion is board-size INDEPENDENCE rather than a fixed count: SBA
+    /// legitimately gathers effects a small constant number of times for other
+    /// reasons, and pinning that constant would make this test a tripwire for
+    /// unrelated work. Growth with `n` is the defect.
+    ///
+    /// Revert-failing: restore `.then_some(...)` in place of `.then(|| ...)` and
+    /// each count becomes `board size + k` — 10 and 34 today, for SBA's constant
+    /// `k` of 2 — because the eager form gathers once more per permanent on top
+    /// of that constant. The equality below is what breaks, not the constant.
+    #[test]
+    fn sba_world_rule_cost_is_independent_of_board_size_when_no_world_is_present() {
+        fn collections_for(n: u64) -> (usize, usize) {
+            let mut state = setup();
+            for i in 1..=n {
+                create_creature(&mut state, CardId(i), PlayerId(0), "Rat", 1, 1);
+            }
+            assert!(
+                state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .all(|o| !o.card_types.supertypes.contains(&Supertype::World)),
+                "reach-guard: the fixture must contain no world permanent, or this \
+                 proves nothing about the zero-world path"
+            );
+
+            crate::game::layers::reset_active_effect_collection_count();
+            let mut events = Vec::new();
+            check_state_based_actions(&mut state, &mut events);
+            (
+                state.battlefield.len(),
+                crate::game::layers::active_effect_collection_count(),
+            )
+        }
+
+        let (small_board, small) = collections_for(8);
+        let (large_board, large) = collections_for(32);
+
+        // The board sizes are load-bearing in the PASSING direction too. Without
+        // these, a fixture that silently stopped creating permanents would leave
+        // `0 == 0` and the tripwire would be disarmed rather than failing.
+        assert_eq!(small_board, 8, "fixture must place 8 permanents");
+        assert_eq!(large_board, 32, "fixture must place 32 permanents");
+        // ...and the counter must actually be reaching the code under test. Pins
+        // k >= 1 without pinning k == 2, so this stays independent of how many
+        // times SBA legitimately gathers.
+        assert!(
+            small > 0,
+            "SBA must gather continuous effects at least once, or the counter is \
+             no longer instrumenting the path this test measures"
+        );
+
+        assert_eq!(
+            small, large,
+            "gathering continuous effects during SBA must not scale with the \
+             battlefield on a world-free board: {small_board} permanents gathered \
+             {small}, {large_board} gathered {large}"
         );
     }
 
