@@ -14,7 +14,10 @@ use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
-use super::oracle_target::{distribute_shared_properties, parse_target, parse_type_phrase};
+use super::oracle_target::{
+    distribute_shared_properties, fold_article_led_type_union, parse_target,
+    parse_type_phrase_folding,
+};
 use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_creature_subtype;
 use super::oracle_util::parse_mana_symbols;
@@ -335,7 +338,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 // `count: 1` + `parse_target` path dropped both. Scope the recovery
                 // to explicit counts >= 2 so single-object continuations keep their
                 // previous parse unchanged (this fix moves no parser surface outside
-                // the explicit-multi-count class). `parse_type_phrase` (the exile
+                // the explicit-multi-count class). `parse_type_phrase_folding` (the exile
                 // arm's own consumption-aware primitive) must consume the whole
                 // object phrase into a concrete filter, so an unsupported rider
                 // stays an honest `Unimplemented` rather than a false-green cost.
@@ -343,7 +346,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                     let filter_text = strip_count_article_prefix(rest.trim())
                         .trim_end_matches('.')
                         .trim();
-                    let (filter, remainder) = parse_type_phrase(filter_text);
+                    let (filter, remainder) = parse_type_phrase_folding(filter_text);
                     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
                         costs[i] = match verb {
                             PrecedingVerb::Sacrifice => {
@@ -472,7 +475,7 @@ fn parse_behold_cost(lower: &str) -> Option<AbilityCost> {
     )))
     .parse(filter_text.trim())
     .ok()?;
-    let (filter, remainder) = parse_type_phrase(filter_text);
+    let (filter, remainder) = parse_type_phrase_folding(filter_text);
     if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -538,8 +541,8 @@ fn parse_choose_or_reveal_behold_cost(lower: &str) -> Option<AbilityCost> {
     .parse(after_article)
     .ok()?;
 
-    let (choose_filter, choose_rem) = parse_type_phrase(choose_type_text.trim());
-    let (reveal_filter, reveal_rem) = parse_type_phrase(reveal_type_text.trim());
+    let (choose_filter, choose_rem) = parse_type_phrase_folding(choose_type_text.trim());
+    let (reveal_filter, reveal_rem) = parse_type_phrase_folding(reveal_type_text.trim());
     if !choose_rem.trim().is_empty()
         || !reveal_rem.trim().is_empty()
         || matches!(choose_filter, TargetFilter::Any)
@@ -760,11 +763,32 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             let stripped = strip_article(rest, &rest_lower);
             (1, stripped.to_string())
         };
-        let (filter, _) = parse_target(&format!("target {}", filter_text));
-        return AbilityCost::Sacrifice(SacrificeCost::count(
-            ensure_another_sacrifice_filter(filter, &filter_text),
-            use_count,
-        ));
+        // CR 205.2a: a sacrifice cost's filter may be a TYPE UNION whose right
+        // conjunct leads with an indefinite article — "Sacrifice another creature
+        // or an artifact" (Mold Folk, Elite Headhunter), "... or an enchantment"
+        // (Slaughter-Priest of Mogis), "... or a Treasure" (Skullport Merchant).
+        // The shared grammar leaves that tail as remainder because the same
+        // surface is an elided-verb clause elsewhere; a cost has no verb to elide,
+        // so it opts into the union reading.
+        //
+        // ORDER IS LOAD-BEARING: `another` is applied to the LEFT conjunct and the
+        // union is folded AFTER. In this surface "another" scopes only the left
+        // conjunct — the right one carries its own determiner ("an"), so an
+        // artifact-ified source may still pay with itself (Elite Headhunter and
+        // Gut, True Soul Zealot both carry an official ruling saying exactly
+        // that). Folding first and distributing after would stamp `Another` onto
+        // the artifact leg and forbid it. The article-LESS surface is unaffected:
+        // there `parse_target` has already built the `Or` itself and
+        // `distribute_shared_properties` correctly reaches both legs, because that
+        // phrase has no second determiner.
+        let filter = {
+            let phrase = format!("target {}", filter_text);
+            let (base, rest) = parse_target(&phrase);
+            let base = ensure_another_sacrifice_filter(base, &filter_text);
+            let (folded, _) = fold_article_led_type_union(base, rest);
+            folded
+        };
+        return AbilityCost::Sacrifice(SacrificeCost::count(filter, use_count));
     }
 
     // "Pay N life" / "Pay life equal to <dynamic quantity>" / "N life"
@@ -953,7 +977,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
         // CR 107.3a + CR 118.8: "Exile X card(s) from your graveyard" — variable
         // count announced during casting (Harvest Pyre). Ordered before the typed
-        // `parse_type_phrase` arm, which cannot represent a bare zone with no filter.
+        // `parse_type_phrase_folding` arm, which cannot represent a bare zone with no filter.
         if let Some(((), rest_after_x)) =
             nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
         {
@@ -1004,7 +1028,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             .map(|(_, remaining)| remaining)
             .unwrap_or(rest);
         let filter_text = strip_count_article_prefix(filter_start);
-        let (filter, remainder) = parse_type_phrase(filter_text);
+        let (filter, remainder) = parse_type_phrase_folding(filter_text);
         if remainder.trim().is_empty() {
             let zone = extract_filter_zone(&filter);
             return AbilityCost::Exile {
@@ -1100,7 +1124,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             // The numeric branch does NOT consume "other" ("tap two other
             // untapped artifacts you control"): the `untapped ` tag fails on
             // the "other " lead, so the phrase reaches `parse_target` intact
-            // and `parse_type_phrase` supplies `FilterProp::Another` itself.
+            // and `parse_type_phrase_folding` supplies `FilterProp::Another` itself.
             // Nothing to re-apply here.
             (n, r, CountWord::Plain)
         } else {
@@ -1187,7 +1211,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         let (i, _) = tag("unattach ").parse(i)?;
         value((), alt((tag("an "), tag("a ")))).parse(i)
     }) {
-        let (filter, remainder) = parse_type_phrase(after_article);
+        let (filter, remainder) = parse_type_phrase_folding(after_article);
         let rem_lower = remainder.to_lowercase();
         if let Some(((), tail)) = nom_on_lower(remainder, &rem_lower, |i| {
             value((), preceded(tag(" from "), parse_cost_self_reference)).parse(i)
@@ -1202,7 +1226,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "reveal your hand" — reveal the controller's entire hand.
     // CR 701.20a: Reveal means show to all players. Used as alternative cost
     // (Land Grant class). Modeled as EffectCost wrapping Effect::RevealHand.
-    // Verified: CR 701.20 (docs/MagicCompRules.txt:3430).
+    // Verified: CR 701.20.
     if nom_on_lower(text, &lower, |i| {
         value((), tag("reveal your hand")).parse(i)
     })
@@ -1484,7 +1508,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     })?;
 
     // Try parse_for_each_clause first (handles counters, player counts, hand size, etc.),
-    // then fall back to parse_type_phrase for standard object count patterns.
+    // then fall back to parse_type_phrase_folding for standard object count patterns.
     if let Ok((_, qty)) = nom_quantity::parse_for_each_clause_ref_complete(after_less) {
         return Some(CostReduction {
             mode,
@@ -1495,7 +1519,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
     }
 
     // Parse the condition as a type phrase
-    let (filter, remainder) = parse_type_phrase(after_less);
+    let (filter, remainder) = parse_type_phrase_folding(after_less);
     if !remainder.trim().is_empty() {
         return None;
     }
@@ -1814,7 +1838,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter = if rem.trim().is_empty() {
         filter
     } else {
-        let (filter, _) = parse_type_phrase(filter_text);
+        let (filter, _) = parse_type_phrase_folding(filter_text);
         filter
     };
     let filter = match filter {
@@ -1987,6 +2011,187 @@ mod tests {
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
+    /// CR 205.2a + CR 601.2h: a sacrifice cost whose filter is a TYPE UNION with
+    /// an article-led right conjunct keeps BOTH legs — "Sacrifice another
+    /// creature or an artifact" (Mold Folk, Sivriss, Elite Headhunter, Street
+    /// Urchin) and "... or an enchantment" (Skophos Warleader, Slaughter-Priest
+    /// of Mogis).
+    ///
+    /// Revert-failing: before the cost parser opted into
+    /// `fold_article_led_type_union` this collapsed to
+    /// `Typed{[Creature], Another}` and the engine refused to let the controller
+    /// sacrifice an artifact or enchantment to pay a cost the card allows.
+    ///
+    /// The article-less surface is the reach-guard: the shared grammar already
+    /// unions it, so both must produce the same legs and the same distributed
+    /// `Another`.
+    #[test]
+    fn sacrifice_cost_unions_an_article_led_right_conjunct() {
+        for (article_led, article_less, right) in [
+            (
+                "Sacrifice another creature or an artifact",
+                "Sacrifice another creature or artifact",
+                TypeFilter::Artifact,
+            ),
+            (
+                "Sacrifice another creature or an enchantment",
+                "Sacrifice another creature or enchantment",
+                TypeFilter::Enchantment,
+            ),
+        ] {
+            let cost = parse_oracle_cost(article_led);
+            let AbilityCost::Sacrifice(SacrificeCost {
+                target,
+                requirement,
+                ..
+            }) = &cost
+            else {
+                panic!("expected a Sacrifice cost for {article_led:?}, got {cost:?}");
+            };
+            assert_eq!(
+                *requirement,
+                SacrificeRequirement::Count { count: 1 },
+                "one permanent is sacrificed"
+            );
+            let TargetFilter::Or { filters } = target else {
+                panic!("{article_led:?} must union both legs, got {target:?}");
+            };
+            assert_eq!(filters.len(), 2, "{filters:?}");
+            let legs: Vec<&TypedFilter> = filters
+                .iter()
+                .map(|f| match f {
+                    TargetFilter::Typed(tf) => tf,
+                    other => panic!("each leg must be Typed, got {other:?}"),
+                })
+                .collect();
+            assert!(legs[0].type_filters.contains(&TypeFilter::Creature));
+            assert!(legs[1].type_filters.contains(&right));
+            // "another" scopes only the LEFT conjunct here: the right one carries
+            // its own determiner ("an artifact"), so it is not "another artifact".
+            // Official rulings — Elite Headhunter (2019-10-04): "If Elite Headhunter
+            // somehow becomes an artifact, you can sacrifice it to pay the cost of
+            // its activated ability"; Gut, True Soul Zealot (2022-06-10): "If Gut
+            // somehow becomes an artifact, you may sacrifice it to its own ability."
+            // Stamping `Another` on the right leg would forbid exactly that.
+            // Deliberately no CR number: the rules text defines no "another" entry,
+            // and this repo treats a wrong citation as worse than none.
+            assert!(
+                legs[0].properties.contains(&FilterProp::Another),
+                "\"another\" scopes the left conjunct: {:?}",
+                legs[0]
+            );
+            assert!(
+                !legs[1].properties.contains(&FilterProp::Another),
+                "the article-led right conjunct must NOT carry `Another` — an \
+                 artifact-ified source may pay with itself: {:?}",
+                legs[1]
+            );
+
+            // The ARTICLE-LESS twin is a different phrase in this respect: it has no
+            // second determiner, so its "another" does scope both legs and the
+            // shared grammar distributes it. The two surfaces therefore must NOT be
+            // equal — that expectation was the falsified premise.
+            let bare = parse_oracle_cost(article_less);
+            let AbilityCost::Sacrifice(SacrificeCost { target: bare_t, .. }) = &bare else {
+                panic!("expected a Sacrifice cost for {article_less:?}, got {bare:?}");
+            };
+            let TargetFilter::Or { filters: bare_legs } = bare_t else {
+                panic!("the article-less twin must union, got {bare_t:?}");
+            };
+            for leg in bare_legs {
+                let TargetFilter::Typed(tf) = leg else {
+                    panic!("expected Typed leg, got {leg:?}")
+                };
+                assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "the article-less surface DOES distribute `another` to both legs: {tf:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 205.3a: the article-led right conjunct may be a SUBTYPE rather than a
+    /// core type — "Sacrifice another creature or a Blood token" (Anje, Maid of
+    /// Dishonor) and "... or a Treasure" (Skullport Merchant). `starts_with_type_word`
+    /// already covers subtypes, so the same wrapper serves both axes; these two
+    /// cards were not predicted when the fix was scoped and were found by the
+    /// corpus parse-diff, so they are pinned rather than left implicit.
+    ///
+    /// Revert-failing: without the wrapper both collapse to
+    /// `Typed{[Creature], Another}` and the token leg is unpayable.
+    #[test]
+    fn sacrifice_cost_unions_an_article_led_subtype_conjunct() {
+        for (phrase, subtype) in [
+            ("Sacrifice another creature or a Blood token", "Blood"),
+            ("Sacrifice another creature or a Treasure", "Treasure"),
+        ] {
+            let cost = parse_oracle_cost(phrase);
+            let AbilityCost::Sacrifice(SacrificeCost { target, .. }) = &cost else {
+                panic!("expected a Sacrifice cost for {phrase:?}, got {cost:?}");
+            };
+            let TargetFilter::Or { filters } = target else {
+                panic!("{phrase:?} must union both legs, got {target:?}");
+            };
+            assert_eq!(filters.len(), 2, "{filters:?}");
+            let legs: Vec<&TypedFilter> = filters
+                .iter()
+                .map(|f| match f {
+                    TargetFilter::Typed(tf) => tf,
+                    other => panic!("each leg must be Typed, got {other:?}"),
+                })
+                .collect();
+            assert!(legs[0].type_filters.contains(&TypeFilter::Creature));
+            assert!(
+                legs[1]
+                    .type_filters
+                    .contains(&TypeFilter::Subtype(subtype.to_string())),
+                "the right leg must be the {subtype} subtype: {:?}",
+                legs[1].type_filters
+            );
+            assert!(
+                legs[0].properties.contains(&FilterProp::Another),
+                "\"another\" scopes the left conjunct: {:?}",
+                legs[0]
+            );
+            assert!(
+                !legs[1].properties.contains(&FilterProp::Another),
+                "the article-led right conjunct must NOT carry `Another`: {:?}",
+                legs[1]
+            );
+        }
+    }
+
+    /// The opt-in stays opt-in at the cost seam too: a sacrifice cost with a
+    /// single filter is untouched, and an article-led BARE-card disjunct does not
+    /// become a type union.
+    #[test]
+    fn sacrifice_cost_article_led_union_does_not_over_fire() {
+        let plain = parse_oracle_cost("Sacrifice a creature");
+        assert!(
+            matches!(
+                plain,
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::Typed(_),
+                    ..
+                })
+            ),
+            "a single-filter sacrifice cost must not grow an Or, got {plain:?}"
+        );
+
+        // Reach-guard: the union path is live on this harness.
+        let union = parse_oracle_cost("Sacrifice another creature or an artifact");
+        assert!(
+            matches!(
+                union,
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::Or { .. },
+                    ..
+                })
+            ),
+            "reach-guard: the union must still fold, got {union:?}"
+        );
+    }
+
     #[test]
     fn cost_tap() {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
@@ -2075,7 +2280,7 @@ mod tests {
     #[test]
     fn cost_explicit_count_continuation_with_unmodeled_rider_stays_unimplemented() {
         // Terminal explicit-count guard: a "<N>=2 …" continuation whose object
-        // phrase carries an unmodeled rider that `parse_type_phrase` cannot fully
+        // phrase carries an unmodeled rider that `parse_type_phrase_folding` cannot fully
         // consume ("… that were dealt damage this turn") must stay honest
         // `Unimplemented` — it must NOT fall through to the count-1 fallback,
         // which would emit a broad supported cost that drops both the rider and
@@ -2400,7 +2605,7 @@ mod tests {
     ///
     /// The "two other untapped" row was already green before this fix: the
     /// numeric branch never consumes "other", so the phrase reaches
-    /// `parse_type_phrase` intact and it supplies the property. That row pins
+    /// `parse_type_phrase_folding` intact and it supplies the property. That row pins
     /// the path; it is not evidence for the fix.
     #[test]
     fn tap_cost_another_carries_the_source_exclusion() {
@@ -2498,7 +2703,7 @@ mod tests {
         // CR 701.3d + CR 608.2k: Captain America's Throw cost. The recipient
         // "from Captain America, First Avenger" is normalized to "from ~"
         // upstream by `normalize_card_name_refs`.
-        let (expected_filter, remainder) = super::parse_type_phrase("Equipment from ~");
+        let (expected_filter, remainder) = super::parse_type_phrase_folding("Equipment from ~");
         assert_eq!(remainder, " from ~");
         assert_eq!(
             parse_oracle_cost("Unattach an Equipment from ~"),
@@ -3409,7 +3614,7 @@ mod tests {
             } => {
                 assert_eq!(count, 1);
                 assert_eq!(filter.get_subtype(), Some("Forest"));
-                // "you control" must be captured — parse_type_phrase delegates to
+                // "you control" must be captured — parse_type_phrase_folding delegates to
                 // parse_controller_suffix which handles this suffix.
                 assert_eq!(filter.controller, Some(ControllerRef::You));
             }

@@ -14,6 +14,7 @@ describe("activeNavKey", () => {
     expect(activeNavKey("/multiplayer")).toBe("online");
     expect(activeNavKey("/draft")).toBe("draft");
     expect(activeNavKey("/my-decks")).toBe("decks");
+    expect(activeNavKey("/tournament")).toBe("tournament");
   });
 
   it("keeps sub-routes under their section", () => {
@@ -23,19 +24,22 @@ describe("activeNavKey", () => {
     // The deck builder is a child of Decks.
     expect(activeNavKey("/deck-builder")).toBe("decks");
     expect(activeNavKey("/deck-builder?returnTo=%2Fmy-decks")).toBe("decks");
+    // A tournament's detail route stays under Tournaments.
+    expect(activeNavKey("/tournament/ABC123")).toBe("tournament");
   });
 
   it("returns null for routes with no primary nav item (e.g. coverage)", () => {
     expect(activeNavKey("/coverage")).toBeNull();
   });
 
-  it("exposes exactly the five primary destinations", () => {
+  it("exposes exactly the six primary destinations", () => {
     expect(NAV_ITEMS.map((n) => n.key)).toEqual([
       "home",
       "play",
       "online",
       "draft",
       "decks",
+      "tournament",
     ]);
   });
 });

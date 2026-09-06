@@ -81,11 +81,68 @@ use super::super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, split_keyword_list};
 use super::super::oracle_util::canonicalize_subtype_name;
+use super::animation::{core_type_from_animation_word, split_in_addition_tail};
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::{
     ContinuousModification, ObjectScope, QuantityExpr, QuantityRef, RoundingMode,
 };
 use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
+
+/// CR 707.9a: Split a mixed-case `"<head>[,] except <body>"` clause into its
+/// head and the typed modifications the except body declares.
+///
+/// [`parse_except_clause`] is the single authority for the body grammar but
+/// requires a lowercased input already positioned at the `except` tag. Callers
+/// that hold a mixed-case clause and also need the *head* back — the copy-spell
+/// imperative (`"copy it, except the copy isn't legendary"`) — go through this
+/// boundary helper instead of re-deriving the split. `oracle_effect/token.rs`
+/// keeps its own boundary because it additionally peels a literal `named <X>`
+/// rename off the body before delegating here.
+///
+/// `lower` must be the pre-lowercased `text` (same byte length), matching the
+/// `(text, lower)` threading convention the effect parsers already use — this
+/// is why the boundary maps through
+/// [`split_once_on_lower`](super::super::oracle_nom::bridge::split_once_on_lower),
+/// the shared authority for "split mixed-case text at a lowercase separator",
+/// rather than re-deriving byte offsets here.
+///
+/// Returns `None` when the clause carries no except tail, **or when the tail's
+/// body grammar read nothing** — see the non-empty guard below. Callers leave
+/// their original text untouched in both cases.
+pub(crate) fn split_except_clause<'a>(
+    text: &'a str,
+    lower: &str,
+    card_name: &str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, Vec<ContinuousModification>)> {
+    // Probe the comma'd separator first: both forms end in "except ", so the
+    // bare form would otherwise match one byte later inside the comma'd one and
+    // leave a stray "," on the head. Same ordering as the sibling boundary in
+    // `token.rs::parse_token_except_boundary`.
+    let (head, _) = [", except ", " except "]
+        .into_iter()
+        .find_map(|sep| split_once_on_lower(text, lower, sep))?;
+    // `parse_except_clause` owns the body grammar and expects its input to still
+    // carry the leading separator, so hand it the lowercase tail measured from
+    // the boundary rather than the post-separator remainder.
+    let (_, modifications) = parse_except_clause(lower.get(head.len()..)?, card_name, ctx)?;
+    // CR 707.9a: `parse_except_clause` is fail-soft by contract — it skips a body
+    // it cannot read and still returns `Some`, so an unreadable body yields an
+    // EMPTY vec rather than `None`. Splitting on that would hand the caller a
+    // shortened head and silently discard the tail, converting an honest parser
+    // gap into an invisible one (no `Effect::unimplemented` marker is emitted on
+    // this path). Decline instead, so the caller keeps its original text and the
+    // gap stays exactly as visible as it was before this seam existed.
+    //
+    // Fork ("Copy target instant or sorcery spell, except that the copy is red")
+    // is the live case: `that the copy is red` matches no body arm, so consuming
+    // the tail would change the text `parse_target` sees and silently alter
+    // Fork's legal-target filter as a ride-along.
+    if modifications.is_empty() {
+        return None;
+    }
+    Some((head, modifications))
+}
 
 /// CR 707.9a: "[,] except {except_body} [and {except_body}]*[.]"
 ///
@@ -535,16 +592,13 @@ enum AdditiveSuffix {
 /// SetPT at layer 7b, color at layer 5 (CR 613.1e), type additions and
 /// subtype removal at layer 4 (CR 613.1d).
 fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("he's a "),
-        tag("he\u{2019}s a "),
-        tag("she's a "),
-        tag("she\u{2019}s a "),
-        tag("it's a "),
-        tag("it\u{2019}s a "),
-    ))
-    .parse(input)
-    .ok()?;
+    // CR 707.9b: "<copy subject> is a N/M …". The subject and copula come from
+    // the shared axes so this arm covers the contracted pronoun forms ("it's a
+    // 4/4 black Zombie") and the spelled-out nominal subject (Donal, Herald of
+    // Wings: "the copy is a 1/1 Spirit in addition to its other types") without
+    // enumerating their product.
+    let (rest, ()) = parse_copy_subject_and_copula(input).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("a ").parse(rest).ok()?;
 
     // Parse "N/M " — both components are positive integers.
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
@@ -605,10 +659,35 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     Some((rest, mods))
 }
 
-/// CR 707.9b + CR 707.9d: Plural token-copy exception — "they're N/M {types}
-/// creature[s] in addition to their other types" (Astral Dragon / Project Image).
-/// Mirrors [`parse_subject_pt_and_types`] but uses the plural anaphor and
-/// terminates on "creature(s)" rather than a bare type list.
+/// CR 707.9b + CR 205.1b: Plural token-copy exception — "they're N/M {types}
+/// creature[s] in addition to their other types" (Astral Dragon, Project Image,
+/// Rebuild the City). Mirrors [`parse_subject_pt_and_types`], which is the
+/// singular sibling and the model for all three corrections below.
+///
+/// Three things this must get right, none of which it previously did:
+///
+/// * **The type text keeps its "creature(s)" head.** It used to be consumed as
+///   a delimiter and discarded, so `AddType{Creature}` was emitted only as a
+///   side effect of the `replace_types && has_exact_creature_subtype` re-add in
+///   [`append_color_and_type_modifications`]. That branch cannot fire for a
+///   token with no creature subtype (Rebuild the City), leaving those tokens
+///   non-creatures entirely.
+/// * **The CR 205.1b carve-out is matched by the shared authority.** The old
+///   phrase lists each began with a space that the `"creatures "` split had
+///   already consumed, so every carve-out branch was unreachable and
+///   `replace_color` / `replace_types` were permanently `true`. That emitted
+///   `RemoveAllSubtypes{Creature}` for a card whose text says "in addition to
+///   their other types" — a CR 205.1b retention violation (Astral Dragon).
+///   `split_in_addition_tail` (`animation.rs`, `pub(crate)` for sharing per its
+///   own doc comment) is the single authority for that marker and brings all
+///   four possessive pronouns and the CR 105.3 "colors and " axis with it.
+///   A "colors"-only carve-out has no plural spelling in that marker class; it
+///   was equally unreachable before, so nothing regresses by omitting it.
+/// * **The remainder is the text AFTER the clause.** The old code kept the
+///   `before` half of [`split_at_body_boundary`] (the singular sibling
+///   correctly takes `after`), orphaning the trailing conjunct instead of
+///   returning it to [`parse_except_clause`]'s loop — which is how "and they
+///   have vigilance and menace" was lost.
 fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("they're "), tag("they are ")))
         .parse(input)
@@ -617,20 +696,27 @@ fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModific
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    let (type_text, rest) = split_on_first_of(rest, &["creatures ", "creature "])?;
-    let (rest, suffix) = if let Some((_, rest)) =
-        split_on_first_of(rest, &[" in addition to their other colors and types"])
-    {
-        (rest, AdditiveSuffix::ColorsAndTypes)
-    } else if let Some((_, rest)) = split_on_first_of(rest, &[" in addition to their other colors"])
-    {
-        (rest, AdditiveSuffix::Colors)
-    } else if let Some((_, rest)) = split_on_first_of(rest, &[" in addition to their other types"])
-    {
-        (rest, AdditiveSuffix::Types)
-    } else {
-        let (rest, _) = split_at_body_boundary(rest);
-        (rest, AdditiveSuffix::None)
+    let (type_text, rest, suffix) = match split_in_addition_tail(rest) {
+        Some((type_text, marker)) => {
+            // `marker` is the matched marker slice; the clause continues
+            // immediately after it. Recover that position the same way
+            // `split_in_addition_tail` computes it — prefix length, then skip
+            // the separating whitespace — so the remainder is exact.
+            let after_prefix = rest[type_text.len()..].trim_start();
+            let after_marker = &after_prefix[marker.len()..];
+            // CR 105.3: the marker itself carries the color axis when it reads
+            // "in addition to their other colors and types".
+            let suffix = if nom_primitives::scan_contains(marker, "colors and ") {
+                AdditiveSuffix::ColorsAndTypes
+            } else {
+                AdditiveSuffix::Types
+            };
+            (type_text, after_marker, suffix)
+        }
+        None => {
+            let (type_text, rest) = split_at_body_boundary(rest);
+            (type_text, rest, AdditiveSuffix::None)
+        }
     };
 
     let (replace_color, replace_types) = match suffix {
@@ -678,6 +764,15 @@ fn append_color_and_type_modifications(
         }
         if let Some((_, supertype)) = parse_supertype_word(word) {
             type_mods.push(ContinuousModification::AddSupertype { supertype });
+            continue;
+        }
+        // CR 205.2a: recognize the core type through the crate's plural-tolerant
+        // recognizer FIRST. `CoreType::from_str` matches the singular literals
+        // only, so a plural head word ("they're 3/3 creatures in addition to
+        // their other types") would fall through and be emitted as a fabricated
+        // `AddSubtype{"Creatures"}` — the tokens would never become creatures.
+        if let Some(core_type) = core_type_from_animation_word(word) {
+            type_mods.push(ContinuousModification::AddType { core_type });
             continue;
         }
         let canonical = canonicalize_subtype_name(word);
@@ -818,28 +913,25 @@ fn split_in_addition_type_suffix(input: &str) -> Option<(&str, &str)> {
 /// The type_word is either a core type (`"artifact"`, `"creature"`, ...) → `AddType`,
 /// or anything else → treated as a subtype and canonicalized → `AddSubtype`.
 fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("it's an "),
-        tag("it's a "),
-        tag("it\u{2019}s an "),
-        tag("it\u{2019}s a "),
-        // CR 707.9b + CR 205.1b: elided-subject form. In a comma-anded copy-except
-        // list ("it isn't legendary, is an artifact in addition to its other
-        // types, and has myriad") the subject pronoun "it" is dropped and "'s"
-        // decontracts to "is" for non-leading bodies. Auton Soldier (core type
-        // Artifact, BecomeCopy path) and The Apprentice's Folly (subtype Reflection,
-        // CopyTokenOf path) are the canonical cases. Reached only after
-        // `parse_its_a_type_loses_others` (parse_except_body) declines, so the
-        // "and loses all other card types" replacement form is never mis-routed
-        // here for the leading-subject "it's" contraction.
-        // NOTE: the loses-others arm matches only the "it's"-contraction; a future
-        // card using the elided form WITH "and loses all other card types" would
-        // incorrectly land here as an AddType — no such card exists today.
-        tag("is an "),
-        tag("is a "),
-    ))
-    .parse(input)
-    .ok()?;
+    // CR 707.9b + CR 205.1b: "<copy subject> is a(n) <type> in addition to its
+    // other types". The subject/copula axes are shared, so this covers the
+    // leading contracted pronoun ("it's an artifact"), the spelled-out nominal
+    // subject (Tawnos, the Toymaker: "the copy is an artifact in addition to
+    // its other types"), and the elided-subject form used by non-leading bodies
+    // in a comma-anded list ("it isn't legendary, is an artifact in addition to
+    // its other types, and has myriad" — Auton Soldier on the BecomeCopy path,
+    // The Apprentice's Folly on the CopyTokenOf path).
+    //
+    // Reached only after `parse_its_a_type_loses_others` (parse_except_body)
+    // declines, so the "and loses all other card types" replacement form is
+    // never mis-routed here for the leading-subject "it's" contraction.
+    // NOTE: the loses-others arm matches only the "it's"-contraction; a future
+    // card using the elided form WITH "and loses all other card types" would
+    // incorrectly land here as an AddType — no such card exists today.
+    let (rest, ()) = parse_copy_subject_and_copula(input).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))
+        .parse(rest)
+        .ok()?;
     let (type_word, rest) = split_in_addition_type_suffix(rest)?;
     let type_word = type_word.trim();
     if type_word.is_empty() {
@@ -1050,7 +1142,22 @@ pub(super) fn parse_becomes_type_loses_all(
 /// copy-a-vanishing-creature case we only over-grant a redundant, benign
 /// instance rather than producing wrong behavior.
 fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("it has ").parse(input).ok()?;
+    // CR 707.9a: accept the same subject alternation the two quoted-ability arms
+    // beside this one already use (`parse_it_has_quoted_ability`,
+    // `parse_it_has_keywords_then_quoted_ability`). Without the plural "they
+    // have " form a BARE keyword conjunct returned by
+    // `parse_theyre_pt_and_types` has no consumer: `parse_except_clause`'s loop
+    // falls through to `skip_to_next_conjunction` and the keywords are dropped
+    // (Rebuild the City's "and they have vigilance and menace"). Matching the
+    // neighbours exactly also keeps the gendered forms from drifting apart.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it has "),
+        tag("he has "),
+        tag("she has "),
+        tag("they have "),
+    ))
+    .parse(input)
+    .ok()?;
     // Keyword list terminates at " and it " (next body), the period, or end.
     let (kw_text, remainder) = split_at_body_boundary(rest);
     let mut modifications = Vec::new();
@@ -1155,67 +1262,155 @@ fn split_single_quoted_ability(input: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// CR 205.4 + CR 707.9b: Match `"the token isn't <supertype>"` /
-/// `"it isn't <supertype>"` (and apostrophe-free, "is not", and contracted
-/// `"it's not"` variants).
+/// CR 707.9a: Grammatical number of a copy-exception body's subject. Selects
+/// which copula spelling agrees with it, so the subject axis and the copula
+/// axis compose instead of being enumerated as a subject×copula product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopySubjectNumber {
+    Singular,
+    Plural,
+}
+
+/// CR 707.9a: The subject slot of a copy-exception body — the anaphor naming
+/// the copy the exception modifies.
+///
+/// Two closed classes appear across the printed corpus, and both are matched
+/// here so every body shape gets the full set from one place:
+/// * **Definite noun phrases** — `the token(s)` (Miirym, The Notary Hobbits),
+///   `the copy`/`the copies` (Iron Man Bleeding Edge, Donal Herald of Wings,
+///   Jackal Genius Geneticist, Storm of Saruman, The Clone Saga, The Sixth
+///   Doctor, Tawnos the Toymaker, The Water Maro).
+/// * **Pronouns** — `it` / `he` / `she` / `they`, so cards from any gender
+///   print route through the same arm.
+///
+/// Plural spellings are tried before their singular prefixes (`the tokens`
+/// before `the token`, `they` before nothing that shadows it) because `alt`
+/// commits to the first match and would otherwise leave a stray `s` that the
+/// copula parse cannot consume.
+fn parse_copy_subject(input: &str) -> OracleResult<'_, CopySubjectNumber> {
+    alt((
+        value(
+            CopySubjectNumber::Plural,
+            tag::<_, _, OracleError<'_>>("the tokens"),
+        ),
+        value(CopySubjectNumber::Plural, tag("the copies")),
+        value(CopySubjectNumber::Plural, tag("they")),
+        value(CopySubjectNumber::Singular, tag("the token")),
+        value(CopySubjectNumber::Singular, tag("the copy")),
+        value(CopySubjectNumber::Singular, tag("it")),
+        value(CopySubjectNumber::Singular, tag("he")),
+        value(CopySubjectNumber::Singular, tag("she")),
+    ))
+    .parse(input)
+}
+
+/// CR 707.9a: The negated copula following a copy-exception subject, in the
+/// spelling that agrees with `number`.
+///
+/// Covers the full orthographic spread the corpus prints: the contracted form
+/// (`isn't` / `aren't`), its apostrophe-free variant, the expanded form
+/// (`is not` / `are not`), and the subject-contracted form (`'s not` /
+/// `'re not`) with both ASCII and curly apostrophes. Splitting this from
+/// [`parse_copy_subject`] turns what was a 23-arm hand-written product into
+/// two composable axes.
+fn parse_negated_copula(input: &str, number: CopySubjectNumber) -> OracleResult<'_, ()> {
+    match number {
+        CopySubjectNumber::Singular => value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>(" isn't "),
+                tag(" isnt "),
+                tag(" is not "),
+                tag("'s not "),
+                tag("\u{2019}s not "),
+            )),
+        )
+        .parse(input),
+        CopySubjectNumber::Plural => value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>(" aren't "),
+                tag(" arent "),
+                tag(" are not "),
+                tag("'re not "),
+                tag("\u{2019}re not "),
+            )),
+        )
+        .parse(input),
+    }
+}
+
+/// CR 707.9a: The affirmative copula joining a copy-exception subject to a
+/// predicate, in the spelling that agrees with `number`.
+///
+/// The subject is *optional* in this position: inside a comma-anded body list
+/// the subject is elided and `'s` decontracts to a bare `is` ("it isn't
+/// legendary, is an artifact in addition to its other types"). The three
+/// spellings therefore differ only by what precedes them:
+/// * `" is "` — after a spelled-out subject ("the copy is an artifact").
+/// * `"'s "` / `"\u{2019}s "` — after a contracted pronoun ("it's a 4/4").
+/// * `"is "` — subject elided, at body start.
+fn parse_affirmative_copula(input: &str, number: CopySubjectNumber) -> OracleResult<'_, ()> {
+    match number {
+        CopySubjectNumber::Singular => value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>(" is "),
+                tag("'s "),
+                tag("\u{2019}s "),
+                tag("is "),
+            )),
+        )
+        .parse(input),
+        CopySubjectNumber::Plural => value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>(" are "),
+                tag("'re "),
+                tag("\u{2019}re "),
+                tag("are "),
+            )),
+        )
+        .parse(input),
+    }
+}
+
+/// CR 707.9a: Consume `"<optional copy subject> <affirmative copula> "`, the
+/// shared opening of every predicative copy-exception body ("it's a 4/4
+/// black Zombie", "the copy is an artifact in addition to its other types",
+/// "is a Reflection in addition to its other types").
+///
+/// Elision is expressed as `opt(parse_copy_subject)` rather than a separate
+/// bare-`is` arm, so the subject axis and the copula axis stay orthogonal.
+/// When the subject is absent the number defaults to singular, which is the
+/// only number the elided form prints.
+fn parse_copy_subject_and_copula(input: &str) -> OracleResult<'_, ()> {
+    let (rest, number) = opt(parse_copy_subject).parse(input)?;
+    parse_affirmative_copula(rest, number.unwrap_or(CopySubjectNumber::Singular))
+}
+
+/// CR 205.4 + CR 707.9b: Match `"<copy subject> isn't <supertype>"` (and every
+/// number/orthography variant [`parse_copy_subject`] and
+/// [`parse_negated_copula`] admit between them).
 /// Emits [`ContinuousModification::RemoveSupertype`].
 ///
 /// Miirym, Sentinel Wyrm: `"create a token that's a copy of it, except the
 /// token isn't legendary"` is the canonical case. The arm is permissive about
-/// subject phrasing because both forms appear across token-copy and
-/// replacement-copy texts (Spark Double's `"and it isn't legendary"` is the
-/// replacement-form variant). The contracted negated-copula form `"it's not
-/// legendary"` (Delina, Wild Mage; Ember Island Production; Ratadrabik of
-/// Urborg; etc.) is also accepted with both ASCII and curly apostrophes.
+/// subject phrasing because the forms are spread across token-copy,
+/// spell-copy, and replacement-copy texts: Spark Double prints `"and it isn't
+/// legendary"`, Iron Man, Bleeding Edge prints `"except the copy isn't
+/// legendary"`, and Delina, Wild Mage prints the contracted `"it's not
+/// legendary"`.
 ///
-/// Plural-token axis: The Notary Hobbits creates TWO copy tokens in one
-/// effect ("create two tokens that are copies of them, except the tokens
-/// aren't legendary"), so the exception's subject is the plural "the
-/// tokens" rather than singular "the token"/"it". Both apply
-/// `RemoveSupertype` per-token via the same `additional_modifications`
+/// Plural axis: The Notary Hobbits creates TWO copy tokens in one effect
+/// ("create two tokens that are copies of them, except the tokens aren't
+/// legendary"), so the exception's subject is plural. Both apply
+/// `RemoveSupertype` per-copy through the same `additional_modifications`
 /// channel (CR 707.9b) — the count axis is orthogonal to the subject-phrasing
 /// axis, so no separate modification variant is needed.
 fn parse_isnt_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
-    // Nested by subject pronoun (mirrors the pronoun-axis convention used
-    // elsewhere in this module): nom's `alt` only implements `Parser` up to
-    // 21 tuple arms, so the singular/plural "the token(s)" group, which grew
-    // an extra 3 arms for The Notary Hobbits' plural "the tokens aren't",
-    // is nested as its own `alt` rather than flattened into one 22-arm tuple.
-    let (rest, _) = alt((
-        alt((
-            tag::<_, _, OracleError<'_>>("the token isn't "),
-            tag("the token isnt "),
-            tag("the token is not "),
-            tag("the token's not "),
-            tag("the token\u{2019}s not "),
-            tag("the tokens aren't "),
-            tag("the tokens arent "),
-            tag("the tokens are not "),
-        )),
-        alt((
-            tag("it isn't "),
-            tag("it isnt "),
-            tag("it is not "),
-            tag("it's not "),
-            tag("it\u{2019}s not "),
-        )),
-        alt((
-            tag("he isn't "),
-            tag("he isnt "),
-            tag("he is not "),
-            tag("he's not "),
-            tag("he\u{2019}s not "),
-        )),
-        alt((
-            tag("she isn't "),
-            tag("she isnt "),
-            tag("she is not "),
-            tag("she's not "),
-            tag("she\u{2019}s not "),
-        )),
-    ))
-    .parse(input)
-    .ok()?;
+    let (rest, number) = parse_copy_subject(input).ok()?;
+    let (rest, ()) = parse_negated_copula(rest, number).ok()?;
     parse_supertype_word(rest)
         .map(|(rest, supertype)| (rest, ContinuousModification::RemoveSupertype { supertype }))
 }
@@ -2785,6 +2980,315 @@ mod tests {
                 }
             )),
             "missing AddType(Creature); got {mods:?}"
+        );
+    }
+
+    /// V11 (issue #8395; CR 707.9b + CR 205.1b): Rebuild the City — "Create three
+    /// tokens that are copies of it, except they're 3/3 creatures in addition to
+    /// their other types and they have vigilance and menace."
+    ///
+    /// Three defects had to be corrected together before this card works: the
+    /// `"creatures"` head word was consumed as a delimiter and discarded (so no
+    /// `AddType`), the carve-out markers were unreachable behind a leading space
+    /// the delimiter split had already eaten, and `split_at_body_boundary`'s
+    /// BEFORE half was kept — orphaning the trailing conjunct instead of
+    /// returning it to `parse_except_clause`'s loop.
+    #[test]
+    fn rebuild_the_city_tokens_are_creatures_with_both_keywords() {
+        let (_, mods) = parse_except_clause(
+            ", except they're 3/3 creatures in addition to their other types and they have vigilance and menace",
+            "Rebuild the City",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.contains(&ContinuousModification::SetPower { value: 3 })
+                && mods.contains(&ContinuousModification::SetToughness { value: 3 }),
+            "CR 707.9b: the copy exception sets base 3/3; got {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }),
+            "the \"creatures\" head word must yield AddType(Creature) — it used to be consumed \
+             as a delimiter and thrown away, leaving the tokens non-creatures; got {mods:?}"
+        );
+        for keyword in [Keyword::Vigilance, Keyword::Menace] {
+            assert!(
+                mods.contains(&ContinuousModification::AddKeyword {
+                    keyword: keyword.clone(),
+                }),
+                "the trailing conjunct's {keyword:?} must survive; got {mods:?}"
+            );
+        }
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "CR 205.1b: \"in addition to their other types\" retains the copied types; \
+             got {mods:?}"
+        );
+    }
+
+    /// V11 companion — defect 4 in ISOLATION. The bare plural keyword conjunct
+    /// must be consumed on its own.
+    ///
+    /// Before the plural alternation was added to `parse_it_has_keywords`,
+    /// `parse_except_clause`'s loop fell through to `skip_to_next_conjunction`
+    /// and both keywords were lost, which would have made the orphaned-remainder
+    /// fix inert for the very card it exists to repair. Asserting it separately
+    /// is what proves the test above cannot pass on its P/T half alone.
+    #[test]
+    fn plural_they_have_keyword_conjunct_is_consumed() {
+        let (_, mods) = parse_except_clause(
+            ", except they have vigilance and menace",
+            "Rebuild the City",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        for keyword in [Keyword::Vigilance, Keyword::Menace] {
+            assert!(
+                mods.contains(&ContinuousModification::AddKeyword {
+                    keyword: keyword.clone(),
+                }),
+                "the plural \"they have\" arm must grant {keyword:?}; got {mods:?}"
+            );
+        }
+    }
+
+    /// V12 (CR 205.1b is the retention authority; CR 707.9d's CDA carve-out is
+    /// why the clause is written at all): Astral Dragon — "…create two tokens
+    /// that are copies of target noncreature permanent, except they're 3/3
+    /// Dragon creatures in addition to their other types, and they have flying."
+    ///
+    /// The card says "in addition to their other types", so the copied types are
+    /// RETAINED. The plural arm nonetheless emitted `RemoveAllSubtypes{Creature}`
+    /// because its carve-out markers were unreachable, leaving `replace_types`
+    /// permanently true.
+    ///
+    /// REACH-GUARD: this is the canonical bare-negative hazard — an absence
+    /// assertion alone would pass if the arm simply declined and emitted
+    /// nothing. The paired positives are what make it a test.
+    #[test]
+    fn astral_dragon_retains_copied_types_without_subtype_wipe() {
+        let (_, mods) = parse_except_clause(
+            ", except they're 3/3 dragon creatures in addition to their other types, and they have flying",
+            "Astral Dragon",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Dragon".to_string(),
+            }),
+            "reach-guard: the Dragon subtype must still be added; got {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }),
+            "reach-guard: the tokens must still become creatures; got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "CR 205.1b: an \"in addition to their other types\" carve-out must NOT wipe the \
+             copied creature types; got {mods:?}"
+        );
+    }
+
+    /// Issue #7724 (CR 205.4 + CR 707.9b): "the copy isn't legendary" — the
+    /// nominal copy subject, as distinct from the "the token" / "it" spellings
+    /// that were already recognised.
+    ///
+    /// Six printed cards phrase the exception this way (Iron Man, Bleeding
+    /// Edge; Jackal, Genius Geneticist; Storm of Saruman; The Clone Saga; The
+    /// Sixth Doctor; The Water Maro). Because the subject word was missing from
+    /// the subject axis, every one of them silently dropped the exception and
+    /// the copy stayed legendary — tripping the legend rule (CR 704.5j) against
+    /// the original.
+    #[test]
+    fn the_copy_isnt_legendary_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except the copy isn't legendary",
+            "Iron Man, Bleeding Edge",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }],
+            "CR 707.9b: \"the copy\" is a copy-exception subject like \"the token\"/\"it\""
+        );
+    }
+
+    /// CR 205.4 + CR 707.9b: the plural nominal subject. `parse_copy_subject`
+    /// must prefer "the copies" over the "the copy" prefix, and the plural
+    /// copula must agree — otherwise the singular arm consumes "the copy" and
+    /// the stray "ies aren't …" fails the copula parse.
+    #[test]
+    fn the_copies_arent_legendary_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except the copies aren't legendary",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// Issue #7724 (CR 707.9b + CR 205.1b): Tawnos, the Toymaker — "except the
+    /// copy is an artifact in addition to its other types". Exercises the
+    /// nominal subject against the AFFIRMATIVE copula, which is a different
+    /// composition path than the negated-copula test above.
+    #[test]
+    fn the_copy_is_a_type_in_addition_emits_add_type() {
+        let (_, mods) = parse_except_clause(
+            ", except the copy is an artifact in addition to its other types",
+            "Tawnos, the Toymaker",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            }]
+        );
+    }
+
+    /// Issue #7724 (CR 707.9b): Donal, Herald of Wings — "except the copy is a
+    /// 1/1 Spirit in addition to its other types". The nominal subject must
+    /// reach the P/T-and-types body shape too, not just the bare type shape.
+    #[test]
+    fn the_copy_is_pt_and_types_sets_pt_and_adds_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except the copy is a 1/1 spirit in addition to its other types",
+            "Donal, Herald of Wings",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.contains(&ContinuousModification::SetPower { value: 1 })
+                && mods.contains(&ContinuousModification::SetToughness { value: 1 }),
+            "CR 707.9b: the exception sets the copy's base P/T to 1/1; got {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Spirit".to_string(),
+            }),
+            "the Spirit subtype must be added; got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "CR 205.1b: \"in addition to its other types\" retains the copied creature types; \
+             got {mods:?}"
+        );
+    }
+
+    /// CR 707.9a: `split_except_clause` is the mixed-case boundary helper the
+    /// copy-spell imperative uses. It must return the head verbatim (original
+    /// casing preserved) alongside the parsed modifications.
+    #[test]
+    fn split_except_clause_returns_head_and_modifications() {
+        let text = "it, except the copy isn't legendary";
+        let (head, mods) = split_except_clause(
+            text,
+            &text.to_lowercase(),
+            "Iron Man, Bleeding Edge",
+            &ParseContext::default(),
+        )
+        .expect("clause carries an except tail");
+        assert_eq!(head, "it");
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 707.9a: the comma'd separator must win over the bare one — both end
+    /// in "except ", so probing " except " first would split one byte later and
+    /// leave a stray "," on the head.
+    #[test]
+    fn split_except_clause_head_excludes_the_separator_comma() {
+        let text = "that spell, except the copy isn't legendary";
+        let (head, _) =
+            split_except_clause(text, &text.to_lowercase(), "Card", &ParseContext::default())
+                .expect("clause carries an except tail");
+        assert_eq!(
+            head, "that spell",
+            "the head must not retain the separator's comma"
+        );
+    }
+
+    /// `split_except_clause` must decline (not panic, not truncate) when the
+    /// clause has no except tail, so the caller keeps its text unchanged.
+    #[test]
+    fn split_except_clause_declines_without_except_tail() {
+        let text = "target instant spell";
+        assert!(
+            split_except_clause(text, &text.to_lowercase(), "Card", &ParseContext::default())
+                .is_none()
+        );
+    }
+
+    /// CR 707.9a: an except tail whose body the grammar cannot read must be
+    /// DECLINED, not consumed. `parse_except_clause` is fail-soft by contract
+    /// (it skips unreadable bodies and still returns `Some`), so without the
+    /// non-empty guard this helper would hand the caller a shortened head and
+    /// discard the tail with no `Effect::unimplemented` marker — converting a
+    /// visible parser gap into a silent one.
+    ///
+    /// Fork is the live case: `"except that the copy is red"` uses a `that `
+    /// subject that matches no body arm. Consuming it would change the text
+    /// `parse_target` receives and silently alter Fork's legal-target filter as
+    /// a ride-along in an unrelated PR. (Fork's own `SetColor { Red }` exception
+    /// stays unimplemented on purpose — `", except that"` appears on exactly one
+    /// card in the corpus, so a `that`-prefix arm would be a special case.)
+    ///
+    /// REACH-GUARD: the paired positive proves the decline comes from the
+    /// empty-body guard and not from the separator probe failing to find the
+    /// tail at all — same head, same separator, a body the grammar CAN read.
+    #[test]
+    fn split_except_clause_declines_unreadable_body_but_accepts_readable_one() {
+        let unreadable = "target instant or sorcery spell, except that the copy is red";
+        assert!(
+            split_except_clause(
+                unreadable,
+                &unreadable.to_lowercase(),
+                "Fork",
+                &ParseContext::default()
+            )
+            .is_none(),
+            "an unreadable except body must leave the caller's text intact"
+        );
+
+        let readable = "target instant or sorcery spell, except the copy isn't legendary";
+        let (head, mods) = split_except_clause(
+            readable,
+            &readable.to_lowercase(),
+            "Card",
+            &ParseContext::default(),
+        )
+        .expect("reach-guard: a readable body at the same separator must still split");
+        assert_eq!(head, "target instant or sorcery spell");
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
         );
     }
 }

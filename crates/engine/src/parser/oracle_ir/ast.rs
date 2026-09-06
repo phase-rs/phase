@@ -4,13 +4,14 @@ use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ChosenCounterCountCondition, ControlWindow, ControllerRef,
-    CopyRetargetPermission, CounterAdjustment, CounterKindChooser, CounterKindDomain,
-    CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
-    ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction, ManaTargetRole,
-    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, ThisWayCause,
+    CastingPermission, ChosenCounterCountCondition, ContinuousModification, ControlWindow,
+    ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
+    CounterKindDomain, CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope,
+    FaceDownProfile, ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue,
+    QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetFilter, ThisWayCause,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -238,8 +239,8 @@ pub(crate) enum PredicateAst {
     },
 }
 
-/// CR 110.2a (docs/MagicCompRules.txt:618): the resolved battlefield-entry
-/// controller for a zone change, as the IR carries it.
+/// CR 110.2a: the resolved battlefield-entry controller for a zone change,
+/// as the IR carries it.
 ///
 /// Three states, not two: `Default` (no explicit controller override in the
 /// IR; lowering carries it as `None` to the existing resolver), `Override` (a
@@ -286,9 +287,9 @@ pub(crate) enum ContinuationAst {
         destination: Zone,
         /// CR 701.23a: When true, the searched card enters the battlefield tapped.
         enter_tapped: bool,
-        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
-        /// controller for the searched card. `Default` lowers through the
-        /// existing no-override carrier; `UnboundAnaphor` fails closed.
+        /// CR 110.2a: the battlefield-entry controller for the searched
+        /// card. `Default` lowers through the existing no-override
+        /// carrier; `UnboundAnaphor` fails closed.
         enters_under: EntersUnderSpec,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
@@ -1162,12 +1163,12 @@ pub(crate) enum TargetedImperativeAst {
         origin: Option<Zone>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
-        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
-        /// controller. `Override(r)` routes the object to the player resolved
-        /// from `r`; `Default` lowers through the existing no-override carrier;
-        /// `UnboundAnaphor` marks a printed control clause whose antecedent
-        /// could not be named, and the lowering site turns it into an honest
-        /// `Effect::unimplemented` rather than a silently-wrong controller.
+        /// CR 110.2a: the battlefield-entry controller. `Override(r)` routes
+        /// the object to the player resolved from `r`; `Default` lowers through
+        /// the existing no-override carrier; `UnboundAnaphor` marks a printed
+        /// control clause whose antecedent could not be named, and the lowering
+        /// site turns it into an honest `Effect::unimplemented` rather than a
+        /// silently-wrong controller.
         enters_under: EntersUnderSpec,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
@@ -1215,9 +1216,9 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
-        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
-        /// controller for mass returns. `Default` preserves default controller
-        /// assignment; `UnboundAnaphor` fails closed at the lowering site.
+        /// CR 110.2a: the battlefield-entry controller for mass returns.
+        /// `Default` preserves default controller assignment; `UnboundAnaphor`
+        /// fails closed at the lowering site.
         enters_under: EntersUnderSpec,
         enter_tapped: bool,
         /// CR 122.1 + CR 122.1h: Counters placed on each returned object as it
@@ -1405,6 +1406,12 @@ pub(crate) enum UtilityImperativeAst {
         target: TargetFilter,
         /// CR 707.10c: set when the imperative remainder is a copy-retarget grant.
         retarget: CopyRetargetPermission,
+        /// CR 707.9a + CR 707.10: typed modifications declared by a trailing
+        /// `"[,] except <body>"` copy exception ("copy it, except the copy
+        /// isn't legendary"). Mirrors the `additional_modifications` channel
+        /// `BecomeCopy` and `CopyTokenOf` already carry, and lowers into
+        /// `Effect::CopySpell.additional_modifications`.
+        additional_modifications: Vec<ContinuousModification>,
     },
     Transform {
         target: TargetFilter,
@@ -1560,12 +1567,12 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
-        /// controller. `Override(r)` routes the object to the player resolved
-        /// from `r`; `Default` lowers through the existing no-override carrier;
-        /// `UnboundAnaphor` marks a printed control clause whose antecedent
-        /// could not be named, and the lowering site turns it into an honest
-        /// `Effect::unimplemented` rather than a silently-wrong controller.
+        /// CR 110.2a: the battlefield-entry controller. `Override(r)` routes
+        /// the object to the player resolved from `r`; `Default` lowers through
+        /// the existing no-override carrier; `UnboundAnaphor` marks a printed
+        /// control clause whose antecedent could not be named, and the lowering
+        /// site turns it into an honest `Effect::unimplemented` rather than a
+        /// silently-wrong controller.
         enters_under: EntersUnderSpec,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
@@ -1593,8 +1600,8 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
-        /// controller for the moved population. `UnboundAnaphor` fails closed.
+        /// CR 110.2a: the battlefield-entry controller for the moved
+        /// population. `UnboundAnaphor` fails closed.
         enters_under: EntersUnderSpec,
         enter_tapped: bool,
         /// CR 401.4: Specific library placement for mass library moves.
@@ -1975,10 +1982,10 @@ pub(crate) fn placeholder_parsed_clause(name: &str) -> ParsedEffectClause {
     })
 }
 
-/// CR 611.2a (`docs/MagicCompRules.txt:2908`): "A continuous effect generated by the
-/// resolution of a spell or ability lasts as long as stated by the spell or ability
-/// creating it." A duration field that already holds a value the parser deliberately
-/// wrote IS a stated window, and a governing prefix must not overwrite it.
+/// CR 611.2a: "A continuous effect generated by the resolution of a spell or ability
+/// lasts as long as stated by the spell or ability creating it." A duration field
+/// that already holds a value the parser deliberately wrote IS a stated window, and
+/// a governing prefix must not overwrite it.
 ///
 /// THE RULE: a duration carrier is "unset" iff it holds `None` or
 /// `Some(Duration::Permanent)`. Every other value is treated as explicitly written
@@ -2177,7 +2184,7 @@ pub(crate) fn with_clause_duration(
     mut clause: ParsedEffectClause,
     duration: Duration,
 ) -> ParsedEffectClause {
-    // CR 611.2a (:2908): a leading duration from Oracle text (e.g. "Until end of turn, ...")
+    // CR 611.2a: a leading duration from Oracle text (e.g. "Until end of turn, ...")
     // is authoritative for `clause.duration` — the CARRIER is written unconditionally here.
     // On the effect's OWN embedded duration field it overrides only the parser's unset
     // sentinels (`None`, and `build_become_clause`'s `Some(Permanent)`): since #7959,
@@ -2188,9 +2195,9 @@ pub(crate) fn with_clause_duration(
     clause
 }
 
-/// CR 611.2a (docs/MagicCompRules.txt:2908): "A continuous effect generated by the
-/// resolution of a spell or ability lasts as long as stated by the spell or ability
-/// creating it (such as 'until end of turn')."
+/// CR 611.2a: "A continuous effect generated by the resolution of a spell or ability
+/// lasts as long as stated by the spell or ability creating it (such as 'until end
+/// of turn')."
 ///
 /// The single authority for writing a stated duration into an effect's OWN embedded
 /// duration field. Extracted from `with_clause_duration` so the clause path and the
@@ -2247,7 +2254,7 @@ pub(crate) fn with_clause_duration(
 ///
 /// * `AddRestriction` — NO EMBEDDED FIELD. Its expiry derives from the enclosing
 ///   `AbilityDefinition.duration` via `add_restriction::fill_runtime_fields`
-///   (CR 514.2, :2442).
+///   (CR 514.2).
 ///
 /// The catch-all covers every effect whose only duration lives on the enclosing
 /// `AbilityDefinition`. A future effect with an embedded duration field MUST be
@@ -2258,12 +2265,12 @@ pub(crate) fn with_clause_duration(
 /// See `duration_arms_match_governed_set`.
 ///
 /// Four of the five writers above are guarded on `duration_is_unset_sentinel`, the
-/// single authority for "this duration carrier is unset" (CR 611.2a, :2908): an
-/// explicitly written embedded window survives a governing prefix. The fifth,
+/// single authority for "this duration carrier is unset" (CR 611.2a): an explicitly
+/// written embedded window survives a governing prefix. The fifth,
 /// `GrantCastingPermission { PlayFromExile }`, is unguarded because its `duration`
 /// is a non-`Option` `Duration` and therefore has no unset sentinel to test. A new
-/// duration-bearing variant whose field DOES have a distinguishable sentinel must
-/// be guarded the same way. (`duration_arms_match_governed_set` pins the 9/5 split.)
+/// duration-bearing variant whose field DOES have a distinguishable sentinel must be
+/// guarded the same way. (`duration_arms_match_governed_set` pins the 9/5 split.)
 fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
     // Both gap outcomes are recorded here and applied AFTER the match, so the
     // borrow of `*effect` taken by the arms has ended before it is replaced.
@@ -2272,12 +2279,12 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
     // CR 611.2a (#7959): the inner lifetime condition the engine cannot evaluate.
     let mut unevaluable_lifetime: Option<String> = None;
     match effect {
-        // CR 611.2a (`docs/MagicCompRules.txt:2908`): yield to an explicitly written
-        // inner duration. The two parser-default sentinels (`None`,
-        // `Some(Permanent)`) still take the governing prefix; any other value was
-        // deliberately written by the recognizer that built this effect and IS a
-        // stated window. `duration_is_unset_sentinel` is the single authority for
-        // that distinction — see its doc.
+        // CR 611.2a: yield to an explicitly written inner duration. The two
+        // parser-default sentinels (`None`, `Some(Permanent)`) still take the
+        // governing prefix; any other value was deliberately written by the
+        // recognizer that built this effect and IS a stated window.
+        // `duration_is_unset_sentinel` is the single authority for that distinction
+        // — see its doc.
         //
         // WHY EACH ARM IS GUARDED, and why the three are NOT one guarantee. The
         // precedence below was read at each resolver, not inferred:
@@ -2390,16 +2397,16 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
             recipient,
             ..
         } => {
-            // CR 611.2b (`:2910`) + CR 301.5 (`:1591`): a leading "for as long as ~
-            // remains attached to it" binds a singular become-copy to the
-            // attachment host. UNCONDITIONAL — this rewrite must run whether or not
-            // the duration write below is declined, which is exactly why the guard
-            // is on the ASSIGNMENT and not on the match arm. Normalizing this into
-            // an arm guard silently loses the binding;
+            // CR 611.2b + CR 301.5: a leading "for as long as ~ remains attached to
+            // it" binds a singular become-copy to the attachment host.
+            // UNCONDITIONAL — this rewrite must run whether or not the duration
+            // write below is declined, which is exactly why the guard is on the
+            // ASSIGNMENT and not on the match arm. Normalizing this into an arm
+            // guard silently loses the binding;
             // `become_copy_recipient_rewrite_survives_a_declined_duration_write`
-            // turns red if anyone does.
-            // The duration is stripped before the body is parsed, so this is the
-            // first point where both the copy and its final duration are available.
+            // turns red if anyone does. The duration is stripped before the body is
+            // parsed, so this is the first point where both the copy and its final
+            // duration are available.
             if matches!(
                 duration,
                 Duration::ForAsLongAs {
@@ -2430,7 +2437,7 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
     }
 }
 
-/// CR 611.2a (:2908): a stated duration governs the lifetime of the effect it
+/// CR 611.2a: a stated duration governs the lifetime of the effect it
 /// prefixes. This is the COMPLETE set. DERIVE IT FROM THE COMMAND, NOT BY EYE:
 ///
 /// ```text
@@ -2441,11 +2448,11 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
 /// At the time of writing that returns SEVEN duration-bearing variants —
 /// GenericEffect, CastFromZone, BecomeCopy, GainActivatedAbilitiesOfTarget,
 /// ForceAttack, ForceBlock, and PreventDamage (whose field is named
-/// `prevention_duration`, which is exactly why an eye-enumeration missed it).
-/// All seven are members. Two more are members without an embedded field:
+/// `prevention_duration`, which is exactly why an eye-enumeration missed it). All
+/// seven are members. Two more are members without an embedded field:
 /// `GrantCastingPermission { permission: CastingPermission::PlayFromExile { .. } }`,
-/// and `AddRestriction`, whose expiry derives from `AbilityDefinition.duration`
-/// in `add_restriction::fill_runtime_fields` (CR 514.2, :2442).
+/// and `AddRestriction`, whose expiry derives from `AbilityDefinition.duration` in
+/// `add_restriction::fill_runtime_fields` (CR 514.2).
 ///
 /// FOUR of the nine deliberately get NO `apply_duration_to_effect` arm —
 /// `AddRestriction`, `ForceAttack`, `ForceBlock`, `PreventDamage`; four of the
@@ -2575,6 +2582,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }
         | Effect::Reveal { .. }
@@ -2709,21 +2717,20 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
     }
 }
 
-/// CR 611.2a + CR 608.2c (:2908, :2797): one stated duration governs the WHOLE
-/// instruction it prefixes — "read the whole text and apply the rules of English".
-/// When a clause recognizer builds its own sequential sibling chain (Xanathar,
-/// Guild Kingpin; Abeyance; Kiora, the Crashing Wave), the duration must reach every
-/// governed link, not only the head. Without this, Xanathar's `CastFromZone`
-/// play-permission is installed with `duration: None` — a permission that is never
-/// pruned (CR 611.2a: "If no duration is stated, it lasts until the end of the
-/// game") — and Kiora's "and dealt by" prevention shield is CREATED with the
-/// engine's end-of-turn `is_shield` default instead of the printed "until your next
-/// turn". (Whether that corrected window is ever OBSERVED is a separate,
-/// pre-existing defect: a resolution-created prevention shield hosted on an object
-/// is discarded by the next layer pass — CR 613.1's top-of-pass reset — before any
-/// damage event consults it. Measured; see the scope-boundary note and its
-/// follow-up. This function puts the right value on the right carrier; it does not
-/// and cannot fix the flush.)
+/// CR 611.2a + CR 608.2c: one stated duration governs the WHOLE instruction it
+/// prefixes — "read the whole text and apply the rules of English". When a clause
+/// recognizer builds its own sequential sibling chain (Xanathar, Guild Kingpin;
+/// Abeyance; Kiora, the Crashing Wave), the duration must reach every governed link,
+/// not only the head. Without this, Xanathar's `CastFromZone` play-permission is
+/// installed with `duration: None` — a permission that is never pruned (CR 611.2a:
+/// "If no duration is stated, it lasts until the end of the game") — and Kiora's
+/// "and dealt by" prevention shield is CREATED with the engine's end-of-turn
+/// `is_shield` default instead of the printed "until your next turn". (Whether that
+/// corrected window is ever OBSERVED is a separate, pre-existing defect: a
+/// resolution-created prevention shield hosted on an object is discarded by the next
+/// layer pass — CR 613.1's top-of-pass reset — before any damage event consults it.
+/// Measured; see the scope-boundary note and its follow-up. This function puts the
+/// right value on the right carrier; it does not and cannot fix the flush.)
 ///
 /// Yields to an explicitly stated narrower duration: a link already carrying
 /// `Some(d)` with `d != Permanent` had that duration deliberately attached by its
@@ -2742,9 +2749,9 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
 /// Walks ONLY `sub_ability` — CR 608.2c: "The controller of the spell or ability
 /// follows its instructions in the order written." `else_ability` and
 /// `mode_abilities` are deliberately NOT walked: a mode is one of several options
-/// of which only the chosen one applies (CR 700.2, :3207; CR 700.2c, :3213), and an
-/// "otherwise" branch is separately-printed alternative text whose own duration, if
-/// any, is stated in that text (CR 608.2c's "read the whole text").
+/// of which only the chosen one applies (CR 700.2; CR 700.2c), and an "otherwise"
+/// branch is separately-printed alternative text whose own duration, if any, is
+/// stated in that text (CR 608.2c's "read the whole text").
 pub(crate) fn with_clause_chain_duration(
     clause: ParsedEffectClause,
     duration: Duration,
@@ -2800,9 +2807,8 @@ fn unrecognized_condition_text(condition: &StaticCondition) -> Option<&str> {
     }
 }
 
-/// CR 611.2a (`docs/MagicCompRules.txt:2908`): the fragment naming an inner lifetime
-/// that MASKS a printed outer window, or `None` when the inner lifetime is either
-/// understood or absent.
+/// CR 611.2a: the fragment naming an inner lifetime that MASKS a printed outer
+/// window, or `None` when the inner lifetime is either understood or absent.
 ///
 /// "Masks" is literal for an effect whose EMBEDDED duration is the sole runtime
 /// authority: if the inner condition cannot be evaluated, nothing ever ends the
@@ -3153,7 +3159,7 @@ mod duration_distribution_tests_7923 {
     }
 
     /// **RECONCILED SEAM (#7959 x #8174) — `[NEW-UNIT]`, COMPOSITION.**
-    /// CR 608.2c (`docs/MagicCompRules.txt:2797`) + CR 611.2a (`:2908`).
+    /// CR 608.2c + CR 611.2a.
     ///
     /// The `CastFromZone` arm now carries TWO independent gap rules that can fire on
     /// the same node, and the ORDER between them is a decision, not an accident. This
@@ -3261,7 +3267,7 @@ mod duration_distribution_tests_7923 {
         }
     }
 
-    /// **V-U1e — `[NEW-UNIT]`.** CR 611.2a (`docs/MagicCompRules.txt:2908`).
+    /// **V-U1e — `[NEW-UNIT]`.** CR 611.2a.
     ///
     /// ANCHORED AGAINST MISCLASSIFICATION OF THE NEW HELPERS, NOT AGAINST BASE_SHA:
     /// neither `duration_governs` nor `apply_duration_to_effect` exists at BASE, so
@@ -3338,7 +3344,7 @@ mod duration_distribution_tests_7923 {
 
     /// **V-U1e's MANDATORY hostile rows.** A link carrying its OWN, NARROWER printed
     /// window under a WIDER outer stated duration must keep the printed one
-    /// (CR 611.2a `:2908` — yield to explicit).
+    /// (CR 611.2a — yield to explicit).
     ///
     /// The `PreventDamage` row is THE discriminating one and is constructed DIRECTLY,
     /// not drawn from the corpus: measured, ZERO printed-window `PreventDamage` nodes
@@ -3408,7 +3414,7 @@ mod duration_distribution_tests_7923 {
         // `PreventDamage` row above is: what they pin — a governed node whose embedded
         // window is WRITTEN and DIFFERS from the window governing it — is the shape the
         // guard exists to protect, and a unit row states it without depending on any
-        // card continuing to print it. (CR 611.2a, :2908: an explicitly written window
+        // card continuing to print it. (CR 611.2a: an explicitly written window
         // is a stated one.) The corpus survey behind that choice, including which of
         // these three types a card can supply today, is in the PR body for #7959; do
         // not re-derive it from a comment.
@@ -3467,7 +3473,7 @@ mod duration_distribution_tests_7923 {
         assert_eq!(stamped(&ge_ueot), ge_ueot);
     }
 
-    /// CR 611.2a (`:2908`) + CR 611.2b (`:2910`) + CR 301.5 (`:1591`).
+    /// CR 611.2a + CR 611.2b + CR 301.5.
     ///
     /// The `BecomeCopy` arm carries TWO obligations under one governing window: the
     /// unconditional attachment-host rewrite, and the duration write that must yield
@@ -3625,10 +3631,10 @@ mod duration_distribution_tests_7923 {
         // link 4 — the shape this change exists for, on a `CastFromZone` carrier: the
         // carrier is unset (so the walk's gate ADMITS the link and stamps it) while the
         // embedded field already holds a written window. The carrier IS stamped; the
-        // embedded window SURVIVES (CR 611.2a, :2908). This link sits AFTER the
-        // declined `explicit` link, so it also pins that the walk ADVANCES past a
-        // decline instead of stopping — `link = def.sub_ability.as_deref_mut();` must
-        // stay OUTSIDE the gate `if` in `with_clause_chain_duration`.
+        // embedded window SURVIVES (CR 611.2a). This link sits AFTER the declined
+        // `explicit` link, so it also pins that the walk ADVANCES past a decline
+        // instead of stopping — `link = def.sub_ability.as_deref_mut();` must stay
+        // OUTSIDE the gate `if` in `with_clause_chain_duration`.
         let l4 = l3.sub_ability.as_deref().expect("link 4");
         assert_eq!(
             l4.duration,
@@ -3664,7 +3670,7 @@ mod duration_distribution_tests_7923 {
         );
     }
 
-    /// CR 700.2 (`:3207`) + CR 700.2c (`:3213`) + CR 608.2c (`:2797`):
+    /// CR 700.2 + CR 700.2c + CR 608.2c:
     /// `else_ability` and `mode_abilities` are deliberately NOT walked.
     #[test]
     fn chain_duration_does_not_walk_else_or_modes() {

@@ -77,8 +77,9 @@ use super::{
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
     def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
-    has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
-    nearest_publisher_is_self_move, parse_spell_graveyard_replacement_rider,
+    has_explicit_player_target, inject_chosen_color_choice_grant,
+    inject_printed_color_choice_filter, mark_uses_tracked_set, nearest_publisher_is_self_move,
+    parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
@@ -86,7 +87,7 @@ use super::{
     rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
     rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
     singular_battlefield_recall, stamp_delayed_returns, try_fold_token_repeat_into_count,
-    wire_optional_cast_decline_fallback,
+    wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -1488,6 +1489,39 @@ fn bind_chosen_number_anaphor(def: &mut AbilityDefinition, prior: &[AbilityDefin
     }
 }
 
+/// CR 608.2d + CR 603.7d: Which player announces a delayed-trigger payload's
+/// "may", when the clause names that player instead of leaving the choice with
+/// the ability's controller.
+///
+/// The subject grammar (`oracle_effect::subject`) lowers a subject-anchored
+/// modal — "its controller may …", "its owner may …", "that creature's
+/// controller may …" — to `optional: true` plus a parent-target player anaphor
+/// in the effect's own player slot. That anaphor IS the actor: CR 608.2d has the
+/// announcing player make the choice while the effect is applied, and CR 603.7d
+/// fixes the delayed ability's *controller* as the creating spell's controller,
+/// so the two differ exactly when the clause names someone else.
+///
+/// Returns the anaphor to stamp as `AbilityDefinition::optional_player` (the
+/// engine's single authority for "who receives this may", consumed by
+/// `game::effects::optional_prompt_player`), or `None` for a controller-held
+/// "may" — including a payload that is not optional at all.
+///
+/// Deliberately narrow: only the two parent-target PLAYER anaphors qualify.
+/// `TargetFilter::Player` is an announced target and `Controller` is the
+/// wrapper's own controller; neither shifts the announcing player away from the
+/// existing lift.
+fn delayed_payload_optional_actor(def: &AbilityDefinition) -> Option<TargetFilter> {
+    if !def.optional || def.optional_player.is_some() {
+        return None;
+    }
+    match def.effect.target_filter()? {
+        actor @ (TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner) => {
+            Some(actor.clone())
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -2754,7 +2788,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // #4956) would re-check that creation-time "if you do" signal when
                 // the delayed trigger fires at end step and skip the return.
                 let lifted_condition = std::mem::take(&mut inner.condition);
-                let lifted_optional = std::mem::replace(&mut inner.optional, false);
+                // CR 603.7d + CR 608.2d: The lift above is correct only for a
+                // "may" the DELAYED TRIGGER'S OWN CONTROLLER holds — CR 603.7d
+                // makes that the player who controlled the creating spell, so
+                // hoisting the flag onto the wrapper asks the right player at a
+                // harmlessly earlier moment. It is wrong for a subject-anchored
+                // "may" whose actor the clause NAMES as a parent-target player
+                // anaphor ("Counter target spell. Its controller may draw up to
+                // two cards at the beginning of the next turn's upkeep" — Arcane
+                // Denial; "its owner may …" is the same shape). CR 608.2d puts
+                // that announcement inside the delayed ability's own resolution,
+                // and the announcing player is the named one, not the wrapper's
+                // controller. Keep the flag on the payload and stamp the actor so
+                // `effects::optional_prompt_player` routes the prompt there.
+                let lifted_optional = match delayed_payload_optional_actor(&inner) {
+                    Some(actor) => {
+                        inner.optional_player = Some(actor);
+                        false
+                    }
+                    None => std::mem::replace(&mut inner.optional, false),
+                };
                 let lifted_optional_for = std::mem::take(&mut inner.optional_for);
                 let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
                 let lifted_player_scope = std::mem::take(&mut inner.player_scope);
@@ -3268,10 +3321,119 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // (max(N − X, 0)). Must run after where-X binding has populated the
     // prevention node's `amount_dynamic`, which happens during IR lowering above.
     fold_deal_damage_then_prevent_into_computed_amount(&mut result);
+    // CR 105.4 + CR 608.2c: supply a colour choice for a clause that printed its
+    // own ("of the color of your choice") on an object filter. Gated on DECLARED
+    // per-clause provenance, never on a shape scan. Runs BEFORE the keyword-grant
+    // injector so that injector's `Effect::Choose{Color}` recursion guard
+    // (`child_under_color_choice`) sees this wrap and cannot double-prompt.
+    //
+    // The "a clause the parser refused must not raise a prompt for semantics it
+    // did not model" guard lives HERE, on the clause that DECLARED the
+    // provenance, not on the chain head the wrap lands on: a head != carrier
+    // chain (head refused, a LATER clause printed the qualifier) would otherwise
+    // lose its chooser while still stamping `FilterProp::IsChosenColor` — a
+    // fail-closed match-NOTHING filter with no `Effect::Unimplemented` and no
+    // parse warning.
+    //
+    // CR 607.1c + CR 607.2d: EVERY surviving carrier is collected, in printed
+    // order — never just the first. Each printed "of the color of your choice"
+    // is its own choice linked to its own filter (CR 607.2d is the "choose a
+    // [value]" / "the chosen [value]" linkage; CR 607.1c is the half that covers
+    // two such occurrences inside ONE ability, which is the chain shape here),
+    // so a first-wins `find_map` over a chain that printed the qualifier TWICE
+    // would bind both stamped filters to one `ChosenAttribute::Color` and
+    // silently discard the second answer. The arity contract — and the honest
+    // `Effect::unimplemented` refusal the multi-carrier case now produces
+    // instead — is the single authority on
+    // `inject_printed_color_choice_filter`, so this call site deliberately does
+    // NOT pre-filter: the empty and non-colour cases are decided there too,
+    // never twice.
+    //
+    // The fragment is built from the SAME filtered clause set as the choices,
+    // so a refusal's description names exactly the clauses whose printed choices
+    // could not be modelled.
+    //
+    // CENSUS, re-measured 2026-08-29 against the pool whose tracked vintage
+    // sidecar `crates/engine/data/mtgjson-vintage` reads 2026-08-28: the printed
+    // form appears on 4 card faces (Avacyn, Guardian Angel / Prismatic Strands /
+    // Root Greevil / Wash Out) and NO ability line prints it twice — Avacyn's
+    // two occurrences sit in two SEPARATE activated abilities, i.e. two chains
+    // carrying one occurrence each. Nothing rests on that any more; it says only
+    // that the refusal arm is not taken by today's pool. Re-measure rather than
+    // trusting the constant:
+    //
+    //   jq -r '.data | to_entries[] | .value[]
+    //          | select((.text // "") | test("of the color of your choice"))
+    //          | (.faceName // .name)' data/mtgjson/AtomicCards.json | sort -u
+    //
+    // The full census, including why Avacyn's two printed occurrences do not
+    // violate "twice in one chain", is on `inject_printed_color_choice_filter`.
+    // CR 608.2c SCOPE: the wrap can only ever land on the chain HEAD, so the
+    // injector also needs to know whether the head IS the carrier's own node.
+    // That is decided here, where the clause list is still visible, and it is
+    // deliberately NOT derived from the carrier's clause INDEX: an index rule
+    // would assume "index 0 ⇒ the head node is clause 0's node", which the
+    // assembly folds falsify — `collapse_ephemeral_color_choice_mana` OVERWRITES
+    // `def.effect` with its sub-ability's effect, and
+    // `fold_deal_damage_then_prevent_into_computed_amount` splices a node out and
+    // renumbers everything behind it, so a head node whose ORIGIN clause is not
+    // clause 0 is constructible. `SoleClause` needs neither assumption: with
+    // exactly one surviving clause, every node in the assembled tree is that
+    // clause's own subtree, so no fold can move the wrap outside the carrying
+    // clause. The property is one-directional and that is what makes it safe —
+    // a non-sole carrier always REFUSES, and a sole carrier always has
+    // head == carrier.
+    //
+    // The clause count is taken over the SAME filtered set the carriers come
+    // from, so the `Unimplemented` guard's subject and the provenance's subject
+    // stay the same clause: a chain whose head the parser refused and whose only
+    // surviving clause printed the qualifier is a sole-clause carrier, not a
+    // later-clause one (pinned by `V-UNIMPL`).
+    let surviving: Vec<_> = ir
+        .clauses
+        .iter()
+        .filter(|clause| !matches!(clause.parsed.effect, Effect::Unimplemented { .. }))
+        .collect();
+    let sole_surviving_clause = surviving.len() == 1;
+    let printed_color_carriers: Vec<(PrintedColorCarrier, &str)> = surviving
+        .iter()
+        .enumerate()
+        .filter_map(|(index, clause)| {
+            clause.printed_color_choice.clone().map(|choice| {
+                let scope = if sole_surviving_clause {
+                    PrintedColorCarrierScope::SoleClause
+                } else if index == 0 {
+                    PrintedColorCarrierScope::ChainHeadOfMany
+                } else {
+                    PrintedColorCarrierScope::LaterClause
+                };
+                (
+                    PrintedColorCarrier { choice, scope },
+                    clause.source.fragment().unwrap_or_default(),
+                )
+            })
+        })
+        .collect();
+    let carriers: Vec<PrintedColorCarrier> = printed_color_carriers
+        .iter()
+        .map(|(carrier, _)| carrier.clone())
+        .collect();
+    let fragment = printed_color_carriers
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>()
+        .join(" ");
+    inject_printed_color_choice_filter(&mut result, &carriers, &fragment);
     // CR 105.4 + CR 702.16: inject a color choice ahead of a "gains
     // protection/hexproof from the color of your choice" grant so the source
     // carries a chosen color for the layer applier to bake in.
-    inject_chosen_color_choice_grant(&mut result, false);
+    //
+    // CR 607.2d: unless a LINKED ability elsewhere on this object already makes
+    // that choice, in which case the grant reads the linked answer and must not
+    // make a second one. That fact is cross-item, so it cannot be seen from
+    // inside one chain — it arrives as `ir.injected_color_choice`, stamped before
+    // lowering from `LinkedChoiceKind::LinkedColorChoice`.
+    inject_chosen_color_choice_grant(&mut result, false, ir.injected_color_choice);
     rewrite_that_type_mana_instead(&mut result);
 
     fold_token_it_has_grants_into_token_statics(&mut result);
@@ -3566,7 +3728,7 @@ mod arena_tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain_ir;
     use crate::parser::oracle_ir::ast::parsed_clause;
-    use crate::parser::oracle_ir::effect_chain::{ClauseIr, ClauseIrBuilder};
+    use crate::parser::oracle_ir::effect_chain::{ClauseIr, ClauseIrBuilder, InjectedColorChoice};
     use crate::parser::oracle_nom::context::ParseContext;
     use crate::types::ability::{DelayedTriggerCondition, ReplacementDefinition};
     use crate::types::phase::Phase;
@@ -3777,6 +3939,7 @@ mod arena_tests {
             actor: None,
             in_trigger: false,
             repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
         }
     }
 

@@ -7,11 +7,68 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
-    PlayerRelation, SpellStackToGraveyardReplacement,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment,
+    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::triggers::AttackTargetFilter;
+
+/// CR 607.2d + CR 614.1c: only an as-enters replacement whose separate static
+/// reads `IsChosenCardType` is promoted from its locally-labeled list.
+#[test]
+fn constrained_card_type_static_relation_promotes_cloud_key_and_archon() {
+    let cases = [
+        (
+            "Cloud Key",
+            vec!["Artifact"],
+            "As Cloud Key enters, choose artifact, creature, enchantment, instant, or sorcery.\nSpells you cast of the chosen type cost {1} less to cast.",
+            vec![
+                CoreType::Artifact,
+                CoreType::Creature,
+                CoreType::Enchantment,
+                CoreType::Instant,
+                CoreType::Sorcery,
+            ],
+        ),
+        (
+            "Archon of Valor's Reach",
+            vec!["Creature"],
+            "As Archon of Valor's Reach enters the battlefield, choose artifact, enchantment, instant, sorcery, or planeswalker.\nPlayers can't cast spells of the chosen type.",
+            vec![
+                CoreType::Artifact,
+                CoreType::Enchantment,
+                CoreType::Instant,
+                CoreType::Sorcery,
+                CoreType::Planeswalker,
+            ],
+        ),
+        (
+            "Supplemental Type Choice",
+            vec!["Artifact"],
+            "As Supplemental Type Choice enters the battlefield, choose artifact or battle.\nSpells you cast of the chosen type cost {1} less to cast.",
+            vec![CoreType::Artifact, CoreType::Battle],
+        ),
+    ];
+    for (name, types, oracle, expected) in cases {
+        let types = types.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        let execute = parsed.replacements[0]
+            .execute
+            .as_deref()
+            .expect("as-enters replacement has an execute");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::CardType { options },
+                    persist: true,
+                    ..
+                } if options == &expected
+            ),
+            "{name} must promote only its proven choice domain"
+        );
+    }
+}
 
 #[test]
 fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
@@ -1786,6 +1843,64 @@ fn parse(
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
     parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
+}
+
+/// The complete Sentry ETB must retain the token's inline keywords and quoted
+/// self-referential attack requirement instead of silently stopping at Flying.
+#[test]
+fn the_sentry_golden_guardian_token_payload_parses_without_dropping_suffixes() {
+    const ORACLE: &str = "Flying, vigilance, indestructible\nWhen The Sentry enters, target opponent creates The Void, a legendary 5/5 black Horror Villain creature token with flying, indestructible, and \"The Void attacks each combat if able.\"";
+
+    let parsed = parse(
+        ORACLE,
+        "The Sentry, Golden Guardian",
+        &[Keyword::Flying, Keyword::Vigilance, Keyword::Indestructible],
+        &["Creature"],
+        &["Human", "Hero"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "The Sentry must parse with no Unimplemented effects: {parsed:#?}"
+    );
+
+    let etb = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger.mode == TriggerMode::ChangesZone
+                && trigger.destination == Some(Zone::Battlefield)
+        })
+        .expect("The Sentry enter-the-battlefield trigger");
+    let execute = etb.execute.as_deref().expect("The Sentry ETB execute");
+    let Effect::Token {
+        name,
+        owner,
+        keywords,
+        static_abilities,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected Effect::Token, got {:?}", execute.effect);
+    };
+
+    assert_eq!(name, "The Void");
+    assert_eq!(
+        keywords,
+        &[Keyword::Flying, Keyword::Indestructible],
+        "the token's inline Flying and Indestructible must survive parsing"
+    );
+    assert_eq!(
+        owner,
+        &TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        "the targeted opponent must create the token"
+    );
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(static_abilities[0].mode, StaticMode::MustAttack);
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::SelfRef),
+        "the quoted The Void self-reference must be preserved as MustAttack"
+    );
 }
 
 /// CR 506.3 + CR 508.1d + CR 611.2c + CR 615: Gideon Jura (verbatim MTGJSON
@@ -6882,6 +6997,7 @@ fn devourer_of_destiny_opening_hand_reveal_creates_first_upkeep_dig() {
             phase: Phase::Upkeep,
             player: PlayerId(0),
             gate: crate::types::ability::TurnGate::None,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         }
     );
 
@@ -7552,18 +7668,21 @@ fn land_equilibrium_parses_chained_sacrifice_replacement() {
         .execute
         .as_ref()
         .expect("replacement execute (the sacrifice rider)");
-    // The sacrifice target is now derived from the parsed gate type rather than a
-    // hardcoded `TypedFilter::land()`. For Land Equilibrium's own Oracle text the
-    // derivation must be byte-identical to the previous hardcoded filter — a land
-    // controlled by the entering player (ControllerRef::You), with no extra
-    // properties leaked from the type-phrase parse.
+    // The sacrifice target is derived from the parsed gate type rather than a
+    // hardcoded `TypedFilter::land()`, and scoped to the SPECIFIC entering
+    // opponent — "that player … sacrifices a land of their choice" — via the
+    // same `ControllerRef::ScopedPlayer` reference the applicability gate's LHS
+    // uses. CR 109.5: it is emphatically NOT `ControllerRef::You`, which names
+    // Land Equilibrium's own controller; that spelling only ever resolved to the
+    // entering player because the post-replacement drain used to bind
+    // `ability.controller` to the affected object's controller (issue #7086).
     let Effect::Sacrifice { target, .. } = &*execute.effect else {
         panic!("execute must be a Sacrifice; got {:?}", execute.effect);
     };
     assert_eq!(
         *target,
-        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
-        "sacrifice target must be byte-identical to a You-controlled land filter"
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::ScopedPlayer)),
+        "sacrifice target must be a land controlled by the SCOPED (entering) player"
     );
 }
 
@@ -8115,7 +8234,7 @@ fn land_grant_reveal_hand_alternative_cost_option() {
 // except for artifacts and lands" must exclude both types (including artifact
 // creatures, per CR 205.2b's multi-type-object rule), not silently drop the
 // exception clause and destroy everything. Drives the full ability-line parse
-// (not just `parse_type_phrase` in isolation) so the interaction with the
+// (not just `parse_type_phrase_folding` in isolation) so the interaction with the
 // trailing "Activate only during your upkeep." restriction sentence is
 // covered too.
 #[test]
@@ -20675,7 +20794,7 @@ fn untargeted_become_monarch_keeps_the_controller_default_cr_109_5() {
 
 /// CR 508.5: the rebind is gated on the trigger clause naming an attacked
 /// PLAYER. `Planeswalker` / `Battle` attack scopes name no player antecedent
-/// (a battle's anaphor would be its protector, CR 310.8d — a different
+/// (a battle's anaphor would be its protector, CR 310.9d — a different
 /// reference), so a `ScopedPlayer` anchor must survive unchanged there.
 ///
 /// There are two distinct noun sources, and each is asserted in the shape the
@@ -21694,7 +21813,7 @@ fn quantum_riddler_draw_line_parses_as_replacement_not_static() {
 
 /// CR 205.3a: "[Subtype] [CoreType]" subject-predicate patterns like
 /// "Wizard creatures gain flying until end of turn" — the subtype+type compound
-/// must be fully consumed by parse_type_phrase so the subject-predicate parser
+/// must be fully consumed by parse_type_phrase_folding so the subject-predicate parser
 /// can extract the filter.
 #[test]
 fn test_subtype_creatures_gain_keyword() {
@@ -26752,7 +26871,7 @@ fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
 /// attacked player, not to `TargetFilter::Any`.
 ///
 /// Revert-failing: without `parse_attacking_defender_anaphor`,
-/// `parse_type_phrase` leaves "attacking that player" unconsumed,
+/// `parse_type_phrase_folding` leaves "attacking that player" unconsumed,
 /// `parse_subject_application`'s rest-empty gate fails, and the clause falls
 /// through to `parse_numeric_imperative_ast`, which emits the documented
 /// `Effect::Pump { target: TargetFilter::Any }` sentinel — a board-wide pump
@@ -26873,7 +26992,7 @@ fn definition_chain_has_defending_player_anaphor(def: &AbilityDefinition) -> boo
 /// corpus. Many of them terminate with a bare "." right after the phrase, which
 /// SATISFIES the clause boundary, so the boundary guard is not what protects
 /// them — the excluded positions never route the phrase through
-/// `parse_type_phrase`'s suffix chain at all.
+/// `parse_type_phrase_folding`'s suffix chain at all.
 #[test]
 fn excluded_attacking_that_player_positions_are_not_stolen() {
     // Inline token spec, bare "." terminator. Verbatim Oracle text (MTGJSON) —
@@ -27101,6 +27220,194 @@ fn owlbear_cub_attacked_player_land_threshold_predicate_is_bound() {
     };
     assert!(typed.type_filters.contains(&TypeFilter::Land));
     assert_eq!(attack.condition, None);
+}
+
+/// Issue #8391 — Cartographer's Hawk's recipient-relative land comparison is
+/// part of the combat-damage event, not an intervening-if condition. The
+/// complete, verbatim Oracle text also pins the existing bounce/search chain.
+#[test]
+fn cartographers_hawk_damage_recipient_predicate_is_bound_to_the_event() {
+    let parsed = parse(
+        "Flying\nWhen this creature deals combat damage to a player who controls more lands than you, return it to its owner's hand. If you do, you may search your library for a Plains card, put it onto the battlefield tapped, then shuffle.",
+        "Cartographer's Hawk",
+        &[Keyword::Flying],
+        &["Creature"],
+        &["Bird"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "Cartographer's Hawk must parse without an Unimplemented effect: {parsed:#?}"
+    );
+
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::DamageDone)
+        .expect("Cartographer's Hawk must retain its combat-damage trigger");
+    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(trigger.valid_source, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        trigger.condition, None,
+        "the event predicate is not CR 603.4"
+    );
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                comparator: Comparator::GT,
+                count: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Land).controller(ControllerRef::You),
+                        ),
+                    },
+                }),
+            }),
+        }),
+        "the damaged player must be compared with the trigger controller"
+    );
+
+    let bounce = trigger
+        .execute
+        .as_deref()
+        .expect("the trigger must retain its effect chain");
+    assert!(
+        matches!(
+            bounce.effect.as_ref(),
+            Effect::Bounce {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "Cartographer's Hawk must begin by returning itself: {bounce:#?}"
+    );
+    let search = bounce
+        .sub_ability
+        .as_deref()
+        .expect("the successful bounce must continue to the optional Plains search");
+    assert!(search.optional, "\"you may search\" must remain optional");
+    assert!(matches!(
+        search.effect.as_ref(),
+        Effect::SearchLibrary { .. }
+    ));
+    let put_plains = search
+        .sub_ability
+        .as_deref()
+        .expect("the search must continue to putting the chosen Plains onto the battlefield");
+    assert!(matches!(
+        put_plains.effect.as_ref(),
+        Effect::ChangeZone {
+            enter_tapped: crate::types::zones::EtbTapState::Tapped,
+            ..
+        }
+    ));
+    assert!(matches!(
+        put_plains
+            .sub_ability
+            .as_deref()
+            .map(|definition| definition.effect.as_ref()),
+        Some(Effect::Shuffle { .. })
+    ));
+}
+
+/// The generic subject-led and article/source-led production routes must emit
+/// the same relative-recipient filter. The negative rows ensure neither route
+/// silently degrades an unmodelled `who` clause to its broad player noun.
+#[test]
+fn damage_recipient_relative_predicates_have_route_parity_and_fail_closed() {
+    let expected = TargetFilter::PlayerMatching {
+        player: Box::new(PlayerFilter::ControlsCount {
+            relation: PlayerRelation::All,
+            filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            comparator: Comparator::GT,
+            count: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Land).controller(ControllerRef::You),
+                    ),
+                },
+            }),
+        }),
+    };
+    for (name, text) in [
+        (
+            "Generic Damage Recipient",
+            "Whenever ~ deals combat damage to a player who controls more lands than you, draw a card.",
+        ),
+        (
+            "Article Damage Recipient",
+            "Whenever a creature deals combat damage to a player who controls more lands than you, draw a card.",
+        ),
+    ] {
+        let parsed = parse(text, name, &[], &["Creature"], &[]);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::DamageDone)
+            .unwrap_or_else(|| panic!("{name} must parse as DamageDone: {parsed:#?}"));
+        assert_eq!(trigger.valid_target, Some(expected.clone()));
+        assert_eq!(trigger.condition, None);
+        assert!(
+            !parsed_has_unimplemented(&parsed),
+            "{name}: supported recipient predicate must not leave an Unimplemented effect: {parsed:#?}"
+        );
+    }
+
+    for (name, text) in [
+        (
+            "Unsupported generic recipient predicate",
+            "Whenever ~ deals combat damage to a player who has drawn three cards this turn, draw a card.",
+        ),
+        (
+            "Partial generic recipient predicate",
+            "Whenever ~ deals combat damage to a player who controls more lands than you and controls a Forest, draw a card.",
+        ),
+        (
+            "Opponent recipient predicate",
+            "Whenever a creature deals combat damage to an opponent who controls more lands than you, draw a card.",
+        ),
+    ] {
+        let parsed = parse(text, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .all(|trigger| matches!(trigger.mode, TriggerMode::Unknown(_))),
+            "{name}: an unmodelled recipient predicate must be terminally Unknown: {parsed:#?}"
+        );
+        assert!(
+            !parsed.triggers.iter().any(|trigger| {
+                trigger.mode == TriggerMode::DamageDone
+                    && matches!(
+                        trigger.valid_target,
+                        None | Some(TargetFilter::Player) | Some(TargetFilter::Typed(_))
+                    )
+            }),
+            "{name}: must not retain a broad damage-recipient filter: {parsed:#?}"
+        );
+    }
+
+    for (name, text) in [
+        (
+            "Plain player recipient",
+            "Whenever ~ deals combat damage to a player, draw a card.",
+        ),
+        (
+            "Plain opponent recipient",
+            "Whenever a creature deals combat damage to an opponent, draw a card.",
+        ),
+    ] {
+        let parsed = parse(text, name, &[], &["Creature"], &[]);
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .any(|trigger| trigger.mode == TriggerMode::DamageDone),
+            "{name}: an unqualified recipient must remain supported: {parsed:#?}"
+        );
+    }
 }
 
 /// V11 — consume-on-success: a `who`-headed clause the predicate grammar cannot
@@ -27668,7 +27975,7 @@ fn census_variant_names(body: &str) -> Vec<String> {
 /// it.
 #[test]
 fn render_net_effect_carrier_census() {
-    const EFFECT_VARIANT_PIN: usize = 232;
+    const EFFECT_VARIANT_PIN: usize = 233;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),
@@ -28555,4 +28862,110 @@ fn cyclops_gladiator_if_you_do_damage_back_reads_targets_power_not_sources() {
          creature', the first sentence's chosen recipient) power, not the \
          attacking Cyclops's own power — got {back_amount:?}"
     );
+}
+
+/// CR 115.1 + CR 608.2c + CR 608.2k: card-exact census of every per-object
+/// power/toughness scope the parser emits for the "where X is that creature's
+/// power/toughness" class (issue #8460).
+///
+/// Each row is a real card's VERBATIM Oracle text run through the production
+/// parser, and the expectation is the full multiset of `Power`/`Toughness`
+/// scopes in its parse — so a scope that moves anywhere in the card, not just
+/// at the node under test, reds this table.
+///
+/// The two halves of the table are the two readings of the same English phrase:
+///
+/// * `Target` — the clause announces its own "target creature", so CR 115.1
+///   makes that announced target the antecedent (Thickest in the Thicket,
+///   Soul's Might, Nantuko Mentor).
+/// * `CostPaidObject` — the antecedent is the CR 608.2k referent named by the
+///   ability's cost or trigger condition, with no announced creature target for
+///   the demonstrative to bind to instead. **Minsc & Boo, Timeless Heroes is the
+///   named non-regression constraint for #8460**: its reflexive "~ deals X
+///   damage to any target, where X is that creature's power" announces
+///   `TargetFilter::Any`, and X must keep reading the creature sacrificed by the
+///   −2 ability. Hamletback Goliath (trigger referent) and Shadowheart, Dark
+///   Justiciar (sacrifice cost) hold the same reading from the other two
+///   directions.
+#[test]
+fn where_x_that_creature_stat_binds_target_only_when_the_clause_announces_one() {
+    /// Collect every `QuantityRef::Power`/`Toughness` scope in a parse, in
+    /// document order. Serializing the whole `ParsedAbilities` reaches nodes no
+    /// hand-written index chain would (sub-abilities, else-branches, granted
+    /// definitions), so a scope that moves anywhere is visible here.
+    fn power_scopes(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let (Some(serde_json::Value::String(kind)), Some(scope)) =
+                    (map.get("type"), map.get("scope"))
+                {
+                    if kind == "Power" || kind == "Toughness" {
+                        if let Some(serde_json::Value::String(name)) = scope.get("type") {
+                            out.push(format!("{kind}/{name}"));
+                        }
+                    }
+                }
+                for nested in map.values() {
+                    power_scopes(nested, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for nested in items {
+                    power_scopes(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let cases: &[(&str, &[&str], &str, &[&str])] = &[
+        (
+            "Thickest in the Thicket",
+            &["Enchantment"],
+            "When this enchantment enters, put X +1/+1 counters on target creature, where X is that creature's power.\nAt the beginning of your end step, draw two cards if you control the creature with the greatest power or tied for the greatest power.",
+            &["Power/Target"],
+        ),
+        (
+            "Soul's Might",
+            &["Sorcery"],
+            "Put X +1/+1 counters on target creature, where X is that creature's power.",
+            &["Power/Target"],
+        ),
+        (
+            "Nantuko Mentor",
+            &["Creature"],
+            "{2}{G}, {T}: Target creature gets +X/+X until end of turn, where X is that creature's power.",
+            &["Power/Target", "Power/Target"],
+        ),
+        (
+            "Minsc & Boo, Timeless Heroes",
+            &["Planeswalker"],
+            "When Minsc & Boo enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste.\n[+1]: Put three +1/+1 counters on up to one target creature with trample or haste.\n[\u{2212}2]: Sacrifice a creature. When you do, Minsc & Boo deals X damage to any target, where X is that creature's power. If the sacrificed creature was a Hamster, draw X cards.\nMinsc & Boo, Timeless Heroes can be your commander.",
+            &["Power/CostPaidObject", "Power/CostPaidObject"],
+        ),
+        (
+            "Hamletback Goliath",
+            &["Creature"],
+            "Whenever another creature enters, you may put X +1/+1 counters on this creature, where X is that creature's power.",
+            &["Power/CostPaidObject"],
+        ),
+        (
+            "Shadowheart, Dark Justiciar",
+            &["Creature"],
+            "{1}{B}, {T}, Sacrifice another creature: Draw X cards, where X is that creature's power.",
+            &["Power/CostPaidObject"],
+        ),
+    ];
+
+    for (name, types, oracle, expected) in cases {
+        let types: Vec<String> = types.iter().map(|t| (*t).to_string()).collect();
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        let value = serde_json::to_value(&parsed).expect("ParsedAbilities must serialize");
+        let mut scopes = Vec::new();
+        power_scopes(&value, &mut scopes);
+        assert_eq!(
+            scopes, *expected,
+            "{name}: per-object power/toughness scopes changed"
+        );
+    }
 }

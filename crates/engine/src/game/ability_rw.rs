@@ -2529,7 +2529,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -2811,7 +2811,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -3280,7 +3280,9 @@ fn legacy_effect(x: &Effect) -> bool {
                 || legacy_quantity_expr(count)
                 || legacy_target_filter(filter)
         }
-        Effect::Seek { filter, count, .. } | Effect::SearchOutsideGame { filter, count, .. } => {
+        Effect::Seek { filter, count, .. }
+        | Effect::SearchOutsideGame { filter, count, .. }
+        | Effect::OpenBoosterPack { filter, count, .. } => {
             legacy_target_filter(filter) || legacy_quantity_expr(count)
         }
         Effect::SearchLibrary {
@@ -6034,6 +6036,7 @@ fn rw_effect(
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::CounterAll { .. }
         | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealFromHand { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::PhaseIn { .. }

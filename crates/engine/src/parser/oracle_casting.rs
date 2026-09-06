@@ -344,11 +344,11 @@ fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
     Some(option)
 }
 
-/// CR 118.9 (verified `docs/MagicCompRules.txt:1014`): "Some spells have alternative costs.
-/// An alternative cost is a cost listed in a spell's text, or applied to it from another
-/// effect, that its controller may pay rather than paying the spell's mana cost. Alternative
-/// costs are usually phrased, 'You may [action] rather than pay [this object's] mana cost,'
-/// or 'You may cast [this object] without paying its mana cost.'"
+/// CR 118.9: "Some spells have alternative costs. An alternative cost is a cost listed in a
+/// spell's text, or applied to it from another effect, that its controller may pay rather
+/// than paying the spell's mana cost. Alternative costs are usually phrased, 'You may
+/// [action] rather than pay [this object's] mana cost,' or 'You may cast [this object]
+/// without paying its mana cost.'"
 ///
 /// Parses both forms. The `"you may [verb-cost] rather than pay this spell's mana cost"`
 /// form is verb-agnostic: the cost text (with verb intact) is delegated to `parse_oracle_cost`,
@@ -1759,7 +1759,7 @@ Trample";
 
     /// Issue #3677: Flare of Denial — "sacrifice a nontoken blue creature" must
     /// keep BOTH the `NonToken` negation and the `blue creature` type/color
-    /// filter. Before the fix to `parse_type_phrase`'s color-prefix scan (which
+    /// filter. Before the fix to `parse_type_phrase_folding`'s color-prefix scan (which
     /// only ran before the `non-` negation loop), the color and creature type
     /// were silently dropped, leaving a filter that matched any nontoken
     /// permanent — including a land — as a valid alternative-cost payment.

@@ -164,6 +164,7 @@ pub mod mill;
 pub mod monstrosity;
 pub mod myriad;
 pub mod note_mana_spent;
+pub mod open_booster_pack;
 pub mod opponent_guess;
 pub mod overload;
 pub mod pair_with;
@@ -2013,7 +2014,7 @@ pub(crate) fn parent_referent_context_from_events(
         return Some(snapshot);
     }
 
-    if let Some(snapshot) = moved_object_context_from_events(events) {
+    if let Some(snapshot) = moved_object_context_from_events(state, events) {
         return Some(snapshot);
     }
 
@@ -2055,15 +2056,10 @@ fn amassed_army_context_from_events(
     // carrier; quantity resolution reads `ResolvedAbility.amassed_army_object`,
     // not the event log.
     events.iter().rev().find_map(|event| match event {
-        GameEvent::ArmyAmassed { object_id, .. } => {
-            state
-                .objects
-                .get(object_id)
-                .map(|obj| CostPaidObjectSnapshot {
-                    object_id: *object_id,
-                    lki: obj.snapshot_public_characteristics(),
-                })
-        }
+        GameEvent::ArmyAmassed { object_id, .. } => state
+            .objects
+            .get(object_id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics())),
         _ => None,
     })
 }
@@ -2086,15 +2082,10 @@ fn damaged_object_context_from_events(
         GameEvent::DamageDealt {
             target: TargetRef::Object(object_id),
             ..
-        } if seen.insert(*object_id) => {
-            state
-                .objects
-                .get(object_id)
-                .map(|obj| CostPaidObjectSnapshot {
-                    object_id: *object_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                })
-        }
+        } if seen.insert(*object_id) => state
+            .objects
+            .get(object_id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())),
         _ => None,
     });
     // CR 608.2c: single-object guard — a multi-target damage parent has no
@@ -2115,10 +2106,7 @@ fn tapped_object_context_from_events(
         GameEvent::PermanentTapped { object_id, .. } if seen.insert(*object_id) => state
             .objects
             .get(object_id)
-            .map(|obj| CostPaidObjectSnapshot {
-                object_id: *object_id,
-                lki: obj.snapshot_for_mana_spent(),
-            }),
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())),
         _ => None,
     });
     let first = tapped.next()?;
@@ -2158,7 +2146,9 @@ fn snapshot_for_sacrificed_object(
     object_id: ObjectId,
 ) -> Option<CostPaidObjectSnapshot> {
     if let Some(lki) = state.lki_cache.get(&object_id).cloned() {
-        return Some(CostPaidObjectSnapshot { object_id, lki });
+        return Some(CostPaidObjectSnapshot::capture_departed(
+            state, object_id, lki,
+        ));
     }
     events.iter().find_map(|event| match event {
         GameEvent::ZoneChanged {
@@ -2166,15 +2156,21 @@ fn snapshot_for_sacrificed_object(
             from: Some(Zone::Battlefield),
             to,
             record,
-        } if *moved_id == object_id && is_public_zone(*to) => Some(CostPaidObjectSnapshot {
-            object_id,
-            lki: lki_snapshot_from_zone_change_record(record),
-        }),
+        } if *moved_id == object_id && is_public_zone(*to) => {
+            Some(CostPaidObjectSnapshot::capture_departed(
+                state,
+                object_id,
+                lki_snapshot_from_zone_change_record(record),
+            ))
+        }
         _ => None,
     })
 }
 
-fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObjectSnapshot> {
+fn moved_object_context_from_events(
+    state: &GameState,
+    events: &[GameEvent],
+) -> Option<CostPaidObjectSnapshot> {
     let mut moved = events.iter().filter_map(|event| match event {
         GameEvent::ZoneChanged {
             object_id,
@@ -2204,10 +2200,11 @@ fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObje
             // graveyard/exile recursion.
             || (*to == Zone::Hand && is_public_zone(*from_zone)) =>
         {
-            Some(CostPaidObjectSnapshot {
-                object_id: *object_id,
-                lki: lki_snapshot_from_zone_change_record(record),
-            })
+            Some(CostPaidObjectSnapshot::capture_departed(
+                state,
+                *object_id,
+                lki_snapshot_from_zone_change_record(record),
+            ))
         }
         _ => None,
     });
@@ -2221,6 +2218,7 @@ fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObje
 /// general `ParentTarget` referent, but later "that player's" instructions may
 /// still identify the player from the move-time LKI snapshot.
 fn library_move_metadata_context_from_events(
+    state: &GameState,
     events: &[GameEvent],
 ) -> Option<CostPaidObjectSnapshot> {
     let mut moved = events.iter().filter_map(|event| match event {
@@ -2229,10 +2227,11 @@ fn library_move_metadata_context_from_events(
             from: Some(from_zone),
             to: Zone::Library,
             record,
-        } if is_public_zone(*from_zone) => Some(CostPaidObjectSnapshot {
-            object_id: *object_id,
-            lki: lki_snapshot_from_zone_change_record(record),
-        }),
+        } if is_public_zone(*from_zone) => Some(CostPaidObjectSnapshot::capture_departed(
+            state,
+            *object_id,
+            lki_snapshot_from_zone_change_record(record),
+        )),
         _ => None,
     });
     let first = moved.next()?;
@@ -2247,15 +2246,10 @@ fn stack_pushed_object_context_from_events(
     events: &[GameEvent],
 ) -> Option<CostPaidObjectSnapshot> {
     let mut pushed = events.iter().filter_map(|event| match event {
-        GameEvent::StackPushed { object_id } => {
-            state
-                .objects
-                .get(object_id)
-                .map(|obj| CostPaidObjectSnapshot {
-                    object_id: *object_id,
-                    lki: obj.snapshot_for_mana_spent(),
-                })
-        }
+        GameEvent::StackPushed { object_id } => state
+            .objects
+            .get(object_id)
+            .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())),
         _ => None,
     });
     let first = pushed.next()?;
@@ -2283,10 +2277,7 @@ fn revealed_object_context_from_events(
         return None;
     };
     let obj = state.objects.get(card_id)?;
-    let snapshot = CostPaidObjectSnapshot {
-        object_id: *card_id,
-        lki: obj.snapshot_for_mana_spent(),
-    };
+    let snapshot = CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent());
     // Second `CardsRevealed` event → ambiguous "it" → no referent.
     revealed.next().is_none().then_some(snapshot)
 }
@@ -2858,6 +2849,95 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
         TargetRef::Object(id) => Some(*id),
         TargetRef::Player(_) => None,
     })
+}
+
+/// CR 113.7a + CR 611.2a + CR 615.3: install a damage replacement created by the
+/// RESOLUTION of a spell or ability whose scope is its SOURCE rather than a
+/// recipient object.
+///
+/// The single authority for the SOURCE-SCOPED DAMAGE-SHIELD installs it owns —
+/// `prevent_damage`'s untargeted branch and player-scoped arm, and
+/// `create_damage_replacement`'s non-battlefield arm — so those cannot drift.
+///
+/// Scope of that claim, stated precisely: it is NOT the only writer to
+/// `state.pending_damage_replacements`. `add_target_replacement::resolve` still
+/// pushes raw at its `TargetFilter::None` global arm and its `TargetRef::Player`
+/// arm, and neither latches `source_controller`, so a controller-relative gate on
+/// those definitions falls back to `state.active_player` in the pending scan
+/// rather than to the installer (CR 113.8 / CR 109.5 would prefer the installer).
+/// That is PRE-EXISTING behavior, deliberately left alone by issue #8485 rather
+/// than changed late in that work, and this comment is its only record. Routing
+/// those two arms through this authority is the clean end state.
+///
+/// CR 113.7a: "Once activated or triggered, an ability exists on the stack
+/// independently of its source. Destruction or removal of the source after that
+/// time won't affect the ability." Hosting such a shield on the SOURCE permanent
+/// (which the pre-#8485 code did whenever the source happened to be a
+/// battlefield object) makes its lifetime an accident of the SOURCE'S ZONE
+/// rather than of the effect's stated duration (CR 611.2a), and subjects it to
+/// the CR 702.26b phased-out gate in `functioning_abilities::active_replacements`
+/// even though the effect is not the source's ability any more.
+///
+/// The floating registry is the engine's home for exactly this: it is not
+/// touched by the CR 613.1 layer reset, is not zone-gated, is mutated in place
+/// by the prevention appliers (all three of which dispatch on the `ObjectId(0)`
+/// sentinel), and is pruned on schedule by all three windows (`turns.rs`:
+/// cleanup, end-of-combat teardown, untap step) -- CR 615.3, "until they're used
+/// up or their duration has expired".
+///
+/// `anchor_zones` is the CALLER'S OWN pre-existing object-hosting zone set --
+/// the zones in which that caller stored the shield on its source before this
+/// authority existed. It is a caller parameter and not a constant because the
+/// two pre-existing forks disagree: `prevent_damage::resolve`'s untargeted
+/// branch tested `Zone::Battlefield` alone while `push_player_scoped_shield`
+/// tested `Zone::Battlefield | Zone::Command`. Handing each caller its own set
+/// is what makes the ANCHORED population exactly the population that caller
+/// newly moves, and leaves every shield that was ALREADY in the registry
+/// carrying `source_object: None` and today's sentinel semantics -- including an
+/// untargeted shield sourced from a Command-zone emblem. A single hardcoded
+/// `Battlefield | Command` test would newly anchor that emblem case and flip
+/// `SourceExclusion::Exclude`, `DamageTargetPlayerScope::SourceChosenPlayer`
+/// and every host-reading `ReplacementCondition` from inert to evaluated.
+/// The SHAPE mirrors the object scan's own `zones_to_scan`
+/// (`replacement.rs`) -- a zone set, checked with `contains`. That is a
+/// shape precedent only: `zones_to_scan` is a hardcoded local with no callers,
+/// so it is not itself an instance of per-caller parameterization. An EMPTY
+/// slice means "anchor nothing", which is correct for a caller that is only
+/// being refactored onto the authority and moves no shield at all.
+pub(crate) fn install_floating_damage_replacement(
+    state: &mut GameState,
+    mut shield: crate::types::ability::ReplacementDefinition,
+    controller: PlayerId,
+    source_id: ObjectId,
+    anchor_zones: &[Zone],
+) {
+    // CR 113.8 + CR 109.5: "The controller of an activated ability on the stack is
+    // the player who activated it"; CR 109.5's "you"/"your" clause says the same
+    // for an activated ability. Latch the installing controller so a
+    // controller-relative filter or condition resolves under the sentinel host,
+    // which per CR 109.4 has no controller of its own.
+    if shield.source_controller.is_none() {
+        shield.source_controller = Some(controller);
+    }
+    // CR 113.7a: anchor the host ONLY for a source that was actually
+    // hosting the shield before this authority existed -- i.e. an object in THIS
+    // CALLER'S `anchor_zones`. The two callers do not agree on that set (see the
+    // doc comment), so it must not be hardcoded here. A shield created by a
+    // resolving instant/sorcery never had a host, and neither did any shield this
+    // caller was ALREADY routing to the registry -- for `prevent_damage::resolve`'s
+    // untargeted branch that includes a Command-zone (emblem) source, which its
+    // `Battlefield`-only fork already sent here. Leaving all of those `None`
+    // reproduces today's sentinel semantics byte-for-byte for the entire
+    // pre-existing registry population.
+    if shield.source_object.is_none()
+        && state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| anchor_zones.contains(&obj.zone))
+    {
+        shield.source_object = Some(source_id);
+    }
+    state.pending_damage_replacements.push(shield);
 }
 
 enum OneSidedFightSubject {
@@ -4014,6 +4094,64 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
             // operation result and propagates that boolean to its printed tail.
             | Effect::CompletePlayerAction { .. }
     )
+}
+
+/// CR 608.2c: the resolver's own verdict on whether its instruction was
+/// actually performed, for the effect classes that can resolve as a legitimate
+/// no-op while a printed tail gates on the outcome.
+///
+/// `None` means "this effect publishes no verdict" — the inherited flag is left
+/// exactly as the accept latch (`resolve_optional_effect_decision`) or the
+/// mandatory-rider seed set it. `Some(v)` is the resolver's answer and
+/// overrides both.
+///
+/// ADMISSION CONTRACT — a new member must satisfy all three:
+///   1. Its resolver emits a discriminating event (or exposes an exact
+///      one-hop result) that is present on success and absent on every no-op
+///      return. A verdict re-derived from post-resolution game state is not
+///      admissible; the state has already moved.
+///   2. It never parks a `WaitingFor` or stashes a continuation. This hook runs
+///      while the parent's event slice is closed, so an effect that suspends
+///      would be judged against an empty slice and wrongly downgraded — and a
+///      parked `ResolutionFrame::AbilityContinuation` would additionally be
+///      re-stamped `true` by `resolve_optional_effect_decision`'s post-chain
+///      continuation writer, silently defeating this verdict. Both current
+///      members are synchronous and self-completing.
+///   3. Its verdict is chain-local — `set_optional_effect_performed_recursive`
+///      stamps the whole local chain including grandchildren, which is correct
+///      only when every gate below belongs to THIS instruction (Volatile
+///      Stormdrake's two-level "If you do ... then ..." is the pinned case).
+fn resolver_performed_outcome(
+    ability: &ResolvedAbility,
+    effect_events: &[GameEvent],
+) -> Option<bool> {
+    match &ability.effect {
+        // CR 608.2c: derives success from its exact one-hop operation result.
+        // A count/cause mismatch is a resolved no-op and keeps `WhenYouDo` /
+        // `IfYouDo` descendants false. (Moved verbatim from the inline block
+        // this authority replaces — behaviour is unchanged.)
+        Effect::CompletePlayerAction { .. } => Some(complete_player_action::succeeded(ability)),
+        // CR 701.12a + CR 701.12b: the exchange may resolve without exchanging
+        // anything. Delegates to the single event-keyed authority rather than
+        // re-deriving — `mandatory_parent_effect_performed`'s
+        // `Effect::ExchangeControl` arm is the one place that mapping lives.
+        //
+        // This is what the MANDATORY-rider seed below cannot supply: the seed is
+        // guarded on `!ability.optional && !ability.context.optional_effect_performed`,
+        // so an OPTIONAL exchange that the controller ACCEPTED arrives here with
+        // `optional` already lowered and the flag already latched true by
+        // `resolve_optional_effect_decision`, and nothing downstream ever lowers
+        // it. Perplexing Chimera's "If you do, you may choose new targets for the
+        // spell" therefore offered a free retarget of an opponent's spell after an
+        // exchange that CR 701.12a had refused, and Arteeoh, Dread Scavenger's
+        // reflexive "When you do" created a token after an exchange CR 701.12b had
+        // refused.
+        Effect::ExchangeControl { .. } => Some(mandatory_parent_effect_performed(
+            &ability.effect,
+            effect_events,
+        )),
+        _ => None,
+    }
 }
 
 fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
@@ -5372,6 +5510,7 @@ pub fn resolve_effect(
         Effect::FlipPermanent { .. } => flip_permanent::resolve(state, ability, events),
         Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
         Effect::SearchOutsideGame { .. } => search_outside_game::resolve(state, ability, events),
+        Effect::OpenBoosterPack { .. } => open_booster_pack::resolve(state, ability, events),
         Effect::Seek { .. } => seek::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::RevealFromHand { .. } => reveal_from_hand::resolve(state, ability, events),
@@ -6853,6 +6992,29 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
                 } | GameEvent::ControllerChanged { .. }
             )
         }),
+        // CR 701.12a + CR 701.12b + CR 608.2c: an exchange whose subjects can't both
+        // be bound, aren't both in an exchangeable zone (CR 109.4 — battlefield or
+        // stack), or already share a controller resolves and exchanges NOTHING.
+        // `exchange_control::resolve` emits `ControllerChanged` only when control
+        // actually moved, so the event is the authoritative "the exchange happened"
+        // signal. Without this arm the effect fell into the `_ => true` default, which
+        // claimed the exchange always happened: Perplexing Chimera's "If you do, you
+        // may choose new targets for the spell" offered a free retarget of an
+        // opponent's spell after an exchange CR 701.12a had refused, and Gilded
+        // Drake's "If you don't or can't make an exchange, sacrifice this creature"
+        // was suppressed on a CR 701.12b no-op.
+        //
+        // DO NOT also add `Effect::ExchangeControl` to `effect_manages_own_outcome_flag`
+        // as a "restore the segregation invariant" tidy-up. Arteeoh, Dread Scavenger's
+        // reflexive "When you do" is suppressed ONLY by
+        // `when_you_do_mandatory_parent_did_nothing`, which requires
+        // `!effect_manages_own_outcome_flag(&parent.effect)`. Enrolling ExchangeControl
+        // there would silently un-suppress it — pinned by the assertion in this file's
+        // test module and, end to end, by the Arteeoh row in
+        // `tests/integration/exchange_control_of_a_spell.rs`.
+        Effect::ExchangeControl { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ControllerChanged { .. })),
         // CR 708.7 + CR 608.2c: A resolving "turn this creature face up" (Etrata,
         // Deadly Fugitive's granted ability) "did anything" iff a permanent
         // actually became face up. `turn_face_up::resolve` emits `TurnedFaceUp`
@@ -10027,6 +10189,40 @@ fn perform_player_scope_sacrifices(
             }
         }
     }
+    // CR 118.12 + CR 608.2c + CR 609.3: "Sacrifice a creature. If you do, [rider]." — seed
+    // the performed-flag for a sacrifice that completed through the INTERACTIVE
+    // `EffectZoneChoice` path (Victimize, #7898).
+    //
+    // The mandatory-rider seed in `resolve_ability_with_events` decides the flag
+    // by scanning the LOCAL event slice for `PermanentSacrificed`. That works for
+    // the auto path (`sacrifice.rs`: `!up_to && eligible.len() <= count`), which
+    // sacrifices inline. But when the controller has more eligible creatures than
+    // the sacrifice needs, the resolver instead parks on
+    // `WaitingFor::EffectZoneChoice` and returns BEFORE anything is sacrificed —
+    // so that slice holds no `PermanentSacrificed` when the seed evaluates, the
+    // flag stays false, and the rider is silently skipped. In a real game that is
+    // the ordinary case (any caster controlling 2+ creatures), which made
+    // Victimize return nothing at all.
+    //
+    // The sacrifice is only actually known to have happened HERE, at the
+    // completion seam the resumed choice runs through, so the flag must be
+    // stamped onto the stashed continuation frame the same way
+    // `resolve_optional_effect_decision` (accepted "you may") and
+    // `finalize_discard_choice_completion` (an answered discard choice) do.
+    //
+    // Guarded on the completion LEDGER, not on the fact that the seam ran: a
+    // declined / empty selection sacrifices nothing, and CR 118.12 makes the
+    // dependent clause do nothing unless the preceding action occurred. This is
+    // deliberately independent of `cost_payment_failed_flag`, which the rider's
+    // own gate still checks separately.
+    if completion.propagate_parent_context && !completion.sacrificed.is_empty() {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame
+                .pending
+                .chain
+                .set_optional_effect_performed_recursive(true);
+        }
+    }
     if completion.propagate_parent_context {
         if let Some(snapshot) =
             parent_referent_context_from_events(state, &events[events_before_sacrifice..]).or_else(
@@ -10827,10 +11023,11 @@ fn stamp_discovered_referent_onto_continuation(state: &mut GameState) {
         } => *hit_card,
         _ => return,
     };
-    let Some(snapshot) = state.objects.get(&hit).map(|obj| CostPaidObjectSnapshot {
-        object_id: hit,
-        lki: obj.snapshot_public_characteristics(),
-    }) else {
+    let Some(snapshot) = state
+        .objects
+        .get(&hit)
+        .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_public_characteristics()))
+    else {
         return;
     };
     if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -10873,6 +11070,9 @@ pub fn resolve_ability_chain(
         // every instruction, and a new top-level resolution cannot inherit a
         // prior resolution's "that kind" if no such instruction is reached.
         state.chosen_counter_kind_this_resolution = None;
+        // CR 608.2d: same reasoning, one axis over — a new top-level
+        // resolution cannot inherit a prior resolution's announced colour.
+        state.chosen_color_this_resolution = None;
         // CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
         // `apply_parent_chain_context` already consumes this at the very next
         // parent->child hand-off after a Dig/ChooseFromZone/RevealHand sets
@@ -11292,10 +11492,10 @@ fn resolve_chain_body(
                 .copied()
                 .find(|id| state.objects.get(id).map(|obj| obj.owner) == Some(*pid));
             let own_snapshot = own_id.and_then(|id| {
-                state.objects.get(&id).map(|obj| CostPaidObjectSnapshot {
-                    object_id: id,
-                    lki: obj.snapshot_for_mana_spent(),
-                })
+                state
+                    .objects
+                    .get(&id)
+                    .map(|obj| CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent()))
             });
             let mut sub = sub_template.as_ref().clone();
             // The directed life loss reads the `Player` target; the put reads the
@@ -12650,10 +12850,10 @@ fn resolve_chain_body(
                             *target = TargetFilter::SpecificObject { id: legal[0] };
                             if let Some(object) = state.objects.get(&legal[0]) {
                                 bound.set_effect_context_object_recursive(
-                                    crate::types::ability::CostPaidObjectSnapshot {
-                                        object_id: legal[0],
-                                        lki: object.snapshot_for_mana_spent(),
-                                    },
+                                    crate::types::ability::CostPaidObjectSnapshot::capture(
+                                        object,
+                                        object.snapshot_for_mana_spent(),
+                                    ),
                                 );
                             }
                         } else {
@@ -13188,18 +13388,46 @@ fn resolve_chain_body(
         }
     }
 
-    // CR 608.2c: Normalize the actual completion outcome before the printed
-    // tail is evaluated. A count/cause mismatch remains a resolved no-op and
-    // therefore keeps `WhenYouDo` / `IfYouDo` descendants false.
-    let completion_outcome_owned;
-    let ability = if matches!(ability.effect, Effect::CompletePlayerAction { .. }) {
-        let mut owned = ability.clone();
-        owned.set_optional_effect_performed_recursive(complete_player_action::succeeded(ability));
-        completion_outcome_owned = owned;
-        &completion_outcome_owned
-    } else {
-        ability
-    };
+    // CR 608.2c: Normalize the actual outcome before the printed tail is
+    // evaluated. An effect that resolved as a no-op keeps `WhenYouDo` /
+    // `IfYouDo` descendants false and lets `Not(IfYouDo)` descendants fire,
+    // whether the parent was mandatory or an accepted "you may".
+    //
+    // RELATIONSHIP TO THE MANDATORY-RIDER SEED BELOW (per-conjunct; the two are
+    // NOT equivalent and every difference is deliberate):
+    //   * `!ability.optional` / `!...optional_effect_performed` — this block
+    //     omits both ON PURPOSE. The accept path arrives with `optional` lowered
+    //     and the flag latched true; that is exactly the case the seed cannot
+    //     reach.
+    //   * `!state.cost_payment_failed_flag` — omitted, and provably neutral: the
+    //     `IfYouDo` consumer already ANDs that flag, so both polarities of the
+    //     verdict produce identical results at every consumer.
+    //   * `!effect_manages_own_outcome_flag(&effect)` — no divergence;
+    //     `ExchangeControl` is absent from that set (and must stay absent, see
+    //     `mandatory_parent_effect_performed`'s arm).
+    //   * `sub.sub_link == SequentialSibling` and the condition shape — omitted;
+    //     `set_optional_effect_performed_recursive` stamps EVERY `sub_ability` /
+    //     `else_ability` descendant of the parent, transitively. For an
+    //     `ExchangeControl` parent that set is small and enumerable from
+    //     `card-data.json`: most of those descendants carry no outcome-reading
+    //     condition at all, so the stamp is inert on them; the rest already gate
+    //     on the outcome, and reaching the ones the seed's `SequentialSibling`
+    //     and condition-shape conjuncts excluded (a `ContinuationStep`
+    //     grandchild, and a `WhenYouDo` node — `condition_depends_on_effect_performed`
+    //     returns false for `WhenYouDo`) is the intended fix, not a side effect.
+    //     The stamp is in any case largely redundant with
+    //     `apply_parent_chain_context`, which re-clones the parent's whole
+    //     context onto each child at every hand-off.
+    let performed_outcome_owned;
+    let ability =
+        if let Some(performed) = resolver_performed_outcome(ability, &events[events_before..]) {
+            let mut owned = ability.clone();
+            owned.set_optional_effect_performed_recursive(performed);
+            performed_outcome_owned = owned;
+            &performed_outcome_owned
+        } else {
+            ability
+        };
 
     // CR 603.7: Record the objects affected by this effect as a tracked set so
     // downstream sub-abilities can resolve "this way" references (pronouns,
@@ -13321,7 +13549,7 @@ fn resolve_chain_body(
                     effect_refs_parent_target_metadata(&sub.effect)
                         && !effect_requires_parent_target_object(&sub.effect)
                 })
-                .then(|| library_move_metadata_context_from_events(effect_events))
+                .then(|| library_move_metadata_context_from_events(state, effect_events))
                 .flatten()
         });
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
@@ -15594,8 +15822,7 @@ pub(crate) fn evaluate_condition(
             if let Some(snapshot) = &ability.cost_paid_object {
                 crate::game::filter::matches_target_filter_on_cost_paid_reference(
                     state,
-                    snapshot.object_id,
-                    &snapshot.lki,
+                    snapshot,
                     filter,
                     &crate::game::filter::FilterContext::from_ability(ability),
                 )
@@ -32834,6 +33061,291 @@ mod tests {
             !mandatory_parent_effect_performed(&give, &not_transferred),
             "GiveControl that failed must not seed the if-they-do rider"
         );
+    }
+
+    /// The `ExchangeControl` shape both of the rows below judge: Gilded Drake's
+    /// "exchange control of this creature and up to one target creature an
+    /// opponent controls".
+    fn exchange_control_effect() -> Effect {
+        Effect::ExchangeControl {
+            target_a: TargetFilter::SelfRef,
+            target_b: TargetFilter::Typed(TypedFilter::creature()),
+        }
+    }
+
+    /// CR 701.12a + CR 701.12b + CR 608.2c: an exchange counts as "performed"
+    /// iff control actually moved, and the only witness of that is
+    /// `ControllerChanged`. Pre-fix `Effect::ExchangeControl` fell into the
+    /// `_ => true` default, which claimed every resolution exchanged something.
+    ///
+    /// NOTE the negative slice: it is the event trail the resolver ACTUALLY
+    /// emits on a no-op (a lone `EffectResolved { ExchangeControl }`), not an
+    /// empty slice. An empty slice is never produced in production, and using
+    /// one would let a regression that keys on `EffectResolved` — the exact
+    /// defect that makes the `GiveControl` arm above vacuous — pass here.
+    #[test]
+    fn exchange_control_performed_tracks_controller_changed_event() {
+        let exchange = exchange_control_effect();
+
+        let exchanged = [
+            GameEvent::ControllerChanged {
+                object_id: ObjectId(1),
+                old_controller: PlayerId(0),
+                new_controller: PlayerId(1),
+            },
+            GameEvent::ControllerChanged {
+                object_id: ObjectId(2),
+                old_controller: PlayerId(1),
+                new_controller: PlayerId(0),
+            },
+            GameEvent::EffectResolved {
+                kind: EffectKind::ExchangeControl,
+                source_id: ObjectId(1),
+                subject: None,
+            },
+        ];
+        assert!(
+            mandatory_parent_effect_performed(&exchange, &exchanged),
+            "an exchange that moved control is 'performed'"
+        );
+
+        // CR 701.12a / CR 701.12b: every reachable no-op return in
+        // `exchange_control::resolve` emits exactly this and nothing else.
+        let not_exchanged = [GameEvent::EffectResolved {
+            kind: EffectKind::ExchangeControl,
+            source_id: ObjectId(1),
+            subject: None,
+        }];
+        assert!(
+            !mandatory_parent_effect_performed(&exchange, &not_exchanged),
+            "an exchange that exchanged nothing must NOT be 'performed' — Gilded Drake's \
+             \"if you don't or can't make an exchange, sacrifice this creature\" rider \
+             depends on this answering no"
+        );
+    }
+
+    /// CR 603.12 + CR 608.2c: Arteeoh, Dread Scavenger's reflexive "When you do,
+    /// create a token ..." under "you may exchange control of two other target
+    /// artifacts".
+    ///
+    /// `when_you_do_mandatory_parent_did_nothing` is the SECOND consumer of the
+    /// new `ExchangeControl` arm, and its suppression path is disjoint from the
+    /// `IfYouDo` / `Not(IfYouDo)` one: `evaluate_condition`'s `WhenYouDo` arm
+    /// reads `ability.optional && !performed`, and the accept path has already
+    /// lowered `optional` to false, so that arm returns true regardless. All
+    /// four of this predicate's conjuncts are therefore load-bearing, and this
+    /// row pins each of them.
+    ///
+    /// The parent is shaped as it arrives POST-ACCEPT: `optional` lowered by
+    /// `resolve_optional_effect_decision`, and `context.optional_effect_performed`
+    /// lowered by the resolver-verdict block in `resolve_ability_chain`.
+    #[test]
+    fn when_you_do_is_suppressed_for_an_exchange_that_exchanged_nothing() {
+        let mut parent = ResolvedAbility::new(
+            exchange_control_effect(),
+            vec![TargetRef::Object(ObjectId(2))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        parent.optional = false;
+        parent.context.optional_effect_performed = false;
+
+        let no_op = [GameEvent::EffectResolved {
+            kind: EffectKind::ExchangeControl,
+            source_id: ObjectId(1),
+            subject: None,
+        }];
+        let exchanged = [GameEvent::ControllerChanged {
+            object_id: ObjectId(2),
+            old_controller: PlayerId(1),
+            new_controller: PlayerId(0),
+        }];
+
+        // (1) The fix: a CR 701.12b no-op suppresses the reflexive trigger.
+        assert!(
+            when_you_do_mandatory_parent_did_nothing(&AbilityCondition::WhenYouDo, &parent, &no_op),
+            "an exchange that exchanged nothing must suppress its reflexive \"When you do\""
+        );
+
+        // (2) PAIRED POSITIVE REACH GUARD: a real exchange must NOT be
+        // suppressed, or the fix would simply delete Arteeoh's token.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &AbilityCondition::WhenYouDo,
+                &parent,
+                &exchanged
+            ),
+            "a completed exchange must still fire its reflexive \"When you do\""
+        );
+
+        // (3) HOSTILE SIBLING: the flag lowering is what unlocks suppression.
+        // Without the resolver-verdict block in `resolve_ability_chain`, the
+        // accept latch leaves this true and nothing downstream lowers it.
+        let mut latched = parent.clone();
+        latched.context.optional_effect_performed = true;
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &AbilityCondition::WhenYouDo,
+                &latched,
+                &no_op
+            ),
+            "a latched performed-flag defeats suppression — the walker's verdict block \
+             lowering it is a precondition of this fix, not an incidental detail"
+        );
+
+        // (4) HOSTILE SIBLING: the predicate is scoped to `WhenYouDo`. An
+        // `EffectOutcome { OptionalEffectPerformed }` gate (Perplexing Chimera's
+        // "If you do") is suppressed by `evaluate_condition` instead, not here.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                },
+                &parent,
+                &no_op
+            ),
+            "only `WhenYouDo` is routed through this predicate"
+        );
+
+        // (5) REGRESSION PIN for a load-bearing EXCLUSION. Enrolling
+        // `Effect::ExchangeControl` in `effect_manages_own_outcome_flag` as a
+        // \"restore the segregation invariant\" tidy-up would make conjunct 4 of
+        // this predicate false and silently un-suppress Arteeoh. Fail here
+        // instead.
+        assert!(
+            !effect_manages_own_outcome_flag(&exchange_control_effect()),
+            "ExchangeControl must NOT manage its own outcome flag — \
+             `when_you_do_mandatory_parent_did_nothing` requires the exclusion"
+        );
+    }
+
+    /// CR 608.2c: Volatile Stormdrake's TWO-LEVEL "If you do ... then ..." —
+    /// "exchange control of this creature and target creature an opponent
+    /// controls. If you do, you get {E}{E}{E}{E}, then sacrifice that creature
+    /// unless you pay ...".
+    ///
+    /// The verdict binds two gate nodes at DIFFERENT chain depths and different
+    /// `sub_link`s. The grandchild's link is `ContinuationStep` (its
+    /// `card-data.json` node carries no `sub_link` key, so it deserialises to
+    /// the `#[default]`), which the mandatory-rider seed's
+    /// `sub_link == SequentialSibling` conjunct excludes outright — reaching it
+    /// is exactly what `set_optional_effect_performed_recursive` buys, and a
+    /// non-recursive stamp would fix the child while leaving the grandchild
+    /// firing after an exchange that never happened.
+    ///
+    /// Unit-level by measurement, not by convenience: this card's trigger
+    /// carries a node-level `unless_pay`, so the ability parks on
+    /// `WaitingFor::UnlessPayment` before `ExchangeControl` ever resolves and
+    /// no end-to-end fixture can reach the gate. The widening itself lives at
+    /// this level, which is where it is pinned.
+    #[test]
+    fn an_exchange_verdict_binds_both_levels_of_a_two_level_if_you_do() {
+        let state = GameState::new_two_player(42);
+
+        let build = || {
+            let mut grandchild = ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: TargetFilter::TriggeringSource,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            grandchild.condition = Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            });
+            grandchild.sub_link = SubAbilityLink::ContinuationStep;
+
+            let mut child = ResolvedAbility::new(
+                Effect::GainEnergy {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            child.condition = Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            });
+            child.sub_link = SubAbilityLink::SequentialSibling;
+            child.sub_ability = Some(Box::new(grandchild));
+
+            let mut parent = ResolvedAbility::new(
+                Effect::ExchangeControl {
+                    target_a: TargetFilter::SelfRef,
+                    target_b: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(ObjectId(2))],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            parent.sub_ability = Some(Box::new(child));
+            // Post-accept shape: `resolve_optional_effect_decision` lowered
+            // `optional` and latched the flag true before the chain ran.
+            parent.optional = false;
+            parent.context.optional_effect_performed = true;
+            parent
+        };
+
+        let gate = AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        };
+        let read_gates = |parent: &ResolvedAbility| {
+            let child = parent.sub_ability.as_deref().expect("child");
+            let grandchild = child.sub_ability.as_deref().expect("grandchild");
+            (
+                evaluate_condition(&gate, &state, child),
+                evaluate_condition(&gate, &state, grandchild),
+            )
+        };
+
+        // CR 701.12a / CR 701.12b: the resolver's no-op trail.
+        let no_op = [GameEvent::EffectResolved {
+            kind: EffectKind::ExchangeControl,
+            source_id: ObjectId(1),
+            subject: None,
+        }];
+        let mut failed = build();
+        let verdict = resolver_performed_outcome(&failed, &no_op)
+            .expect("ExchangeControl is enrolled in the resolver-verdict authority");
+        assert!(
+            !verdict,
+            "an exchange that exchanged nothing is not performed"
+        );
+        failed.set_optional_effect_performed_recursive(verdict);
+        assert_eq!(
+            read_gates(&failed),
+            (false, false),
+            "BOTH levels must go false — the SequentialSibling child AND the \
+             ContinuationStep grandchild the mandatory-rider seed cannot reach"
+        );
+
+        // PAIRED POSITIVE REACH GUARD: a completed exchange leaves both gates
+        // true, so the row cannot pass by suppressing everything.
+        let success = [GameEvent::ControllerChanged {
+            object_id: ObjectId(2),
+            old_controller: PlayerId(1),
+            new_controller: PlayerId(0),
+        }];
+        let mut performed = build();
+        let verdict = resolver_performed_outcome(&performed, &success)
+            .expect("ExchangeControl is enrolled in the resolver-verdict authority");
+        assert!(verdict, "an exchange that moved control IS performed");
+        performed.set_optional_effect_performed_recursive(verdict);
+        assert_eq!(read_gates(&performed), (true, true));
+
+        // HOSTILE SIBLING: an unenrolled effect publishes no verdict at all, so
+        // the inherited flag is left exactly as the accept latch set it. A bare
+        // `bool` return would have stamped `false` here and silently broken
+        // every "you may draw a card. If you do, ..." in the engine.
+        let mut unenrolled = build();
+        unenrolled.effect = Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        };
+        assert_eq!(resolver_performed_outcome(&unenrolled, &no_op), None);
     }
 
     /// CR 702.131b + CR 702.131d (#2873): Ocelot Pride's race. The parent

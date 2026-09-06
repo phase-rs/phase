@@ -21,13 +21,21 @@ use crate::types::game_state::GameState;
 /// future whole-corpus mechanic. Never special-case a card.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub enum FullDbReason {
-    /// CR 707.2 + CR 202.3: Momir seeds its random-token pool from the ENTIRE
-    /// creature corpus, keyed by mana value, at rehydrate (printed_cards.rs:1334;
-    /// `momir_pool_faces` is `#[serde(skip)]`). The emblem creates a token that's
-    /// a copy (CR 707.2) of a random creature card with the chosen mana value
-    /// (CR 202.3). A subset DB yields a tiny, wrong pool, so Momir games use the
-    /// full DB on AI workers.
+    /// CR 707.2 + CR 202.3: the Momir emblem creates a token that's a copy
+    /// (CR 707.2) of a random creature card with the chosen mana value
+    /// (CR 202.3), drawn at RESOLUTION time from the whole creature corpus via
+    /// `GameState::card_db` (`create_token_copy_from_pool`). The candidate set
+    /// is therefore whatever database the resolving engine has loaded: a subset
+    /// DB silently narrows it to the handful of cards this game's decks
+    /// reference, so Momir games must give AI workers the full DB.
     Momir,
+    /// CR 400.11 + CR 400.11b: `Effect::OpenBoosterPack` stocks its shelf from
+    /// the ENTIRE printed corpus at rehydrate (`game::boosters::build_shelf`),
+    /// because a pack may contain any card from any set. A subset DB carries
+    /// only this game's cards, so no set could fill a pack and the shelf would
+    /// come back empty — an AI worker would then simulate every booster open as
+    /// doing nothing. Games that can open a pack use the full DB.
+    BoosterPack,
 }
 
 /// Result of building an AI-worker card subset for one game. `Full` means the
@@ -47,6 +55,12 @@ pub fn game_requires_full_card_db(state: &GameState) -> Option<FullDbReason> {
         GameFormat::Momir => Some(FullDbReason::Momir),
         _ => None,
     }
+    // CR 400.11b: see `FullDbReason::BoosterPack`. Checked after the format
+    // gate so a Momir game keeps reporting the reason it escalated for. A
+    // stocked shelf is the db-free signal that this game can open a pack: it is
+    // populated at rehydrate, on the main worker that holds the full database,
+    // exactly when `boosters::game_opens_booster_packs` holds.
+    .or_else(|| (!state.booster_shelf.is_empty()).then_some(FullDbReason::BoosterPack))
 }
 
 /// Every card-face name an AI worker could need for THIS game: every object's

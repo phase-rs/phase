@@ -563,8 +563,8 @@ pub fn parse_counter_type_typed(input: &str) -> OracleResult<'_, CounterType> {
 /// a real counter type before classifying a disjunctive list as a counter
 /// choice.
 ///
-/// CR 122.1b: keyword counters (docs/MagicCompRules.txt:1180).
-/// CR 122.1: named counters (docs/MagicCompRules.txt:1176).
+/// CR 122.1b: keyword counters.
+/// CR 122.1: named counters.
 pub(crate) fn parse_strict_counter_type(input: &str) -> OracleResult<'_, CounterType> {
     alt((
         map(parse_pt_modifier, |(power, toughness)| {

@@ -11,7 +11,10 @@ use engine::types::player::PlayerId;
 use rand::Rng;
 use tracing::{info, warn};
 
+use seat_reducer::types::DeckChoice;
+
 use crate::deck_resolve;
+use crate::deck_resolve::deck_data_from_payload;
 use crate::persist::{PersistedDraftSession, PersistedLobbyMeta};
 use crate::protocol::DeckData;
 use crate::reconnect::ReconnectManager;
@@ -55,6 +58,28 @@ impl DraftSession {
     /// Returns true if all seats are claimed.
     pub fn is_full(&self) -> bool {
         self.player_tokens.iter().all(|t| !t.is_empty())
+    }
+
+    /// Resolve a draft seat to its current spawned game and corresponding
+    /// player seat in that two-player game.
+    pub fn active_match_for_seat(&self, seat: usize) -> Option<(&DraftPairing, &str, PlayerId)> {
+        if self.session.status != DraftStatus::MatchInProgress {
+            return None;
+        }
+
+        let draft_player = PlayerId(u8::try_from(seat).ok()?);
+        let pairing = self.session.pairings.iter().find(|pairing| {
+            pairing.round == self.session.current_round
+                && pairing.status != PairingStatus::Complete
+                && pairing.players.contains(&draft_player)
+        })?;
+        let game_player = pairing
+            .players
+            .iter()
+            .position(|player| *player == draft_player)?;
+        let game_code = self.active_matches.get(&pairing.match_id)?;
+
+        Some((pairing, game_code, PlayerId(game_player as u8)))
     }
 
     /// Create a serializable snapshot for disk persistence.
@@ -558,7 +583,7 @@ impl DraftSessionManager {
         &mut self,
         draft_code: &str,
         game_mgr: &mut SessionManager,
-        db: &engine::database::CardDatabase,
+        db: &std::sync::Arc<engine::database::CardDatabase>,
         round: u8,
     ) -> Result<Vec<DraftMatchSpawn>, String> {
         let session = self
@@ -623,15 +648,26 @@ impl DraftSessionManager {
                 .cloned()
                 .unwrap_or_else(|| format!("Player {}", seat1));
 
-            let (game_code, token0) = game_mgr.create_game_n_players(
+            // A draft deck arrives already resolved, so each seat's provenance
+            // is recovered from its payload against the same database.
+            let choice0 = DeckChoice::DeckList(Box::new(deck_data_from_payload(db, &decks[0])));
+            let choice1 = DeckChoice::DeckList(Box::new(deck_data_from_payload(db, &decks[1])));
+            let (game_code, _token0) = game_mgr.create_game_n_players(
                 decks[0].clone(),
+                Some(choice0),
                 name0,
                 None,
                 2,
                 match_config,
                 Some(format_config.clone()),
             )?;
-            let (token1, _) = game_mgr.join_game_with_name(&game_code, decks[1].clone(), name1)?;
+            let (_token1, _) = game_mgr.join_game_with_name_and_reservation(
+                &game_code,
+                decks[1].clone(),
+                Some(choice1),
+                name1,
+                None,
+            )?;
 
             game_mgr
                 .sessions
@@ -650,12 +686,10 @@ impl DraftSessionManager {
                 game_code,
                 player_a: DraftMatchPlayer {
                     draft_seat: pairing.players[0].0,
-                    game_token: token0,
                     game_player: PlayerId(0),
                 },
                 player_b: DraftMatchPlayer {
                     draft_seat: pairing.players[1].0,
-                    game_token: token1,
                     game_player: PlayerId(1),
                 },
                 opponent_names: [
@@ -712,7 +746,6 @@ pub struct DraftMatchSpawn {
 #[derive(Debug, Clone)]
 pub struct DraftMatchPlayer {
     pub draft_seat: u8,
-    pub game_token: String,
     pub game_player: PlayerId,
 }
 
@@ -1266,6 +1299,46 @@ mod tests {
     }
 
     #[test]
+    fn active_match_for_seat_uses_the_current_round_pairing_order() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.session.status = DraftStatus::MatchInProgress;
+        session.session.current_round = 2;
+        session.session.pairings.extend([
+            DraftPairing {
+                round: 1,
+                table: 0,
+                players: [PlayerId(0), PlayerId(4)],
+                match_id: "r1-t0".to_string(),
+                status: PairingStatus::Pending,
+                winner: None,
+            },
+            DraftPairing {
+                round: 2,
+                table: 0,
+                players: [PlayerId(4), PlayerId(0)],
+                match_id: "r2-t0".to_string(),
+                status: PairingStatus::Pending,
+                winner: None,
+            },
+        ]);
+        session
+            .active_matches
+            .insert("r1-t0".to_string(), "OLD001".to_string());
+        session
+            .active_matches
+            .insert("r2-t0".to_string(), "GAME02".to_string());
+
+        let (pairing, game_code, game_player) = session
+            .active_match_for_seat(0)
+            .expect("seat zero has a current match");
+        assert_eq!(pairing.match_id, "r2-t0");
+        assert_eq!(game_code, "GAME02");
+        assert_eq!(game_player, PlayerId(1));
+    }
+
+    #[test]
     fn spawn_match_games_skips_pairing_without_submitted_decks() {
         let mut draft_mgr = DraftSessionManager::new();
         let (code, _host_token, _) = draft_mgr.create_draft(test_config(), "Alice".to_string());
@@ -1290,7 +1363,12 @@ mod tests {
 
         let mut game_mgr = SessionManager::new();
         let spawns = draft_mgr
-            .spawn_match_games_for_round(&code, &mut game_mgr, &CardDatabase::default(), 1)
+            .spawn_match_games_for_round(
+                &code,
+                &mut game_mgr,
+                &std::sync::Arc::new(CardDatabase::default()),
+                1,
+            )
             .expect("missing deck submissions should skip only the incomplete pairing");
 
         assert!(spawns.is_empty());

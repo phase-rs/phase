@@ -186,6 +186,87 @@ describe("WebSocketAdapter", () => {
     expect(ws.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ConcedeMatch" }));
   });
 
+  const fullFollowUpCases = [
+    {
+      label: "StateUpdate",
+      acceptedEvent: "stateChanged",
+      frame: (fullKey?: { game_code: string; generation: number }) => ({
+        type: "StateUpdate",
+        data: {
+          state_revision: 2,
+          state: { ...createMockState(), turn_number: 2 },
+          events: [],
+          ...(fullKey ? { full_key: fullKey } : {}),
+        },
+      }),
+    },
+    {
+      label: "OpponentDisconnected",
+      acceptedEvent: "opponentDisconnected",
+      frame: (fullKey?: { game_code: string; generation: number }) => ({
+        type: "OpponentDisconnected",
+        data: { grace_seconds: 30, ...(fullKey ? { full_key: fullKey } : {}) },
+      }),
+    },
+    {
+      label: "OpponentReconnected",
+      acceptedEvent: "opponentReconnected",
+      frame: (fullKey?: { game_code: string; generation: number }) => ({
+        type: "OpponentReconnected",
+        data: fullKey ? { full_key: fullKey } : {},
+      }),
+    },
+  ];
+
+  it.each(
+    fullFollowUpCases.flatMap(({ label, acceptedEvent, frame }) => [
+      {
+        label,
+        acceptedEvent,
+        frame: frame(),
+        expectedError: "Server omitted a valid Full session identity",
+      },
+      {
+        label,
+        acceptedEvent,
+        frame: frame({ game_code: "GAME01", generation: 2 }),
+        expectedError: "Server changed the Full session identity",
+      },
+      {
+        label,
+        acceptedEvent,
+        frame: frame({ game_code: "GAME01", generation: 1 }),
+        expectedError: null,
+      },
+    ]),
+  )("fences $label by the established Full identity", ({ frame, acceptedEvent, expectedError }) => {
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "GameCreated",
+        data: {
+          game_code: "GAME01",
+          player_token: "player-token",
+          full_key: { game_code: "GAME01", generation: 1 },
+        },
+      }),
+    );
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+
+    ws.dispatchSynthetic("message", JSON.stringify(frame));
+
+    expect(listener.mock.calls.some(([event]) => event.type === acceptedEvent)).toBe(
+      expectedError === null,
+    );
+    if (expectedError) {
+      expect(listener).toHaveBeenCalledWith({ type: "error", message: expectedError });
+      expect(ws.close).toHaveBeenCalledOnce();
+    } else {
+      expect(ws.close).not.toHaveBeenCalled();
+    }
+  });
+
   it("exports only the trusted snapshot returned by the server", async () => {
     const exported = adapter.exportPersistenceState();
 

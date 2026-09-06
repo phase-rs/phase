@@ -26,6 +26,8 @@ import {
   DraftPauseReason,
 } from "../network/draftProtocol";
 import type {
+  CommanderSeatDecks,
+  DraftCommanderLaunch,
   DraftDeckPayload,
   DraftMatchBinding,
   DraftMatchDeckPayload,
@@ -147,6 +149,13 @@ export type DraftHostEvent =
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
   | { type: "matchStart"; launch: DraftMatchLaunch }
+  /**
+   * CR 903.13a: a completed Commander pod's launch into ONE shared N-seat game.
+   * The host is always pod seat 0, so this is how the HOST receives its own
+   * launch — `sendCommanderLaunches` includes the local seat in the recipient
+   * set and `sendToSeat`'s seat-0 arm turns that send into this event.
+   */
+  | { type: "commanderLaunch"; launch: DraftCommanderLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
   | { type: "roundAdvanced" }
   | { type: "timerExpired" }
@@ -1961,6 +1970,140 @@ export class P2PDraftHost {
   }
 
   /**
+   * Partition a completed Commander pod's seats into the ones a human will
+   * actually pilot and the ones the engine must.
+   *
+   * A seat is a LIVE HUMAN iff `!is_bot && connected`; everything else — a bot,
+   * or a human who dropped before the launch — is ENGINE-PILOTED. This is the
+   * single authority for that classification.
+   *
+   * `is_bot` is load bearing and `connected` alone would be wrong: the engine
+   * reports `connected` as `true` UNCONDITIONALLY for bot seats
+   * (`draft-core/src/view.rs`, `DraftSeat::Bot => true`), so a `connected`-only
+   * test classifies every bot as a live human and dispatches launches into the
+   * void.
+   *
+   * Seat 0 (the host) is always live: humans read `get_or(i, true)` over
+   * `connected_seats`, which starts all-true at pod size, and the engine's
+   * `apply_set_seat_connected` rejects bot seats — every client-side
+   * `setSeatConnected(x, false)` site is guest-keyed, so the host never flips.
+   */
+  private commanderSeatPlan(view: DraftPlayerView): {
+    liveHumanSeats: number[];
+    engineSeats: number[];
+  } {
+    const liveHumanSeats: number[] = [];
+    const engineSeats: number[] = [];
+    for (const seat of view.seats) {
+      const live = !this.isBotSeatFromView(view, seat.seat_index) && seat.connected;
+      (live ? liveHumanSeats : engineSeats).push(seat.seat_index);
+    }
+    return { liveHumanSeats, engineSeats };
+  }
+
+  /**
+   * CR 903.13a: every deck a completed Commander pod's launch needs. PURE —
+   * this sends nothing; `sendCommanderLaunches` does that from the result.
+   *
+   * The split exists so a caller can bring the game up (AI seat mutations and
+   * all) BEFORE any guest is invited into it: a guest that joins early takes
+   * the first waiting seat and the mutation then kicks it.
+   *
+   * `view` MUST be the freshest published view, read at call time rather than
+   * taken from a captured closure. There is a real stale-view window this does
+   * not close: `handleGuestDisconnect` deletes the `guestSessions` entry
+   * synchronously while the engine's `connected` flag flips only inside the
+   * detached mutation and reaches the store later still. A launch dispatched
+   * against a view captured inside that window classifies the departed seat
+   * LIVE, `sendToSeat` then silently no-ops for it (no session), the seat gets
+   * no engine pilot either, and the game never fills. Reading the view at call
+   * time is the caller's responsibility.
+   *
+   * Modelled on `dispatchMatchLaunch`: `exportDraftSession()` is called EXACTLY
+   * ONCE and threaded through, so every deck is synthesized exactly once. That
+   * invariant is why `liveSeatDecks` carries EVERY live seat's deck rather than
+   * just the engine-piloted ones — a sender holding only `hostDeck` would have
+   * to export the session a second time to resolve its other recipients.
+   *
+   * `localSeat` is a parameter, never a hardcoded 0, and its entry in
+   * `liveSeatDecks` is the SAME OBJECT as `hostDeck`.
+   *
+   * Throws when `localSeat` has no submitted deck — the existing
+   * `submittedDeckForSeat` throw, not a new error path.
+   */
+  async commanderSeatDecks(view: DraftPlayerView, localSeat: number): Promise<CommanderSeatDecks> {
+    const { liveHumanSeats, engineSeats } = this.commanderSeatPlan(view);
+    const session = await this.exportDraftSession();
+
+    // FIRST, before any other seat's deck: the local seat's missing-deck throw
+    // is the one that must surface, whatever the rest of the pod looks like.
+    const hostDeck = this.submittedDeckForSeat(session, localSeat);
+
+    const engineSeatDecks: Array<{ seat: number; deck: DraftDeckPayload }> = [];
+    for (const seat of engineSeats) {
+      engineSeatDecks.push({
+        seat,
+        deck: this.isBotSeatFromView(view, seat)
+          ? await this.botDeckForSeat(session, seat)
+          : this.submittedDeckForSeat(session, seat),
+      });
+    }
+
+    const liveSeatDecks = liveHumanSeats.map((seat) => ({
+      seat,
+      // `localSeat`'s deck is REUSED, never re-synthesized.
+      deck: seat === localSeat ? hostDeck : this.submittedDeckForSeat(session, seat),
+    }));
+
+    return { hostDeck, liveSeatDecks, engineSeatDecks };
+  }
+
+  /**
+   * CR 903.13a: put one `draft_commander_launch` on every seat a human will
+   * pilot, from decks `commanderSeatDecks` already computed.
+   *
+   * The recipient set is exactly `decks.liveSeatDecks` and INCLUDES the local
+   * seat — the host is always pod seat 0, and `sendToSeat`'s seat-0 arm turns
+   * that send into a local `commanderLaunch` event, which is the ONLY path by
+   * which the host learns of its own launch.
+   *
+   * Takes no `localSeat`: `liveSeatDecks` already carries every live seat's own
+   * deck, the local seat's being the same object as `hostDeck`, so this list is
+   * the single authority for both the recipients and their decks. Re-running
+   * `commanderSeatPlan` here would create a second authority that a view drifting
+   * between the two calls could disagree with, yielding a recipient with no deck.
+   */
+  sendCommanderLaunches(
+    view: DraftPlayerView,
+    gameId: string,
+    roomCode: string,
+    decks: CommanderSeatDecks,
+  ): void {
+    for (const { seat, deck } of decks.liveSeatDecks) {
+      this.sendToSeat(seat, {
+        type: "draft_commander_launch",
+        launch: {
+          gameId,
+          roomCode,
+          localDeck: deck,
+          playerCount: view.seats.length,
+          // CR 903.13f(3): carry the host's own value through. The view's field
+          // is optional while the wire's is required-nullable, so `?? null` is
+          // the required narrowing — NOT `?? []`, which would assert "the draft
+          // contained zero sets" where the host already knows the answer.
+          draftSetCodes: view.draft_set_codes ?? null,
+        },
+      });
+    }
+  }
+
+  /**
+   * RESTORED (it was removed when `commanderSeatDecks` landed, which stranded
+   * 7- and 8-seat pods with no playable outcome at all). The two are NOT
+   * redundant: this one assembles ONE local game's payload in game-player
+   * order, `commanderSeatDecks` assembles per-seat decks for a P2P launch.
+   * Above the transport's seat ceiling only this one applies.
+   *
    * The N-seat deck payload for a completed Commander pod (CR 903.13a: "a draft
    * ... followed by a multiplayer game").
    *
@@ -2595,6 +2738,9 @@ export class P2PDraftHost {
       switch (msg.type) {
         case "draft_match_start":
           this.emit({ type: "matchStart", launch: msg.launch });
+          break;
+        case "draft_commander_launch":
+          this.emit({ type: "commanderLaunch", launch: msg.launch });
           break;
         case "draft_bo3_sideboard_prompt":
           this.emit({

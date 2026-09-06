@@ -1926,11 +1926,7 @@ pub(crate) fn apply_zone_delivery_tail(
 /// that the intrinsic enter-with-counters seeding in
 /// `consult_and_deliver_zone_change` and `copy_effect_for_source` already use.
 fn entering_object_projection(state: &GameState, object_id: ObjectId) -> Option<&GameObject> {
-    state
-        .liminal_entries
-        .get(&object_id)
-        .map(|entry| entry.object.projected())
-        .or_else(|| state.objects.get(&object_id))
+    state.entering_or_live_object(object_id)
 }
 
 fn aura_enchant_filter(state: &GameState, object_id: ObjectId) -> Option<TargetFilter> {

@@ -12,7 +12,7 @@ use super::super::oracle_nom::enters_under::{
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
-use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
+use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
 use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_ordinal, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
@@ -3626,7 +3626,7 @@ pub(super) fn push_clause_chunk(
 // Leading-duration conjunct expansion (issue #7923)
 // ---------------------------------------------------------------------------
 
-/// CR 608.2c (:2797) — "read the whole text and apply the rules of English".
+/// CR 608.2c — "read the whole text and apply the rules of English".
 ///
 /// True when this conjunct's LEADING TOKEN IS A CONJUGATED THIRD-PERSON FORM of a
 /// recognized clause-starting verb — the exact shape `starts_clause_text_or_conjugated`
@@ -3673,11 +3673,11 @@ fn recovered_conjunct_continues_prior_subject(text: &str) -> bool {
     !starts_clause_text(t) && starts_clause_text_or_conjugated(t)
 }
 
-/// CR 603.1 (:2559) + CR 603.7 (:2614): a boundary that severs a mid-sentence
-/// delayed-trigger head from its body does not divide two independent instructions —
-/// it divides one printed "[At] [event], [effect]" in half. Splitting there emits the
-/// trigger's body as a one-shot the card never authorizes (measured: Giant Oyster gains
-/// a top-level `PutCounter{ForAsLongAs SourceIsTapped}`).
+/// CR 603.1 + CR 603.7: a boundary that severs a mid-sentence delayed-trigger head from
+/// its body does not divide two independent instructions — it divides one printed "[At]
+/// [event], [effect]" in half. Splitting there emits the trigger's body as a one-shot
+/// the card never authorizes (measured: Giant Oyster gains a top-level
+/// `PutCounter{ForAsLongAs SourceIsTapped}`).
 fn head_ends_with_dangling_phase_trigger(head: &str) -> bool {
     let lower = head.to_ascii_lowercase();
     nom_primitives::scan_at_word_boundaries(
@@ -3865,8 +3865,8 @@ fn chunk_end_offset(body: &str, sub: &[ClauseChunk], k: usize) -> Option<usize> 
     Some(cursor)
 }
 
-/// CR 608.2c + CR 611.2a (:2797, :2908): a leading duration states the lifetime of
-/// the WHOLE instruction it prefixes, not only of its first conjunct.
+/// CR 608.2c + CR 611.2a: a leading duration states the lifetime of the WHOLE
+/// instruction it prefixes, not only of its first conjunct.
 ///
 /// `starts_prefix_clause` latches `"until "` / `"for as long as "` (as it also latches
 /// `"if "`), so the whole sentence arrives as one chunk. A leading CONDITIONAL is then
@@ -5674,7 +5674,9 @@ pub(super) fn apply_clause_continuation(
             // `parse_dig_library_owner` lifts this materialized `ExileTop` into a
             // per-player `player_scope: All` fan-out, the same shape the direct
             // "exile the top card of each player's library" path gets via the lift
-            // in `parse_effect_chain_ir`. This is the symmetric materialization
+            // in `parse_effect_chain_ir`. CR 102.2 + CR 102.3: the `Opponent`
+            // owner marker ("each opponent's library", Lobelia) lifts the same way
+            // into `player_scope: Opponent`. This is the symmetric materialization
             // seam: the direct path lifts where `parse_exile_ast` produces its
             // `ExileTop`, and this look-then-exile path lifts where the `Dig` is
             // back-patched into one. The lift survives assembly because this
@@ -5684,7 +5686,7 @@ pub(super) fn apply_clause_continuation(
             // detached by `split_player_scope_chain` and runs once for the
             // controller over the union of exiled cards.
             let d = &mut defs[bound_index];
-            super::lift_each_player_exile_top_scope(&mut d.effect, &mut d.player_scope);
+            super::lift_distributive_exile_top_scope(&mut d.effect, &mut d.player_scope);
         }
         // CR 702.75a + CR 406.3: "exile one of them face down" patches the
         // preceding private `Dig` into the Hideaway shape — the controller
@@ -6082,18 +6084,17 @@ pub(super) fn parse_intrinsic_continuation_ast(
             Some(ContinuationAst::SearchDestination {
                 destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
-                // CR 110.2a (docs/MagicCompRules.txt:618): the SAME span
-                // (`full_lower`) as the single-literal `scan_contains` this
-                // replaces — no widening. `You`-wins makes the fold
-                // byte-for-byte non-regressive. This seam has no object filter
-                // of its own (the found card is not a parsed `TargetFilter`
-                // here), so the CR 108.3 moved-object-owner source can never
-                // fire: only a mapped, `ParseContext`-declared referent binds.
-                // The one dangerous scope value at this seam (`TargetPlayer`,
-                // which `filter.rs` resolves to the FIRST player target of an
-                // unrelated slot) is refused inside
-                // `map_relative_player_scope`, so the seam needs no
-                // special-casing of its own.
+                // CR 110.2a: the SAME span (`full_lower`) as the
+                // single-literal `scan_contains` this replaces — no widening.
+                // `You`-wins makes the fold byte-for-byte non-regressive. This
+                // seam has no object filter of its own (the found card is not
+                // a parsed `TargetFilter` here), so the CR 108.3
+                // moved-object-owner source can never fire: only a mapped,
+                // `ParseContext`-declared referent binds. The one dangerous
+                // scope value at this seam (`TargetPlayer`, which `filter.rs`
+                // resolves to the FIRST player target of an unrelated slot) is
+                // refused inside `map_relative_player_scope`, so the seam
+                // needs no special-casing of its own.
                 enters_under: bind_control_clause(
                     fold_control_clauses(&full_lower),
                     name_entry_control_antecedent(None, ctx),
@@ -6999,6 +7000,8 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        // CR 400.11: reads a pack from outside the game, never a `Dig` antecedent.
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }
         | Effect::Reveal { .. }
@@ -7227,11 +7230,11 @@ fn parse_change_zone_enters_tapped_attacking(
     if !recognized {
         return None;
     }
-    // N-D: materialize TargetFilter::Typed via parse_type_phrase on the type
+    // N-D: materialize TargetFilter::Typed via parse_type_phrase_folding on the type
     // tail — RevealedHasCardType carries no TargetFilter, so reuse the canonical
     // materializer rather than reconstructing from the recognized condition.
     let type_tail = strip_moved_object_subject(condition_clause)?;
-    let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase(type_tail);
+    let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase_folding(type_tail);
     if matches!(filter, TargetFilter::Any | TargetFilter::None) || !leftover.trim().is_empty() {
         return None;
     }
@@ -7246,7 +7249,7 @@ fn parse_change_zone_enters_tapped_attacking(
 /// (Summoner's Grimoire). Shared with the `Condition_If` swallow detector so the
 /// represented clause can be located and stripped text-scoped, reusing the same
 /// leading-condition combinators (`strip_moved_object_subject` +
-/// `parse_type_phrase`) that `parse_change_zone_enters_tapped_attacking` uses —
+/// `parse_type_phrase_folding`) that `parse_change_zone_enters_tapped_attacking` uses —
 /// not a verbatim Oracle-string match.
 pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
     let lower = sentence.to_lowercase();
@@ -7262,7 +7265,7 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
     let Some(type_tail) = strip_moved_object_subject(after_if) else {
         return false;
     };
-    let (filter, _leftover) = crate::parser::oracle_target::parse_type_phrase(type_tail);
+    let (filter, _leftover) = crate::parser::oracle_target::parse_type_phrase_folding(type_tail);
     !matches!(filter, TargetFilter::Any | TargetFilter::None)
 }
 
@@ -8227,6 +8230,7 @@ fn parse_choose_and_sacrifice_rest_followup(lower: &str) -> Option<ContinuationA
             opt(tag::<_, _, E>("then ")),
             alt((
                 parse_bare_choose_and_sacrifice_rest_filter,
+                parse_not_chosen_this_way_choose_and_sacrifice_rest_filter,
                 parse_explicit_choose_and_sacrifice_rest_filter,
             )),
         ),
@@ -8243,6 +8247,33 @@ fn parse_bare_choose_and_sacrifice_rest_filter(
     let (input, _) =
         alt((tag::<_, _, OracleError<'_>>("sacrifices"), tag("sacrifice"))).parse(input)?;
     let (input, _) = tag(" the rest").parse(input)?;
+    Ok((input, None))
+}
+
+/// CR 608.2c: "[each player] sacrifice[s] all `<domain>` [they/you/that
+/// player] control[s] not chosen this way" — a fully-explicit but
+/// semantically bare sweep sentence (The Eternal Wanderer's −4: "Each player
+/// sacrifices all creatures they control not chosen this way"). The trailing
+/// "not chosen this way" anaphor names exactly the set `ChooseAndSacrificeRest`
+/// already excludes (CR 608.2c: apply the rules of English — later text
+/// clarifies, rather than overriding, earlier text), so this folds to the SAME
+/// bare-sweep outcome (`None`) as "sacrifice the rest" — never a NEW filter
+/// constraint. Sibling of [`parse_explicit_choose_and_sacrifice_rest_filter`]'s
+/// "all other `<domain>`" shape: that arm requires "other" and narrows the
+/// swept domain; this one requires "not chosen this way" and narrows nothing,
+/// since "not chosen this way" is not a domain qualifier — it is a restatement
+/// of the choose step's own membership test.
+fn parse_not_chosen_this_way_choose_and_sacrifice_rest_filter(
+    input: &str,
+) -> Result<(&str, Option<TargetFilter>), nom::Err<OracleError<'_>>> {
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("each player ")).parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("sacrifices all "),
+        tag("sacrifice all "),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((parse_nonland_permanent_domain, parse_creature_domain)).parse(input)?;
+    let (input, _) = tag(" not chosen this way").parse(input)?;
     Ok((input, None))
 }
 
@@ -8806,7 +8837,7 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
 /// class ("do the same for <type>"), not Estrid alone.
 ///
 /// Combinators only: `opt`/`tag`/`alt` for the prefix, then the shared
-/// `parse_type_phrase` for the filter. Requires the phrase to be fully consumed
+/// `parse_type_phrase_folding` for the filter. Requires the phrase to be fully consumed
 /// (modulo a trailing period) by a non-empty typed filter, so unrelated
 /// "do/repeat …" tails fall through to normal dispatch rather than being
 /// swallowed.
@@ -8817,7 +8848,7 @@ pub(super) fn try_parse_do_the_same_for_type(text: &str) -> Option<Vec<TypeFilte
         let (i, _) = tag::<_, _, OracleError<'_>>("do the same for ").parse(i)?;
         Ok((i, ()))
     })?;
-    let (filter, remainder) = parse_type_phrase(rest.trim().trim_end_matches('.').trim());
+    let (filter, remainder) = parse_type_phrase_folding(rest.trim().trim_end_matches('.').trim());
     if !remainder.trim().trim_end_matches('.').trim().is_empty() {
         return None;
     }
@@ -8845,7 +8876,7 @@ fn starts_do_the_same_for_type_before_then(text: &str) -> bool {
     .parse(lower.as_str()) else {
         return false;
     };
-    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    let (filter, remainder) = parse_type_phrase_folding(type_text.trim());
     remainder.trim().is_empty() && pure_type_substitution(filter).is_some()
 }
 
@@ -11883,7 +11914,7 @@ mod tests {
     /// milled artifact (e.g. an Equipment, an artifact land) be moved to hand.
     ///
     /// End-to-end guard: the building-block fix lives in
-    /// `parse_type_phrase_with_ctx` (`oracle_target.rs`); this test pins the
+    /// `parse_type_phrase_folding_with_ctx` (`oracle_target.rs`); this test pins the
     /// full Oracle-text → typed-AST contract for the milled-card retrieval
     /// path so future refactors to the dig-from-among lowering can't silently
     /// regress the AND-of-types semantics.
@@ -14455,7 +14486,7 @@ mod tests {
 mod leading_duration_guard_tests_7923 {
     use super::*;
 
-    /// **V-U2d unit half — `[NEW-UNIT]`.** CR 608.2c (`docs/MagicCompRules.txt:2797`).
+    /// **V-U2d unit half — `[NEW-UNIT]`.** CR 608.2c.
     ///
     /// Anchored against MISCLASSIFICATION of a new helper, not against BASE_SHA
     /// (the helper does not exist there). It pins guard 1's ACTUAL property —
@@ -14547,7 +14578,7 @@ mod leading_duration_guard_tests_7923 {
         }
     }
 
-    /// **V-U2f unit half — `[NEW-UNIT]`.** CR 603.1 (`:2559`) + CR 603.7 (`:2614`).
+    /// **V-U2f unit half — `[NEW-UNIT]`.** CR 603.1 + CR 603.7.
     ///
     /// G8: the negative here is UNIT-LEVEL, not a production boundary — corpus-wide
     /// exactly ONE head reaching guard 2 contains "at the beginning of" (Giant

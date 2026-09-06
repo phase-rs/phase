@@ -15,7 +15,7 @@ import type { DraftKind, DraftPlayerView, PairingView, PodPolicy, PoolInput, Sea
 import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
-import type { DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import type { CommanderSeatDecks, DraftCommanderLaunch, DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
 import { loadDraftHostSession } from "../services/draftPersistence";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
@@ -57,6 +57,13 @@ export type DraftPodHostEvent =
   | { type: "seatKicked"; seatIndex: number; reason: DraftPauseReason | string }
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
   | { type: "matchStart"; launch: DraftMatchLaunch }
+  /**
+   * CR 903.13a: the completed Commander pod's launch into ONE shared N-seat
+   * game. `handleHostEvent` in the store is typed on THIS union, not on
+   * `DraftHostEvent`, so the member has to exist here for the host's own launch
+   * to reach the store at all.
+   */
+  | { type: "commanderLaunch"; launch: DraftCommanderLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
   | { type: "roundAdvanced" }
   | { type: "timerExpired" }
@@ -442,6 +449,15 @@ export class DraftPodHostAdapter {
         this.setStatus("matchInProgress");
         this.emit({ type: "matchStart", launch: event.launch });
         break;
+      case "commanderLaunch":
+        // Shape B, deliberately UNLIKE `matchStart` above: no status is written
+        // here. A Commander launch does not change pod phase — the pod stays
+        // `complete`, and the host must stay on `CompleteView` so its
+        // launch-in-flight state and Cancel control can render. Writing
+        // "matchInProgress" here would be the same overwrite of the reducer's
+        // own answer that `allDecksSubmitted` documents above.
+        this.emit({ type: "commanderLaunch", launch: event.launch });
+        break;
       case "matchResultReceived":
         this.emit({ type: "matchResultReceived", matchId: event.matchId, winnerSeat: event.winnerSeat });
         break;
@@ -552,9 +568,10 @@ export class DraftPodHostAdapter {
   }
 
   /**
-   * CR 903.13a: the N-seat deck payload a completed Commander pod launches its
-   * multiplayer game from. The store holds this wrapper, not the underlying
-   * `P2PDraftHost`, so every host call goes through a delegate like this one.
+   * CR 903.13a: the N-seat deck payload a completed Commander pod launches a
+   * LOCAL multiplayer game from, used above the P2P seat ceiling. The store
+   * holds this wrapper, not the underlying `P2PDraftHost`, so every host call
+   * goes through a delegate like this one.
    */
   async podCommanderDeckPayload(
     view: DraftPlayerView,
@@ -562,6 +579,30 @@ export class DraftPodHostAdapter {
   ): Promise<DraftMatchDeckPayload> {
     if (!this.host) throw new Error("Host not initialized");
     return this.host.podCommanderDeckPayload(view, localSeat);
+  }
+
+  /**
+   * CR 903.13a: every deck the completed Commander pod's launch needs. Sends
+   * nothing — pair it with `sendCommanderLaunches` once the game is up. `view`
+   * must be read at call time — see `P2PDraftHost.commanderSeatDecks`.
+   */
+  async commanderSeatDecks(view: DraftPlayerView, localSeat: number): Promise<CommanderSeatDecks> {
+    if (!this.host) throw new Error("Host not initialized");
+    return this.host.commanderSeatDecks(view, localSeat);
+  }
+
+  /**
+   * CR 903.13a: put the pod's launch on every live human seat, the host's own
+   * included, from decks `commanderSeatDecks` already computed.
+   */
+  sendCommanderLaunches(
+    view: DraftPlayerView,
+    gameId: string,
+    roomCode: string,
+    decks: CommanderSeatDecks,
+  ): void {
+    if (!this.host) throw new Error("Host not initialized");
+    this.host.sendCommanderLaunches(view, gameId, roomCode, decks);
   }
 
   async replaceSeatWithBot(seat: number): Promise<void> {

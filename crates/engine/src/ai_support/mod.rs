@@ -464,6 +464,8 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             let mut sideboard_counts: HashMap<usize, usize> = HashMap::new();
             let mut exile_seen: HashSet<ObjectId> = HashSet::new();
             let mut exile_dup = false;
+            let mut pack_slots_seen: HashSet<usize> = HashSet::new();
+            let mut pack_slot_dup = false;
             for selection in selections {
                 match selection {
                     OutsideGameSelection::Sideboard { sideboard_index } => {
@@ -472,6 +474,11 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                     OutsideGameSelection::FaceUpExile { object_id } => {
                         if !exile_seen.insert(*object_id) {
                             exile_dup = true;
+                        }
+                    }
+                    OutsideGameSelection::BoosterPack { pack_slot } => {
+                        if !pack_slots_seen.insert(*pack_slot) {
+                            pack_slot_dup = true;
                         }
                     }
                 }
@@ -495,7 +502,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                     OutsideGameChoiceSource::FaceUpExile { object_id: oid } if oid == object_id
                 ))
                 });
-            !valid_count || exile_dup || bad_sideboard || bad_exile
+            let bad_pack_slot = pack_slots_seen.iter().any(|pack_slot| {
+                !choices.iter().any(|choice| matches!(
+                    &choice.source,
+                    OutsideGameChoiceSource::BoosterPack { pack_slot: slot, .. } if slot == pack_slot
+                ))
+            });
+            !valid_count || exile_dup || pack_slot_dup || bad_sideboard || bad_exile || bad_pack_slot
         }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
@@ -2601,9 +2614,14 @@ fn collect_activation_block_reasons_for_object(
 /// actionable in that window. The gate is the rule, not an optimisation.
 ///
 /// Scoped to the acting player across the same five zones and behind the same
-/// `obj.controller == player` / `!is_mana_ability` filters as the enforcement
-/// sites in `candidates.rs`, so an entry can only ever describe an object the
-/// viewer controls.
+/// player-scoping / `!is_mana_ability` filters as the enforcement sites in
+/// `candidates.rs`, so an entry can only ever describe an object the viewer
+/// controls. Battlefield and command-zone scans scope by `obj.controller`; the
+/// owner-keyed hand and graveyard scans scope by `obj.owner` (CR 108.4 +
+/// CR 108.4a — a card that is not a permanent or spell has no controller). The
+/// two files MUST agree: this read-out and the offered action set partition one
+/// ability space, so a scope that differs between them yields a blocked row for
+/// an ability that is never offered.
 ///
 /// Bounded by [`MAX_ACTIVATION_BLOCK_TOTAL`]. Returns a map, never a `Result`.
 pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<AbilityBlockEntry>> {
@@ -2644,8 +2662,9 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
     // search hot path and is deliberately out of scope.
 
     // CR 602.2: "Only an object's controller (or its owner, if it doesn't have a
-    // controller) can activate its activated ability" — battlefield, therefore
-    // controller-scoped, with no `activation_zone` filter
+    // controller) can activate its activated ability unless the object
+    // specifically says otherwise." Battlefield, therefore controller-scoped,
+    // with no `activation_zone` filter
     // (the gate itself checks `obj.zone != required_zone`).
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
@@ -2685,9 +2704,12 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
     }
 
     // CR 602.1: hand-activated abilities (Cycling per CR 702.29a, etc.).
+    // CR 108.4 + CR 108.4a: a card in a hand is neither a permanent nor a spell,
+    // so it has no controller and the owner stands in. Mirrors the hand loop in
+    // `candidates.rs`.
     for &obj_id in &state.players[player.0 as usize].hand {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            if obj.owner == player {
                 collect_activation_block_reasons_for_object(
                     state,
                     player,
@@ -2702,9 +2724,12 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
     }
 
     // CR 113.6b + CR 602.2: graveyard-activated abilities.
+    // CR 108.4 + CR 108.4a: same owner fallback as the hand loop above, and
+    // CR 404.1 puts a card into its OWNER's graveyard. Mirrors the graveyard
+    // loop in `candidates.rs`.
     for &obj_id in &state.players[player.0 as usize].graveyard {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            if obj.owner == player {
                 collect_activation_block_reasons_for_object(
                     state,
                     player,
@@ -4111,6 +4136,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
 
         assert!(cheap_reject_candidate(

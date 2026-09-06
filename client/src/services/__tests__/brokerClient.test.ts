@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PhaseSocket } from "../openPhaseSocket";
 import {
   lookupJoinTargetOver,
+  makeBrokerClient,
   resolveGuestOver,
   subscribeLobbyOver,
 } from "../brokerClient";
@@ -333,5 +334,50 @@ describe("subscribeLobbyOver", () => {
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"UnsubscribeLobby"'),
     );
+  });
+});
+
+describe("broker client keepalive", () => {
+  function pingFrames(ws: MockWebSocket): { type: string }[] {
+    return ws.send.mock.calls
+      .map((call) => JSON.parse(call[0] as string) as { type: string })
+      .filter((frame) => frame.type === "Ping");
+  }
+
+  it("pings its socket and stops when the socket closes", async () => {
+    vi.useFakeTimers();
+    try {
+      const ws = new MockWebSocket();
+      makeBrokerClient(makePhaseSocket(ws));
+
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(pingFrames(ws).length).toBeGreaterThanOrEqual(2);
+
+      ws.fireClose();
+      ws.send.mockClear();
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(pingFrames(ws)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops pinging when the client is closed", async () => {
+    vi.useFakeTimers();
+    try {
+      const ws = new MockWebSocket();
+      const client = makeBrokerClient(makePhaseSocket(ws));
+
+      await vi.advanceTimersByTimeAsync(11_000);
+      // Reach guard: the interval was running before `close()` ended it.
+      expect(pingFrames(ws).length).toBeGreaterThanOrEqual(2);
+
+      client.close();
+      ws.send.mockClear();
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(pingFrames(ws)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

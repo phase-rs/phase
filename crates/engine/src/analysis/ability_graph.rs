@@ -909,6 +909,8 @@ fn effect_projection(effect: &Effect) -> Projection {
         // like `Transform`.
         | Effect::FlipPermanent { .. }
         | Effect::SearchOutsideGame { .. }
+        // CR 400.11b: carries no nested ability edge.
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }
         | Effect::Reveal { .. }

@@ -32,8 +32,10 @@ import {
   findLobbyGameByCode,
   hostingLobbySource,
   useMultiplayerStore,
+  type ConnectionMode,
   type LobbySource,
 } from "../stores/multiplayerStore";
+import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../config/multiplayerServer";
 import {
   useMultiplayerDraftStore,
   type MultiplayerDraftPhase,
@@ -42,8 +44,6 @@ import { useGameStore, saveActiveGame } from "../stores/gameStore";
 import { useCardDataStore } from "../stores/cardDataStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
-
-type ConnectionMode = "server" | "p2p";
 
 function parseViewParam(value: string | null): MultiplayerView {
   if (value === "host-setup" || value === "deck-select" || value === "draft-lobby") return value;
@@ -143,12 +143,6 @@ function MultiplayerPageContent({
   const leaveDraft = useMultiplayerDraftStore((s) => s.leave);
 
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
-  // Initial mode tracks `hostingServer`: if the user has picked "None" in
-  // `ServerPicker` (the `null` direct-codes sentinel), skip straight to P2P
-  // so the lobby doesn't attempt a doomed subscription.
-  const [connectionMode, setConnectionMode] = useState<ConnectionMode>(
-    useMultiplayerStore.getState().hostingServer !== null ? "server" : "p2p",
-  );
   const [showSettings, setShowSettings] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   // Shown when `LobbyView` detects the server is unreachable. The user picks
@@ -182,6 +176,16 @@ function MultiplayerPageContent({
   const [deckSelectReturn, setDeckSelectReturn] =
     useState<MultiplayerView>("lobby");
   const hostingServer = useMultiplayerStore((s) => s.hostingServer);
+  const chosenConnectionMode = useMultiplayerStore((s) => s.connectionMode);
+  const setConnectionMode = useMultiplayerStore((s) => s.setConnectionMode);
+  const setHostingServer = useMultiplayerStore((s) => s.setHostingServer);
+  // The mode in force. An explicit choice WINS; the `hostingServer`-derived
+  // expression is the hydration fallback, reached only on a first run or a
+  // blob persisted before the connection switch existed — a user whose anchor
+  // is the `null` direct-codes sentinel must still boot into P2P. It is a
+  // migration default, not a competing writer.
+  const connectionMode: ConnectionMode =
+    chosenConnectionMode ?? (hostingServer !== null ? "server" : "p2p");
   // HostSetup mirrors its in-flight format into the store on every change,
   // so reading it here lets both the deck-picker filter and the live
   // compatibility check react to the user's format choice without any
@@ -225,14 +229,23 @@ function MultiplayerPageContent({
     navigate(location.pathname, { replace: true, state: null });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync connectionMode when the user changes their hosting server via
-  // ServerPicker. `null` → P2P (no server to talk to). Restored address →
-  // server (selecting a server IS the explicit intent). Only reacts to
-  // `hostingServer` changes — not connectionMode — so an explicit "Use
-  // Direct Code" selection isn't immediately reversed.
-  useEffect(() => {
-    setConnectionMode(hostingServer === null ? "p2p" : "server");
-  }, [hostingServer]);
+  // The single owner of a mode change, called by BOTH surfaces that render
+  // the switch (the lobby header and Host Game) so the anchor repair below
+  // lives in exactly one place.
+  const handleConnectionModeChange = useCallback(
+    (mode: ConnectionMode) => {
+      setConnectionMode(mode);
+      // Server mode needs an anchor to browse and host through, and the
+      // server chip — now the only route back to `ServerPicker` — renders
+      // empty without one. The only way to still hold a `null` anchor is a
+      // blob persisted before the picker's "None" row was removed. This
+      // ensures an anchor exists; it never clears one.
+      if (mode === "server" && useMultiplayerStore.getState().hostingServer === null) {
+        setHostingServer(DEFAULT_MULTIPLAYER_SERVER_URL);
+      }
+    },
+    [setConnectionMode, setHostingServer],
+  );
 
   // Live legality check: whenever the user is on host-setup with an active
   // deck and a chosen format, re-run the engine's compatibility check after
@@ -901,6 +914,7 @@ function MultiplayerPageContent({
             onJoinGame={handleJoinGame}
             onSpectate={connectionMode === "server" ? handleSpectate : undefined}
             connectionMode={connectionMode}
+            onConnectionModeChange={handleConnectionModeChange}
             onServerOffline={() => {
               // Only prompt when we're actually trying to use the server; if
               // the user already flipped to P2P the "unreachable" state is
@@ -917,6 +931,7 @@ function MultiplayerPageContent({
             onHost={handleHostSetupComplete}
             onBack={() => setView("lobby")}
             connectionMode={connectionMode}
+            onConnectionModeChange={handleConnectionModeChange}
             hostDisabled={liveCheck.status === "illegal" || liveCheck.status === "checking"}
             hostDisabledReason={
               liveCheck.status === "illegal"

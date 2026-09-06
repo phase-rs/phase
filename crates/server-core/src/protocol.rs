@@ -96,7 +96,9 @@ pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame, ServerErrorCode}
 // projection of its own domain types) and re-exported here, so the canonical
 // `ServerMessage` and the broker's `LobbyServerMessage` carry the identical
 // struct rather than two copies that could drift apart field by field.
-pub use lobby_broker::protocol::{PairingView, PlayerSummary, TournamentSummary, TournamentView};
+pub use lobby_broker::protocol::{
+    PairingView, PlayerSummary, TournamentRequestId, TournamentSummary, TournamentView,
+};
 // The domain types those views embed, re-exported for the same reason. All are
 // already `Serialize`/`Deserialize` — `MatchArity` and `ScoringPolicy` through
 // validated `try_from`/`into` boundaries, so a malformed value is refused at
@@ -544,23 +546,39 @@ pub enum ClientMessage {
     GetTournament {
         code: String,
     },
+    // The four GATED actions each mirror `lobby_broker`'s optional
+    // `request_id`, in the same position with the same serde attributes. The
+    // position is load-bearing, not cosmetic: serde emits struct-variant fields
+    // in declaration order, and `tournament_variants_survive_the_canonical_lobby_roundtrip`
+    // compares the two enums' serialized STRINGS, so a field that sits
+    // elsewhere in one mirror breaks the projection's wire compatibility.
     StartTournamentRound {
         code: String,
         organizer_token: String,
+        /// Mirrors [`lobby_broker::LobbyClientMessage::StartTournamentRound`]'s
+        /// correlator. `None` from a client that predates correlation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
     ReportMatchResult {
         code: String,
         pairing_id: PairingId,
         player_token: String,
         outcome: PodOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
     DropFromTournament {
         code: String,
         player_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
     EndTournament {
         code: String,
         organizer_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
     },
 }
 
@@ -686,6 +704,10 @@ pub enum ServerMessage {
         rewind_targets: Vec<RewindOption>,
     },
     StateUpdate {
+        /// The exact Full identity associated with this state stream. It is
+        /// omitted only for wire-compatible non-Full producers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
         /// Monotonic server-authored snapshot revision. Reused for read-only
         /// snapshots and advanced only by authoritative state transitions.
         state_revision: u64,
@@ -794,11 +816,15 @@ pub enum ServerMessage {
         message: String,
     },
     OpponentDisconnected {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
         grace_seconds: u32,
         #[serde(default)]
         player: Option<PlayerId>,
     },
     OpponentReconnected {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
         #[serde(default)]
         player: Option<PlayerId>,
     },
@@ -926,6 +952,11 @@ pub enum ServerMessage {
         match_id: String,
         round: u8,
         game_code: String,
+        /// Exact identity of the spawned Full session. The client accepts the
+        /// following `GameStarted` only when it carries this same key.
+        full_key: FullSessionKey,
+        /// Stable draft-seat credential used to reattach this socket. The Full
+        /// game token remains server-side and is derived from the pairing.
         player_token: String,
         your_player: PlayerId,
         opponent_name: String,
@@ -988,6 +1019,21 @@ pub enum ServerMessage {
     },
     TournamentListUpdate {
         tournaments: Vec<TournamentSummary>,
+    },
+    /// Requester-only acknowledgement of one gated tournament action, carrying
+    /// the correlator the caller minted. Mirrors
+    /// [`lobby_broker::LobbyServerMessage::TournamentActionAck`]. Carries no
+    /// token: the caller already holds the one that authorized the action.
+    TournamentActionAck {
+        request_id: TournamentRequestId,
+        code: String,
+        view: TournamentView,
+    },
+    /// Requester-only refusal of one gated tournament action. Mirrors
+    /// [`lobby_broker::LobbyServerMessage::TournamentActionRejected`].
+    TournamentActionRejected {
+        request_id: TournamentRequestId,
+        message: String,
     },
 }
 
@@ -1436,7 +1482,10 @@ mod tests {
 
     #[test]
     fn server_message_tagged_json_format() {
-        let msg = ServerMessage::OpponentReconnected { player: None };
+        let msg = ServerMessage::OpponentReconnected {
+            full_key: None,
+            player: None,
+        };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "OpponentReconnected");
     }
@@ -2952,6 +3001,10 @@ mod tests {
             match_id: "r1-t0".to_string(),
             round: 1,
             game_code: "GAME01".to_string(),
+            full_key: FullSessionKey {
+                game_code: "GAME01".to_string(),
+                generation: 7,
+            },
             player_token: "tok456".to_string(),
             your_player: PlayerId(0),
             opponent_name: "Bob".to_string(),
@@ -2963,6 +3016,7 @@ mod tests {
                 match_id,
                 round,
                 game_code,
+                full_key,
                 player_token,
                 your_player,
                 opponent_name,
@@ -2970,6 +3024,8 @@ mod tests {
                 assert_eq!(match_id, "r1-t0");
                 assert_eq!(round, 1);
                 assert_eq!(game_code, "GAME01");
+                assert_eq!(full_key.game_code, "GAME01");
+                assert_eq!(full_key.generation, 7);
                 assert_eq!(player_token, "tok456");
                 assert_eq!(your_player, PlayerId(0));
                 assert_eq!(opponent_name, "Bob");
@@ -3099,8 +3155,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_62_for_activation_block_readout() {
-        assert_eq!(PROTOCOL_VERSION, 62);
+    fn protocol_version_is_66_for_token_copy_source_shapes() {
+        assert_eq!(PROTOCOL_VERSION, 66);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3111,7 +3167,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_62_for_activation_block_readout` stays
+    /// `protocol_version_is_66_for_token_copy_source_shapes` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -3256,6 +3312,7 @@ mod tests {
         let viewer_interaction =
             engine::game::interaction::derive_viewer_interaction(&state, &state, PlayerId(0));
         let build = |rewind_targets: Vec<RewindOption>| ServerMessage::StateUpdate {
+            full_key: None,
             state_revision: 4,
             state: state.clone(),
             events: vec![],

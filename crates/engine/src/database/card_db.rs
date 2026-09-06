@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +13,50 @@ use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
 use crate::types::card_type::CoreType;
 
 use std::io::{BufReader, Read};
+
+/// Shared, cheaply-cloneable handle to the loaded [`CardDatabase`].
+///
+/// Exists so `GameState` can carry the database for resolvers that must query
+/// the whole card corpus at resolution time (Momir's random creature draw)
+/// rather than pre-staging a copy of it into state. `Arc` keeps
+/// `GameState::clone()` during AI search O(1), matching the `Arc` on
+/// `card_face_registry` / `all_card_names`.
+///
+/// `Debug` is hand-written as a one-line summary: `GameState` derives `Debug`,
+/// and a derived impl here would dump every loaded card face on any `{:?}` of
+/// a game state.
+#[derive(Clone)]
+pub struct CardDbHandle(Arc<CardDatabase>);
+
+impl CardDbHandle {
+    pub fn new(db: Arc<CardDatabase>) -> Self {
+        Self(db)
+    }
+
+    pub fn arc(&self) -> &Arc<CardDatabase> {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CardDbHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CardDbHandle({} faces)", self.0.face_index.len())
+    }
+}
+
+impl std::ops::Deref for CardDbHandle {
+    type Target = CardDatabase;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Arc<CardDatabase>> for CardDbHandle {
+    fn from(db: Arc<CardDatabase>) -> Self {
+        Self(db)
+    }
+}
 
 #[derive(Default)]
 pub struct CardDatabase {
@@ -262,6 +307,30 @@ impl CardDatabase {
         self.printings_index.get(&key).map(Vec::as_slice)
     }
 
+    /// CR 712.2 + CR 601.3e: whether the face stored under `key` (a
+    /// `face_iter` key, already normalized) is the card's FRONT face — the one
+    /// a printed card presents outside the battlefield.
+    ///
+    /// Back faces are stored in `face_index` alongside their fronts and inherit
+    /// the whole card's `printings`/`rarities`, so any consumer that enumerates
+    /// printings (booster collation, set browsing) must exclude them or the
+    /// same physical card is counted twice. Single-faced cards record no face
+    /// order and are fronts by definition.
+    pub fn is_front_face_key(&self, key: &str) -> bool {
+        self.face_order_index.get(key).copied().unwrap_or(0) == 0
+    }
+
+    /// Set codes recorded for a `face_iter` key, without the name normalization
+    /// [`printings_for`](Self::printings_for) performs. Callers iterating
+    /// `face_iter` already hold the storage key; re-deriving it per card costs a
+    /// lowercase allocation and an alias lookup for every face in the corpus.
+    pub fn printings_for_key(&self, key: &str) -> &[String] {
+        self.printings_index
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     /// Returns the official WotC rulings for a card. Returns an empty slice
     /// when the card has no recorded rulings, when the card was loaded via a
     /// path that doesn't record rulings, or when looking up a back-face name
@@ -381,6 +450,20 @@ impl CardDatabase {
         self.face_index.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Every loaded face in the database's deterministic scan order.
+    ///
+    /// `face_iter` walks a `HashMap` and so yields a different order per
+    /// process; this walks the precomputed `search_face_keys` (sorted by
+    /// oracle id, then face order, then key), which is identical for any two
+    /// loads of the same card data. Use this — never `face_iter` — whenever
+    /// the ORDER is load-bearing, such as an RNG draw whose result has to
+    /// match across peers and replays.
+    pub fn faces_in_scan_order(&self) -> impl Iterator<Item = &CardFace> {
+        self.search_face_keys
+            .iter()
+            .filter_map(|key| self.face_index.get(key))
+    }
+
     /// CR 205.3m: Returns the full creature subtype vocabulary derived from
     /// every loaded creature face. Sorted and deduplicated. Consumers seed
     /// `GameState::all_creature_types` from this so token-only types
@@ -420,8 +503,50 @@ impl CardDatabase {
     /// single-face fast path. `lookup_key` collapses combined names to their
     /// front face, so without this pre-split a back-face signal would be
     /// silently dropped whenever the front face is in the export map.
+    ///
+    /// The split accepts both the canonical spaced form (`"A // B"`) and the
+    /// hand-typed glued form (`"A//B"`), matching the set of composite forms
+    /// [`Self::lookup_key`] resolves. Splitting on the spaced form alone would
+    /// leave a glued composite name aggregating only its front face's signals,
+    /// silently losing a back-face Game Changer / mass-land-denial / extra-turn
+    /// signal in Commander bracket classification.
+    ///
+    /// A single-faced card whose printed name literally contains `//`
+    /// (`"SP//dr, Piloted by Peni"`) must NOT be split, so the whole-name
+    /// lookup is tried first — the same false-positive guard, and the same
+    /// ordering, that `lookup_key` documents. "Whole name" here spans every
+    /// source this function reads, `bracket_lists` included, since a curated
+    /// list entry may name a card the export map does not carry, and the
+    /// unaccented-alias index, which `lookup_key` folds through before it
+    /// splits.
     pub fn bracket_signals_for(&self, name: &str) -> BracketSignals {
-        if let Some((a, b)) = name.split_once(" // ") {
+        // Exact-match guard only: a name that is ITSELF an indexed card must
+        // not be split. Deliberately not `lookup_key`, which collapses a
+        // composite name to its front face and would therefore report every
+        // composite name whose front face is indexed as a "whole name",
+        // suppressing the very aggregation this function exists to perform.
+        let lower = name.to_lowercase();
+        // `bracket_lists` is a third source of whole printed names: it keys on
+        // the raw lowercased name with no index membership, so a curated-list
+        // card that is absent from the export map is known ONLY here. Omitting
+        // it would split such a name on its literal `//` into two nonexistent
+        // faces and report all-false, dropping its real signal. It takes the
+        // ORIGINAL `name`, not `lower`: `contains` owns its own case folding,
+        // so passing the pre-folded copy would fold twice and imply the lookup
+        // is case-sensitive to a future caller.
+        // The unaccented-alias index is a fourth whole-name source, and
+        // `lookup_key` folds through it BEFORE it splits on `//`. Omitting it
+        // here would make the two functions disagree about what is a composite
+        // name — the exact failure `lookup_key`'s doc warns is wrong by
+        // construction — for a single-faced card whose printed name carries
+        // both `//` and a diacritic, typed unaccented.
+        let is_indexed_whole_name = self.face_index.contains_key(&lower)
+            || self.cards.contains_key(&lower)
+            || self.bracket_lists.contains(name)
+            || self
+                .name_alias_index
+                .contains_key(&fold_card_name_key(name));
+        if let Some((a, b)) = name.split_once("//").filter(|_| !is_indexed_whole_name) {
             let sa = self.signals_for_single_face(a.trim());
             let sb = self.signals_for_single_face(b.trim());
             return BracketSignals {
@@ -448,7 +573,52 @@ impl CardDatabase {
         }
     }
 
-    fn lookup_key(&self, name: &str) -> String {
+    /// Single authority for resolving any caller-supplied card name — including
+    /// a multi-face composite name (`"Front // Back"`) — to a key in
+    /// `face_index` / `cards`. Every name-keyed accessor on `CardDatabase`
+    /// routes through here; no caller may re-implement `//` splitting.
+    ///
+    /// Resolution order is significant and must be preserved:
+    /// 1. Exact (lowercased) match. This MUST precede the `//` split so a
+    ///    single-faced card whose printed name literally contains `//`
+    ///    (`"SP//dr, Piloted by Peni"`) is not mistaken for a composite name.
+    /// 2. Unaccented alias fold, for decklists typed without diacritics.
+    /// 3. `//` split, taking the **front** face — both the canonical spaced
+    ///    form (`"A // B"`) and the hand-typed glued form (`"A//B"`) — then
+    ///    retrying steps 1 and 2 against that front segment.
+    ///
+    /// Collapsing to the front face is correct for decklist *identity*
+    /// resolution: a composite name denotes exactly one card. CR 709.2: although
+    /// split cards have two castable halves, each split card is only one card,
+    /// so a deck entry for `"Fire // Ice"` is one copy of that card, not two.
+    /// It is deliberately lossy in the other direction — the back half is not
+    /// reachable through this function, and CR 709.4a (each split card has two
+    /// names, and an effect choosing a name must choose one half, not both)
+    /// means name-choice effects must not be routed through this collapse.
+    /// Callers that genuinely need per-face data for a composite name must
+    /// split the name themselves and query each face, the way
+    /// [`Self::bracket_signals_for`] does; do not widen `lookup_key` to return
+    /// multiple keys. Such a caller must accept the SAME composite forms this
+    /// function does (spaced and glued) and apply the same exact-match-first
+    /// guard, or it will disagree with `lookup_key` about what is a composite
+    /// name — `bracket_signals_for` is the worked example.
+    ///
+    /// `data/card-data.json` stores each face under its own key and contains no
+    /// composite `"A // B"` keys, so composite-name support rests entirely on
+    /// the `//` branch below with no data-level backstop. The regression
+    /// barrier is therefore the test set in this module —
+    /// `combined_face_name_lookup_resolves_front_face`,
+    /// `glued_combined_face_name_resolves_front_face`,
+    /// `single_face_name_containing_double_slash_resolves_to_itself` (the
+    /// false-positive guard, issue #4790), and
+    /// `name_lookup_accepts_unaccented_aliases`. Any refactor of this function
+    /// must keep all four passing.
+    ///
+    /// `pub(crate)` so in-crate name-keyed code (notably deck validation, which
+    /// keys copy counts and coverage buckets by resolved name) can reuse this
+    /// one resolution instead of re-implementing the `//` split with a
+    /// different — and therefore wrong — ordering.
+    pub(crate) fn lookup_key(&self, name: &str) -> String {
         let lower = name.to_lowercase();
         if self.face_index.contains_key(&lower) || self.cards.contains_key(&lower) {
             return lower;
@@ -1265,6 +1435,97 @@ mod tests {
         assert!(
             sig.game_changer,
             "back-face partner signal must survive lookup_key's front-face collapse"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_glued_combined_name_picks_up_back_face_signal() {
+        // Regression: the pre-split accepted only the spaced " // " form, so a
+        // hand-typed glued composite name ("Front//Back") fell through to the
+        // single-face fast path, where lookup_key collapses it to the front
+        // face — silently dropping a back-face Game Changer signal from
+        // Commander bracket classification. The split must accept every
+        // composite form lookup_key resolves.
+        let json = r#"{
+            "halana, kessig ranger": {
+                "name": "Halana, Kessig Ranger",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": false, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            },
+            "alena, trapper founder": {
+                "name": "Alena, Trapper Founder",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+        assert!(
+            db.bracket_signals_for("Halana, Kessig Ranger//Alena, Trapper Founder")
+                .game_changer,
+            "glued composite name must aggregate both faces, like the spaced form"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_single_face_name_containing_double_slash_is_not_split() {
+        // The false-positive guard (issue #4790) applied to bracket signals:
+        // "SP//dr, Piloted by Peni" is ONE indexed card whose printed name
+        // contains "//". Splitting it would look up two nonexistent faces and
+        // report all-false, losing its real signal.
+        let json = r#"{
+            "sp//dr, piloted by peni": {
+                "name": "SP//dr, Piloted by Peni",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+        assert!(
+            db.bracket_signals_for("SP//dr, Piloted by Peni")
+                .game_changer,
+            "an indexed whole name containing // must not be split into faces"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_glued_single_face_name_known_only_to_bracket_lists_is_not_split() {
+        use crate::database::bracket_lists::BracketLists;
+        // Glued-form twin of the spaced-form fallback test below, for the
+        // false-positive guard: "SP//dr, Piloted by Peni" is ONE printed card
+        // whose name contains "//", and here it is known only to the curated
+        // lists (empty export map). The whole-name guard must consult
+        // `bracket_lists` too, or the name is split into two nonexistent faces
+        // and its real mass-land-denial signal is lost.
+        let lists = BracketLists::from_json_str(
+            r#"{"version":"t","mass_land_denial":["SP//dr, Piloted by Peni"]}"#,
+        )
+        .unwrap();
+        let db = CardDatabase::default().with_bracket_lists(lists);
+        assert!(
+            db.bracket_signals_for("SP//dr, Piloted by Peni")
+                .mass_land_denial,
+            "a lists-only whole name containing // must not be split into faces"
         );
     }
 

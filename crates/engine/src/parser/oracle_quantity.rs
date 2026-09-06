@@ -36,7 +36,9 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_effect::parse_controls_permanent_object;
-use crate::parser::oracle_target::{parse_target, parse_type_phrase, parse_type_phrase_with_ctx};
+use crate::parser::oracle_target::{
+    parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+};
 use crate::parser::oracle_util::{merge_or_filters, parse_count_multiplier};
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, Comparator, ControllerRef,
@@ -262,7 +264,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                 continue;
             }
             let counter_type = normalize_counter_type(counter_text);
-            let (filter, remainder) = parse_type_phrase_with_ctx(after_filter, ctx);
+            let (filter, remainder) = parse_type_phrase_folding_with_ctx(after_filter, ctx);
             if remainder.trim().is_empty()
                 && !matches!(filter, TargetFilter::Any)
                 && !is_empty_typed_filter(&filter)
@@ -354,7 +356,7 @@ pub(crate) fn parse_quantity_ref_with_context(
         // cards" is an aggregate over the most recent chain tracked set, not over live
         // battlefield objects — the anaphor "those exiled cards" refers to the set
         // the preceding effect published (e.g. Ensnared by the Mara's `ExileTop`).
-        // Matched before `parse_type_phrase_with_ctx` so the exile anaphor isn't
+        // Matched before `parse_type_phrase_folding_with_ctx` so the exile anaphor isn't
         // mis-read as a type phrase. Reuses the established exile-anaphor pair from
         // `oracle_effect::mod` (`those exiled cards` / `the exiled cards`).
         if let Ok((anaphor_rest, _)) = alt((
@@ -381,7 +383,7 @@ pub(crate) fn parse_quantity_ref_with_context(
         // batched "whenever one or more creatures … die" trigger, "those
         // creatures" references the triggering event batch (its dying subjects),
         // NOT a live zone filter or a chain-published set. Matched before
-        // `parse_type_phrase_with_ctx` so the anaphor isn't mis-read as a type
+        // `parse_type_phrase_folding_with_ctx` so the anaphor isn't mis-read as a type
         // phrase (bare "creatures" would otherwise parse as a filter).
         //
         // Scoped narrowly because this parser is context-free and cannot see
@@ -428,7 +430,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                 ));
             }
         }
-        let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
+        let (filter, remainder) = parse_type_phrase_folding_with_ctx(rest, ctx);
         // CR 608.2h: present-tense aggregate. Accept a bare empty remainder
         // (existing no-snapshot behavior) or a trailing cast/activation-time
         // snapshot suffix ("as you cast this spell") — the suffix is a pure
@@ -449,7 +451,7 @@ pub(crate) fn parse_quantity_ref_with_context(
         // control] this turn" aggregates over this turn's battlefield→graveyard
         // zone-change records, not live battlefield objects — the objects have
         // left play and carry their death-time P/T snapshot. Reuse the filter
-        // parse_type_phrase_with_ctx already produced (above) and run the shared
+        // parse_type_phrase_folding_with_ctx already produced (above) and run the shared
         // death-suffix combinator on its remainder. Placed before the past-tense
         // "you controlled" arm so it isn't shadowed, and after the present-tense
         // arm so plain "the total power of creatures you control" stays a live
@@ -479,7 +481,7 @@ pub(crate) fn parse_quantity_ref_with_context(
         // CR 608.2i: past-tense "you controlled" look-back. tag("you control") in
         // parse_zone_controller has no word boundary and would prefix-match
         // "you controlled", corrupting the remainder to "led …". Isolate the bare
-        // head via take_until(" you controlled ") BEFORE parse_type_phrase, then
+        // head via take_until(" you controlled ") BEFORE parse_type_phrase_folding, then
         // re-inject ControllerRef::You. Reuses the inject_controller_you building
         // block; same strip-controller-before-type-phrase ordering as
         // parse_controller_controlled_as_cast_condition
@@ -487,7 +489,7 @@ pub(crate) fn parse_quantity_ref_with_context(
         if let Ok((after_head_tag, head_text)) =
             take_until::<_, _, OracleError<'_>>(" you controlled ").parse(rest)
         {
-            let (head_filter, head_rem) = parse_type_phrase(head_text);
+            let (head_filter, head_rem) = parse_type_phrase_folding(head_text);
             if head_rem.trim().is_empty()
                 && !matches!(head_filter, TargetFilter::Any)
                 && !is_empty_typed_filter(&head_filter)
@@ -621,7 +623,7 @@ pub(crate) fn parse_quantity_ref_with_context(
         // CR 608.2c + CR 400.7: "the number of [filter] destroyed/sacrificed
         // this way" — count from the tracked set populated by the preceding
         // destroy/sacrifice in the sub_ability chain. Must run BEFORE
-        // `parse_type_phrase`, which would consume "creatures you controlled"
+        // `parse_type_phrase_folding`, which would consume "creatures you controlled"
         // and leave an unresolved "that were destroyed this way" tail.
         // Class: Kaya's Wrath (issue #2943), Ceaseless Conflict, and any
         // "equal to the number of … destroyed this way" lifegain phrasing.
@@ -652,8 +654,8 @@ pub(crate) fn parse_quantity_ref_with_context(
                 return Some(canonicalize_quantity_ref(qty));
             }
         }
-        let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
-        // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
+        let (filter, remainder) = parse_type_phrase_folding_with_ctx(rest, ctx);
+        // CR 109.1: `parse_type_phrase_folding_with_ctx` always returns `TargetFilter::Typed`,
         // including the empty-shaped form (no `type_filters`, no `controller`, no
         // `properties`) when the input has no recognized type word (e.g.
         // "opponents that were dealt combat damage this turn"). The empty shape
@@ -730,13 +732,13 @@ fn parse_shuffled_this_way_count(text: &str) -> Option<QuantityRef> {
     .then_some(QuantityRef::EventContextAmount)
 }
 
-/// CR 109.1: `parse_type_phrase` always returns `TargetFilter::Typed`, even
+/// CR 109.1: `parse_type_phrase_folding` always returns `TargetFilter::Typed`, even
 /// when no type word was matched — in that case all three of `type_filters`,
 /// `controller`, and `properties` are empty. An empty-shaped `Typed` matches
 /// *every* battlefield object, so callers that interpret a non-`Any` filter
 /// as "type phrase recognized" must reject this shape explicitly. The
 /// building-block guard lives here so every quantity parser that wraps
-/// `parse_type_phrase` shares one consistent rejection rule.
+/// `parse_type_phrase_folding` shares one consistent rejection rule.
 pub(crate) fn is_empty_typed_filter(filter: &TargetFilter) -> bool {
     matches!(
         filter,
@@ -1127,14 +1129,14 @@ fn parse_greatest_among_prefix(
 
 /// CR 202.3 + CR 208.2a: "the greatest <prop> among <A> and <B>" → Max of two
 /// single-zone Aggregates. Each operand is decoded through the shared
-/// `parse_type_phrase_with_ctx` filter grammar, so per-arm zone/controller
+/// `parse_type_phrase_folding_with_ctx` filter grammar, so per-arm zone/controller
 /// semantics (e.g. "noncreature cards in your graveyard" → InZone Graveyard) are
 /// unambiguous. Returns None unless both operands parse to non-empty typed
 /// filters with the conjunction fully consumed.
 fn parse_greatest_among_conjunction(text: &str, ctx: &mut ParseContext) -> Option<QuantityExpr> {
     let (rest, (func, prop)) = parse_greatest_among_prefix(text).ok()?;
 
-    let (filter_a, remainder) = parse_type_phrase_with_ctx(rest, ctx);
+    let (filter_a, remainder) = parse_type_phrase_folding_with_ctx(rest, ctx);
     if matches!(filter_a, TargetFilter::Any) || is_empty_typed_filter(&filter_a) {
         return None;
     }
@@ -1143,7 +1145,7 @@ fn parse_greatest_among_conjunction(text: &str, ctx: &mut ParseContext) -> Optio
         .parse(remainder.trim_end())
         .ok()?;
 
-    let (filter_b, tail) = parse_type_phrase_with_ctx(after_and, ctx);
+    let (filter_b, tail) = parse_type_phrase_folding_with_ctx(after_and, ctx);
     if !tail.trim().is_empty()
         || matches!(filter_b, TargetFilter::Any)
         || is_empty_typed_filter(&filter_b)
@@ -1736,7 +1738,7 @@ fn parse_battlefield_entries_attr_clause(input: &str) -> OracleResult<'_, (Quant
     let (input, type_text) =
         take_until(" enter the battlefield under their control this turn").parse(input)?;
     let (input, _) = tag(" enter the battlefield under their control this turn").parse(input)?;
-    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    let (filter, remainder) = parse_type_phrase_folding(type_text.trim());
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return Err(nom::Err::Error(OracleError::new(
             input,
@@ -2361,7 +2363,7 @@ fn filter_is_nontrivial_for_tracked_set(filter: &crate::types::ability::TargetFi
 ///   - exiled this way → `Exiled` (CR 701.13a).
 ///
 /// Uses `terminated(take_until(suffix), tag(suffix))` to split at each
-/// recognized suffix, then delegates the prefix to `parse_type_phrase`. The
+/// recognized suffix, then delegates the prefix to `parse_type_phrase_folding`. The
 /// `caused_by` action lets the resulting `FilteredTrackedSetSize` count only the
 /// members the matching verb produced within a merged chain set — disjoint from
 /// same-destination actions and stable under replacement redirection (#2932).
@@ -2400,13 +2402,13 @@ fn parse_destroyed_or_sacrificed_this_way_filter(
             terminated(take_until(suffix), tag(suffix)).parse(lower);
         if let Ok(("", filter_phrase)) = result {
             // CR 700.1: "card" is the zone-agnostic head noun for the discarded
-            // members ("nonland card discarded this way"). parse_type_phrase maps
+            // members ("nonland card discarded this way"). parse_type_phrase_folding maps
             // it to TypeFilter::Card (matches every card type), so "nonland card"
             // yields [Card, Non(Land)] — counting nonland instants/sorceries too.
             // It must NOT be narrowed to TypeFilter::Permanent: a nonland instant
             // discarded by Seasoned Pyromancer is still counted (CR 701.9a).
             let (filter, remainder) =
-                crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
+                crate::parser::oracle_target::parse_type_phrase_folding(filter_phrase.trim());
             if remainder.trim().is_empty() {
                 return Some((Some(filter), cause));
             }
@@ -2444,10 +2446,10 @@ fn parse_destroyed_or_sacrificed_this_way_filter(
 fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
     // Composed landing-zone tail grammar (one nom production, not a string-table
     // loop): `<type phrase> [that was|that were]? (returned | put into a
-    // graveyard) this way`. `parse_type_phrase` consumes the noun phrase; the
+    // graveyard) this way`. `parse_type_phrase_folding` consumes the noun phrase; the
     // tail is a shared optional relative clause (`opt(alt(..))`) plus an `alt()`
     // over the landing-zone verb phrases, terminated by "this way".
-    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase(lower);
+    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase_folding(lower);
 
     // Require a specific, controller-agnostic type filter. A typeless or generic
     // "card" filter is the unfiltered count; a controller-bearing filter is
@@ -2493,7 +2495,7 @@ fn parse_filtered_revealed_this_way(lower: &str) -> Option<QuantityRef> {
             terminated(take_until(suffix), tag(suffix)).parse(lower);
         if let Ok(("", filter_phrase)) = result {
             let (filter, remainder) =
-                crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
+                crate::parser::oracle_target::parse_type_phrase_folding(filter_phrase.trim());
             if !remainder.trim().is_empty() {
                 continue;
             }
@@ -3129,7 +3131,7 @@ fn parse_spell_history_clause(
         .parse(noun)
         .map(|(_, before)| before.trim())
         .unwrap_or(noun);
-        let (filter, remainder) = parse_type_phrase(qualifier);
+        let (filter, remainder) = parse_type_phrase_folding(qualifier);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             return Some((scope, Some(filter)));
         }
@@ -3165,7 +3167,7 @@ fn parse_spell_history_clause(
 /// `caused_by: None` counts every filtered member of the most recent tracked set
 /// (the cards moved "this way").
 fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
-    let (filter, rest) = parse_type_phrase(clause);
+    let (filter, rest) = parse_type_phrase_folding(clause);
     let TargetFilter::Typed(ref typed) = filter else {
         return None;
     };
@@ -3295,7 +3297,7 @@ fn parse_for_each_clause_with_they_controller(
         .parse(clause)
         {
             if after.trim().is_empty() {
-                let (type_filter, type_rest) = parse_type_phrase(prefix);
+                let (type_filter, type_rest) = parse_type_phrase_folding(prefix);
                 if type_rest.trim().is_empty() && !matches!(type_filter, TargetFilter::Any) {
                     return Some(QuantityRef::ObjectCount {
                         filter: TargetFilter::And {
@@ -3513,10 +3515,10 @@ fn parse_for_each_clause_with_they_controller(
             // The counter suffix must consume the rest of the clause (possibly with
             // trailing whitespace / punctuation already stripped by trim_end_matches).
             if suffix_part[consumed..].trim().is_empty() {
-                let (filter, type_rest) = parse_type_phrase(type_part);
+                let (filter, type_rest) = parse_type_phrase_folding(type_part);
                 if type_rest.trim().is_empty() {
                     // Compose: attach the counter property onto the typed filter.
-                    // parse_type_phrase always emits TargetFilter::Typed for non-Any
+                    // parse_type_phrase_folding always emits TargetFilter::Typed for non-Any
                     // returns, so the other branch is defensive.
                     if let TargetFilter::Typed(typed) = filter {
                         let mut props = typed.properties.clone();
@@ -3627,19 +3629,19 @@ fn parse_for_each_clause_with_they_controller(
     }
 
     // "creature you control", "artifact you control", etc.
-    // Use parse_type_phrase_with_ctx (not parse_target) to avoid generating
+    // Use parse_type_phrase_folding_with_ctx (not parse_target) to avoid generating
     // spurious target-fallback warnings for quantity text that isn't a target
     // clause.
     //
     // CR 109.5 + CR 109.4: thread the relative player scope so "they control"
     // binds to the iterating/targeted/chosen player rather than collapsing to the
     // caster. "you control" still resolves to ControllerRef::You inside
-    // parse_type_phrase_with_ctx (its suffix arm is ctx-independent), so The Scarab
+    // parse_type_phrase_folding_with_ctx (its suffix arm is ctx-independent), so The Scarab
     // God and other caster-relative counts are unchanged. CR 608.2c: the controller
     // follows instructions in order, so a per-player-scoped count reads the
     // iterating player.
     let mut tp_ctx = for_each_anaphor_context(ctx, &they_controller);
-    let (filter, remainder) = parse_type_phrase_with_ctx(clause, &mut tp_ctx);
+    let (filter, remainder) = parse_type_phrase_folding_with_ctx(clause, &mut tp_ctx);
     if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
         return Some(QuantityRef::ObjectCount { filter });
     }
@@ -3735,7 +3737,7 @@ fn parse_for_each_target_controlled_type(clause: &str) -> Option<QuantityRef> {
         return None;
     }
 
-    let (filter, remainder) = parse_type_phrase(type_text);
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
     if remainder.trim().is_empty() {
         with_target_player_controller(filter).map(|filter| QuantityRef::ObjectCount { filter })
     } else {
@@ -5635,14 +5637,14 @@ mod tests {
         }
     }
 
-    /// CR 109.1: Defense-in-depth — when `parse_type_phrase` returns an
+    /// CR 109.1: Defense-in-depth — when `parse_type_phrase_folding` returns an
     /// empty-shaped `Typed` filter (no type words, no controller, no
     /// properties), `parse_quantity_ref` must decline rather than emit an
     /// `ObjectCount` that would match every battlefield permanent.
     ///
     /// The exact text exercised here ("opponents that were dealt combat
     /// damage this turn", without the `the number of` prefix) is the
-    /// substring that flows into `parse_type_phrase` for Tymna's body. If
+    /// substring that flows into `parse_type_phrase_folding` for Tymna's body. If
     /// `parse_quantity_ref` is ever called on it directly (e.g. by a future
     /// quantity context that didn't bind the `PlayerCount` arm), the
     /// empty-Typed guard ensures it declines rather than returning an
@@ -6739,8 +6741,8 @@ mod tests {
 
     /// CR 109.5 + CR 608.2c: "creature they control" inside a "for each [player]"
     /// clause threads the relative player scope into the `ObjectCount` filter's
-    /// controller. Edit 1b swapped the no-ctx fallback (`parse_type_phrase`) for
-    /// the ctx-aware `parse_type_phrase_with_ctx`. Reverting Edit 1b discards the
+    /// controller. Edit 1b swapped the no-ctx fallback (`parse_type_phrase_folding`) for
+    /// the ctx-aware `parse_type_phrase_folding_with_ctx`. Reverting Edit 1b discards the
     /// scope, so "they control" collapses to `ControllerRef::You` and this assert
     /// (ScopedPlayer) fails. Discriminating fail-on-revert guard for the parser fix.
     #[test]
@@ -7772,7 +7774,7 @@ mod tests {
     /// CR 608.2i: past-tense look-back — "the greatest power among creatures you
     /// controlled as you cast this spell" (Lifestream's Blessing). The
     /// discriminating ordering test: `take_until(" you controlled ")` must run
-    /// BEFORE parse_type_phrase so the controller is still resolved to You and
+    /// BEFORE parse_type_phrase_folding so the controller is still resolved to You and
     /// the head filter is "creatures" (not corrupted by "you control"
     /// prefix-matching "you controlled").
     #[test]
@@ -7928,7 +7930,7 @@ mod tests {
     /// destroyed this way" (Kaya's Wrath, issue #2943) must lower to
     /// `FilteredTrackedSetSize`, not `Effect::Unimplemented`. The for-each
     /// path already handled this shape; the `parse_quantity_ref` "the number
-    /// of …" path must mirror it before `parse_type_phrase` strips the tail.
+    /// of …" path must mirror it before `parse_type_phrase_folding` strips the tail.
     #[test]
     fn parse_quantity_ref_creatures_you_controlled_destroyed_this_way() {
         let qty = parse_quantity_ref(
@@ -8177,7 +8179,7 @@ mod tests {
     }
 
     /// NEGATIVE (Builder's Bane guard): a controller-bearing prefix that leaves
-    /// a `parse_type_phrase` remainder must fail cleanly, not produce a
+    /// a `parse_type_phrase_folding` remainder must fail cleanly, not produce a
     /// FilteredTrackedSetSize.
     #[test]
     fn artifacts_they_controlled_put_into_graveyard_this_way_is_none() {

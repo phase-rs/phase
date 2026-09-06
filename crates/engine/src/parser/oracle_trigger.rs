@@ -10,7 +10,7 @@ use nom::Parser;
 use super::oracle_effect::conditions::source_saddled_filter;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
-    lower_effect_chain_ir, parse_attacked_player_relative_clause, parse_effect_chain_ir,
+    lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause,
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
 use super::oracle_ir::ast::parsed_clause;
@@ -39,8 +39,8 @@ use super::oracle_nom::primitives::{
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_static::{parse_commander_subject_filter_prefix, typed_filter_for_subtype};
 use super::oracle_target::{
-    attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase,
-    parse_type_phrase_with_ctx, starts_with_type_list_continuation, starts_with_type_word,
+    attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, starts_with_type_list_continuation, starts_with_type_word,
 };
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
@@ -1499,8 +1499,22 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
         actor: ctx.actor.clone(),
-        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text)
-            .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
+        // CR 608.2k: nearest antecedent wins. An intervening-`if` that pins the
+        // source OFF the battlefield ("... if ~ is in your graveyard, return it")
+        // re-establishes the source card as the antecedent, and it sits nearer to
+        // the effect body than the trigger condition does — so it outranks the
+        // condition-derived antecedent, not the other way round.
+        //
+        // The two were previously ordered condition-first. That was unobservable
+        // while `parse_effect_chain_ir` discarded this field wholesale (see the
+        // `object_pronoun_ref` note in `oracle_effect/mod.rs`): the value never
+        // reached a resolver, so which of the two won could not be seen. Restoring
+        // the propagation makes the ordering load-bearing, and Managorger Phoenix
+        // ("Whenever you cast a spell, if ~ is in your graveyard, ... return it")
+        // is the card that discriminates them — the spell-cast axis would
+        // otherwise bind "return it" to the cast spell instead of the Phoenix.
+        object_pronoun_ref: trigger_object_pronoun_ref_for_intervening_if(&if_condition)
+            .or_else(|| trigger_object_pronoun_ref_for_condition(condition_text, &trigger_subject)),
         plural_object_pronoun_ref: trigger_plural_object_pronoun_ref_for_intervening_if(
             &if_condition,
         ),
@@ -5064,7 +5078,7 @@ pub(crate) fn attack_intervening_if_anaphor_is_defending_player(def: &TriggerDef
 ///   supplies no antecedent.
 ///
 /// `Planeswalker` and `Battle` name no player noun at all — the correct anaphor
-/// for a battle would be "its protector" (CR 310.8d), a different reference.
+/// for a battle would be "its protector" (CR 310.9d), a different reference.
 /// `Owner`, `OwnerOrPlaneswalker` and `PlayerOrPermanents` are attack-RESTRICTION
 /// scopes with no arm in `attack_target_type_matches`, so a trigger carrying one
 /// never fires at all. Exhaustive — a future attack scope must decide here.
@@ -6594,7 +6608,7 @@ fn extract_if_condition_with_card_name(
     }
 
     // CR 509.1a + CR 603.4: "if defending player controls no [type]"
-    // Nom combinator prefix dispatch + parse_type_phrase for the remainder.
+    // Nom combinator prefix dispatch + parse_type_phrase_folding for the remainder.
     {
         fn def_prefix(i: &str) -> nom::IResult<&str, (), OracleError<'_>> {
             let (i, _) = tag("if defending player controls no ").parse(i)?;
@@ -6604,7 +6618,7 @@ fn extract_if_condition_with_card_name(
             let pos = before.len();
             let prefix_len = "if defending player controls no ".len();
             let after = &text[pos + prefix_len..];
-            let (filter, rest) = parse_type_phrase(after);
+            let (filter, rest) = parse_type_phrase_folding(after);
             if !matches!(filter, TargetFilter::Any) {
                 let consumed = after.len() - rest.len();
                 return (
@@ -6765,7 +6779,7 @@ fn parse_gendered_dies_event_object_condition<'a>(
         DiesEventObjectPronoun::It | DiesEventObjectPronoun::He | DiesEventObjectPronoun::She => {}
     }
 
-    let (filter, rest) = parse_type_phrase(descriptor);
+    let (filter, rest) = parse_type_phrase_folding(descriptor);
     if matches!(filter, TargetFilter::Any) {
         return Err(oracle_err(input));
     }
@@ -9966,7 +9980,7 @@ fn continues_player_action_list(after_comma: &str) -> bool {
 }
 
 fn type_phrase_continues_to_combat_damage_player_event(text: &str) -> bool {
-    let (filter, rest) = parse_type_phrase(text);
+    let (filter, rest) = parse_type_phrase_folding(text);
     if matches!(filter, TargetFilter::Any) || rest.len() >= text.len() {
         return false;
     }
@@ -10301,6 +10315,14 @@ fn make_base() -> TriggerDefinition {
         .trigger_zones(vec![Zone::Battlefield])
 }
 
+fn unknown_trigger_definition(description: &str) -> (TriggerMode, TriggerDefinition) {
+    let mode = TriggerMode::Unknown(description.to_string());
+    let mut def = make_base();
+    def.mode = mode.clone();
+    def.description = Some(description.to_string());
+    (mode, def)
+}
+
 /// CR 202.3 + CR 208.1: Spell-cast quality suffix comparing mana value and/or
 /// power/toughness against the source's chosen number (Talion class).
 fn parse_spell_chosen_number_quality(spell_clause: &str) -> Option<TypedFilter> {
@@ -10324,7 +10346,7 @@ fn parse_spell_chosen_number_quality(spell_clause: &str) -> Option<TypedFilter> 
     let base_tf = if rest.is_empty() || rest == "spell" {
         TypedFilter::default()
     } else {
-        let (filter, _) = parse_type_phrase(rest);
+        let (filter, _) = parse_type_phrase_folding(rest);
         match filter {
             TargetFilter::Typed(tf) => tf,
             _ => TypedFilter::default(),
@@ -10762,7 +10784,38 @@ fn extract_trigger_subject_for_context(
     subject
 }
 
-fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<TargetFilter> {
+/// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.10: the PASSIVE-voice damage verb
+/// phrase — "is/are dealt [combat|noncombat|excess] damage".
+///
+/// Two independent axes, one `alt()` each, rather than the five printed strings
+/// they expand to: grammatical number ("is " / "are ") and the CR 120.2a/120.2b
+/// damage class, widened by the CR 120.10 excess qualifier. All five
+/// combinations that appear in the printed corpus are covered by composing the
+/// axes; none is enumerated as a whole-phrase `tag`.
+///
+/// Voice is the whole point of this combinator. In the ACTIVE voice ("a creature
+/// DEALS damage") the trigger's grammatical subject is the damage SOURCE; in the
+/// PASSIVE voice ("a creature IS DEALT damage") the subject is the RECIPIENT.
+/// CR 120.1 makes that distinction load-bearing: "an object that deals damage is
+/// the source of that damage", and the recipient is the object that *receives*
+/// it. The two roles are carried by different fields of the same
+/// `GameEvent::DamageDealt`, so a bare object anaphor in the effect body binds to
+/// a different object depending only on voice.
+fn parse_passive_dealt_damage(input: &str) -> OracleResult<'_, ()> {
+    // Axis 1 — grammatical number.
+    let (input, _) = alt((tag("is "), tag("are "))).parse(input)?;
+    let (input, _) = tag("dealt ").parse(input)?;
+    // Axis 2 — CR 120.2a/120.2b damage class, plus the CR 120.10 excess
+    // qualifier. Absent on the bare form, which is the corpus majority.
+    let (input, _) = opt(alt((tag("combat "), tag("noncombat "), tag("excess ")))).parse(input)?;
+    let (input, _) = tag("damage").parse(input)?;
+    Ok((input, ()))
+}
+
+fn trigger_object_pronoun_ref_for_condition(
+    condition_text: &str,
+    trigger_subject: &TargetFilter,
+) -> Option<TargetFilter> {
     let lower = condition_text.to_lowercase();
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
@@ -10787,6 +10840,43 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
     .is_ok();
     if is_spell_cast_trigger {
         return Some(TargetFilter::TriggeringSource);
+    }
+
+    // CR 608.2k + CR 120.1: a PASSIVE-voice damage trigger condition ("whenever
+    // <subject> is dealt damage") makes its grammatical subject the damage
+    // RECIPIENT, so the effect body's untargeted object anaphor ("destroy it",
+    // "put a +1/+1 counter on it") names the damaged permanent — CR 608.2k's
+    // "specific untargeted object … previously referred to by that ability's …
+    // trigger condition". `TargetFilter::EventTarget` reads
+    // `GameEvent::DamageDealt.target`; the subject-derived
+    // `TargetFilter::TriggeringSource` fallback in `resolve_it_pronoun` reads
+    // `.source_id`, which on a passive-voice trigger is the damage DEALER — a
+    // different object entirely (Termination Facilitator destroyed the source of
+    // the damage instead of the bountied creature, issue #8379).
+    //
+    // The subject phrase is arbitrarily long ("a creature or planeswalker an
+    // opponent controls with a bounty counter on it"), so the verb phrase is
+    // found by scanning the shared word-boundary primitive rather than by
+    // anchoring at a fixed offset.
+    //
+    // Gated on the subject NOT being self-referential, mirroring the exclusion
+    // set both pronoun resolvers already apply (`resolve_it_pronoun`,
+    // `resolve_pronoun_target`): on a self-scoped enrage trigger ("whenever this
+    // creature is dealt damage") the recipient IS the source, and `SelfRef` /
+    // `ParentTarget` remain the more precise antecedents — they resolve without
+    // consulting the trigger event at all.
+    let subject_is_self_referential = matches!(
+        trigger_subject,
+        TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+    );
+    if !subject_is_self_referential
+        && crate::parser::oracle_nom::primitives::scan_at_word_boundaries(
+            after_keyword,
+            parse_passive_dealt_damage,
+        )
+        .is_some()
+    {
+        return Some(TargetFilter::EventTarget);
     }
 
     None
@@ -11190,7 +11280,7 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
     // "another <type phrase>" — compose with FilterProp::Another
     if let Ok((after_another, ())) = value((), tag::<_, _, OracleError<'_>>("another ")).parse(text)
     {
-        let (filter, rest) = parse_type_phrase(after_another);
+        let (filter, rest) = parse_type_phrase_folding(after_another);
         let with_another = add_another_prop(filter);
         return (with_another, rest);
     }
@@ -11237,7 +11327,7 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
             return (filter, trimmed);
         }
 
-        let (filter, rest) = parse_type_phrase(after_quantifier);
+        let (filter, rest) = parse_type_phrase_folding(after_quantifier);
         if rest.len() < after_quantifier.len() {
             return (filter, rest);
         }
@@ -11256,8 +11346,8 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
 
     // CR 608.2k: Player subjects for pronoun resolution in trigger effects.
     // "an opponent", "a player", "each opponent" — these are player-type subjects,
-    // not object types. Must fire before the generic "a "/"an " + parse_type_phrase
-    // path, which would send "opponent" to parse_type_phrase and return Any.
+    // not object types. Must fire before the generic "a "/"an " + parse_type_phrase_folding
+    // path, which would send "opponent" to parse_type_phrase_folding and return Any.
     // "each opponent" maps to the same filter as "an opponent" for subject extraction;
     // the trigger mode (not the subject filter) determines per-opponent firing.
     if let Ok((rest, filter)) = alt((
@@ -11299,7 +11389,7 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         .parse(rest)
         {
             if let Some((clause_text, verb_rest)) = find_clause_verb_boundary(after_who) {
-                let (clause_filter, clause_remainder) = parse_type_phrase(clause_text);
+                let (clause_filter, clause_remainder) = parse_type_phrase_folding(clause_text);
                 // Only treat this as a control-relative clause when the clause
                 // text parsed cleanly into a typed filter.
                 if clause_remainder.trim().is_empty() && !matches!(clause_filter, TargetFilter::Any)
@@ -11317,14 +11407,14 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
     // caller's `relative_player_scope` — e.g. the counter-placement actor for
     // Bold Plagiarist ("an opponent puts … on a creature they control"). With a
     // default ctx (`relative_player_scope == None`) this is identical to the
-    // scope-free `parse_type_phrase`, so every other subject is unchanged.
+    // scope-free `parse_type_phrase_folding`, so every other subject is unchanged.
     if let Ok((after, ())) = alt((
         value((), tag::<_, _, OracleError<'_>>("a ")),
         value((), tag("an ")),
     ))
     .parse(text)
     {
-        let (filter, rest) = parse_type_phrase_with_ctx(after, ctx);
+        let (filter, rest) = parse_type_phrase_folding_with_ctx(after, ctx);
         return (filter, rest);
     }
 
@@ -11332,7 +11422,7 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         return (filter, rest.trim_start());
     }
 
-    let (filter, rest) = parse_type_phrase(text);
+    let (filter, rest) = parse_type_phrase_folding(text);
     if rest.len() < text.len() {
         return (filter, rest);
     }
@@ -11590,6 +11680,40 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
     .parse(rest)
 }
 
+/// CR 603.1 + CR 603.2: A relative clause in a damage trigger's recipient
+/// ("to a player who …") narrows the event's damaged player. It is evaluated
+/// while matching that event through `valid_target`, rather than installed as
+/// an intervening-if `condition` that CR 603.4 would re-check on resolution.
+fn parse_damage_player_relative_recipient<'a>(
+    after_damage: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, TargetFilter> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("to ").parse(after_damage.trim_start())?;
+    let (rest, relation) = value(PlayerRelation::All, tag("a player")).parse(rest)?;
+    let (rest, _) = space1.parse(rest)?;
+    let (rest, player) = parse_player_relative_clause(rest, relation, ctx)?;
+    let (rest, ()) = nom_primitives::peek_clause_terminator(rest)?;
+    Ok((
+        rest,
+        TargetFilter::PlayerMatching {
+            player: Box::new(player),
+        },
+    ))
+}
+
+/// Returns whether a recognized ordinary damage-recipient noun leaves a
+/// `who`-headed predicate that this route did not model. The zero-consumption
+/// peek makes that residual a terminal unknown rather than silently retaining
+/// the broad player filter.
+fn has_unmodelled_damage_recipient_predicate(after_damage: &str) -> bool {
+    let Ok((remainder, _)) = parse_damage_to_qualifier_with_rest(after_damage) else {
+        return false;
+    };
+    peek(preceded(space1, tag::<_, _, OracleError<'_>>("who ")))
+        .parse(remainder)
+        .is_ok()
+}
+
 /// CR 120.1 + CR 208.1 + CR 603.4: Parse the full Taii Wakeen recipient shape —
 /// `"to <object> equal to that <object>'s toughness|power"` — atomically. Only
 /// succeeds when an object recipient is immediately followed by the equal-to-P/T
@@ -11606,7 +11730,7 @@ fn parse_object_recipient_pt_gate(
     let (rest, ()) =
         value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
     // CR 120.1: object recipient ("a creature" / "a permanent" / typed). The
-    // leading article is consumed before delegating to `parse_type_phrase`.
+    // leading article is consumed before delegating to `parse_type_phrase_folding`.
     let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
     let (rest, filter) = parse_type_phrase_nom(rest)?;
     // The equal-to-P/T qualifier is mandatory: without it this is an ordinary
@@ -11648,7 +11772,7 @@ fn parse_object_recipient_filter(after_verb: &str) -> OracleResult<'_, TargetFil
     // parse and the trigger fell back to `valid_target = None` (fires on ANY
     // recipient, including a player). Consume the leading `FilterProp`s and merge
     // them into the typed recipient so the trigger gates on the damaged object's
-    // combat state. Mirrors the prefix loop in `oracle_target::parse_type_phrase`.
+    // combat state. Mirrors the prefix loop in `oracle_target::parse_type_phrase_folding`.
     let (rest, prefix_props) = many0(terminated(parse_property_filter, space1)).parse(rest)?;
     let (rest, mut filter) = parse_type_phrase_nom(rest)?;
     // Phrase-terminator guard: accept only end-of-string or a non-alphanumeric
@@ -11860,7 +11984,7 @@ fn append_trigger_condition(
 /// active-voice mill trigger ("mills **a nonland card**", "mills **one or more
 /// creature cards**"). Optionally consumes a leading "one or more " quantifier
 /// (semantically redundant — `valid_card` matching is per-object), then
-/// delegates the typed-filter recognition to `parse_type_phrase` (which strips
+/// delegates the typed-filter recognition to `parse_type_phrase_folding` (which strips
 /// the "a "/"an " article itself). Returns `None` when the tail is not a
 /// recognizable type phrase, so the caller falls through to the next arm.
 fn parse_milled_object_filter(input: &str) -> Option<TargetFilter> {
@@ -11868,7 +11992,7 @@ fn parse_milled_object_filter(input: &str) -> Option<TargetFilter> {
         .parse(input)
         .map(|(rest, _)| rest)
         .unwrap_or(input);
-    let (filter, rest) = parse_type_phrase(after_quantifier);
+    let (filter, rest) = parse_type_phrase_folding(after_quantifier);
     // Require the type phrase to have consumed something — a bare fallthrough
     // (rest == after_quantifier) means no typed filter was recognized.
     if rest.len() < after_quantifier.len() {
@@ -12390,6 +12514,10 @@ fn try_parse_event(
                 scope: DamageAmountScope::PerSource,
             });
             def.valid_source = Some(subject.clone());
+            if let Ok((_, filter)) = parse_damage_player_relative_recipient(after_damage, ctx) {
+                def.valid_target = Some(filter);
+                return Some((TriggerMode::DamageDone, def));
+            }
             // CR 120.1 + CR 208.1 + CR 603.4: Taii Wakeen's damage==recipient-P/T
             // shape ("to <object> equal to that <object>'s toughness/power") is
             // tried first and atomically — it succeeds only when the object
@@ -12431,6 +12559,9 @@ fn try_parse_event(
                 // Ordinary player recipient ("to a player" / "to an opponent" /
                 // …) — unchanged from the pre-Taii behavior.
                 def.valid_target = Some(filter);
+            }
+            if has_unmodelled_damage_recipient_predicate(after_damage) {
+                return Some(unknown_trigger_definition(full_lower));
             }
             return Some((TriggerMode::DamageDone, def));
         }
@@ -12594,7 +12725,7 @@ fn try_parse_event(
                 // is a real clause boundary, checked with the shared
                 // `peek_clause_terminator` authority; anything else falls into
                 // the SAME declined branch as a total parse failure.
-                let modelled = parse_attacked_player_relative_clause(after_noun, relation, ctx)
+                let modelled = parse_player_relative_clause(after_noun, relation, ctx)
                     .ok()
                     .filter(|(remainder, _)| {
                         nom_primitives::peek_clause_terminator(remainder).is_ok()
@@ -13024,7 +13155,7 @@ fn try_parse_event(
             return Ok((remaining, SimpleEvent::BecomesUnattached(None)));
         }
         let (host, _) = tag(" from ").parse(remaining)?;
-        let (filter, rest) = parse_type_phrase(host);
+        let (filter, rest) = parse_type_phrase_folding(host);
         if !rest.trim().is_empty() {
             return Err(nom::Err::Error(OracleError::new(
                 rest,
@@ -13280,7 +13411,7 @@ fn try_parse_event(
         let (type_phrase, _) = alt((tag::<_, _, OracleError<'_>>(" by a "), tag(" by an ")))
             .parse(input)
             .ok()?;
-        let (filter, rest) = parse_type_phrase(type_phrase);
+        let (filter, rest) = parse_type_phrase_folding(type_phrase);
         rest.trim().is_empty().then_some(filter)
     }
     /// CR 509.3b: "blocks a <filter>" carries a target-side (attacker) qualifier —
@@ -13289,7 +13420,7 @@ fn try_parse_event(
         let (type_phrase, _) = alt((tag::<_, _, OracleError<'_>>(" a "), tag(" an ")))
             .parse(input)
             .ok()?;
-        let (filter, rest) = parse_type_phrase(type_phrase);
+        let (filter, rest) = parse_type_phrase_folding(type_phrase);
         rest.trim().is_empty().then_some(filter)
     }
     if let Ok((remaining, event)) = parse_simple_event.parse(rest) {
@@ -13576,7 +13707,7 @@ fn try_parse_event(
                 if matches!(subject, TargetFilter::SelfRef) {
                     // Pattern 1: "Whenever ~ becomes attached to [host]"
                     if !remaining.is_empty() {
-                        let (filter, rest) = parse_type_phrase(remaining);
+                        let (filter, rest) = parse_type_phrase_folding(remaining);
                         if !rest.trim().is_empty() {
                             return None;
                         }
@@ -14093,6 +14224,14 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
     def.mode = TriggerMode::DamageDone;
     def.damage_kind = damage_kind;
     def.valid_source = Some(source_filter);
+    let mut recipient_ctx = ParseContext::default();
+    if let Ok((_, filter)) =
+        parse_damage_player_relative_recipient(after_damage, &mut recipient_ctx)
+    {
+        def.valid_target = Some(filter);
+        def.damage_amount = threshold;
+        return Some((TriggerMode::DamageDone, def));
+    }
     // CR 120.1 + CR 208.1 + CR 603.4: Taii Wakeen's damage==recipient-P/T shape
     // ("to <object> equal to that <object>'s toughness/power"). Tried first and
     // atomically — succeeds only when an object recipient is immediately
@@ -14146,6 +14285,9 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
     // but is not one of this parser's recipient qualifiers, leave the line for
     // narrower parsers such as "a source deals damage to this creature".
     let valid_target = parse_damage_to_qualifier(after_damage);
+    if has_unmodelled_damage_recipient_predicate(after_damage) {
+        return Some(unknown_trigger_definition(lower));
+    }
     let has_recipient_tail = preceded(opt(space1), tag::<_, _, OracleError<'_>>("to "))
         .parse(after_damage)
         .is_ok();
@@ -15055,7 +15197,7 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
         // relative clause and capture it as a non-source-relative attachment filter.
         let (subject_core, attachment_prop) = strip_attachment_relative_clause(subject_text);
 
-        let (filter, remainder) = parse_type_phrase(subject_core);
+        let (filter, remainder) = parse_type_phrase_folding(subject_core);
         if !remainder.trim().is_empty() {
             continue;
         }
@@ -15224,7 +15366,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     // Count==1 needs only the matcher's valid_card gate; count>1 additionally
     // uses AttackersDeclaredCount when the type phrase narrows beyond bare
     // "creatures".
-    let (filter, remainder) = parse_type_phrase(after_quantifier);
+    let (filter, remainder) = parse_type_phrase_folding(after_quantifier);
     // Accept optional trailing " each turn" / " this turn" qualifier (unused here,
     // but keeps the matcher permissive for CR 603.4 timing qualifiers). Must end
     // at the condition boundary — the caller already split the effect text off,
@@ -15310,7 +15452,7 @@ fn try_parse_one_or_more_die(lower: &str) -> Option<(TriggerMode, TriggerDefinit
             continue;
         };
 
-        let (filter, remainder) = parse_type_phrase(subject_text);
+        let (filter, remainder) = parse_type_phrase_folding(subject_text);
         if !remainder.trim().is_empty() {
             continue;
         }
@@ -15386,7 +15528,7 @@ fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, Tri
     let valid_card = if subject_text.trim().is_empty() {
         None
     } else {
-        let (filter, remainder) = parse_type_phrase(subject_text);
+        let (filter, remainder) = parse_type_phrase_folding(subject_text);
         if !remainder.trim().is_empty() {
             return None;
         }
@@ -15434,7 +15576,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
                 let filters: Vec<TargetFilter> = parts
                     .iter()
                     .filter_map(|part| {
-                        let (f, rem) = parse_type_phrase(part.trim());
+                        let (f, rem) = parse_type_phrase_folding(part.trim());
                         if rem.trim().is_empty() {
                             Some(f)
                         } else {
@@ -15448,7 +15590,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
                     continue;
                 }
             } else {
-                let (filter, remainder) = parse_type_phrase(type_text);
+                let (filter, remainder) = parse_type_phrase_folding(type_text);
                 if !remainder.trim().is_empty() {
                     continue;
                 }
@@ -15630,7 +15772,7 @@ fn try_parse_one_or_more_combat_damage_to_player(
             continue;
         };
 
-        let (filter, remainder) = parse_type_phrase(subject_text);
+        let (filter, remainder) = parse_type_phrase_folding(subject_text);
         let filter = if remainder.trim().is_empty() {
             filter
         } else if let Some(or_filter) = try_split_or_compound_type_phrase(subject_text) {
@@ -15706,7 +15848,7 @@ fn parse_controlled_subtype_subject(subject_text: &str) -> Option<TargetFilter> 
 }
 
 /// CR 205.3m: Try to split "subtype or subtype [card_type] [you control]" into an Or filter.
-/// Handles patterns like "ninja or rogue creatures you control" where parse_type_phrase
+/// Handles patterns like "ninja or rogue creatures you control" where parse_type_phrase_folding
 /// can't natively handle the "or" compound with a shared card_type suffix.
 /// Parses the full right-side phrase ("rogue creatures you control") as a complete type phrase,
 /// then applies the shared card_type and controller to the left-side bare subtype.
@@ -15714,15 +15856,15 @@ fn try_split_or_compound_type_phrase(text: &str) -> Option<TargetFilter> {
     let (_, (left, right)) = nom_primitives::split_once_on(text, " or ").ok()?;
     let left_trimmed = left.trim();
     // Parse the full right side as a type phrase — "rogue creatures you control" is a complete phrase
-    // that parse_type_phrase handles as subtype-only + trailing text. Instead, parse the whole
-    // "subtype card_type controller" suffix manually by feeding "right" to parse_type_phrase
+    // that parse_type_phrase_folding handles as subtype-only + trailing text. Instead, parse the whole
+    // "subtype card_type controller" suffix manually by feeding "right" to parse_type_phrase_folding
     // but appending it to make a single-subtype phrase.
     // The simplest correct approach: parse the entire text AFTER stripping the "subtype or " prefix
     // from the left, treating the rest as a single type phrase that gives us card_type + controller.
     let right_trimmed = right.trim();
     // Try parsing the entire right side as a type phrase
-    let (right_filter, right_remainder) = parse_type_phrase(right_trimmed);
-    // If parse_type_phrase didn't fully consume, the right side has "subtype card_type you control"
+    let (right_filter, right_remainder) = parse_type_phrase_folding(right_trimmed);
+    // If parse_type_phrase_folding didn't fully consume, the right side has "subtype card_type you control"
     // pattern. Reconstruct: the right_filter has subtype, and remainder has "card_type you control".
     let (primary_type, controller) = if right_remainder.trim().is_empty() {
         // Fully consumed
@@ -15733,7 +15875,7 @@ fn try_split_or_compound_type_phrase(text: &str) -> Option<TargetFilter> {
         }
     } else if let TargetFilter::Typed(ref tf) = right_filter {
         // Partially consumed: right_filter has subtype, remainder has "creatures you control"
-        let (suffix_filter, suffix_rem) = parse_type_phrase(right_remainder.trim());
+        let (suffix_filter, suffix_rem) = parse_type_phrase_folding(right_remainder.trim());
         if !suffix_rem.trim().is_empty() {
             return None;
         }
@@ -15791,7 +15933,7 @@ fn try_parse_self_or_another_controlled_subtype_enters(
         let Some(subtype_text) = subject_text.trim().strip_suffix(" you control") else {
             continue;
         };
-        let (_, remainder) = parse_type_phrase(subtype_text);
+        let (_, remainder) = parse_type_phrase_folding(subtype_text);
         if remainder.len() < subtype_text.len() {
             continue;
         }
@@ -15870,8 +16012,8 @@ fn try_parse_controlled_chosen_type_enters(
     }
 
     // Parse the type word (e.g. "permanent", "creature", "nontoken creature").
-    // Use parse_type_phrase which handles "nontoken" prefixes and type words.
-    let (filter, remainder) = parse_type_phrase(type_text);
+    // Use parse_type_phrase_folding which handles "nontoken" prefixes and type words.
+    let (filter, remainder) = parse_type_phrase_folding(type_text);
     if !remainder.is_empty() {
         return None;
     }
@@ -15890,7 +16032,7 @@ fn try_parse_controlled_chosen_type_enters(
             TargetFilter::Typed(typed)
         }
         _ => {
-            // parse_type_phrase should always return Typed for a type word;
+            // parse_type_phrase_folding should always return Typed for a type word;
             // if not, bail.
             return None;
         }
@@ -15944,7 +16086,7 @@ fn try_parse_controlled_subtype_enters(lower: &str) -> Option<(TriggerMode, Trig
         return None;
     }
 
-    let (_, remainder) = parse_type_phrase(subtype_text);
+    let (_, remainder) = parse_type_phrase_folding(subtype_text);
     if remainder.len() < subtype_text.len() {
         return None;
     }
@@ -15977,7 +16119,7 @@ fn try_parse_another_controlled_subtype_enters(
         let Some(subtype_text) = subject_text.trim().strip_suffix(" you control") else {
             continue;
         };
-        let (_, remainder) = parse_type_phrase(subtype_text);
+        let (_, remainder) = parse_type_phrase_folding(subtype_text);
         if remainder.len() < subtype_text.len() {
             continue;
         }
@@ -16008,7 +16150,7 @@ fn try_parse_controlled_subtype_attacks(lower: &str) -> Option<(TriggerMode, Tri
         let Some(subtype_text) = subject_text.trim().strip_suffix(" you control") else {
             continue;
         };
-        let (_, remainder) = parse_type_phrase(subtype_text);
+        let (_, remainder) = parse_type_phrase_folding(subtype_text);
         if remainder.len() < subtype_text.len() {
             continue;
         }
@@ -16491,7 +16633,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // [from <zone>]" fires on the CR 305 special action. Handles both the
     // third-person "plays a land" form (a player, an opponent) and the
     // second-person "play a land" form (you — e.g. Fastbond). The optional
-    // from-zone tail rides through `parse_type_phrase`, matching the existing
+    // from-zone tail rides through `parse_type_phrase_folding`, matching the existing
     // cast-spell trigger shape used by Rocco, Street Chef.
     if let Some((valid_target, land_filter)) = parse_land_play_trigger_subject(lower) {
         let mut def = make_base();
@@ -16860,7 +17002,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
 
         // CR 601.2a: pre-extract the "from <zone>" cast-origin tail BEFORE
-        // running the type-phrase parser. `parse_type_phrase`'s
+        // running the type-phrase parser. `parse_type_phrase_folding`'s
         // `parse_zone_suffix` would otherwise attach the zone as a
         // `FilterProp::InZone` on `valid_card` — semantically wrong for
         // SpellCast triggers because the spell object's zone at
@@ -16885,7 +17027,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
         // CR 700.2: Peel an optional leading "modal " qualifier off the payload
         // BEFORE the type-phrase / spell-qualifier parsers run. "modal" is not a
-        // card type, so `parse_type_phrase("modal spell")` yields an empty filter
+        // card type, so `parse_type_phrase_folding("modal spell")` yields an empty filter
         // and `parse_spell_qualifier_payload` treats "modal" as an unknown pre-
         // spell word — either way the modality is silently dropped and
         // `valid_card` is left `None`, over-triggering on every spell (issue
@@ -16924,7 +17066,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
 
         // Fall back to the classic type-phrase parser for bare type filters.
-        let (filter, _rest) = parse_type_phrase(payload);
+        let (filter, _rest) = parse_type_phrase_folding(payload);
         let filter = if is_another {
             add_another_prop(filter)
         } else {
@@ -16983,7 +17125,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             }
 
             // Parse the spell quality generically (e.g., "creature spell", "multicolored spell")
-            // using the same parse_type_phrase building block as the "you cast" branch above.
+            // using the same parse_type_phrase_folding building block as the "you cast" branch above.
             // The condition/effect boundary was already split by `split_trigger`; do not
             // truncate on ", " here — spell qualities may contain commas (Talion:
             // "mana value, power, or toughness equal to the chosen number").
@@ -17056,7 +17198,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 };
                 def.valid_card = Some(filter);
             } else {
-                let (filter, _rest) = parse_type_phrase(spell_clause);
+                let (filter, _rest) = parse_type_phrase_folding(spell_clause);
                 let is_meaningful = match &filter {
                     TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
                     TargetFilter::Or { .. } => true,
@@ -18011,7 +18153,7 @@ fn parse_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
         None
     } else {
         // Non-empty post-spell text that does NOT match a recognized modifier
-        // (e.g. "that targets only ~" — handled by the legacy `parse_type_phrase`
+        // (e.g. "that targets only ~" — handled by the legacy `parse_type_phrase_folding`
         // pathway). `?` propagates None so the caller can fall back.
         Some(parse_post_spell_modifier(post_spell)?)
     };
@@ -18026,7 +18168,7 @@ fn parse_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
 }
 
 /// Parse a bare type phrase (e.g. "noncreature", "creature") as a `TargetFilter`.
-/// Returns `None` if `parse_type_phrase` reports `TargetFilter::Any` or leaves
+/// Returns `None` if `parse_type_phrase_folding` reports `TargetFilter::Any` or leaves
 /// residual text — both indicate the phrase was not a pure type qualifier.
 fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
     // CR 105.2b: bare color-quality qualifiers ("multicolored", "monocolored",
@@ -18048,7 +18190,7 @@ fn type_only_filter(qualifier: &str) -> Option<TargetFilter> {
             TypedFilter::card().properties(vec![FilterProp::WasKicked]),
         ));
     }
-    let (filter, remainder) = parse_type_phrase(qualifier);
+    let (filter, remainder) = parse_type_phrase_folding(qualifier);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         Some(filter)
     } else {
@@ -18243,7 +18385,7 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
     // or a creature card in your graveyard" (Volo, Guide to Monsters). Reuse the
     // shared-quality clause combinator so the disjunctive reference ("creature
     // you control or a creature card in your graveyard") is not mis-split as a
-    // type-phrase `Or` inside `parse_type_phrase`.
+    // type-phrase `Or` inside `parse_type_phrase_folding`.
     if let Ok((rest, prop)) =
         super::oracle_target::parse_shared_quality_clause(modifier, &ParseContext::default())
     {
@@ -19273,7 +19415,7 @@ fn try_parse_one_or_more_put_into_graveyard(
         let base_filter = if subject_text == "cards" {
             None
         } else if let Some(type_text) = subject_text.strip_suffix(" cards") {
-            let (f, remainder) = parse_type_phrase(type_text);
+            let (f, remainder) = parse_type_phrase_folding(type_text);
             if !remainder.trim().is_empty() {
                 continue;
             }
@@ -19424,7 +19566,7 @@ fn try_parse_discard_trigger(
                 .is_ok()
         }
 
-        let (filter, rest) = parse_type_phrase(after_verb);
+        let (filter, rest) = parse_type_phrase_folding(after_verb);
         if !discard_filter_tail_is_complete(rest)
             && tag::<_, _, OracleError<'_>>("or ")
                 .parse(rest.trim_start())
@@ -19786,12 +19928,11 @@ fn parse_phase_determiner_prefix(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("each player's "), tag("each "), tag("the ")))).parse(input)
 }
 
-/// CR 603.1 (docs/MagicCompRules.txt:2559) + CR 603.7 (:2614): a triggered ability
-/// is printed as "[When/Whenever/At] [trigger event], [effect]", and a DELAYED
-/// triggered ability "will contain 'when,' 'whenever,' or 'at,' although that word
-/// won't usually begin the ability" — i.e. it appears mid-sentence, with its own
-/// internal comma between head and body. This combinator matches that head,
-/// ANCHORED TO END-OF-INPUT.
+/// CR 603.1 + CR 603.7: a triggered ability is printed as "[When/Whenever/At]
+/// [trigger event], [effect]", and a DELAYED triggered ability "will contain
+/// 'when,' 'whenever,' or 'at,' although that word won't usually begin the
+/// ability" — i.e. it appears mid-sentence, with its own internal comma between
+/// head and body. This combinator matches that head, ANCHORED TO END-OF-INPUT.
 ///
 /// "at the beginning of ⟨possessive|determiner⟩? ⟨'next '⟩? ⟨phase⟩ 's'?
 ///  ⟨' on your turn'⟩? EOF"
@@ -19833,11 +19974,11 @@ pub(crate) fn parse_dangling_phase_trigger_head(input: &str) -> OracleResult<'_,
     .parse(input)
 }
 
-/// CR 500.1 (docs/MagicCompRules.txt:2115): a printed phase or step noun names a
-/// subdivision of a TURN, which is what makes a turn-owner possessive in front of it
-/// ("each of your upkeeps", "an opponent's end step") a statement about WHOSE TURN
-/// the trigger may fire on. Migrated from `CR 503.1a / CR 507.1`, both verified
-/// misfits (upkeep triggers going on the stack; choosing a defending player).
+/// CR 500.1: a printed phase or step noun names a subdivision of a TURN, which is
+/// what makes a turn-owner possessive in front of it ("each of your upkeeps", "an
+/// opponent's end step") a statement about WHOSE TURN the trigger may fire on.
+/// Migrated from `CR 503.1a / CR 507.1`, both verified misfits (upkeep triggers
+/// going on the stack; choosing a defending player).
 ///
 /// The possessive table itself lives in [`parse_turn_possessive_prefix`] — one
 /// table, two consumers. Also checks for a trailing "on your turn" suffix.
@@ -19965,14 +20106,14 @@ fn parse_land_play_trigger_subject(
     .parse(after_prefix)
     .ok()?;
     // CR 305.1: Decompose verb ("play"/"plays") from the land object phrase.
-    // The object phrase itself goes through `parse_type_phrase`, the shared
+    // The object phrase itself goes through `parse_type_phrase_folding`, the shared
     // typed-filter grammar for supertypes, subtypes, "another", and zone
     // suffixes. That keeps "a legendary land", "another land", "an Island",
     // and "a land from exile" on one parser seam.
     let (after_verb, _) = alt((tag::<_, _, OracleError<'_>>("plays "), tag("play ")))
         .parse(after_subject)
         .ok()?;
-    let (filter, rest) = parse_type_phrase(after_verb);
+    let (filter, rest) = parse_type_phrase_folding(after_verb);
     if rest.len() == after_verb.len() {
         return None;
     }
@@ -20230,7 +20371,7 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
         };
 
     // Try parsing as a type phrase first (handles "creatures", "artifacts", "lands", etc.)
-    let (filter, rest) = parse_type_phrase(remainder);
+    let (filter, rest) = parse_type_phrase_folding(remainder);
     if !rest.trim().is_empty() {
         return None;
     }

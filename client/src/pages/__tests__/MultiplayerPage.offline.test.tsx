@@ -23,6 +23,11 @@ const mocks = vi.hoisted(() => ({
     closeSubscriptionSocket: vi.fn(),
     clearAllToasts: vi.fn(),
     serverAddress: "wss://example.test/ws",
+    // The page reads both off the store now; without them the mode selector
+    // resolves to `undefined` and the switch's setter is not callable.
+    connectionMode: null as "server" | "p2p" | null,
+    setConnectionMode: vi.fn(),
+    setHostingServer: vi.fn(),
     formatConfig: null,
     compatibilityPlayerCount: null,
     resolveGuest: vi.fn(),

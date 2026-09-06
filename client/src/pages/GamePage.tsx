@@ -84,6 +84,7 @@ import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.t
 import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
+import { RippleRevealChoiceModal } from "../components/modal/RippleRevealChoiceModal.tsx";
 import { FreeCastWindowModal } from "../components/modal/FreeCastWindowModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
 import { AlternativeCostModal } from "../components/modal/AlternativeCostModal.tsx";
@@ -2046,6 +2047,7 @@ function GamePageContent({
         <LifeRedistributionModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
+        <RippleRevealChoiceModal />
         <SpellbookDraftModal />
         <FreeCastWindowModal />
         <ModalFaceModal />
@@ -3007,6 +3009,24 @@ function GameOverScreen({
     navigate("/draft/quick?resume=1");
   };
 
+  /**
+   * There are TWO "back to pod" affordances in a `draft-match` game — this
+   * game-over button and the in-game menu's "Back to draft"
+   * (`GameMenu.tsx`) — and a third exit through Concede
+   * (`useConcedeHandler`). All three ask the same question, so all three ask
+   * `endCommanderSession`, which owns the answer and the reasoning: a pairwise
+   * pod match must survive being left, a Commander launch must not.
+   *
+   * `finally`, not `then` — a teardown that rejects must not strand the player
+   * on the game-over screen.
+   */
+  const handleBackToPod = () => {
+    void useMultiplayerDraftStore
+      .getState()
+      .endCommanderSession()
+      .finally(() => navigate("/draft-pod"));
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
@@ -3096,7 +3116,7 @@ function GameOverScreen({
             ) : isDraftPodMatch ? (
               <button
                 disabled={!resultRecorded}
-                onClick={() => navigate("/draft-pod")}
+                onClick={handleBackToPod}
                 className={gameButtonClass({
                   tone: isVictory ? "amber" : "slate",
                   size: "lg",

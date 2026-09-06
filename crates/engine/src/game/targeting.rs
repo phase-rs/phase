@@ -800,12 +800,36 @@ pub fn resolved_targets(
         // filter-layer `TargetFilter::CostPaidObject` arm in `game/filter.rs`
         // and the `ObjectScope::CostPaidObject` P/T ladder in `game/quantity.rs`
         // so every `CostPaidObject` reader binds the same referent.
+        // CR 400.7 + CR 608.2k: CR 608.2k keeps this untargeted back-reference
+        // alive across *characteristic* changes, but an object that changed
+        // zones became a NEW object (CR 400.7) that the reference no longer
+        // names. The engine reuses `ObjectId` as storage identity, so the id
+        // alone cannot tell those apart — gate on the incarnation captured at
+        // binding time. A stale referent yields no target here rather than
+        // falling through to the live object at the same id.
+        //
+        // Scope of this guard, stated exactly: it prevents acting on a
+        // different incarnation at the same id. It does not assert the
+        // referent is still on the battlefield or otherwise legal; effects
+        // with zone requirements (CR 701.21a sacrifice) enforce those
+        // themselves.
+        // CR 608.2k: try each slot INDEPENDENTLY. `Option::or` would short-circuit
+        // on a present-but-stale slot 1 and never reach a live slot 2, so a
+        // departed cost referent would mask an effect-context referent that is
+        // still current. Resolving each in turn keeps the documented slot order
+        // while letting a stale slot fall through.
         return ability
             .cost_paid_object
             .as_ref()
-            .or(ability.effect_context_object.as_ref())
+            .and_then(|snap| snap.live_object_id(state))
+            .or_else(|| {
+                ability
+                    .effect_context_object
+                    .as_ref()
+                    .and_then(|snap| snap.live_object_id(state))
+            })
             .into_iter()
-            .map(|snap| TargetRef::Object(snap.object_id))
+            .map(TargetRef::Object)
             .collect();
     }
     // CR 701.47c: "the amassed Army" / "the Army you amassed" — resolves to
@@ -814,12 +838,16 @@ pub fn resolved_targets(
     // in `game/effects/mod.rs` from the `Amass` effect's own resolution).
     // Mirrors the `CostPaidObject` ladder immediately above: a resolution-local
     // referent read out of ability state, not the targeting pipeline.
+    // CR 400.7: the amassed Army is a captured live referent, so it takes the
+    // same shared identity guard as `CostPaidObject` above — an Army that
+    // changed zones and returned is a new object.
     if matches!(target_filter, TargetFilter::AmassedArmy) {
         return ability
             .amassed_army_object
             .as_ref()
+            .and_then(|snap| snap.live_object_id(state))
             .into_iter()
-            .map(|snap| TargetRef::Object(snap.object_id))
+            .map(TargetRef::Object)
             .collect();
     }
     // CR 701.20e: "it" / "that card" after a look-at or reveal instruction.
@@ -969,7 +997,7 @@ pub(crate) fn resolve_parent_slot_from_root(
         .nth(index)
 }
 
-fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
+pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
     matches!(
         target_filter,
         TargetFilter::TriggeringSpellController
@@ -2241,12 +2269,14 @@ fn stack_entry_controller_matches(
 /// CR 400.3 fixes which zones those are.
 ///
 /// Matching them against `obj.controller` excluded a card from its OWN owner's
-/// query whenever a control-change effect left a stale controller behind — the
-/// state `effects::change_zone` documents for a creature stolen via Mind Control
-/// that dies into its owner's graveyard, where `reset_for_battlefield_exit` does
-/// not reset controller and the layer pass that would skips objects off the
-/// battlefield. Exile keeps controller matching deliberately; see
-/// `filter::is_owner_scoped_zone` for why.
+/// query whenever a control-change effect left a stale controller behind.
+/// `zones::apply_zone_exit_cleanup` already resets `controller` back to the
+/// owner fallback on the way into these zones, but this owner-scoped match is
+/// defence-in-depth for a hand-built or serialized state where the two have
+/// diverged — the state `effects::change_zone` documents at its own site, for a
+/// creature stolen via Mind Control that dies into its owner's graveyard. Exile
+/// keeps controller matching deliberately; see `filter::is_owner_scoped_zone`
+/// for why.
 fn add_zone_targets(
     state: &GameState,
     zone: Zone,
@@ -3241,6 +3271,7 @@ mod tests {
                 applied: HashSet::new(),
                 event_source: Some(c0),
                 event_target: None,
+                controller: None,
             },
             ResidentDrainPolicy::Replace,
         );
@@ -3287,6 +3318,7 @@ mod tests {
                 applied: HashSet::new(),
                 event_target: Some(TargetRef::Object(c1)),
                 event_source: None,
+                controller: None,
             },
             ResidentDrainPolicy::Replace,
         );
@@ -5583,12 +5615,15 @@ mod tests {
     /// resolution and the spell fizzles. Fixing only enumeration would leave exactly
     /// that split, so both are asserted here on one state.
     ///
-    /// The fixture stages the divergence CR 400.3 makes reachable: a card goes to its
-    /// OWNER's graveyard, while `reset_for_battlefield_exit` leaves a stale
-    /// `controller` behind from a control-change effect. So `mine` (owner P0,
-    /// controller P1) is in P0's graveyard and must match "creature card in YOUR
-    /// graveyard"; `theirs` (owner P1, controller P0) is in P1's graveyard and must
-    /// not — under controller matching the two verdicts invert exactly.
+    /// The fixture hand-builds the divergence CR 400.3 makes reachable in principle:
+    /// a card sits in its OWNER's graveyard while `controller` still names a
+    /// different player, as it would if a control-change effect's reset had not
+    /// run (`zones::apply_zone_exit_cleanup` resets it in production; this test
+    /// constructs the divergent state directly, as defence-in-depth coverage). So
+    /// `mine` (owner P0, controller P1) is in P0's graveyard and must match
+    /// "creature card in YOUR graveyard"; `theirs` (owner P1, controller P0) is in
+    /// P1's graveyard and must not — under controller matching the two verdicts
+    /// invert exactly.
     #[test]
     fn owner_scoped_zone_query_agrees_across_selection_and_resolution() {
         let mut state = GameState::new_two_player(42);
@@ -6491,6 +6526,239 @@ mod tests {
             resolve_effect_player_ref(&state, &ability, &TargetFilter::Opponent),
             Some(targeted),
             "an already-targeted opponent is the announcer"
+        );
+    }
+
+    /// CR 400.7 + CR 608.2k: A `CostPaidObject` referent that left and returned
+    /// is a NEW object at the same storage `ObjectId`. The chokepoint must not
+    /// resolve to it, and must not fall through to any other battlefield
+    /// permanent (an inherited live parent target or an unrelated bystander).
+    ///
+    /// Paired with `resolved_targets_cost_paid_object_binds_referent_that_never_departed`,
+    /// which proves this fixture reaches the arm at all — a bare negative here
+    /// would still pass if the arm were never entered.
+    #[test]
+    fn resolved_targets_cost_paid_object_rejects_new_incarnation_after_round_trip() {
+        use crate::types::ability::CostPaidObjectSnapshot;
+
+        let mut state = GameState::new_two_player(42);
+        let referent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Referent".to_string(),
+            Zone::Battlefield,
+        );
+        let parent_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Inherited Parent Target".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+
+        let referent_obj = state.objects.get(&referent).expect("referent exists");
+        // Bind the PRE-departure incarnation so the reach-guard below compares
+        // against what was actually captured, not against a hardcoded 0 that
+        // would only discriminate incidentally.
+        let incarnation_before = referent_obj.incarnation;
+        let snapshot = CostPaidObjectSnapshot::capture(
+            referent_obj,
+            referent_obj.snapshot_public_characteristics(),
+        );
+        // A live inherited parent target is present, per the regression spec.
+        let mut ability =
+            make_resolved_with_targets(vec![TargetRef::Object(parent_target)], referent);
+        ability.set_cost_paid_object_recursive(snapshot);
+
+        // CR 400.7: battlefield -> graveyard -> battlefield. Two real zone
+        // changes, so two incarnation bumps at the same ObjectId.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, referent, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, referent, Zone::Battlefield, &mut events);
+
+        let returned = state.objects.get(&referent).expect("row survives the move");
+        assert_eq!(
+            returned.zone,
+            Zone::Battlefield,
+            "fixture reach-guard: the referent id must be back on the battlefield, \
+             or this test would pass for the wrong reason (nothing there to hit)"
+        );
+        assert!(
+            returned.incarnation > incarnation_before,
+            "fixture reach-guard: the round trip must have bumped the incarnation past the captured one ({} -> {})",
+            incarnation_before,
+            returned.incarnation
+        );
+
+        let result = resolved_targets(&ability, &TargetFilter::CostPaidObject, &state);
+
+        assert!(
+            result.is_empty(),
+            "CR 400.7: the returned permanent is a new object, so the cost-paid \
+             reference must resolve to nothing and must not fall through to the \
+             inherited parent target or the bystander. Got {result:?}"
+        );
+        assert!(
+            !result.contains(&TargetRef::Object(parent_target)),
+            "the inherited live parent target must never be substituted"
+        );
+        assert!(
+            !result.contains(&TargetRef::Object(bystander)),
+            "the unrelated bystander must never be substituted"
+        );
+    }
+
+    /// CR 608.2k: Paired positive for
+    /// `resolved_targets_cost_paid_object_rejects_new_incarnation_after_round_trip`.
+    /// Same fixture shape, same live parent target and bystander, but the
+    /// referent never departs — so the arm IS reached and DOES bind it. Without
+    /// this, the negative above would be vacuous.
+    #[test]
+    fn resolved_targets_cost_paid_object_binds_referent_that_never_departed() {
+        use crate::types::ability::CostPaidObjectSnapshot;
+
+        let mut state = GameState::new_two_player(42);
+        let referent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Referent".to_string(),
+            Zone::Battlefield,
+        );
+        let parent_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Inherited Parent Target".to_string(),
+            Zone::Battlefield,
+        );
+        let _bystander = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+
+        let referent_obj = state.objects.get(&referent).expect("referent exists");
+        let snapshot = CostPaidObjectSnapshot::capture(
+            referent_obj,
+            referent_obj.snapshot_public_characteristics(),
+        );
+        let mut ability =
+            make_resolved_with_targets(vec![TargetRef::Object(parent_target)], referent);
+        ability.set_cost_paid_object_recursive(snapshot);
+
+        let result = resolved_targets(&ability, &TargetFilter::CostPaidObject, &state);
+
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(referent)],
+            "CR 608.2k: an undeparted cost-paid referent still binds, and the \
+             inherited parent target does not displace it"
+        );
+    }
+
+    /// CR 400.7: A referent that left and did NOT come back is equally stale.
+    /// Distinct from the round-trip case: here nothing occupies the id on the
+    /// battlefield, so this pins the "no fall-through to the untargeted pool"
+    /// half of the guard.
+    #[test]
+    fn resolved_targets_cost_paid_object_rejects_departed_referent() {
+        use crate::types::ability::CostPaidObjectSnapshot;
+
+        let mut state = GameState::new_two_player(42);
+        let referent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Referent".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+
+        let referent_obj = state.objects.get(&referent).expect("referent exists");
+        let snapshot = CostPaidObjectSnapshot::capture(
+            referent_obj,
+            referent_obj.snapshot_public_characteristics(),
+        );
+        let mut ability = make_resolved_with_targets(vec![], referent);
+        ability.set_cost_paid_object_recursive(snapshot);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, referent, Zone::Exile, &mut events);
+
+        let result = resolved_targets(&ability, &TargetFilter::CostPaidObject, &state);
+
+        assert!(
+            result.is_empty(),
+            "CR 400.7: an exiled referent is a new object; got {result:?}"
+        );
+        assert!(
+            !result.contains(&TargetRef::Object(bystander)),
+            "must not fall through to the untargeted battlefield pool"
+        );
+    }
+
+    /// CR 400.7: A pre-migration save carries no captured incarnation. It
+    /// deserializes to `LEGACY_INCARNATION`, which no live object can match, so
+    /// such a record is treated as stale (fail-closed) rather than silently
+    /// naming whatever object now occupies that id.
+    #[test]
+    fn resolved_targets_cost_paid_object_legacy_save_is_fail_closed() {
+        use crate::types::ability::CostPaidObjectSnapshot;
+
+        let mut state = GameState::new_two_player(42);
+        let referent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Referent".to_string(),
+            Zone::Battlefield,
+        );
+
+        let lki = state
+            .objects
+            .get(&referent)
+            .expect("referent exists")
+            .snapshot_public_characteristics();
+        // Exactly what a legacy record deserializes to: no `incarnation` key.
+        let legacy: CostPaidObjectSnapshot = serde_json::from_value(serde_json::json!({
+            "object_id": referent,
+            "lki": lki,
+        }))
+        .expect("legacy shape must still deserialize");
+
+        assert_eq!(
+            legacy.incarnation,
+            crate::types::identifiers::LEGACY_INCARNATION,
+            "an absent incarnation must bind the sentinel, not 0 — 0 would \
+             silently match a freshly created object"
+        );
+
+        let mut ability = make_resolved_with_targets(vec![], referent);
+        ability.set_cost_paid_object_recursive(legacy);
+
+        let result = resolved_targets(&ability, &TargetFilter::CostPaidObject, &state);
+
+        assert!(
+            result.is_empty(),
+            "a legacy record cannot prove which incarnation it bound, so it must \
+             not act on the object now at that id; got {result:?}"
         );
     }
 }

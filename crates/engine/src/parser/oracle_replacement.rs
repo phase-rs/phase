@@ -29,7 +29,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_type_filter_word;
 use super::oracle_quantity::capitalize_first;
-use super::oracle_target::{parse_target, parse_type_phrase};
+use super::oracle_target::{parse_target, parse_type_phrase_folding};
 use super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
     strip_reminder_text, TextPair,
@@ -1382,7 +1382,7 @@ fn parse_as_enters_exile_from_graveyards(
     };
 
     // Parse the type filter (e.g., "creature")
-    let (filter, remainder) = parse_type_phrase(filter_text.trim());
+    let (filter, remainder) = parse_type_phrase_folding(filter_text.trim());
     if !remainder.trim().is_empty() {
         return None;
     }
@@ -1598,7 +1598,7 @@ fn parse_assemble_contraption_subject(subject: &str) -> Option<TargetFilter> {
     };
     let (_, subject) = all_consuming(parse_leading_article).parse(subject).ok()?;
     let subject = subject.trim();
-    let (mut filter, leftover) = parse_type_phrase(subject);
+    let (mut filter, leftover) = parse_type_phrase_folding(subject);
     if !leftover.trim().is_empty() || filter == TargetFilter::Any {
         return None;
     }
@@ -1787,11 +1787,11 @@ fn parse_reveal_land(
     let remainder_lower = remainder.to_lowercase();
 
     // Parse the filter phrase (e.g., "Plains or Island", "Elf") into a TargetFilter.
-    // `parse_type_phrase` handles union types via `TargetFilter::Or` and single
+    // `parse_type_phrase_folding` handles union types via `TargetFilter::Or` and single
     // subtypes via `TargetFilter::Typed`. Reject phrases we cannot classify —
     // better to fall through to a generic enter-tapped parse than to synthesize
     // a misbehaving filter.
-    let (filter, filter_remainder) = parse_type_phrase(filter_phrase.trim());
+    let (filter, filter_remainder) = parse_type_phrase_folding(filter_phrase.trim());
     if !filter_remainder.trim().is_empty() {
         return None;
     }
@@ -1915,7 +1915,7 @@ fn parse_reveal_land_tail(
     })?;
     let first_filter_consumed = after_unless.len() - after_first_filter.len();
     let first_filter_phrase = &after_unless[..first_filter_consumed];
-    let (first_filter, first_remainder) = parse_type_phrase(first_filter_phrase.trim());
+    let (first_filter, first_remainder) = parse_type_phrase_folding(first_filter_phrase.trim());
     if !first_remainder.trim().is_empty() || first_filter != *expected_filter {
         return None;
     }
@@ -1935,7 +1935,7 @@ fn parse_reveal_land_tail(
         .parse(i)
     })?;
     let second_filter_phrase = after_or.trim().trim_end_matches('.').trim();
-    let (second_filter, second_remainder) = parse_type_phrase(second_filter_phrase);
+    let (second_filter, second_remainder) = parse_type_phrase_folding(second_filter_phrase);
     if !second_remainder.trim().is_empty() || second_filter != *expected_filter {
         return None;
     }
@@ -2443,7 +2443,7 @@ fn parse_as_enters_becomes(text: &str) -> Option<ReplacementDefinition> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
-    // Lead "as " + non-empty external subject up to " enters". `parse_type_phrase`
+    // Lead "as " + non-empty external subject up to " enters". `parse_type_phrase_folding`
     // lowercases internally, so the lowercase subject slice is sufficient here.
     let (after_as, _) = tag::<_, _, VE>("as ").parse(lower.as_str()).ok()?;
     let (after_subject, subject_lower) = take_until::<_, _, VE>(" enters").parse(after_as).ok()?;
@@ -2451,7 +2451,7 @@ fn parse_as_enters_becomes(text: &str) -> Option<ReplacementDefinition> {
         return None;
     }
 
-    // Strip the optional leading article so `parse_type_phrase` reaches the type
+    // Strip the optional leading article so `parse_type_phrase_folding` reaches the type
     // word. `opt` never fails, so the original slice is preserved when absent.
     let (subject_rest, _) = opt(alt((tag::<_, _, VE>("a "), tag("an "))))
         .parse(subject_lower)
@@ -2461,7 +2461,7 @@ fn parse_as_enters_becomes(text: &str) -> Option<ReplacementDefinition> {
     // you control" → Typed permanent / controller You / FilterProp::Historic).
     // Require a genuine non-self subset subject (`Typed`) with full consumption,
     // so self (`~ enters`) and copy ("enter as a copy") lines are not claimed.
-    let (valid_card, rest) = parse_type_phrase(subject_rest);
+    let (valid_card, rest) = parse_type_phrase_folding(subject_rest);
     if !matches!(valid_card, TargetFilter::Typed(_)) || !rest.trim().is_empty() {
         return None;
     }
@@ -3132,13 +3132,13 @@ fn parse_clone_replacement(
         .map_or(type_text, |(rest, _)| rest)
         .trim();
 
-    let (mut filter, leftover) = parse_type_phrase(type_text);
+    let (mut filter, leftover) = parse_type_phrase_folding(type_text);
     if !leftover.trim().is_empty() {
         return None;
     }
 
     // CR 400.1: Thread the source zone onto the filter when it isn't the default
-    // battlefield. `parse_type_phrase` does not emit `InZone` from a bare type
+    // battlefield. `parse_type_phrase_folding` does not emit `InZone` from a bare type
     // word like "creature", so the zone must be attached here. Skip for
     // battlefield to preserve existing Clone/Phantasmal Image filter shape.
     if source_zone != Zone::Battlefield {
@@ -3362,7 +3362,7 @@ fn split_on_clone_source_zone(
     }
     // CR 614.1c: no zone phrase and no "except" clause — the whole post-`copy
     // of` remainder is the type phrase. Drop the sentence-final period so the
-    // downstream `parse_type_phrase` leftover guard accepts plain
+    // downstream `parse_type_phrase_folding` leftover guard accepts plain
     // controller-scoped filters like "a creature you control" (Mirror Image)
     // or "an artifact or creature you control" (Waxen Shapethief), which carry
     // no zone/except boundary to absorb the trailing punctuation.
@@ -3374,8 +3374,8 @@ fn split_on_clone_source_zone(
     ))
 }
 
-/// Attach `FilterProp::InZone { zone }` to a filter produced by `parse_type_phrase`.
-/// `parse_type_phrase` handles its own "in a graveyard" suffix when present in
+/// Attach `FilterProp::InZone { zone }` to a filter produced by `parse_type_phrase_folding`.
+/// `parse_type_phrase_folding` handles its own "in a graveyard" suffix when present in
 /// the type text, but clone-replacement text carries the zone *outside* the type
 /// phrase ("any creature card in a graveyard"), so the zone must be merged in.
 fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
@@ -3693,7 +3693,7 @@ fn parse_if_controls_count_condition(norm_lower: &str) -> Option<ReplacementCond
         .ok()?;
     let (minimum, type_text) = try_parse_quantity_prefix(rest)?;
 
-    let (filter, leftover) = parse_type_phrase(type_text);
+    let (filter, leftover) = parse_type_phrase_folding(type_text);
     // Allow trailing clause like ", this land enters tapped." — strip up to the comma.
     let leftover = leftover.trim().trim_start_matches(',').trim();
     if !leftover.trim_end_matches('.').is_empty()
@@ -3750,8 +3750,8 @@ fn parse_fast_condition(norm_lower: &str) -> Option<ReplacementCondition> {
         .ok()?;
     let type_text = after_or_fewer.trim_end_matches('.');
 
-    // parse_type_phrase handles "other lands" → TypedFilter { Land, [Another] }
-    let (filter, leftover) = parse_type_phrase(type_text);
+    // parse_type_phrase_folding handles "other lands" → TypedFilter { Land, [Another] }
+    let (filter, leftover) = parse_type_phrase_folding(type_text);
     if !leftover.trim().is_empty() {
         return None;
     }
@@ -3788,7 +3788,7 @@ fn parse_controls_typed_condition(norm_lower: &str) -> Option<ReplacementConditi
 
     // Try "N or more [type]" pattern first (e.g., "two or more other lands")
     if let Some((minimum, type_text)) = try_parse_quantity_prefix(rest) {
-        let (filter, leftover) = parse_type_phrase(type_text);
+        let (filter, leftover) = parse_type_phrase_folding(type_text);
         if !leftover.trim().trim_end_matches('.').is_empty() || filter == TargetFilter::Any {
             return None;
         }
@@ -3796,16 +3796,16 @@ fn parse_controls_typed_condition(norm_lower: &str) -> Option<ReplacementConditi
         return Some(ReplacementCondition::UnlessControlsCountMatching { minimum, filter });
     }
 
-    // Strip leading article — parse_type_phrase does NOT handle "a "/"an "
+    // Strip leading article — parse_type_phrase_folding does NOT handle "a "/"an "
     let rest = rest.trim_start_matches("a ").trim_start_matches("an ");
 
-    let (filter, leftover) = parse_type_phrase(rest);
+    let (filter, leftover) = parse_type_phrase_folding(rest);
     // Reject partial parse — all text must be consumed (modulo trailing period)
     if !leftover.trim().trim_end_matches('.').is_empty() {
         return None;
     }
 
-    // Reject if parse_type_phrase returned Any (nothing meaningful parsed)
+    // Reject if parse_type_phrase_folding returned Any (nothing meaningful parsed)
     if filter == TargetFilter::Any {
         return None;
     }
@@ -3825,7 +3825,7 @@ fn parse_controls_typed_condition(norm_lower: &str) -> Option<ReplacementConditi
 fn parse_opponents_control_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     let rest = strip_after(norm_lower, "unless your opponents control ")?;
     let (minimum, type_text) = try_parse_quantity_prefix(rest)?;
-    let (filter, leftover) = parse_type_phrase(type_text);
+    let (filter, leftover) = parse_type_phrase_folding(type_text);
     if !leftover.trim().trim_end_matches('.').is_empty() || filter == TargetFilter::Any {
         return None;
     }
@@ -4238,7 +4238,7 @@ fn parse_enters_with_counters(
     //     self-application occurs here — but the class must not exclude itself.)
     //
     // `parse_distributive_subject` strips the prefix and reports the scope, then
-    // `parse_type_phrase` acts as the type detector: accept the subject iff the
+    // `parse_type_phrase_folding` acts as the type detector: accept the subject iff the
     // parse yields a typed filter with a concrete type/subtype (not the `Any`
     // fallback). A non-type subject parses to the `[Any]` fallback and is
     // rejected, falling through to the `SelfRef` self-ETB branch.
@@ -4260,7 +4260,7 @@ fn parse_enters_with_counters(
             // noun and the quality survives as a filter property.
             let (after_color, color_prop) =
                 crate::parser::oracle_static::peel_color_quality_prefix(subject_text);
-            let (filter, _) = parse_type_phrase(after_color);
+            let (filter, _) = parse_type_phrase_folding(after_color);
             let is_valid = matches!(
                 &filter,
                 TargetFilter::Typed(TypedFilter { type_filters, .. })
@@ -5244,9 +5244,9 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<(TypedFilter, &str)
     // `split_once_on` returns `Ok(("", (prefix, suffix)))`.
     let (_, (spell_filter_text, after_that_text)) =
         nom_primitives::split_once_on(rest, ", that ").ok()?;
-    let (spell_filter, filter_rest) = parse_type_phrase(spell_filter_text);
+    let (spell_filter, filter_rest) = parse_type_phrase_folding(spell_filter_text);
     // Require that the spell filter cleanly consumed its text (modulo trailing
-    // "spell" token which parse_type_phrase leaves in the remainder on some paths).
+    // "spell" token which parse_type_phrase_folding leaves in the remainder on some paths).
     let filter_rest = filter_rest.trim();
     if !filter_rest.is_empty() && filter_rest != "spell" && filter_rest != "spells" {
         return None;
@@ -5777,7 +5777,7 @@ fn build_external_entry_replacement(
         | ExternalEntryKind::PlayedByOpponents { enters_tapped } => enters_tapped,
     };
 
-    let (filter, rest) = parse_type_phrase(subject);
+    let (filter, rest) = parse_type_phrase_folding(subject);
     if !rest.trim().is_empty() {
         return None;
     }
@@ -5925,7 +5925,7 @@ fn parse_creature_die_exile_replacement(
     }
 
     // Parse the subject filter (e.g., "another creature", "a nontoken creature an opponent controls")
-    let (filter, subject_rest) = parse_type_phrase(subject_filter_text);
+    let (filter, subject_rest) = parse_type_phrase_folding(subject_filter_text);
     if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
         return None;
     }
@@ -6098,7 +6098,7 @@ fn parse_creature_enter_wasnt_cast_exile_replacement(
         .parse(subject)
         .map_or(subject, |(rest, _)| rest)
         .trim();
-    let (filter, subject_rest) = parse_type_phrase(subject);
+    let (filter, subject_rest) = parse_type_phrase_folding(subject);
     if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
         return None;
     }
@@ -6209,7 +6209,7 @@ fn parse_typed_permanent_you_controlled_damage_source(
     let (after_type, type_text) =
         take_until::<_, _, OracleError<'_>>(" you controlled").parse(rest)?;
     let (after, _) = tag::<_, _, OracleError<'_>>(" you controlled").parse(after_type)?;
-    let (filter, leftover) = parse_type_phrase(type_text);
+    let (filter, leftover) = parse_type_phrase_folding(type_text);
     if !leftover.trim().is_empty() {
         return Err(nom::Err::Error(OracleError::new(
             leftover,
@@ -7829,14 +7829,14 @@ fn parse_oneshot_source_filter(body: &str) -> Option<TargetFilter> {
 /// Protection cycle, Rune of Protection cycle) — the qualifier restricts which
 /// source may be chosen and is retained on the variant so the resolver can (a)
 /// offer only matching candidates when prompting the choice and (b) recheck
-/// source qualities at damage time. Parses the qualifier with `parse_type_phrase`
+/// source qualities at damage time. Parses the qualifier with `parse_type_phrase_folding`
 /// directly (the shared color/type/supertype phrase combinator used throughout
 /// this file), which resolves a bare core type word like "land" to the correct
-/// `TypeFilter::Land` — so any future color/type/supertype word `parse_type_phrase`
+/// `TypeFilter::Land` — so any future color/type/supertype word `parse_type_phrase_folding`
 /// recognizes is covered for free, not just the 13 Circle/Rune of Protection cards.
 fn parse_qualified_chosen_damage_source(subject: &str) -> Option<TargetFilter> {
     let (rest, _) = nom_primitives::parse_article.parse(subject).ok()?;
-    let (filter, rest) = parse_type_phrase(rest.trim_start());
+    let (filter, rest) = parse_type_phrase_folding(rest.trim_start());
     if matches!(filter, TargetFilter::Any) {
         // Bare "source" — not a qualifier; the caller's bare-anaphor branch
         // handles "a source of your choice" directly.
@@ -7897,7 +7897,7 @@ pub(crate) fn parse_choose_damage_source_candidate(input: &str) -> Option<Target
     // CR 609.7a: interactive "Choose a source …" — only the leading clause
     // (Desperate Gambit: "Choose a source you control. Flip a coin. …").
     // Must NOT reuse `parse_damage_source_subject_filter`'s typed-target fallback
-    // (`parse_type_phrase`), which would misroute "choose a creature …" /
+    // (`parse_type_phrase_folding`), which would misroute "choose a creature …" /
     // "choose a creature or land" to damage-source selection.
     let first_clause = nom_primitives::split_once_on(input, ".")
         .map(|(_, (before, _))| before.trim().trim_end_matches('.'))
@@ -7974,7 +7974,7 @@ fn finish_damage_source_subject(subject: &str) -> Option<TargetFilter> {
         .trim();
 
     // "a spell" — any spell is the source; no typed filter (Benevolent Unicorn).
-    // Must precede `parse_type_phrase`, which maps bare "spell" to Card.
+    // Must precede `parse_type_phrase_folding`, which maps bare "spell" to Card.
     if subject == "spell" {
         return None;
     }
@@ -8115,7 +8115,7 @@ pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<Target
     // "creatures you control with counters on them", ...) share the normal
     // target grammar; damage replacement parsing should not maintain a parallel
     // counter/property grammar.
-    let (filter, rest) = parse_type_phrase(subject);
+    let (filter, rest) = parse_type_phrase_folding(subject);
     if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         return Some(filter);
     }
@@ -8970,7 +8970,7 @@ fn parse_connive_replacement(lower: &str, original_text: &str) -> Option<Replace
 /// CR 502.3 + CR 502.4 + CR 614.1a: untap-step replacement —
 /// "If [filter] would untap during [its controller's | your] untap step,
 /// [effect] instead" (Freyalise's Winds, Edge of Malacol). The `valid_card`
-/// filter scopes WHICH permanent (parsed generically via `parse_type_phrase`),
+/// filter scopes WHICH permanent (parsed generically via `parse_type_phrase_folding`),
 /// and `ReplacementCondition::DuringUntapStep` scopes WHEN (so effect-untaps at
 /// other times are unaffected). The alternative effect appears BEFORE "instead"
 /// ("remove all wind counters from it instead", "put two +1/+1 counters on it
@@ -9049,12 +9049,12 @@ fn parse_untap_step_replacement(original_text: &str, lower: &str) -> Option<Repl
         return None;
     }
     // CR 614.1a: consume the leading "if " with a `tag` combinator, then parse
-    // the subject as a typed filter (lowercase, as `parse_type_phrase` expects).
+    // the subject as a typed filter (lowercase, as `parse_type_phrase_folding` expects).
     let head_lc = head.trim().to_ascii_lowercase();
     let (subject_lc, _) = tag::<_, _, OracleError<'_>>("if ")
         .parse(head_lc.as_str())
         .ok()?;
-    let (filter, subject_rest) = parse_type_phrase(subject_lc.trim());
+    let (filter, subject_rest) = parse_type_phrase_folding(subject_lc.trim());
     if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
         return None;
     }
@@ -9568,31 +9568,128 @@ fn parse_optional_token_substitution_choice(
     )
 }
 
-/// CR 614.1a + CR 614.4: "The first time you would create one or more tokens each
-/// turn, you may instead create that many tokens that are copies of enchanted
-/// permanent." (Moonlit Meditation). A once-per-turn, per-source, optional
-/// `CreateToken` substitution whose copies are of the Aura's host
-/// (`TargetFilter::AttachedTo`). The specific "the first time … each turn"
-/// antecedent tag is why this must dispatch BEFORE
-/// `parse_optional_token_substitution_choice` (Jinnie "if you would create…") and
-/// the Doubling Season family ("if an effect would…") — it cannot steal either.
+/// The copy source of a first-time token substitution: a static filter
+/// (Moonlit Meditation's enchanted host) or a permanent chosen during
+/// resolution (Esix, Fractal Bloom). Typed rather than a bool, because the two
+/// arms build structurally different `execute` trees.
+enum FirstTimeCopySource {
+    Static(TargetFilter),
+    Chosen(TargetFilter),
+}
+
+/// The `CopyTokenOf` both Axis-B arms create. "That many" is
+/// `EventContextAmount` (the replaced event's `count`) and CR 111.2 puts the
+/// tokens under their creator's control; only the copy `target` differs
+/// between the arms, so factoring it here stops the two from drifting.
+fn copy_token_of(target: TargetFilter) -> Effect {
+    Effect::CopyTokenOf {
+        target,
+        owner: TargetFilter::Controller,
+        source_filter: None,
+        enters_attacking: false,
+        tapped: false,
+        count: QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+        extra_keywords: vec![],
+        additional_modifications: vec![],
+    }
+}
+
+/// Axis B, static arm: "create that many tokens that are copies of enchanted
+/// permanent" (Moonlit Meditation). The copy source is fixed by the card's own
+/// attachment, so resolution raises no choice.
+fn parse_static_copy_source(input: &str) -> OracleResult<'_, FirstTimeCopySource> {
+    let (input, _) = tag("create that many tokens that are copies of ").parse(input)?;
+    let (input, host) = alt((
+        value(TargetFilter::AttachedTo, tag("enchanted permanent")),
+        value(TargetFilter::AttachedTo, tag("enchanted creature")),
+        value(TargetFilter::AttachedTo, tag("enchanted artifact")),
+    ))
+    .parse(input)?;
+    Ok((input, FirstTimeCopySource::Static(host)))
+}
+
+/// Axis B, chosen arm: "choose a creature other than ~ and create that many
+/// tokens that are copies of that creature" (Esix, Fractal Bloom). The copy
+/// source is picked during resolution (CR 115.10a: a choice, not a target), so
+/// this arm lowers to `Effect::ChoosePermanent` with the copy as its
+/// `sub_ability`.
+fn parse_chosen_copy_source(input: &str) -> OracleResult<'_, FirstTimeCopySource> {
+    let (input, _) = tag("choose ").parse(input)?;
+    // `parse_type_phrase_folding` is INFALLIBLE (`oracle_target.rs:2176` returns
+    // `(TargetFilter, &str)`, falling back to `TargetFilter::Any`), so inside an
+    // `alt` it has to be made to fail: a non-`Typed` result, or one that consumed
+    // nothing, is a parse failure this arm can backtrack out of. This is the one
+    // position where `parse_type_phrase_folding`'s article strip AND its
+    // `other than <self-ref>` suffix are both wanted (CR 201.5).
+    let (filter, rest) = parse_type_phrase_folding(input);
+    if rest.len() == input.len() {
+        return Err(oracle_err(input));
+    }
+    let TargetFilter::Typed(typed) = filter else {
+        return Err(oracle_err(input));
+    };
+    let (rest, _) = tag(" and create that many tokens that are copies of that ").parse(rest)?;
+    // CR 707.1 + CR 201.5: "that creature" is an anaphor for the permanent just
+    // chosen. Same shape as `parse_definite_parent_reference`
+    // (`oracle_target.rs:1958-2013`): determiner (carried in the tag above) ->
+    // `parse_type_filter_word` -> agreement. Require the nouns to agree, so a
+    // disagreeing sentence fails the parse instead of silently binding the wrong
+    // subject; the compound-noun case ("that artifact creature") is refused here
+    // and again by the post-bridge remainder guard.
+    let (rest, anaphor) = parse_type_filter_word(rest)?;
+    if typed.type_filters.as_slice() != std::slice::from_ref(&anaphor) {
+        return Err(oracle_err(rest));
+    }
+    Ok((
+        rest,
+        FirstTimeCopySource::Chosen(TargetFilter::Typed(typed)),
+    ))
+}
+
+/// CR 614.1a + CR 614.4: the "the first time you would create one or more
+/// tokens" optional `CreateToken` substitution family, generalized along two
+/// independent axes.
+///
+/// Axis A — the window's turn scope. "each turn" leaves the window unscoped
+/// (Moonlit Meditation); "during each of your turns" restricts it to the
+/// controller's own turns (Esix, Fractal Bloom — CR 102.1: the active player is
+/// the player whose turn it is). Carried by
+/// `FirstTokenCreationEachTurn { active_player_req }`.
+///
+/// Axis B — where the copy source comes from. A STATIC filter fixed by the card
+/// ("copies of enchanted permanent" — Moonlit's Aura host,
+/// `TargetFilter::AttachedTo`), or a permanent CHOSEN during resolution
+/// ("choose a creature other than ~ … copies of that creature" — Esix), which
+/// lowers to `Effect::ChoosePermanent` carrying the copy as its `sub_ability`.
+///
+/// The specific "the first time …" antecedent tag is why this must dispatch
+/// BEFORE `parse_optional_token_substitution_choice` (Jinnie "if you would
+/// create…") and the Doubling Season family ("if an effect would…") — it cannot
+/// steal either.
 fn parse_first_time_token_copy_of_host_replacement(
     lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    let (host, remainder) = nom_on_lower(original_text, lower, |input| {
-        let (input, _) =
-            tag("the first time you would create one or more tokens each turn, ").parse(input)?;
-        let (input, _) =
-            tag("you may instead create that many tokens that are copies of ").parse(input)?;
-        let (input, host) = alt((
-            value(TargetFilter::AttachedTo, tag("enchanted permanent")),
-            value(TargetFilter::AttachedTo, tag("enchanted creature")),
-            value(TargetFilter::AttachedTo, tag("enchanted artifact")),
+    let ((active_player_req, source), remainder) = nom_on_lower(original_text, lower, |input| {
+        // Axis A — the window, nested under the one shared prefix.
+        let (input, _) = tag("the first time you would create one or more tokens ").parse(input)?;
+        // CR 102.1: the active player is the player whose turn it is, so
+        // "during each of your turns" scopes the window to the controller's own
+        // turns while a bare "each turn" leaves it unscoped.
+        let (input, active_player_req) = alt((
+            value(Some(ControllerRef::You), tag("during each of your turns")),
+            value(None, tag("each turn")),
         ))
         .parse(input)?;
+        let (input, _) = tag(", you may instead ").parse(input)?;
+
+        // Axis B — the copy source.
+        let (input, source) =
+            alt((parse_chosen_copy_source, parse_static_copy_source)).parse(input)?;
         let (input, _) = opt(char('.')).parse(input)?;
-        Ok((input, host))
+        Ok((input, (active_player_req, source)))
     })?;
 
     if !remainder.trim().is_empty() {
@@ -9605,27 +9702,32 @@ fn parse_first_time_token_copy_of_host_replacement(
     // affected object id, so a `valid_card` gate would be unsatisfiable. The
     // per-turn window is enforced by `FirstTokenCreationEachTurn`; "that many"
     // is `EventContextAmount` (the replaced event's `count`).
+    //
+    // Both Axis-B arms share all of that and differ only in how the copy source
+    // is determined, which is what makes their `execute` trees structurally
+    // different rather than merely differently parameterized.
+    let execute = match source {
+        FirstTimeCopySource::Static(host) => {
+            AbilityDefinition::new(AbilityKind::Spell, copy_token_of(host))
+        }
+        // CR 614.12a: the choice IS the post-replacement continuation; the copy
+        // rides as its `sub_ability`, so `apply_post_replacement_effect` raises
+        // the prompt and the answer handler resolves the tail against the
+        // chosen object.
+        FirstTimeCopySource::Chosen(filter) => {
+            AbilityDefinition::new(AbilityKind::Spell, Effect::ChoosePermanent { filter })
+                .sub_ability(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    copy_token_of(TargetFilter::Any),
+                ))
+        }
+    };
+
     Some(
         ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
-            .condition(ReplacementCondition::FirstTokenCreationEachTurn {
-                player: ControllerRef::You,
-            })
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::CopyTokenOf {
-                    target: host,
-                    owner: TargetFilter::Controller,
-                    source_filter: None,
-                    enters_attacking: false,
-                    tapped: false,
-                    count: QuantityExpr::Ref {
-                        qty: QuantityRef::EventContextAmount,
-                    },
-                    extra_keywords: vec![],
-                    additional_modifications: vec![],
-                },
-            ))
+            .condition(ReplacementCondition::FirstTokenCreationEachTurn { active_player_req })
+            .execute(execute)
             .mode(ReplacementMode::Optional { decline: None })
             .description(original_text.to_string()),
     )
@@ -10382,7 +10484,7 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
 fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
     let (_, (), after_anchor) =
         nom_primitives::scan_preceded(lower, parse_counter_replacement_scope_anchor)?;
-    let (filter, rest) = parse_type_phrase(after_anchor);
+    let (filter, rest) = parse_type_phrase_folding(after_anchor);
     if !is_counter_replacement_object_scope(&filter)
         || parse_counter_replacement_scope_tail(rest).is_err()
     {
@@ -10720,7 +10822,7 @@ fn parse_cant_become_untapped_replacement(
 /// unblocked creatures is dealt to ~ instead." (Veteran Bodyguard, Weathered
 /// Bodyguards). Delegates entirely to `parse_damage_source_subject_filter`
 /// (the same subject-typing helper every other damage-source clause in this
-/// module already uses), which itself falls back to `parse_type_phrase` — the
+/// module already uses), which itself falls back to `parse_type_phrase_folding` — the
 /// SAME combinator that already resolves "unblocked creatures" / "unblocked
 /// attacking creatures" to `FilterProp::Unblocked` via
 /// `parse_combat_status_prefix` (`oracle_target.rs`), proven by the existing
@@ -12015,7 +12117,7 @@ fn parse_damage_recipient_scope(working_lower: &str) -> Option<DamageTargetFilte
 fn parse_damage_recipient_after_prefix(working_lower: &str, prefix: &str) -> Option<TargetFilter> {
     nom_primitives::scan_at_word_boundaries(working_lower, |input| {
         let (after_to, _) = tag::<_, _, OracleError<'_>>(prefix).parse(input)?;
-        let (filter, rest) = parse_type_phrase(after_to);
+        let (filter, rest) = parse_type_phrase_folding(after_to);
         if matches!(filter, TargetFilter::Any) {
             return Err(nom::Err::Error(OracleError::new(
                 after_to,
@@ -12521,7 +12623,7 @@ fn parse_opponent_put_land_sacrifice_replacement(
     // type the applicability gate counts onto the battlefield. Rather than hardcode
     // "a land" (which silently diverges from the already-parsed gate type), match
     // the structural frame and re-derive the entering permanent's filter from the
-    // event noun via the shared `parse_type_phrase` combinator, then require it to
+    // event noun via the shared `parse_type_phrase_folding` combinator, then require it to
     // equal the gate's `type_filter`. This keeps the condition, the replaced event,
     // and the sacrifice rider bound to one type — so the same construction with a
     // different permanent noun stays internally consistent instead of half generic.
@@ -12534,7 +12636,7 @@ fn parse_opponent_put_land_sacrifice_replacement(
     let (rest, _) = tag::<_, _, OracleError<'_>>(" onto the battlefield")
         .parse(rest)
         .ok()?;
-    let (event_filter, event_rem) = parse_type_phrase(event_noun.trim());
+    let (event_filter, event_rem) = parse_type_phrase_folding(event_noun.trim());
     if !event_rem.trim().is_empty() || event_filter != type_filter {
         return None;
     }
@@ -12571,11 +12673,21 @@ fn parse_opponent_put_land_sacrifice_replacement(
         active_player_req: None,
     };
 
-    // CR 701.21a: "sacrifices a land of their choice." `ControllerRef::You`
-    // resolves to the entering land's resulting controller because the
-    // post-replacement continuation is stashed with the ENTERING object as its
-    // source (see `apply_single_replacement`), NOT `ControllerRef::ParentTargetController`
-    // (which has no target context here and would never resolve).
+    // CR 701.21a + CR 109.5: "that player … sacrifices a land of their choice."
+    // The subject is *that player* — the specific opponent the gate was
+    // evaluated against — NOT "you". It is therefore
+    // `ControllerRef::ScopedPlayer`, the same reference the applicability gate's
+    // LHS above already uses, and the drain binds both from one place
+    // (`apply_post_replacement_effect` stamps `scoped_player` with the affected
+    // object's controller). `ControllerRef::You` would name Land Equilibrium's
+    // own controller, and `ControllerRef::ParentTargetController` has no target
+    // context here and would never resolve.
+    //
+    // Until issue #7086 this arm read `You` and relied on the drain binding
+    // `ability.controller` to the ENTERING object's controller — a coupling that
+    // simultaneously made every third-party replacement's genuine "you" rider
+    // (Head of the Hunt's Wolf token) resolve to the wrong player. Naming the
+    // reference correctly is what lets the drain name "you" correctly.
     //
     // KNOWN, ACCEPTED SCOPE LIMITATION (CR 614.13 / Gatherer ruling): Land
     // Equilibrium's official ruling states "it doesn't matter under whose control
@@ -12596,7 +12708,7 @@ fn parse_opponent_put_land_sacrifice_replacement(
             // derived from the parsed `type_filter` (not a hardcoded land), so a card
             // of this class with a different permanent noun stays consistent. For
             // Land Equilibrium this is byte-identical to `TypedFilter::land()`.
-            target: inject_controller(sacrifice_type_filter, ControllerRef::You),
+            target: inject_controller(sacrifice_type_filter, ControllerRef::ScopedPlayer),
             count: QuantityExpr::Fixed { value: 1 },
             min_count: 0,
         },
@@ -12915,7 +13027,7 @@ fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDe
     .ok()?;
 
     // Build the controller-scoped filter (e.g., "creature you control").
-    let (filter, leftover) = parse_type_phrase(filter_text);
+    let (filter, leftover) = parse_type_phrase_folding(filter_text);
     if filter == TargetFilter::Any || !leftover.trim().is_empty() {
         return None;
     }
@@ -13020,6 +13132,55 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+
+    /// V13 — building block: `parse_type_phrase_folding`'s leading-article strip and its
+    /// `other than <self-ref>` suffix (CR 201.5) compose MID-STREAM, leaving the
+    /// trailing conjunction for the caller's own combinator.
+    ///
+    /// This is the composition `parse_chosen_copy_source` rests on, tested at the
+    /// building-block level rather than through one card. The exact-remainder
+    /// assertion is the load-bearing half: a mass-type-union continuation that
+    /// swallowed " and create …" would still satisfy a `contains(Another)` check
+    /// and would silently leave the Axis-B tail `tag` with no input to match.
+    ///
+    /// This assertion was MEASURED green during planning; it is a regression lock
+    /// on an existing property, not an open question.
+    #[test]
+    fn type_phrase_composes_article_and_other_than_self_ref_mid_stream() {
+        let tail = " and create that many tokens that are copies of that creature.";
+        // Bound to locals: `parse_type_phrase_folding` returns a remainder borrowed from
+        // its input, so the input must outlive the assertions below.
+        let with_article = format!("a creature other than ~{tail}");
+        let without_article = format!("creature other than ~{tail}");
+        let (filter, remainder) = parse_type_phrase_folding(&with_article);
+
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected a Typed filter, got {filter:?}");
+        };
+        assert_eq!(
+            typed.type_filters,
+            vec![TypeFilter::Creature],
+            "the article is consumed and the noun reads as Creature"
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Another),
+            "CR 201.5: `other than ~` must push FilterProp::Another, got {:?}",
+            typed.properties
+        );
+        assert_eq!(
+            remainder, tail,
+            "the trailing conjunction must survive intact for the caller's tag"
+        );
+
+        // Sibling control: the no-article form yields the IDENTICAL filter, so
+        // the article path is purely additive rather than a separate grammar.
+        let (bare_filter, bare_remainder) = parse_type_phrase_folding(&without_article);
+        assert_eq!(
+            bare_filter, filter,
+            "the article is optional and changes nothing about the filter"
+        );
+        assert_eq!(bare_remainder, tail);
+    }
 
     /// `take_damage_source_subject_clause` must stop at whichever terminator
     /// occurs EARLIEST in the text, not whichever is tried first. Regression
@@ -17316,7 +17477,7 @@ mod tests {
     #[test]
     fn each_non_type_subject_falls_through_to_selfref() {
         // "each opponent" — "opponent" is not a `TypeFilter` variant, so
-        // `parse_type_phrase` yields the `[Any]` fallback and the subject is
+        // `parse_type_phrase_folding` yields the `[Any]` fallback and the subject is
         // rejected, leaving the self-ETB `SelfRef`/`Moved` result.
         let def = parse_replacement_line(
             "Each opponent enters with a +1/+1 counter on it.",
@@ -20577,7 +20738,7 @@ mod tests {
     /// CR 707.9 + CR 614.1c: Mirror Image / Waxen Shapethief — "enter as a copy
     /// of a creature you control" with no zone phrase and no except clause. The
     /// controller-scoped filter must parse despite the sentence-final period
-    /// (previously left as `parse_type_phrase` leftover, dropping the clone).
+    /// (previously left as `parse_type_phrase_folding` leftover, dropping the clone).
     #[test]
     fn clone_creature_you_control_no_zone_phrase() {
         let mirror = parse_replacement_line(
@@ -20922,7 +21083,7 @@ mod tests {
     /// copy of a creature card in exile with a takeover counter on it." The copy
     /// SOURCE is an exile-zoned card constrained by a takeover-counter predicate.
     /// The full source phrase (zone clause THEN counter clause) must flow through
-    /// `parse_type_phrase` with no leftover, so the optional Moved/Battlefield
+    /// `parse_type_phrase_folding` with no leftover, so the optional Moved/Battlefield
     /// clone replacement registers and its `BecomeCopy` target filter carries both
     /// `InZone { Exile }` and the `Counters { OfType("takeover"), GE, 1 }` source
     /// predicate (honored at runtime by `find_copy_targets` scanning exile).

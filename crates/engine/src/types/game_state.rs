@@ -7,6 +7,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::database::card_db::CardDbHandle;
+
 use super::ability::{
     default_target_filter_permanent, legacy_trigger_entry_list,
     materialize_legacy_printed_trigger_entries, AbilityCost, AbilityDefinition, AdditionalCost,
@@ -804,17 +806,28 @@ impl NamedChoiceSource {
     /// moved to a public zone as part of its own resolution, the still-pending
     /// resolution may find that successor. A later same-id object cannot match
     /// the relatch's original/current incarnation pair.
+    ///
+    /// CR 614.12a: an entry replacement's required choice is made before the
+    /// permanent enters, so the "exact object" a persisting as-enters choice must
+    /// bind to can still be a liminal projection rather than a stored object —
+    /// hence the [`GameState::entering_or_live_object`] read here and the
+    /// matching [`GameState::chosen_attributes_mut`] write below. The relatch
+    /// branch stays `objects`-only: CR 400.7j is about a source that has already
+    /// MOVED between zones, which an entrant that has not yet entered cannot have
+    /// done.
     pub fn source_mut_exact_for_resolution<'a>(
         &self,
         state: &'a mut GameState,
-    ) -> Option<&'a mut GameObject> {
+    ) -> Option<&'a mut Vec<ChosenAttribute>> {
         let context = self.context.as_ref()?;
         let identity = &context.identity;
         let object_id = identity.reference.object_id;
-        let is_exact = state.objects.get(&object_id).is_some_and(|object| {
-            ObjectIncarnationRef::from_object(object) == identity.reference
-                && object.zone == identity.expected_zone
-        });
+        let is_exact = state
+            .entering_or_live_object(object_id)
+            .is_some_and(|object| {
+                ObjectIncarnationRef::from_object(object) == identity.reference
+                    && object.zone == identity.expected_zone
+            });
         let is_resolution_successor =
             state
                 .resolution_source_relatch
@@ -827,9 +840,26 @@ impl NamedChoiceSource {
                             .get(&object_id)
                             .is_some_and(|object| object.incarnation == relatch.current_incarnation)
                 });
-        (is_exact || is_resolution_successor)
-            .then(|| state.objects.get_mut(&object_id))
-            .flatten()
+        // Each branch writes through the lookup its own check validated. The
+        // exact branch validated `entering_or_live_object`, so it writes through
+        // the liminal-first `chosen_attributes_mut`. The relatch branch validated
+        // `state.objects` alone — CR 400.7j finds an object that has already MOVED
+        // to a public zone, which an entrant that has not yet entered cannot have
+        // done — so it writes through `objects` alone. Funnelling both through
+        // `chosen_attributes_mut` would let a liminal projection sharing this id
+        // (`meld::finish_meld_entry` stores the CR 701.42 meld result under the
+        // component's own id) receive a write the relatch validated against the
+        // stored object.
+        if is_exact {
+            state.chosen_attributes_mut(object_id)
+        } else if is_resolution_successor {
+            state
+                .objects
+                .get_mut(&object_id)
+                .map(|object| &mut object.chosen_attributes)
+        } else {
+            None
+        }
     }
 }
 
@@ -8353,6 +8383,23 @@ pub enum OutsideGameChoiceSource {
     },
     /// CR 406.3: A face-up card the player owns in the exile zone.
     FaceUpExile { object_id: ObjectId },
+    /// CR 400.11 + CR 400.11b: A card in a booster pack `Effect::OpenBoosterPack`
+    /// just opened. The pack's cards are outside the game and in no zone, so —
+    /// like `Sideboard` — the entry carries the full `CardFace` the taken card
+    /// is built from, plus the set the pack came from for display. `pack_slot`
+    /// is the card's position in the opened pack and its only stable identity.
+    BoosterPack {
+        pack_slot: usize,
+        set_code: String,
+        /// Boxed, unlike `Sideboard`'s inline face: `WaitingFor` is stored
+        /// inline in `GameState`, which `phase-server` moves BY VALUE through
+        /// the action + AI path, so this enum's largest variant is multiplied by
+        /// every live `GameState` on a frame chain (see `types/game_state_size.rs`
+        /// and the `game_state_stack_budget` regression). `Sideboard` already
+        /// sets that ceiling; adding a set code beside a second inline face
+        /// would raise it.
+        card: Box<crate::types::card::CardFace>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8367,6 +8414,47 @@ pub struct OutsideGameChoiceEntry {
 
 fn default_one_u32() -> u32 {
     1
+}
+
+/// CR 400.11: the sealed booster products a game can open packs from.
+///
+/// A "shelf" rather than the whole printed corpus: hydrating every set's faces
+/// would clone the entire card database into game state. Instead
+/// `game::boosters::build_shelf` stocks a small, deterministic sample of sets,
+/// and each `Effect::OpenBoosterPack` resolution opens a freshly collated pack
+/// from one of them — so the number of packs a game can open is unbounded while
+/// the resident cost stays proportional to the shelf, not to the corpus.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoosterShelf {
+    /// Products in deterministic order. Empty when no card in the game opens
+    /// booster packs, or when the loaded card database carries no set that can
+    /// fill a pack.
+    pub products: Vec<BoosterProduct>,
+}
+
+impl BoosterShelf {
+    pub fn is_empty(&self) -> bool {
+        self.products.is_empty()
+    }
+}
+
+/// One set on the [`BoosterShelf`], with its cards bucketed by the pack slot
+/// they can fill. Buckets hold full `CardFace`s because a card taken out of the
+/// pack becomes a real card in the game (CR 400.11b) and there is no card
+/// database at resolution time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoosterProduct {
+    /// MTGJSON set code, shown to the player as the pack's identity.
+    pub set_code: String,
+    /// Cards printed at common in this set (the ten-card commons run).
+    pub commons: Vec<CardFace>,
+    /// Cards printed at uncommon in this set (three-card run).
+    pub uncommons: Vec<CardFace>,
+    /// Cards printed at rare in this set (the rare slot).
+    pub rares: Vec<CardFace>,
+    /// Cards printed at mythic rare in this set. The rare slot upgrades to a
+    /// mythic at the printed rate when this bucket is non-empty.
+    pub mythics: Vec<CardFace>,
 }
 
 /// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.
@@ -8454,6 +8542,33 @@ pub struct ReplacementCandidateSummary {
     pub source_id: ObjectId,
     pub source_name: String,
     pub description: String,
+}
+
+/// CR 616.1: Which *kind* of decision a [`WaitingFor::ReplacementChoice`] asks
+/// for. One `WaitingFor` variant serves three structurally different prompts,
+/// and the display layer cannot tell them apart from the candidate list alone
+/// (an accept/decline pair and a two-effect ordering prompt are both "two
+/// candidates"). The engine owns the distinction; the frontend must never
+/// re-derive it by inspecting label text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum ReplacementChoiceKind {
+    /// CR 616.1e: two or more *distinct* applicable replacements whose order is
+    /// material. The player arranges them; per CR 616.1f the engine applies the
+    /// selected one and re-prompts for whatever is still applicable, so the
+    /// effect applied LAST is the one whose write survives.
+    #[default]
+    Order,
+    /// A single optional ("you may") replacement surfaced as two branches of
+    /// one source — index 0 accepts, index 1 declines. This is an engine
+    /// presentation shape, not a CR-numbered category: the yes/no decision
+    /// belongs to whoever the effect's own text gives it to. It is NOT an
+    /// ordering and must never render as a sortable list.
+    OptionalBranch,
+    /// A choice between destinations for a found card. Like `OptionalBranch`
+    /// this is an engine presentation shape: the options are mutually exclusive
+    /// alternatives rather than a sequence, so it renders as plain options.
+    SearchFoundDestination,
 }
 
 /// CR 603.3b + CR 603.7: One completed normal-plus-delayed trigger collection
@@ -8714,7 +8829,7 @@ pub enum AlternativeCastKeyword {
     /// Custom Warp keyword — exile-at-end-step rider; no CR section.
     Warp,
     /// CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent
-    /// was cast for its evoke cost (CR 702.74b).
+    /// was cast for its evoke cost.
     Evoke,
     /// CR 702.119a-c: Emerge alternative cost requires sacrificing the specified
     /// permanent quality while casting and reduces the emerge cost by that
@@ -8978,7 +9093,10 @@ pub enum CastOfferKind {
     /// mana cost, or decline. `hit_card` is the matching revealed card being
     /// offered, `remaining_hits` are other same-named cards from the same reveal
     /// still eligible to cast, and `revealed_misses` are revealed cards that
-    /// cannot be cast this way.
+    /// cannot be cast this way. CR 701.20b: every id here names a card that is
+    /// still in the controller's library (the reveal does not move them); the
+    /// hit is cast from the library and the misses are placed on the bottom
+    /// once the offers are exhausted.
     Ripple {
         hit_card: ObjectId,
         remaining_hits: Vec<ObjectId>,
@@ -11565,6 +11683,39 @@ impl TrustedGameStateEnvelope {
 }
 
 impl GameState {
+    /// CR 616.1 load migration: re-derive `ReplacementChoice::kind` from the
+    /// live pending replacement.
+    ///
+    /// `kind` is `#[serde(default)]`, so a save written before the field existed
+    /// deserializes every parked prompt as `Order` — including an optional
+    /// "you may" accept/decline and a search-found destination pick. The
+    /// frontend keys its presentation off `kind`, so a restored legacy save
+    /// would render a sortable ordering list for a yes/no decision.
+    ///
+    /// `replacement_choice_waiting_for` is the single authority that classifies
+    /// a prompt from `pending_replacement`, so re-deriving through it keeps the
+    /// restored value identical to what a live park would have produced. With no
+    /// pending replacement there is nothing to classify and the prompt is left
+    /// untouched (it is already unactionable and handled by the count-0 guard).
+    fn migrate_restored_replacement_choice_kind(&mut self) {
+        let WaitingFor::ReplacementChoice { player, .. } = self.waiting_for else {
+            return;
+        };
+        if self.pending_replacement.is_none() {
+            return;
+        }
+        let rederived = crate::game::replacement::replacement_choice_waiting_for(player, self);
+        if let WaitingFor::ReplacementChoice { kind, .. } = rederived {
+            if let WaitingFor::ReplacementChoice {
+                kind: restored_kind,
+                ..
+            } = &mut self.waiting_for
+            {
+                *restored_kind = kind;
+            }
+        }
+    }
+
     /// CR 732.2a (FIX-3) load migration: `last_loop_action_sequence` is transient loop-detection
     /// bookkeeping that re-accumulates from live play. On restore, DROP it UNLESS the save was
     /// captured inside an object-growth shortcut proposal/response window
@@ -11878,6 +12029,12 @@ impl PersistedGameState {
         // CR 732.2a (FIX-3): drop stale transient loop-detection bookkeeping on load unless the save
         // sits in an object-growth shortcut window whose pending resolution still consumes it.
         state.migrate_transient_loop_sequence();
+        // CR 616.1: re-derive a parked replacement prompt's `kind` (see
+        // `migrate_restored_replacement_choice_kind`). Placed at this shared
+        // chokepoint so BOTH the untrusted `Raw` and trusted envelope paths get
+        // the repair — a legacy save restored through either one would
+        // otherwise present an optional or search-found prompt as an ordering.
+        state.migrate_restored_replacement_choice_kind();
         // `pending_trigger_event_batch` is a construction carrier for the
         // corresponding `pending_trigger`. A historical save can retain the
         // carrier after its trigger was dropped; it cannot represent live
@@ -12266,6 +12423,19 @@ pub enum WaitingFor {
         candidate_count: usize,
         #[serde(default)]
         candidates: Vec<ReplacementCandidateSummary>,
+        /// CR 616.1: which kind of decision this is. Defaults to
+        /// [`ReplacementChoiceKind::Order`] so pre-existing serialized states
+        /// and the many test constructions keep deserializing unchanged.
+        #[serde(default)]
+        kind: ReplacementChoiceKind,
+        /// CR 616.1f: whether the LAST-applied candidate alone decides the
+        /// outcome (every colliding write overwrites the whole field), so the
+        /// UI may name a concrete winning result. False for compositional
+        /// collisions — damage doublers vs adders, count and mana modifiers —
+        /// where both effects apply and there is no single winner. The display
+        /// layer must not assume last-write-wins; this is the engine's answer.
+        #[serde(default)]
+        last_applied_decides: bool,
     },
     /// CR 614.12a: choose the opponent that a permanent enters under before
     /// the zone change is delivered. `candidates` is captured at replacement
@@ -12392,6 +12562,42 @@ pub enum WaitingFor {
     ScryChoice {
         player: PlayerId,
         cards: Vec<ObjectId>,
+    },
+    /// CR 702.60a: "you **may** reveal the top N cards of your library" — the
+    /// initial optional-reveal decision of a resolving Ripple trigger. The
+    /// controller answers with `GameAction::RippleChoice` (`Cast` = reveal,
+    /// `Decline` = don't). On decline nothing is revealed, the library is left
+    /// untouched, and no `CardsRevealed` / `revealed_cards` publication occurs.
+    RippleRevealChoice {
+        player: PlayerId,
+        /// The resolving Ripple ability's source spell (CR 702.60a).
+        source_id: ObjectId,
+        /// N from "Ripple N" — how many cards the reveal would show. Carried for
+        /// the prompt UI; the actual pile is re-read from the live library top
+        /// when the reveal is accepted.
+        count: u32,
+    },
+    /// CR 702.60a + CR 608.2d: "put all revealed cards not cast this way on the
+    /// bottom of your library **in any order**." Once the same-named free-cast
+    /// offers are exhausted (or declined, or there was no hit), the controller
+    /// announces the order for the uncast revealed cards. The response is
+    /// `GameAction::SelectCards { cards }` carrying a permutation of `cards`;
+    /// the engine places them on the library bottom in that submitted order.
+    /// Raised only when 2+ cards remain — a single card has no ordering choice.
+    RippleBottomOrder {
+        player: PlayerId,
+        /// The resolving Ripple ability's source spell (CR 702.60a).
+        source_id: ObjectId,
+        /// The uncast revealed cards awaiting a bottom-placement order. Still in
+        /// the controller's library and still publicly revealed (CR 701.20a)
+        /// until the order is submitted.
+        cards: Vec<ObjectId>,
+        /// CR 603.3b + CR 608.2g: the same-named card cast from the terminal
+        /// free-cast offer, if any. Threaded into
+        /// `BatchCompletion::RippleTerminalComplete` when the order is submitted
+        /// so the parked-trigger / terminal-`SpellCast` settlement still fires.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_cast: Option<ObjectId>,
     },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
@@ -12988,7 +13194,7 @@ pub enum WaitingFor {
     ///   may be recast from exile later (no CR section; rider lives on the
     ///   keyword).
     /// - `Evoke` (CR 702.74a) — creature ETBs and sacrifices itself when cast
-    ///   for the evoke cost (CR 702.74b).
+    ///   for the evoke cost.
     /// - `Overload` (CR 702.96a) — substitutes the overload cost and rewrites
     ///   every "target" in the spell's text to "each" (CR 702.96b-c).
     /// - `Bestow` (CR 702.103a) — substitutes the bestow cost and turns the
@@ -13808,7 +14014,7 @@ pub enum WaitingFor {
         /// The zone the commander is currently in (Graveyard, Exile, Hand, or Library).
         current_zone: Zone,
     },
-    /// CR 310.11 + CR 310.12a + CR 704.5w + CR 704.5x: A battle that isn't being attacked has no
+    /// CR 310.11 + CR 310.12a + CR 704.5x: A battle that isn't being attacked has no
     /// protector, an illegal protector, or (for Sieges) a protector equal to its
     /// controller. The battle's controller (`player`) chooses a legal protector from
     /// `candidates`. Emitted only when `candidates.len() > 1`; the SBA auto-applies
@@ -14101,14 +14307,52 @@ pub enum WaitingFor {
         pending_mana_ability: Option<Box<PendingManaAbility>>,
     },
     /// CR 115.7: Change the target(s) of a spell or ability on the stack.
-    /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
-    /// TODO: Add Effect::ChangeTargets variant + resolver in effects/change_targets.rs.
-    /// Requires parser support for "change the target of" Oracle text patterns.
     RetargetChoice {
         player: PlayerId,
         stack_entry_index: usize,
         scope: RetargetScope,
+        /// CR 115.7d: the chain's currently declared targets, flat, in
+        /// `chain_retarget_slots` order and positionally aligned with `slots`
+        /// and `slot_pools`. The submission (`GameAction::RetargetSpell.new_targets`)
+        /// uses the same index space, so the frontend stays width-agnostic and
+        /// learns nothing about chain nodes. Its first `root.targets.len()`
+        /// entries are exactly what this field held before phase-rs/phase#8355,
+        /// so the index space is a backward-compatible prefix extension.
         current_targets: Vec<TargetRef>,
+        /// CR 115.7d: where each position of `current_targets` LIVES — the chain
+        /// node and the slot within it. Validation, pool admission and the
+        /// target-incarnation pin refresh all follow this address, so they reach
+        /// every affected node rather than only the root (phase-rs/phase#8355).
+        ///
+        /// `serde(default)`: `GameState`/`PersistedGameState` cross the
+        /// multiplayer/WASM boundary against a HAND-WRITTEN TS mirror, and a
+        /// peer or a stored state predating this field must still load. An
+        /// empty `slots` is inert — `apply_retarget`'s alignment check trivially
+        /// passes and the per-address write loop visits nothing.
+        #[serde(default)]
+        slots: Vec<RetargetSlotAddress>,
+        /// CR 115.7d, INVARIANT SC: the candidate set for EACH position,
+        /// aligned 1:1 with `slots`. Produced once by
+        /// `change_targets::slot_pool` and thereafter only READ — see that
+        /// function's doc for the single-computation invariant.
+        ///
+        /// EMPTY MEANS TWO DIFFERENT THINGS, deliberately:
+        ///   * an empty OUTER vec = "no per-position refinement was recorded",
+        ///     which is the truth for any payload predating this field. Every
+        ///     consumer then falls back to `legal_new_targets`, which in
+        ///     exactly that case IS BASE's cascade — BASE behaviour by
+        ///     construction, not by convention.
+        ///   * an empty INNER vec = "this position has no legal alternative",
+        ///     and admits nothing. `slot_pools.get(i)` yields `Some(&[])`
+        ///     there, so the fallback correctly does NOT fire. Do not
+        ///     "helpfully" collapse an all-empty `slot_pools` to `Vec::new()`.
+        #[serde(default)]
+        slot_pools: Vec<Vec<TargetRef>>,
+        /// CR 115.7d: the UNION — BASE's cascade verbatim, extended with every
+        /// `slot_pools` member not already present. Read by `interaction.rs`'s
+        /// projection and by the frontend, both of which stay width- and
+        /// node-agnostic. NOT the admission set for any single position: that
+        /// is `slot_pools[i]`. Prefix-identical to BASE's cascade.
         legal_new_targets: Vec<TargetRef>,
     },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: A combat declaration is paused
@@ -14428,6 +14672,39 @@ pub enum RetargetScope {
     ForcedTo(TargetRef),
 }
 
+/// CR 601.2c: one descent step from a stack entry's root `ResolvedAbility`
+/// toward a node that owns declared targets.
+///
+/// Two variants because `ResolvedAbility` has exactly two child links. The
+/// enumerator (`ability_utils::chain_retarget_slots`) emits only `SubAbility`
+/// today, because `assign_targets_recursive` never descends into
+/// `else_ability` — read-verified; only `stamp_other_batch_source_targets`
+/// visits that branch, and its writes are synthesized rather than declared.
+/// `ElseAbility` exists so that a future else-branch owner is addressed
+/// correctly instead of being silently mis-addressed as a sub-branch one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChainStep {
+    SubAbility,
+    ElseAbility,
+}
+
+/// CR 115.7d: the address of ONE declared-target slot inside a resolved chain.
+/// `path` walks from the stack entry's root ability; `slot` indexes that node's
+/// OWN `targets`. Carried on `WaitingFor::RetargetChoice` so a submission is
+/// validated, admitted and written against the exact slot the prompt offered.
+///
+/// NOTE: an empty `path` is NOT the same predicate as "BASE already exposes
+/// this position". Under `AdditionalCostPaidInstead` delegation the BASE-exposed
+/// node is the SUB (`assign_targets_recursive:7008-7019` mirrors its targets
+/// onto the parent), so its addresses carry `path == [SubAbility]`. Consumers
+/// must never re-derive the position class from `path`; the enumerator settles
+/// it once, in `SlotEnforcement` (`ability_utils.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetargetSlotAddress {
+    pub path: Vec<ChainStep>,
+    pub slot: usize,
+}
+
 /// CR 103.5 / CR 104.1: who — if anyone — may act in a `WaitingFor` state. THE single authority
 /// behind [`WaitingFor::acting_player`] and [`WaitingFor::acting_players`], which are adapters
 /// over [`WaitingFor::acting_authority`], whose exhaustive per-variant match lives there and
@@ -14526,6 +14803,8 @@ impl WaitingFor {
             WaitingFor::StationTarget { .. } => "StationTarget",
             WaitingFor::SaddleMount { .. } => "SaddleMount",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
+            WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -14683,6 +14962,8 @@ impl WaitingFor {
             | WaitingFor::StationTarget { player, .. }
             | WaitingFor::SaddleMount { player, .. }
             | WaitingFor::ScryChoice { player, .. }
+            | WaitingFor::RippleRevealChoice { player, .. }
+            | WaitingFor::RippleBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -14996,7 +15277,7 @@ impl WaitingFor {
     ///   fixpoint before priority is granted.
     /// * [`WaitingFor::BattleProtectorChoice`] — CR 310.11 ("its controller chooses an
     ///   appropriate player to be its protector ... This is a state-based action")
-    ///   + CR 704.5w / CR 704.5x, likewise answered inside the CR 704.3 fixpoint.
+    ///   + CR 704.5x, likewise answered inside the CR 704.3 fixpoint.
     ///
     /// Those SBA members (the commander-zone, legend and battle-protector choices) are
     /// the COMPLETE set of player-choice pauses `game::sba` opens inside the SBA
@@ -15133,6 +15414,10 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
+                // CR 702.60a: the Ripple bottom-order response is a free
+                // permutation of the offered pile — the candidate enumerator
+                // only lists {identity}, so `apply()` is the real validator.
+                | WaitingFor::RippleBottomOrder { .. }
         )
     }
 
@@ -16651,6 +16936,14 @@ impl TokenProjection {
     pub fn set_tapped(&mut self, tapped: bool) {
         self.0.tapped = tapped;
     }
+
+    /// CR 607.2d + CR 614.12a: an entry replacement that requires a choice makes
+    /// that choice BEFORE the permanent enters, so the answer has to land on the
+    /// entrant while it is still a projection. Narrow for the same reason
+    /// [`TokenProjection::set_tapped`] is: one field, not the whole object.
+    pub fn chosen_attributes_mut(&mut self) -> &mut Vec<ChosenAttribute> {
+        &mut self.0.chosen_attributes
+    }
 }
 
 /// CR 614.12: the entrant of a liminal (decided-but-not-yet-entered) projection.
@@ -16700,6 +16993,16 @@ impl LiminalEntrant {
     /// witness rather than by trusting a flag on the projected object.
     pub fn is_token_projection(&self) -> bool {
         matches!(self, Self::Token(_))
+    }
+
+    /// CR 607.2d + CR 614.12a: the entrant's chosen-attribute list, so a
+    /// persisting as-enters choice binds to the projection that is about to
+    /// become the permanent. See [`TokenProjection::chosen_attributes_mut`].
+    pub fn chosen_attributes_mut(&mut self) -> &mut Vec<ChosenAttribute> {
+        match self {
+            Self::Token(token) => token.chosen_attributes_mut(),
+            Self::Card(object) => &mut object.chosen_attributes,
+        }
     }
 
     /// CR 614.1c: settle the entrant's tapped state before it enters.
@@ -18617,6 +18920,17 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_counter_kind_this_resolution: Option<CounterType>,
 
+    /// CR 608.2d: the colour a PERSISTING chooser bound during the current
+    /// resolution. Separate from `last_named_choice` (set for every named choice,
+    /// persisting or not, and not resolution-scoped) and from the source's
+    /// `ChosenAttribute::Color` history (which CR 607.2d readers own).
+    ///
+    /// Written only on the exact-object binding path, so a `persist: false`
+    /// printed `Choose a color.` — the F1 class — still writes nothing and
+    /// still resolves to a no-op. That gate is what keeps F1 out of this change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_color_this_resolution: Option<crate::types::mana::ManaColor>,
+
     /// CR 609.7a-b: The most recently chosen damage source and its source
     /// filter. Set by `DamageSourceChoice`, consumed by prevention/replacement
     /// continuation effects, and then cleared.
@@ -18647,21 +18961,34 @@ declare_game_state! {
     #[serde(skip)]
     pub meld_pair_registry: Arc<HashMap<String, MeldPairRecord>>,
 
-    /// Momir Basic selection index: mana value -> sorted creature face names.
-    /// CR 707.2 + CR 202.3: the random-token pool, keyed by mana value so the
-    /// emblem's `{X}` ability can pick a creature with mana value X. Built only
-    /// when `format == Momir` (see `rehydrate_card_db_metadata`); empty
-    /// otherwise. Skipped in serialization and rebuilt deterministically per peer
-    /// from the loaded card DB.
+    /// Handle to the loaded card database, for the rare resolver that must
+    /// query the WHOLE card corpus at resolution time instead of pre-staging a
+    /// copy of it into state.
+    ///
+    /// CR 707.2 + CR 202.3: the Momir Basic emblem's `{X}` ability creates a
+    /// token that's a copy of a creature card with mana value X "chosen at
+    /// random" — a draw over every printed creature. Materializing that corpus
+    /// into `GameState` (the previous `momir_pool` / `momir_pool_faces` pair)
+    /// meant holding ~19,500 `CardFace` clones of data the card database
+    /// already owns in the same engine instance. The resolver now draws one
+    /// face on demand through this handle.
+    ///
+    /// `Arc` inside [`CardDbHandle`] keeps `GameState::clone()` during AI
+    /// search O(1), matching `all_card_names` / `card_face_registry`. Skipped
+    /// in serialization and reinstalled by `install_card_db` on every path that
+    /// builds or restores a game.
     #[serde(skip)]
-    pub momir_pool: BTreeMap<i32, Vec<String>>,
+    pub card_db: Option<CardDbHandle>,
 
-    /// Momir Basic hydration map: lowercase creature name -> `CardFace`. The
-    /// resolver reads this (NEVER `card_face_registry`, which is conjure-scoped
-    /// and misses most creatures) to build the copy token. Skipped in
-    /// serialization; rebuilt with `momir_pool`.
+    /// CR 400.11: the sealed booster products this game can open packs from.
+    /// Populated only when some card in the game carries
+    /// `Effect::OpenBoosterPack` (see `rehydrate_card_db_metadata`); empty
+    /// otherwise, so an ordinary game pays nothing for it. Skipped in
+    /// serialization and rebuilt deterministically per peer from the loaded card
+    /// DB — the pack a resolution actually opens travels in `waiting_for`, so no
+    /// peer needs the shelf to see it.
     #[serde(skip)]
-    pub momir_pool_faces: Arc<HashMap<String, CardFace>>,
+    pub booster_shelf: Arc<BoosterShelf>,
 
     /// Display names for log resolution. Set by server; WASM leaves empty (defaults to "Player N").
     /// Skipped in serialization — runtime context only.
@@ -19666,6 +19993,26 @@ pub struct PostReplacementDrain {
     /// CR 615.5: target of the prevented event itself, for
     /// `TargetFilter::PostReplacementDamageTarget`.
     pub event_target: Option<crate::types::ability::TargetRef>,
+
+    /// CR 109.5: the player "you" names inside this continuation — the
+    /// controller of the object whose ability is doing the replacing.
+    ///
+    /// Distinct from [`Self::source`] and deliberately a `PlayerId` rather than
+    /// an `ObjectId`: `source` is the object a `SelfRef` post-effect resolves
+    /// against (rebound to the *affected* object on every zone-change path, and
+    /// cleared outright by [`GameState::clear_post_replacement_source`]), while
+    /// this is the ability's controller, fixed when the replacement applied.
+    /// CR 614.6 makes that snapshot load-bearing: the modified event and its
+    /// continuation are one step, and the replacing object may already be gone
+    /// by drain time (Head of the Hunt dying in the same state-based-action
+    /// batch as the creature it exiles), so a drain-time object lookup would
+    /// answer `None` exactly when the rider still has to name its controller.
+    ///
+    /// `None` on every install path that has no replacing object to speak of —
+    /// combat-prevention riders, the ready-continuation helpers, test fixtures —
+    /// where the affected object's controller remains the fallback.
+    #[serde(default)]
+    pub controller: Option<crate::types::player::PlayerId>,
 }
 
 /// CR 616.1g: what an install does when a continuation is already resident.
@@ -19775,6 +20122,7 @@ impl PostReplacementDrain {
             applied: HashSet::new(),
             event_source: None,
             event_target: None,
+            controller: None,
         }
     }
 
@@ -21761,10 +22109,47 @@ impl GameState {
         self.resolution_stack.active_spell_resolution_mut()
     }
 
-    /// Parks permanent-spell completion context above the replacement choice
-    /// that suspended its entry.
+    /// Parks permanent-spell completion context as the active frame. This is the
+    /// NO-CHILD case only: a call site that follows a producer which may have
+    /// raised a resolution frame must use `push_spell_resolution_after_child`,
+    /// which parks the parent BENEATH that child stack. Pushing on top of a live
+    /// child makes every top-only resume accessor read `None` and strands both
+    /// frames.
     pub fn push_spell_resolution(&mut self, pending: PendingSpellResolution) {
         self.resolution_stack.push_spell_resolution(pending);
+    }
+
+    /// Park permanent-spell completion context beneath the complete child stack
+    /// its own delivery raised. The recorded depth is structural, not a search for
+    /// a buried parent.
+    ///
+    /// CR 616.1 / CR 616.1f + CR 614.1c: the delivery tail's enters-with-counters
+    /// step can pause on an ordering choice among applicable counter replacements,
+    /// and the queue that owns the remaining work is read TOP-ONLY. That queue is
+    /// therefore a CHILD of the resolving spell, and the CR 608.3a completion
+    /// context parked for it must never sit above it.
+    pub fn push_spell_resolution_after_child(
+        &mut self,
+        pending: PendingSpellResolution,
+        child_stack_start: ChildStackDepth,
+    ) {
+        match self
+            .resolution_stack
+            .capture_child_boundary()
+            .cmp(&child_stack_start)
+        {
+            std::cmp::Ordering::Less => {
+                panic!("spell delivery removed a parent before it could be parked")
+            }
+            std::cmp::Ordering::Equal => self.push_spell_resolution(pending),
+            std::cmp::Ordering::Greater => self
+                .resolution_stack
+                .insert_parent_at_child_boundary(
+                    super::resolution::ResolutionFrame::SpellResolution(pending),
+                    child_stack_start,
+                )
+                .expect("parked spell resolution must be inserted below its child stack"),
+        }
     }
 
     /// Consumes exactly the active permanent-spell completion context. Child
@@ -23427,13 +23812,14 @@ impl GameState {
             resolving_begin_game_abilities: false,
             last_named_choice: None,
             chosen_counter_kind_this_resolution: None,
+            chosen_color_this_resolution: None,
             last_chosen_damage_source: None,
             all_creature_types: Vec::new(),
             all_card_names: Arc::from([]),
             card_face_registry: Arc::new(HashMap::new()),
             meld_pair_registry: Arc::new(HashMap::new()),
-            momir_pool: BTreeMap::new(),
-            momir_pool_faces: Arc::new(HashMap::new()),
+            card_db: None,
+            booster_shelf: Arc::new(BoosterShelf::default()),
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
@@ -23532,6 +23918,105 @@ impl GameState {
     pub fn set_match_config(&mut self, config: MatchConfig) {
         self.match_config = config;
         self.loop_detection = config.loop_detection;
+    }
+
+    /// CR 614.12: the object `id` names — "the characteristics of the permanent
+    /// as it would exist on the battlefield" — including an entrant whose entry
+    /// has been decided but has not yet committed.
+    ///
+    /// Single authority for the objects-vs-liminal precedence. A liminal entry is
+    /// deliberately absent from `objects` while its own entry replacements run, so
+    /// a seam that reads `objects` alone is blind to every entering token and to
+    /// the CR 701.42 meld result. The liminal projection wins where both exist:
+    /// for a meld the object still stored under that id is the entrant's PRE-entry
+    /// self (the exiled front-face component), which is not what CR 614.12 asks
+    /// about.
+    ///
+    /// This replaces three hand-rolled copies of the same lookup
+    /// (`filter::entering_object_projection`,
+    /// `zone_pipeline::entering_object_projection`, and
+    /// `engine_replacement::apply_post_replacement_effect`'s inline dual lookup).
+    /// `engine_replacement::copy_effect_for_source` still branches on
+    /// `liminal_entries` itself: it is not this lookup, because the two branches
+    /// search different ability sets (an entrant's own replacement definitions
+    /// versus `functioning_abilities::active_replacements`, which additionally
+    /// filters phased-out and non-emblem command-zone sources).
+    ///
+    /// Reach for this in any seam that resolves an ability's `source_id` during an
+    /// entry chain.
+    pub fn entering_or_live_object(&self, id: ObjectId) -> Option<&GameObject> {
+        self.liminal_entries
+            .get(&id)
+            .map(|entry| entry.object.projected())
+            .or_else(|| self.objects.get(&id))
+    }
+
+    /// CR 607.2d: the chosen-attribute list of the object `id` names, with the
+    /// same liminal precedence as [`GameState::entering_or_live_object`].
+    ///
+    /// Deliberately narrower than a `&mut GameObject`: an entering token is stored
+    /// as a [`TokenProjection`], whose whole purpose is to keep the CR 111.1
+    /// is-a-token witness out of a caller's reach. A persisting `Effect::Choose`
+    /// ("As this ~ enters, choose a colour", Tribute's CR 702.104a opponent
+    /// choice) needs exactly this one list and nothing else, so this is the whole
+    /// mutable surface it gets. Attributes written here survive the entry:
+    /// `token::commit_liminal_token_entry_with_post_actions` inserts the
+    /// projection itself into `objects`.
+    pub fn chosen_attributes_mut(&mut self, id: ObjectId) -> Option<&mut Vec<ChosenAttribute>> {
+        if let Some(entry) = self.liminal_entries.get_mut(&id) {
+            return Some(entry.object.chosen_attributes_mut());
+        }
+        self.objects
+            .get_mut(&id)
+            .map(|object| &mut object.chosen_attributes)
+    }
+
+    /// CR 614.1c + CR 122.6a: schedule counters onto a TOKEN entrant whose entry
+    /// has been decided but has not yet committed, so they are placed AS it enters
+    /// rather than added to it afterwards.
+    ///
+    /// Returns `false` when `id` names no such entrant, which is the caller's
+    /// signal to take its ordinary live-object path.
+    ///
+    /// The distinction is not bookkeeping. CR 702.104a's tribute counters, and
+    /// every other "as it enters" counter, are placed as part of the entry event,
+    /// so they must go through the entry's own CR 614.1a replacement pass —
+    /// Doubling Season, Corpsejack Menace, Hardened Scales all apply to them.
+    /// Adding them after the commit instead would be a second, separate event
+    /// that those replacements have already declined to modify, and would let the
+    /// permanent exist for an observable instant without the counters it entered
+    /// with (CR 704.5f decides a 0/0 entrant on exactly that instant).
+    ///
+    /// # Why only a token entrant
+    ///
+    /// CR 111.1: a token entrant "is a marker used to represent any permanent
+    /// that isn't represented by a card" and, until this entry commits, it sits in
+    /// no zone — there is no object under its id at all, so an ordinary counter
+    /// addition would find nothing and silently drop the counters. The other
+    /// entrant kind, the CR 701.42 meld result, is card-backed: the id still names
+    /// a real object (the entrant's pre-entry self), an ordinary addition reaches
+    /// it, and `meld::commit_meld_battlefield` does not consume
+    /// `LiminalEntry::enter_with_counters` at all — so redirecting a meld here
+    /// would be the very silent drop this exists to prevent. The stored CR 111.1
+    /// witness answers which kind this is, rather than a flag to be trusted.
+    pub fn schedule_entry_counters(
+        &mut self,
+        id: ObjectId,
+        counter_type: CounterType,
+        count: u32,
+    ) -> bool {
+        let Some(entry) = self
+            .liminal_entries
+            .get_mut(&id)
+            .filter(|entry| entry.object.is_token_projection())
+        else {
+            return false;
+        };
+        // The commit folds this list into the entry's counter pass in order, so
+        // appending is what puts these counters after any the creating effect
+        // already specified — CR 702.104a's "an ADDITIONAL N +1/+1 counters".
+        entry.enter_with_counters.push((counter_type, count));
+        true
     }
 
     /// Returns the current timestamp and increments for next use.
@@ -24157,6 +24642,18 @@ impl GameState {
             .and_then(|drain| drain.source)
     }
 
+    /// CR 109.5: the resident drain's replacing ability's controller — the
+    /// player "you" refers to in the continuation. See
+    /// [`PostReplacementDrain::controller`]; unlike
+    /// [`Self::post_replacement_source`] this survives
+    /// [`Self::clear_post_replacement_source`], because clearing the `SelfRef`
+    /// referent says nothing about whose ability produced the continuation.
+    pub fn post_replacement_controller(&self) -> Option<crate::types::player::PlayerId> {
+        self.active_post_replacement_drains()?
+            .resident()
+            .and_then(|drain| drain.controller)
+    }
+
     /// CR 615.5 + CR 609.7: the resident drain's *prevented-event* source — the
     /// damage dealer, not the shield.
     pub fn post_replacement_event_source(&self) -> Option<crate::types::identifiers::ObjectId> {
@@ -24205,6 +24702,7 @@ impl GameState {
         // following PutChosenCounter, so distinct live values must not share a
         // loop pre-filter fingerprint.
         self.chosen_counter_kind_this_resolution.hash(&mut h);
+        self.chosen_color_this_resolution.hash(&mut h);
         self.stack.len().hash(&mut h);
         self.objects.len().hash(&mut h);
         // im::Vector<ObjectId>: Hash, ordered.
@@ -25445,13 +25943,14 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_begin_game_abilities: _,
         last_named_choice: _,
         chosen_counter_kind_this_resolution: _,
+        chosen_color_this_resolution: _,
         last_chosen_damage_source: _,
         all_creature_types: _,
         all_card_names: _,
         card_face_registry: _,
         meld_pair_registry: _,
-        momir_pool: _,
-        momir_pool_faces: _,
+        card_db: _,
+        booster_shelf: _,
         log_player_names: _,
         last_created_token_ids: _,
         last_revealed_ids: _,
@@ -25797,6 +26296,7 @@ impl PartialEq for GameState {
             && self.last_named_choice == other.last_named_choice
             && self.chosen_counter_kind_this_resolution
                 == other.chosen_counter_kind_this_resolution
+            && self.chosen_color_this_resolution == other.chosen_color_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
             && self.private_look_ids == other.private_look_ids
             && self.private_look_player == other.private_look_player
@@ -26229,7 +26729,7 @@ mod forced_cascade_window_tests {
                 },
             ),
             (
-                "BattleProtectorChoice (CR 310.11 + CR 704.5w / CR 704.5x — likewise an SBA)",
+                "BattleProtectorChoice (CR 310.11 + CR 704.5x — likewise an SBA)",
                 WaitingFor::BattleProtectorChoice {
                     player: PlayerId(0),
                     battle_id: ObjectId(5),
@@ -28253,6 +28753,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -28420,6 +28922,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
         };
         assert!(
             !matches!(state.waiting_for, WaitingFor::Priority { .. }),
@@ -33574,6 +34078,8 @@ mod tests {
             player: PlayerId(0),
             candidate_count: 2,
             candidates: vec![],
+            kind: Default::default(),
+            last_applied_decides: false,
         }));
         variants.push(Box::new(WaitingFor::ExploreChoice {
             player: PlayerId(0),

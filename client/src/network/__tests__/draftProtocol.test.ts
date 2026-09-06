@@ -21,6 +21,19 @@ const validWorkspace = {
 
 const validDraftView = { launch_capability: "None" as const, commanders_required: 0 };
 
+/** A well-formed `DraftCommanderLaunch`, rebuilt per case so mutations cannot leak. */
+const commanderLaunch = () => ({
+  gameId: "commander-game-1",
+  roomCode: "PHASE-CMDR",
+  localDeck: {
+    main_deck: ["Island"],
+    sideboard: ["Mountain"],
+    commander: ["Kenrith, the Returned King"],
+  },
+  playerCount: 4,
+  draftSetCodes: null as string[] | null,
+});
+
 function workspaceWithPlacementCount(count: number) {
   return {
     schemaVersion: 1 as const,
@@ -42,8 +55,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 26", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(26);
+    it("is version 27", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(27);
     });
   });
 
@@ -753,6 +766,70 @@ describe("draftProtocol", () => {
       });
     });
 
+    describe("draft_commander_launch", () => {
+      const withDeck = (deck: Record<string, unknown>) => ({
+        ...commanderLaunch(),
+        localDeck: { ...commanderLaunch().localDeck, ...deck },
+      });
+      const withoutKey = (key: string): Record<string, unknown> => {
+        const launch: Record<string, unknown> = commanderLaunch();
+        delete launch[key];
+        return launch;
+      };
+
+      it("accepts a launch whose draftSetCodes is null", () => {
+        const launch = commanderLaunch();
+        expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
+          type: "draft_commander_launch",
+          launch,
+        });
+      });
+
+      it("accepts a launch carrying every set the draft contained", () => {
+        const launch = { ...commanderLaunch(), draftSetCodes: ["CMM", "CLB"] };
+        expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
+          type: "draft_commander_launch",
+          launch,
+        });
+      });
+
+      // ACCEPTANCE control: the branch is a shape guard, not a whitelist, so an
+      // unrecognized field survives rather than failing the message.
+      it("accepts a structurally valid launch carrying an unknown extra field", () => {
+        const launch = { ...commanderLaunch(), unknownFutureField: "carried" };
+        expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
+          type: "draft_commander_launch",
+          launch,
+        });
+      });
+
+      const rejections: Array<[string, unknown]> = [
+        ["launch is absent", undefined],
+        ["gameId is not a string", { ...commanderLaunch(), gameId: 7 }],
+        ["gameId is empty", { ...commanderLaunch(), gameId: "" }],
+        ["roomCode is not a string", { ...commanderLaunch(), roomCode: null }],
+        ["roomCode is empty", { ...commanderLaunch(), roomCode: "" }],
+        ["playerCount is not an integer", { ...commanderLaunch(), playerCount: 2.5 }],
+        // 0, not a negative: both `>= 0` and `> 0` reject a negative, so only
+        // the zero boundary discriminates between them.
+        ["playerCount is zero", { ...commanderLaunch(), playerCount: 0 }],
+        ["localDeck is absent", withoutKey("localDeck")],
+        ["main_deck is not an array", withDeck({ main_deck: "Island" })],
+        // The `.every` half of the guard: an `Array.isArray`-only implementation
+        // passes every non-array case above and fails only this one.
+        ["main_deck holds a non-string element", withDeck({ main_deck: ["Island", 3] })],
+        ["sideboard is not an array", withDeck({ sideboard: "Mountain" })],
+        ["commander is not an array", withDeck({ commander: null })],
+        ["draftSetCodes is neither null nor an array", { ...commanderLaunch(), draftSetCodes: "CMM" }],
+        ["draftSetCodes is absent", withoutKey("draftSetCodes")],
+      ];
+
+      it.each(rejections)("rejects a launch whose %s", (_label, launch) => {
+        expect(() => validateDraftMessage({ type: "draft_commander_launch", launch }))
+          .toThrow(/Invalid commander launch/);
+      });
+    });
+
     it.each([
       "draft_join",
       "draft_reconnect",
@@ -779,6 +856,7 @@ describe("draftProtocol", () => {
       "draft_timer_sync",
       "draft_request_advance",
       "draft_match_start",
+      "draft_commander_launch",
       "draft_bo3_sideboard_prompt",
       "draft_bo3_between_games",
       "draft_bo3_sideboard_submit",
@@ -804,6 +882,7 @@ describe("draftProtocol", () => {
         },
         draft_reconnect_rejected: { kind: "NoReconnectWindow", reason: "No grace window" },
         draft_deck_submit_ack: { submissionId: "submission-1", view: validDraftView },
+        draft_commander_launch: { launch: commanderLaunch() },
       };
       const msg = validateDraftMessage(
         msgType === "draft_workspace_update"
@@ -1110,6 +1189,16 @@ describe("draftProtocol", () => {
             matchAuthoritySeat: 0,
           },
         },
+      };
+
+      const decoded = await decodeDraftWireMessage(await encodeDraftWireMessage(msg));
+      expect(decoded).toEqual(msg);
+    });
+
+    it("round-trips a commander launch message", async () => {
+      const msg: DraftP2PMessage = {
+        type: "draft_commander_launch",
+        launch: { ...commanderLaunch(), draftSetCodes: ["CMM"] },
       };
 
       const decoded = await decodeDraftWireMessage(await encodeDraftWireMessage(msg));

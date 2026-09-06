@@ -1419,35 +1419,62 @@ fn baleful_mastery_opponent_draw_uses_choose_not_cast_target() {
 }
 
 #[test]
-fn named_choice_recognizes_enumerated_card_types() {
-    // Issue #930 — Cloud Key's older templating enumerates the card-type
-    // options ("choose artifact, creature, enchantment, instant, or
-    // sorcery") instead of the modern "choose a card type". Both must map
-    // to ChoiceType::CardType so the chosen type persists for downstream
-    // IsChosenCardType reads (CR 205.2).
-    assert!(matches!(
-        try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery"),
-        Some(ChoiceType::CardType { .. })
-    ));
-    assert!(matches!(
+fn named_choice_keeps_enumerated_card_types_as_source_ordered_labels() {
+    let canonical =
+        try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery");
+    assert_eq!(
+        canonical,
+        Some(ChoiceType::Labeled {
+            options: vec![
+                "Artifact".to_string(),
+                "Creature".to_string(),
+                "Enchantment".to_string(),
+                "Instant".to_string(),
+                "Sorcery".to_string(),
+            ],
+        })
+    );
+
+    let reordered =
+        try_parse_named_choice("choose sorcery, artifact, instant, creature, or enchantment");
+    assert_eq!(
+        reordered,
+        Some(ChoiceType::Labeled {
+            options: vec![
+                "Sorcery".to_string(),
+                "Artifact".to_string(),
+                "Instant".to_string(),
+                "Creature".to_string(),
+                "Enchantment".to_string(),
+            ],
+        })
+    );
+
+    assert_eq!(
         try_parse_named_choice("choose a card type"),
-        Some(ChoiceType::CardType { .. })
-    ));
-    // Trailing period, as it appears in oracle text.
-    assert!(matches!(
-        try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery."),
-        Some(ChoiceType::CardType { .. })
-    ));
+        Some(ChoiceType::card_type())
+    );
 }
 
 #[test]
 fn named_choice_enumeration_does_not_misfire() {
-    // Non-card-type lists and articled / creature-type choices must not be
-    // treated as a card-type enumeration.
-    assert!(!is_card_type_enumeration("one or more creatures"));
-    assert!(!is_card_type_enumeration("a creature"));
-    assert!(!matches!(
+    for choice in [
+        "choose artifact, creature, or sorcery",
+        "choose artifact, creature, enchantment, instant, or land",
+        "choose artifact, creature, enchantment, instant, or planeswalker",
+        "choose artifact, creature, enchantment, instant, or artifact",
+        "choose artifact, creature, enchantment, instant, or mystery",
+    ] {
+        assert!(
+            matches!(
+                try_parse_named_choice(choice),
+                Some(ChoiceType::Labeled { .. })
+            ),
+            "{choice:?} must retain the labeled-choice fallback"
+        );
+    }
+    assert!(matches!(
         try_parse_named_choice("choose a creature type"),
-        Some(ChoiceType::CardType { .. })
+        Some(ChoiceType::CreatureType { .. })
     ));
 }

@@ -34,7 +34,7 @@ import type {
   PodPolicy,
   DraftKind,
 } from "./draft-adapter";
-import type { ServerInfo } from "./ws-adapter";
+import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -95,12 +95,26 @@ export type ServerDraftAdapterEvent =
   | { type: "draftActionRejected"; reason: string }
   | { type: "gameStateUpdated"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult; logEntries?: GameLogEntry[] }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "opponentDisconnected"; graceSeconds: number }
+  | { type: "opponentReconnected" }
   | { type: "actionPendingChanged"; pending: boolean }
   | { type: "disconnected" }
   | { type: "reconnected" }
   | { type: "error"; message: string };
 
 type ServerDraftAdapterEventListener = (event: ServerDraftAdapterEvent) => void;
+
+function fullSessionKeysEqual(
+  left: FullSessionKey | null | undefined,
+  right: FullSessionKey | null | undefined,
+): boolean {
+  return left !== null
+    && left !== undefined
+    && right !== null
+    && right !== undefined
+    && left.game_code === right.game_code
+    && left.generation === right.generation;
+}
 
 // ── ServerDraftAdapter ──────────────────────────────────────────────────
 
@@ -137,6 +151,10 @@ export class ServerDraftAdapter implements EngineAdapter {
   private _playerId: PlayerId | null = null;
   private activeMatchId: string | null = null;
   private _gameCode: string | null = null;
+  /** Full match lifetime announced by DraftMatchStart. */
+  private activeFullKey: FullSessionKey | null = null;
+  /** Full match lifetime whose matching GameStarted has been accepted. */
+  private acceptedFullKey: FullSessionKey | null = null;
 
   // ── Infrastructure ─────────────────────────────────────────────────
   private ws: PhaseSocketTransport | null = null;
@@ -638,21 +656,60 @@ export class ServerDraftAdapter implements EngineAdapter {
           match_id: string;
           round: number;
           game_code: string;
+          full_key?: FullSessionKey;
           player_token: string;
           your_player: PlayerId;
           opponent_name: string;
         };
+        if (
+          !data.full_key
+          || data.full_key.game_code !== data.game_code
+          || data.full_key.generation < 1
+        ) {
+          this.emit({
+            type: "error",
+            message: "Server omitted a valid Full session identity for the draft match.",
+          });
+          break;
+        }
+        const sameMatch =
+          this.activeMatchId === data.match_id
+          && this._gameCode === data.game_code
+          && this._playerId === data.your_player
+          && fullSessionKeysEqual(this.activeFullKey, data.full_key);
+        if (!sameMatch) {
+          this.snapshot = null;
+          this.acceptedFullKey = null;
+        }
         this.phase = "match";
         this.activeMatchId = data.match_id;
         this._playerId = data.your_player;
         this._gameCode = data.game_code;
-        this.emit({
-          type: "matchStarting",
-          matchId: data.match_id,
-          round: data.round,
-          opponentName: data.opponent_name,
-          gameCode: data.game_code,
-        });
+        this.draftToken = data.player_token;
+        this.activeFullKey = data.full_key;
+        if (!sameMatch) {
+          if (this.draftCode && this.draftToken) {
+            this.send({
+              type: "ReconnectDraft",
+              data: {
+                draft_code: this.draftCode,
+                player_token: this.draftToken,
+              },
+            });
+          } else {
+            this.emit({
+              type: "error",
+              message: "Cannot attach draft match without draft credentials.",
+            });
+          }
+          this.emit({
+            type: "matchStarting",
+            matchId: data.match_id,
+            round: data.round,
+            opponentName: data.opponent_name,
+            gameCode: data.game_code,
+          });
+        }
         break;
       }
 
@@ -696,7 +753,17 @@ export class ServerDraftAdapter implements EngineAdapter {
           activation_block_reasons?: Record<string, AbilityBlockEntry[]>;
           viewer_interaction?: LegalActionsResult["viewerInteraction"];
           derived?: GameState["derived"];
+          full_key?: FullSessionKey;
         };
+        if (
+          this.activeMatchId === null
+          || this._gameCode === null
+          || this._playerId !== data.your_player
+          || !fullSessionKeysEqual(data.full_key, this.activeFullKey)
+        ) {
+          break;
+        }
+        this.acceptedFullKey = data.full_key ?? null;
         const startedSnapshot = this.cacheSnapshot(
           { ...data.state, derived: data.derived ?? data.state.derived },
           {
@@ -734,7 +801,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           viewer_interaction?: LegalActionsResult["viewerInteraction"];
           log_entries?: GameLogEntry[];
           derived?: GameState["derived"];
+          full_key?: FullSessionKey;
         };
+        if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          break;
+        }
         const updateSnapshot = this.cacheSnapshot(
           { ...data.state, derived: data.derived ?? data.state.derived },
           {
@@ -872,6 +943,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.phase = "between_rounds";
         this.activeMatchId = null;
         this._gameCode = null;
+        this.activeFullKey = null;
+        this.acceptedFullKey = null;
         this.snapshot = null;
         this.emit({ type: "actionPendingChanged", pending: false });
         this.emit({
@@ -879,6 +952,29 @@ export class ServerDraftAdapter implements EngineAdapter {
           winner: data.winner,
           reason: data.reason,
         });
+        break;
+      }
+
+      case "OpponentDisconnected": {
+        const data = msg.data as {
+          grace_seconds: number;
+          full_key?: FullSessionKey;
+        };
+        if (!fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          break;
+        }
+        this.emit({
+          type: "opponentDisconnected",
+          graceSeconds: data.grace_seconds,
+        });
+        break;
+      }
+
+      case "OpponentReconnected": {
+        const data = (msg.data ?? {}) as { full_key?: FullSessionKey };
+        if (fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          this.emit({ type: "opponentReconnected" });
+        }
         break;
       }
 
@@ -1018,6 +1114,8 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.draftView = null;
     this.seatIndex = null;
     this.activeMatchId = null;
+    this.activeFullKey = null;
+    this.acceptedFullKey = null;
     if (this.pendingReject) {
       this.pendingReject(
         new AdapterError("WS_CLOSED", "Adapter disposed during action", true),

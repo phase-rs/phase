@@ -41,7 +41,8 @@ use super::super::oracle_static::{
     parse_static_line_multi, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, TargetSyntax,
+    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
+    TargetSyntax,
 };
 use super::super::oracle_util::{
     merge_or_filters, parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
@@ -2071,14 +2072,14 @@ fn try_parse_subject_restriction_clause(
         // ties the prohibition to the target's tap state. Without that suffix the
         // window is UNSTATED here, and it must stay `None`.
         //
-        // CR 611.2a (`docs/MagicCompRules.txt:2908`): this value lands on BOTH the
-        // embedded `GenericEffect.duration` and the clause CARRIER below, so an
-        // injected `UntilEndOfTurn` default made both indistinguishable from a
-        // printed window and `with_clause_chain_duration` / `apply_duration_to_effect`
-        // declined to distribute the enclosing sentence's window into either.
-        // Measured: Dovin Baan, Edifice of Authority and Mythos of Vadrok print
-        // "until your next turn" on the head and had this prohibition end a full turn
-        // early. Emitting verbatim lets the head window reach it; the resolver
+        // CR 611.2a: this value lands on BOTH the embedded `GenericEffect.duration`
+        // and the clause CARRIER below, so an injected `UntilEndOfTurn` default made
+        // both indistinguishable from a printed window and
+        // `with_clause_chain_duration` / `apply_duration_to_effect` declined to
+        // distribute the enclosing sentence's window into either. Measured: Dovin
+        // Baan, Edifice of Authority and Mythos of Vadrok print "until your next turn"
+        // on the head and had this prohibition end a full turn early. Emitting
+        // verbatim lets the head window reach it; the resolver
         // (`game/effects/effect.rs`) remains the single authority for the fallback
         // when nothing is printed anywhere.
         let duration = tapped_bound_prohibition_duration(&lower);
@@ -2736,7 +2737,7 @@ pub(super) fn parse_subject_application(
     {
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
-        let (filter, rest) = parse_type_phrase(phrase);
+        let (filter, rest) = parse_type_phrase_folding(phrase);
         let filter = merge_partial_type_phrase_filter(filter, rest.trim());
         return subject_filter_application(filter, false);
     }
@@ -3361,7 +3362,7 @@ pub(super) fn parse_subject_application(
     {
         let consumed = lower.len() - rest_subject.len();
         let original_rest = &subject[consumed..];
-        let (filter, rem) = parse_type_phrase(original_rest);
+        let (filter, rem) = parse_type_phrase_folding(original_rest);
         if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             return Some(SubjectApplication {
                 affected: TargetFilter::ParentTarget,
@@ -3382,7 +3383,7 @@ pub(super) fn parse_subject_application(
         // the remainder as a type phrase. Covers all "that [type]" patterns generically.
         let consumed = lower.len() - rest_subject.len();
         let original_rest = &subject[consumed..];
-        let (filter, rem) = parse_type_phrase(original_rest);
+        let (filter, rem) = parse_type_phrase_folding(original_rest);
         if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             // CR 608.2k + CR 608.2c: Inside a trigger effect, "that [type]" is an
             // anaphoric back-reference to the triggering event's subject object (the
@@ -3411,7 +3412,7 @@ pub(super) fn parse_subject_application(
         }
     }
 
-    let (filter, rest) = parse_type_phrase(subject);
+    let (filter, rest) = parse_type_phrase_folding(subject);
     if rest.trim().is_empty() {
         return subject_filter_application(filter, false);
     }
@@ -3916,7 +3917,7 @@ fn merge_partial_type_phrase_filter(filter: TargetFilter, remainder: &str) -> Ta
     let TargetFilter::Typed(mut left) = filter else {
         return filter;
     };
-    let (suffix_filter, suffix_remainder) = parse_type_phrase(remainder);
+    let (suffix_filter, suffix_remainder) = parse_type_phrase_folding(remainder);
     let TargetFilter::Typed(right) = suffix_filter else {
         return TargetFilter::Typed(left);
     };
@@ -6067,12 +6068,12 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
         // CR 105.4 + CR 608.2c (issue #327): Try the "of the chosen / of that"
         // qualifier parser first so "creatures of that color" lowers to a
         // typed filter with `FilterProp::IsChosenColor`. The plain
-        // `parse_type_phrase` would silently drop the trailing qualifier and
+        // `parse_type_phrase_folding` would silently drop the trailing qualifier and
         // leave the filter as a bare-creature match, making the restriction
         // accept ALL creatures rather than only those of the chosen color.
         let filter_tp = TextPair::new(filter_text, filter_text);
         let filter = parse_chosen_qualifier_subject(&filter_tp).unwrap_or_else(|| {
-            let (f, _) = parse_type_phrase(filter_text);
+            let (f, _) = parse_type_phrase_folding(filter_text);
             f
         });
         if !matches!(filter, TargetFilter::Any) {

@@ -390,7 +390,7 @@ fn teysa_runtime_no_clue_when_no_opponent_lost_life() {
 // ("for each goaded creature you control") and Sophina ("for each nontoken attacking
 // creature"). The parameterized gate-widen + Gap A (`FilterProp::Goaded`) now lift
 // Serene Sleuth to an `ObjectCount` repeat_for; Sophina stays a bare Investigate
-// (Gap B deferred — parse_type_phrase leading-adjective order-dependence). Both
+// (Gap B deferred — parse_type_phrase_folding leading-adjective order-dependence). Both
 // branches drive the real seam and pair their `repeat_for` assertion with a positive
 // `Effect::Investigate` reach-guard so neither is vacuous.
 const SERENE_SLEUTH: &str = "When this creature enters, investigate. (Create a Clue token. It's \
@@ -558,7 +558,7 @@ fn object_for_each_investigate_is_lifted() {
     );
 
     // Sophina's attack trigger: object for-each ("nontoken attacking creature") —
-    // Gap B (DEFERRED). parse_type_phrase's leading-adjective order-dependence means
+    // Gap B (DEFERRED). parse_type_phrase_folding's leading-adjective order-dependence means
     // this for-each does NOT yet parse to a member-count, so the seam leaves it a bare
     // Investigate. Deferred-gap tripwire: paired with a positive `Effect::Investigate`
     // reach-guard (non-vacuous), it asserts the CURRENT bare-Investigate state and
@@ -576,7 +576,7 @@ fn object_for_each_investigate_is_lifted() {
     );
     assert!(
         attack.repeat_for.is_none(),
-        "Gap B deferred (parse_type_phrase leading-adjective order-dependence): \
+        "Gap B deferred (parse_type_phrase_folding leading-adjective order-dependence): \
          'nontoken attacking creature' does not yet lift — flip this guard when Gap B lands: {:?}",
         attack.repeat_for
     );

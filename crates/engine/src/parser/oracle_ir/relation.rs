@@ -22,7 +22,10 @@
 //! whole choice axis is one parameterized variant).
 
 use super::doc::OracleItemId;
-use crate::types::ability::{ChosenSubtypeKind, TargetFilter};
+use crate::types::{
+    ability::{ChosenSubtypeKind, TargetFilter},
+    card_type::CoreType,
+};
 
 /// A cross-item relation between parsed document items, recovered at parse time
 /// and applied by id during lowering. Closed set.
@@ -107,6 +110,15 @@ pub(crate) enum LinkedReturnOutcome {
 /// `DocumentRelationIr` variant.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum LinkedChoiceKind {
+    /// CR 607.2d + CR 614.1c + CR 614.12a: an as-enters replacement makes a
+    /// persisted labeled card-type choice, and distinct static item(s) read the
+    /// source's `IsChosenCardType` property. `options` is the proven exact
+    /// domain; lowering changes only this replacement item's proven chooser.
+    ConstrainedCardTypeStatic {
+        chooser: OracleItemId,
+        statics: Vec<OracleItemId>,
+        options: Vec<CoreType>,
+    },
     /// CR 607.2d + CR 614.1c: A persisted "as this enters, choose a creature
     /// type / color" replacement (`chooser`) linked to a self-ETB counter
     /// replacement (`counter`) whose counter count reads the chosen creature
@@ -160,4 +172,29 @@ pub(crate) enum LinkedChoiceKind {
         filter: TargetFilter,
         description: String,
     },
+    /// CR 607.2d: A colour choice made on ONE ability of an object, read back by
+    /// a `Protection(ChosenColor)` / `HexproofFrom(ChosenColor)` grant on ANOTHER
+    /// ability of the same object. CR 607.2d: "If an object has an ability
+    /// printed on it that causes a player to 'choose a [value]' and an ability
+    /// printed on it that refers to 'the chosen [value]' … those abilities are
+    /// linked. The second ability refers only to a choice made as the result of
+    /// the first ability." A linked reader therefore must NOT make a second
+    /// choice of its own, and `inject_chosen_color_choice_grant` must not supply
+    /// one.
+    ///
+    /// ONE producer of this relation: a PRINTED `Effect::Choose { Color }` on a
+    /// different item (Floating Shield's "As this Aura enters, choose a color."
+    /// replacement, read back by its "Sacrifice this Aura:" grant).
+    ///
+    /// `consumers` names every item that is a genuinely ANAPHORIC reader of that
+    /// choice, per `oracle.rs::item_reads_anaphoric_chosen_color` — an item whose
+    /// own printed text makes a fresh CR 608.2d choice of its own (e.g. "…the
+    /// color of your choice") is NOT a consumer, even if it also happens to be
+    /// injectable, because CR 608.2d requires that fresh choice to be announced
+    /// while applying the effect. Emitted only when a supplier exists and at
+    /// least one consumer is a DIFFERENT item — a chain that makes its own
+    /// choice ahead of its own grant (Akroma's Blessing, Brave the Elements) is
+    /// one item and is already handled by the injector's
+    /// `child_under_color_choice` guard.
+    LinkedColorChoice { consumers: Vec<OracleItemId> },
 }

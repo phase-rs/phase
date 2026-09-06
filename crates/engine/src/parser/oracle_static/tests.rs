@@ -6587,7 +6587,7 @@ fn static_spells_cost_less() {
 
 // CR 205.4a: Kethis, the Hidden Hand — "Legendary spells you cast cost {1} less
 // to cast" must restrict to legendary spells via a HasSupertype filter, not drop
-// the restriction (spell_filter: None) and cheapen EVERY spell. `parse_type_phrase`
+// the restriction (spell_filter: None) and cheapen EVERY spell. `parse_type_phrase_folding`
 // doesn't consume a lone supertype word, so it needed an explicit arm.
 #[test]
 fn static_legendary_spells_cost_less_keeps_supertype_filter() {
@@ -7218,7 +7218,7 @@ fn static_instant_sorcery_spells_cost_less() {
             "Expected spell_filter for instant/sorcery"
         );
         let filter = spell_filter.as_ref().unwrap();
-        // parse_type_phrase("instant and sorcery") → TargetFilter::Or { [Typed(Instant), Typed(Sorcery)] }
+        // parse_type_phrase_folding("instant and sorcery") → TargetFilter::Or { [Typed(Instant), Typed(Sorcery)] }
         fn contains_type(f: &TargetFilter, expected: TypeFilter) -> bool {
             match f {
                 TargetFilter::Typed(tf) => tf.type_filters.contains(&expected),
@@ -8227,7 +8227,8 @@ fn static_top_of_library_creature_gate_mul_daya_channelers() {
     .unwrap();
 
     assert_eq!(def.mode, StaticMode::Continuous);
-    let (creature_filter, _) = crate::parser::oracle_target::parse_type_phrase("creature card");
+    let (creature_filter, _) =
+        crate::parser::oracle_target::parse_type_phrase_folding("creature card");
     assert_eq!(
         def.condition,
         Some(StaticCondition::TopOfLibraryMatches {
@@ -10727,7 +10728,7 @@ fn static_as_long_as_equipped_creature_is_attacking_grants_first_strike_to_host(
 
     // CR 509.1c: the lure is the typed MustBeBlocked { by: Some(Dalek) }, gated
     // on the same attacking condition, affecting the equipped creature.
-    let dalek = crate::parser::oracle_target::parse_type_phrase("a dalek").0;
+    let dalek = crate::parser::oracle_target::parse_type_phrase_folding("a dalek").0;
     assert_ne!(dalek, TargetFilter::Any, "Dalek subtype must be recognized");
     assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: Some(dalek) });
     assert_eq!(defs[1].affected, Some(equipped_creature_filter()));
@@ -11025,7 +11026,7 @@ fn slayers_cleaver_lure_conjunct_models_typed_must_be_blocked() {
         .contains(&ContinuousModification::AddToughness { value: 1 }));
     assert_eq!(defs[0].condition, None);
 
-    let eldrazi = crate::parser::oracle_target::parse_type_phrase("an eldrazi").0;
+    let eldrazi = crate::parser::oracle_target::parse_type_phrase_folding("an eldrazi").0;
     assert_ne!(
         eldrazi,
         TargetFilter::Any,
@@ -11054,7 +11055,7 @@ fn attached_subject_pure_filtered_lure_models_typed_must_be_blocked() {
         1,
         "pure filtered lure → one static, got {defs:?}"
     );
-    let eldrazi = crate::parser::oracle_target::parse_type_phrase("an eldrazi").0;
+    let eldrazi = crate::parser::oracle_target::parse_type_phrase_folding("an eldrazi").0;
     assert_eq!(
         defs[0].mode,
         StaticMode::MustBeBlocked { by: Some(eldrazi) }
@@ -11082,11 +11083,11 @@ fn parse_must_be_blocked_by_filter_building_block() {
     // Filter lowering for both known subtypes (case-insensitive canonicalization).
     assert_eq!(
         parse_must_be_blocked_by_filter("must be blocked by a Dalek if able"),
-        Some(crate::parser::oracle_target::parse_type_phrase("a dalek").0),
+        Some(crate::parser::oracle_target::parse_type_phrase_folding("a dalek").0),
     );
     assert_eq!(
         parse_must_be_blocked_by_filter("must be blocked by an Eldrazi if able"),
-        Some(crate::parser::oracle_target::parse_type_phrase("an eldrazi").0),
+        Some(crate::parser::oracle_target::parse_type_phrase_folding("an eldrazi").0),
     );
     // Bare form yields no filter.
     assert_eq!(
@@ -11114,7 +11115,7 @@ fn extract_must_be_blocked_by_conjunct_classifies_quality() {
 
     // Guard: the fixture quality is genuinely unrecognized — it constrains no
     // blocker, so the lowering helper rejects it (returns no filter). NOTE:
-    // `parse_type_phrase` yields an empty `Typed` (not `TargetFilter::Any`) here.
+    // `parse_type_phrase_folding` yields an empty `Typed` (not `TargetFilter::Any`) here.
     assert!(parse_must_be_blocked_by_filter("must be blocked by a splorf if able").is_none());
     // Unrecognized quality → Unrecognized(diagnostic), NOT collapsed to None.
     let conjunct = extract_must_be_blocked_by_conjunct("must be blocked by a Splorf if able");
@@ -14244,7 +14245,7 @@ fn graveyard_cast_permission_gisa_geralf() {
             ..
         }
     ));
-    // "zombie creature" → parse_type_phrase recognizes "zombie" as subtype.
+    // "zombie creature" → parse_type_phrase_folding recognizes "zombie" as subtype.
     // card_type may be None (subtype alone) or Creature depending on parser —
     // either is functionally correct since Zombie is exclusively a creature subtype.
     if let Some(TargetFilter::Typed(tf)) = &def.affected {
@@ -15942,7 +15943,7 @@ fn continuous_subject_filter_nontoken_is_negation_not_subtype() {
     // CR 111.1 / CR 205.3: "Nontoken creatures you control" (Ashaya, Soul of
     // the Wild) is a type phrase with a token-identity negation, NOT a
     // subtype. The negation guard in `parse_creature_subject_filter` must
-    // return None so the phrase falls through to `parse_type_phrase`, which
+    // return None so the phrase falls through to `parse_type_phrase_folding`, which
     // produces a `Creature` filter with the `NonToken` property.
     let filter = parse_continuous_subject_filter("Nontoken creatures you control")
         .expect("nontoken creature subject should parse");
@@ -16166,7 +16167,7 @@ fn continuous_subject_filter_capitalized_subtype_still_works() {
 fn continuous_subject_filter_noncreature_word_boundary_anchor() {
     // Word-boundary anchor check: the `non` guard fires for genuine negation
     // descriptors ("Nonland creatures"), and the negated word reaches
-    // `classify_negation` via `parse_type_phrase`. This confirms the guard
+    // `classify_negation` via `parse_type_phrase_folding`. This confirms the guard
     // is not over-broad — it only fires when `non` heads a real descriptor
     // token, which is always true for a `parse_creature_subject_filter`
     // descriptor extracted by stripping " creatures".
@@ -16195,7 +16196,7 @@ fn static_pump_line_nontoken_subject_routes_through_negation_guard() {
     // negation descriptor ("Nontoken creatures you control get/have ...")
     // must NOT fabricate a `Subtype("Nontoken")`. This exercises the
     // `parse_typed_you_control` negation guard (`:2764`/`:2783`): the guard
-    // returns None, dispatch falls through, and `parse_type_phrase`'s
+    // returns None, dispatch falls through, and `parse_type_phrase_folding`'s
     // negation loop yields the correct `Creature` + `NonToken` filter.
     for line in [
         "Nontoken creatures you control get +1/+1.",
@@ -23678,7 +23679,7 @@ fn static_reduce_exhaust_ability_cost_other_permanents() {
     // less to activate." The generalized "<keyword> abilities of [subject]" arm
     // keys the reduction on the "exhaust" ability tag (CR 602.1 / CR 601.2f) and
     // routes the "other permanents you control" self-exclusion through
-    // parse_type_phrase.
+    // parse_type_phrase_folding.
     let def = parse_static_line(
         "Exhaust abilities of other permanents you control cost {2} less to activate.",
     )
@@ -24638,7 +24639,7 @@ fn apply_spell_keyword_subject_constraints_recurses_and() {
 //  (1) `Keyword::from_str("affinity for creatures")` previously returned
 //      `Keyword::Unknown` — so `apply_affinity_reduction` silently skipped
 //      the granted keyword and no cost reduction was applied at cast time.
-//  (2) `parse_type_phrase("Instant and sorcery")` returns `TargetFilter::Or`,
+//  (2) `parse_type_phrase_folding("Instant and sorcery")` returns `TargetFilter::Or`,
 //      which the old `match TargetFilter::Typed(tf) => tf, _ => card()`
 //      arm discarded — leaving the static affecting every spell card the
 //      player casts (CR 113.3a: affected filter must scope recipients).
@@ -25201,7 +25202,7 @@ fn death_baron_compound_get_have_predicate_unaffected_by_typed_you_control_guard
 // CR 205.4a (supertype) + CR 105.2 (color count). Amazing Spider-Man's back
 // face grants web-slinging only to "legendary spells … that's one or more
 // colors"; the affected filter must carry BOTH qualifiers, and the supertype
-// must be emitted exactly once (no parse_type_phrase double-emit).
+// must be emitted exactly once (no parse_type_phrase_folding double-emit).
 
 #[test]
 fn static_legendary_colored_spells_have_web_slinging() {
@@ -25254,7 +25255,7 @@ fn static_legendary_colored_spells_have_web_slinging() {
 #[test]
 fn static_legendary_creature_spells_emit_supertype_once() {
     // Compound subject: supertype must be emitted exactly once (peel here OR
-    // parse_type_phrase, never both) and the Creature type must be present.
+    // parse_type_phrase_folding, never both) and the Creature type must be present.
     let def = parse_static_line("Each legendary creature spell you cast has flash.").unwrap();
     assert_eq!(
         def.mode,
@@ -26245,7 +26246,7 @@ fn cant_be_activated_clarion_multi_type_filter() {
     // CR 602.5 + CR 603.2a: Clarion Conqueror — "Activated abilities of artifacts,
     // creatures, and planeswalkers your opponents control can't be activated."
     // The activator axis is AllPlayers; opponent-ness rides on the filter's
-    // `ControllerRef::Opponent`. `parse_type_phrase` emits an `Or`-disjunction of
+    // `ControllerRef::Opponent`. `parse_type_phrase_folding` emits an `Or`-disjunction of
     // `Typed` filters when a comma-separated type list is present — each variant
     // inherits the shared controller suffix via the post-process pass.
     let def = parse_static_line(
@@ -29179,7 +29180,7 @@ fn tiered_enters_with_additional_counters_static_one_counter_otherwise_singular(
 /// Sliver) must land as a TOP-LEVEL continuous static granting Shroud to a
 /// `Typed(Subtype:"Sliver")` subject — NOT a spell-resolution GenericEffect.
 /// The "all " universal quantifier on the rule-static subject must be stripped
-/// and delegated to `parse_type_phrase`.
+/// and delegated to `parse_type_phrase_folding`.
 #[test]
 fn static_all_slivers_have_shroud_top_level_typed_subtype() {
     let def =
@@ -31074,7 +31075,7 @@ fn static_creatures_enchanted_player_controls_get_minus_1_minus_1() {
 fn static_creatures_target_player_controls_not_via_suffix_parser() {
     // Negative test: "target player controls" must NOT be accepted by
     // parse_static_controller_suffix (the restricted subject-suffix grammar).
-    // The full parse_static_line may still succeed via the parse_type_phrase
+    // The full parse_static_line may still succeed via the parse_type_phrase_folding
     // fallback, but the controller must NOT originate from our suffix helper.
     // We verify by checking parse_creature_subject_filter directly — it should
     // return None for this subject since the suffix parser rejects TargetPlayer.
@@ -31947,7 +31948,7 @@ fn static_self_dynamic_pump_for_each_other_creature_you_control_with_counter() {
 /// granted instance. It must also carry `InZone{Hand}`.
 #[test]
 fn without_foretell_routes_to_keyword_kind_not_concrete() {
-    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase(
+    let (filter, remainder) = crate::parser::oracle_target::parse_type_phrase_folding(
         "nonland card in your hand without foretell",
     );
     assert!(
@@ -33806,7 +33807,7 @@ fn parse_legendary_black_creatures_you_control() {
     )));
 }
 
-// Decline guard: the new fallback delegates to `parse_type_phrase` and
+// Decline guard: the new fallback delegates to `parse_type_phrase_folding` and
 // requires FULL consumption of the subject as a single `Typed` filter. An
 // unrecognized leading word before "legendary" must not be silently accepted
 // as a fabricated filter — it must still fall through to `Unimplemented`
@@ -33820,7 +33821,7 @@ fn parse_unrecognized_word_legendary_creatures_you_control_declines() {
 }
 
 // Review finding: the compound-descriptor fallback must decline for a
-// descriptor `parse_type_phrase` fully consumes but that carries NEITHER a
+// descriptor `parse_type_phrase_folding` fully consumes but that carries NEITHER a
 // color NOR a supertype — a full-consumption check alone is not a narrow
 // enough acceptance gate. Saryth, the Viper's Fang and Augusta, Dean of Order
 // both read "Other tapped creatures you control have/get <predicate>." and
@@ -33828,7 +33829,7 @@ fn parse_unrecognized_word_legendary_creatures_you_control_declines() {
 // "untapped" are combat-status words, not colors or supertypes. Before the
 // property gate, `parse_typed_you_control`'s unconditional final `else`
 // wrongly claimed BOTH of these (each fully consumes through
-// `parse_type_phrase` as a bare `Typed(Creature)` filter with a `Tapped`/
+// `parse_type_phrase_folding` as a bare `Typed(Creature)` filter with a `Tapped`/
 // `Untapped` property, satisfying the old remainder-only check), preventing
 // dispatch from ever reaching whichever OTHER handler correctly resolves
 // these two real, unrelated cards and silently changing their parsed
@@ -35165,5 +35166,333 @@ fn havi_historic_graveyard_gate_parses_with_reminder_text() {
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 4 },
         })
+    );
+}
+
+// ===========================================================================
+// Issue #8395 — the animation clause silently dropped from compound continuous
+// statics. Idol of False Gods is the type specimen. Each test names the
+// verification-matrix row it discharges and carries an explicit reach-guard:
+// positive evidence the changed path ran, never the mere absence of a failure.
+// ===========================================================================
+
+/// V1 + V2 (CR 613.1d + CR 613.4b + CR 613.1f): Idol of False Gods' printed line,
+/// with the card's self-reference normalized to `~` exactly as the production
+/// pipeline does upstream (`oracle.rs:449` runs `normalize_card_name_refs`
+/// before line splitting).
+///
+/// The whole defect in one assertion set. The line reaches the legacy `" has "`
+/// arm only AFTER `try_split_inverted_as_long_as` rewrites the inverted
+/// "As long as <cond>, <effect>" form into canonical
+/// "<effect> as long as <cond>" order — and in THAT order the conjunct's
+/// `" has "` precedes the gate's `" as long as "`. The old arm sliced from that
+/// `" has "`, discarded the entire animation clause, and hardcoded `SelfRef`,
+/// exporting `[AddKeyword{Annihilator(2)}]` and nothing else.
+///
+/// REACH-GUARD: the Annihilator assertion passes both before and after the fix.
+/// That is precisely what makes it evidence the static was CLAIMED rather than
+/// vanishing — it is deliberately not independent coverage.
+#[test]
+fn idol_of_false_gods_animates_and_keeps_annihilator() {
+    let def = parse_static_line(
+        "As long as ~ has eight or more +1/+1 counters on it, it's a 0/0 creature in addition to its other types and it has annihilator 2.",
+    )
+    .expect("Idol's compound animation static must parse");
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Annihilator(2),
+        }),
+        "reach-guard: Annihilator 2 must still be granted, proving the line was claimed; mods = {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }),
+        "CR 613.1d (Layer 4): Idol must become a creature; mods = {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetPower { value: 0 })
+            && mods.contains(&ContinuousModification::SetToughness { value: 0 }),
+        "CR 613.4b (Layer 7b): base P/T 0/0 must be set; mods = {mods:?}"
+    );
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "CR 205.1b: \"in addition to its other types\" RETAINS the prior card types, \
+         so no replacing SetCardTypes may be emitted; mods = {mods:?}"
+    );
+    assert!(
+        def.condition
+            .as_ref()
+            .is_some_and(|c| !c.contains_unrecognized()),
+        "CR 611.3a: the eight-counter gate must type, not fall back to Unrecognized; \
+         condition = {:?}",
+        def.condition
+    );
+}
+
+/// V6 (CR 613.1d Layer 4 + CR 613.4b Layer 7b + CR 613.1f Layer 6): the conjunct
+/// axis across all four grant verbs — the two pronoun forms times the two verb
+/// families, exercised as one `opt` and one `alt` rather than a permutation
+/// chain.
+///
+/// REACH-GUARD: every case asserts the ANIMATION half and the KEYWORD half in
+/// the SAME definition. A test asserting only the keyword would pass against the
+/// legacy arm that dropped the animation entirely; one asserting only the
+/// animation would pass against a peel that swallowed the conjunct.
+#[test]
+fn animation_conjunct_emits_both_halves_for_every_grant_verb() {
+    for (line, keyword) in [
+        (
+            "it's a 0/0 creature in addition to its other types and it has annihilator 2",
+            Keyword::Annihilator(2),
+        ),
+        (
+            "it's a 0/0 creature in addition to its other types and has trample",
+            Keyword::Trample,
+        ),
+        (
+            "it's a 0/0 creature in addition to its other types and it gains flying",
+            Keyword::Flying,
+        ),
+        (
+            "they're a 0/0 creature in addition to their other types and they gain vigilance",
+            Keyword::Vigilance,
+        ),
+    ] {
+        let def = parse_static_line(line)
+            .unwrap_or_else(|| panic!("compound animation static must parse; line = {line:?}"));
+        let mods = &def.modifications;
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }),
+            "animation half (CR 613.1d) must survive the conjunct; line = {line:?}, mods = {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::SetPower { value: 0 })
+                && mods.contains(&ContinuousModification::SetToughness { value: 0 }),
+            "base P/T (CR 613.4b) must survive the conjunct; line = {line:?}, mods = {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddKeyword {
+                keyword: keyword.clone(),
+            }),
+            "conjunct keyword (CR 613.1f) must be carried; line = {line:?}, mods = {mods:?}"
+        );
+    }
+}
+
+/// V6 hostile sibling: a NON-grant conjunct verb must not be peeled. "and loses
+/// defender" is an ability-REMOVING clause (still CR 613.1f, Layer 6) already
+/// owned elsewhere; the new boundary combinator matches only the four grant
+/// verbs, so this line must keep its existing shape.
+#[test]
+fn animation_conjunct_boundary_ignores_non_grant_verbs() {
+    let def =
+        parse_static_line("it's a 0/0 creature in addition to its other types and loses defender")
+            .expect(
+                "a non-grant conjunct must retain its existing parse path; the previous `if let \
+         Some(def)` let an unintended decline satisfy this test without asserting anything",
+            );
+    assert!(
+        !def.modifications.is_empty(),
+        "a non-grant conjunct must not be turned into an empty-modification static; \
+         mods = {:?}",
+        def.modifications
+    );
+}
+
+/// V7: an unrecognized conjunct is honest, not swallowed.
+///
+/// REACH-GUARD: the SAME line minus the conjunct must still parse fully. That
+/// pairing is what proves the decline is a DECISION taken by the conjunct peel
+/// rather than an unrelated upstream miss — without it, a `None` from any
+/// earlier arm would satisfy the test.
+#[test]
+fn unrecognized_animation_conjunct_declines_rather_than_half_parsing() {
+    let with_nonsense = "it's a 0/0 creature in addition to its other types and it has florblewick";
+    let claimed = parse_static_line(with_nonsense);
+    assert!(
+        claimed.is_none(),
+        "an unmappable conjunct must decline the whole line so it surfaces as unimplemented, \
+         rather than emitting the animation and silently dropping the ability; got {claimed:?}"
+    );
+
+    let without = "it's a 0/0 creature in addition to its other types";
+    let def = parse_static_line(without)
+        .expect("reach-guard: the bare animation clause must still parse");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }),
+        "reach-guard: the animation half is supported on its own, so the decline above is \
+         attributable to the conjunct; mods = {:?}",
+        def.modifications
+    );
+}
+
+/// V8 (CR 604.1): a quoted-ability conjunct no longer vanishes. Before this
+/// change the line exported `[]` — a total silent loss of both halves.
+///
+/// REACH-GUARD: the animation half is asserted alongside the grant, so the test
+/// cannot pass on a downstream arm that claims the line while emitting only one
+/// of the two.
+#[test]
+fn quoted_ability_animation_conjunct_is_granted_not_dropped() {
+    let line = "it's a 0/0 creature in addition to its other types and it has \
+                \"When this creature dies, draw a card.\"";
+    let def = parse_static_line(line)
+        .expect("a quoted-ability conjunct must be claimed by the shared quoted-ability authority");
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }),
+        "reach-guard: the animation half must survive; mods = {mods:?}"
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::GrantTrigger { .. }
+                | ContinuousModification::GrantAbility { .. }
+        )),
+        "CR 604.1: the quoted ability must be granted, not dropped; mods = {mods:?}"
+    );
+}
+
+/// V9: the rewritten `dispatch.rs` self-ref keyword arm keeps its legitimate
+/// coverage, in BOTH printed orientations — the postfix form and the inverted
+/// form that `try_split_inverted_as_long_as` rewrites into it.
+///
+/// REACH-GUARD: assert the condition is a TYPED `IsPresent`, not `Unrecognized`.
+/// A bare "still returns AddKeyword" would pass even if some other arm claimed
+/// the line. This is also where a case-preservation regression surfaces: the new
+/// combinator runs on LOWERED text, so a lowercased "you control a forest"
+/// reaching `parse_static_condition` would degrade the gate to `Unrecognized`
+/// and fail here.
+#[test]
+fn self_ref_keyword_as_long_as_keeps_typed_condition_in_both_orders() {
+    for line in [
+        "~ has flying as long as you control a Forest.",
+        "As long as you control a Forest, ~ has trample.",
+    ] {
+        let def = parse_static_line(line)
+            .unwrap_or_else(|| panic!("legitimate self-ref keyword static must parse; {line:?}"));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::SelfRef),
+            "CR 613.1f: a self-referential grant affects its own source; line = {line:?}"
+        );
+        assert!(
+            def.condition
+                .as_ref()
+                .is_some_and(|c| !c.contains_unrecognized()),
+            "the Forest gate must type; a lowercased subject would degrade it to Unrecognized; \
+             line = {line:?}, condition = {:?}",
+            def.condition
+        );
+    }
+}
+
+/// V10: the empty-modification mouth is closed. The legacy arm returned `Some`
+/// with `modifications: []` whenever the keyword text failed to map — a static
+/// that claims support and does nothing, with no honesty marker at all.
+///
+/// REACH-GUARD: the same shape with a MAPPABLE keyword must still return `Some`
+/// carrying its `AddKeyword`. Without that pair a blanket decline would also
+/// satisfy the first assertion.
+#[test]
+fn self_ref_keyword_as_long_as_never_returns_empty_modifications() {
+    let unmappable = parse_static_line("~ has florblewick as long as you control a Forest.");
+    assert!(
+        unmappable.is_none(),
+        "an unmappable keyword must DECLINE. The weaker `!is_some_and(|d| \
+         d.modifications.is_empty())` this replaces was also satisfied by a `Some` carrying \
+         NON-empty modifications — a static that claims the line while granting something \
+         other than the keyword it failed to map; got {unmappable:?}"
+    );
+
+    let mappable = parse_static_line("~ has flying as long as you control a Forest.")
+        .expect("reach-guard: the mappable sibling must still parse");
+    assert!(
+        mappable
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }),
+        "reach-guard: the arm still runs and only the empty case declines; mods = {:?}",
+        mappable.modifications
+    );
+}
+
+/// V5 (CR 613.1d + CR 613.4b + CR 613.1f): the shared additive-type leaf must
+/// return the COMPLETE modification set for a clause that also states P/T and
+/// keywords.
+///
+/// The input is Case of the Gorgon's Kiss's PRODUCTION string — the
+/// subject-stripped, un-`~`-normalized description the effect pipeline actually
+/// hands the leaf (measured at `/abilities[0]/effect/static_abilities[0]`), not
+/// the printed line. Testing the printed line would exercise a route this card
+/// never takes and could go green while the card stayed broken.
+///
+/// REACH-GUARD: the pre-existing `AddSubtype{Gorgon}` and `AddType{Creature}`
+/// must still be present ALONGSIDE the new `SetPower{4}`. That proves the
+/// pre-marker span is now animation-parsed rather than the leaf merely
+/// declining and something else filling in.
+#[test]
+fn additive_type_leaf_keeps_base_pt_and_pre_marker_keywords() {
+    let mods = parse_additive_type_clause_modifications(
+        "is a 4/4 Gorgon creature with deathtouch and lifelink in addition to its other types",
+    )
+    .expect("the additive-type leaf must claim this clause");
+    for expected in [
+        ContinuousModification::SetPower { value: 4 },
+        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Deathtouch,
+        },
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Lifelink,
+        },
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        },
+        ContinuousModification::AddSubtype {
+            subtype: "Gorgon".to_string(),
+        },
+    ] {
+        assert!(
+            mods.contains(&expected),
+            "missing {expected:?}; mods = {mods:?}"
+        );
+    }
+}
+
+/// V5 hostile sibling — the DOUBLE-EMIT GUARD. A clause with no leading `N/M`
+/// must keep the word-classification path: the new animation route is keyed on
+/// a LEADING fixed P/T precisely so it stays disjoint from the trailing
+/// "base power and toughness N/M" form that callers already emit themselves.
+/// If that keying ever loosened, this is what fails.
+#[test]
+fn additive_type_leaf_without_leading_pt_emits_no_base_pt() {
+    let mods =
+        parse_additive_type_clause_modifications("is a Gorgon in addition to its other types")
+            .expect("the type-only clause must still parse");
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Gorgon".to_string(),
+        }),
+        "reach-guard: the type-only clause still yields its subtype; mods = {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetPower { .. } | ContinuousModification::SetToughness { .. }
+        )),
+        "a clause with no leading N/M must not acquire a base P/T; mods = {mods:?}"
     );
 }

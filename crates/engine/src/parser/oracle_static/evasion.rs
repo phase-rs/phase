@@ -102,7 +102,7 @@ pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
 
     // CR 603.2d: The source may be a flat type union sharing one trailing
     // controller scope — "a Shaman or another Wizard you control" (Harmonic
-    // Prodigy). `parse_type_phrase`'s own disjunction recursion only fires when
+    // Prodigy). `parse_type_phrase_folding`'s own disjunction recursion only fires when
     // the trailing disjunct opens with a bare type word, not an article or an
     // "another"/"other" designation ("another Wizard"), so it stops after the
     // first disjunct and leaves the connector in the remainder. Dispatch on that
@@ -174,13 +174,13 @@ fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
 }
 
 /// CR 603.2d + CR 301.5a: Parse one disjunct of a trigger-doubler's source
-/// phrase, handling the two source-relative referents `parse_type_phrase` cannot
+/// phrase, handling the two source-relative referents `parse_type_phrase_folding` cannot
 /// express before falling back to it for ordinary typed clauses:
 /// - `~` — the normalized source name → [`TargetFilter::SelfRef`] (Cloud doubling
 ///   "a triggered ability of ~").
 /// - "an Equipment attached to it" — here "it" is anaphoric on the doubler's own
 ///   source, so it is the source-relative [`FilterProp::AttachedToSource`] set.
-///   `parse_type_phrase` maps "attached to it" to `AttachedToRecipient` (an
+///   `parse_type_phrase_folding` maps "attached to it" to `AttachedToRecipient` (an
 ///   enchanted-creature host), which is the wrong referent in a doubler, so this
 ///   clause is hand-built.
 fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
@@ -202,7 +202,7 @@ fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
     {
         return (filter, rest);
     }
-    parse_type_phrase(phrase)
+    parse_type_phrase_folding(phrase)
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
@@ -223,6 +223,19 @@ pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMod
                 defender: Some(AttackDefenderScope::Controller),
             },
             tag::<_, _, OracleError<'_>>(" can attack you each combat"),
+        ),
+        // CR 508.5: "...can attack ~ each combat" is a defending-PERMANENT-
+        // scoped cap (The Eternal Wanderer) — only attacks declared against
+        // this static's own source (a planeswalker or battle), not against its
+        // controller's other permanents. Self-ref normalization rewrites the
+        // card's own name to `~` before this parser runs. Must precede the
+        // bare " can attack each combat" arm (longest match first).
+        value(
+            StaticMode::MaxAttackersEachCombat {
+                max,
+                defender: Some(AttackDefenderScope::ThisPermanent),
+            },
+            tag(" can attack ~ each combat"),
         ),
         value(
             StaticMode::MaxAttackersEachCombat {
@@ -383,12 +396,12 @@ pub(crate) fn parse_leading_except_for_rule_static(
 /// [`parse_leading_except_for_rule_static`]: a bare type-phrase exemption
 /// ("artifact creatures") or a named exemption within a type class ("creatures
 /// named Akron Legionnaire"). The " named " split happens BEFORE
-/// `parse_type_phrase` runs (mirroring `parse_control_named_type_filter` in
-/// `oracle_nom/condition.rs`) — `parse_type_phrase` has no grammar for a
+/// `parse_type_phrase_folding` runs (mirroring `parse_control_named_type_filter` in
+/// `oracle_nom/condition.rs`) — `parse_type_phrase_folding` has no grammar for a
 /// trailing "named `<Name>`" clause and would otherwise leave it unconsumed.
 fn parse_exempt_conjunct(conjunct: &str) -> Option<TargetFilter> {
     if let Ok((_, (type_text, name_text))) = nom_primitives::split_once_on(conjunct, " named ") {
-        let (filter, remainder) = parse_type_phrase(type_text);
+        let (filter, remainder) = parse_type_phrase_folding(type_text);
         // `merge_filter_prop` silently no-ops on a non-`Typed` filter (Or/And/
         // SelfRef/…), which would drop the Named constraint and over-claim
         // every object of the bare type instead of just the named one — fail
@@ -407,7 +420,7 @@ fn parse_exempt_conjunct(conjunct: &str) -> Option<TargetFilter> {
             },
         ));
     }
-    let (filter, remainder) = parse_type_phrase(conjunct);
+    let (filter, remainder) = parse_type_phrase_folding(conjunct);
     if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
         return Some(filter);
     }
@@ -462,7 +475,7 @@ pub(crate) fn parse_compound_subject_keyword_static(
     // leading comma leaves the 2-item path's existing fallthrough to
     // `parse_rule_static_subject_filter` (which itself resolves an object
     // subject with an internal bare "and", e.g. "artifacts and creatures you
-    // control", via `parse_type_phrase`'s own trailing-suffix distribution)
+    // control", via `parse_type_phrase_folding`'s own trailing-suffix distribution)
     // completely unchanged.
     let (after_you, multi_object) = match nom_tag_tp(&body, "you, ") {
         Some(rest) => (rest, true),
@@ -541,7 +554,7 @@ pub(crate) fn parse_compound_subject_keyword_static(
 /// other creatures you control".
 ///
 /// Each conjunct is a COMPLETE, independently-resolvable subject phrase — unlike
-/// the Silkguard-class object list in `parse_type_phrase` (`oracle_target.rs`),
+/// the Silkguard-class object list in `parse_type_phrase_folding` (`oracle_target.rs`),
 /// where a single trailing suffix distributes backward across bare type nouns
 /// with no clause of their own ("Auras, Equipment, and modified creatures you
 /// control"). So every conjunct here is resolved one at a time through the same
@@ -549,7 +562,7 @@ pub(crate) fn parse_compound_subject_keyword_static(
 /// bespoke list grammar. Splitting is nom-based (`split_once_on`), peeling
 /// `", "`-separated conjuncts and stripping the final conjunct's `"and "`
 /// connector — never a bare `" and "` split, so the 2-item form's own
-/// internal-"and" handling (via `parse_type_phrase`'s trailing-suffix
+/// internal-"and" handling (via `parse_type_phrase_folding`'s trailing-suffix
 /// distribution) is never shadowed.
 ///
 /// Declines (returns `None`, the strict-fail signal) if any conjunct fails to
@@ -779,7 +792,7 @@ pub(crate) fn is_extra_blockers_static_candidate(lower: &str) -> bool {
 ///   old single `tag`, so unfiltered lines are unchanged.
 /// - Slot B — "<type-phrase> able to block " (Talruum Piper "creatures with
 ///   flying", Marble Priest "Walls") → `Some(filter)`. The type slot is parsed by
-///   the shared `parse_type_phrase` building block; the phrase must fully consume
+///   the shared `parse_type_phrase_folding` building block; the phrase must fully consume
 ///   up to the literal " able to block " (else the Some form is rejected as
 ///   mis-scoped and this returns `None`, letting the line fall through).
 ///
@@ -796,12 +809,12 @@ pub(crate) fn parse_forced_block_blocker_slot(input: &str) -> Option<(&str, Opti
         return Some((rest, None));
     }
     // Slot B: "<type-phrase> able to block " → Some(filter). Scope the type phrase
-    // to the text before the literal " able to block " so `parse_type_phrase`
+    // to the text before the literal " able to block " so `parse_type_phrase_folding`
     // cannot over-consume into the subject.
     let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" able to block ")
         .parse(input)
         .ok()?;
-    let (filter, filter_remainder) = parse_type_phrase(type_text);
+    let (filter, filter_remainder) = parse_type_phrase_folding(type_text);
     if !filter_remainder.trim().is_empty() {
         return None; // mis-scoped Some — reject rather than accept a partial filter.
     }
@@ -1710,7 +1723,7 @@ pub(crate) fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<S
         let (filter, remainder) = if let Some(filter) = parse_chosen_qualifier_subject(&filter_tp) {
             (filter, "")
         } else {
-            parse_type_phrase(filter_text)
+            parse_type_phrase_folding(filter_text)
         };
         if !matches!(filter, TargetFilter::Any) {
             let condition = parse_compound_cant_be_blocked_condition(remainder);

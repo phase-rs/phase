@@ -81,7 +81,7 @@ pub fn signature_spell_selection_policy(
     }
 
     let commander_identity = request.commander.first().and_then(|name| {
-        db.get_face_by_name(resolve_card_name(db, name))
+        db.get_face_by_name(name)
             .filter(|face| face.is_oathbreaker)
             .map(card_color_identity)
     });
@@ -90,7 +90,7 @@ pub fn signature_spell_selection_policy(
             .main_deck
             .iter()
             .filter_map(|name| {
-                let face = db.get_face_by_name(resolve_card_name(db, name))?;
+                let face = db.get_face_by_name(name)?;
                 (is_instant_or_sorcery(face)
                     && card_color_identity(face)
                         .iter()
@@ -131,7 +131,7 @@ pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityReques
         .iter()
         .enumerate()
         .filter_map(|(index, name)| {
-            let face = db.get_face_by_name(resolve_card_name(db, name))?;
+            let face = db.get_face_by_name(name)?;
             let mut remaining_main = request.main_deck.clone();
             remaining_main.remove(index);
             let companion = DeckEntry::from_resolved_face(db, face, 1);
@@ -214,6 +214,12 @@ fn default_one() -> usize {
 }
 
 /// Engine coverage summary for a deck: how many unique cards are fully supported.
+///
+/// The three fields satisfy `supported_unique + unsupported_cards.len() ==
+/// total_unique` by construction: `total_unique` counts only cards that
+/// resolved to a database face, since a card with no face lands in neither
+/// coverage bucket. Names that do not resolve at all are reported separately as
+/// unknown cards, not folded into this ratio.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeckCoverage {
     pub total_unique: usize,
@@ -596,7 +602,7 @@ fn evaluate_constructed(
     // CR 100.2a + CR 100.4a: The copy limit applies to main + sideboard
     // combined, at the ceiling the resolved format config carries.
     let limit = format_rules.default_deck_copy_limit;
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::CountVerbatim);
     let over_limit = copy_limit_violations(db, &counts, limit);
     if !over_limit.is_empty() {
         reasons.push(summarize_cards(&copy_limit_label(limit), &over_limit, 6));
@@ -608,8 +614,7 @@ fn evaluate_constructed(
         if unknown_cards.contains(name) {
             continue;
         }
-        let resolved = resolve_card_name(db, name);
-        match db.legality_status(resolved, legality_format) {
+        match db.legality_status(name, legality_format) {
             Some(LegalityStatus::Legal) => {}
             // CR 100.2b: A card on a format's restricted list is legal but
             // a deck may contain at most one copy of it. Vintage is the
@@ -622,10 +627,17 @@ fn evaluate_constructed(
                 restricted_canonical.insert(canonical_deck_count_key(db, name));
             }
             Some(status) => {
-                illegal_cards.insert(format!("{name} ({})", status_label(status)));
+                illegal_cards.insert(format!(
+                    "{} ({})",
+                    display_name(db, name),
+                    status_label(status)
+                ));
             }
             None => {
-                illegal_cards.insert(format!("{name} (not legal in {format_label})"));
+                illegal_cards.insert(format!(
+                    "{} (not legal in {format_label})",
+                    display_name(db, name)
+                ));
             }
         }
     }
@@ -685,7 +697,7 @@ fn evaluate_planechase(
     }
 
     let limit = format_rules.default_deck_copy_limit;
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::CountVerbatim);
     let over_limit = copy_limit_violations(db, &counts, limit);
     if !over_limit.is_empty() {
         reasons.push(summarize_cards(&copy_limit_label(limit), &over_limit, 6));
@@ -714,7 +726,7 @@ fn evaluate_planechase(
     let mut planes = 0usize;
     let mut phenomena = 0usize;
     for name in &request.planar_deck {
-        let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) else {
+        let Some(face) = db.get_face_by_name(name) else {
             continue;
         };
         let canonical = face.name.to_lowercase();
@@ -794,7 +806,7 @@ fn evaluate_archenemy(
     }
 
     let limit = format_rules.default_deck_copy_limit;
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::CountVerbatim);
     let over_limit = copy_limit_violations(db, &counts, limit);
     if !over_limit.is_empty() {
         reasons.push(summarize_cards(&copy_limit_label(limit), &over_limit, 6));
@@ -824,7 +836,7 @@ fn validate_scheme_deck(db: &CardDatabase, scheme_deck: &[String], reasons: &mut
     let mut non_scheme = BTreeSet::new();
     let mut unsupported = BTreeSet::new();
     for name in scheme_deck {
-        let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) else {
+        let Some(face) = db.get_face_by_name(name) else {
             continue;
         };
         *counts.entry(face.name.to_lowercase()).or_insert(0) += 1;
@@ -992,8 +1004,7 @@ fn request_without_sideboard(request: &DeckCompatibilityRequest) -> DeckCompatib
 fn deck_entries_for_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
     let mut entries: Vec<DeckEntry> = Vec::new();
     for name in names {
-        let resolved = resolve_card_name(db, name);
-        let Some(face) = db.get_face_by_name(resolved) else {
+        let Some(face) = db.get_face_by_name(name) else {
             continue;
         };
         if let Some(entry) = entries
@@ -1030,7 +1041,7 @@ fn validate_commander_companion(
     }
 
     let companion_name = &request.companion[0];
-    let Some(face) = db.get_face_by_name(resolve_card_name(db, companion_name)) else {
+    let Some(face) = db.get_face_by_name(companion_name) else {
         return;
     };
     let companion = DeckEntry::from_resolved_face(db, face, 1);
@@ -1140,16 +1151,7 @@ fn evaluate_commander_with_format(
     // staging area) and enforce CR 903.5e at game load by dropping them —
     // see `load_deck_into_state` in `deck_loading.rs`.
 
-    let represented_in_main = request
-        .commander
-        .iter()
-        .filter(|name| {
-            request
-                .main_deck
-                .iter()
-                .any(|card| card.eq_ignore_ascii_case(name))
-        })
-        .count();
+    let represented_in_main = commanders_represented_in_main(db, request);
     let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
     if !deck_size.accepts(total_cards) {
         reasons.push(format!(
@@ -1159,15 +1161,16 @@ fn evaluate_commander_with_format(
     }
 
     // CR 903.5b: Other than basic lands, each card in a Commander deck must have
-    // a different English name. Canonicalization (CR 201.3) is handled inside
-    // the shared helper.
+    // a different English name. Canonicalization to one bucket per PHYSICAL
+    // card (CR 709.2 / CR 712.1 for multi-face cards) is handled inside the
+    // shared helper.
     //
     // CR 903.13f(2) displaces that rule for Commander Draft — "A player's deck
     // may include any number of cards from that player's card pool with the
     // same name" — which is exactly what `default_deck_copy_limit()` already
     // reports as `Unlimited`, so the format answers this rather than the
     // caller.
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     let singleton_violations =
         copy_limit_violations(db, &counts, format_rules.default_deck_copy_limit);
     if !singleton_violations.is_empty() {
@@ -1186,21 +1189,23 @@ fn evaluate_commander_with_format(
             if unknown_cards.contains(name) {
                 continue;
             }
-            if rules.skip_commander_legality
-                && request
-                    .commander
-                    .iter()
-                    .any(|commander| commander.eq_ignore_ascii_case(name))
-            {
+            if rules.skip_commander_legality && is_commander_entry(db, request, name) {
                 continue;
             }
-            match db.legality_status(resolve_card_name(db, name), legality_format) {
+            match db.legality_status(name, legality_format) {
                 Some(status) if status.is_legal() => {}
                 Some(status) => {
-                    illegal_cards.insert(format!("{name} ({})", status_label(status)));
+                    illegal_cards.insert(format!(
+                        "{} ({})",
+                        display_name(db, name),
+                        status_label(status)
+                    ));
                 }
                 None => {
-                    illegal_cards.insert(format!("{name} (not legal in {format_label})"));
+                    illegal_cards.insert(format!(
+                        "{} (not legal in {format_label})",
+                        display_name(db, name)
+                    ));
                 }
             }
         }
@@ -1217,7 +1222,7 @@ fn evaluate_commander_with_format(
     // the commander(s)' combined color identity.
     let mut commander_identity = HashSet::new();
     for name in &request.commander {
-        if let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) {
+        if let Some(face) = db.get_face_by_name(name) {
             commander_identity.extend(card_color_identity(face));
         }
     }
@@ -1226,12 +1231,13 @@ fn evaluate_commander_with_format(
         &request.main_deck,
         &commander_identity,
         unknown_cards,
-        |name| {
-            request
-                .commander
-                .iter()
-                .any(|c| c.eq_ignore_ascii_case(name))
-        },
+        // `same_card` compares resolved keys, not raw spellings: a DFC
+        // commander listed in the command zone by its composite name
+        // ("Tovolar, Dire Overlord // Tovolar, the Midnight Scourge") and in
+        // the 99 by its front name is the same card. Without this the
+        // commander escapes the command-zone skip and is reported as a
+        // CR 903.5c violation against its own color identity.
+        |name| is_commander_entry(db, request, name),
     );
     if !identity_violations.is_empty() {
         reasons.push(summarize_cards(
@@ -1302,7 +1308,7 @@ fn evaluate_brawl(
     // Validate commander eligibility: legendary creature OR legendary planeswalker
     if request.commander.len() == 1 {
         let name = &request.commander[0];
-        if let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) {
+        if let Some(face) = db.get_face_by_name(name) {
             if !is_brawl_commander_eligible(face) {
                 reasons.push(format!(
                     "{format_label} commander must be a legendary creature or legendary planeswalker: {name}"
@@ -1321,16 +1327,7 @@ fn evaluate_brawl(
     // total card count (main + commander, accounting for commander listed in
     // main) — never re-derive min-vs-exact here.
     let deck_size = format_rules.deck_size;
-    let represented_in_main = request
-        .commander
-        .iter()
-        .filter(|name| {
-            request
-                .main_deck
-                .iter()
-                .any(|card| card.eq_ignore_ascii_case(name))
-        })
-        .count();
+    let represented_in_main = commanders_represented_in_main(db, request);
     let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
     if !deck_size.accepts(total_cards) {
         reasons.push(format!(
@@ -1339,9 +1336,10 @@ fn evaluate_brawl(
         ));
     }
 
-    // CR 903.5b (Brawl variant): singleton rule, basic lands exempt, canonicalized
-    // via CR 201.3 in the shared helper.
-    let counts = combined_copy_counts(db, request);
+    // CR 903.5b (Brawl variant): singleton rule, basic lands exempt,
+    // canonicalized to one bucket per physical card (CR 709.2 / CR 712.1) in
+    // the shared helper.
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     let singleton_violations =
         copy_limit_violations(db, &counts, format_rules.default_deck_copy_limit);
     if !singleton_violations.is_empty() {
@@ -1358,13 +1356,20 @@ fn evaluate_brawl(
         if unknown_cards.contains(name) {
             continue;
         }
-        match db.legality_status(resolve_card_name(db, name), legality_format) {
+        match db.legality_status(name, legality_format) {
             Some(status) if status.is_legal() => {}
             Some(status) => {
-                illegal_cards.insert(format!("{name} ({})", status_label(status)));
+                illegal_cards.insert(format!(
+                    "{} ({})",
+                    display_name(db, name),
+                    status_label(status)
+                ));
             }
             None => {
-                illegal_cards.insert(format!("{name} (not legal in {format_label})"));
+                illegal_cards.insert(format!(
+                    "{} (not legal in {format_label})",
+                    display_name(db, name)
+                ));
             }
         }
     }
@@ -1380,26 +1385,19 @@ fn evaluate_brawl(
     // the commander's color identity.
     if request.commander.len() == 1 {
         let cmd_name = &request.commander[0];
-        if let Some(face) = db.get_face_by_name(resolve_card_name(db, cmd_name)) {
+        if let Some(face) = db.get_face_by_name(cmd_name) {
             let commander_identity = card_color_identity(face);
-            let mut identity_violations = BTreeSet::new();
-            for name in &request.main_deck {
-                if name.eq_ignore_ascii_case(cmd_name) {
-                    continue;
-                }
-                if unknown_cards.contains(name.as_str()) {
-                    continue;
-                }
-                if let Some(card_face) = db.get_face_by_name(resolve_card_name(db, name)) {
-                    let card_colors = card_color_identity(card_face);
-                    for color in &card_colors {
-                        if !commander_identity.contains(color) {
-                            identity_violations.insert(name.clone());
-                            break;
-                        }
-                    }
-                }
-            }
+            // Same CR 903.5c subset check as the other command-zone formats —
+            // share the one authority instead of re-deriving it, so the
+            // command-zone skip and the violation keys stay resolved on both
+            // sides here too.
+            let identity_violations = color_identity_violations(
+                db,
+                &request.main_deck,
+                &commander_identity,
+                unknown_cards,
+                |name| same_card(db, name, cmd_name),
+            );
             if !identity_violations.is_empty() {
                 reasons.push(summarize_cards(
                     &format!("Cards outside {format_label} commander's color identity"),
@@ -1526,7 +1524,7 @@ fn evaluate_tiny_leaders(
         let mut ineligible_commanders = BTreeSet::new();
         let mut commander_bans = BTreeSet::new();
         for name in &request.commander {
-            let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) else {
+            let Some(face) = db.get_face_by_name(name) else {
                 continue;
             };
             if !is_tiny_leader_eligible(face) {
@@ -1548,8 +1546,8 @@ fn evaluate_tiny_leaders(
         }
 
         if request.commander.len() == 2 {
-            let face_a = db.get_face_by_name(resolve_card_name(db, &request.commander[0]));
-            let face_b = db.get_face_by_name(resolve_card_name(db, &request.commander[1]));
+            let face_a = db.get_face_by_name(&request.commander[0]);
+            let face_b = db.get_face_by_name(&request.commander[1]);
             if let (Some(a), Some(b)) = (face_a, face_b) {
                 // CR 903.13f(3) is scoped to Commander Draft. Tiny Leaders has
                 // no `CommanderVariantRules` and no draft set code, so it
@@ -1573,16 +1571,7 @@ fn evaluate_tiny_leaders(
         ));
     }
 
-    let represented_in_main = request
-        .commander
-        .iter()
-        .filter(|name| {
-            request
-                .main_deck
-                .iter()
-                .any(|card| card.eq_ignore_ascii_case(name))
-        })
-        .count();
+    let represented_in_main = commanders_represented_in_main(db, request);
     let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
     if total_cards != 50 {
         reasons.push(format!(
@@ -1591,7 +1580,7 @@ fn evaluate_tiny_leaders(
     }
 
     let limit = format_rules.default_deck_copy_limit;
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     let singleton_violations = copy_limit_violations(db, &counts, limit);
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
@@ -1603,7 +1592,7 @@ fn evaluate_tiny_leaders(
 
     let mut commander_identity = HashSet::new();
     for name in &request.commander {
-        if let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) {
+        if let Some(face) = db.get_face_by_name(name) {
             commander_identity.extend(card_color_identity(face));
         }
     }
@@ -1618,8 +1607,7 @@ fn evaluate_tiny_leaders(
         if unknown_cards.contains(name) {
             continue;
         }
-        let resolved = resolve_card_name(db, name);
-        let Some(face) = db.get_face_by_name(resolved) else {
+        let Some(face) = db.get_face_by_name(name) else {
             continue;
         };
 
@@ -1630,14 +1618,15 @@ fn evaluate_tiny_leaders(
             category_bans.insert(face.name.clone());
         }
 
-        if !request
-            .commander
-            .iter()
-            .any(|commander| commander.eq_ignore_ascii_case(name))
-        {
+        if !is_commander_entry(db, request, name) {
             for color in card_color_identity(face) {
                 if !commander_identity.contains(&color) {
-                    identity_violations.insert(name.to_string());
+                    // Resolved face name, not the caller's raw spelling — the
+                    // same convention `color_identity_violations` documents and
+                    // the sibling `basic_land_type_violations` /
+                    // `tiny_identity_violations` inserts below already follow,
+                    // so the `BTreeSet` dedups a card listed under two spellings.
+                    identity_violations.insert(face.name.clone());
                     break;
                 }
             }
@@ -1650,7 +1639,7 @@ fn evaluate_tiny_leaders(
             }
         }
 
-        if !tiny_leaders_cost_identity_ok(db, resolved) {
+        if !tiny_leaders_cost_identity_ok(db, name) {
             tiny_identity_violations.insert(face.name.clone());
         }
     }
@@ -1852,7 +1841,7 @@ fn evaluate_oathbreaker(
         ));
     } else {
         let name = &request.commander[0];
-        if let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) {
+        if let Some(face) = db.get_face_by_name(name) {
             if !face.is_oathbreaker {
                 reasons.push(format!(
                     "{name}: Oathbreaker must be a legendary Planeswalker"
@@ -1862,7 +1851,7 @@ fn evaluate_oathbreaker(
     }
 
     let oathbreaker_identity = request.commander.first().and_then(|ob_name| {
-        db.get_face_by_name(resolve_card_name(db, ob_name))
+        db.get_face_by_name(ob_name)
             .filter(|face| face.is_oathbreaker)
             .map(|face| {
                 card_color_identity(face)
@@ -1879,7 +1868,7 @@ fn evaluate_oathbreaker(
         ));
     } else {
         let sig_name = &request.signature_spell[0];
-        if let Some(face) = db.get_face_by_name(resolve_card_name(db, sig_name)) {
+        if let Some(face) = db.get_face_by_name(sig_name) {
             if !is_instant_or_sorcery(face) {
                 reasons.push(format!(
                     "{sig_name}: signature spell must be an instant or sorcery"
@@ -1901,15 +1890,16 @@ fn evaluate_oathbreaker(
 
     // Oathbreaker RC: exactly 60 cards total (main + commander + signature spell,
     // de-duplicating any that appear in both main and a command-zone slot).
-    let commander_represented = request
-        .commander
-        .iter()
-        .filter(|n| request.main_deck.iter().any(|c| names_match(c, n)))
-        .count();
+    // CR 709.2 / CR 712.1: both slots compare resolved card identities, not raw
+    // spellings, because a split or double-faced card is one physical card,
+    // so a composite-named ("Front // Back") Oathbreaker or signature spell
+    // listed in the main deck by its front face is recognized as the same
+    // physical card instead of being counted twice.
+    let commander_represented = commanders_represented_in_main(db, request);
     let sig_represented = request
         .signature_spell
         .iter()
-        .filter(|n| request.main_deck.iter().any(|c| names_match(c, n)))
+        .filter(|n| request.main_deck.iter().any(|c| same_card(db, c, n)))
         .count();
     let total_cards = request.main_deck.len()
         + (request
@@ -1927,10 +1917,15 @@ fn evaluate_oathbreaker(
     }
 
     // Oathbreaker RC: singleton (basic lands exempt, consistent with other
-    // singleton command-zone formats). `all_deck_cards` now includes `signature_spell`
-    // so a card in both the main deck and signature-spell slot is caught here.
+    // singleton command-zone formats). `construction_deck_cards` includes
+    // `signature_spell`, so a genuine second copy of a card in both the main
+    // deck and the signature-spell slot is caught here; a single physical card
+    // named in both slots under different spellings is netted out first by
+    // `CommandZoneNetting::NetAgainstMainDeck`, which resolves both command-zone
+    // slots by card identity (CR 709.2 / CR 712.1: one physical card) rather
+    // than by raw spelling.
     let limit = format_rules.default_deck_copy_limit;
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     let singleton_violations = copy_limit_violations(db, &counts, limit);
     if !singleton_violations.is_empty() {
         reasons.push(summarize_cards(
@@ -1953,8 +1948,7 @@ fn evaluate_oathbreaker(
             if unknown_cards.contains(name) {
                 continue;
             }
-            let resolved = resolve_card_name(db, name);
-            let Some(face) = db.get_face_by_name(resolved) else {
+            let Some(face) = db.get_face_by_name(name) else {
                 continue;
             };
             for color in basic_land_type_colors(face) {
@@ -2031,8 +2025,7 @@ fn evaluate_momir(
         if unknown_cards.contains(name) {
             continue;
         }
-        let resolved = resolve_card_name(db, name);
-        let Some(face) = db.get_face_by_name(resolved) else {
+        let Some(face) = db.get_face_by_name(name) else {
             continue;
         };
         // CR 205.4a + CR 305: Snow + Basic supertypes on a Land.
@@ -2336,13 +2329,13 @@ fn quick_constructed_check(
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut restricted = HashSet::new();
     for name in construction_deck_cards(request) {
-        let resolved = resolve_card_name(db, name);
-        if db.get_face_by_name(resolved).is_none() {
+        let resolved = db.lookup_key(name);
+        if db.get_face_by_name(&resolved).is_none() {
             return QuickCheckResult::unknown(name);
         }
         let canonical = canonical_deck_count_key(db, name);
         *counts.entry(canonical.clone()).or_insert(0) += 1;
-        match db.legality_status(resolved, legality_format) {
+        match db.legality_status(&resolved, legality_format) {
             Some(LegalityStatus::Legal) => {}
             Some(LegalityStatus::Restricted) => {
                 restricted.insert(canonical);
@@ -2410,7 +2403,7 @@ fn quick_commander_check(
     if let Some(unknown_companion) = request
         .companion
         .iter()
-        .find(|name| db.get_face_by_name(resolve_card_name(db, name)).is_none())
+        .find(|name| db.get_face_by_name(name).is_none())
     {
         return QuickCheckResult::unknown(unknown_companion);
     }
@@ -2421,16 +2414,7 @@ fn quick_commander_check(
         return QuickCheckResult::incompatible(reason);
     }
 
-    let represented_in_main = request
-        .commander
-        .iter()
-        .filter(|name| {
-            request
-                .main_deck
-                .iter()
-                .any(|card| card.eq_ignore_ascii_case(name))
-        })
-        .count();
+    let represented_in_main = commanders_represented_in_main(db, request);
     let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
     // CR 903.5a: the format's `DeckSizeRule` is the single authority for
     // min-vs-exact; this seam must not re-derive it with `!=`.
@@ -2443,7 +2427,7 @@ fn quick_commander_check(
 
     let mut commander_identity = HashSet::new();
     for name in &request.commander {
-        let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) else {
+        let Some(face) = db.get_face_by_name(name) else {
             return QuickCheckResult::unknown(name);
         };
         if !(rules.eligible)(face) {
@@ -2452,8 +2436,8 @@ fn quick_commander_check(
         commander_identity.extend(card_color_identity(face));
     }
     if request.commander.len() == 2 {
-        let face_a = db.get_face_by_name(resolve_card_name(db, &request.commander[0]));
-        let face_b = db.get_face_by_name(resolve_card_name(db, &request.commander[1]));
+        let face_a = db.get_face_by_name(&request.commander[0]);
+        let face_b = db.get_face_by_name(&request.commander[1]);
         if let (Some(a), Some(b)) = (face_a, face_b) {
             // CR 903.13f(3): the summary-path twin of the full validator's
             // pairing check; same per-variant axis, same source.
@@ -2466,25 +2450,22 @@ fn quick_commander_check(
         }
     }
 
-    let mut counts: HashMap<String, u32> = HashMap::new();
+    // CR 903.5b copy counting is the full validator's `combined_copy_counts`,
+    // not a second inline tally: that helper keys every listing by RESOLVED
+    // card identity (CR 709.2 / CR 712.1 — one physical card per multi-face
+    // card), so re-deriving counts here would make the summary path reach a
+    // different singleton verdict than the full path for the same decklist.
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     for name in construction_deck_cards(request) {
-        let resolved = resolve_card_name(db, name);
-        let Some(face) = db.get_face_by_name(resolved) else {
+        let resolved = db.lookup_key(name);
+        let Some(face) = db.get_face_by_name(&resolved) else {
             return QuickCheckResult::unknown(name);
         };
-        *counts
-            .entry(canonical_deck_count_key(db, name))
-            .or_insert(0) += 1;
         // CR 903.13e: `None` means the format has no constructed legality
         // table, so there is nothing to check.
         if let Some(legality_format) = legality_format {
-            if !rules.skip_commander_legality
-                || !request
-                    .commander
-                    .iter()
-                    .any(|commander| commander.eq_ignore_ascii_case(name))
-            {
-                match db.legality_status(resolved, legality_format) {
+            if !rules.skip_commander_legality || !is_commander_entry(db, request, name) {
+                match db.legality_status(&resolved, legality_format) {
                     Some(status) if status.is_legal() => {}
                     Some(status) => {
                         return QuickCheckResult::incompatible(format!(
@@ -2500,11 +2481,7 @@ fn quick_commander_check(
                 }
             }
         }
-        if request
-            .commander
-            .iter()
-            .any(|commander| commander.eq_ignore_ascii_case(name))
-        {
+        if is_commander_entry(db, request, name) {
             continue;
         }
         for color in card_color_identity(face) {
@@ -2520,12 +2497,11 @@ fn quick_commander_check(
     // its format legality separately without contributing to the starting
     // deck's size or singleton count.
     for name in &request.companion {
-        let resolved = resolve_card_name(db, name);
         // CR 903.13e: as above — no legality table, nothing to check.
         let Some(legality_format) = legality_format else {
             break;
         };
-        match db.legality_status(resolved, legality_format) {
+        match db.legality_status(name, legality_format) {
             Some(status) if status.is_legal() => {}
             Some(status) => {
                 return QuickCheckResult::incompatible(format!(
@@ -2571,7 +2547,7 @@ fn quick_brawl_check(
         ));
     }
     let name = &request.commander[0];
-    let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) else {
+    let Some(face) = db.get_face_by_name(name) else {
         return QuickCheckResult::unknown(name);
     };
     if !is_brawl_commander_eligible(face) {
@@ -2794,28 +2770,48 @@ fn evaluate_selected_format(
 }
 
 fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest) -> DeckCoverage {
-    // Count copies per card name for the tooltip severity indicator
+    // One canonical key drives all three outputs — the copy counts, the unique
+    // set, and `total_unique`. `canonical_deck_count_key` is the single
+    // copy-count authority in this module (shared with `combined_copy_counts`,
+    // and therefore with the CR 100.2a copy-limit verdict), so coverage and
+    // copy limits can never bucket the same card differently. Keying by
+    // `lookup_key` here instead would diverge for the ~30 cards `oracle-gen`
+    // stores under a hidden `[oracle-id]` key (minted by
+    // `oracle_gen::insert_hidden_multiface`, preserved by
+    // `CardDatabase::export_subset_json`),
+    // whose storage key is not `name.to_lowercase()`.
+    //
+    // Each key keeps one raw spelling for display/lookup, so a decklist mixing
+    // a composite name ("Fire // Ice"), a glued one ("Fire//Ice"), a front-face
+    // name ("Fire"), and an unaccented alias ("Nazgul") resolves to a single
+    // entry counted once — not N entries each claiming the full copy count.
     let mut copy_counts: HashMap<String, usize> = HashMap::new();
+    let mut unique_names: HashMap<String, &str> = HashMap::new();
     for name in all_deck_cards(request) {
-        let resolved = resolve_card_name(db, name);
-        *copy_counts.entry(resolved.to_lowercase()).or_insert(0) += 1;
+        let canonical = canonical_deck_count_key(db, name);
+        *copy_counts.entry(canonical.clone()).or_insert(0) += 1;
+        unique_names.entry(canonical).or_insert(name);
     }
 
-    let unique_names: HashSet<&str> = all_deck_cards(request).collect();
     let mut unsupported_cards = Vec::new();
     let mut supported_count = 0usize;
+    // An unresolvable name (typo, un-exported card) belongs to NEITHER coverage
+    // bucket — `card_face_gaps` needs a face to inspect. Counting it in
+    // `total_unique` anyway would silently break the deck builder's
+    // supported/total ratio and the
+    // `supported_unique + unsupported_cards.len() == total_unique` invariant, so
+    // it is excluded from the total instead. Unknown cards are surfaced to the
+    // user separately, through `collect_unknown_cards`.
+    let mut resolved_unique = 0usize;
 
-    for name in &unique_names {
-        let resolved = resolve_card_name(db, name);
-        if let Some(face) = db.get_face_by_name(resolved) {
+    for (canonical, name) in &unique_names {
+        if let Some(face) = db.get_face_by_name(name) {
+            resolved_unique += 1;
             let gaps = crate::game::coverage::card_face_gaps(face);
             if gaps.is_empty() {
                 supported_count += 1;
             } else {
-                let copies = copy_counts
-                    .get(&face.name.to_lowercase())
-                    .copied()
-                    .unwrap_or(1);
+                let copies = copy_counts.get(canonical).copied().unwrap_or(1);
                 let parse_details = crate::game::coverage::build_parse_details_for_face(face);
                 unsupported_cards.push(UnsupportedCard {
                     name: face.name.clone(),
@@ -2832,7 +2828,7 @@ fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest)
     unsupported_cards.sort_by(|a, b| a.name.cmp(&b.name));
 
     DeckCoverage {
-        total_unique: unique_names.len(),
+        total_unique: resolved_unique,
         supported_unique: supported_count,
         unsupported_cards,
     }
@@ -2851,9 +2847,8 @@ fn evaluate_format_legality(
     for format in LegalityFormat::ALL {
         let mut worst = LegalityStatus::Legal;
         for name in &unique_names {
-            let resolved = resolve_card_name(db, name);
             let status = db
-                .legality_status(resolved, format)
+                .legality_status(name, format)
                 .unwrap_or(LegalityStatus::NotLegal);
             match status {
                 LegalityStatus::Banned => {
@@ -2917,12 +2912,17 @@ fn color_identity_violations(
         if is_command_zone_card(name.as_str()) || unknown_cards.contains(name.as_str()) {
             continue;
         }
-        if let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) {
+        if let Some(face) = db.get_face_by_name(name) {
             if card_color_identity(face)
                 .iter()
                 .any(|color| !identity.contains(color))
             {
-                violations.insert(name.clone());
+                // Insert the resolved face name, not the caller's raw spelling,
+                // so the `BTreeSet` actually dedups a card listed under two
+                // spellings (composite + front face, or accented + unaccented).
+                // Matches the sibling `basic_type_violations` loop in
+                // `evaluate_oathbreaker`, which already keys by `face.name`.
+                violations.insert(face.name.clone());
             }
         }
     }
@@ -2968,8 +2968,7 @@ fn collect_color_identity(db: &CardDatabase, request: &DeckCompatibilityRequest)
     let unique_names: HashSet<&str> = all_deck_cards(request).collect();
 
     for name in unique_names {
-        let resolved = resolve_card_name(db, name);
-        if let Some(face) = db.get_face_by_name(resolved) {
+        if let Some(face) = db.get_face_by_name(name) {
             colors.extend(card_color_identity(face));
         }
     }
@@ -2990,7 +2989,7 @@ fn collect_main_deck_color_distribution(
     let mut counts = HashMap::new();
 
     for name in &request.main_deck {
-        let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) else {
+        let Some(face) = db.get_face_by_name(name) else {
             continue;
         };
         for color in card_color_identity(face) {
@@ -3029,10 +3028,73 @@ fn mana_color_letter(color: &ManaColor) -> String {
     .to_string()
 }
 
-/// Returns true if the card is in the database, handling DFC names like "Front // Back"
-/// by also trying just the front face name.
+/// Returns true if the card is in the database. Composite multi-face names
+/// ("Front // Back", glued or spaced) and unaccented aliases are resolved by
+/// `CardDatabase::lookup_key` inside the accessor — this function must not
+/// pre-split the name itself (see `lookup_key`'s ordering contract).
 fn card_is_known(db: &CardDatabase, name: &str) -> bool {
-    db.get_face_by_name(resolve_card_name(db, name)).is_some()
+    db.get_face_by_name(name).is_some()
+}
+
+/// Single authority for "are these two decklist entries the same card?".
+///
+/// Two spellings denote the same card when they resolve to the same database
+/// key, which is what `CardDatabase::lookup_key` decides — composite multi-face
+/// names (`"Front // Back"`, spaced or glued) collapse to their front face, and
+/// unaccented aliases fold to the indexed name.
+///
+/// CR 709.2 (although split cards have two castable halves, each split card is
+/// only one card) and CR 712.1 + CR 712.8a (a double-faced card is one card
+/// with two faces; outside the battlefield and stack — which includes every
+/// deck-construction zone — it has only its front face's characteristics) are
+/// what authorize collapsing a composite spelling and a front-face spelling to
+/// one identity. This is deliberately NOT CR 201.3: interchangeable names are
+/// two separately printed cards pinned together by a printed indicator
+/// (CR 201.3c), a different mechanic that this module does not implement. A
+/// split card and a DFC each have two *distinct* names (CR 709.4a, CR 201.4d),
+/// so they are not interchangeable-name cards — they collapse here because they
+/// are one physical card, not because their names are equated.
+///
+/// Raw
+/// `eq_ignore_ascii_case` is NOT equivalent and must not be used for
+/// name-identity decisions in this module: a commander listed in the command
+/// zone by its composite name and in the 99 by its front name is one card, and
+/// the raw comparison reports it as two.
+///
+/// Every CR 903.5a deck-size, CR 903.5b singleton, CR 903.5c color-identity,
+/// and commander-legality-skip decision routes through here so the module can
+/// never resolve a name two different ways.
+fn same_card(db: &CardDatabase, left: &str, right: &str) -> bool {
+    db.lookup_key(left) == db.lookup_key(right)
+}
+
+/// CR 903.5a: a commander is part of the 100, so a decklist that names it in
+/// both the command zone and the main deck describes ONE physical card. Counts
+/// how many command-zone entries are also present in the main deck, comparing
+/// resolved keys via `same_card` (CR 709.2 / CR 712.1 one-physical-card
+/// identity) so a composite/front-face spelling split is not mistaken for two
+/// distinct cards.
+fn commanders_represented_in_main(db: &CardDatabase, request: &DeckCompatibilityRequest) -> usize {
+    request
+        .commander
+        .iter()
+        .filter(|name| {
+            request
+                .main_deck
+                .iter()
+                .any(|card| same_card(db, card, name))
+        })
+        .count()
+}
+
+/// True when `name` denotes one of the deck's commanders under any spelling.
+/// Shared by the CR 903.5b singleton exemption, the CR 903.5c color-identity
+/// skip, and the commander legality skip.
+fn is_commander_entry(db: &CardDatabase, request: &DeckCompatibilityRequest, name: &str) -> bool {
+    request
+        .commander
+        .iter()
+        .any(|commander| same_card(db, commander, name))
 }
 
 /// Combined copy counts across main deck + sideboard + commander, keyed by the
@@ -3040,24 +3102,125 @@ fn card_is_known(db: &CardDatabase, name: &str) -> bool {
 /// `"Delver of Secrets // Insectile Aberration"`/`"Delver of Secrets"` are
 /// counted as the same card.
 ///
-/// CR 201.3 + CR 100.2a: Canonical key for aggregating deck copy counts.
+/// CR 100.2a (no more than four of any card with a particular English name) and
+/// CR 903.5b (each card in a Commander deck must have a different English name)
+/// both count PHYSICAL cards, so the bucket must be one per physical card. A
+/// multi-face card is one card — CR 709.2 for split cards, CR 712.1 + CR 712.8a
+/// for double-faced cards, which have only their front face's characteristics
+/// in every deck-construction zone — so both of its spellings key to one
+/// bucket. That collapse comes from the one-card rule, NOT from CR 201.3:
+/// a split card has two names (CR 709.4a) and a DFC's back face is a separately
+/// choosable name (CR 201.4d), so these faces are not interchangeable names in
+/// the CR 201.3 sense (which requires a printed indicator per CR 201.3c).
+///
 /// Uses the indexed face name when the card resolves so alias spellings
 /// ("Nazgul" vs "Nazgûl") merge into one bucket for copy-limit checks.
 fn canonical_deck_count_key(db: &CardDatabase, name: &str) -> String {
-    let resolved = resolve_card_name(db, name);
-    db.get_face_by_name(resolved)
+    let resolved = db.lookup_key(name);
+    db.get_face_by_name(&resolved)
         .map(|face| face.name.to_lowercase())
-        .unwrap_or_else(|| resolved.to_lowercase())
+        .unwrap_or(resolved)
+}
+
+/// Whether the evaluating format has a command zone whose entries are part of
+/// the deck proper.
+///
+/// CR 903.5a makes the commander one of the 100, so a decklist naming a
+/// command-zone card in BOTH its zone slot and the main deck still describes a
+/// single physical card, and the duplicate must be netted out before the copy
+/// limit is applied. Formats with no command zone (constructed, Planechase,
+/// Archenemy) have no such identity: they must count `construction_deck_cards`
+/// verbatim, or netting would silently hide one copy of any card that also
+/// appears in a (rejected, but still populated) commander slot and turn a real
+/// CR 100.2a violation into a pass, from a rule that has no commander concept.
+///
+/// The set of formats whose `evaluate_*`/`quick_*` function passes
+/// `NetAgainstMainDeck` is exactly the set for which
+/// `GameFormat::command_zone_holds_decklist_commander()` returns `true`, and
+/// `game::deck_loading` reads that predicate to decide both what it nets out of
+/// the library and what it places in the command zone. The two must agree: a
+/// format netted here but not placed there starts the game a card short, and
+/// one placed but not netted starts it a card long.
+/// `types::format`'s
+/// `command_zone_holds_decklist_commander_matches_the_validator_netting_set`
+/// locks that agreement — update it when adding a format to either side.
+///
+/// Typed rather than a `bool` so each call site states which rule it is under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandZoneNetting {
+    /// CR 903.5a: net a command-zone card that is also listed in the main deck
+    /// down to the one physical card it is.
+    NetAgainstMainDeck,
+    /// No command zone: count every listed slot verbatim.
+    CountVerbatim,
 }
 
 fn combined_copy_counts(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
+    netting: CommandZoneNetting,
 ) -> HashMap<String, u32> {
     let mut counts: HashMap<String, u32> = HashMap::new();
     for name in construction_deck_cards(request) {
         let canonical = canonical_deck_count_key(db, name);
         *counts.entry(canonical).or_insert(0) += 1;
+    }
+    if netting == CommandZoneNetting::CountVerbatim {
+        return counts;
+    }
+    // CR 903.5a: the commander is one of the 100, so a decklist naming it in
+    // both the command zone and the main deck still describes a single physical
+    // card. `construction_deck_cards` chains both slots, so that card was just
+    // counted twice — decrement the duplicate before CR 903.5b sees it, or the
+    // commander is reported as a singleton violation against itself. Comparing
+    // resolved keys (CR 709.2 / CR 712.1: a split or double-faced card is one
+    // physical card) is what makes this fire for a composite-named
+    // commander listed in the 99 by its front name; the same double-listing
+    // is already netted out of the CR 903.5a total by
+    // `commanders_represented_in_main`.
+    //
+    // The Oathbreaker signature spell (Oathbreaker RC) is a second command-zone
+    // slot with the same "one physical card" identity, and
+    // `construction_deck_cards` chains it too — so it is netted on the same
+    // axis rather than as a special case. Without it, a compositely-named
+    // signature spell listed by its front face in the 58 is reported as a
+    // CR 903.5b singleton violation against itself.
+    //
+    // The decrement is bounded by OCCURRENCE, not merely gated on presence:
+    // subtract `min(command_zone_entries, main_deck_occurrences)` per canonical
+    // key. A per-entry `saturating_sub(1)` gated only on "the main deck
+    // contains this card at all" over-credits whenever two command-zone slots
+    // resolve to the same card — partner slots spelled composite and front-face
+    // ("Fire // Ice" + "Fire"), or an Oathbreaker whose commander and signature
+    // spell name one card — netting two copies away against a single main-deck
+    // listing and hiding a genuine CR 903.5b violation. Netting must be the
+    // exact CR 903.5a double-listing correction, never a blanket amnesty.
+    let mut main_deck_occurrences: HashMap<String, u32> = HashMap::new();
+    for name in &request.main_deck {
+        *main_deck_occurrences
+            .entry(canonical_deck_count_key(db, name))
+            .or_insert(0) += 1;
+    }
+    let mut command_zone_entries: HashMap<String, u32> = HashMap::new();
+    for entry in request
+        .commander
+        .iter()
+        .chain(request.signature_spell.iter())
+    {
+        *command_zone_entries
+            .entry(canonical_deck_count_key(db, entry))
+            .or_insert(0) += 1;
+    }
+    for (canonical, command_copies) in command_zone_entries {
+        let netted = command_copies.min(
+            main_deck_occurrences
+                .get(&canonical)
+                .copied()
+                .unwrap_or_default(),
+        );
+        if let Some(count) = counts.get_mut(&canonical) {
+            *count = count.saturating_sub(netted);
+        }
     }
     counts
 }
@@ -3223,9 +3386,7 @@ pub fn max_deck_copies(
     if format_config
         .format
         .legality_format()
-        .and_then(|legality_format| {
-            db.legality_status(resolve_card_name(db, name), legality_format)
-        })
+        .and_then(|legality_format| db.legality_status(name, legality_format))
         .is_some_and(|status| status == LegalityStatus::Restricted)
     {
         return DeckCopyLimit::UpTo(1);
@@ -3437,21 +3598,6 @@ pub fn draft_set_concessions_for<'a>(
         .fold(DraftSetConcessions::default(), DraftSetConcessions::union)
 }
 
-/// Resolves a card name to the key used in the database. For DFC names like "Front // Back",
-/// returns the front face name if that's how it's indexed.
-fn resolve_card_name<'a>(db: &CardDatabase, name: &'a str) -> &'a str {
-    if let Some((front, _)) = name.split_once("//") {
-        let front = front.trim();
-        if db.get_face_by_name(front).is_some() {
-            return front;
-        }
-    }
-    if db.get_face_by_name(name).is_some() {
-        return name;
-    }
-    name
-}
-
 /// Every card reference, including dedicated companion. Use this for card-data
 /// lookup, coverage, and legality reporting; use `construction_deck_cards`
 /// for ordinary deck-size and copy calculations.
@@ -3474,6 +3620,24 @@ fn construction_deck_cards(request: &DeckCompatibilityRequest) -> impl Iterator<
         .chain(request.commander.iter())
         .chain(request.signature_spell.iter())
         .map(String::as_str)
+}
+
+/// The name to SHOW the user for a decklist spelling — the resolved face name,
+/// falling back to the raw spelling when the card is unknown. Presentation and
+/// dedup only: this enforces no game rule and intentionally carries no CR
+/// annotation. The identity it displays is decided upstream by `same_card` /
+/// `canonical_deck_count_key`, which carry the rule citations.
+///
+/// Every `illegal_cards`-style `BTreeSet` must key on this rather than on the
+/// caller's raw spelling, or one physical card listed under several spellings
+/// ("Fire // Ice", "Fire//Ice", "Fire") is reported as several separate illegal
+/// cards, inflating the reason string and burning the `summarize_cards` name
+/// cap on duplicates of one card. Matches the dedup `color_identity_violations`
+/// performs by keying on `face.name`.
+fn display_name(db: &CardDatabase, name: &str) -> String {
+    db.get_face_by_name(name)
+        .map(|face| face.name.clone())
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn status_label(status: LegalityStatus) -> &'static str {
@@ -4847,7 +5011,7 @@ mod tests {
             draft_set_codes: Vec::new(),
         };
 
-        let counts = combined_copy_counts(&db, &request);
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
         assert_eq!(counts.get("nazgûl"), Some(&10));
         assert!(!copy_limit_violations(&db, &counts, DeckCopyLimit::UpTo(1)).is_empty());
     }
@@ -6727,7 +6891,8 @@ mod tests {
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
 
-    // --- Sideboard size + combined copy-limit tests (CR 100.2a, CR 100.4a, CR 201.3) ---
+    // --- Sideboard size + combined copy-limit tests (CR 100.2a, CR 100.4a,
+    // plus CR 709.2 / CR 712.1 one-physical-card canonicalization) ---
 
     #[test]
     fn constructed_sideboard_of_15_is_accepted() {
@@ -6833,7 +6998,8 @@ mod tests {
     #[test]
     fn combined_copies_case_insensitive() {
         // Regression for B1: "Legal Standard" + "legal standard" must count as
-        // the same card (CR 201.3 / CR 100.2a canonicalization).
+        // the same card: CR 100.2a's limit is per English name, and case is not
+        // part of a name, so both spellings share one copy-count bucket.
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         let mut main = expand("Legal Standard", 3);
         main.extend(expand("legal standard", 2)); // lowercase
@@ -8113,6 +8279,601 @@ mod tests {
                 .any(|r| r.contains("Singleton violations")),
             "reasons: {:?}",
             check.reasons
+        );
+    }
+
+    /// Regression: deck validation must resolve every name through
+    /// `CardDatabase::lookup_key`, never through its own `//` split.
+    ///
+    /// The discriminating case is a single-faced card whose printed name
+    /// literally contains `//` (issue #4790's `"SP//dr, Piloted by Peni"`
+    /// class) whose front segment is ALSO a real card. `lookup_key` matches the
+    /// exact name first, so it resolves to the whole card; a split-first
+    /// ordering resolves to the front segment — the wrong card, with the wrong
+    /// legality. Today's corpus has no such collision, so this synthetic DB is
+    /// the only barrier keeping the two orderings from diverging again.
+    #[test]
+    fn deck_validation_resolves_a_double_slash_card_name_before_splitting_it() {
+        let mut cards = Map::new();
+        // Front segment collides with a real, differently-legal card.
+        let mut fire = planechase_card_json("Fire", &[], &["Instant"]);
+        fire["legalities"] = serde_json::json!({ "standard": "banned" });
+        cards.insert("fire".to_string(), fire);
+        insert_planechase_card(&mut cards, "Fire//Ice, the Whole Card", &[], &["Instant"]);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let whole = "Fire//Ice, the Whole Card";
+
+        // Every assertion below goes through a deck-validation wrapper, not
+        // `db` directly: `CardDatabase`'s own accessors already resolved
+        // through `lookup_key` before this change, so asserting on them cannot
+        // fail if the local `//` split is reinstated. `card_db.rs` covers those
+        // four cases in its own tests.
+
+        // Copy counting buckets by the resolved key, so the whole card and its
+        // colliding front segment stay distinct entries.
+        assert_ne!(
+            canonical_deck_count_key(&db, whole),
+            canonical_deck_count_key(&db, "Fire"),
+            "the whole card and its front segment must not share a count bucket"
+        );
+
+        // The unknown-card sweep must not report the whole card missing, and
+        // must resolve the front segment to the front card rather than to it.
+        assert!(card_is_known(&db, whole));
+        assert_eq!(
+            canonical_deck_count_key(&db, whole),
+            whole.to_lowercase(),
+            "the whole card must key by its own name, not its front segment"
+        );
+
+        // Legality on the dominant decklist path: a split-first ordering would
+        // report the front segment's `banned`, condemning a legal deck. Asserted
+        // through `evaluate_deck_compatibility`, the production entry point.
+        let request = DeckCompatibilityRequest {
+            main_deck: std::iter::repeat_n(whole.to_string(), 60).collect(),
+            default_deck_copy_limit: Some(DeckCopyLimit::Unlimited),
+            ..Default::default()
+        };
+        let legality = evaluate_format_legality(&db, &request);
+        assert_eq!(
+            legality.get("standard").map(String::as_str),
+            Some("legal"),
+            "legality must come from the whole card, not its front segment: {legality:?}"
+        );
+    }
+
+    /// Regression: coverage must report one entry per *card*, not one per
+    /// spelling. A decklist that mixes a composite name, a glued composite, and
+    /// the bare front-face name refers to a single card; keying the unique set
+    /// on raw strings counted it N times and gave each entry the full copy
+    /// count, so the supported/total ratio the deck-builder renders was wrong.
+    #[test]
+    fn deck_coverage_counts_one_card_once_across_mixed_spellings() {
+        let mut cards = Map::new();
+        // `Fire` must be UNSUPPORTED here: `copies` is carried only by
+        // `UnsupportedCard`, so a fully-supported fixture leaves the copy-count
+        // assertion below with nothing to run against. Same construction as
+        // `insert_unsupported_scheme_card`, which `archenemy_rejects_unsupported_scheme`
+        // already pins through the same `card_face_gaps` predicate.
+        let mut fire = planechase_card_json("Fire", &[], &["Instant"]);
+        fire["abilities"] = serde_json::to_value(vec![crate::types::AbilityDefinition::new(
+            crate::types::AbilityKind::Spell,
+            crate::types::Effect::unimplemented("deck_coverage_test", "unsupported test card"),
+        )])
+        .unwrap();
+        cards.insert("fire".to_string(), fire);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let request = DeckCompatibilityRequest {
+            main_deck: vec![
+                "Fire // Ice".to_string(),
+                "Fire//Ice".to_string(),
+                "Fire".to_string(),
+                "fire".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let coverage = evaluate_deck_coverage(&db, &request);
+        assert_eq!(
+            coverage.total_unique, 1,
+            "four spellings of one card are one unique card"
+        );
+        assert_eq!(
+            coverage.supported_unique + coverage.unsupported_cards.len(),
+            coverage.total_unique,
+            "every unique card must land in exactly one bucket"
+        );
+        assert_eq!(
+            coverage.unsupported_cards.len(),
+            1,
+            "the unsupported fixture must reach the bucket the copy count lives in"
+        );
+        assert_eq!(
+            coverage.unsupported_cards[0].copies, 4,
+            "the single entry carries the whole playset, not a per-spelling share"
+        );
+    }
+
+    #[test]
+    fn deck_coverage_excludes_unresolvable_names_from_both_buckets() {
+        // The mixed-spelling test above never reaches the `get_face_by_name ->
+        // None` arm, because every fixture there is a known card. Production
+        // decklists take that arm constantly (typos, un-exported cards), so
+        // this fixture drives it directly: an unknown name must land in neither
+        // coverage bucket AND must not inflate `total_unique`, or the deck
+        // builder's supported/total ratio silently disagrees with itself.
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let request = DeckCompatibilityRequest {
+            main_deck: vec![
+                "Plains".to_string(),
+                "Totally Not A Real Card Xyzzy".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let coverage = evaluate_deck_coverage(&db, &request);
+        assert_eq!(
+            coverage.total_unique, 1,
+            "the unresolvable name is not a card the engine can rate"
+        );
+        assert_eq!(
+            coverage.supported_unique + coverage.unsupported_cards.len(),
+            coverage.total_unique,
+            "every counted card must land in exactly one bucket"
+        );
+    }
+
+    /// A DFC commander whose two faces are each indexed under their own key,
+    /// the way `data/card-data.json` stores every multi-face card (it holds no
+    /// composite `"A // B"` keys at all). Both faces are mono-red so the deck's
+    /// CR 903.5c identity is unambiguous.
+    fn dfc_commander_db() -> CardDatabase {
+        let mut cards = Map::new();
+        let mut front =
+            planechase_card_json("Tovolar, Dire Overlord", &["Legendary"], &["Creature"]);
+        front["color_override"] = serde_json::json!(["Red"]);
+        cards.insert("tovolar, dire overlord".to_string(), front);
+        let mut back = planechase_card_json(
+            "Tovolar, the Midnight Scourge",
+            &["Legendary"],
+            &["Creature"],
+        );
+        back["color_override"] = serde_json::json!(["Red"]);
+        cards.insert("tovolar, the midnight scourge".to_string(), back);
+        insert_planechase_card(&mut cards, "Mountain", &["Basic"], &["Land"]);
+        CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
+    }
+
+    /// CR 903.5a: the commander is one of the 100, so a decklist naming it in
+    /// the command zone by its composite name and in the 99 by its front face
+    /// describes ONE physical card and the deck is 100, not 101.
+    ///
+    /// This pins `commanders_represented_in_main`'s switch from
+    /// `eq_ignore_ascii_case` to `same_card` — the composite-aware deck-size
+    /// compare, and the one substantive rules change this PR makes to
+    /// `deck_validation`. Restoring the raw-spelling comparison makes
+    /// `represented_in_main` count 0 instead of 1, the deck reads 101, and the
+    /// deck-size reason below appears.
+    ///
+    /// Asserted on the deck-SIZE reason specifically rather than on
+    /// `reasons.is_empty()`: the singleton and netting behavior around the same
+    /// listing is command-zone netting, which is a separate change.
+    #[test]
+    fn a_composite_named_commander_listed_in_the_99_counts_toward_the_100_once() {
+        let db = dfc_commander_db();
+        // Command zone spells the composite name; the main deck lists the front
+        // face. One physical card, so total = main.len() + (1 - 1) = 100.
+        let mut main = vec!["Tovolar, Dire Overlord".to_string()];
+        main.extend(expand("Mountain", 99));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec!["Tovolar, Dire Overlord // Tovolar, the Midnight Scourge".to_string()],
+            selected_format: Some(GameFormat::Commander),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        // PREMISE: the two spellings really are different strings, so this is
+        // about resolution rather than a trivially equal comparison.
+        assert_ne!(request.commander[0], request.main_deck[0]);
+        assert_eq!(
+            commanders_represented_in_main(&db, &request),
+            1,
+            "the composite-named commander is the same physical card as the \
+             front-face listing in the 99"
+        );
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100 cards")),
+            "99 listings + 1 commander that is one of them is a legal 100, so no \
+             deck-size reason may be reported: {:?}",
+            result.selected_format_reasons
+        );
+    }
+
+    /// Control for the test above: when the command-zone card is genuinely NOT
+    /// in the 99, nothing is netted and the same 99 + 1 arithmetic must report
+    /// a 100-card deck too — so the test above cannot pass merely because the
+    /// deck-size check is inert.
+    #[test]
+    fn a_commander_absent_from_the_99_still_counts_toward_the_100() {
+        let db = dfc_commander_db();
+        // Commander absent from the 99: total = 99 + (1 - 0) = 100.
+        let mut main = Vec::new();
+        main.extend(expand("Mountain", 99));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec!["Tovolar, Dire Overlord".to_string()],
+            selected_format: Some(GameFormat::Commander),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            commanders_represented_in_main(&db, &request),
+            0,
+            "the commander is not listed in the 99, so nothing is represented"
+        );
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100 cards")),
+            "99 + a commander not among them is also exactly 100: {:?}",
+            result.selected_format_reasons
+        );
+    }
+
+    /// The commander exemption must not become a blanket amnesty: a SECOND
+    /// copy of the commander in the 99 is still a CR 903.5b violation, and the
+    /// deck is still 101 cards. Guards the deck-size compare in
+    /// `combined_copy_counts` against over-crediting.
+    #[test]
+    fn a_genuine_second_copy_of_the_commander_is_still_a_violation() {
+        let db = dfc_commander_db();
+        let mut main = vec![
+            "Tovolar, Dire Overlord".to_string(),
+            "Tovolar, Dire Overlord // Tovolar, the Midnight Scourge".to_string(),
+        ];
+        main.extend(expand("Mountain", 99));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec!["Tovolar, Dire Overlord".to_string()],
+            selected_format: Some(GameFormat::Commander),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("Singleton violations")),
+            "two real copies must still trip CR 903.5b: {:?}",
+            result.selected_format_reasons
+        );
+    }
+
+    /// Regression: a DFC commander listed in the command zone by its composite
+    /// name and in the 99 by its front name is one card. Comparing the raw
+    /// spellings let it escape the command-zone skip and be reported as a
+    /// CR 903.5c violation against its own color identity.
+    #[test]
+    fn commander_listed_under_two_spellings_is_not_its_own_identity_violation() {
+        let mut cards = Map::new();
+        let mut commander = planechase_card_json("Tovolar", &["Legendary"], &["Creature"]);
+        commander["color_override"] = serde_json::json!(["Red"]);
+        cards.insert("tovolar".to_string(), commander);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let identity: HashSet<ManaColor> = HashSet::new();
+        let violations = color_identity_violations(
+            &db,
+            &["Tovolar // Tovolar, the Midnight Scourge".to_string()],
+            &identity,
+            &BTreeSet::new(),
+            |name| db.lookup_key(name) == db.lookup_key("Tovolar"),
+        );
+        assert!(
+            violations.is_empty(),
+            "the commander must be skipped under any spelling: {violations:?}"
+        );
+
+        // And when a card genuinely violates, it is reported once under its
+        // resolved face name even if listed under two spellings.
+        let violations = color_identity_violations(
+            &db,
+            &[
+                "Tovolar // Tovolar, the Midnight Scourge".to_string(),
+                "Tovolar".to_string(),
+            ],
+            &identity,
+            &BTreeSet::new(),
+            |_| false,
+        );
+        assert_eq!(
+            violations.iter().cloned().collect::<Vec<_>>(),
+            vec!["Tovolar".to_string()],
+            "one card must produce exactly one violation entry"
+        );
+    }
+
+    /// An Oathbreaker DB whose Oathbreaker and signature spell are each
+    /// multi-face, with every face indexed under its own key the way
+    /// `data/card-data.json` stores multi-face cards (it holds no composite
+    /// `"A // B"` keys at all). Everything is mono-red so CR 903.5c and the
+    /// Oathbreaker RC color-identity rule are unambiguous.
+    fn dfc_oathbreaker_db() -> CardDatabase {
+        let mut cards = Map::new();
+        let mut ob_front = planechase_card_json("Ob Front", &["Legendary"], &["Planeswalker"]);
+        ob_front["color_override"] = serde_json::json!(["Red"]);
+        ob_front["is_oathbreaker"] = serde_json::json!(true);
+        cards.insert("ob front".to_string(), ob_front);
+        let mut ob_back = planechase_card_json("Ob Back", &["Legendary"], &["Planeswalker"]);
+        ob_back["color_override"] = serde_json::json!(["Red"]);
+        ob_back["is_oathbreaker"] = serde_json::json!(true);
+        cards.insert("ob back".to_string(), ob_back);
+
+        let mut sig_front = planechase_card_json("Sig Front", &[], &["Sorcery"]);
+        sig_front["color_override"] = serde_json::json!(["Red"]);
+        cards.insert("sig front".to_string(), sig_front);
+        let mut sig_back = planechase_card_json("Sig Back", &[], &["Sorcery"]);
+        sig_back["color_override"] = serde_json::json!(["Red"]);
+        cards.insert("sig back".to_string(), sig_back);
+
+        insert_planechase_card(&mut cards, "Mountain", &["Basic"], &["Land"]);
+        CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
+    }
+
+    /// The headline regression, driven end-to-end through
+    /// `evaluate_deck_compatibility` rather than through a hand-written closure,
+    /// so it actually executes the production comparison sites.
+    ///
+    /// A commander listed in the command zone by its composite name and in the
+    /// 99 by its front name is ONE card (CR 903.5a: the deck is 100 cards
+    /// *including* its commander; CR 709.2 / CR 712.1: a split or double-faced
+    /// card is a single physical card, whichever of its faces a decklist names
+    /// it by). Comparing raw spellings made all three CR 903.5 checks
+    /// misfire at once: the deck counted 101 cards, the commander was reported
+    /// as a 2-copy CR 903.5b singleton violation against itself, and it escaped
+    /// the CR 903.5c command-zone skip.
+    #[test]
+    fn commander_listed_by_composite_and_front_name_is_one_card() {
+        let db = dfc_commander_db();
+        let composite = "Tovolar, Dire Overlord // Tovolar, the Midnight Scourge";
+
+        let mut main = vec!["Tovolar, Dire Overlord".to_string()];
+        main.extend(expand("Mountain", 99));
+        assert_eq!(main.len(), 100, "the commander is one of the 100");
+
+        for summary_only in [false, true] {
+            let request = DeckCompatibilityRequest {
+                main_deck: main.clone(),
+                commander: vec![composite.to_string()],
+                selected_format: Some(GameFormat::Commander),
+                summary_only,
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: deck must be legal, got: {:?}",
+                result.selected_format_reasons
+            );
+            assert!(
+                result.selected_format_reasons.is_empty(),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    /// Regression: the Oathbreaker RC deck-size check is the fourth
+    /// command-zone format, and it must resolve card identity (CR 709.2 /
+    /// CR 712.1: one physical card per multi-face card) like
+    /// the other three. Listing the Oathbreaker in the command zone by its
+    /// composite name and in the 59 by its front face describes ONE physical
+    /// card; a raw-spelling compare counted it twice and rejected a legal
+    /// 60-card deck as 61.
+    #[test]
+    fn oathbreaker_listed_by_composite_and_front_name_is_one_card() {
+        let db = dfc_oathbreaker_db();
+
+        // 58 Mountain + 1 Ob Front + 1 Sig Front = 60 physical cards.
+        let mut main = vec!["Ob Front".to_string(), "Sig Front".to_string()];
+        main.extend(expand("Mountain", 58));
+        assert_eq!(main.len(), 60);
+
+        // Both verdict paths: the summary twin delegates to the same
+        // `evaluate_oathbreaker`, so they must agree for the same decklist.
+        for summary_only in [false, true] {
+            let request = DeckCompatibilityRequest {
+                main_deck: main.clone(),
+                commander: vec!["Ob Front // Ob Back".to_string()],
+                signature_spell: vec!["Sig Front // Sig Back".to_string()],
+                selected_format: Some(GameFormat::Oathbreaker),
+                summary_only,
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: reasons: {:?}",
+                result.selected_format_reasons
+            );
+            assert!(
+                result.selected_format_reasons.is_empty(),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    /// Regression: the signature spell is a command-zone slot with the same
+    /// "one physical card" identity as the Oathbreaker, so a composite/front
+    /// spelling split across the two slots must not be reported as a CR 903.5b
+    /// singleton violation against itself. Netting only the commander left this
+    /// live even after the deck-size check was fixed.
+    #[test]
+    fn signature_spell_listed_under_two_spellings_is_not_its_own_singleton_violation() {
+        let db = dfc_oathbreaker_db();
+
+        let mut main = vec!["Ob Front".to_string(), "Sig Front".to_string()];
+        main.extend(expand("Mountain", 58));
+
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec!["Ob Front".to_string()],
+            signature_spell: vec!["Sig Front // Sig Back".to_string()],
+            selected_format: Some(GameFormat::Oathbreaker),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
+        assert_eq!(
+            counts.get("sig front"),
+            Some(&1),
+            "one physical signature spell counts once: {counts:?}"
+        );
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("Singleton violations")),
+            "{:?}",
+            result.selected_format_reasons
+        );
+    }
+
+    /// CR 903.5a netting corrects a DOUBLE-listing; it is not a blanket amnesty.
+    /// When two command-zone slots resolve to the same card — here an
+    /// Oathbreaker whose commander and signature spell are two spellings of one
+    /// card — a per-entry `saturating_sub(1)` gated only on "the main deck
+    /// contains this card at all" decrements twice against a single main-deck
+    /// listing, netting a real 2-copy CR 903.5b violation down to 1 and hiding
+    /// it. Bounding the decrement by main-deck occurrence is what keeps the
+    /// violation visible.
+    #[test]
+    fn netting_never_credits_more_copies_than_the_main_deck_actually_lists() {
+        let db = dfc_oathbreaker_db();
+
+        let mut main = vec!["Ob Front".to_string(), "Ob Front".to_string()];
+        main.extend(expand("Mountain", 58));
+
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            // Both command-zone slots resolve to the SAME card.
+            commander: vec!["Ob Front".to_string()],
+            signature_spell: vec!["Ob Front // Ob Back".to_string()],
+            selected_format: Some(GameFormat::Oathbreaker),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
+        assert_eq!(
+            counts.get("ob front"),
+            Some(&2),
+            "three listings minus the one copy the main deck actually double-lists              leaves a genuine 2-copy singleton violation: {counts:?}"
+        );
+    }
+
+    /// The signature-spell exemption must not become a blanket amnesty either:
+    /// a genuine SECOND copy of the signature spell in the 58 is still a
+    /// singleton violation. Guards the copy-count bucketing against
+    /// over-crediting on the new slot.
+    #[test]
+    fn a_genuine_second_copy_of_the_signature_spell_is_still_a_violation() {
+        let db = dfc_oathbreaker_db();
+
+        let mut main = vec![
+            "Ob Front".to_string(),
+            "Sig Front".to_string(),
+            "Sig Front // Sig Back".to_string(),
+        ];
+        main.extend(expand("Mountain", 57));
+
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec!["Ob Front".to_string()],
+            signature_spell: vec!["Sig Front".to_string()],
+            selected_format: Some(GameFormat::Oathbreaker),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("Singleton violations")),
+            "two real copies must still trip the singleton rule: {:?}",
+            result.selected_format_reasons
+        );
+    }
+
+    /// Regression: CR 903.5a netting belongs to command-zone formats only.
+    /// Constructed has no commander concept, so a populated commander slot must
+    /// not silently discount one main-deck copy and hide a real CR 100.2a
+    /// violation. `CommandZoneNetting::CountVerbatim` is what keeps the two
+    /// rules apart.
+    #[test]
+    fn constructed_copy_limit_does_not_net_out_a_commander_slot_entry() {
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Fire", &[], &["Instant"]);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let mut main = expand("Fire", 5);
+        main.extend(expand("Plains", 55));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec!["Fire".to_string()],
+            selected_format: Some(GameFormat::Standard),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::CountVerbatim);
+        assert_eq!(
+            counts.get("fire"),
+            Some(&6),
+            "constructed counts every listed slot verbatim: {counts:?}"
+        );
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("Fire")),
+            "five main-deck copies must still trip CR 100.2a: {:?}",
+            result.selected_format_reasons
         );
     }
 }

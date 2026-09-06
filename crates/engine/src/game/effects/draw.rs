@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    AbilityDefinition, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter,
+};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{DrawSequenceOrigin, GameState, PendingDrawDelivery};
 use crate::types::identifiers::ObjectId;
@@ -223,6 +225,71 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 608.2d: "Draw up to N" is encoded as `count: UpTo { max }`, and the
+    // magnitude is a choice the DRAWING player announces while the effect is
+    // applied — not a value the game state determines. `peel_up_to` splits the
+    // wrapper into its upper-bound expression and the may-draw-fewer flag so
+    // the prompt below can honour it.
+    //
+    // The generic resolver cannot do this: `game/quantity.rs` folds
+    // `UpTo { max } => recurse(max)`, which ANSWERS the choice as the upper
+    // bound. Before this guard existed, `resolve` read the count through that
+    // transparent path and Arcane Denial's "Its controller may draw up to two
+    // cards" always drew exactly two, with both 0 and 1 unreachable (#8543).
+    if let Effect::Draw { count, target } = &ability.effect {
+        let (max_expr, up_to) = count.peel_up_to();
+        if up_to {
+            // CR 107.1b: a calculation yielding a negative number uses zero.
+            let max = resolve_quantity_with_targets(state, max_expr, ability).max(0) as u32;
+            // A zero upper bound has exactly one legal answer, so it needs no
+            // round-trip; it falls through to the mandatory path below and
+            // resolves as a zero-count draw.
+            if max > 0 {
+                let drawing_player = super::resolve_player_for_context_ref(state, ability, target);
+                // CR 121.3: "if an effect says that a player can't draw cards
+                // and another effect offers that player the choice to draw a
+                // card, that player can't choose to do so." CR 121.3a extends
+                // that to a chooser who is not the drawer and keys the test on
+                // the DRAWER — which is why `drawing_player`, not
+                // `ability.controller`, is the subject here (Arcane Denial's
+                // exact shape).
+                //
+                // GATE, DO NOT CLAMP. The test is `== 0`, not
+                // `0..=allowed_draw_count(..)`. CR 121.3 withholds the choice
+                // only when an effect says the player can't draw cards *at all*;
+                // a `PerTurnDrawLimit` with draws still remaining says no such
+                // thing, so "up to two" under a one-per-turn limit must still
+                // offer 2 and then deliver 1. CR 101.2's "can't" precedence is
+                // applied per individual draw downstream by
+                // `apply_draw_after_replacement`, which calls
+                // `allowed_draw_count` itself; clamping the ANNOUNCEMENT here
+                // would apply the same restriction twice, at the wrong layer.
+                //
+                // With `max > 0`, `min(max, remaining) == 0` holds exactly when
+                // `remaining == 0`, so the `max` argument is not load-bearing to
+                // the gate — this asks "may this player draw at all right now".
+                //
+                // NOT `can_draw_at_least_one`, which looks like the helper for
+                // this and is not: it also answers false for an empty library
+                // and for a replacement-removed draw, and CR 121.3's FIRST
+                // sentence requires the choice to stay open in both of those
+                // cases. Using it here would silently reintroduce the
+                // library-size clamp this menu must never have.
+                if allowed_draw_count(state, drawing_player, max) > 0 {
+                    prompt_up_to_draw_count(state, ability, target, drawing_player, max);
+                    return Ok(());
+                }
+                // Falls through to the mandatory path, exactly as a printed
+                // `Draw { Fixed(max) }` under the same prohibition does: the
+                // draw sequence runs, `apply_draw_after_replacement` clamps
+                // every unit to zero, and `EffectResolved { kind: Draw }` still
+                // fires. No CR 704.5b exposure — `attempted_empty_library` is
+                // gated on `allowed_count > 0`, so a forbidden draw records no
+                // empty-library attempt.
+            }
+        }
+    }
+
     let (num_cards, drawing_player) = match &ability.effect {
         // CR 107.1b: Resolve with full ability context so `QuantityRef::Variable { "X" }`
         // finds the caster-chosen X on the ability.
@@ -230,12 +297,10 @@ pub fn resolve(
         // chosen during spell announcement and is in `ability.targets` —
         // `target_player()` reads it back, falling back to controller for
         // context-ref filters that don't surface a target slot.
-        // CR 608.2d: "Draw up to N" is encoded as `count: UpTo { max }`.
-        // Generic resolution sees `UpTo` transparently as `max`, so this
-        // call already returns the upper-bound count. By the time we reach
-        // here the engine has already resolved the chosen count via the
-        // player choice mechanism in `engine_resolution_choices` and
-        // baked it into the ProposedEvent::Draw count.
+        // CR 608.2d: any `UpTo` count that reaches here is either the
+        // already-answered `Fixed` branch the prompt above installed, or an
+        // `UpTo` whose maximum resolved to 0. Both are mandatory counts, so
+        // reading them through the transparent generic resolver is correct.
         Effect::Draw { count, target } => (
             // CR 107.1b: a calculation yielding a negative number uses zero
             // instead. Clamp before the `as u32` cast — an unclamped negative
@@ -274,6 +339,97 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 608.2d: open the resolution-time count choice for an "up to N" draw.
+///
+/// Offers every legal answer (0..=`max`) as a branch of the existing
+/// `WaitingFor::ChooseOneOfBranch` round-trip. This is the same shape
+/// `stickers::prompt_count_choice` uses — the other resolver whose `up_to` is a
+/// pure magnitude with nothing to select. (The object-selecting `up_to`
+/// resolvers, `sacrifice` and `search_library`, derive their count from the
+/// chosen objects instead and so need a different prompt.)
+///
+/// Callers must have already cleared the CR 121.3 gate (`allowed_draw_count > 0`
+/// for `drawing_player`): this builds the menu unconditionally and does not
+/// re-check whether the choice may be offered at all.
+///
+/// Three properties CR 608.2d requires of the offer:
+///
+/// * **Not clamped to library size.** CR 121.3: "If there are no cards in a
+///   player's library and an effect offers that player the choice to draw a
+///   card, that player can choose to do so." CR 608.2d carries the same
+///   exemption from its own "can't choose an option that's illegal or
+///   impossible" restriction. Choosing more cards than the library holds is a
+///   legal announcement; the shortfall is settled later by CR 704.5b (a player
+///   who attempted to draw from an empty library loses at the next state-based
+///   check), not by narrowing this menu.
+/// * **Choosing 0 resolves.** The `Fixed { value: 0 }` branch re-enters
+///   `resolve`, runs a zero-count draw sequence, and emits
+///   `EffectResolved { kind: Draw }`. An ability that never resolved emits no
+///   such event, so "drew nothing by choice" stays distinguishable from "did
+///   not happen".
+/// * **The chooser is the drawing player, not the ability's controller.** For
+///   Arcane Denial ("Its controller may draw up to two cards") the countered
+///   spell's controller decides. Passing that player as the sole chooser also
+///   keeps the branch's own player resolution consistent: whichever rung of
+///   `resolve_player_for_context_ref` the filter takes,
+///   `choose_one_of::resolve_branch` has already seeded the branch's scoped
+///   player and appended `TargetRef::Player(chooser)` to the inherited parent
+///   targets, so every rung converges on this same player.
+fn prompt_up_to_draw_count(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+    drawing_player: crate::types::player::PlayerId,
+    max: u32,
+) {
+    let branches = (0..=max)
+        .map(|amount| {
+            let mut branch = AbilityDefinition::new(
+                // Preserve the parent's ability kind so a delayed-trigger draw
+                // (Arcane Denial) stays a triggered ability in the branch.
+                ability.kind,
+                Effect::Draw {
+                    // The branch IS the announced answer, so it carries a plain
+                    // count — re-entering `resolve` with it cannot re-prompt.
+                    count: QuantityExpr::Fixed {
+                        value: amount as i32,
+                    },
+                    target: target.clone(),
+                },
+            );
+            branch.description = Some(match amount {
+                0 => "Draw no cards".to_string(),
+                1 => "Draw 1 card".to_string(),
+                n => format!("Draw {n} cards"),
+            });
+            branch
+        })
+        .collect();
+
+    super::choose_one_of::prompt_next(
+        state,
+        super::choose_one_of::PromptRequest {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            branches,
+            parent_targets: ability.targets.clone(),
+            context: ability.context.clone(),
+            // CR 608.2c: the trailing instructions of this chain ("…, then
+            // discard a card") are parked by `resolve_ability_chain`'s generic
+            // pause path, which already lists `WaitingFor::ChooseOneOfBranch` in
+            // `waits_for_resolution_choice`. Handing them over here as well
+            // would run the tail twice.
+            continuation: None,
+            // CR 614.5 + CR 616.1f: a replacement effect "gets only one
+            // opportunity to affect an event". Carry the already-applied keys
+            // into the branch so the answered draw cannot re-invoke a
+            // replacement this instruction has already consumed.
+            replacement_applied: ability.replacement_applied.clone(),
+            players: vec![drawing_player],
+        },
+    );
 }
 
 /// CR 121.2: Begin one draw instruction — "if a player is instructed to draw
