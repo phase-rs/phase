@@ -1304,7 +1304,10 @@ mod tests {
     /// earlier check in `is_static_pattern` claims, and does so as a pure
     /// WIDENING. On the Class route (`oracle_class.rs`), `is_static_pattern` is
     /// the ONLY gate to `parse_static_line` (no ungated leftover-static
-    /// fallback exists there, unlike the normal route's `oracle.rs:7078`), so
+    /// fallback exists there, unlike the normal route's own attempt — the one
+    /// guarded by `oracle.rs`'s "Leftover permanent text can still be a valid
+    /// static even when classifier heuristics miss it" comment, which calls
+    /// `parse_static_line_with_graveyard_keyword_continuation` ungated), so
     /// this terminal peel is what makes a windowed line reachable at all for a
     /// card like Gourmand's Talent.
     #[test]
