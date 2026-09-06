@@ -437,7 +437,7 @@ class MediaPluginPackagingTests(unittest.TestCase):
             f"echo apt-get install {' '.join(DEFAULT_PACKAGES)}"))
         r = t.run()
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("without running it as its own command", r.stderr)
+        self.assertIn("without running it", r.stderr)
         for package in DEFAULT_PACKAGES:
             self.assertNotIn(f"  {package}", r.stdout)
 
@@ -592,6 +592,28 @@ class MediaPluginPackagingTests(unittest.TestCase):
                                       f"{' '.join(DEFAULT_PACKAGES)}\n{extra}"))
                 r = t.run()
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_later_chained_command_cannot_supply_packages(self) -> None:
+        # Reported by CodeRabbit on #8630 and reproduced: judging the line as a
+        # whole let the FIRST command (`apt-get update`) satisfy the "is this
+        # really an apt install" check, while `tokens.index("install")` then
+        # found the SECOND command's verb and credited its arguments. A step
+        # installing nothing read as full coverage -- the exact fail-open this
+        # gate exists to prevent, so each command is judged on its own.
+        joined = " ".join(DEFAULT_PACKAGES)
+        for shape, command in (
+            ("update && echo", f"sudo apt-get update && echo apt-get install -y {joined}"),
+            ("real install, then echo",
+             f"sudo apt-get install -y libgtk-3-dev && echo apt-get install {joined}"),
+            ("semicolon separated",
+             f"sudo apt-get update; echo apt-get install -y {joined}"),
+        ):
+            with self.subTest(shape=shape):
+                t = self.tree()
+                t.write_workflow(run=command)
+                r = t.run()
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn("without running it", r.stderr)
 
     def test_an_apt_step_that_installs_nothing_refuses(self) -> None:
         # The step still exists, on the right job and the right arm, and runs

@@ -383,53 +383,80 @@ def appimage_apt_packages() -> set[str]:
         # message saying the line does not run an install when it does. Only a
         # wrapper licenses skipping a flag, so a bare `-x apt-get` still stops
         # at a token that is not an apt command.
-        head, wrapped = 0, False
-        while head < len(tokens):
-            token = tokens[head]
-            if "=" in token and not token.startswith("-"):
-                head += 1
-            elif token in PRIVILEGE_WRAPPERS:
-                head, wrapped = head + 1, True
-            elif wrapped and token.startswith("-"):
-                head += 1
-            else:
-                break
-        if head >= len(tokens) or tokens[head] not in APT_COMMANDS:
-            raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' has a line that "
-                          f"names `apt-get install` without running it as its "
-                          f"own command: {line.strip()!r}. This gate will not "
-                          "guess which packages such a line installs")
-        tokens = tokens[head:]
-        if "install" in tokens:
-            tokens = tokens[tokens.index("install") + 1:]
-        for token in tokens:
-            # An operator ends the argument list. `apt-get install -y a || true`
-            # is a tolerant install, not a step naming a package called `||`,
-            # and refusing it would block a shape a maintainer could write.
-            if token in SHELL_OPERATORS or token.endswith(";"):
-                break
-            if token.startswith("-"):
-                continue
-            # An unexpanded `$PACKAGES` or `${{ env.X }}` is not a package this
-            # gate can resolve. Crediting it as a literal name reports a
-            # correct tree as *missing* the four packages the step installs --
-            # blocking CI while telling the maintainer to add what is already
-            # there. The deb side already refuses names it cannot read.
-            if not DEBIAN_NAME.fullmatch(token):
-                raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' installs "
-                              f"{token!r}, which is not a literal package name "
-                              "this gate can resolve -- most likely a shell or "
-                              "workflow expression it cannot expand")
-            # Normalized through the same helper as the `.deb` side, so
-            # `gstreamer1.0-libav:amd64` matches the authority on both
-            # consumers rather than on only one of them.
-            packages.add(debian_package_name(token))
+        # A line is a sequence of commands joined by operators, and each has
+        # to be judged on its own. Searching the whole line for `install`
+        # credits a later segment's arguments to an earlier segment's verdict:
+        # `apt-get update && echo apt-get install <packages>` passed the head
+        # check on `apt-get update`, then found the `echo`'s `install` and
+        # credited everything after it -- a step that installs nothing reading
+        # as full coverage, which is the fail-open this gate exists to prevent.
+        for segment in split_on_operators(tokens):
+            if "install" not in segment:
+                continue  # `apt-get update`, `true`, and other non-installs.
+
+            head, wrapped = 0, False
+            while head < len(segment):
+                token = segment[head]
+                if "=" in token and not token.startswith("-"):
+                    head += 1
+                elif token in PRIVILEGE_WRAPPERS:
+                    head, wrapped = head + 1, True
+                elif wrapped and token.startswith("-"):
+                    head += 1
+                else:
+                    break
+            if head >= len(segment) or segment[head] not in APT_COMMANDS:
+                raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' has a "
+                              f"command that names `apt-get install` without "
+                              f"running it: {' '.join(segment)!r}. This gate "
+                              "will not guess which packages such a command "
+                              "installs")
+            arguments = segment[segment.index("install") + 1:]
+
+            for token in arguments:
+                if token.startswith("-"):
+                    continue
+                # An unexpanded `$PACKAGES` or `${{ env.X }}` is not a package
+                # this gate can resolve. Crediting it as a literal name reports
+                # a correct tree as *missing* the four packages the step
+                # installs -- blocking CI while telling the maintainer to add
+                # what is already there. The deb side already refuses names it
+                # cannot read.
+                if not DEBIAN_NAME.fullmatch(token):
+                    raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' installs "
+                                  f"{token!r}, which is not a literal package "
+                                  "name this gate can resolve -- most likely a "
+                                  "shell or workflow expression it cannot expand")
+                # Normalized through the same helper as the `.deb` side, so
+                # `gstreamer1.0-libav:amd64` matches the authority on both
+                # consumers rather than on only one of them.
+                packages.add(debian_package_name(token))
 
     if not packages:
         raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' tokenizes to zero "
                       "package names; an empty install list would pass this "
                       "gate vacuously")
     return packages
+
+
+def split_on_operators(tokens: list[str]) -> list[list[str]]:
+    """One token list per command, split on the shell operators joining them.
+
+    `apt-get update && echo apt-get install x` is two commands, and only the
+    second mentions an install. Judging the line as a whole lets the first
+    command satisfy the "is this really an apt install" check while the second
+    supplies the packages.
+    """
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in SHELL_OPERATORS:
+            segments.append([])
+        elif token.endswith(";"):
+            segments[-1].append(token[:-1])
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return [segment for segment in segments if segment]
 
 
 class Consumer(NamedTuple):
