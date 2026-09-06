@@ -8427,7 +8427,7 @@ pub(crate) fn parse_opponent_most_life_restriction(input: &str) -> OracleResult<
 /// CR 119.1 + CR 109.5 + CR 810.9a: "who has more life than you" as a
 /// per-candidate player predicate. Consumes its OWN `who ` prefix, matching the
 /// convention of [`lower::parse_controls_permanent_object`] so that every arm of
-/// [`parse_attacked_player_relative_clause`] starts from the same input
+/// [`parse_player_relative_clause`] starts from the same input
 /// position.
 ///
 /// `attr` is read PER CANDIDATE by `effects::candidate_player_scalar_with_state`
@@ -8569,24 +8569,24 @@ fn controls_clause_player_filter<'a>(
 }
 
 /// CR 508.1b + CR 603.2 + CR 102.1: the `who`-headed relative clause narrowing
-/// an ATTACKED player ("attacks a player who has more life than you"). Composed
-/// by axis — one arm per predicate family — so a new predicate costs one arm,
-/// never a full-sentence `tag`.
+/// a trigger-event player ("attacks a player who has more life than you" /
+/// "deals combat damage to a player who controls more lands than you").
+/// Composed by axis — one arm per predicate family — so a new predicate costs
+/// one arm, never a full-sentence `tag`.
 ///
 /// The `who ` token is consumed by the ARMS, exactly once each, never by this
 /// dispatcher: `parse_has_more_life_than_you` opens with `tag("who ")`, and
 /// `controls_clause_player_filter`'s delegate opens all of its branches with
 /// `tag("who ")`. Stripping `who ` here would break the delegate.
 ///
-/// `input` MUST be the caller's post-noun slice — the text after the single
-/// space that follows the attacked-player noun. Every `parse_attack_target` tag
-/// carries a LEADING space, so the raw remainder begins with that space and no
-/// arm here would match it.
+/// `input` MUST be the caller's post-noun slice, with the relative-clause head
+/// (`who `) unconsumed. Callers normalize their own noun remainder before
+/// entering this shared predicate grammar.
 ///
-/// `relation` is supplied by the caller from the base attacked-player noun
+/// `relation` is supplied by the caller from the base player noun
 /// ("a player" -> All, "one of your opponents" -> Opponent), so the base-scope
 /// and predicate axes compose rather than multiply.
-pub(crate) fn parse_attacked_player_relative_clause<'a>(
+pub(crate) fn parse_player_relative_clause<'a>(
     input: &'a str,
     relation: PlayerRelation,
     ctx: &mut ParseContext,

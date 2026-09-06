@@ -1813,6 +1813,29 @@ impl GameAction {
         )
     }
 
+    /// Whether this action names the submitting seat itself rather than a
+    /// decision slot the engine is waiting on.
+    ///
+    /// CR 723.5b: the controller of another player can't make choices or
+    /// decisions for that player that aren't called for by the rules or by any
+    /// objects. A UI preference mutates the submitter's own slot and a debug
+    /// capability grant authorizes the submitting connection — neither is such
+    /// a choice, so controlling a player must not redirect either one.
+    ///
+    /// Not `game::interaction::action_preserves_interaction`, whose
+    /// near-identical list answers a different question: this one decides
+    /// whether an action may skip the seat check, that one whether an action
+    /// leaves an open interaction standing. The two lists may diverge.
+    pub fn is_submitter_scoped(&self) -> bool {
+        self.is_actor_scoped_preference()
+            || matches!(
+                self,
+                GameAction::Debug(_)
+                    | GameAction::GrantDebugPermission { .. }
+                    | GameAction::RevokeDebugPermission { .. }
+            )
+    }
+
     /// Issue #4878: allocation-free total order over `GameAction`, used for
     /// deterministic AI candidate / legal-action sorting. Orders by the
     /// `GameActionKind` discriminant first, then by payload fields, so equal

@@ -837,9 +837,13 @@ fn live_mana_output_units(
 /// Pure action-boundary validation for semantic land-mana submissions. It is
 /// deliberately called before interaction rebinding or transient-state cleanup
 /// so a hostile stale/ambiguous payload leaves the complete game state intact.
+/// `authenticated_actor` is the submitting connection, not the seat whose mana
+/// sources are being activated: CR 723.5a lets a controller spend only the
+/// controlled player's resources, so the seat comes from `state.waiting_for`
+/// and only the right to submit for it is checked here.
 pub(crate) fn preflight_tap_land_action(
     state: &GameState,
-    player: PlayerId,
+    authenticated_actor: PlayerId,
     action: &GameAction,
 ) -> Result<(), EngineError> {
     if !matches!(action, GameAction::TapLandForMana { .. }) {
@@ -858,7 +862,7 @@ pub(crate) fn preflight_tap_land_action(
     // CR 723.5 + CR 723.5a: a turn controller makes the waiting player's
     // choices, but activates that player's mana sources and spends only that
     // player's resources.
-    if turn_control::authorized_submitter_for_player(state, waiting_player) != player {
+    if turn_control::authorized_submitter_for_player(state, waiting_player) != authenticated_actor {
         return Err(EngineError::WrongPlayer);
     }
     let matches = activatable_mana_actions_for_player(state, waiting_player)
