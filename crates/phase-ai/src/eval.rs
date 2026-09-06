@@ -1191,6 +1191,7 @@ pub fn creature_combat_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::{Confidence, ProjectionHorizon};
     use engine::game::zones::create_object;
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::CardId;
@@ -2285,20 +2286,163 @@ mod tests {
     }
 
     #[test]
-    fn multiplayer_threat_curve_remains_monotonic_above_old_board_cap() {
-        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
-        let at_old_cap = threat_level(&state, PlayerId(0), PlayerId(1));
-        for _ in 0..4 {
-            add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
-        }
-        let developed = threat_level(&state, PlayerId(0), PlayerId(1));
-        for _ in 0..8 {
-            add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
-        }
-        let overwhelming = threat_level(&state, PlayerId(0), PlayerId(1));
+    fn multiplayer_threat_curve_matches_bounded_raw_strength_table() {
+        let mut threats = Vec::new();
+        for (raw_strength, powers, expected_threat) in [
+            (0.0, &[] as &[i32], 0.1),
+            (10.0, &[13, 0, 0] as &[i32], 0.3),
+            (30.0, &[21, 21] as &[i32], 0.4),
+            (100.0, &[71, 71] as &[i32], 0.463_636_363_636_363_6),
+        ] {
+            let mut state =
+                GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+            for &power in powers {
+                add_creature(&mut state, PlayerId(1), power, 1, vec![]);
+            }
 
-        assert!(at_old_cap < developed && developed < overwhelming);
-        assert!(overwhelming.is_finite() && overwhelming <= 1.0);
+            let stats = board_stats(&state, PlayerId(1));
+            let actual_raw_strength =
+                (stats.creatures as f64 * 0.3 + stats.power.max(0) as f64 * 0.7).max(0.0);
+            assert!(
+                (actual_raw_strength - raw_strength).abs() < 1e-12,
+                "fixture must realize raw board strength {raw_strength}, got {actual_raw_strength}"
+            );
+
+            let threat = threat_level(&state, PlayerId(0), PlayerId(1));
+            assert!(
+                (threat - expected_threat).abs() < 1e-12,
+                "raw board strength {raw_strength} should have threat {expected_threat}, got {threat}"
+            );
+            assert!(
+                threat.is_finite() && (0.0..=1.0).contains(&threat),
+                "threat must stay finite and bounded for raw board strength {raw_strength}: {threat}"
+            );
+            threats.push(threat);
+        }
+
+        assert!(
+            threats.windows(2).all(|pair| pair[0] < pair[1]),
+            "the free-for-all curve must remain strictly monotonic: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn multiplayer_threat_clamps_negative_power_without_dropping_creature_presence() {
+        let mut negative_power =
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        add_creature(&mut negative_power, PlayerId(1), -5, 1, vec![]);
+
+        let mut zero_power =
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        add_creature(&mut zero_power, PlayerId(1), 0, 1, vec![]);
+
+        assert_eq!(board_stats(&negative_power, PlayerId(1)).power, -5);
+        assert_eq!(board_stats(&zero_power, PlayerId(1)).power, 0);
+        let negative_threat = threat_level(&negative_power, PlayerId(0), PlayerId(1));
+        let zero_threat = threat_level(&zero_power, PlayerId(0), PlayerId(1));
+        assert!(
+            (negative_threat - zero_threat).abs() < 1e-12,
+            "negative power must clamp to zero while its creature-presence contribution remains"
+        );
+        assert!(
+            negative_threat
+                > threat_level(
+                    &GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42),
+                    PlayerId(0),
+                    PlayerId(1),
+                ),
+            "reach-guard: the fixture must retain its creature-presence contribution"
+        );
+    }
+
+    #[test]
+    fn legacy_threat_curve_is_unchanged_outside_multiplayer_individual_seats() {
+        let cases = [
+            (
+                "two-seat individual seats",
+                engine::types::format::FormatConfig::free_for_all(),
+                2,
+                PlayerId(1),
+                0.5,
+            ),
+            (
+                "fixed teams",
+                engine::types::format::FormatConfig::two_headed_giant(),
+                4,
+                PlayerId(2),
+                0.45,
+            ),
+            (
+                "one versus many",
+                engine::types::format::FormatConfig::archenemy(),
+                3,
+                PlayerId(1),
+                0.5,
+            ),
+        ];
+
+        for (name, config, player_count, target, expected_threat) in cases {
+            let topology = config.topology();
+            match topology {
+                FormatTopology::IndividualSeats => assert_eq!(player_count, 2, "{name}"),
+                FormatTopology::FixedTeams { .. } => assert_eq!(name, "fixed teams"),
+                FormatTopology::OneVsMany { .. } => assert_eq!(name, "one versus many"),
+            }
+
+            let mut state = GameState::new(config, player_count, 42);
+            add_creature(&mut state, target, 21, 1, vec![]);
+            add_creature(&mut state, target, 21, 1, vec![]);
+            let stats = board_stats(&state, target);
+            assert_eq!(stats.creatures, 2, "reach-guard for {name}");
+            assert_eq!(stats.power, 42, "reach-guard for {name}");
+
+            let threat = threat_level(&state, PlayerId(0), target);
+            assert!(
+                (threat - expected_threat).abs() < 1e-12,
+                "{name} must retain the legacy raw-strength cap, got {threat}"
+            );
+        }
+    }
+
+    #[test]
+    fn equal_multiplayer_opponent_boards_have_equal_threat() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
+        add_creature(&mut state, PlayerId(2), 5, 5, vec![]);
+
+        assert_eq!(board_stats(&state, PlayerId(1)).power, 5);
+        assert_eq!(board_stats(&state, PlayerId(2)).power, 5);
+        assert_eq!(
+            threat_level(&state, PlayerId(0), PlayerId(1)),
+            threat_level(&state, PlayerId(0), PlayerId(2)),
+            "identical public opponent boards must receive identical threat scores"
+        );
+    }
+
+    #[test]
+    fn projected_stronger_board_increases_threat() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        let creature = add_creature(&mut state, PlayerId(1), 1, 1, vec![]);
+        let current_threat = threat_level(&state, PlayerId(0), PlayerId(1));
+
+        let mut projected_state = state.clone();
+        projected_state.objects.get_mut(&creature).unwrap().power = Some(9);
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentBeginCombat,
+            state: projected_state.clone(),
+            snapshots: vec![(ProjectionHorizon::OpponentBeginCombat, projected_state)],
+            confidence: Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+
+        assert_eq!(board_stats(&state, PlayerId(1)).power, 1);
+        assert_eq!(board_stats(&projection.state, PlayerId(1)).power, 9);
+        let projected_threat =
+            threat_level_projected(&state, PlayerId(0), PlayerId(1), Some(&projection));
+        assert!(
+            projected_threat > current_threat,
+            "a projection with more opponent power must increase threat: {current_threat} -> {projected_threat}"
+        );
     }
 
     #[test]
@@ -2512,6 +2656,7 @@ mod tests {
         let own = add_creature(&mut state, PlayerId(0), 3, 3, vec![]);
         let teammate = add_creature(&mut state, PlayerId(1), 3, 3, vec![]);
         let eliminated = add_creature(&mut state, PlayerId(2), 3, 3, vec![]);
+        let live_enemy = add_creature(&mut state, PlayerId(3), 3, 3, vec![]);
         state.players[2].is_eliminated = true;
 
         let noncreature_card_id = CardId(state.next_object_id);
@@ -2545,5 +2690,11 @@ mod tests {
                 "{id:?} must be outside the living-opponent battlefield-creature contract"
             );
         }
+
+        assert!(
+            opponent_battlefield_creature_threat_value(&state, PlayerId(0), live_enemy)
+                .is_some_and(|value| value > 0.0),
+            "reach-guard: a living opponent's battlefield creature must remain a valid consumer"
+        );
     }
 }

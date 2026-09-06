@@ -6811,8 +6811,9 @@ mod tests {
             valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
+        let hidden = add_opp_hidden(&mut state, "HiddenA", Zone::Hand);
         let session = AiSession::arc_from_game(&state);
-        let mut k0 = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(2);
+        let mut k0 = create_config(AiDifficulty::Hard, Platform::Native);
         k0.search.determinization_samples = 0;
         let mut k3 = k0.clone();
         k3.search.determinization_samples = 3;
@@ -6832,6 +6833,25 @@ mod tests {
         let (entries, _pairs, completed) = crate::combat_ai::expanded_comparison_counters();
         assert_eq!(entries, 1, "K=3 enters the root combat comparison once");
         assert!(completed >= 2, "the one entry evaluates complete proposals");
+
+        let mut measured_k0 =
+            create_config(AiDifficulty::Hard, Platform::Native).into_measurement(2);
+        measured_k0.search.determinization_samples = 0;
+        let mut measured_k3 = measured_k0.clone();
+        measured_k3.search.determinization_samples = 3;
+        assert_eq!(
+            score_candidates_with_session(&state, PlayerId(0), &measured_k3, &session),
+            score_candidates_with_session(&state, PlayerId(0), &measured_k0, &session),
+            "measurement deadline override preserves the same one-action attacker score for K=0 and K=3"
+        );
+
+        state.objects.get_mut(&hidden).unwrap().name = "HiddenB".to_string();
+        let mutated_session = AiSession::arc_from_game(&state);
+        assert_eq!(
+            score_candidates_with_session(&state, PlayerId(0), &k3, &mutated_session),
+            sampled,
+            "attacker comparison reads public combat state, not a hidden opponent identity with unchanged counts"
+        );
     }
 
     #[test]
@@ -9721,25 +9741,52 @@ mod tests {
             ],
             false,
         );
+        state.format_config = engine::types::format::FormatConfig::free_for_all();
+        state.players.push(state.players[1].clone());
         state.players[1].life = 1;
         for _ in 0..6 {
             add_creature(&mut state, PlayerId(2), 4, 4);
         }
 
         let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
         let mut rng = SmallRng::seed_from_u64(42);
-        assert_eq!(
-            choose_action(&state, PlayerId(0), &config, &mut rng),
-            Some(GameAction::ChooseTarget {
-                target: Some(TargetRef::Player(PlayerId(1))),
-            }),
-            "a known fixed lethal remains above a nonlethal threatening opponent"
+        let selection =
+            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let receipt = selection
+            .receipt
+            .expect("target selection is a ranked decision");
+        let lethal = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(PlayerId(1))),
+                    }
+            })
+            .expect("the engine issued the legal lethal opponent target");
+        let threatening = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(PlayerId(2))),
+                    }
+            })
+            .expect("the engine issued the legal threatening opponent target");
+        assert!(
+            lethal.is_top_ranked && lethal.score > threatening.score,
+            "a known fixed lethal remains above a nonlethal threatening opponent: lethal={lethal:?}, threatening={threatening:?}"
         );
     }
 
     #[test]
     fn public_harmful_object_target_prefers_the_threatening_controller() {
         let mut target_state = spell_target_selection_state(Vec::new(), Vec::new(), false);
+        target_state.format_config = engine::types::format::FormatConfig::free_for_all();
+        target_state.players.push(target_state.players[1].clone());
         let quiet = add_creature(&mut target_state, PlayerId(1), 2, 2);
         let threatening = add_creature(&mut target_state, PlayerId(2), 2, 2);
         for _ in 0..5 {
@@ -9759,13 +9806,41 @@ mod tests {
         }
 
         let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let session = AiSession::arc_from_game(&target_state);
         let mut rng = SmallRng::seed_from_u64(42);
-        assert_eq!(
-            choose_action(&target_state, PlayerId(0), &config, &mut rng),
-            Some(GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(threatening)),
-            }),
-            "equal legal bodies must be ranked by their controller's shared threat"
+        let selection = choose_action_with_session_diagnostic(
+            &target_state,
+            PlayerId(0),
+            &config,
+            &mut rng,
+            &session,
+        );
+        let receipt = selection
+            .receipt
+            .expect("target selection is a ranked decision");
+        let quiet = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(quiet)),
+                    }
+            })
+            .expect("the engine issued the quiet legal creature target");
+        let threatening = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(threatening)),
+                    }
+            })
+            .expect("the engine issued the threatening legal creature target");
+        assert!(
+            threatening.is_top_ranked && threatening.score > quiet.score,
+            "equal legal bodies must be ranked by their controller's shared threat: quiet={quiet:?}, threatening={threatening:?}"
         );
     }
 
