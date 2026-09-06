@@ -857,7 +857,36 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
             .iter_all()
             .map(|entry| entry.definition.clone())
             .collect(),
-        replacement_definitions: obj.replacement_definitions.clone(),
+        // CR 611.2c + CR 613.1 (issue #8485): a face snapshot captures the FACE's
+        // characteristics. A replacement created by the resolution of a spell or
+        // ability is not one of them, so it must not ride out with the face.
+        //
+        // This filter is load-bearing for correctness, not tidiness.
+        // `apply_back_face_to_object` writes this vector to BOTH the live store and
+        // `base_replacement_definitions`. A `Resolution`-origin def reaching base
+        // breaks the precondition that
+        // `game_object::reseed_replacements_carrying_resolution_effects` relies on
+        // ("no baseline ever contains a `Resolution` member"): the carry-over would
+        // then compute `base ++ live_resolution` on EVERY layer pass, growing the
+        // shield count by one per pass without bound — a Maze of Ith / regeneration /
+        // Fog shield would prevent N damage events instead of one. Reachable on any
+        // transform round-trip, which stashes the live face and restores it.
+        //
+        // Same guard `copiable_replacement_definitions` (producer side) and
+        // `GameObject::sync_missing_base_characteristics` (back-fill side) already
+        // apply. Filtering HERE rather than at the base write also stops the live
+        // write from restoring a stale, possibly already-consumed shield.
+        //
+        // Consequence, deliberate and documented: a transform DROPS a carried
+        // resolution shield rather than duplicating it. See the removal-paths note
+        // on `reseed_replacements_carrying_resolution_effects`.
+        replacement_definitions: obj
+            .replacement_definitions
+            .iter_all()
+            .filter(|d| !d.is_resolution_installed())
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
         // Snapshot: deref the Arc to satisfy `Definitions::from(Vec<T>)`.
         static_definitions: (*obj.base_static_definitions).clone().into(),
         color: obj.color.clone(),
@@ -1718,6 +1747,110 @@ pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 611.2c + CR 613.1 (issue #8485, round-5 HIGH-1): a transform ROUND TRIP
+    /// must not seed `base_replacement_definitions` with a resolution-created
+    /// shield, and must not multiply it once per layer pass.
+    ///
+    /// The bug this pins: `snapshot_object_face` copied the LIVE store verbatim and
+    /// `apply_back_face_to_object` writes that snapshot to live AND base. A
+    /// `Resolution`-origin def in base falsifies the precondition
+    /// `game_object::reseed_replacements_carrying_resolution_effects` depends on, so
+    /// the carry-over computed `base ++ live_resolution` on EVERY pass and the shield
+    /// count grew without bound — a Maze of Ith / regeneration / Fog shield would
+    /// prevent N damage events instead of one. No existing test covered a transform
+    /// round-trip over a live resolution shield, which is how it survived review.
+    ///
+    /// Revert-failing on two independent assertions: un-filter
+    /// `snapshot_object_face` and (a) base holds a `Resolution` def and (b) the
+    /// per-object resolution count GROWS between the two `evaluate_layers` passes.
+    #[test]
+    fn transform_round_trip_does_not_duplicate_a_resolution_shield() {
+        fn printed_def() -> ReplacementDefinition {
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(crate::types::ability::PreventionAmount::All)
+        }
+        fn resolution_shield() -> ReplacementDefinition {
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(crate::types::ability::PreventionAmount::All)
+                .expiry(crate::types::ability::RestrictionExpiry::EndOfTurn)
+        }
+        fn resolution_count(state: &GameState, id: ObjectId) -> usize {
+            state.objects[&id]
+                .replacement_definitions
+                .iter_all()
+                .filter(|d| d.is_resolution_installed())
+                .count()
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.base_characteristics_initialized = true;
+            obj.base_replacement_definitions = Arc::new(vec![printed_def()]);
+            obj.replacement_definitions = vec![printed_def()].into();
+            obj.install_resolution_replacement(resolution_shield());
+            let mut back = snapshot_object_face(obj);
+            back.name = "Back Face".to_string();
+            obj.back_face = Some(back);
+        }
+        // Positive reach-guard: the shield really is live before the transform, so
+        // the post-transform assertions are not vacuously satisfied by there being
+        // nothing to duplicate.
+        assert_eq!(resolution_count(&state, id), 1);
+
+        swap_object_faces(state.objects.get_mut(&id).unwrap());
+        assert_eq!(
+            state.objects[&id].name, "Back Face",
+            "reach-guard: the transform must actually have happened"
+        );
+        swap_object_faces(state.objects.get_mut(&id).unwrap());
+        assert_eq!(
+            state.objects[&id].name, "Front Face",
+            "reach-guard: the return transform must actually have happened"
+        );
+
+        // The invariant the whole carry-over rests on.
+        assert!(
+            !state.objects[&id]
+                .base_replacement_definitions
+                .iter()
+                .any(|d| d.is_resolution_installed()),
+            "a transform round-trip must not seed base with a `Resolution` def: \
+             base = {:?}",
+            state.objects[&id].base_replacement_definitions
+        );
+
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        let after_first = resolution_count(&state, id);
+        state.layers_dirty.mark_full();
+        crate::game::layers::evaluate_layers(&mut state);
+        let after_second = resolution_count(&state, id);
+        assert_eq!(
+            after_first, after_second,
+            "the resolution-shield count must not grow per layer pass \
+             (pass 1: {after_first}, pass 2: {after_second})"
+        );
+        assert!(
+            after_second <= 1,
+            "at most one copy of the shield may survive, got {after_second}"
+        );
+    }
+
     use crate::database::CardDatabase;
     use crate::game::deck_loading::create_object_from_card_face;
     use crate::game::deck_loading::DeckEntry;

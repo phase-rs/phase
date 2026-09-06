@@ -1689,9 +1689,13 @@ impl GameObject {
     /// (see `reseed_replacements_carrying_resolution_effects`).
     pub(crate) fn install_resolution_replacement(&mut self, mut def: ReplacementDefinition) {
         // CR 611.2a: a `Resolution`-origin def is carried across every CR 613.1
-        // reset, so its ONLY removal paths are an expiry prune (`turns.rs`, all
-        // three of which key on `expiry` alone) and a zone change. A def with no
-        // expiry has neither — carrying it would make it immortal. Fail CLOSED:
+        // reset, so its SCHEDULED removal paths are an expiry prune (`turns.rs`, all
+        // three of which key on `expiry` alone) and a zone change. (Three face
+        // rewrites — transform/specialize, flip, morph — also drop it in place; see
+        // `reseed_replacements_carrying_resolution_effects`. Those are unscheduled
+        // shield-loss and cannot be relied on to end anything.) A def with no expiry
+        // has no scheduled end at all — carrying it would make it immortal. Fail
+        // CLOSED:
         // install it live-only, exactly as this call site behaved before the
         // authority existed, so it is still reset away at the next pass. The one
         // caller that can reach this arm is `add_target_replacement`'s
@@ -1703,14 +1707,31 @@ impl GameObject {
             self.replacement_definitions.push(def);
             return;
         }
-        // Asserted AFTER the fail-closed return, not before it: the invariant is
-        // about defs that actually get STAMPED `Resolution`, and an unbounded def
-        // never is. Checking it earlier would abort debug and test builds for a
-        // legitimate unstated-duration rider that merely happens to equal a printed
-        // base def — a def that, being live-only and unstamped, cannot double-apply.
+        // Asserts the ACTUAL precondition of the carry-over: base holds no
+        // `Resolution`-origin member at all. That is what
+        // `reseed_replacements_carrying_resolution_effects` needs to stay
+        // idempotent, and violating it causes unbounded per-pass duplication.
+        //
+        // Deliberately NOT `base.contains(&def)`. That older form compared the
+        // incoming def — necessarily still `Characteristic` at this point, since the
+        // stamp is applied below — against base by full structural equality, so it
+        // fired on a legitimate shape: a turn-bound rider installed through this arm
+        // onto an object that already carries a structurally identical rider written
+        // to base by `add_target_replacement`'s `install_to_base` trio (two Auras or
+        // two triggers granting the same rider). That is legal and harmless, and it
+        // would have aborted debug and test builds.
+        //
+        // Placed after the fail-closed return because an unbounded def is never
+        // stamped and so cannot break the invariant either way. This form would also
+        // have caught the transform round-trip that seeded base with a `Resolution`
+        // def (issue #8485 round 5) on the next install onto that object.
         debug_assert!(
-            !self.base_replacement_definitions.contains(&def),
-            "a resolution-installed replacement must not also live in base"
+            !self
+                .base_replacement_definitions
+                .iter()
+                .any(|d| d.is_resolution_installed()),
+            "base must never hold a `Resolution`-origin replacement: the CR 613.1 \
+             carry-over would then re-add it every pass, duplicating the effect"
         );
         def.origin = crate::types::ability::ReplacementOrigin::Resolution;
         self.replacement_definitions.push(def);
@@ -3333,16 +3354,24 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 /// ability.
 ///
 /// CR 613.1 governs an object's CHARACTERISTICS. CR 611.2c settles that a
-/// prevention shield is not one — "An effect that reads 'Prevent all damage
-/// creatures would deal this turn' doesn't modify any object's characteristics,
-/// so it's modifying the rules of the game." A shield is merely stored on an
+/// prevention shield is not one — CR 611.2c's EXAMPLE block says so outright:
+/// "An effect that reads 'Prevent all damage creatures would deal this turn'
+/// doesn't modify any object's characteristics, so it's modifying the rules of
+/// the game." (That sentence is the Example, not the rule text proper; the rule
+/// itself is the surrounding CR 611.2c paragraph on continuous effects from
+/// resolution.) A shield is merely stored on an
 /// object so the pipeline can find it, and CR 611.2a gives it the lifetime the
 /// ability stated, not "until the next layer pass". CR 615.3 ends it when it is
 /// used up or its duration expires.
 ///
 /// Carried entries keep their runtime state — CR 615.3 consumption, CR 615.7
-/// depletion, CR 701.19a regeneration — because they are the same, single copy
-/// the appliers mutate.
+/// depletion, CR 701.19a regeneration — because the carried VALUE is copied
+/// forward verbatim, `is_consumed` and depleted amount included. (The entries are
+/// `.cloned()` into the rebuilt vector below, so this is value preservation, not
+/// object identity; nothing holds a borrow across the rebuild. The single-copy
+/// property that matters is the STORE-level one: a resolution def lives in the
+/// live store only, never also in base, so no pristine twin can be re-seeded over
+/// a mutated one.)
 ///
 /// TWO baselines, ONE authority. Within a single layer pass an object's live
 /// store can be wholesale-rewritten up to three times:
@@ -3369,17 +3398,40 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 ///   2. `GameObject::sync_missing_base_characteristics` is the ONLY production path
 ///      anywhere in the tree that can copy the LIVE store INTO base, and it filters
 ///      `Resolution` defs out.
-///   3. EVERY other production write to `base_replacement_definitions` sources its
-///      content from somewhere a `Resolution` def cannot be — a parsed / printed /
-///      face / snapshot source, or a RETAIN over what is already there, or a
-///      `#[cfg(test)]` fixture. Regenerate that audit with:
-///      `grep -rn "base_replacement_definitions" crates/engine/src | grep -E "=|make_mut"`.
-///      (The `printed_cards.rs` write copies `CopiableValues::replacement_definitions`,
+///   3. `printed_cards::apply_back_face_to_object` writes a `BackFaceData` snapshot
+///      to base. That snapshot comes from `printed_cards::snapshot_object_face`,
+///      which copies the LIVE store — so it MUST filter `Resolution` defs out, and
+///      does. This leg was previously (and wrongly) written as "a parsed / printed /
+///      face / snapshot source" being safe by construction; it is not, and a
+///      transform round-trip (`transform.rs` stashes the live face and restores it,
+///      also reachable via `turn_face_up.rs`, `morph.rs`, `zones.rs`, `casting.rs`,
+///      `specialize.rs`) put a `Resolution` def into base and made this function
+///      compute `base ++ live_resolution` on EVERY pass — unbounded per-pass
+///      duplication of the shield. Pinned by
+///      `printed_cards::tests::transform_round_trip_does_not_duplicate_a_resolution_shield`.
+///   4. EVERY other production write to `base_replacement_definitions` sources its
+///      content from a parsed / printed source, or is a RETAIN over what is already
+///      there, or is a `#[cfg(test)]` fixture. Regenerate that audit with:
+///      `grep -rn "base_replacement_definitions" crates/engine/src | grep -E "=|make_mut"`
+///      and check each hit against the live store, NOT just against the parser.
+///      (The `printed_cards.rs` copy write takes `CopiableValues::replacement_definitions`,
 ///      which `copiable_replacement_definitions` derives from base — so it inherits
 ///      the invariant rather than threatening it.)
 ///
-/// The carried set is therefore invariant across all three rewrites, for every
-/// baseline the two callers can supply. That is why this function takes the
+/// REMOVAL PATHS, stated accurately. The expiry prunes (`turns.rs`: cleanup,
+/// end-of-combat teardown, untap step) and a zone change
+/// (`revert_layered_characteristics_to_base`, CR 400.7) are the SCHEDULED ends. They
+/// are not the only ones: three in-place face rewrites also drop a carried shield,
+/// because each wholesale-assigns the live store from a face snapshot —
+/// `printed_cards::apply_back_face_to_object` (transform / specialize),
+/// `flip.rs` (CR 710.1b), and `morph.rs` (turn face down, CR 708.2a). Those three
+/// are shield-LOSS, not duplication, and are a known limitation rather than a
+/// correctness hazard; CR 611.2a argues the shield should survive them, which is
+/// recorded in `BACKLOG.md`. Do not restate the old "removed ONLY by an expiry
+/// prune or a zone change" claim — it is false.
+///
+/// The carried set is therefore invariant across all three IN-PASS rewrites, for
+/// every baseline the two callers can supply. That is why this function takes the
 /// baseline as a PARAMETER rather than reading `obj.base_replacement_definitions`
 /// itself.
 ///

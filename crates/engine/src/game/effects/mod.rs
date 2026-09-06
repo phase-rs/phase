@@ -2864,8 +2864,19 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
 /// RESOLUTION of a spell or ability whose scope is its SOURCE rather than a
 /// recipient object.
 ///
-/// THE single authority for that case, shared by `prevent_damage` and
-/// `create_damage_replacement` so the two cannot drift.
+/// The single authority for the SOURCE-SCOPED DAMAGE-SHIELD installs it owns —
+/// `prevent_damage`'s untargeted branch and player-scoped arm, and
+/// `create_damage_replacement`'s non-battlefield arm — so those cannot drift.
+///
+/// Scope of that claim, stated precisely: it is NOT the only writer to
+/// `state.pending_damage_replacements`. `add_target_replacement::resolve` still
+/// pushes raw at its `TargetFilter::None` global arm and its `TargetRef::Player`
+/// arm, and neither latches `source_controller`, so a controller-relative gate on
+/// those definitions falls back to `state.active_player` in the pending scan
+/// rather than to the installer (CR 113.8 / CR 109.5 would prefer the installer).
+/// That is PRE-EXISTING behavior, deliberately left alone by issue #8485 rather
+/// than changed late in that work, and it is recorded in `BACKLOG.md`. Routing
+/// those two arms through this authority is the clean end state.
 ///
 /// CR 113.7a: "Once activated or triggered, an ability exists on the stack
 /// independently of its source. Destruction or removal of the source after that

@@ -214,9 +214,18 @@ fn run_mazed_combat_with_maze_removal(
     // have been performed. Without this, a future change that stopped raising
     // `AssignCombatDamage` would silently return those fixtures to the vacuous state
     // this guard was added to fix.
+    //
+    // Counted PER ATTACKER, not over the whole combat: CR 510.1c raises the
+    // division for a single attacker blocked by two or more creatures, so a combat
+    // with two attackers blocked by one creature EACH needs no division at all
+    // (`issue_8485_maze_prevents_both_directions_against_opposing_attacker`). A
+    // whole-combat `blockers.len() > 1` would demand a division that correctly never
+    // happens and fail that fixture. `blockers` is `(blocker, attacker)` pairs.
+    //
     // Looked up defensively: a panic on a missing object here would mask the
     // assertion rather than report it.
-    let needs_division = blockers.len() > 1
+    let blockers_on_mazed = blockers.iter().filter(|(_, atk)| *atk == attacker).count();
+    let needs_division = blockers_on_mazed > 1
         || runner
             .state()
             .objects
@@ -224,9 +233,9 @@ fn run_mazed_combat_with_maze_removal(
             .is_some_and(|o| o.has_keyword(&engine::types::keywords::Keyword::Trample));
     assert!(
         !needs_division || divided_damage,
-        "this fixture blocks with {} creature(s) and/or has trample, so a CR 510.1c \
-         damage division was required — but `AssignCombatDamage` never fired",
-        blockers.len()
+        "the Mazed attacker is blocked by {blockers_on_mazed} creature(s) and/or has \
+         trample, so a CR 510.1c damage division was required — but \
+         `AssignCombatDamage` never fired"
     );
 }
 
