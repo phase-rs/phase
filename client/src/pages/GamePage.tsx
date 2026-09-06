@@ -1376,6 +1376,10 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
     "--game-split-safe-top": "0px",
+    // Fixed board tools are descendants of the game column, while the log is
+    // its sibling. Keep those tools out of the dedicated log column.
+    "--game-right-rail-offset": logPanelOpen && !isMobile ? "20rem" : "0px",
+    "--game-left-rail-offset": "0px",
     // Where the targeting prompt starts, which is the only part of its
     // placement this page can state: the split layout puts seat panes at the
     // very top of the board, so the prompt clears them. How TALL the block is
@@ -1470,9 +1474,12 @@ function GamePageContent({
 
   return (
     <div
-      ref={containerRef}
-      className={`game-no-select relative h-[100dvh] w-full overflow-hidden bg-gray-950${showDebugBounds ? " debug-bounds" : ""}`}
-      style={gamePageStyle}
+      className={`game-no-select flex h-[100dvh] w-full flex-col bg-gray-950 lg:flex-row${showDebugBounds ? " debug-bounds" : ""}`}
+    >
+      <div
+        ref={containerRef}
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden"
+        style={gamePageStyle}
       onContextMenu={(e) => {
         e.preventDefault();
         const target = e.target as HTMLElement | null;
@@ -1539,13 +1546,6 @@ function GamePageContent({
         className={`relative ${boardChoiceLayerActive && !isReconnecting ? GAME_Z_LAYER.boardChoiceGrid : GAME_Z_LAYER.board} grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
         style={{
           paddingTop: "var(--game-top-overlay-offset, 0px)",
-          // The game log docks as a rail, not an overlay: it publishes its width
-          // as `--game-{left,right}-rail-offset` and the board's content box
-          // shrinks by that much, so nothing is ever hidden underneath it.
-          // Padding (not width/margin) keeps row 3's `100dvh`-derived height
-          // math untouched — only the horizontal content box moves.
-          paddingLeft: "var(--game-left-rail-offset, 0px)",
-          paddingRight: "var(--game-right-rail-offset, 0px)",
           gridTemplateRows,
           gridTemplateColumns: "1fr",
         }}
@@ -1742,7 +1742,6 @@ function GamePageContent({
         </div>
       </DraggableWidget>
 
-      <GameLogPanel />
       <MobileHandDrawer />
       <FlexEditOverlay />
 
@@ -2345,6 +2344,8 @@ function GamePageContent({
         onExit={handleUnhandledExit}
         exitLabel={isOnlineMode ? t("gamePage.actions.concedeGame") : t("gamePage.actions.returnToMenuLower")}
       />
+      </div>
+      <GameLogPanel />
     </div>
   );
 }

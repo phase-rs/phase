@@ -3,7 +3,6 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { LOG_CATEGORIES, type GameLogEntry, type LogCategory } from "../../adapter/types.ts";
-import { useDraggableWidget } from "../../hooks/useDraggableWidget.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -24,7 +23,6 @@ import { LogEntry } from "./LogEntry.tsx";
 import { copyText } from "../../services/copyText";
 
 const EMPTY_LOG: GameLogEntry[] = [];
-const LOG_PANEL_WIDTH_PX = 320;
 const VIEWS: LogView[] = ["timeline", "details", "diagnostics"];
 
 const VIEW_LABEL_KEYS: Record<LogView, string> = {
@@ -57,8 +55,6 @@ export function GameLogPanel() {
   const { t } = useTranslation("game");
   const logHistory = useGameStore((s) => s.logHistory ?? EMPTY_LOG);
   const logPanelLastChoice = usePreferencesStore((s) => s.logPanelLastChoice);
-  const logDockSide = usePreferencesStore((s) => s.logDockSide);
-  const setLogDockSide = usePreferencesStore((s) => s.setLogDockSide);
   const isGameOver = useGameStore((s) => s.gameState?.waiting_for?.type === "GameOver");
   const isOpen = useUiStore((s) => s.logPanelOpen);
   const setLogPanelOpen = useUiStore((s) => s.setLogPanelOpen);
@@ -67,7 +63,6 @@ export function GameLogPanel() {
   const gameSessionGeneration = useGameStore((s) => s.gameSessionGeneration);
   const reduceMotion = useReducedMotion();
   const isMobile = useIsMobile();
-  const dockedLeft = !isMobile && logDockSide === "left";
 
   const [view, setView] = useState<LogView>("timeline");
   const [searchQuery, setSearchQuery] = useState("");
@@ -81,7 +76,6 @@ export function GameLogPanel() {
   const lastGameSessionRef = useRef(gameSessionGeneration);
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nearBottomRef = useRef(true);
-  const logDrag = useDraggableWidget({ kind: "widget", key: "logPanel" });
 
   const presentationFiltered = useMemo(
     () => filterLogByView(logHistory, view, categoryFilter.size > 0 ? categoryFilter : null, showHiddenInformation),
@@ -187,22 +181,6 @@ export function GameLogPanel() {
     if (nearBottomRef.current) setUnreadCount(0);
   }, []);
 
-  useEffect(() => {
-    const root = document.documentElement;
-    root.style.setProperty(
-      "--game-right-rail-offset",
-      isOpen && !isMobile && !dockedLeft ? `${LOG_PANEL_WIDTH_PX}px` : "0px",
-    );
-    root.style.setProperty(
-      "--game-left-rail-offset",
-      isOpen && !isMobile && dockedLeft ? `${LOG_PANEL_WIDTH_PX}px` : "0px",
-    );
-    return () => {
-      root.style.setProperty("--game-right-rail-offset", "0px");
-      root.style.setProperty("--game-left-rail-offset", "0px");
-    };
-  }, [dockedLeft, isMobile, isOpen]);
-
   const toggleCategory = (category: LogCategory) => {
     setCategoryFilter((previous) => {
       const next = new Set(previous);
@@ -253,19 +231,10 @@ export function GameLogPanel() {
   return (
     <AnimatePresence>
       {isOpen && (
-        <motion.div
-          ref={logDrag.ref}
-          data-flex-zone="logPanel"
+        <motion.aside
           role="region"
           aria-label={t("log.panelLabel")}
-          drag={logDrag.drag}
-          dragMomentum={logDrag.dragMomentum}
-          dragElastic={logDrag.dragElastic}
-          onDragStart={logDrag.onDragStart}
-          onDragEnd={logDrag.onDragEnd}
-          onClickCapture={logDrag.onClickCapture}
-          className={`fixed bottom-0 top-0 z-[60] flex w-[min(20rem,100vw)] flex-col bg-gray-900/95 pb-[env(safe-area-inset-bottom)] shadow-2xl ${dockedLeft ? "left-0 border-r border-gray-700" : "right-0 border-l border-gray-700"} ${logDrag.drag ? "cursor-grab active:cursor-grabbing" : ""}`}
-          style={logDrag.style}
+          className="flex h-[min(50dvh,28rem)] w-full shrink-0 flex-col border-t border-gray-700 bg-gray-900/95 pb-[env(safe-area-inset-bottom)] shadow-2xl lg:h-full lg:w-80 lg:border-l lg:border-t-0"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -274,16 +243,9 @@ export function GameLogPanel() {
           <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-300">{t("log.title")}</h3>
             <div className="flex items-center gap-1">
-              {!isMobile && (
-                <button type="button" onClick={() => setLogDockSide(dockedLeft ? "right" : "left")} className="min-h-11 min-w-11 rounded text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400" aria-label={t(dockedLeft ? "log.dockRight" : "log.dockLeft")} title={t(dockedLeft ? "log.dockRight" : "log.dockLeft")}>
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-9L21 3m0 0-4.5 4.5M21 3H7.5" />
-                  </svg>
-                </button>
-              )}
               <button type="button" onClick={() => void handleCopy()} className="min-h-11 rounded px-2 text-[10px] text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400" aria-label={t("log.copyFiltered", { count: filteredEntries.length })}>{t("log.copy")}</button>
               <button type="button" onClick={handleExport} className="min-h-11 rounded px-2 text-[10px] text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400" aria-label={t("log.exportFiltered", { count: filteredEntries.length })}>{t("log.export")}</button>
-              <button type="button" onClick={() => setLogPanelOpenByUser(false)} disabled={logDrag.drag} className="min-h-11 min-w-11 rounded text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400 disabled:opacity-40" aria-label={t("log.closeLog")}>×</button>
+              <button type="button" onClick={() => setLogPanelOpenByUser(false)} className="min-h-11 min-w-11 rounded text-gray-400 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400" aria-label={t("log.closeLog")}>×</button>
             </div>
           </div>
 
@@ -318,7 +280,7 @@ export function GameLogPanel() {
           </div>
           {unreadCount > 0 && <button type="button" onClick={jumpToLatest} className="m-2 min-h-11 rounded bg-cyan-700 px-3 text-xs font-medium text-white shadow focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("log.jumpToLatest", { count: unreadCount })}</button>}
           <p className="sr-only" aria-live="polite">{copyStatus === "success" ? t("log.copySuccess") : copyStatus === "failure" ? t("log.copyFailure") : filterSummary}</p>
-        </motion.div>
+        </motion.aside>
       )}
     </AnimatePresence>
   );

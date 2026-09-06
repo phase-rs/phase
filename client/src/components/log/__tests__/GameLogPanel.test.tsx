@@ -13,25 +13,6 @@ import {
 } from "../../../test/factories/gameStateFactory.ts";
 import { GameLogPanel } from "../GameLogPanel.tsx";
 
-const draggable = vi.hoisted(() => ({ ref: { current: null as HTMLDivElement | null } }));
-
-vi.mock("../../../hooks/useDraggableWidget.ts", () => ({
-  useDraggableWidget: () => ({
-    ref: draggable.ref,
-    style: {},
-    drag: false,
-    dragMomentum: false,
-    dragElastic: 0,
-    onDragStart: vi.fn(),
-    onDragEnd: vi.fn(),
-    onClickCapture: undefined,
-    dragging: false,
-    x: undefined,
-    y: undefined,
-    scale: 1,
-  }),
-}));
-
 function entry(
   seq: number,
   text: string,
@@ -83,7 +64,6 @@ function snapshot(seq: number): EngineSnapshot {
 describe("GameLogPanel", () => {
   beforeEach(() => {
     setViewportWidth(1024);
-    draggable.ref.current = null;
     useGameStore.getState().reset();
     useGameStore.setState({
       gameState: buildGameState({ waiting_for: buildPriorityWaitingFor() }),
@@ -271,11 +251,10 @@ describe("GameLogPanel", () => {
     expect(screen.getByText("AI draws a card")).toBeInTheDocument();
   });
 
-  it("shares the panel node with drag behavior and stays open through outside interaction", () => {
+  it("stays open through outside interaction until explicitly closed", () => {
     render(<GameLogPanel />);
 
     const panel = screen.getByRole("region", { name: "Game log panel" });
-    expect(draggable.ref.current).toBe(panel);
 
     fireEvent.mouseDown(panel);
     expect(useUiStore.getState().logPanelOpen).toBe(true);
@@ -373,23 +352,16 @@ describe("GameLogPanel", () => {
     expect(usePreferencesStore.getState().logPanelLastChoice).toBe("closed");
   });
 
-  it("persists a desktop dock-side swap and reserves the matching game rail", () => {
+  it("renders as an in-flow desktop column instead of a fixed drawer", () => {
     render(<GameLogPanel />);
 
     const panel = screen.getByRole("region", { name: "Game log panel" });
-    expect(panel).toHaveClass("right-0", "border-l");
-    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("320px");
-    expect(document.documentElement.style.getPropertyValue("--game-left-rail-offset")).toBe("0px");
-
-    fireEvent.click(screen.getByRole("button", { name: "Dock game log on the left" }));
-
-    expect(usePreferencesStore.getState().logDockSide).toBe("left");
-    expect(panel).toHaveClass("left-0", "border-r");
-    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("0px");
-    expect(document.documentElement.style.getPropertyValue("--game-left-rail-offset")).toBe("320px");
+    expect(panel).toHaveClass("w-full", "lg:h-full", "lg:w-80", "lg:border-l");
+    expect(panel).not.toHaveClass("fixed", "left-0", "right-0", "z-[60]");
+    expect(screen.queryByRole("button", { name: /dock game log/i })).not.toBeInTheDocument();
   });
 
-  it("keeps the narrow layout right-docked with its existing responsive width", () => {
+  it("uses a separate bottom row on narrow screens", () => {
     setViewportWidth(800);
     usePreferencesStore.setState({ logDockSide: "left" });
 
@@ -402,20 +374,9 @@ describe("GameLogPanel", () => {
     });
 
     const panel = screen.getByRole("region", { name: "Game log panel" });
-    expect(panel).toHaveClass("right-0", "border-l", "w-[min(20rem,100vw)]");
+    expect(panel).toHaveClass("h-[min(50dvh,28rem)]", "w-full", "border-t");
+    expect(panel).not.toHaveClass("fixed", "right-0", "left-0");
     expect(screen.queryByRole("button", { name: /dock game log/i })).not.toBeInTheDocument();
-    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("0px");
-    expect(document.documentElement.style.getPropertyValue("--game-left-rail-offset")).toBe("0px");
-  });
-
-  it("clears both game-rail offsets when the panel unmounts", () => {
-    const { unmount } = render(<GameLogPanel />);
-
-    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("320px");
-    unmount();
-
-    expect(document.documentElement.style.getPropertyValue("--game-right-rail-offset")).toBe("0px");
-    expect(document.documentElement.style.getPropertyValue("--game-left-rail-offset")).toBe("0px");
   });
 
   it("opens a sticky preview when a card-name link is clicked", () => {
