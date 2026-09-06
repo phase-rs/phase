@@ -1878,14 +1878,15 @@ impl GameObject {
                 // `GrantKeywords` (base_keywords) and `ModifyCost`
                 // (base_static_definitions) arms above.
                 //
-                // CR 601.2f / CR 611.2c: the match below is EXHAUSTIVE over
-                // `PerpetualGrantModification` — the closed, typed set of kinds
-                // this installer handles (`types/ability.rs`). It carries no
-                // wildcard arm on purpose: the parser cannot construct a
-                // `GrantAbility` holding an uninstallable kind
+                // Architectural note (no CR citation -- this describes the
+                // Rust match's exhaustiveness, not a rule): the match below is
+                // EXHAUSTIVE over `PerpetualGrantModification` -- the closed,
+                // typed set of kinds this installer handles (`types/ability.rs`).
+                // It carries no wildcard arm on purpose: the parser cannot
+                // construct a `GrantAbility` holding an uninstallable kind
                 // (`PerpetualGrantModification::try_from` is the single gate, and
-                // rejects `classify_quoted_inner`'s other outputs —
-                // `GrantTrigger`, `GrantReplacement` — closing the whole parse),
+                // rejects `classify_quoted_inner`'s other outputs --
+                // `GrantTrigger`, `GrantReplacement` -- closing the whole parse),
                 // and widening that gate is a compile error here until the new
                 // kind is installed. A wildcard would let a widened gate record
                 // the modification in `perpetual_mods` while installing nothing.
@@ -1908,9 +1909,9 @@ impl GameObject {
                             self.static_definitions.push(synthetic.clone());
                             Arc::make_mut(&mut self.base_static_definitions).push(synthetic);
                         }
-                        // CR 113 / CR 117: the quoted body classified to a full
-                        // spell/activated ability (Agent of Raffine's "You may
-                        // spend mana as though it were mana of any color to
+                        // CR 113.3a + CR 113.3b: the quoted body classified to a
+                        // full spell/activated ability (Agent of Raffine's "You
+                        // may spend mana as though it were mana of any color to
                         // cast this spell.") rather than a bare keyword or
                         // restriction static. Mirrors the NON-perpetual layer-6
                         // `GrantAbility` apply (`game/layers.rs`): push onto

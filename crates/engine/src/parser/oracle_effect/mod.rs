@@ -11066,13 +11066,14 @@ fn try_parse_perpetual_grant_ability(tp: TextPair, ctx: &ParseContext) -> Option
     }
 
     let (lower_rest, target) = parse_perpetual_self_subject(tp.lower, ctx)?;
-    // CR 608.2k idiom (`oracle_util`'s `text.len() - rest.len()` offset,
-    // `TextPair` cannot be reconstructed here because `parse_perpetual_self_subject`
-    // returns a lowercase-only remainder): re-derive the ORIGINAL-case
-    // remainder from how much of `tp.lower` the subject prefix consumed, so
-    // the quoted bodies below are classified with their printed casing
-    // preserved (`classify_quoted_inner`'s fallback stamps its
-    // `AbilityDefinition::description` straight from the text it is handed).
+    // Not a CR citation -- a Rust string-slicing idiom (`oracle_util`'s
+    // `text.len() - rest.len()` offset), used because `TextPair` cannot be
+    // reconstructed here: `parse_perpetual_self_subject` returns a
+    // lowercase-only remainder. Re-derive the ORIGINAL-case remainder from how
+    // much of `tp.lower` the subject prefix consumed, so the quoted bodies
+    // below are classified with their printed casing preserved
+    // (`classify_quoted_inner`'s fallback stamps its `AbilityDefinition::description`
+    // straight from the text it is handed).
     let consumed = tp.lower.len() - lower_rest.len();
     let orig_rest = &tp.original[consumed..];
 
@@ -11092,14 +11093,16 @@ fn try_parse_perpetual_grant_ability(tp: TextPair, ctx: &ParseContext) -> Option
         .flat_map(super::oracle_static::classify_quoted_inner)
         .collect();
 
-    // CR 601.2f / CR 611.2c: honest-red gate. An empty list (a degenerate quote
-    // with no recognized body) would record a grant that installs nothing, and a
-    // body classifying to a kind with no persistent-baseline installer
-    // (`GrantTrigger`, `GrantReplacement`, …) must fail the WHOLE clause rather
-    // than silently drop part of a multi-ability grant — so the `Result` collect
-    // short-circuits on the first rejection. `PerpetualGrantModification` is the
-    // single authority for what "installable" means (see its `TryFrom`); there is
-    // no second predicate here to drift out of sync with the installer.
+    // Not a CR citation -- an architectural honest-red gate. An empty list (a
+    // degenerate quote with no recognized body) would record a grant that
+    // installs nothing, and a body classifying to a kind with no
+    // persistent-baseline installer (`GrantTrigger`, `GrantReplacement`, a
+    // `GrantAbility` whose nested tree still carries `Effect::Unimplemented`,
+    // …) must fail the WHOLE clause rather than silently drop part of a
+    // multi-ability grant — so the `Result` collect short-circuits on the
+    // first rejection. `PerpetualGrantModification` is the single authority
+    // for what "installable" means (see its `TryFrom`); there is no second
+    // predicate here to drift out of sync with the installer.
     if classified.is_empty() {
         return None;
     }

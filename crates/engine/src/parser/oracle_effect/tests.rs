@@ -41032,6 +41032,37 @@ fn perpetual_grant_ability_rejects_unsupported_triggered_body() {
     );
 }
 
+/// Regression (PR #8494 blocker, ntindle/matthewevans): Boareskyr Tollkeeper's
+/// full Oracle text (verified against MTGJSON's `AtomicCards.json`) is "When
+/// this creature enters, target opponent reveals all creature and land cards
+/// in their hand. Choose one of them. That card perpetually gains \"This
+/// permanent enters tapped.\"" Card-level parsing normalizes the self-reference
+/// "This permanent" to "~" (`normalize_card_name_refs`) before any clause
+/// reaches `classify_quoted_inner`, so this fragment-level test feeds the
+/// clause its already-normalized quoted body -- "~ enters tapped." -- exactly
+/// like every neighboring `perpetual_parser_maps_*` / `perpetual_grant_ability_*`
+/// test's convention.
+///
+/// "~ enters tapped." is a standalone sentence with no static/trigger/keyword
+/// recognizer: `oracle_static` only recognizes "enters tapped" as a rider on a
+/// host put-onto-battlefield effect (a token/create-and-put step), never as a
+/// freestanding sentence, so `classify_quoted_inner` falls through to its
+/// CR 113.3a + CR 113.3b `GrantAbility` catch-all, and `parse_quoted_ability`
+/// has no handler for a bare "enters tapped" sentence either -- it lowers to
+/// `Effect::Unimplemented`. Before `PerpetualGrantModification::try_from`
+/// rejected an `Effect::Unimplemented`-bearing `GrantAbility` tree, this landed
+/// as a green `Effect::ApplyPerpetual` wrapping a no-op nested ability (the
+/// coverage-invisible gap the blocker described); the fail-closed gate must now
+/// reject it exactly like the sibling triggered-ability rejection above.
+#[test]
+fn perpetual_grant_ability_rejects_boareskyr_tollkeeper_enters_tapped() {
+    let e = parse_effect("that card perpetually gains \"~ enters tapped.\"");
+    assert!(
+        matches!(e, Effect::Unimplemented { .. }),
+        "Boareskyr Tollkeeper's granted \"~ enters tapped.\" body has no          static/trigger/keyword recognizer and must fail the whole clause closed          rather than install a no-op ability, got {e:?}"
+    );
+}
+
 /// CR 608.2c pronoun rebinding (the Agent of Raffine / Karlach cycle shape):
 /// a bare "it" following a same-chain object-CREATING clause must bind to
 /// that just-created object (`TargetFilter::LastCreated`), not to the

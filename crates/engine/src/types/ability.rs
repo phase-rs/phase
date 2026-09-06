@@ -13849,8 +13849,8 @@ impl FaceDownProfile {
     }
 }
 
-/// CR 601.2f / CR 611.2c (digital-only Alchemy "perpetually" grant): the CLOSED
-/// set of quoted-ability grant kinds that `GameObject::apply_perpetual_modification`
+/// Digital-only Alchemy (no CR entry for "perpetually"): the CLOSED set of
+/// quoted-ability grant kinds that `GameObject::apply_perpetual_modification`
 /// can install onto a persistent baseline.
 ///
 /// `ContinuousModification` is the engine-wide 57-variant layer vocabulary; only
@@ -13899,6 +13899,30 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
         match modification {
             ContinuousModification::AddKeyword { keyword } => Ok(Self::AddKeyword { keyword }),
             ContinuousModification::AddStaticMode { mode } => Ok(Self::AddStaticMode { mode }),
+            // Fail-closed: a `GrantAbility` whose nested tree contains
+            // `Effect::Unimplemented` did not actually parse -- the quoted body
+            // fell through to the parser's honest "couldn't classify this" stub
+            // (e.g. Boareskyr Tollkeeper's "~ enters tapped." is a standalone
+            // sentence with no static/trigger/keyword recognizer). Accepting it
+            // here would install a no-op ability while the top-level effect
+            // stays `Effect::ApplyPerpetual` (never `Effect::Unimplemented`), so
+            // coverage/`cargo semantic-audit` would keep reporting the card as
+            // fully supported. Reuse `game::coverage::ability_tree_any` -- the
+            // single walker authority -- rather than reimplementing tree
+            // recursion here. Rejecting here propagates through the `Result`
+            // collect in `try_parse_perpetual_grant_ability`, which fails the
+            // whole clause closed (falls back to `Effect::unimplemented`) rather
+            // than installing a partial grant. Catch-all grants that DO fully
+            // parse (Topsoil Turner's "{T}: Add {G}{G}.", Ethereal Grasp's "{8}:
+            // Untap this creature.") carry no `Effect::Unimplemented` node and
+            // are unaffected.
+            ContinuousModification::GrantAbility { definition }
+                if crate::game::coverage::ability_tree_any(&definition, &|d| {
+                    matches!(&*d.effect, Effect::Unimplemented { .. })
+                }) =>
+            {
+                Err(ContinuousModification::GrantAbility { definition })
+            }
             ContinuousModification::GrantAbility { definition } => {
                 Ok(Self::GrantAbility { definition })
             }
