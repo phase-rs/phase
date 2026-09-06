@@ -514,6 +514,131 @@ enum AiProposalSubmission {
     },
 }
 
+/// Natively-testable core of the AI proposal submission boundary. The
+/// `wasm_bindgen` shell owns proposal-token lookup and serialization; this core
+/// owns the state/contract decision that must be identical for browser and
+/// native regression coverage.
+enum AiProposalApplication {
+    Applied {
+        result: Box<engine::types::game_state::ActionResult>,
+        verified_stack_pass: bool,
+    },
+    Stale,
+    Rejected {
+        rejection: ActionRejection,
+    },
+}
+
+fn apply_ai_action_proposal_inner(
+    state: &mut GameState,
+    contract: &AiDecisionContract,
+    actor: PlayerId,
+    action: GameAction,
+) -> AiProposalApplication {
+    // Classification lives in the engine (`verified_ai_stack_pass_player`),
+    // not in this adapter: it is the same call the callee gates on, so the
+    // two cannot disagree. CLAUDE.md — transport layers hold zero game logic.
+    let verified_stack_pass =
+        engine::game::engine::verified_ai_stack_pass_player(state, &action).is_some();
+    // Every proposal, including a stack recheck pass, is bound to the revision
+    // that issued it. Resolve All legitimately advances that revision while an
+    // AI proposal is in flight; report the old capability as stale so the
+    // controller re-queries instead of counting an ordinary race as an AI
+    // failure.
+    if !contract.permits(state, actor, &action) {
+        return AiProposalApplication::Stale;
+    }
+    let applied = if verified_stack_pass {
+        engine::game::engine::apply_verified_ai_priority_pass_with_rejection(
+            state, actor, contract, action,
+        )
+    } else {
+        apply_interaction_with_rejection(state, actor, contract.semantic_owner, action)
+    };
+    match applied {
+        Ok(result) => AiProposalApplication::Applied {
+            result: Box::new(result),
+            verified_stack_pass,
+        },
+        Err(rejection) => AiProposalApplication::Rejected { rejection },
+    }
+}
+
+#[cfg(test)]
+mod ai_proposal_submission_tests {
+    use super::*;
+    use engine::types::ability::{Effect, ResolvedAbility};
+    use engine::types::game_state::{
+        StackEntry, StackEntryKind, StackResolutionPolicy, WaitingFor,
+    };
+    use engine::types::identifiers::ObjectId;
+    use engine::types::phase::Phase;
+
+    fn priority_state(player: PlayerId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        state
+    }
+
+    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            },
+        }
+    }
+
+    #[test]
+    fn stack_pass_proposal_uses_the_verified_recheck_seam() {
+        let player = PlayerId(0);
+        let mut state = priority_state(player);
+        state
+            .stack
+            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
+        let contract = AiDecisionContract::issue(&state, player);
+
+        assert!(matches!(
+            apply_ai_action_proposal_inner(&mut state, &contract, player, GameAction::PassPriority),
+            AiProposalApplication::Applied {
+                verified_stack_pass: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            state
+                .stack_resolution_session
+                .as_ref()
+                .map(|session| session.policy),
+            Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
+        );
+    }
+
+    #[test]
+    fn stale_stack_pass_proposal_is_not_a_rejected_ai_decision() {
+        let player = PlayerId(0);
+        let mut state = priority_state(player);
+        state
+            .stack
+            .push_back(no_op_stack_entry(70_102, PlayerId(1)));
+        let contract = AiDecisionContract::issue(&state, player);
+        state.state_revision = state.state_revision.wrapping_add(1);
+
+        assert!(matches!(
+            apply_ai_action_proposal_inner(&mut state, &contract, player, GameAction::PassPriority),
+            AiProposalApplication::Stale
+        ));
+        assert!(state.stack_resolution_session.is_none());
+    }
+}
+
 /// Private WASM boundary outcome for expected engine rejections. Serialization
 /// keeps recoverable action failures distinct from raw WASM/runtime errors,
 /// which continue to cross this boundary as strings or thrown `JsValue`s.
@@ -3305,53 +3430,26 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     };
 
     match with_state_mut(|state| {
-        // Classification lives in the engine (`verified_ai_stack_pass_player`),
-        // not in this adapter: it is the same call the callee gates on, so the
-        // two cannot disagree. CLAUDE.md — transport layers hold zero game
-        // logic.
-        let is_stack_recheck_pass =
-            engine::game::engine::verified_ai_stack_pass_player(state, &action).is_some();
-        // A payment finalize is no longer misclassified, so it now passes
-        // through `permits` — whose `state_revision` equality check can report
-        // `Stale` for a proposal minted against a superseded state. The client
-        // treats `Stale` as a benign race and re-queries without counting a
-        // failure, which is the intended handling for every other action.
-        if !is_stack_recheck_pass && !proposal.contract.permits(state, actor, &action) {
-            return AiProposalSubmission::Stale {
-                reason: "decision_changed_or_action_outside_issued_bounds",
-            };
-        }
-        let applied = if is_stack_recheck_pass {
-            engine::game::engine::apply_verified_ai_priority_pass_with_rejection(
-                state,
-                actor,
-                &proposal.contract,
-                action.clone(),
-            )
-        } else {
-            apply_interaction_with_rejection(
-                state,
-                actor,
-                proposal.contract.semantic_owner,
-                action.clone(),
-            )
-        };
-        match applied {
-            Ok(result) => {
-                if is_stack_recheck_pass {
-                    record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
-                } else {
-                    record_replay_action(false, actor, action);
-                }
-                invalidate_ai_proposals();
-                AiProposalSubmission::Applied {
-                    result: Box::new(result),
-                }
-            }
-            Err(rejection) => AiProposalSubmission::Rejected { rejection },
-        }
+        apply_ai_action_proposal_inner(state, &proposal.contract, actor, action.clone())
     }) {
-        Ok(outcome) => to_js(&outcome),
+        Ok(AiProposalApplication::Applied {
+            result,
+            verified_stack_pass,
+        }) => {
+            if verified_stack_pass {
+                record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
+            } else {
+                record_replay_action(false, actor, action);
+            }
+            invalidate_ai_proposals();
+            to_js(&AiProposalSubmission::Applied { result })
+        }
+        Ok(AiProposalApplication::Stale) => to_js(&AiProposalSubmission::Stale {
+            reason: "decision_changed_or_action_outside_issued_bounds",
+        }),
+        Ok(AiProposalApplication::Rejected { rejection }) => {
+            to_js(&AiProposalSubmission::Rejected { rejection })
+        }
         Err(_) => to_js(&AiProposalSubmission::Stale {
             reason: "state_unavailable",
         }),
@@ -4258,35 +4356,6 @@ mod tests {
     }
 
     #[test]
-    fn stack_pass_proposal_uses_the_verified_recheck_seam() {
-        let player = PlayerId(0);
-        let mut state = priority_state(player);
-        state
-            .stack
-            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
-        add_non_mana_recheck_action(&mut state, PlayerId(1));
-        let action = GameAction::PassPriority;
-        let token = install_issued_candidate(state, player, &action);
-
-        assert_eq!(
-            proposal_outcome(&token, player, &action)["status"],
-            "applied"
-        );
-        with_state(|state| {
-            assert_eq!(
-                state
-                    .stack_resolution_session
-                    .as_ref()
-                    .map(|session| session.policy),
-                Some(engine::types::game_state::StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
-                "the WASM proposal boundary must not downgrade a verified stack pass"
-            );
-        })
-        .expect("test state must remain installed");
-        clear_game_state();
-    }
-
-    #[test]
     fn public_proposal_issuer_mints_a_submitable_priority_capability() {
         let player = PlayerId(0);
         clear_game_state();
@@ -4840,28 +4909,6 @@ mod tests {
             })));
         });
         assert!(has_replay_recording());
-    }
-
-    fn add_non_mana_recheck_action(state: &mut GameState, controller: PlayerId) {
-        let object_id = create_object(
-            state,
-            CardId(70_100),
-            controller,
-            "Wasm Recheck Action".to_string(),
-            Zone::Battlefield,
-        );
-        let object = state
-            .objects
-            .get_mut(&object_id)
-            .expect("created battlefield object");
-        object.card_types.core_types.push(CoreType::Artifact);
-        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-        ));
     }
 
     #[test]
