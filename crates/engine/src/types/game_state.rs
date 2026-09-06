@@ -840,9 +840,26 @@ impl NamedChoiceSource {
                             .get(&object_id)
                             .is_some_and(|object| object.incarnation == relatch.current_incarnation)
                 });
-        (is_exact || is_resolution_successor)
-            .then(|| state.chosen_attributes_mut(object_id))
-            .flatten()
+        // Each branch writes through the lookup its own check validated. The
+        // exact branch validated `entering_or_live_object`, so it writes through
+        // the liminal-first `chosen_attributes_mut`. The relatch branch validated
+        // `state.objects` alone — CR 400.7j finds an object that has already MOVED
+        // to a public zone, which an entrant that has not yet entered cannot have
+        // done — so it writes through `objects` alone. Funnelling both through
+        // `chosen_attributes_mut` would let a liminal projection sharing this id
+        // (`meld::finish_meld_entry` stores the CR 701.42 meld result under the
+        // component's own id) receive a write the relatch validated against the
+        // stored object.
+        if is_exact {
+            state.chosen_attributes_mut(object_id)
+        } else if is_resolution_successor {
+            state
+                .objects
+                .get_mut(&object_id)
+                .map(|object| &mut object.chosen_attributes)
+        } else {
+            None
+        }
     }
 }
 
