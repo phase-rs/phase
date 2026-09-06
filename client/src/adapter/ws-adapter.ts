@@ -208,6 +208,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 65 — DraftMatchStart now announces the exact Full-session identity for the
+ *      spawned match. Draft reconnect attaches the authenticated draft seat
+ *      to that Full-session lifetime, and Full follow-up frames carry the key
+ *      needed to reject stale-generation traffic. Lobby messages are unchanged.
  * 61 — Effect.ChooseCounterKind gained domain and chooser (CR 608.2d): the
  *      population a counter-kind choice draws from, and whether the game draws
  *      one at random instead of prompting. Serde-additive, so an older payload
@@ -437,7 +441,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 64;
+export const PROTOCOL_VERSION = 65;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -1855,7 +1859,8 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "StateUpdate": {
-        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"]; rewind_targets?: RewindOption[] };
+        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"]; rewind_targets?: RewindOption[]; full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         // Attach the engine-authored derived views to the state snapshot so
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
@@ -2057,7 +2062,8 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "OpponentDisconnected": {
-        const data = msg.data as { grace_seconds: number };
+        const data = msg.data as { grace_seconds: number; full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         this.emit({
           type: "opponentDisconnected",
           graceSeconds: data.grace_seconds,
@@ -2066,6 +2072,8 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "OpponentReconnected": {
+        const data = (msg.data ?? {}) as { full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         this.emit({ type: "opponentReconnected" });
         break;
       }
@@ -2276,6 +2284,13 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     this.fullSessionKey = key;
     return true;
+  }
+
+  /** Allows legacy follow-up frames only until the server establishes an exact Full identity. */
+  private acceptFollowUpFullSessionKey(key: FullSessionKey | undefined): boolean {
+    return !this.fullSessionKey && !key
+      ? true
+      : this.acceptFullSessionKey(key);
   }
 
   /** Reject identity-bearing reconnect frames before they can update session state. */
