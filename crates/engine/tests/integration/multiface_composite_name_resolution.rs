@@ -16,11 +16,16 @@
 //! database and that accessor returns `None` for every name, composite or not.
 //! Only the MTGJSON loader populates it.
 //!
-//! The three cards named here are the ones this mechanic unlocked. Their
-//! layouts and face names were verified against the Scryfall API rather than
-//! recalled: `Response // Resurgence` and `Rough // Tumble` are `split`,
-//! `Dowsing Dagger // Lost Vale` is `transform`. Both layouts are one physical
-//! card and must collapse to the front face identically.
+//! None of the three cards named here is newly unlocked — all three already
+//! resolve, because `data/card-data.json` keys every face individually (of its
+//! 35,798 keys exactly one contains `//`) and `lookup_key`'s `//`-splitting
+//! predates this file. These eight tests exist as a regression barrier around
+//! `lookup_key` becoming the sole name-resolution authority, not as evidence of
+//! newly supported cards. Their layouts and face names were verified against
+//! the Scryfall API rather than recalled: `Response // Resurgence` and
+//! `Rough // Tumble` are `split`, `Dowsing Dagger // Lost Vale` is `transform`.
+//! Both layouts are one physical card and must collapse to the front face
+//! identically.
 //!
 //! CR 709.2: although split cards have two castable halves, each split card is
 //! only one card — so a deck entry for `"Fire // Ice"` is one copy of that

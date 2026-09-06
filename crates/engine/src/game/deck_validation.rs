@@ -1623,7 +1623,12 @@ fn evaluate_tiny_leaders(
         if !is_commander_entry(db, request, name) {
             for color in card_color_identity(face) {
                 if !commander_identity.contains(&color) {
-                    identity_violations.insert(name.to_string());
+                    // Resolved face name, not the caller's raw spelling — the
+                    // same convention `color_identity_violations` documents and
+                    // the sibling `basic_land_type_violations` /
+                    // `tiny_identity_violations` inserts below already follow,
+                    // so the `BTreeSet` dedups a card listed under two spellings.
+                    identity_violations.insert(face.name.clone());
                     break;
                 }
             }
@@ -8106,7 +8111,18 @@ mod tests {
     #[test]
     fn deck_coverage_counts_one_card_once_across_mixed_spellings() {
         let mut cards = Map::new();
-        insert_planechase_card(&mut cards, "Fire", &[], &["Instant"]);
+        // `Fire` must be UNSUPPORTED here: `copies` is carried only by
+        // `UnsupportedCard`, so a fully-supported fixture leaves the copy-count
+        // assertion below with nothing to run against. Same construction as
+        // `insert_unsupported_scheme_card`, which `archenemy_rejects_unsupported_scheme`
+        // already pins through the same `card_face_gaps` predicate.
+        let mut fire = planechase_card_json("Fire", &[], &["Instant"]);
+        fire["abilities"] = serde_json::to_value(vec![crate::types::AbilityDefinition::new(
+            crate::types::AbilityKind::Spell,
+            crate::types::Effect::unimplemented("deck_coverage_test", "unsupported test card"),
+        )])
+        .unwrap();
+        cards.insert("fire".to_string(), fire);
         insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
         let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
 
@@ -8130,12 +8146,15 @@ mod tests {
             coverage.total_unique,
             "every unique card must land in exactly one bucket"
         );
-        for card in &coverage.unsupported_cards {
-            assert_eq!(
-                card.copies, 4,
-                "the single entry carries the whole playset, not a per-spelling share"
-            );
-        }
+        assert_eq!(
+            coverage.unsupported_cards.len(),
+            1,
+            "the unsupported fixture must reach the bucket the copy count lives in"
+        );
+        assert_eq!(
+            coverage.unsupported_cards[0].copies, 4,
+            "the single entry carries the whole playset, not a per-spelling share"
+        );
     }
 
     #[test]
