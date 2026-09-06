@@ -3409,8 +3409,6 @@ fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
 /// the caller can fall back to the plain BecomeCopy replacement without a
 /// reflexive trigger).
 fn parse_post_replacement_rider(post_period: &str) -> Option<AbilityDefinition> {
-    use crate::types::ability::AbilityCondition;
-
     // Strip the sentence terminator / separator space preceding the reflexive
     // clause. These are structural punctuation, not parsing dispatch.
     let trimmed = post_period.trim_start_matches(['.', ' ']);
