@@ -2,7 +2,7 @@
 //! Put a +1/+1 counter on this creature."
 //!
 //! CR 205.2a (a cost filter may be a two-leg card-TYPE union) + CR 601.2h (the
-//! activation cost is paid with permanents matching that filter) + CR 701.16a
+//! activation cost is paid with permanents matching that filter) + CR 701.21a
 //! (sacrifice).
 //!
 //! The right conjunct of the union leads with an indefinite article, and the
