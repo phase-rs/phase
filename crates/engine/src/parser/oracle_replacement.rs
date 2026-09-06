@@ -3401,8 +3401,9 @@ fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
 /// maps to `AbilityCondition::WhenYouDo`; the "if you do" connector maps to
 /// `AbilityCondition::EffectOutcome { OptionalEffectPerformed }`.
 /// At this owning accepted-branch seam, literal `When` keeps its CR 603.12
-/// `WhenYouDo` creation gate, while literal `If` has its CR 608.2c performed gate
-/// consumed because reaching the replacement's execute branch proves acceptance.
+/// `WhenYouDo` creation gate (including a root-level generic `if` guard), while
+/// literal `If` has its CR 608.2c performed gate consumed because reaching the
+/// replacement's execute branch proves acceptance.
 /// Any other condition fails closed. Returns None when the text doesn't start
 /// with a connector or the chain parser produces an unimplemented effect (so
 /// the caller can fall back to the plain BecomeCopy replacement without a
@@ -3441,8 +3442,11 @@ fn parse_post_replacement_rider(post_period: &str) -> Option<AbilityDefinition> 
         return None;
     }
     match def.condition.take() {
-        Some(AbilityCondition::WhenYouDo) => {
-            def.condition = Some(AbilityCondition::WhenYouDo);
+        Some(condition) if condition.has_when_you_do_marker() => {
+            // Keep the complete root condition: the marker creates the reflexive
+            // trigger, while any flattened generic `if` guard is checked when
+            // that trigger resolves.
+            def.condition = Some(condition);
         }
         Some(condition) if condition.is_optional_effect_performed() => {}
         Some(_) | None => return None,

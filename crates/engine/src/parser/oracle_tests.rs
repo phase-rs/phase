@@ -16364,6 +16364,51 @@ fn a_sigil_of_myrkul_keeps_reflexive_marker_and_graveyard_guard() {
     );
 }
 
+/// CR 614.1c + CR 603.12 + CR 608.2c: a copy-replacement rider may carry the
+/// same reflexive marker plus generic resolution guard as an ordinary effect
+/// chain. The replacement parser must attach the complete rider rather than
+/// accepting only a bare `WhenYouDo` condition.
+#[test]
+fn guarded_clone_replacement_rider_keeps_reflexive_marker_and_guard() {
+    use crate::types::ability::AbilityCondition;
+
+    let parsed = parse(
+        "You may have Guarded Clone enter as a copy of any creature on the battlefield. When you do, if you are the monarch, draw a card.",
+        "Guarded Clone",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let replacement = parsed
+        .replacements
+        .first()
+        .expect("the clone replacement must parse");
+    let execute = replacement
+        .execute
+        .as_deref()
+        .expect("the clone replacement must have an execute definition");
+    assert!(
+        matches!(*execute.effect, Effect::BecomeCopy { .. }),
+        "the replacement must retain the copy instruction"
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("the guarded reflexive rider must remain attached to the copy instruction");
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::when_you_do_with_guard(
+            AbilityCondition::IsMonarch
+        )),
+        "the CR 603.12 marker and CR 608.2c guard must both survive"
+    );
+    assert!(
+        matches!(*rider.effect, Effect::Draw { .. }),
+        "the guarded rider must retain its draw instruction"
+    );
+}
+
 #[test]
 fn semicolon_keyword_splitting_defender_reach() {
     let r = parse_with_keyword_names(
