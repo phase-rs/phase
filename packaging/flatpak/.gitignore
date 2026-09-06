@@ -1,0 +1,7 @@
+# Staged release binary and flatpak-builder working trees; all reproducible
+# from a released artifact via ./build-local.sh.
+build/
+.flatpak-builder-out/
+.flatpak-repo/
+.flatpak-builder/
+*.flatpak

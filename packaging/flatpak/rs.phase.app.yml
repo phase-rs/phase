@@ -1,0 +1,77 @@
+# Flatpak manifest for the phase.rs desktop shell.
+#
+# What this manifest deliberately does NOT contain is the point of it: no
+# WebKitGTK, no GTK, no GLib, no GStreamer. `org.gnome.Platform//50` supplies
+# every one of them. `objdump -p phase-tauri` lists 14 shared libraries plus the
+# dynamic loader; all 15 resolve inside the runtime, and the runtime's glibc
+# (2.42) clears the binary's GLIBC_2.39 floor, so the same `phase-tauri` the
+# Linux release job already builds runs here unmodified.
+#
+# That is also why this package behaves differently from the AppImage on the
+# defects tracked in #8614 and #8615: it inherits the runtime's WebKitGTK and
+# the runtime's GStreamer plugin set instead of vendoring its own.
+#
+# Build it with ./build-local.sh, which stages `phase-tauri` out of a released
+# .deb or .AppImage and then drives flatpak-builder with this file.
+app-id: rs.phase.app
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: phase-tauri
+
+finish-args:
+  # The shell is a thin bootstrap: it navigates the webview to the remote
+  # channel origin (client/bootstrap/bootstrap.ts), so the app is inert
+  # without network.
+  - --share=network
+  # X11 shared-memory transport; GTK needs it alongside --socket=x11.
+  - --share=ipc
+  # Plain x11, NOT fallback-x11. fallback-x11 withholds X11 only when
+  # --socket=wayland is granted *as well* and a Wayland socket exists, so with
+  # no wayland grant here the two are equivalent today. Plain x11 is the one
+  # that stays correct the moment someone adds --socket=wayland: fallback-x11
+  # would then resolve to no X11 on a Wayland session, leaving DISPLAY unset
+  # and aborting gtk_init() while GDK_BACKEND below still pins the x11 backend.
+  # Xwayland serves the Wayland case.
+  - --socket=x11
+  # Audio. WebKitGTK has no audio stack of its own — every AudioContext is a
+  # GStreamer pipeline — and the runtime supplies the plugins (see README).
+  - --socket=pulseaudio
+  # Hardware acceleration. Without it WebKit falls back to software rendering,
+  # which is exactly the outcome the #8614 investigation was avoiding.
+  - --device=dri
+  # tao/tauri crash on the GDK Wayland backend (tauri-apps/tauri#8541), which
+  # is why the AppImage's AppRun exports the same variable. Because the backend
+  # is pinned to x11 here, --socket=wayland would grant an access this app can
+  # never use; drop this env and add that socket together, not separately.
+  - --env=GDK_BACKEND=x11
+
+modules:
+  - name: phase
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 phase-tauri /app/bin/phase-tauri
+      - install -Dm644 rs.phase.app.desktop /app/share/applications/rs.phase.app.desktop
+      - install -Dm644 rs.phase.app.metainfo.xml /app/share/metainfo/rs.phase.app.metainfo.xml
+      - install -Dm644 32x32.png /app/share/icons/hicolor/32x32/apps/rs.phase.app.png
+      - install -Dm644 128x128.png /app/share/icons/hicolor/128x128/apps/rs.phase.app.png
+      - install -Dm644 128x128@2x.png /app/share/icons/hicolor/256x256/apps/rs.phase.app.png
+    sources:
+      # Staged by build-local.sh out of a released .deb or .AppImage so the
+      # package ships the exact binary users already get, rather than a
+      # separately-compiled one.
+      - type: file
+        path: build/phase-tauri
+      - type: file
+        path: rs.phase.app.desktop
+      - type: file
+        path: rs.phase.app.metainfo.xml
+      # Icons are reused from the Tauri bundle's own icon set rather than
+      # duplicated into this directory. Flatpak keys icons by app-id, so each
+      # is renamed to rs.phase.app.png at install time above.
+      - type: file
+        path: ../../client/src-tauri/icons/32x32.png
+      - type: file
+        path: ../../client/src-tauri/icons/128x128.png
+      - type: file
+        path: ../../client/src-tauri/icons/128x128@2x.png
