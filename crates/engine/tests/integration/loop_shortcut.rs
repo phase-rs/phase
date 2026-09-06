@@ -7027,6 +7027,20 @@ fn dump_drive_one_beat(
     state: &mut GameState,
     pin: Option<PlayerId>,
 ) -> Result<Vec<GameEvent>, String> {
+    // CR 117.3d: at a priority window this policy always passes, so dispatch the pass instead of
+    // enumerating the whole per-viewer candidate set to find it — on the 152-entry `dellian` stack
+    // that scan is a real per-beat cost. This reproduces both halves of the enumerator's hatch —
+    // its structural predicate and the submitter identity it authorizes (CR 723.5) — so this arm
+    // stays inside the subset that hatch asserts equivalent to a simulated pass; every other shape
+    // falls through to the enumerating path below.
+    if let WaitingFor::Priority { player } = state.waiting_for {
+        if engine::game::priority::pass_priority_structurally_legal(state, player) {
+            let actor = engine::game::turn_control::authorized_submitter_for_player(state, player);
+            return apply(state, actor, GameAction::PassPriority)
+                .map(|r| r.events)
+                .map_err(|e| format!("apply err (PassPriority): {e:?}"));
+        }
+    }
     let Some((who, actions)) = dump_beat_actor(state) else {
         return Err(format!("no legal actor at {:?}", state.waiting_for));
     };
@@ -7053,7 +7067,8 @@ fn dump_drive_one_beat(
     let Some(action) = chosen else {
         return Err(format!("empty action list at {:?}", state.waiting_for));
     };
-    apply(state, who, action.clone())
+    let actor = engine::game::turn_control::authorized_submitter_for_player(state, who);
+    apply(state, actor, action.clone())
         .map(|r| r.events)
         .map_err(|e| format!("apply err ({action:?}): {e:?}"))
 }
@@ -7834,7 +7849,8 @@ fn combat_drive_one_beat(state: &mut GameState) -> Result<Vec<GameEvent>, String
                 .filter(|(n, _)| *n > 0)
                 .map(|(_, a)| a.clone());
             if let Some(action) = biggest {
-                return apply(state, who, action.clone())
+                let actor = engine::game::turn_control::authorized_submitter_for_player(state, who);
+                return apply(state, actor, action.clone())
                     .map(|r| r.events)
                     .map_err(|e| format!("apply err ({action:?}): {e:?}"));
             }
@@ -14171,21 +14187,6 @@ fn ring_membership_delta<'a, T>(
     (minted, dropped)
 }
 
-/// `dump_drive_one_beat`'s policy with its `Priority` arm taken directly. That policy is
-/// unconditionally "pass" at a `Priority` window, so routing through the enumerator costs a full
-/// per-viewer candidate scan — on the 152-entry `dellian` stack, the dominant cost of a long
-/// drive — only to find the `PassPriority` the policy already chose. `apply` performs the real
-/// legality check itself (`game::priority::pass_priority_legality`), so nothing is skipped but
-/// the enumeration. Every other window still goes through the shared driver unchanged.
-fn drive_one_beat_passing_fast(state: &mut GameState, pin: Option<PlayerId>) -> Result<(), String> {
-    if let WaitingFor::Priority { player } = state.waiting_for {
-        return apply(state, player, GameAction::PassPriority)
-            .map(|_| ())
-            .map_err(|e| format!("pass err: {e:?}"));
-    }
-    dump_drive_one_beat(state, pin).map(|_| ())
-}
-
 /// CR 732.2a. ROUTE ⓔ — EVICTION AT `LOOP_DETECT_RING_CAP`: a beat that MINTS WITHOUT GROWING.
 ///
 /// `answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact` reads a beat's
@@ -14238,7 +14239,7 @@ fn an_evicting_beat_mints_without_growing_the_ring() {
             break;
         }
         let before: Vec<_> = state.loop_detect_ring.iter().cloned().collect();
-        if drive_one_beat_passing_fast(&mut state, pin).is_err() {
+        if dump_drive_one_beat(&mut state, pin).is_err() {
             break;
         }
         beats_run = beat + 1;
@@ -14354,7 +14355,7 @@ fn a_clearing_beat_rebuilds_the_ring_inside_the_same_beat() {
             .map(|_| ())
             .map_err(|e| format!("resolve-all err: {e:?}"))
         } else {
-            drive_one_beat_passing_fast(&mut state, pin)
+            dump_drive_one_beat(&mut state, pin).map(|_| ())
         };
         if outcome.is_err() {
             break;

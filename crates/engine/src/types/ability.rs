@@ -15098,8 +15098,8 @@ pub enum Effect {
     /// of a creature card chosen from a format-defined pool whose mana value
     /// satisfies `mv <comparator> mv_bound`. The canonical card is the Momir
     /// Basic emblem ("Create a token that's a copy of a creature card with mana
-    /// value X chosen at random"). The pool is the engine's creature corpus
-    /// (`GameState::momir_pool` / `momir_pool_faces`). `selection` chooses how a
+    /// value X chosen at random"). The pool is the engine's creature corpus,
+    /// drawn from `GameState::card_db` at resolution time. `selection` chooses how a
     /// candidate is picked from the matching set: `Random` (CR 701.9a is the
     /// discard keyword action; the random *selection* here is analogous to the
     /// random-choice idiom) or `Chosen`. Built as a reusable primitive so the

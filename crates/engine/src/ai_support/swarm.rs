@@ -545,3 +545,40 @@ fn player_life(state: &GameState, player: PlayerId) -> i32 {
         .find(|candidate| candidate.id == player)
         .map_or(0, |candidate| candidate.life)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::identifiers::ObjectId;
+    use std::collections::HashMap;
+
+    /// The refusal is `count > SWARM_WITNESS_MAX_DECLARATIONS`, so a product landing exactly on
+    /// the cap is affordable and must be admitted. The integration fixture only exercises a
+    /// product above the bound, which a `>=` here would still refuse — leaving which side of the
+    /// comparison the boundary falls on unpinned.
+    #[test]
+    fn the_declaration_cap_is_admitted_and_only_the_count_past_it_is_refused() {
+        let blocker = ObjectId(1);
+        // Each blocker contributes `legal targets + 1`, the +1 being "does not block".
+        let product_with = |choices: usize| {
+            let targets = HashMap::from([(
+                blocker,
+                (0..choices)
+                    .map(|i| ObjectId(i as u64 + 2))
+                    .collect::<Vec<_>>(),
+            )]);
+            checked_declaration_product(&[blocker], &targets)
+        };
+
+        assert_eq!(
+            product_with(SWARM_WITNESS_MAX_DECLARATIONS - 1),
+            Some(SWARM_WITNESS_MAX_DECLARATIONS),
+            "a declaration product equal to the cap is affordable and must be admitted"
+        );
+        assert_eq!(
+            product_with(SWARM_WITNESS_MAX_DECLARATIONS),
+            None,
+            "one declaration past the cap must be refused"
+        );
+    }
+}

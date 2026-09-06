@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +13,50 @@ use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
 use crate::types::card_type::CoreType;
 
 use std::io::{BufReader, Read};
+
+/// Shared, cheaply-cloneable handle to the loaded [`CardDatabase`].
+///
+/// Exists so `GameState` can carry the database for resolvers that must query
+/// the whole card corpus at resolution time (Momir's random creature draw)
+/// rather than pre-staging a copy of it into state. `Arc` keeps
+/// `GameState::clone()` during AI search O(1), matching the `Arc` on
+/// `card_face_registry` / `all_card_names`.
+///
+/// `Debug` is hand-written as a one-line summary: `GameState` derives `Debug`,
+/// and a derived impl here would dump every loaded card face on any `{:?}` of
+/// a game state.
+#[derive(Clone)]
+pub struct CardDbHandle(Arc<CardDatabase>);
+
+impl CardDbHandle {
+    pub fn new(db: Arc<CardDatabase>) -> Self {
+        Self(db)
+    }
+
+    pub fn arc(&self) -> &Arc<CardDatabase> {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CardDbHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CardDbHandle({} faces)", self.0.face_index.len())
+    }
+}
+
+impl std::ops::Deref for CardDbHandle {
+    type Target = CardDatabase;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Arc<CardDatabase>> for CardDbHandle {
+    fn from(db: Arc<CardDatabase>) -> Self {
+        Self(db)
+    }
+}
 
 #[derive(Default)]
 pub struct CardDatabase {
@@ -403,6 +448,20 @@ impl CardDatabase {
 
     pub fn face_iter(&self) -> impl Iterator<Item = (&str, &CardFace)> {
         self.face_index.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Every loaded face in the database's deterministic scan order.
+    ///
+    /// `face_iter` walks a `HashMap` and so yields a different order per
+    /// process; this walks the precomputed `search_face_keys` (sorted by
+    /// oracle id, then face order, then key), which is identical for any two
+    /// loads of the same card data. Use this — never `face_iter` — whenever
+    /// the ORDER is load-bearing, such as an RNG draw whose result has to
+    /// match across peers and replays.
+    pub fn faces_in_scan_order(&self) -> impl Iterator<Item = &CardFace> {
+        self.search_face_keys
+            .iter()
+            .filter_map(|key| self.face_index.get(key))
     }
 
     /// CR 205.3m: Returns the full creature subtype vocabulary derived from

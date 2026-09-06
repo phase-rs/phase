@@ -7597,6 +7597,20 @@ mod tests {
         use crate::types::actions::GameAction;
         use crate::types::game_state::WaitingFor;
 
+        // CR 117.3d: at a priority window this policy always passes, so dispatch the pass instead
+        // of enumerating the whole per-viewer candidate set to find it. This reproduces both halves
+        // of the enumerator's hatch — its structural predicate and the submitter identity it
+        // authorizes (CR 723.5) — so this arm stays inside the subset that hatch asserts equivalent
+        // to a simulated pass; every other shape falls through below.
+        if let WaitingFor::Priority { player } = state.waiting_for {
+            if crate::game::priority::pass_priority_structurally_legal(state, player) {
+                let actor =
+                    crate::game::turn_control::authorized_submitter_for_player(state, player);
+                return crate::game::engine::apply(state, actor, GameAction::PassPriority)
+                    .map(|_| ())
+                    .map_err(|e| format!("apply err (PassPriority): {e:?}"));
+            }
+        }
         let actor = state
             .waiting_for
             .acting_player()
@@ -7625,7 +7639,8 @@ mod tests {
         let Some(action) = chosen.cloned() else {
             return Err(format!("empty action list at {:?}", state.waiting_for));
         };
-        crate::game::engine::apply(state, who, action.clone())
+        let actor = crate::game::turn_control::authorized_submitter_for_player(state, who);
+        crate::game::engine::apply(state, actor, action.clone())
             .map(|_| ())
             .map_err(|e| format!("apply err ({action:?}): {e:?}"))
     }
@@ -18316,46 +18331,7 @@ mod tests {
     #[test]
     fn drawgo_turn_structure_yields_no_basis_b_signature() {
         use crate::game::scenario::GameScenario;
-        use crate::types::actions::GameAction;
-        use crate::types::game_state::{LoopDetectionMode, WaitingFor};
-
-        /// One beat of the shared dump drive policy (`tests/integration/loop_shortcut.rs`'s
-        /// `dump_drive_one_beat`): at `Priority` always pass — the mandatory triggers resolve
-        /// and re-trigger, which IS the loop when there is one — and otherwise take the first
-        /// legal non-terminal action.
-        fn drive_one_beat(state: &mut GameState) -> Result<(), String> {
-            let actor = state
-                .waiting_for
-                .acting_player()
-                .into_iter()
-                .chain(state.players.iter().map(|p| p.id))
-                .find_map(|p| {
-                    let (actions, _costs, _grouped) =
-                        crate::ai_support::legal_actions_for_viewer(state, p);
-                    (!actions.is_empty()).then_some((p, actions))
-                });
-            let Some((who, actions)) = actor else {
-                return Err(format!("no legal actor at {:?}", state.waiting_for));
-            };
-            let forbidden =
-                |a: &GameAction| matches!(a, GameAction::Concede { .. } | GameAction::Debug(_));
-            let chosen = if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                actions
-                    .iter()
-                    .find(|a| matches!(a, GameAction::PassPriority))
-            } else {
-                actions
-                    .iter()
-                    .find(|a| !matches!(a, GameAction::PassPriority) && !forbidden(a))
-                    .or_else(|| actions.iter().find(|a| !forbidden(a)))
-            };
-            let Some(action) = chosen.cloned() else {
-                return Err(format!("empty action list at {:?}", state.waiting_for));
-            };
-            crate::game::engine::apply(state, who, action.clone())
-                .map(|_| ())
-                .map_err(|e| format!("apply err ({action:?}): {e:?}"))
-        }
+        use crate::types::game_state::LoopDetectionMode;
 
         let mut scenario = GameScenario::new_n_player(2, 7);
         scenario.at_phase(Phase::PreCombatMain);
@@ -18440,7 +18416,7 @@ mod tests {
                     flattened_some += 1;
                 }
             }
-            if drive_one_beat(&mut state).is_err() {
+            if dump_drive_one_beat(&mut state).is_err() {
                 break;
             }
         }

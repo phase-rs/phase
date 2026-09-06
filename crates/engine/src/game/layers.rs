@@ -3793,6 +3793,12 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         // `PlayerFilter` — route it (`ControllerMatches{OpponentLostLife}` anthem
         // flips its affected set at a life-loss site).
         FilterProp::ControllerMatches { player } => player_filter_reads_life(player),
+        // CR 109.4 + CR 120.1: the recipient scope is an `Option<PlayerFilter>`
+        // that can nest a life-reading predicate, so it routes here rather than
+        // counting as payload-free. `None` = any recipient, which reads nothing.
+        FilterProp::DealtDamageThisTurn { recipient, .. } => {
+            recipient.as_ref().is_some_and(player_filter_reads_life)
+        }
         // The six TargetFilter-bearing props all route their nested filter
         // (deref coercion → &TargetFilter). Field names differ; unified here.
         FilterProp::CanEnchant { target: f }
@@ -3874,7 +3880,6 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -23292,6 +23297,24 @@ mod tests {
                 min_sources: 1,
             }
         ));
+        // CR 120.1: the damage-recipient scope routes through the same player
+        // classifier, so a life-reading recipient must be reported. Grouping the
+        // arm with the payload-free props would under-report the layer
+        // dependency at a life-change site.
+        assert!(filter_prop_reads_life(&FilterProp::DealtDamageThisTurn {
+            kind: DamageKindFilter::Any,
+            recipient: Some(PlayerFilter::OpponentLostLife),
+        }));
+        // Negative controls: a recipient that reads no life, and no recipient at
+        // all, so the positive above is not passing vacuously.
+        assert!(!filter_prop_reads_life(&FilterProp::DealtDamageThisTurn {
+            kind: DamageKindFilter::Any,
+            recipient: Some(PlayerFilter::Opponent),
+        }));
+        assert!(!filter_prop_reads_life(&FilterProp::DealtDamageThisTurn {
+            kind: DamageKindFilter::Any,
+            recipient: None,
+        }));
         // CR 608.2c: exclusion anchor recurses.
         assert!(player_filter_reads_life(&PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::OpponentGainedLife),

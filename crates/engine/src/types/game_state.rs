@@ -7,6 +7,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::database::card_db::CardDbHandle;
+
 use super::ability::{
     default_target_filter_permanent, legacy_trigger_entry_list,
     materialize_legacy_printed_trigger_entries, AbilityCost, AbilityDefinition, AdditionalCost,
@@ -18913,21 +18915,24 @@ declare_game_state! {
     #[serde(skip)]
     pub meld_pair_registry: Arc<HashMap<String, MeldPairRecord>>,
 
-    /// Momir Basic selection index: mana value -> sorted creature face names.
-    /// CR 707.2 + CR 202.3: the random-token pool, keyed by mana value so the
-    /// emblem's `{X}` ability can pick a creature with mana value X. Built only
-    /// when `format == Momir` (see `rehydrate_card_db_metadata`); empty
-    /// otherwise. Skipped in serialization and rebuilt deterministically per peer
-    /// from the loaded card DB.
+    /// Handle to the loaded card database, for the rare resolver that must
+    /// query the WHOLE card corpus at resolution time instead of pre-staging a
+    /// copy of it into state.
+    ///
+    /// CR 707.2 + CR 202.3: the Momir Basic emblem's `{X}` ability creates a
+    /// token that's a copy of a creature card with mana value X "chosen at
+    /// random" — a draw over every printed creature. Materializing that corpus
+    /// into `GameState` (the previous `momir_pool` / `momir_pool_faces` pair)
+    /// meant holding ~19,500 `CardFace` clones of data the card database
+    /// already owns in the same engine instance. The resolver now draws one
+    /// face on demand through this handle.
+    ///
+    /// `Arc` inside [`CardDbHandle`] keeps `GameState::clone()` during AI
+    /// search O(1), matching `all_card_names` / `card_face_registry`. Skipped
+    /// in serialization and reinstalled by `install_card_db` on every path that
+    /// builds or restores a game.
     #[serde(skip)]
-    pub momir_pool: BTreeMap<i32, Vec<String>>,
-
-    /// Momir Basic hydration map: lowercase creature name -> `CardFace`. The
-    /// resolver reads this (NEVER `card_face_registry`, which is conjure-scoped
-    /// and misses most creatures) to build the copy token. Skipped in
-    /// serialization; rebuilt with `momir_pool`.
-    #[serde(skip)]
-    pub momir_pool_faces: Arc<HashMap<String, CardFace>>,
+    pub card_db: Option<CardDbHandle>,
 
     /// CR 400.11: the sealed booster products this game can open packs from.
     /// Populated only when some card in the game carries
@@ -19942,6 +19947,26 @@ pub struct PostReplacementDrain {
     /// CR 615.5: target of the prevented event itself, for
     /// `TargetFilter::PostReplacementDamageTarget`.
     pub event_target: Option<crate::types::ability::TargetRef>,
+
+    /// CR 109.5: the player "you" names inside this continuation — the
+    /// controller of the object whose ability is doing the replacing.
+    ///
+    /// Distinct from [`Self::source`] and deliberately a `PlayerId` rather than
+    /// an `ObjectId`: `source` is the object a `SelfRef` post-effect resolves
+    /// against (rebound to the *affected* object on every zone-change path, and
+    /// cleared outright by [`GameState::clear_post_replacement_source`]), while
+    /// this is the ability's controller, fixed when the replacement applied.
+    /// CR 614.6 makes that snapshot load-bearing: the modified event and its
+    /// continuation are one step, and the replacing object may already be gone
+    /// by drain time (Head of the Hunt dying in the same state-based-action
+    /// batch as the creature it exiles), so a drain-time object lookup would
+    /// answer `None` exactly when the rider still has to name its controller.
+    ///
+    /// `None` on every install path that has no replacing object to speak of —
+    /// combat-prevention riders, the ready-continuation helpers, test fixtures —
+    /// where the affected object's controller remains the fallback.
+    #[serde(default)]
+    pub controller: Option<crate::types::player::PlayerId>,
 }
 
 /// CR 616.1g: what an install does when a continuation is already resident.
@@ -20051,6 +20076,7 @@ impl PostReplacementDrain {
             applied: HashSet::new(),
             event_source: None,
             event_target: None,
+            controller: None,
         }
     }
 
@@ -23746,8 +23772,7 @@ impl GameState {
             all_card_names: Arc::from([]),
             card_face_registry: Arc::new(HashMap::new()),
             meld_pair_registry: Arc::new(HashMap::new()),
-            momir_pool: BTreeMap::new(),
-            momir_pool_faces: Arc::new(HashMap::new()),
+            card_db: None,
             booster_shelf: Arc::new(BoosterShelf::default()),
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
@@ -24470,6 +24495,18 @@ impl GameState {
         self.active_post_replacement_drains()?
             .resident()
             .and_then(|drain| drain.source)
+    }
+
+    /// CR 109.5: the resident drain's replacing ability's controller — the
+    /// player "you" refers to in the continuation. See
+    /// [`PostReplacementDrain::controller`]; unlike
+    /// [`Self::post_replacement_source`] this survives
+    /// [`Self::clear_post_replacement_source`], because clearing the `SelfRef`
+    /// referent says nothing about whose ability produced the continuation.
+    pub fn post_replacement_controller(&self) -> Option<crate::types::player::PlayerId> {
+        self.active_post_replacement_drains()?
+            .resident()
+            .and_then(|drain| drain.controller)
     }
 
     /// CR 615.5 + CR 609.7: the resident drain's *prevented-event* source — the
@@ -25767,8 +25804,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         all_card_names: _,
         card_face_registry: _,
         meld_pair_registry: _,
-        momir_pool: _,
-        momir_pool_faces: _,
+        card_db: _,
         booster_shelf: _,
         log_player_names: _,
         last_created_token_ids: _,

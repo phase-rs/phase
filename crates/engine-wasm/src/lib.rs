@@ -374,7 +374,7 @@ thread_local! {
     /// panics leaves the borrow flag permanently set — every subsequent call fails.
     /// Cell::take() + Cell::set() has no borrow guard, making it panic-resilient.
     static GAME_STATE: Cell<Option<GameState>> = const { Cell::new(None) };
-    static CARD_DB: RefCell<Option<CardDatabase>> = const { RefCell::new(None) };
+    static CARD_DB: RefCell<Option<std::sync::Arc<CardDatabase>>> = const { RefCell::new(None) };
     /// When set, this engine is claimed by a multiplayer host session. The
     /// engine claims it itself, in the same call that installs the game
     /// (`initialize_multiplayer_host_game`, `resume_multiplayer_host_state`),
@@ -737,7 +737,7 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Failed to parse card database: {}", e)))?;
     let count = db.card_count() as u32;
     CARD_DB.with(|cell| {
-        *cell.borrow_mut() = Some(db);
+        *cell.borrow_mut() = Some(std::sync::Arc::new(db));
     });
     Ok(count)
 }
@@ -750,9 +750,11 @@ pub fn build_ai_card_subset() -> Result<String, JsValue> {
         let db = db_cell.borrow();
         GAME_STATE.with(|state_cell| {
             let state = state_cell.take();
+            // `Option<&Arc<T>>` does not coerce to `Option<&T>` — deref
+            // coercion does not reach inside a generic type constructor.
             let result = engine::game::card_subset::build_ai_card_subset_or_full(
                 state.as_ref(),
-                db.as_ref(),
+                db.as_deref(),
             );
             state_cell.set(state);
             result
@@ -1575,8 +1577,11 @@ fn initialize_game_impl(
             // a hard error instead of a silently-wrong-format game.
             let payload = resolve_deck_list(db, &deck_list);
 
-            load_and_hydrate_decks(&mut state, &payload, Some(db));
+            load_and_hydrate_decks(&mut state, &payload, Some(&**db));
             state.all_card_names = db.card_names().into();
+            // CR 707.2 + CR 202.3: resolvers that draw from the whole corpus
+            // (the Momir Basic emblem) read the database through this handle.
+            engine::game::install_card_db(&mut state, std::sync::Arc::clone(db));
             None
         });
 
@@ -2374,6 +2379,9 @@ fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), St
             db,
             CardDbRehydrationFinalization::Defer,
         );
+        // `card_db` is `#[serde(skip)]`, so a restored state arrives without a
+        // draw source. Reinstall it or the Momir emblem silently makes nothing.
+        engine::game::install_card_db(state, std::sync::Arc::clone(db));
         Ok(())
     })
 }
@@ -2439,10 +2447,10 @@ fn backfill_legacy_debug_permissions(
 #[cfg(test)]
 fn load_minimal_test_card_database() {
     CARD_DB.with(|cell| {
-        *cell.borrow_mut() = Some(
+        *cell.borrow_mut() = Some(std::sync::Arc::new(
             CardDatabase::from_json_str("{}")
                 .expect("an empty test card database must deserialize"),
-        );
+        ));
     });
 }
 
@@ -3453,7 +3461,7 @@ mod bracket_estimate_tests {
         )
         .unwrap()
         .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap());
-        CARD_DB.with(|c| *c.borrow_mut() = Some(db));
+        CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let deck = PlayerDeckList {
             commander: vec!["Atraxa, Praetors' Voice".into()],
@@ -5312,7 +5320,7 @@ mod replay_bridge_tests {
             }"#,
         )
         .unwrap();
-        CARD_DB.with(|c| *c.borrow_mut() = Some(db));
+        CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let mut state = GameState::new_two_player(11);
         state.debug_mode = true;
@@ -5420,7 +5428,7 @@ mod replay_bridge_tests {
             }"#,
         )
         .unwrap();
-        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let mut state = GameState::new_two_player(19);
         state.debug_mode = true;
@@ -5781,10 +5789,10 @@ mod ai_scoring_rng_bridge_tests {
         // rows this module would then have to keep true. `restored_card_db_requirements_tests`
         // is the row that pins the requirement itself.
         CARD_DB.with(|cell| {
-            *cell.borrow_mut() = Some(
+            *cell.borrow_mut() = Some(std::sync::Arc::new(
                 engine::database::CardDatabase::from_json_str("{}")
                     .expect("an empty card database must parse"),
-            );
+            ));
         });
 
         // The exact shipped plant: `AiWorkerPool` calls `worker.restoreState(..)`
