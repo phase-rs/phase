@@ -611,7 +611,7 @@ fn evaluate_constructed(
     // CR 100.2a + CR 100.4a: The copy limit applies to main + sideboard
     // combined, at the ceiling the request's resolved format config carries.
     let limit = resolved_copy_limit(request, format);
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::CountVerbatim);
     let over_limit = copy_limit_violations(db, &counts, limit);
     if !over_limit.is_empty() {
         reasons.push(summarize_cards(&copy_limit_label(limit), &over_limit, 6));
@@ -702,7 +702,7 @@ fn evaluate_planechase(
     }
 
     let limit = resolved_copy_limit(request, GameFormat::Planechase);
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::CountVerbatim);
     let over_limit = copy_limit_violations(db, &counts, limit);
     if !over_limit.is_empty() {
         reasons.push(summarize_cards(&copy_limit_label(limit), &over_limit, 6));
@@ -807,7 +807,7 @@ fn evaluate_archenemy(
     }
 
     let limit = resolved_copy_limit(request, GameFormat::Archenemy);
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::CountVerbatim);
     let over_limit = copy_limit_violations(db, &counts, limit);
     if !over_limit.is_empty() {
         reasons.push(summarize_cards(&copy_limit_label(limit), &over_limit, 6));
@@ -1171,7 +1171,7 @@ fn evaluate_commander_with_format(
     // same name" — which is exactly what `default_deck_copy_limit()` already
     // reports as `Unlimited`, so the format answers this rather than the
     // caller.
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     let singleton_violations =
         copy_limit_violations(db, &counts, resolved_copy_limit(request, game_format));
     if !singleton_violations.is_empty() {
@@ -1342,7 +1342,7 @@ fn evaluate_brawl(
     // CR 903.5b (Brawl variant): singleton rule, basic lands exempt,
     // canonicalized to one bucket per physical card (CR 709.2 / CR 712.1) in
     // the shared helper.
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     let singleton_violations =
         copy_limit_violations(db, &counts, resolved_copy_limit(request, game_format));
     if !singleton_violations.is_empty() {
@@ -1578,7 +1578,7 @@ fn evaluate_tiny_leaders(
         ));
     }
 
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     let singleton_violations = copy_limit_violations(
         db,
         &counts,
@@ -1916,11 +1916,12 @@ fn evaluate_oathbreaker(
     // Oathbreaker RC: singleton (basic lands exempt, consistent with other
     // singleton command-zone formats). `construction_deck_cards` includes
     // `signature_spell`, so a genuine second copy of a card in both the main
-    // deck and the signature-spell slot is caught here. Counts are keyed by
-    // resolved card identity (CR 709.2 / CR 712.1: one physical card) rather
-    // than by raw spelling, so the two spellings of one multi-face card share
-    // a bucket.
-    let counts = combined_copy_counts(db, request);
+    // deck and the signature-spell slot is caught here; a single physical card
+    // named in both slots under different spellings is netted out first by
+    // `CommandZoneNetting::NetAgainstMainDeck`, which resolves both command-zone
+    // slots by card identity (CR 709.2 / CR 712.1: one physical card) rather
+    // than by raw spelling.
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     let singleton_violations = copy_limit_violations(
         db,
         &counts,
@@ -2453,7 +2454,7 @@ fn quick_commander_check(
     // card identity (CR 709.2 / CR 712.1 — one physical card per multi-face
     // card), so re-deriving counts here would make the summary path reach a
     // different singleton verdict than the full path for the same decklist.
-    let counts = combined_copy_counts(db, request);
+    let counts = combined_copy_counts(db, request, CommandZoneNetting::NetAgainstMainDeck);
     for name in construction_deck_cards(request) {
         let resolved = db.lookup_key(name);
         let Some(face) = db.get_face_by_name(&resolved) else {
@@ -3107,14 +3108,105 @@ fn canonical_deck_count_key(db: &CardDatabase, name: &str) -> String {
         .unwrap_or(resolved)
 }
 
+/// Whether the evaluating format has a command zone whose entries are part of
+/// the deck proper.
+///
+/// CR 903.5a makes the commander one of the 100, so a decklist naming a
+/// command-zone card in BOTH its zone slot and the main deck still describes a
+/// single physical card, and the duplicate must be netted out before the copy
+/// limit is applied. Formats with no command zone (constructed, Planechase,
+/// Archenemy) have no such identity: they must count `construction_deck_cards`
+/// verbatim, or netting would silently hide one copy of any card that also
+/// appears in a (rejected, but still populated) commander slot and turn a real
+/// CR 100.2a violation into a pass, from a rule that has no commander concept.
+///
+/// The set of formats whose `evaluate_*`/`quick_*` function passes
+/// `NetAgainstMainDeck` is exactly the set for which
+/// `GameFormat::command_zone_holds_decklist_commander()` returns `true`, and
+/// `game::deck_loading` reads that predicate to decide both what it nets out of
+/// the library and what it places in the command zone. The two must agree: a
+/// format netted here but not placed there starts the game a card short, and
+/// one placed but not netted starts it a card long.
+/// `types::format`'s
+/// `command_zone_holds_decklist_commander_matches_the_validator_netting_set`
+/// locks that agreement — update it when adding a format to either side.
+///
+/// Typed rather than a `bool` so each call site states which rule it is under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandZoneNetting {
+    /// CR 903.5a: net a command-zone card that is also listed in the main deck
+    /// down to the one physical card it is.
+    NetAgainstMainDeck,
+    /// No command zone: count every listed slot verbatim.
+    CountVerbatim,
+}
+
 fn combined_copy_counts(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
+    netting: CommandZoneNetting,
 ) -> HashMap<String, u32> {
     let mut counts: HashMap<String, u32> = HashMap::new();
     for name in construction_deck_cards(request) {
         let canonical = canonical_deck_count_key(db, name);
         *counts.entry(canonical).or_insert(0) += 1;
+    }
+    if netting == CommandZoneNetting::CountVerbatim {
+        return counts;
+    }
+    // CR 903.5a: the commander is one of the 100, so a decklist naming it in
+    // both the command zone and the main deck still describes a single physical
+    // card. `construction_deck_cards` chains both slots, so that card was just
+    // counted twice — decrement the duplicate before CR 903.5b sees it, or the
+    // commander is reported as a singleton violation against itself. Comparing
+    // resolved keys (CR 709.2 / CR 712.1: a split or double-faced card is one
+    // physical card) is what makes this fire for a composite-named
+    // commander listed in the 99 by its front name; the same double-listing
+    // is already netted out of the CR 903.5a total by
+    // `commanders_represented_in_main`.
+    //
+    // The Oathbreaker signature spell (Oathbreaker RC) is a second command-zone
+    // slot with the same "one physical card" identity, and
+    // `construction_deck_cards` chains it too — so it is netted on the same
+    // axis rather than as a special case. Without it, a compositely-named
+    // signature spell listed by its front face in the 58 is reported as a
+    // CR 903.5b singleton violation against itself.
+    //
+    // The decrement is bounded by OCCURRENCE, not merely gated on presence:
+    // subtract `min(command_zone_entries, main_deck_occurrences)` per canonical
+    // key. A per-entry `saturating_sub(1)` gated only on "the main deck
+    // contains this card at all" over-credits whenever two command-zone slots
+    // resolve to the same card — partner slots spelled composite and front-face
+    // ("Fire // Ice" + "Fire"), or an Oathbreaker whose commander and signature
+    // spell name one card — netting two copies away against a single main-deck
+    // listing and hiding a genuine CR 903.5b violation. Netting must be the
+    // exact CR 903.5a double-listing correction, never a blanket amnesty.
+    let mut main_deck_occurrences: HashMap<String, u32> = HashMap::new();
+    for name in &request.main_deck {
+        *main_deck_occurrences
+            .entry(canonical_deck_count_key(db, name))
+            .or_insert(0) += 1;
+    }
+    let mut command_zone_entries: HashMap<String, u32> = HashMap::new();
+    for entry in request
+        .commander
+        .iter()
+        .chain(request.signature_spell.iter())
+    {
+        *command_zone_entries
+            .entry(canonical_deck_count_key(db, entry))
+            .or_insert(0) += 1;
+    }
+    for (canonical, command_copies) in command_zone_entries {
+        let netted = command_copies.min(
+            main_deck_occurrences
+                .get(&canonical)
+                .copied()
+                .unwrap_or_default(),
+        );
+        if let Some(count) = counts.get_mut(&canonical) {
+            *count = count.saturating_sub(netted);
+        }
     }
     counts
 }
@@ -4879,7 +4971,7 @@ mod tests {
             default_deck_copy_limit: None,
         };
 
-        let counts = combined_copy_counts(&db, &request);
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
         assert_eq!(counts.get("nazgûl"), Some(&10));
         assert!(!copy_limit_violations(&db, &counts, DeckCopyLimit::UpTo(1)).is_empty());
     }
@@ -8399,6 +8491,168 @@ mod tests {
         CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
     }
 
+    /// The headline regression, driven end-to-end through
+    /// `evaluate_deck_compatibility` rather than through a hand-written closure,
+    /// so it actually executes the production comparison sites.
+    ///
+    /// A commander listed in the command zone by its composite name and in the
+    /// 99 by its front name is ONE card (CR 903.5a: the deck is 100 cards
+    /// *including* its commander; CR 709.2 / CR 712.1: a split or double-faced
+    /// card is a single physical card, whichever of its faces a decklist names
+    /// it by). Comparing raw spellings made all three CR 903.5 checks
+    /// misfire at once: the deck counted 101 cards, the commander was reported
+    /// as a 2-copy CR 903.5b singleton violation against itself, and it escaped
+    /// the CR 903.5c command-zone skip.
+    #[test]
+    fn commander_listed_by_composite_and_front_name_is_one_card() {
+        let db = dfc_commander_db();
+        let composite = "Tovolar, Dire Overlord // Tovolar, the Midnight Scourge";
+
+        let mut main = vec!["Tovolar, Dire Overlord".to_string()];
+        main.extend(expand("Mountain", 99));
+        assert_eq!(main.len(), 100, "the commander is one of the 100");
+
+        for summary_only in [false, true] {
+            let request = DeckCompatibilityRequest {
+                main_deck: main.clone(),
+                commander: vec![composite.to_string()],
+                selected_format: Some(GameFormat::Commander),
+                summary_only,
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: deck must be legal, got: {:?}",
+                result.selected_format_reasons
+            );
+            assert!(
+                result.selected_format_reasons.is_empty(),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    /// Regression: the Oathbreaker RC deck-size check is the fourth
+    /// command-zone format, and it must resolve card identity (CR 709.2 /
+    /// CR 712.1: one physical card per multi-face card) like
+    /// the other three. Listing the Oathbreaker in the command zone by its
+    /// composite name and in the 59 by its front face describes ONE physical
+    /// card; a raw-spelling compare counted it twice and rejected a legal
+    /// 60-card deck as 61.
+    #[test]
+    fn oathbreaker_listed_by_composite_and_front_name_is_one_card() {
+        let db = dfc_oathbreaker_db();
+
+        // 58 Mountain + 1 Ob Front + 1 Sig Front = 60 physical cards.
+        let mut main = vec!["Ob Front".to_string(), "Sig Front".to_string()];
+        main.extend(expand("Mountain", 58));
+        assert_eq!(main.len(), 60);
+
+        // Both verdict paths: the summary twin delegates to the same
+        // `evaluate_oathbreaker`, so they must agree for the same decklist.
+        for summary_only in [false, true] {
+            let request = DeckCompatibilityRequest {
+                main_deck: main.clone(),
+                commander: vec!["Ob Front // Ob Back".to_string()],
+                signature_spell: vec!["Sig Front // Sig Back".to_string()],
+                selected_format: Some(GameFormat::Oathbreaker),
+                summary_only,
+                player_count: default_player_count(),
+                ..Default::default()
+            };
+
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: reasons: {:?}",
+                result.selected_format_reasons
+            );
+            assert!(
+                result.selected_format_reasons.is_empty(),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    /// Regression: the signature spell is a command-zone slot with the same
+    /// "one physical card" identity as the Oathbreaker, so a composite/front
+    /// spelling split across the two slots must not be reported as a CR 903.5b
+    /// singleton violation against itself. Netting only the commander left this
+    /// live even after the deck-size check was fixed.
+    #[test]
+    fn signature_spell_listed_under_two_spellings_is_not_its_own_singleton_violation() {
+        let db = dfc_oathbreaker_db();
+
+        let mut main = vec!["Ob Front".to_string(), "Sig Front".to_string()];
+        main.extend(expand("Mountain", 58));
+
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec!["Ob Front".to_string()],
+            signature_spell: vec!["Sig Front // Sig Back".to_string()],
+            selected_format: Some(GameFormat::Oathbreaker),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
+        assert_eq!(
+            counts.get("sig front"),
+            Some(&1),
+            "one physical signature spell counts once: {counts:?}"
+        );
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("Singleton violations")),
+            "{:?}",
+            result.selected_format_reasons
+        );
+    }
+
+    /// CR 903.5a netting corrects a DOUBLE-listing; it is not a blanket amnesty.
+    /// When two command-zone slots resolve to the same card — here an
+    /// Oathbreaker whose commander and signature spell are two spellings of one
+    /// card — a per-entry `saturating_sub(1)` gated only on "the main deck
+    /// contains this card at all" decrements twice against a single main-deck
+    /// listing, netting a real 2-copy CR 903.5b violation down to 1 and hiding
+    /// it. Bounding the decrement by main-deck occurrence is what keeps the
+    /// violation visible.
+    #[test]
+    fn netting_never_credits_more_copies_than_the_main_deck_actually_lists() {
+        let db = dfc_oathbreaker_db();
+
+        let mut main = vec!["Ob Front".to_string(), "Ob Front".to_string()];
+        main.extend(expand("Mountain", 58));
+
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            // Both command-zone slots resolve to the SAME card.
+            commander: vec!["Ob Front".to_string()],
+            signature_spell: vec!["Ob Front // Ob Back".to_string()],
+            selected_format: Some(GameFormat::Oathbreaker),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
+        assert_eq!(
+            counts.get("ob front"),
+            Some(&2),
+            "three listings minus the one copy the main deck actually double-lists              leaves a genuine 2-copy singleton violation: {counts:?}"
+        );
+    }
+
     /// The signature-spell exemption must not become a blanket amnesty either:
     /// a genuine SECOND copy of the signature spell in the 58 is still a
     /// singleton violation. Guards the copy-count bucketing against
@@ -8430,6 +8684,46 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("Singleton violations")),
             "two real copies must still trip the singleton rule: {:?}",
+            result.selected_format_reasons
+        );
+    }
+
+    /// Regression: CR 903.5a netting belongs to command-zone formats only.
+    /// Constructed has no commander concept, so a populated commander slot must
+    /// not silently discount one main-deck copy and hide a real CR 100.2a
+    /// violation. `CommandZoneNetting::CountVerbatim` is what keeps the two
+    /// rules apart.
+    #[test]
+    fn constructed_copy_limit_does_not_net_out_a_commander_slot_entry() {
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Fire", &[], &["Instant"]);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let mut main = expand("Fire", 5);
+        main.extend(expand("Plains", 55));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            commander: vec!["Fire".to_string()],
+            selected_format: Some(GameFormat::Standard),
+            player_count: default_player_count(),
+            ..Default::default()
+        };
+
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::CountVerbatim);
+        assert_eq!(
+            counts.get("fire"),
+            Some(&6),
+            "constructed counts every listed slot verbatim: {counts:?}"
+        );
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("Fire")),
+            "five main-deck copies must still trip CR 100.2a: {:?}",
             result.selected_format_reasons
         );
     }
