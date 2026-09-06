@@ -27,6 +27,19 @@ pub fn resolve(
 
     let player = match target {
         TargetFilter::Controller | TargetFilter::SelfRef => ability.controller,
+        // CR 603.7c + CR 510.2: "that player" on a triggered ability ("Whenever
+        // ~ deals combat damage to a player, that player skips their next combat
+        // phase" — Blinding Angel) is an event-context reference to the damaged
+        // player, not a chosen target, so `ability.targets` is empty. Resolve it
+        // from the triggering event, mirroring `additional_phase`'s
+        // `TriggeringPlayer` arm. Without this the skip fell through to
+        // `ability.controller`, so the Angel's own controller lost their combat
+        // phase while the damaged opponent was unaffected.
+        TargetFilter::TriggeringPlayer => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(|event| crate::game::targeting::extract_player_from_event(event, state))
+            .unwrap_or(ability.controller),
         _ => {
             if let Some(TargetRef::Player(pid)) = ability.targets.first() {
                 *pid
@@ -217,6 +230,62 @@ mod tests {
         // Non-combat steps must not be touched.
         assert!(skips.get(&Phase::Untap).is_none(), "Untap must not be set");
         assert!(skips.get(&Phase::Draw).is_none(), "Draw must not be set");
+    }
+
+    /// CR 603.7c + CR 510.2 + CR 500.11: Blinding Angel — "Whenever this creature
+    /// deals combat damage to a player, that player skips their next combat
+    /// phase." The `TriggeringPlayer` target must resolve to the damaged player
+    /// carried on `current_trigger_event`, not the ability's controller. The
+    /// controller's own combat steps must be untouched.
+    #[test]
+    fn triggering_player_skip_targets_damaged_player_not_controller() {
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::ObjectId;
+
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+
+        let mut ability = make_ability_scoped(
+            StepSkipTarget::CombatPhase,
+            QuantityExpr::Fixed { value: 1 },
+            SkipScope::NextOccurrence,
+        );
+        ability.controller = PlayerId(0);
+        ability.effect = Effect::SkipNextStep {
+            target: TargetFilter::TriggeringPlayer,
+            step: StepSkipTarget::CombatPhase,
+            count: QuantityExpr::Fixed { value: 1 },
+            scope: SkipScope::NextOccurrence,
+        };
+
+        // Blinding Angel (controller P0) deals combat damage to P1.
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        });
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 500.11: all five combat steps skipped for the DAMAGED player (P1).
+        let p1 = &state.steps_to_skip[1];
+        assert_eq!(p1.get(&Phase::BeginCombat), Some(&1), "BeginCombat");
+        assert_eq!(
+            p1.get(&Phase::DeclareAttackers),
+            Some(&1),
+            "DeclareAttackers"
+        );
+        assert_eq!(p1.get(&Phase::DeclareBlockers), Some(&1), "DeclareBlockers");
+        assert_eq!(p1.get(&Phase::CombatDamage), Some(&1), "CombatDamage");
+        assert_eq!(p1.get(&Phase::EndCombat), Some(&1), "EndCombat");
+
+        // The Angel's controller (P0) must NOT be affected.
+        assert!(
+            state.steps_to_skip.first().is_none_or(|m| m.is_empty()),
+            "controller's combat phase must be untouched"
+        );
     }
 
     /// CR 614.10 + CR 614.10a: an `AllOfNextTurn` combat skip arms one pending
