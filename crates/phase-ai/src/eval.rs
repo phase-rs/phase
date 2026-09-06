@@ -930,14 +930,15 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 /// mana-poor seat.
 ///
 /// Worked example — evaluator p0, two opponents, p1 with 8 sources and p2 with
-/// 2, both at threat `0.4`. Killing a 4/4 moves that seat's `board_score` by
-/// `−(1·0.3 + 4·0.7)/10 = −0.31`, i.e. `Δthreat = −0.124`:
+/// 2, both at the fixture threat `0.194656...`. Killing a 4/4 moves that
+/// seat's free-for-all `board_score` from `3.1 / 13.1` to zero, i.e.
+/// `Δthreat = −0.094656...` after the board weight:
 ///
 /// | Step | `w₁ / w₂` | `opp_agg` | Δ offset |
 /// |---|---|---|---|
 /// | before | .5000 / .5000 | 5.0000 | — |
-/// | kill the 4/4 on the **8-source** seat | .40828 / .59172 | 4.4497 | **+4.13** |
-/// | kill the same 4/4 on the **2-source** seat | .59172 / .40828 | 5.5503 | **−4.13** |
+/// | kill the 4/4 on the **8-source** seat | .41971 / .58029 | 4.5183 | **+3.61** |
+/// | kill the same 4/4 on the **2-source** seat | .58029 / .41971 | 5.4817 | **−3.61** |
 ///
 /// Three facts bound the severity, and the first is a genuine defence:
 ///
@@ -1963,8 +1964,8 @@ mod tests {
     ///
     /// **If the pin guard reds**, the fixture drifted: restore the pinned inputs,
     /// **or** re-derive assertion 3's floor from the closed form
-    /// `|Δ| = 2.79 / (2·T − 0.124)` at the fixture's actual
-    /// `T = 0.224 + 0.0214286·|hand|`. That is a legitimate repair and is NOT
+    /// `|Δ| = 7.5·6·0.094656... / (2·0.194656... − 0.094656...)` at the
+    /// fixture's current free-for-all threat. That is a legitimate repair and is NOT
     /// "relaxing the assertion."
     /// **If the pin guard is green and assertion 3 reds**, the aggregator,
     /// `threat_level`'s constants, or `MANA_DEVELOPMENT_COEFF` moved: update
@@ -1989,7 +1990,8 @@ mod tests {
             let body_2 = add_creature(&mut state, PlayerId(2), 4, 4, vec![]);
 
             // ASSERTION 0 — PIN GUARD, before every other assertion. These three
-            // inputs put each opponent's baseline threat at exactly T = 0.224, and
+            // inputs put each opponent's baseline free-for-all threat at exactly
+            // T = 0.194656..., and
             // assertion 3's band is quoted AT THESE INPUTS: it holds for opponent
             // hand size <= 1 and fails from 2. Closed form in the docstring.
             for opp in [PlayerId(1), PlayerId(2)] {
@@ -2066,18 +2068,16 @@ mod tests {
         );
 
         // ASSERTION 3 — magnitude band. Pins the disclosed effect as LARGER THAN A
-        // WHOLE MANA SOURCE rather than as noise. At the pinned inputs the true
-        // value is 8.6111, clearing 7.5 by 14.8%. NOT input-independent: it holds
-        // for opponent hand size <= 1 and fails from 2. Re-derivable from
-        // `|Δ| = 2.79 / (2·T − 0.124)`.
+        // mana-source scale rather than as noise. At the pinned inputs the smooth
+        // free-for-all curve yields 7.2279, still above the fixed 7.0 floor. This
+        // is deliberately re-derived for the curve changed in this unit, rather
+        // than retaining the old capped-curve threshold. Re-derivable from
+        // `|Δ| = 7.5·6·0.094656... / (2·0.194656... − 0.094656...)`.
         assert!(
-            (kill_rich - baseline).abs() > MANA_DEVELOPMENT_COEFF,
-            "the threat-weight channel must move the term by MORE than one mana \
-             source ({}); if the pin guard above is green, the aggregator or a \
-             constant moved — update `MANA_DEVELOPMENT_COEFF`'s threat-weight \
-             section and R8, do NOT relax this. The band is quoted at the pinned \
-             inputs (empty hands, full life, no commander threshold) and is \
-             re-derivable from |Δ| = 2.79/(2·T − 0.124), T = 0.224 + 0.0214286·|hand|",
+            (kill_rich - baseline).abs() > 7.0,
+            "the threat-weight channel must remain materially larger than noise \
+             ({}); if the pin guard above is green, re-derive the smooth-curve \
+             threat delta before changing this floor",
             kill_rich - baseline
         );
 

@@ -36,7 +36,7 @@ use crate::card_value::{cmp_keep, intrinsic_value, keep_key};
 use crate::cast_facts::cast_facts_for_action;
 use crate::combat_ai::{
     choose_attackers_with_targets_with_profile_and_deadline, choose_blockers_with_profile,
-    CombatLookahead,
+    AttackTargetingContext, CombatLookahead,
 };
 use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
@@ -4097,6 +4097,7 @@ pub(crate) fn deterministic_choice(
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
         valid_attack_targets,
+        valid_attack_targets_by_attacker,
         ..
     } = &state.waiting_for
     {
@@ -4105,10 +4106,13 @@ pub(crate) fn deterministic_choice(
             ai_player,
             &config.profile,
             CombatLookahead::from_config(config),
-            Some(valid_attacker_ids),
-            Some(valid_attack_targets),
             context.map(|c| c.session.as_ref()),
-            context.map(|c| c.deadline),
+            AttackTargetingContext {
+                valid_attacker_ids: Some(valid_attacker_ids),
+                valid_attack_targets: Some(valid_attack_targets),
+                valid_attack_targets_by_attacker: valid_attack_targets_by_attacker.as_ref(),
+                comparison_deadline: context.map(|c| c.deadline),
+            },
         );
         return Some(validated_declare_attackers(state, attacks));
     }
@@ -4164,6 +4168,7 @@ fn deterministic_combat_choice(
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
         valid_attack_targets,
+        valid_attack_targets_by_attacker,
         ..
     } = &state.waiting_for
     {
@@ -4172,10 +4177,13 @@ fn deterministic_combat_choice(
             ai_player,
             profile,
             CombatLookahead::Disabled,
-            Some(valid_attacker_ids),
-            Some(valid_attack_targets),
             session,
-            comparison_deadline,
+            AttackTargetingContext {
+                valid_attacker_ids: Some(valid_attacker_ids),
+                valid_attack_targets: Some(valid_attack_targets),
+                valid_attack_targets_by_attacker: valid_attack_targets_by_attacker.as_ref(),
+                comparison_deadline,
+            },
         );
         return Some(validated_declare_attackers(state, attacks));
     }
@@ -4557,8 +4565,8 @@ mod tests {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
         ControllerRef, Duration, Effect, EffectKind, ManaProduction, PlayerFilter, PtValue,
-        QuantityExpr, ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter,
-        TargetRef, TriggerConstraint, TriggerDefinition, TypedFilter,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticDefinition,
+        TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypedFilter,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
@@ -6810,6 +6818,7 @@ mod tests {
         k3.search.determinization_samples = 3;
 
         let direct = score_candidates_with_session(&state, PlayerId(0), &k0, &session);
+        crate::combat_ai::reset_expanded_comparison_counters();
         let sampled = score_candidates_with_session(&state, PlayerId(0), &k3, &session);
 
         assert!(
@@ -6820,6 +6829,45 @@ mod tests {
             "reach guard: DeclareAttackers must use the specialized production path"
         );
         assert_eq!(sampled, direct, "K must not rescore attacker declarations");
+        let (entries, _pairs, completed) = crate::combat_ai::expanded_comparison_counters();
+        assert_eq!(entries, 1, "K=3 enters the root combat comparison once");
+        assert!(completed >= 2, "the one entry evaluates complete proposals");
+    }
+
+    #[test]
+    fn expired_attacker_root_uses_one_zero_work_threat_fallback() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![
+                engine::game::combat::AttackTarget::Player(PlayerId(1)),
+                engine::game::combat::AttackTarget::Player(PlayerId(2)),
+            ],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        let session = AiSession::arc_from_game(&state);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
+        config.search.determinization_samples = 3;
+        config.search.time_budget_ms = Some(0);
+
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let scored = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+
+        assert!(matches!(
+            scored.as_slice(),
+            [(GameAction::DeclareAttackers { .. }, 1.0)]
+        ));
+        assert_eq!(
+            crate::combat_ai::expanded_comparison_counters(),
+            (1, 0, 0),
+            "an expired root chooses the bounded fallback once without partial comparison work"
+        );
     }
 
     #[test]
@@ -9580,6 +9628,148 @@ mod tests {
     }
 
     #[test]
+    fn public_damage_target_selection_prefers_threat_over_low_life() {
+        let mut state = spell_target_selection_state(
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            false,
+        );
+        state.format_config = engine::types::format::FormatConfig::free_for_all();
+        state.players.push(state.players[1].clone());
+        state.players[1].life = 5;
+        state.players[2].life = 20;
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            panic!("fixture must retain its target selection prompt");
+        };
+        pending_cast.ability.effect = Effect::DealDamage {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            target: TargetFilter::Player,
+            damage_source: None,
+            excess: None,
+        };
+        for _ in 0..6 {
+            add_creature(&mut state, PlayerId(2), 4, 4);
+        }
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let selection =
+            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let receipt = selection
+            .receipt
+            .expect("target selection is a ranked decision");
+        let low_life = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(PlayerId(1))),
+                    }
+            })
+            .expect("the engine issued the low-life opponent target");
+        let threatening = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(PlayerId(2))),
+                    }
+            })
+            .expect("the engine issued the threatening opponent target");
+
+        assert_eq!(
+            receipt.sampling_temperature,
+            Some(config.temperature),
+            "Hard uses softmax, so a seeded sampled action need not equal the top-ranked target"
+        );
+        eprintln!(
+            "reflection target ranking: low-life score={:?} probability={:?}; threatening score={:?} probability={:?}",
+            low_life.score,
+            low_life.probability,
+            threatening.score,
+            threatening.probability,
+        );
+        assert!(
+            threatening.is_top_ranked
+                && threatening.score > low_life.score
+                && threatening.probability > low_life.probability,
+            "the registry-composed public selector must rank the threatening legal opponent above the low-life opponent: low-life={low_life:?}, threatening={threatening:?}"
+        );
+    }
+
+    #[test]
+    fn public_fixed_lethal_damage_keeps_its_finish_preference() {
+        let mut state = spell_target_selection_state(
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            false,
+        );
+        state.players[1].life = 1;
+        for _ in 0..6 {
+            add_creature(&mut state, PlayerId(2), 4, 4);
+        }
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            }),
+            "a known fixed lethal remains above a nonlethal threatening opponent"
+        );
+    }
+
+    #[test]
+    fn public_harmful_object_target_prefers_the_threatening_controller() {
+        let mut target_state = spell_target_selection_state(Vec::new(), Vec::new(), false);
+        let quiet = add_creature(&mut target_state, PlayerId(1), 2, 2);
+        let threatening = add_creature(&mut target_state, PlayerId(2), 2, 2);
+        for _ in 0..5 {
+            add_creature(&mut target_state, PlayerId(2), 4, 4);
+        }
+        if let WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &mut target_state.waiting_for
+        {
+            let legal = vec![TargetRef::Object(quiet), TargetRef::Object(threatening)];
+            target_slots[0].legal_targets.clone_from(&legal);
+            selection.current_legal_targets = legal;
+        } else {
+            panic!("fixture must retain its target selection prompt");
+        }
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        assert_eq!(
+            choose_action(&target_state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(threatening)),
+            }),
+            "equal legal bodies must be ranked by their controller's shared threat"
+        );
+    }
+
+    #[test]
     fn unmodeled_target_selection_uses_a_reducer_validated_forward_action() {
         let mut state = spell_target_selection_state(
             vec![
@@ -9853,14 +10043,18 @@ mod tests {
         state.phase = Phase::DeclareAttackers;
         state.active_player = PlayerId(0);
         let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        let player_one = engine::game::combat::AttackTarget::Player(PlayerId(1));
+        let player_two = engine::game::combat::AttackTarget::Player(PlayerId(2));
+        let mut targets_by_attacker = std::collections::HashMap::new();
+        // The aggregate domain contains both opponents, while the engine-issued
+        // support for this attacker admits only player two. The production combat
+        // path must preserve that pair through completion.
+        targets_by_attacker.insert(attacker, vec![player_two]);
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
             valid_attacker_ids: vec![attacker],
-            valid_attack_targets: vec![
-                engine::game::combat::AttackTarget::Player(PlayerId(1)),
-                engine::game::combat::AttackTarget::Player(PlayerId(2)),
-            ],
-            valid_attack_targets_by_attacker: None,
+            valid_attack_targets: vec![player_one, player_two],
+            valid_attack_targets_by_attacker: Some(targets_by_attacker),
             attacker_constraints: Default::default(),
         };
         let config = create_config(AiDifficulty::Hard, Platform::Native);
@@ -9868,7 +10062,10 @@ mod tests {
         let action =
             choose_action(&state, PlayerId(0), &config, &mut rng).expect("DeclareAttackers action");
 
-        assert!(matches!(action, GameAction::DeclareAttackers { .. }));
+        let GameAction::DeclareAttackers { attacks, .. } = &action else {
+            panic!("expected DeclareAttackers, got {action:?}");
+        };
+        assert_eq!(attacks, &vec![(attacker, player_two)]);
         engine::game::engine::apply_as_current(&mut state, action)
             .expect("the engine must accept the AI's coherent target assignment");
     }
