@@ -180,7 +180,6 @@
     "createDraft": "Create Draft"
   },
   "lobbyView": {
-    "directConnection": "Direct Connection",
     "onlineLobby": "Online Lobby",
     "online": "{{count}} online",
     "format": "Format",
@@ -193,15 +192,11 @@
     "noFormatGames": "No {{format}} games right now.",
     "noOpenGames": "No open games right now.",
     "showAllFormats": "Show all formats",
-    "p2pNotice": "Peer-to-peer mode. Host or join directly with a 5-character room code.",
-    "joinByCode": "Join by Code",
     "joinATable": "Join a Table",
-    "p2pCodePlaceholder": "Enter 5-character P2P code",
     "serverCodePlaceholder": "Enter code or CODE@IP:PORT",
     "join": "Join",
     "watch": "Watch",
     "host": "Host",
-    "hostP2PDescription": "Create a direct room for one opponent.",
     "hostServerDescription": "Open a room and wait for players.",
     "hostDraft": "Host Draft",
     "hostGame": "Host Game",

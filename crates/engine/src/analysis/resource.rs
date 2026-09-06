@@ -27680,7 +27680,7 @@ mod tests {
             comparator: Comparator::GE,
             count: Box::new(QuantityExpr::Fixed { value: 1 }),
         };
-        // The other payload `parse_attacked_player_relative_clause` builds ("attacks a player
+        // The other payload `parse_player_relative_clause` builds ("attacks a player
         // who has more life than you"): `player_filter_contains` treats it as a LEAF, so the
         // walk is handed NOTHING below the crossing and no extension of that walk could reach
         // the dependence — the verdict has to be taken at the node.

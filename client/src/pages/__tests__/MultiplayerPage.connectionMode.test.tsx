@@ -9,16 +9,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  *
  * Three claims live here: a stored choice OUTRANKS the `hostingServer`-derived
  * fallback across a remount; the server-offline prompt flips the same switch
- * the user sees rather than routing around it; and entering server mode with
- * no anchor repairs the anchor instead of leaving the lobby pointed at
- * nothing. Harness shape follows `MultiplayerPage.hostServer.test.tsx`: render
- * the real page, stub the children, keep the real store module.
+ * the user sees rather than routing around it; and arriving with no anchor
+ * repairs it instead of leaving the lobby pointed at nothing. Harness shape
+ * follows `MultiplayerPage.hostServer.test.tsx`: render the real page, stub
+ * the children, keep the real store module.
+ *
+ * The switch is read off HOST SETUP, not the lobby: the transport configures a
+ * game being created, so that is the only surface that renders it.
  */
 const harness = vi.hoisted(() => ({
   navigate: vi.fn(),
-  /** Live props of the stubbed lobby, so a test reads the mode the page
-   * actually handed the switch — not the store field behind it. */
+  /** Live props of the stubbed lobby — the route into host setup. */
   lobby: null as Record<string, unknown> | null,
+  /** Live props of the stubbed host setup, so a test reads the mode the page
+   * actually handed the switch — not the store field behind it. */
+  hostSetup: null as Record<string, unknown> | null,
 }));
 
 /**
@@ -45,7 +50,12 @@ vi.mock("../../components/lobby/LobbyView", () => ({
   },
 }));
 
-vi.mock("../../components/lobby/HostSetup", () => ({ HostSetup: () => null }));
+vi.mock("../../components/lobby/HostSetup", () => ({
+  HostSetup: (props: Record<string, unknown>) => {
+    harness.hostSetup = props;
+    return <div data-testid="host-setup" />;
+  },
+}));
 vi.mock("../../components/chrome/ScreenChrome", () => ({ ScreenChrome: () => null }));
 vi.mock("../../components/chrome/ShellContext", () => ({ useInShell: () => false }));
 vi.mock("../../components/menu/MenuParticles", () => ({ MenuParticles: () => null }));
@@ -99,10 +109,26 @@ function renderPage() {
   );
 }
 
+/** Walk the production route to the switch: lobby → Host Game. */
+async function openHostSetup() {
+  await screen.findByTestId("lobby");
+  act(() => {
+    (harness.lobby!.onHostGame as () => void)();
+  });
+  await screen.findByTestId("host-setup");
+}
+
+function switchMode(mode: string) {
+  act(() => {
+    (harness.hostSetup!.onConnectionModeChange as (m: string) => void)(mode);
+  });
+}
+
 describe("MultiplayerPage connection mode", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     harness.lobby = null;
+    harness.hostSetup = null;
     useMultiplayerStore.setState({
       hostingServer: ANCHOR_URL,
       connectionMode: null,
@@ -121,15 +147,13 @@ describe("MultiplayerPage connection mode", () => {
     // so the assertion after the choice measures the precedence and not a
     // page that is always in P2P.
     renderPage();
-    await screen.findByTestId("lobby");
-    expect(harness.lobby!.connectionMode).toBe("server");
+    await openHostSetup();
+    expect(harness.hostSetup!.connectionMode).toBe("server");
 
-    act(() => {
-      (harness.lobby!.onConnectionModeChange as (mode: string) => void)("p2p");
-    });
-    expect(harness.lobby!.connectionMode).toBe("p2p");
-    // The anchor is untouched: it is also the P2P broker target, so the switch
-    // must never clear it.
+    switchMode("p2p");
+    expect(harness.hostSetup!.connectionMode).toBe("p2p");
+    // The anchor is untouched: it is also the P2P broker target, and the lobby
+    // browses through it in either mode, so the switch must never clear it.
     expect(useMultiplayerStore.getState().hostingServer).toBe(ANCHOR_URL);
     // The choice reaches storage. Without this the whole design is inert on a
     // reload, and the in-memory remount below would pass on a value that only
@@ -141,35 +165,40 @@ describe("MultiplayerPage connection mode", () => {
 
     cleanup();
     renderPage();
-    await screen.findByTestId("lobby");
+    await openHostSetup();
 
-    expect(harness.lobby!.connectionMode).toBe("p2p");
+    expect(harness.hostSetup!.connectionMode).toBe("p2p");
   });
 
-  it("repairs a missing anchor when the user picks server mode", async () => {
+  it("repairs a missing anchor on arrival, in either mode", async () => {
     // The legacy state: a blob persisted while the picker still offered its
-    // "None" row. Nothing else can produce it any more.
-    useMultiplayerStore.setState({ hostingServer: null });
+    // "None" row. Nothing else can produce it any more. The repair is no
+    // longer tied to picking server mode — the lobby browses, joins and
+    // spectates through the anchor whatever the hosting choice is, so an
+    // anchorless page is not a reachable state at all.
+    // `connectionMode` is null too: these blobs predate the switch entirely,
+    // so "None" is the only record of the transport this player wanted.
+    useMultiplayerStore.setState({ hostingServer: null, connectionMode: null });
+    expect(useMultiplayerStore.getState().hostingServer).toBeNull();
 
     renderPage();
     await screen.findByTestId("lobby");
-    expect(harness.lobby!.connectionMode).toBe("p2p");
 
-    act(() => {
-      (harness.lobby!.onConnectionModeChange as (mode: string) => void)("server");
-    });
-
-    expect(harness.lobby!.connectionMode).toBe("server");
     expect(useMultiplayerStore.getState().hostingServer).toBe(
       DEFAULT_MULTIPLAYER_SERVER_URL,
     );
+    // The anchor repair must not read as a transport change: seeding it while
+    // the mode derived from it would move a deliberate P2P-only player onto
+    // the official server without them touching anything.
+    expect(useMultiplayerStore.getState().connectionMode).toBe("p2p");
+    await openHostSetup();
+    expect(harness.hostSetup!.connectionMode).toBe("p2p");
   });
 
   it("flips the switch when the offline prompt offers direct codes", async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId("lobby");
-    expect(harness.lobby!.connectionMode).toBe("server");
 
     act(() => {
       (harness.lobby!.onServerOffline as () => void)();
@@ -177,11 +206,46 @@ describe("MultiplayerPage connection mode", () => {
 
     await user.click(screen.getByRole("button", { name: "Use direct code" }));
 
-    // The prompt must not route AROUND the control: after it, the switch the
-    // user is looking at reports P2P, and the choice is stored like any other.
-    expect(harness.lobby!.connectionMode).toBe("p2p");
     expect(useMultiplayerStore.getState().connectionMode).toBe("p2p");
     // It chooses a mode, not a server.
     expect(useMultiplayerStore.getState().hostingServer).toBe(ANCHOR_URL);
+
+    // The prompt must not route AROUND the control: the switch the user next
+    // sees on Host Game reports the mode the prompt chose for them.
+    await openHostSetup();
+    expect(harness.hostSetup!.connectionMode).toBe("p2p");
+  });
+
+  /**
+   * Regression. The lobby is no longer gated by the connection mode, so the two
+   * guards that used to make "Use direct code" an escape hatch are gone:
+   * `LobbyView` short-circuited its subscription effect in P2P, and this page
+   * suppressed `onServerOffline` in P2P. What replaces them is identity
+   * stability. `LobbyView` lists this callback in its subscription effect's
+   * dependency array, so an inline arrow re-ran that effect on every render of
+   * this page — re-dialling sources that were still down and re-opening the
+   * modal on the very re-render its own dismissal caused. Neither button could
+   * close it.
+   */
+  it("hands the lobby an offline callback that survives answering the prompt", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByTestId("lobby");
+    const first = harness.lobby!.onServerOffline;
+
+    act(() => {
+      (harness.lobby!.onServerOffline as () => void)();
+    });
+    // Opening the prompt is a page state change, so the lobby has re-rendered.
+    expect(screen.getByRole("button", { name: "Use direct code" })).toBeInTheDocument();
+    expect(harness.lobby!.onServerOffline).toBe(first);
+
+    await user.click(screen.getByRole("button", { name: "Use direct code" }));
+    expect(
+      screen.queryByRole("button", { name: "Use direct code" }),
+    ).not.toBeInTheDocument();
+    // Unchanged across the answer's own re-render too — which is precisely what
+    // stops `LobbyView`'s effect re-running and re-arming what was just closed.
+    expect(harness.lobby!.onServerOffline).toBe(first);
   });
 });

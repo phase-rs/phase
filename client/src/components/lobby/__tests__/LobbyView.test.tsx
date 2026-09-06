@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { LobbyGame } from "../../../adapter/types";
@@ -126,8 +126,6 @@ function renderLobby(props: {
   return render(
     <LobbyView
       onHostGame={vi.fn()}
-      onHostP2P={vi.fn()}
-      onConnectionModeChange={vi.fn()}
       onJoinGame={props.onJoinGame ?? vi.fn()}
       onSpectate={props.onSpectate ?? vi.fn()}
       onServerOffline={vi.fn()}
@@ -204,8 +202,6 @@ describe("LobbyView", () => {
     render(
       <LobbyView
         onHostGame={vi.fn()}
-        onHostP2P={vi.fn()}
-        onConnectionModeChange={vi.fn()}
         onJoinGame={vi.fn()}
         onServerOffline={onServerOffline}
       />,
@@ -235,8 +231,6 @@ describe("LobbyView", () => {
     const { unmount } = render(
       <LobbyView
         onHostGame={vi.fn()}
-        onHostP2P={vi.fn()}
-        onConnectionModeChange={vi.fn()}
         onJoinGame={vi.fn()}
         onServerOffline={onServerOffline}
       />,
@@ -247,23 +241,6 @@ describe("LobbyView", () => {
     await Promise.resolve();
 
     expect(onServerOffline).not.toHaveBeenCalled();
-  });
-
-  it("does not subscribe in p2p mode", () => {
-    const subscribeLobby = vi.fn();
-    useMultiplayerStore.setState({ subscribeLobby });
-    render(
-      <LobbyView
-        onHostGame={vi.fn()}
-        onHostP2P={vi.fn()}
-        onConnectionModeChange={vi.fn()}
-        onJoinGame={vi.fn()}
-        connectionMode="p2p"
-        onServerOffline={vi.fn()}
-      />,
-    );
-
-    expect(subscribeLobby).not.toHaveBeenCalled();
   });
 
   // Renamed from "fires offline fallback when the stored server address is
@@ -282,8 +259,6 @@ describe("LobbyView", () => {
     render(
       <LobbyView
         onHostGame={vi.fn()}
-        onHostP2P={vi.fn()}
-        onConnectionModeChange={vi.fn()}
         onJoinGame={vi.fn()}
         onServerOffline={onServerOffline}
       />,
@@ -627,27 +602,13 @@ describe("LobbyView", () => {
   });
 
   // V-U11j
-  it("refreshes the server directory on mount, in server mode only", async () => {
+  it("refreshes the server directory on mount", async () => {
     useMultiplayerStore.setState({
       subscribeLobby: vi.fn().mockResolvedValue(() => {}),
       subscribeAmbientLobby: vi.fn(() => () => {}),
     });
     renderLobby({});
     expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(1);
-
-    cleanup();
-    directoryMocks.refreshServerDirectory.mockClear();
-    // Paired negative: P2P has no lobby to browse and no directory to read.
-    render(
-      <LobbyView
-        onHostGame={vi.fn()}
-        onHostP2P={vi.fn()}
-        onConnectionModeChange={vi.fn()}
-        onJoinGame={vi.fn()}
-        connectionMode="p2p"
-      />,
-    );
-    expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(0);
   });
 
   // V-U11k
@@ -713,31 +674,11 @@ describe("LobbyView", () => {
   });
 
   // V-U12rb
-  it("installs no visibility refresh in p2p mode and removes it on unmount", () => {
+  it("refreshes on tab visibility and removes the listener on unmount", () => {
     const visibility = vi.spyOn(document, "visibilityState", "get");
     try {
       visibility.mockReturnValue("visible");
 
-      // (i) P2P has no lobby to browse and no directory to read.
-      render(
-        <LobbyView
-          onHostGame={vi.fn()}
-          onHostP2P={vi.fn()}
-          onConnectionModeChange={vi.fn()}
-          onJoinGame={vi.fn()}
-          onSpectate={vi.fn()}
-          onServerOffline={vi.fn()}
-          connectionMode="p2p"
-        />,
-      );
-      // Reach-guard: a p2p-ONLY element, so the zero below is the effect's
-      // guard and not a render that never happened.
-      expect(screen.getByText(/Peer-to-peer mode\./)).toBeInTheDocument();
-      document.dispatchEvent(new Event("visibilitychange"));
-      expect(directoryMocks.refreshServerDirectory).toHaveBeenCalledTimes(0);
-
-      // (ii) Server mode: the listener works, and is gone after unmount.
-      cleanup();
       const { unmount } = renderLobby({});
       document.dispatchEvent(new Event("visibilitychange"));
       const beforeUnmount = directoryMocks.refreshServerDirectory.mock.calls.length;
@@ -797,89 +738,76 @@ describe("LobbyView", () => {
     expect(presetRow.textContent).not.toContain("SLOW");
   });
 
-  // ── Connection mode switch ──────────────────────────────────────────────
+  // ── The lobby is transport-agnostic ─────────────────────────────────────
 
-  /** Mode is a PROP: the view reports a change and never applies one to
-   *  itself, which is what keeps the page the single authority. */
-  function renderWithMode(props: {
-    connectionMode: "server" | "p2p";
-    onHostGame?: () => void;
-    onHostP2P?: () => void;
-    onConnectionModeChange?: (mode: "server" | "p2p") => void;
-  }) {
-    return render(
-      <LobbyView
-        onHostGame={props.onHostGame ?? vi.fn()}
-        onHostP2P={props.onHostP2P ?? vi.fn()}
-        onConnectionModeChange={props.onConnectionModeChange ?? vi.fn()}
-        onJoinGame={vi.fn()}
-        onSpectate={vi.fn()}
-        onServerOffline={vi.fn()}
-        connectionMode={props.connectionMode}
-      />,
-    );
-  }
+  /** The P2P / Official Server choice lives on Host Game, because it
+   *  configures a game being CREATED. This view only browses, joins and
+   *  spectates — all of which behave identically under either transport — so
+   *  it takes no mode prop at all. */
+  it("renders no connection switch: the transport is a Host Game choice", () => {
+    renderLobby({});
 
-  it("reports a mode change instead of applying one", async () => {
-    const user = userEvent.setup();
-    const onConnectionModeChange = vi.fn();
-    renderWithMode({ connectionMode: "server", onConnectionModeChange });
-
-    const group = screen.getByRole("group", { name: "Connection" });
     expect(
-      within(group).getByRole("button", { name: "Official Server" }),
-    ).toHaveAttribute("aria-pressed", "true");
-
-    await user.click(within(group).getByRole("button", { name: "P2P" }));
-
-    expect(onConnectionModeChange).toHaveBeenCalledWith("p2p");
-    // Nothing local moved: the view still renders the mode it was given.
-    expect(
-      within(group).getByRole("button", { name: "Official Server" }),
-    ).toHaveAttribute("aria-pressed", "true");
-  });
-
-  it("offers one host button whose action follows the active mode", async () => {
-    const user = userEvent.setup();
-    const server = { onHostGame: vi.fn(), onHostP2P: vi.fn() };
-    renderWithMode({ connectionMode: "server", ...server });
-
-    // One button, not two mutually-exclusive ones.
-    expect(screen.getAllByRole("button", { name: "Host Game" })).toHaveLength(1);
-    await user.click(screen.getByRole("button", { name: "Host Game" }));
-    expect(server.onHostGame).toHaveBeenCalledTimes(1);
-    expect(server.onHostP2P).not.toHaveBeenCalled();
-
-    // Same button in P2P, dispatching to the entry point that does NOT seed
-    // host-setup from the lobby's format filter.
-    cleanup();
-    const p2p = { onHostGame: vi.fn(), onHostP2P: vi.fn() };
-    renderWithMode({ connectionMode: "p2p", ...p2p });
-
-    await user.click(screen.getByRole("button", { name: "Host Game" }));
-    expect(p2p.onHostP2P).toHaveBeenCalledTimes(1);
-    expect(p2p.onHostGame).not.toHaveBeenCalled();
-  });
-
-  it("replaces the P2P-only server shortcut with the switch", () => {
-    renderWithMode({ connectionMode: "p2p" });
-
-    expect(screen.getByRole("group", { name: "Connection" })).toBeInTheDocument();
+      screen.queryByRole("group", { name: "Connection" }),
+    ).not.toBeInTheDocument();
+    // The switch replaced this shortcut, and removing the switch must not
+    // bring it back.
     expect(
       screen.queryByRole("button", { name: "Pick server" }),
     ).not.toBeInTheDocument();
   });
 
-  it("keeps the room-type filter applied when the connection switch is used", async () => {
+  it("accepts a full-length server code in the join field", async () => {
+    const user = userEvent.setup();
+    renderLobby({});
+
+    const input = screen.getByPlaceholderText("Enter code or CODE@IP:PORT");
+    // Regression guard. `MultiplayerPage` routes a join on the SHAPE of the
+    // code, never on a connection mode — but the field used to cap itself at
+    // the 5-character P2P length whenever the lobby was in P2P mode, which
+    // silently truncated exactly this string as the user typed it.
+    const scoped = "ABC12@play.example.com:8443";
+    await user.type(input, scoped);
+    expect(input).toHaveValue(scoped);
+  });
+
+  it("offers one host button, which opens Host Game", async () => {
+    const user = userEvent.setup();
+    const onHostGame = vi.fn();
+    render(
+      <LobbyView
+        onHostGame={onHostGame}
+        onJoinGame={vi.fn()}
+        onSpectate={vi.fn()}
+        onServerOffline={vi.fn()}
+      />,
+    );
+
+    // One button, not a server one and a P2P one.
+    expect(screen.getAllByRole("button", { name: "Host Game" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    expect(onHostGame).toHaveBeenCalledTimes(1);
+  });
+
+  it("filters the browsed list by room type, P2P rows included", async () => {
     const user = userEvent.setup();
     const source: LobbySource = {
       url: SERVER_PRESETS[0].url,
       name: "lobby.phase-rs.dev",
       origin: "official",
     };
+    // Two rows of opposite transports, so each filter has something to KEEP as
+    // well as something to hide — a single-row fixture would let every
+    // assertion below pass on the first filter click alone.
     const subscribeLobby = vi.fn(
       async (onUpdate: (games: LobbyGame[], source: LobbySource) => void) => {
-        onUpdate([lobbyGame("SRV01", "Server table", 100)], source);
+        onUpdate(
+          [
+            lobbyGame("SRV01", "Server table", 100),
+            { ...lobbyGame("P2P01", "Direct table", 200), is_p2p: true },
+          ],
+          source,
+        );
         return () => {};
       },
     );
@@ -887,25 +815,20 @@ describe("LobbyView", () => {
       subscribeLobby,
       subscribeAmbientLobby: vi.fn(() => () => {}),
     });
-    renderWithMode({ connectionMode: "server" });
+    renderLobby({});
 
     await screen.findByRole("button", { name: /Server table/ });
-    // "Draft", not "P2P": the room-type filter and the connection switch both
-    // carry a "P2P" label, and only the switch is inside the named group.
-    await user.click(screen.getByRole("button", { name: "Draft" }));
+    expect(screen.getByRole("button", { name: /Direct table/ })).toBeInTheDocument();
+
+    // The room-type filter is what scopes the list, and it is available
+    // unconditionally: a player browses P2P tables without changing anything
+    // about how they would host.
+    await user.click(screen.getByRole("button", { name: "P2P" }));
+    expect(screen.getByRole("button", { name: /Direct table/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Server table/ })).not.toBeInTheDocument();
 
-    await user.click(
-      within(screen.getByRole("group", { name: "Connection" })).getByRole(
-        "button",
-        { name: "P2P" },
-      ),
-    );
-
-    // The filter the user set still hides the non-draft row. Deliberately NOT
-    // asserting "no re-subscribe": `connectionMode` is a fixed prop here and
-    // `onConnectionModeChange` is a spy, so the mode cannot actually change and
-    // a re-subscribe count would hold no matter what the switch did.
-    expect(screen.queryByRole("button", { name: /Server table/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Server" }));
+    expect(screen.getByRole("button", { name: /Server table/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Direct table/ })).not.toBeInTheDocument();
   });
 });

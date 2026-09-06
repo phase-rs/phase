@@ -32233,3 +32233,82 @@ fn brain_maggot_reveals_the_target_opponents_hand_at_runtime() {
         "the controller's own hand must NOT be revealed (issue #8428), got {revealed:?}"
     );
 }
+/// Issue #7724 (CR 707.9a + CR 707.10 + CR 704.5j): Iron Man, Bleeding Edge —
+/// "Whenever you cast an artifact spell, you may copy it, except the copy isn't
+/// legendary."
+///
+/// The `[,] except <body>` tail of a copy INSTRUCTION was dropped entirely:
+/// `Effect::CopySpell` already carries an `additional_modifications` channel and
+/// the resolver already strips the supertype from the stack copy, but nothing
+/// routed the parsed exception into it. The copy therefore entered the
+/// battlefield still legendary and the legend rule killed one of the pair.
+///
+/// Asserts the whole class in one place — the exception must survive as a
+/// typed `RemoveSupertype`, not merely be absent from the description.
+#[test]
+fn iron_man_bleeding_edge_copy_is_not_legendary() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhenever you cast an artifact spell, you may copy it, except the copy isn't \
+         legendary. Do this only once each turn. (The copy becomes a token.)",
+        "Iron Man, Bleeding Edge",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Human".to_string(), "Hero".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::SpellCast)
+        .expect("cast-artifact-spell trigger");
+    let execute = trigger.execute.as_ref().expect("copy effect");
+    let Effect::CopySpell {
+        additional_modifications,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected CopySpell, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        additional_modifications,
+        &vec![ContinuousModification::RemoveSupertype {
+            supertype: Supertype::Legendary,
+        }],
+        "CR 707.9a: \"except the copy isn't legendary\" must ride the copy so CR 704.5j \
+         never sees two legends"
+    );
+    assert_no_unimplemented(execute.as_ref());
+}
+
+/// Issue #7724 companion (CR 707.9b + CR 205.1b): Tawnos, the Toymaker proves
+/// the routing fix is not legend-specific — the same `[,] except <body>` tail
+/// carries a type-addition exception into `CopySpell` too.
+#[test]
+fn tawnos_the_toymaker_copy_is_an_artifact() {
+    let parsed = parse_oracle_text(
+        "Whenever you cast a Beast or Bird creature spell, you may copy it, except the copy is \
+         an artifact in addition to its other types. (The copy becomes a token.)",
+        "Tawnos, the Toymaker",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_ref())
+        .expect("copy effect");
+    let Effect::CopySpell {
+        additional_modifications,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected CopySpell, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        additional_modifications,
+        &vec![ContinuousModification::AddType {
+            core_type: crate::types::card_type::CoreType::Artifact,
+        }]
+    );
+    assert_no_unimplemented(execute.as_ref());
+}

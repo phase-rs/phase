@@ -861,6 +861,11 @@ pub(crate) fn semantic_owner_for_actor(state: &GameState, actor: PlayerId) -> Op
         .find(|owner| interaction_submitter_for_owner(state, *owner) == actor)
 }
 
+/// Whether this action leaves an open interaction standing.
+///
+/// Not [`GameAction::is_submitter_scoped`], whose near-identical list answers a
+/// different question — whether an action may skip the seat check. The two
+/// lists may diverge.
 pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
     matches!(
         action,

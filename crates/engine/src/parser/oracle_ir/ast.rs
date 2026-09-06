@@ -4,13 +4,14 @@ use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ChosenCounterCountCondition, ControlWindow, ControllerRef,
-    CopyRetargetPermission, CounterAdjustment, CounterKindChooser, CounterKindDomain,
-    CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
-    ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction, ManaTargetRole,
-    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, ThisWayCause,
+    CastingPermission, ChosenCounterCountCondition, ContinuousModification, ControlWindow,
+    ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
+    CounterKindDomain, CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope,
+    FaceDownProfile, ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue,
+    QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetFilter, ThisWayCause,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -1405,6 +1406,12 @@ pub(crate) enum UtilityImperativeAst {
         target: TargetFilter,
         /// CR 707.10c: set when the imperative remainder is a copy-retarget grant.
         retarget: CopyRetargetPermission,
+        /// CR 707.9a + CR 707.10: typed modifications declared by a trailing
+        /// `"[,] except <body>"` copy exception ("copy it, except the copy
+        /// isn't legendary"). Mirrors the `additional_modifications` channel
+        /// `BecomeCopy` and `CopyTokenOf` already carry, and lowers into
+        /// `Effect::CopySpell.additional_modifications`.
+        additional_modifications: Vec<ContinuousModification>,
     },
     Transform {
         target: TargetFilter,

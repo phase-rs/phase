@@ -10,11 +10,19 @@
 //! the seat's objects its own, so the seat must stay the semantic owner rather
 //! than be remapped. CR 723.9 (self-control) must remain a no-op.
 
+use engine::game::engine::apply_for_simulation;
 use engine::game::public_state::sync_waiting_for;
+use engine::game::scenario::GameScenario;
 use engine::game::turn_control::authorized_submitter_for_player;
-use engine::types::game_state::GameState;
+use engine::game::EngineError;
+use engine::types::ability::{CastingPermission, ManaSpendPermission};
+use engine::types::actions::GameAction;
+use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 use engine::util::Deadline;
 use phase_ai::projection::{project_to, ProjectionHorizon};
 use phase_ai::saved_state::load_saved_game_state;
@@ -215,4 +223,146 @@ fn self_control_leaves_the_seat_as_its_own_submitter() {
     );
 
     assert_projected_past_the_turn_boundary(&base, &controlled, "self-controlled");
+}
+
+const OPPOSITION_AGENT: &str = "Flash\n\
+You control your opponents while they're searching their libraries.\n\
+While an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.";
+const TEST_TUTOR: &str =
+    "Search your library for a card, put that card into your hand, then shuffle.";
+
+/// A board halted on the searcher's own library search, optionally under an
+/// Opposition Agent. CR 723.2 latches the search decision onto the agent's
+/// controller without ever setting `turn_decision_controller`.
+fn opposition_agent_search_state(with_agent: bool) -> (GameState, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    if with_agent {
+        scenario.add_creature_from_oracle(CONTROLLER, "Opposition Agent", 3, 2, OPPOSITION_AGENT);
+    }
+    let tutor = scenario
+        .add_spell_to_hand_from_oracle(SEAT, "Test Tutor", false, TEST_TUTOR)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let found = scenario
+        .add_spell_to_library_top(SEAT, "Found Card", true)
+        .id();
+    scenario.add_card_to_library_top(SEAT, "Library Filler");
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = SEAT;
+        state.priority_player = SEAT;
+        state.waiting_for = WaitingFor::Priority { player: SEAT };
+    }
+    let outcome = runner.cast(tutor).resolve();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::SearchChoice { player, .. } if *player == SEAT
+        ),
+        "the tutor must halt on the searcher's own search choice, got {:?}",
+        outcome.final_waiting_for()
+    );
+    (runner.state().clone(), found)
+}
+
+fn agent_permission_granted_to(state: &GameState, found: ObjectId, grantee: PlayerId) -> bool {
+    state.objects[&found]
+        .casting_permissions
+        .iter()
+        .any(|permission| {
+            matches!(
+                permission,
+                CastingPermission::PlayFromExile {
+                    granted_to,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    ..
+                } if *granted_to == grantee
+            )
+        })
+}
+
+/// Row 4. The second CR 723 redirect source. `turn_decision_controller` is
+/// unset here, so a projection that only handled that field would dispatch the
+/// searcher as its own submitter and be refused.
+#[test]
+fn projection_advances_over_a_search_control_latch() {
+    let (latched, found) = opposition_agent_search_state(true);
+    assert!(
+        latched.turn_decision_controller.is_none(),
+        "the latch must redirect with no turn-control field set"
+    );
+    assert_eq!(
+        authorized_submitter_for_player(&latched, SEAT),
+        CONTROLLER,
+        "the searcher's decisions are submittable only by the agent's controller"
+    );
+
+    let projection = project_to(
+        &latched,
+        CONTROLLER,
+        SEAT,
+        ProjectionHorizon::OpponentBeginCombat,
+        Deadline::none(),
+    )
+    .unwrap_or_else(|bail| panic!("latched: projection bailed with {bail:?}"));
+
+    // The split is what carries this row: the collapsed dispatch is refused on
+    // this same board, which is the bail a re-collapsed `project_to` would hit.
+    let mut collapsed = latched.clone();
+    assert!(
+        matches!(
+            apply_for_simulation(
+                &mut collapsed,
+                SEAT,
+                GameAction::SelectCards { cards: vec![found] }
+            ),
+            Err(EngineError::WrongPlayer)
+        ),
+        "the searcher is not its own authorized submitter under the latch"
+    );
+
+    assert_eq!(
+        projection.state.objects[&found].zone,
+        Zone::Exile,
+        "CR 723.3: the found card follows the searcher's own replaced destination"
+    );
+    assert!(
+        agent_permission_granted_to(&projection.state, found, CONTROLLER),
+        "the agent grants its controller permission to play the exiled card"
+    );
+}
+
+/// Paired reach-guard: the same tutor with no agent reaches the same horizon,
+/// so the row above pins the latch rather than the projection's ability to
+/// traverse a search at all.
+#[test]
+fn projection_reaches_the_same_horizon_without_a_search_control_latch() {
+    let (unlatched, found) = opposition_agent_search_state(false);
+    assert_eq!(
+        authorized_submitter_for_player(&unlatched, SEAT),
+        SEAT,
+        "with no agent the searcher submits its own search choice"
+    );
+
+    let projection = project_to(
+        &unlatched,
+        CONTROLLER,
+        SEAT,
+        ProjectionHorizon::OpponentBeginCombat,
+        Deadline::none(),
+    )
+    .unwrap_or_else(|bail| panic!("unlatched: projection bailed with {bail:?}"));
+
+    assert_eq!(
+        projection.state.objects[&found].zone,
+        Zone::Hand,
+        "with no agent the found card reaches the tutor's own destination"
+    );
+    assert!(!agent_permission_granted_to(
+        &projection.state,
+        found,
+        CONTROLLER
+    ));
 }

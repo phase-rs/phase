@@ -20,7 +20,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 
-use super::{engine::EngineError, turn_control};
+use super::engine::EngineError;
 
 /// Bounded proof length for the finite clone route, keeping shortcut replay
 /// nonlethal and below the engine's per-action work limit.
@@ -93,9 +93,12 @@ pub(super) fn maybe_offer_after_cast_triggers(
 /// Handles all pre-cast protocol actions. The public state carries only opaque
 /// epoch/breakpoint ids; route validation and replay data are read solely from
 /// the private sidecar.
+///
+/// CR 723.5: submitter authorization is settled at the action boundary before
+/// this runs, so the response dispatches on the open prompt and the live offer
+/// alone.
 pub(super) fn handle(
     state: &mut GameState,
-    actor: PlayerId,
     epoch: u64,
     response: PrecastCopyShortcutResponse,
     events: &mut Vec<GameEvent>,
@@ -112,19 +115,14 @@ pub(super) fn handle(
     }
 
     match (&state.waiting_for, response) {
-        (
-            WaitingFor::PrecastCopyShortcutOffer { proposer, .. },
-            PrecastCopyShortcutResponse::Decline,
-        ) if actor == turn_control::authorized_submitter_for_player(state, *proposer) => {
+        (WaitingFor::PrecastCopyShortcutOffer { .. }, PrecastCopyShortcutResponse::Decline) => {
             suppress_current_offer(state, &offer);
             Ok(priority_for(offer.caster))
         }
         (
-            WaitingFor::PrecastCopyShortcutOffer { proposer, .. },
+            WaitingFor::PrecastCopyShortcutOffer { .. },
             PrecastCopyShortcutResponse::Propose { route_id },
-        ) if actor == turn_control::authorized_submitter_for_player(state, *proposer)
-            && route_id == offer.route_id =>
-        {
+        ) if route_id == offer.route_id => {
             if let Some((&next, rest)) = offer.responders.split_first() {
                 Ok(responder_wait(next, offer.epoch, rest, &offer.breakpoints))
             } else {
@@ -133,12 +131,10 @@ pub(super) fn handle(
         }
         (
             WaitingFor::RespondToPrecastCopyShortcut {
-                player,
-                remaining_players,
-                ..
+                remaining_players, ..
             },
             PrecastCopyShortcutResponse::Accept,
-        ) if actor == turn_control::authorized_submitter_for_player(state, *player) => {
+        ) => {
             if let Some((&next, rest)) = remaining_players.split_first() {
                 Ok(responder_wait(next, offer.epoch, rest, &offer.breakpoints))
             } else {
@@ -152,7 +148,7 @@ pub(super) fn handle(
                 ..
             },
             PrecastCopyShortcutResponse::Shorten { breakpoint_id },
-        ) if actor == turn_control::authorized_submitter_for_player(state, *player) => {
+        ) => {
             let Some(breakpoint) = offer
                 .breakpoints
                 .iter()
