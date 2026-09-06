@@ -65,22 +65,23 @@ pub const IN_PROGRESS_ABANDON_SECS: u64 = 7 * 24 * 60 * 60;
 pub const TERMINAL_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// How long a freshly minted [`TournamentCredential`] is accepted, in
-/// milliseconds. Twelve hours.
+/// milliseconds. Derived from [`IN_PROGRESS_ABANDON_SECS`] so the two cannot
+/// drift apart: a credential stays valid for exactly as long as the event it
+/// authorizes can stay live.
 ///
-/// Chosen against the two constants that actually bound it rather than picked
-/// round. It must comfortably exceed a real event — a Swiss event of 8-9
-/// rounds runs well under a day — and it must sit far below
-/// [`IN_PROGRESS_ABANDON_SECS`] (7 days), so a credential stops being accepted
-/// long before the record it authorizes is reaped. The other lifecycle window
-/// that could have bounded it, [`REGISTRATION_TIMEOUT_SECS`], is 300 seconds:
-/// three orders of magnitude below this, so there is no pre-start window in
-/// which an organizer's credential can outlive its usefulness or vice versa.
-///
-/// Longer than the full-game session token's 2h because an organizer's
-/// authority spans an entire event rather than one game; rotation
-/// ([`TournamentManager::renew_credential`]) is what makes the practical
-/// ceiling the event's duration rather than this number.
-pub const TOURNAMENT_CREDENTIAL_TTL_MS: u64 = 12 * 60 * 60 * 1000;
+/// An earlier 12-hour value was shorter than a real event's *between-round*
+/// gaps — [`IN_PROGRESS_ABANDON_SECS`]'s own doc notes seven days "comfortably
+/// exceeds any real multi-round event's between-round gaps." That left an
+/// organizer who paired round 1 on Friday evening and returned Saturday holding
+/// a credential that could neither authorize an action nor be renewed (renewal
+/// refuses an already-expired credential — see
+/// [`TournamentManager::renew_credential`]), stranding a live event until the
+/// reaper abandoned it a week later. Tying the credential window to the abandon
+/// window closes that gap by construction: a credential only lapses once the
+/// event itself is eligible to be reaped, never during a normal between-round
+/// gap. Rotation ([`TournamentManager::renew_credential`], available while the
+/// credential is still live) refreshes the window for a genuinely active event.
+pub const TOURNAMENT_CREDENTIAL_TTL_MS: u64 = IN_PROGRESS_ABANDON_SECS * 1000;
 
 // ---------------------------------------------------------------------------
 // Bearer credentials
@@ -188,7 +189,17 @@ impl TournamentCredential {
     /// empty `presented` can never match: stored secrets come from
     /// [`BrokerEnv::new_token`] and are never empty, and the length check below
     /// refuses the mismatch outright.
+    ///
+    /// The empty-secret rejection is made EXPLICIT here rather than left to the
+    /// `new_token()`-is-never-empty invariant: an empty stored or presented
+    /// secret is a mismatch unconditionally, so a regression in the minting
+    /// invariant cannot turn `verdict` into an authorizer of the empty string.
+    /// The check is length-only (already public via the length branch in
+    /// `constant_time_eq`), so it adds no secret-dependent timing.
     pub fn verdict(&self, presented: &str, now_ms: u64) -> CredentialVerdict {
+        if self.secret.is_empty() || presented.is_empty() {
+            return CredentialVerdict::Mismatch;
+        }
         if !constant_time_eq(self.secret.as_bytes(), presented.as_bytes()) {
             return CredentialVerdict::Mismatch;
         }
@@ -4943,6 +4954,47 @@ mod tests {
             err.contains("expired"),
             "expected the expiry message, got: {err}"
         );
+    }
+
+    /// A credential survives a realistic multi-day between-round gap. The former
+    /// 12-hour TTL stranded an organizer who paired round 1 and returned the
+    /// next day: the credential had lapsed, so authorization refused the action
+    /// AND `renew_credential` refused the same expired credential — a live event
+    /// unusable until the reaper abandoned it a week later. Tying the TTL to the
+    /// abandon window fixes that by construction; this pins it against a
+    /// regression back to a sub-gap TTL.
+    #[test]
+    fn credential_survives_a_realistic_between_round_gap() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let org = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Weekend Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                },
+                &env,
+            )
+            .expect("create");
+
+        // A full day passes between rounds — far past the old 12h TTL, but well
+        // under the 7-day window this event is allowed to idle for.
+        env.advance_secs(24 * 60 * 60);
+        let now = env.now_ms();
+
+        assert!(
+            mgr.get("T")
+                .expect("event")
+                .organizer_token
+                .accepts(&org.secret, now),
+            "a day-old credential must still authorize a live event's actions",
+        );
+        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, &env)
+            .expect("a day-old credential must still be renewable");
     }
 
     /// A dropped entrant's credential stops authorizing everything, renewal
