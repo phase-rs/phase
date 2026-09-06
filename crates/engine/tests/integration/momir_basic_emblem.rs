@@ -660,29 +660,17 @@ fn tribute_creature_face(name: &str, mana_value: u32, tribute: u32) -> CardFace 
 /// log rendered as `(unknown #N)`.
 #[test]
 fn momir_emblem_copying_tribute_creature_runs_entry_chain_and_enters() {
-    let mut state = GameState::new(FormatConfig::momir(), 2, 42);
-    state.phase = Phase::PreCombatMain;
-    state.turn_number = 2;
-    state.active_player = P0;
-    state.priority_player = P0;
-    state.waiting_for = WaitingFor::Priority { player: P0 };
-
-    let mut by_mv: BTreeMap<i32, Vec<String>> = BTreeMap::new();
-    by_mv.insert(3, vec!["Tribute Beast".to_string()]);
-    let mut faces = std::collections::HashMap::new();
-    faces.insert(
-        "tribute beast".to_string(),
-        tribute_creature_face("Tribute Beast", 3, 2),
-    );
-    state.momir_pool = by_mv;
-    state.momir_pool_faces = Arc::new(faces);
-
-    let emblem_id = engine::game::effects::create_emblem::grant_emblem(
+    // `momir_state` builds the Momir game at precombat main and grants the
+    // emblem. Its pool argument is empty because this test's candidate has to
+    // carry Tribute rather than being a plain `creature_face`: install the
+    // one-face database over the empty one the helper left, the same way
+    // `create_token_copy_from_pool_applies_type_filter` seeds a custom pool.
+    // The emblem draws from `GameState::card_db` at resolution, so this IS the
+    // candidate set.
+    let (mut state, emblem_id) = momir_state(&[]);
+    crate::support::install_synthetic_card_db(
         &mut state,
-        P0,
-        Vec::new(),
-        Vec::new(),
-        vec![momir_emblem_ability()],
+        &[tribute_creature_face("Tribute Beast", 3, 2)],
     );
     let card = fund_and_card(&mut state, 3);
 
