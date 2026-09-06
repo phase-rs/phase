@@ -248,6 +248,16 @@ pub fn resolve(
     // `game/quantity.rs`. Calling that chokepoint instead of re-reading the
     // two fields keeps a single authority for the binding.
     //
+    // CR 400.7: the incarnation check lives in that chokepoint, not here.
+    // `resolved_targets` resolves each ladder rung through
+    // `CostPaidObjectSnapshot::live_object_id`, which compares the epoch
+    // captured at binding time against the live object, so a referent that
+    // left and returned under the same storage id yields nothing. Do NOT add
+    // a local staleness guard here: `ResolvedAbility::target_pin_is_current`
+    // in particular fails OPEN when no ordinary target pin was recorded, and
+    // a `CostPaidObject` referent never has one, so it passed for free and
+    // validated nothing (#8265 review; fixed upstream by #8277/#8278).
+    //
     // CR 701.21a: "A player can't sacrifice something that isn't a permanent."
     // If the referent is absent (never bound) or has departed the battlefield
     // (including a same-id return, which CR 400.7 makes a new object), this
@@ -263,7 +273,6 @@ pub fn resolve(
                 TargetRef::Object(id) => Some(id),
                 TargetRef::Player(_) => None,
             })
-            .filter(|id| ability.target_pin_is_current(*id, state))
             .filter(|id| {
                 state
                     .objects
@@ -2103,8 +2112,8 @@ mod tests {
         source: ObjectId,
         controller: PlayerId,
         inherited_parent_target: ObjectId,
-        cost_paid: Option<ObjectId>,
-        effect_context: Option<ObjectId>,
+        cost_paid: Option<(ObjectId, u64)>,
+        effect_context: Option<(ObjectId, u64)>,
     ) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::Sacrifice {
@@ -2119,15 +2128,34 @@ mod tests {
             source,
             controller,
         );
-        ability.cost_paid_object = cost_paid.map(|id| CostPaidObjectSnapshot {
+        ability.cost_paid_object = cost_paid.map(|(id, incarnation)| CostPaidObjectSnapshot {
             object_id: id,
             lki: cost_paid_lki("Cost Paid Creature", controller),
+            incarnation,
         });
-        ability.effect_context_object = effect_context.map(|id| CostPaidObjectSnapshot {
-            object_id: id,
-            lki: cost_paid_lki("Context Creature", controller),
-        });
+        ability.effect_context_object =
+            effect_context.map(|(id, incarnation)| CostPaidObjectSnapshot {
+                object_id: id,
+                lki: cost_paid_lki("Context Creature", controller),
+                incarnation,
+            });
         ability
+    }
+
+    /// CR 400.7: bind a referent at the incarnation it currently has, the way a
+    /// production cost-payment seam does via `CostPaidObjectSnapshot::capture`.
+    /// Callers that need a PRE-departure binding must call this BEFORE moving
+    /// the object, otherwise they record the post-move epoch and any staleness
+    /// assertion built on it passes vacuously.
+    fn bind_at_current_incarnation(state: &GameState, id: ObjectId) -> (ObjectId, u64) {
+        (
+            id,
+            state
+                .objects
+                .get(&id)
+                .expect("referent must exist when it is bound")
+                .incarnation,
+        )
     }
 
     /// CR 608.2k + CR 701.21a: a stack-timed `Sacrifice { target:
@@ -2163,8 +2191,13 @@ mod tests {
         crate::game::zones::move_to_zone(&mut state, departed, Zone::Graveyard, &mut setup_events);
 
         let source = make_battlefield_creature(&mut state, 4, "Sacrifice Source", PlayerId(0));
-        let ability =
-            make_cost_paid_sacrifice(source, PlayerId(0), bystander, Some(departed), None);
+        let ability = make_cost_paid_sacrifice(
+            source,
+            PlayerId(0),
+            bystander,
+            Some(bind_at_current_incarnation(&state, departed)),
+            None,
+        );
 
         let before: Vec<ObjectId> = state.battlefield.iter().copied().collect();
         let mut events = Vec::new();
@@ -2221,8 +2254,13 @@ mod tests {
         let spare = make_battlefield_creature(&mut state, 3, "Spare Permanent", PlayerId(0));
         let source = make_battlefield_creature(&mut state, 4, "Sacrifice Source", PlayerId(0));
 
-        let ability =
-            make_cost_paid_sacrifice(source, PlayerId(0), bystander, Some(referent), None);
+        let ability = make_cost_paid_sacrifice(
+            source,
+            PlayerId(0),
+            bystander,
+            Some(bind_at_current_incarnation(&state, referent)),
+            None,
+        );
 
         let mut events = Vec::new();
         let result = resolve(&mut state, &ability, &mut events).unwrap();
@@ -2267,8 +2305,13 @@ mod tests {
         crate::game::zones::move_to_zone(&mut state, departed, Zone::Graveyard, &mut setup_events);
 
         // No `cost_paid_object` — slot 2 only, exercising the `.or(...)` rung.
-        let ability =
-            make_cost_paid_sacrifice(source, PlayerId(0), bystander, None, Some(departed));
+        let ability = make_cost_paid_sacrifice(
+            source,
+            PlayerId(0),
+            bystander,
+            None,
+            Some(bind_at_current_incarnation(&state, departed)),
+        );
 
         let before: Vec<ObjectId> = state.battlefield.iter().copied().collect();
         let mut events = Vec::new();
@@ -2296,8 +2339,13 @@ mod tests {
         let bystander = make_battlefield_creature(&mut state, 2, "Innocent Bystander", PlayerId(0));
         let source = make_battlefield_creature(&mut state, 3, "Sacrifice Source", PlayerId(0));
 
-        let ability =
-            make_cost_paid_sacrifice(source, PlayerId(0), bystander, None, Some(referent));
+        let ability = make_cost_paid_sacrifice(
+            source,
+            PlayerId(0),
+            bystander,
+            None,
+            Some(bind_at_current_incarnation(&state, referent)),
+        );
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -2337,6 +2385,130 @@ mod tests {
         assert!(
             state.battlefield.contains(&bystander) && state.battlefield.contains(&spare),
             "neither the inherited parent target nor the untargeted pool may be used"
+        );
+    }
+
+    /// CR 400.7 LEAVE-AND-RETURN, SAME STORAGE ID. The referent departs the
+    /// battlefield and comes BACK before this sub-ability resolves, so the
+    /// engine reuses its `ObjectId` while `incarnation` advances. The returned
+    /// permanent is a NEW object that the cost-paid reference no longer names,
+    /// so the sacrifice must be a hard no-op -- it must sacrifice neither the
+    /// new incarnation nor the inherited live parent target, and must not fall
+    /// through to the untargeted battlefield pool.
+    ///
+    /// This is the case the departed-only tests above cannot reach: they leave
+    /// the referent in the graveyard, where a bare `ObjectId` comparison
+    /// already fails for the unrelated reason that it is not on the
+    /// battlefield. Only a return under the same id distinguishes an identity
+    /// check from a zone check.
+    ///
+    /// NON-VACUITY: the binding is taken BEFORE the round trip, and the test
+    /// asserts the incarnation actually advanced. Binding after the return
+    /// would record the new epoch and the assertion would hold no matter what
+    /// the resolver did.
+    #[test]
+    fn cost_paid_object_sacrifice_ignores_same_id_return_of_departed_referent() {
+        let mut state = GameState::new_two_player(42);
+
+        let referent = make_battlefield_creature(&mut state, 1, "Round Tripper", PlayerId(0));
+        let bystander = make_battlefield_creature(&mut state, 2, "Innocent Bystander", PlayerId(0));
+        let spare = make_battlefield_creature(&mut state, 3, "Spare Permanent", PlayerId(0));
+
+        // Bind while the referent is still the object the cost paid for.
+        let bound = bind_at_current_incarnation(&state, referent);
+        let incarnation_at_binding = bound.1;
+
+        // Round trip through the real engine zone mover (CR 400.7), so the
+        // returned permanent is a genuinely new object rather than a poked
+        // field. Two moves, so the epoch advances twice.
+        let mut setup_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, referent, Zone::Graveyard, &mut setup_events);
+        crate::game::zones::move_to_zone(
+            &mut state,
+            referent,
+            Zone::Battlefield,
+            &mut setup_events,
+        );
+
+        // REACH-GUARDS: the round trip really happened, the storage id really
+        // was reused, and the epoch really moved. Without these the test could
+        // pass on a fixture that never departed at all.
+        assert!(
+            state.battlefield.contains(&referent),
+            "fixture intent: the referent must be back on the battlefield"
+        );
+        let incarnation_after_return = state
+            .objects
+            .get(&referent)
+            .expect("the returned object keeps its storage id")
+            .incarnation;
+        assert!(
+            incarnation_after_return > incarnation_at_binding,
+            "fixture intent: the round trip must advance the incarnation              (bound at {incarnation_at_binding}, now {incarnation_after_return});              otherwise this test cannot discriminate identity from zone"
+        );
+
+        let source = make_battlefield_creature(&mut state, 4, "Sacrifice Source", PlayerId(0));
+        let ability = make_cost_paid_sacrifice(source, PlayerId(0), bystander, Some(bound), None);
+
+        let before: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Positive reach-guard: the resolver ran to completion rather than
+        // bailing out somewhere upstream of the branch under test.
+        assert!(
+            result.is_some(),
+            "reach-guard: the sacrifice effect must have resolved"
+        );
+
+        // CR 400.7: the returned permanent is a new object, so it is NOT the
+        // cost-paid referent and must survive.
+        assert!(
+            state.battlefield.contains(&referent),
+            "the returned same-id object is a NEW object (CR 400.7) and must not be sacrificed"
+        );
+        // CR 608.2k: the inherited parent target is not this effect's subject.
+        assert!(
+            state.battlefield.contains(&bystander),
+            "the inherited live parent target must not be sacrificed"
+        );
+        // CR 701.21a: no fallthrough to the untargeted battlefield pool.
+        assert!(
+            state.battlefield.contains(&spare),
+            "a stale referent must not fall through to the untargeted pool"
+        );
+        let after: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        assert_eq!(before, after, "the whole effect must be a hard no-op");
+    }
+
+    /// POSITIVE TWIN of the leave-and-return case. Identical fixture and
+    /// identical binding, except the referent never moves -- so the epoch it
+    /// was bound at is still current and it IS sacrificed. Without this pair
+    /// the negative above would also pass if the branch simply never
+    /// sacrificed anything.
+    #[test]
+    fn cost_paid_object_sacrifice_sacrifices_referent_that_never_left() {
+        let mut state = GameState::new_two_player(42);
+
+        let referent = make_battlefield_creature(&mut state, 1, "Round Tripper", PlayerId(0));
+        let bystander = make_battlefield_creature(&mut state, 2, "Innocent Bystander", PlayerId(0));
+        let spare = make_battlefield_creature(&mut state, 3, "Spare Permanent", PlayerId(0));
+
+        let bound = bind_at_current_incarnation(&state, referent);
+
+        let source = make_battlefield_creature(&mut state, 4, "Sacrifice Source", PlayerId(0));
+        let ability = make_cost_paid_sacrifice(source, PlayerId(0), bystander, Some(bound), None);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&referent),
+            "a referent still at its bound incarnation must be sacrificed"
+        );
+        assert!(
+            state.battlefield.contains(&bystander) && state.battlefield.contains(&spare),
+            "only the referent may be sacrificed"
         );
     }
 }
