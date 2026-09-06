@@ -4512,6 +4512,11 @@ export interface EngineAdapter {
   resumeRestoredGameState?(): Promise<RestoredGameStateResult | null>;
   /** Returns an opaque, exact member of the current engine-issued decision domain. */
   getAiActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
+  /**
+   * Returns an engine-issued tactical proposal without optional deep search.
+   * Used only to recover an AI seat whose normal proposal repeatedly failed.
+   */
+  getAiTacticalActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
   /** Applies a proposal only if its authority token and exact action remain current. */
   submitAiActionProposal?(proposal: AiActionProposal): Promise<AiProposalSubmission> | AiProposalSubmission;
   restoreState(state: PersistedGameState): void | Promise<void>;
