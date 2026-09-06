@@ -355,7 +355,14 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
 /// mirrors the trailing suffix arm below. `peel_leading_cost_modifier_condition`
 /// consumes this before self-spell and first-qualified dispatch, so every
 /// cost-modifier branch retains the scope.
-fn parse_leading_turn_scope(text: &str) -> OracleResult<'_, StaticCondition> {
+///
+/// Also the single authority for two terminal arms that generalize this window
+/// rather than re-deriving it: `oracle_classifier::is_static_pattern` (routing —
+/// does this line reach the static parser at all) and
+/// `oracle_static::dispatch::parse_static_line_inner` (composition — attach the
+/// matching `StaticCondition` to any enforceable continuous static the
+/// dispatcher would otherwise refuse). CR 604.1 + CR 611.3a + CR 102.1.
+pub(crate) fn parse_leading_turn_scope(text: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         value(
             StaticCondition::Not {

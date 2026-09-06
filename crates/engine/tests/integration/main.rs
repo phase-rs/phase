@@ -328,6 +328,7 @@ mod gluntch_choose_player_chain;
 mod goaded_creature_under_pacifism_visible;
 mod gollum_scheming_guide_card_predicate_guess;
 mod good_king_mog_xii_chapter_iv_588;
+mod gourmands_talent_turn_scoped_food_grant;
 mod gran_gran_integration;
 mod granted_alt_cost_hand_keyword;
 mod granted_bloodthirst_5802;

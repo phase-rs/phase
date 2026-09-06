@@ -35496,3 +35496,302 @@ fn additive_type_leaf_without_leading_pt_emits_no_base_pt() {
         "a clause with no leading N/M must not acquire a base P/T; mods = {mods:?}"
     );
 }
+
+// --- Gourmand's Talent: leading turn-window composition (parse_static_line_inner terminal arm) ---
+//
+// CR 604.1 + CR 102.1 + CR 611.3a: "During your turn, <static>" / "During turns
+// other than yours, <static>" is a printed leading timing clause that scopes
+// WHEN a static ability's statement is true. The terminal arm of
+// `parse_static_line_inner` peels this window with the single authority
+// `static_helpers::parse_leading_turn_scope`, recurses on the remainder, and
+// composes the resulting `StaticCondition` onto whatever the recursed static
+// already carries — giving the composition ONE HOME instead of N ad hoc peels.
+//
+// `GOURMAND_L1` is the level-1 line of Gourmand's Talent (BLC) with the Class
+// pre-parser's self-reference normalization already applied ("this artifact"
+// -> `~`), matching what `oracle_class.rs` hands to `parse_static_line`.
+const GOURMAND_L1: &str = "During your turn, artifacts you control are Foods in addition to \
+their other types and have \"{2}, {T}, Sacrifice ~: You gain 3 life.\"";
+
+/// V1 — the level-1 line parses to a `Continuous` static carrying both
+/// `AddSubtype{Food}` and `GrantAbility`, gated `DuringYourTurn`. Today (before
+/// this change) this line returns `None` from every static parser and the
+/// card falls through to `Effect::Unimplemented`.
+#[test]
+fn during_your_turn_additive_food_grant_composes_turn_condition() {
+    let def = parse_static_line(GOURMAND_L1).expect("the windowed additive-type grant must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::Continuous,
+        "the composed static must remain Continuous: {def:?}"
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "the leading window must become the static's condition: {def:?}"
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You)
+        )),
+        "affected must be artifacts you control: {def:?}"
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSubtype {
+                subtype: "Food".to_string(),
+            }),
+        "must add the Food subtype: {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+        "must grant the quoted sacrifice-for-life ability: {:?}",
+        def.modifications
+    );
+}
+
+/// V2 — the negated polarity ("During turns other than yours, ") composes
+/// symmetrically, producing `Not{DuringYourTurn}` rather than dropping the
+/// window or emitting a bare `DuringYourTurn`.
+#[test]
+fn during_turns_other_than_yours_additive_grant_composes_negated_condition() {
+    let negated = GOURMAND_L1.replacen("During your turn, ", "During turns other than yours, ", 1);
+    let def = parse_static_line(&negated).expect("the negated windowed grant must parse");
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        }),
+        "the negated window must become Not{{DuringYourTurn}}: {def:?}"
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSubtype {
+                subtype: "Food".to_string(),
+            }),
+        "the negated line must still compose the same modifications: {:?}",
+        def.modifications
+    );
+}
+
+/// V3 — the class, not the card: three non-Gourmand shapes (subtype, land
+/// type, color) all compose with the leading window through the same terminal
+/// arm. Each is `None` at BASE (P-2 p02/p03/p05).
+#[test]
+fn during_your_turn_composes_onto_subtype_land_and_color_statics() {
+    let subtype_line =
+        "During your turn, creatures you control are Zombies in addition to their other types.";
+    let land_line =
+        "During your turn, lands you control are Mountains in addition to their other types.";
+    let color_line =
+        "During your turn, creatures you control are green in addition to their other colors.";
+
+    let subtype_def =
+        parse_static_line(subtype_line).expect("subtype-granting windowed line must parse");
+    assert_eq!(subtype_def.condition, Some(StaticCondition::DuringYourTurn));
+    assert!(!subtype_def.modifications.is_empty(), "{subtype_def:?}");
+
+    let land_def = parse_static_line(land_line).expect("land-type windowed line must parse");
+    assert_eq!(land_def.condition, Some(StaticCondition::DuringYourTurn));
+    assert!(!land_def.modifications.is_empty(), "{land_def:?}");
+
+    let color_def = parse_static_line(color_line).expect("color-granting windowed line must parse");
+    assert_eq!(color_def.condition, Some(StaticCondition::DuringYourTurn));
+    assert!(
+        color_def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddColor { .. })),
+        "{:?}",
+        color_def.modifications
+    );
+}
+
+/// V4 — ORDERING INVARIANT: Bello, Bard of the Brambles is still claimed by
+/// its dedicated owner (`type_change::parse_each_compound_subject_type_change`),
+/// not by the general terminal arm reached through recursion. The fingerprint
+/// is modification ORDER: the dedicated owner emits `SetPower`/`SetToughness`
+/// FIRST (from the leading "is a 4/4 ... creature" clause), whereas the
+/// terminal arm's own recursion into `anthem::parse_subject_continuous_static`
+/// would emit `AddSubtype` first on the bare remainder. This is a regression
+/// guard, not a revert-failing test: Bello parses identically before and after
+/// this change (measured, P-2 p14).
+#[test]
+fn bello_verbatim_line_retains_each_compound_subject_owner() {
+    let line = "During your turn, each non-Equipment artifact and non-Aura enchantment you \
+                control with mana value 4 or greater is a 4/4 Elemental creature in addition \
+                to its other types and has indestructible, haste, and \"Whenever this creature \
+                deals combat damage to a player, draw a card.\"";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(defs.len(), 1, "Bello is one compound static: {defs:?}");
+    let def = &defs[0];
+    assert_eq!(
+        def.modifications.first(),
+        Some(&ContinuousModification::SetPower { value: 4 }),
+        "the dedicated compound-subject owner must emit SetPower first: {:?}",
+        def.modifications
+    );
+    assert_eq!(
+        def.modifications.get(1),
+        Some(&ContinuousModification::SetToughness { value: 4 }),
+        "then SetToughness: {:?}",
+        def.modifications
+    );
+}
+
+/// V5 — HOSTILE / lying-green: an unenforceable recursed static (Elvish
+/// Refueler's remainder parses to `Continuous` with ZERO modifications) is
+/// REFUSED by `is_enforceable_continuous_static`, so the card stays an honest
+/// `Effect::Unimplemented` rather than becoming a silent no-op that reports as
+/// supported.
+///
+/// PAIRED POSITIVE REACH-GUARD (mandatory): the remainder alone is asserted to
+/// parse to `Some(Continuous, [])`, proving the recursion reached a real parse
+/// and was refused by the `!modifications.is_empty()` gate — not vacuously
+/// because the peel itself failed to fire.
+#[test]
+fn during_your_turn_unenforceable_remainder_stays_unsupported() {
+    const ELVISH_REFUELER_LINE: &str = "During your turn, as long as you haven't activated an \
+        exhaust ability this turn, you may activate exhaust abilities as though they haven't \
+        been activated.";
+    const ELVISH_REFUELER_REMAINDER: &str = "as long as you haven't activated an exhaust ability \
+        this turn, you may activate exhaust abilities as though they haven't been activated.";
+
+    assert!(
+        parse_static_line(ELVISH_REFUELER_LINE).is_none(),
+        "an unenforceable recursed static must not be accepted through the window"
+    );
+
+    let remainder_def = parse_static_line(ELVISH_REFUELER_REMAINDER)
+        .expect("reach-guard: the bare remainder must still parse on its own");
+    assert_eq!(
+        remainder_def.mode,
+        StaticMode::Continuous,
+        "{remainder_def:?}"
+    );
+    assert!(
+        remainder_def.modifications.is_empty(),
+        "reach-guard: the remainder must be the zero-modification shape the gate refuses: {:?}",
+        remainder_def.modifications
+    );
+}
+
+/// V5b — HOSTILE / silently-inert gate: a remainder that DOES carry
+/// modifications but whose condition tree contains `StaticCondition::Unrecognized`
+/// must also be refused.
+///
+/// This is the other half of V5's hazard and the more dangerous one. V5's
+/// remainder is refused for having zero modifications; this one would sail past
+/// that conjunct. `game::layers::evaluate_condition` maps `Unrecognized` to
+/// `true`, so composing the window onto it would apply `AddSubtype{Food}` for
+/// the whole of the controller's turn while silently discarding the printed
+/// "as long as …" restriction — wrong game behavior, not merely absent
+/// behavior. Refusing keeps the line an honest `Effect::Unimplemented`.
+#[test]
+fn during_your_turn_unrecognized_condition_remainder_stays_unsupported() {
+    const LINE: &str = "During your turn, artifacts you control are Foods in addition to their \
+                        other types as long as the harvest moon is waxing.";
+    const REMAINDER: &str = "artifacts you control are Foods in addition to their other types as \
+                             long as the harvest moon is waxing.";
+
+    assert!(
+        parse_static_line(LINE).is_none(),
+        "a remainder whose condition tree is Unrecognized must not be composed with the window"
+    );
+
+    // PAIRED POSITIVE REACH-GUARD: the bare remainder really does reach a parse
+    // and really does produce the dangerous shape — Continuous, NON-empty
+    // modifications, Unrecognized condition — so the refusal above comes from
+    // the new `contains_unrecognized` conjunct and not vacuously from a peel
+    // that never fired or a remainder that never parsed.
+    let remainder_def = parse_static_line(REMAINDER)
+        .expect("reach-guard: the bare remainder must still parse on its own");
+    assert_eq!(
+        remainder_def.mode,
+        StaticMode::Continuous,
+        "{remainder_def:?}"
+    );
+    assert!(
+        !remainder_def.modifications.is_empty(),
+        "reach-guard: this remainder must clear V5's non-empty conjunct, so that the \
+         Unrecognized conjunct is what refuses it: {remainder_def:?}"
+    );
+    assert!(
+        remainder_def
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::contains_unrecognized),
+        "reach-guard: the remainder's condition must be the Unrecognized shape: {:?}",
+        remainder_def.condition
+    );
+}
+
+/// V6 — HOSTILE / two authorities: a remainder that already carries its own
+/// `as long as` condition must COMPOSE with the leading window via
+/// `StaticCondition::And`, never drop either one.
+#[test]
+fn during_your_turn_composes_with_remainder_condition() {
+    let line = "During your turn, artifacts you control are Foods in addition to their other \
+                types as long as you control a Forest.";
+    let def = parse_static_line(line).expect("the two-condition composed line must parse");
+    let Some(StaticCondition::And { conditions }) = def.condition.clone() else {
+        panic!(
+            "expected And{{DuringYourTurn, <inner>}}, got {:?}",
+            def.condition
+        );
+    };
+    assert_eq!(conditions.len(), 2, "{conditions:?}");
+    assert_eq!(
+        conditions[0],
+        StaticCondition::DuringYourTurn,
+        "the outer (peeled) condition must be first: {conditions:?}"
+    );
+    // Pin the CONCRETE inner variant, not merely "not DuringYourTurn". A bare
+    // `assert_ne!` would also pass on a duplicated window or on any wrong
+    // variant that happens not to equal `DuringYourTurn`, so it proves far less
+    // than it appears to. `IsPresent` is the shape "as long as you control a
+    // <type>" actually produces (measured through the export pipeline, not
+    // assumed).
+    //
+    // The always-true `StaticCondition::Unrecognized` shape is NOT what this
+    // assertion guards: `is_enforceable_continuous_static` now refuses it
+    // upstream via `contains_unrecognized`, so such a line never reaches a
+    // composed `And` at all — see
+    // `during_your_turn_unrecognized_condition_remainder_stays_unsupported`,
+    // which pins that refusal directly.
+    assert!(
+        matches!(conditions[1], StaticCondition::IsPresent { .. }),
+        "the inner (recursed) condition must be the remainder's own concrete \
+         IsPresent gate, never a duplicate window and never the always-true \
+         Unrecognized fallback: {conditions:?}"
+    );
+}
+
+/// V7 — Regression: an already-claimed windowed line (Bedrock Tortoise) is
+/// untouched by the new terminal arm, because its dedicated per-parser peel
+/// (or an earlier dispatcher arm) still claims it first.
+#[test]
+fn during_your_turn_keyword_grant_unchanged() {
+    let line = "During your turn, creatures you control have hexproof.";
+    let def = parse_static_line(line).expect("Bedrock Tortoise's first line must parse");
+    assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        )),
+        "{def:?}"
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }],
+        "{:?}",
+        def.modifications
+    );
+}

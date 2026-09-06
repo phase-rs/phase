@@ -776,6 +776,51 @@ fn parse_attacking_defender_scope<'a>(tp: &TextPair<'a>) -> Option<(&'a str, Con
     None
 }
 
+/// CR 604.1 + CR 611.3a + CR 613.1: a recursed static may carry a composed
+/// leading timing window only when the layer system will actually honor it.
+///
+/// `StaticMode::Continuous` is the mode whose `condition` is evaluated by
+/// `game::layers::gather_active_continuous_effects` → `evaluate_condition`, so
+/// it is the mode where a composed window is guaranteed to be enforced.
+///
+/// This is CONSERVATIVE, not necessary, and the cost is measured rather than
+/// assumed: several non-`Continuous` enforcement points DO evaluate `condition`
+/// (`game::combat` for `CantBlock`/`CantAttack` via
+/// `layers::evaluate_condition_with_recipient`; `game::casting` for
+/// `CastWithKeyword` via `layers::evaluate_condition`). Measured today, the
+/// restriction costs ZERO corpus coverage — of the corpus lines this arm would
+/// otherwise reach, none parses to a non-`Continuous` mode — while off-corpus
+/// it declines the `MustAttack` / `CastWithKeyword` / `CantBlock` shapes, which
+/// therefore stay honestly `Effect::Unimplemented`. Widening is per-mode work:
+/// each admitted mode needs its own runtime discriminating test proving its
+/// enforcement point honors the window.
+///
+/// The non-empty check is the fail-closed half, and it is load-bearing:
+/// measured, Elvish Refueler's remainder parses to a `Continuous` static with an
+/// `Unrecognized` condition and ZERO modifications. Accepting it would replace
+/// an honest `Effect::Unimplemented` with a silent no-op that reports as
+/// supported — a lying green. Mirrors the fail-closed acceptance bar on
+/// `parse_extra_blockers_static` below.
+/// The third conjunct closes the remaining half of the same hazard. A remainder
+/// can parse to a `Continuous` static that has modifications but whose condition
+/// tree carries `StaticCondition::Unrecognized` (an unparsed `as long as …`
+/// clause). `game::layers::evaluate_condition` maps `Unrecognized` to `true`, so
+/// composing the window onto it would apply the modification for the whole of
+/// the controller's turn while silently discarding the printed condition —
+/// wrong game behavior, not merely missing behavior. `contains_unrecognized`
+/// (`types/ability.rs`) is the single authority for that test and already
+/// recurses through `And`/`Or`/`Not`; `game::coverage` uses the same helper to
+/// keep such a static out of the supported set, so refusing here keeps the
+/// parser and the coverage report telling the same story.
+fn is_enforceable_continuous_static(def: &StaticDefinition) -> bool {
+    matches!(def.mode, StaticMode::Continuous)
+        && !def.modifications.is_empty()
+        && !def
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::contains_unrecognized)
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -3692,6 +3737,63 @@ pub(crate) fn parse_static_line_inner(
             def = def.affected(filter);
         }
         return Some(def);
+    }
+
+    // --- TERMINAL: "During your turn, <static>" / "During turns other than
+    //     yours, <static>" — leading timing-window composition. ---
+    //
+    // CR 604.1: a static ability's statement is simply true, so a printed
+    // timing clause is an intrinsic gate on the WHOLE statement, not part of
+    // its subject. CR 102.1 + CR 109.5: "your turn" binds to the source
+    // object's controller, which is exactly what `StaticCondition::DuringYourTurn`
+    // means to `game::layers::evaluate_condition`. CR 611.3a: the composed gate
+    // is re-evaluated live, never locked in.
+    //
+    // WHY THIS IS TERMINAL, and why it must never move earlier. Many sites
+    // under `crates/engine/src/parser/` peel this same prefix internally
+    // (regenerate the list with:
+    //   grep -rn '"during your turn, "\|"during turns other than yours, "' \
+    //     crates/engine/src/parser/ | grep -v tests
+    // ). Each is MORE SPECIFIC than the general subject-static path, and several
+    // are dispatched AFTER it. Running the peel before those parsers have
+    // refused the FULL line would hand a specific line's remainder to the
+    // general path and change which authority owns it: measured, Bello, Bard of
+    // the Brambles' remainder is claimed by `anthem::parse_subject_continuous_static`
+    // and emits the same modification SET in a different ORDER than its rightful
+    // owner `type_change::parse_each_compound_subject_type_change`. Placing the
+    // peel LAST makes it a pure addition — it can only claim lines this entire
+    // dispatcher has already refused, so no card that parses today can change.
+    //
+    // The composition mirrors `anthem::parse_leading_condition_peel` (which owns
+    // the compound "During your turn, as long as <cond>, " form): compose with
+    // any condition the recursed static already carries via `StaticCondition::And`
+    // rather than dropping one.
+    //
+    // `nom_on_lower` (not a raw tag on `tp.lower`) is required so the remainder
+    // keeps its ORIGINAL case: a granted quoted ability's mana symbols must
+    // reach the cost parser un-lowercased (issue #5599).
+    if let Some((turn_condition, remainder)) =
+        nom_on_lower(tp.original, tp.lower, super::parse_leading_turn_scope)
+    {
+        if let Some(mut def) = parse_static_line_inner(remainder.trim(), inverted) {
+            if is_enforceable_continuous_static(&def) {
+                // CR 611.3a: both gates survive.
+                def.condition = Some(match def.condition.take() {
+                    Some(existing) => StaticCondition::And {
+                        conditions: vec![turn_condition, existing],
+                    },
+                    None => turn_condition,
+                });
+                // The description is the FULL line as this function sees it —
+                // i.e. the REMINDER-STRIPPED line, because `text` is shadowed by
+                // `strip_reminder_text(text)` at the top of
+                // `parse_static_line_inner` and every sibling arm's `description`
+                // is that same shadowed `text`. Never the peeled remainder
+                // (matches `parse_leading_condition_peel`).
+                def.description = Some(text.to_string());
+                return Some(def);
+            }
+        }
     }
 
     None
