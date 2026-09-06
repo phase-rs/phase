@@ -11,7 +11,7 @@ use nom::character::complete::multispace0;
 /// Shared by the chosen-name name-picker classes — the `CantBeActivated`
 /// prohibition (Pithing Needle / Phyrexian Revoker / Sorcerous Spyglass) and the
 /// directional activated-ability cost modifier (Skyseer's Chariot). Returns
-/// `None` for any other subject so callers fall back to `parse_type_phrase`.
+/// `None` for any other subject so callers fall back to `parse_type_phrase_folding`.
 pub(crate) fn parse_chosen_name_source_filter(subject_lower: &str) -> Option<TargetFilter> {
     let trimmed = subject_lower.trim();
     value(
@@ -39,7 +39,7 @@ pub(crate) fn parse_chosen_name_source_filter(subject_lower: &str) -> Option<Tar
 /// `"cost"`. Handles compound subjects such as Goblin Anarchomancer's
 /// "Each spell you cast that's red or green" via `parse_that_clause_suffix`.
 /// CR 205.4a: A bare supertype spell subject ("Legendary spells you cast cost
-/// {1} less", Kethis, the Hidden Hand) — `parse_type_phrase` doesn't consume a
+/// {1} less", Kethis, the Hidden Hand) — `parse_type_phrase_folding` doesn't consume a
 /// lone supertype word (it requires a following type noun), so the restriction
 /// would otherwise drop and reduce the cost of EVERY spell. Emit a `HasSupertype`
 /// card filter instead.
@@ -56,7 +56,7 @@ fn parse_bare_supertype_spell_filter(base: &str) -> Option<TargetFilter> {
 /// CR 105.2 + CR 700.6 + CR 205.4a + CR 601.2f: Resolve a BARE-word spell-subject
 /// filter for a cost modifier — a color or color-CATEGORY ("white", "colorless",
 /// "monocolored", "multicolored"), "historic", or a supertype ("legendary").
-/// `parse_type_phrase` declines all of these because they carry no trailing type
+/// `parse_type_phrase_folding` declines all of these because they carry no trailing type
 /// noun (it needs "white creature", not a lone "white"), so without this the
 /// whole restriction dropped and the cost modifier (mis)applied to EVERY spell.
 ///
@@ -172,7 +172,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     // <color> spells" (the Prophecy Familiar cycle: Nightscape / Stormscape /
     // Sunscape / Thornscape / Thunderscape Familiar). The single-subject path
     // below maps a lone bare color via `parse_named_color`, and
-    // `parse_type_phrase` decomposes compounds whose operands carry a type noun
+    // `parse_type_phrase_folding` decomposes compounds whose operands carry a type noun
     // ("Angel spells and Human spells", "red creature spells and green creature
     // spells"). A two-BARE-color compound falls through both and yields
     // `None` — which silently drops the color restriction and reduces EVERY
@@ -220,7 +220,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     let typed_filter = if base_part.is_empty() {
         None
     } else {
-        let (filter, remainder) = parse_type_phrase(base_part);
+        let (filter, remainder) = parse_type_phrase_folding(base_part);
         let remainder = remainder.trim();
         match &filter {
             TargetFilter::Typed(tf)
@@ -234,7 +234,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             }
             // Bare color/color-category words ("white", "colorless",
             // "multicolored"), "historic", and bare supertype words ("legendary")
-            // are not consumed by parse_type_phrase, which requires a trailing type
+            // are not consumed by parse_type_phrase_folding, which requires a trailing type
             // noun ("white creature", "legendary permanent"). Route them through
             // the single bare-subject authority so the color-category axis is not
             // dropped (CR 105.2 + CR 700.6 + CR 205.4a).
@@ -274,7 +274,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
 /// Thornscape / Thunderscape Familiar) is the exemplar class. Requires two or
 /// more colors and full consumption, so a lone bare color ("Red spells …") and
 /// a noun-bearing operand ("red creature spells and …") both decline here and
-/// fall through to the single-subject path and `parse_type_phrase` respectively.
+/// fall through to the single-subject path and `parse_type_phrase_folding` respectively.
 fn parse_cost_mod_compound_color_subject(base: &str) -> Option<TargetFilter> {
     // Operand: a bare color name, optionally followed by the spell noun. The
     // trailing " spell[s]" is present on every operand except the last (the
@@ -662,7 +662,7 @@ pub(crate) fn try_parse_cost_modification(
         // qualifier (Cloud Key, Umori, Stenn, Herald's Horn: "Spells you cast of
         // the chosen type cost {1} less"). A "you cast" infix sits between the
         // type word and this qualifier, so the trim chain below can't reach the
-        // type word and `parse_type_phrase` never extracts the chosen-type
+        // type word and `parse_type_phrase_folding` never extracts the chosen-type
         // discriminator. Strip it here and re-attach IsChosenCardType /
         // IsChosenCreatureType after the base type is parsed — mirrors the
         // "with the chosen name" handling above.
@@ -803,7 +803,7 @@ pub(crate) fn try_parse_cost_modification(
                 }
             })
             .or_else(|| {
-                let (count_filter, _) = parse_type_phrase(count_text);
+                let (count_filter, _) = parse_type_phrase_folding(count_text);
                 Some(QuantityRef::ObjectCount {
                     filter: count_filter,
                 })

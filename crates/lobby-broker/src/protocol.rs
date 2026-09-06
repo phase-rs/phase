@@ -56,6 +56,19 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 66 — `ReplacementCondition::FirstTokenCreationEachTurn` moved its required
+///      `player` field to an optional `active_player_req`, and
+///      `CopyTargetPurpose` gained a `CopyTokenSource` variant. Both are
+///      one-way parse breaks. `player` was a REQUIRED field through v65 and
+///      carried no `#[serde(default)]`, so a v65 peer hits a missing-field
+///      error on a v66 payload; `CopyTargetPurpose` is `#[serde(tag = "type")]`,
+///      so a v65 peer hits an unknown-variant error on `CopyTokenSource`.
+///      Authored against 65 and renumbered here: #8497 claimed 65 for
+///      the entry below while this branch was open, and
+///      `check-protocol-version.mjs` could not catch the collision
+///      because it enforces that the Rust and TS constants AGREE, not
+///      that the number is UNCLAIMED.
+///      Lobby messages are unchanged.
 /// 65 — `DraftMatchStart` now announces the exact Full-session identity for
 ///      the spawned match. Draft reconnect uses the authenticated draft seat
 ///      to attach that socket to the same Full-session lifetime, and Full
@@ -387,7 +400,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 65;
+pub const PROTOCOL_VERSION: u32 = 66;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1242,12 +1255,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 65);
+        assert_eq!(PROTOCOL_VERSION, 66);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 64);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 65);
     }
 
     #[test]

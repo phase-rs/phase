@@ -13,6 +13,63 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::triggers::AttackTargetFilter;
 
+/// CR 607.2d + CR 614.1c: only an as-enters replacement whose separate static
+/// reads `IsChosenCardType` is promoted from its locally-labeled list.
+#[test]
+fn constrained_card_type_static_relation_promotes_cloud_key_and_archon() {
+    let cases = [
+        (
+            "Cloud Key",
+            vec!["Artifact"],
+            "As Cloud Key enters, choose artifact, creature, enchantment, instant, or sorcery.\nSpells you cast of the chosen type cost {1} less to cast.",
+            vec![
+                CoreType::Artifact,
+                CoreType::Creature,
+                CoreType::Enchantment,
+                CoreType::Instant,
+                CoreType::Sorcery,
+            ],
+        ),
+        (
+            "Archon of Valor's Reach",
+            vec!["Creature"],
+            "As Archon of Valor's Reach enters the battlefield, choose artifact, enchantment, instant, sorcery, or planeswalker.\nPlayers can't cast spells of the chosen type.",
+            vec![
+                CoreType::Artifact,
+                CoreType::Enchantment,
+                CoreType::Instant,
+                CoreType::Sorcery,
+                CoreType::Planeswalker,
+            ],
+        ),
+        (
+            "Supplemental Type Choice",
+            vec!["Artifact"],
+            "As Supplemental Type Choice enters the battlefield, choose artifact or battle.\nSpells you cast of the chosen type cost {1} less to cast.",
+            vec![CoreType::Artifact, CoreType::Battle],
+        ),
+    ];
+    for (name, types, oracle, expected) in cases {
+        let types = types.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        let execute = parsed.replacements[0]
+            .execute
+            .as_deref()
+            .expect("as-enters replacement has an execute");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::CardType { options },
+                    persist: true,
+                    ..
+                } if options == &expected
+            ),
+            "{name} must promote only its proven choice domain"
+        );
+    }
+}
+
 #[test]
 fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
     let generic = lower_unsupported_node(&UnsupportedAbilityIr::unknown("unknown line"), 1);
@@ -8177,7 +8234,7 @@ fn land_grant_reveal_hand_alternative_cost_option() {
 // except for artifacts and lands" must exclude both types (including artifact
 // creatures, per CR 205.2b's multi-type-object rule), not silently drop the
 // exception clause and destroy everything. Drives the full ability-line parse
-// (not just `parse_type_phrase` in isolation) so the interaction with the
+// (not just `parse_type_phrase_folding` in isolation) so the interaction with the
 // trailing "Activate only during your upkeep." restriction sentence is
 // covered too.
 #[test]
@@ -21756,7 +21813,7 @@ fn quantum_riddler_draw_line_parses_as_replacement_not_static() {
 
 /// CR 205.3a: "[Subtype] [CoreType]" subject-predicate patterns like
 /// "Wizard creatures gain flying until end of turn" — the subtype+type compound
-/// must be fully consumed by parse_type_phrase so the subject-predicate parser
+/// must be fully consumed by parse_type_phrase_folding so the subject-predicate parser
 /// can extract the filter.
 #[test]
 fn test_subtype_creatures_gain_keyword() {
@@ -26814,7 +26871,7 @@ fn target_filter_has_defending_player_anaphor(filter: &TargetFilter) -> bool {
 /// attacked player, not to `TargetFilter::Any`.
 ///
 /// Revert-failing: without `parse_attacking_defender_anaphor`,
-/// `parse_type_phrase` leaves "attacking that player" unconsumed,
+/// `parse_type_phrase_folding` leaves "attacking that player" unconsumed,
 /// `parse_subject_application`'s rest-empty gate fails, and the clause falls
 /// through to `parse_numeric_imperative_ast`, which emits the documented
 /// `Effect::Pump { target: TargetFilter::Any }` sentinel — a board-wide pump
@@ -26935,7 +26992,7 @@ fn definition_chain_has_defending_player_anaphor(def: &AbilityDefinition) -> boo
 /// corpus. Many of them terminate with a bare "." right after the phrase, which
 /// SATISFIES the clause boundary, so the boundary guard is not what protects
 /// them — the excluded positions never route the phrase through
-/// `parse_type_phrase`'s suffix chain at all.
+/// `parse_type_phrase_folding`'s suffix chain at all.
 #[test]
 fn excluded_attacking_that_player_positions_are_not_stolen() {
     // Inline token spec, bare "." terminator. Verbatim Oracle text (MTGJSON) —

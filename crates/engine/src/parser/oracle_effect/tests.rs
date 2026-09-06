@@ -34739,7 +34739,7 @@ fn effect_from_the_rubble_chosen_type_graveyard_target() {
 
 /// CR 115.2: An already zone-qualified reanimation target ("return target
 /// creature card from your graveyard to the battlefield") must NOT be
-/// re-scoped by the inferred-origin pass. `parse_type_phrase` already parses
+/// re-scoped by the inferred-origin pass. `parse_type_phrase_folding` already parses
 /// "from your graveyard" into `InZone { Graveyard }` plus a single owner
 /// scope on the filter's `controller` field, so the candidate filter must
 /// carry exactly one owner-`You` scope — guarding against the 905-card
@@ -35645,7 +35645,7 @@ fn passive_cant_be_cast_single_clause_has_no_land_sub_ability() {
 }
 
 /// Pattern-coverage companion: the land-play axis is not limited to "chosen
-/// name" — `parse_type_phrase` resolves any type-phrase subject, so a
+/// name" — `parse_type_phrase_folding` resolves any type-phrase subject, so a
 /// hypothetical type-scoped land-play ban parses the same way (building for
 /// the class, not the single card).
 #[test]
@@ -42766,6 +42766,53 @@ fn labeled_choice_ternary_artifact_creature_land() {
     );
 }
 
+/// CR 205.2a: bare lists remain labels; only the proven as-enters/static
+/// relation promotes Cloud Key and Archon later in document lowering.
+#[test]
+fn bare_core_type_lists_remain_labeled_choices() {
+    assert_eq!(
+        super::try_parse_named_choice(
+            "choose artifact, creature, enchantment, instant, or sorcery"
+        ),
+        Some(ChoiceType::Labeled {
+            options: vec![
+                "Artifact".to_string(),
+                "Creature".to_string(),
+                "Enchantment".to_string(),
+                "Instant".to_string(),
+                "Sorcery".to_string(),
+            ],
+        })
+    );
+}
+
+/// CR 205.2a: Stenn's exclusion is represented as its ordered positive
+/// complement, so prompt generation and answer validation share one domain.
+#[test]
+fn card_type_other_than_uses_ordered_positive_complement() {
+    assert_eq!(
+        super::try_parse_named_choice("choose a card type other than creature or land."),
+        Some(ChoiceType::card_type_from(vec![
+            CoreType::Artifact,
+            CoreType::Enchantment,
+            CoreType::Instant,
+            CoreType::Planeswalker,
+            CoreType::Sorcery,
+        ]))
+    );
+    for malformed in [
+        "choose a card type other than creature or",
+        "choose a card type other than creature, creature",
+        "choose a card type other than battle",
+    ] {
+        assert_eq!(
+            super::try_parse_named_choice(malformed),
+            None,
+            "{malformed}"
+        );
+    }
+}
+
 /// Teferi's Realm — 4-option Oxford-comma labeled choice. Confirms the
 /// generalization is N-ary, not capped at 3.
 #[test]
@@ -44345,8 +44392,14 @@ fn choose_one_of_detects_shared_target_counter_choice() {
 
     // The shared "on up to one other target artifact" is a single cast-time
     // target lifted to a `TargetOnly` head; the up-to-one cap lives on the
-    // head, and the counter choice is the chained sub-ability whose branches
-    // act on `ParentTarget`.
+    // head, and the counter choice is the chained sub-ability.
+    //
+    // The branches name the head's first target SLOT, not a bare parent
+    // anaphor. CR 115.6 allows announcing zero targets for "up to one", and a
+    // bare anaphor with no chosen object falls back to the ability's own source
+    // — which this card excludes by name ("one OTHER target artifact"). See
+    // `inspirit_with_no_other_artifact_puts_no_counter_on_itself`, which
+    // measured a +1/+1 counter landing on the Spacecraft itself.
     assert!(
         matches!(&*ability.effect, Effect::TargetOnly { .. }),
         "expected TargetOnly head, got {:?}",
@@ -44375,7 +44428,7 @@ fn choose_one_of_detects_shared_target_counter_choice() {
         } => {
             assert_eq!(*counter_type, CounterType::Plus1Plus1);
             assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
-            assert_eq!(*target, TargetFilter::ParentTarget);
+            assert_eq!(*target, TargetFilter::ParentTargetSlot { index: 0 });
         }
         other => panic!("expected first branch PutCounter, got {other:?}"),
     }
@@ -44388,7 +44441,7 @@ fn choose_one_of_detects_shared_target_counter_choice() {
         } => {
             assert_eq!(*counter_type, CounterType::Generic("charge".to_string()));
             assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
-            assert_eq!(*target, TargetFilter::ParentTarget);
+            assert_eq!(*target, TargetFilter::ParentTargetSlot { index: 0 });
         }
         other => panic!("expected second branch PutCounter, got {other:?}"),
     }
@@ -44604,6 +44657,120 @@ fn choose_one_of_detects_from_among_counter_choice() {
             other => panic!("expected branch {i} PutCounter, got {other:?}"),
         }
     }
+}
+
+/// CR 122.1a + CR 122.1b + CR 608.2d: Elspeth Resplendent's +1 conjoins a
+/// FIXED counter with a chosen one — "Put a +1/+1 counter and a counter from
+/// among flying, first strike, lifelink, or vigilance on it". Both halves are
+/// already supported apart (Unexpected Fangs prints the conjoined pair of fixed
+/// kinds, Aragorn prints the bare from-among choice); only the combination fell
+/// to `Unimplemented`, so the whole ability did nothing.
+///
+/// Shape follows the card's printed ruling of 2022-04-29: "its controller
+/// chooses flying, first strike, lifelink, or vigilance, then that counter and
+/// the +1/+1 counter are placed on the target creature at the same time." So
+/// the CHOICE sits above both placements and the unconditional counter rides
+/// inside each branch — no player decision separates the two placements.
+#[test]
+fn choose_one_of_detects_fixed_counter_conjoined_with_from_among_choice() {
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    let ability = parse_effect_chain(
+        "Put a +1/+1 counter and a counter from among flying, first strike, lifelink, or vigilance on it.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(&*ability.effect, Effect::TargetOnly { .. }),
+        "expected TargetOnly head, got {:?}",
+        ability.effect
+    );
+
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("the choice must be chained under the shared target");
+    let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+        panic!(
+            "expected ChooseOneOf directly under the target, got {:?}",
+            choice.effect
+        );
+    };
+    assert_eq!(*chooser, PlayerFilter::Controller);
+    assert_eq!(branches.len(), 4, "four printed kinds");
+
+    let expected = [
+        KeywordKind::Flying,
+        KeywordKind::FirstStrike,
+        KeywordKind::Lifelink,
+        KeywordKind::Vigilance,
+    ];
+    for (i, kind) in expected.iter().enumerate() {
+        match &*branches[i].effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Keyword(*kind), "branch {i}");
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                // The parent's FIRST target slot, not a bare parent anaphor.
+                // The clause parsed here carries no "up to one" of its own —
+                // the conjoined form always names the slot. The optional-slot
+                // case that motivates it is pinned at runtime by
+                // `elspeth_plus_one_with_no_target_places_nothing`.
+                assert_eq!(*target, TargetFilter::ParentTargetSlot { index: 0 });
+            }
+            other => panic!("expected branch {i} PutCounter, got {other:?}"),
+        }
+
+        // The unconditional half rides inside the branch, after the chosen
+        // kind and with nothing in between.
+        let conjoined = branches[i]
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("branch {i} must carry the +1/+1 counter"));
+        assert!(
+            matches!(
+                &*conjoined.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    target: TargetFilter::ParentTargetSlot { index: 0 },
+                    ..
+                }
+            ),
+            "branch {i} must place the +1/+1 counter on the same slot, got {:?}",
+            conjoined.effect
+        );
+        assert!(
+            conjoined.sub_ability.is_none(),
+            "branch {i} places exactly the two counters"
+        );
+    }
+}
+
+/// The peel is what admits a `FromAmong` list without the "your choice of "
+/// marker. Without a fixed conjunct the marker is still required, so this bare
+/// text must stay unsupported.
+///
+/// This case is green on `main` too — it does not discriminate the fix. It is a
+/// bolt against later widening, and that was measured, not assumed: removing
+/// the `FromAmong` guard in `try_parse_put_counter_choice` makes this text
+/// supported and this test the only one that falls.
+#[test]
+fn from_among_without_marker_or_fixed_conjunct_stays_unsupported() {
+    let ability = parse_effect_chain(
+        "Put a counter from among flying, first strike, lifelink, or vigilance on it.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(&*ability.effect, Effect::Unimplemented { .. }),
+        "\"from among\" without the marker and without a fixed conjunct must stay a \
+         strict gap, got {:?}",
+        ability.effect
+    );
 }
 
 #[test]
@@ -54853,7 +55020,7 @@ fn ogre_geargrabber_lose_control_stays_unimplemented() {
 /// regardless of its individual disguise cost.
 #[test]
 fn parse_type_phrase_creatures_you_control_with_disguise() {
-    let (filter, rem) = parse_type_phrase("creatures you control with disguise");
+    let (filter, rem) = parse_type_phrase_folding("creatures you control with disguise");
     assert!(
         rem.trim().is_empty(),
         "must fully consume, leftover: {rem:?}"
@@ -59141,7 +59308,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
 /// That `false` is a DATED POOL CENSUS, not a structural property, and the
 /// distinction matters enough to spell out. `FilterProp::IsChosenColor` is
 /// stamped by the printed-qualifier arm inside the GENERAL type-phrase parser
-/// (`parser/oracle_target.rs` `parse_type_phrase_with_ctx`), gated only on
+/// (`parser/oracle_target.rs` `parse_type_phrase_folding_with_ctx`), gated only on
 /// `ChosenColorQualifierScope::ChainBound` — which `oracle_effect/mod.rs` sets
 /// for EVERY chunk of EVERY chain. So the grammar does not forbid the prop from
 /// landing in a sibling mass-effect object filter: `ChangeZoneAll`, `PumpAll`,
@@ -59511,7 +59678,7 @@ fn anaphor_color_cards_are_unchanged_by_the_printed_qualifier_arm() {
 ///
 /// The fixture must be MULTI-CLAUSE: a single-clause refusal cannot reach the
 /// guard, because if the clause lowered to `Unimplemented` then
-/// `parse_type_phrase_with_ctx` generally never ran on it, so
+/// `parse_type_phrase_folding_with_ctx` generally never ran on it, so
 /// `printed_color_choice` is `None` and the injector's `Some(_) | None` arm is
 /// taken instead — indistinguishable from the guard firing. That same argument
 /// is why the guard's own negative arm (the CARRIER itself refused, so

@@ -14,12 +14,14 @@ import {
   isLobbyEntryCompatible,
   lobbySources,
   useMultiplayerStore,
+  type ConnectionMode,
   type LobbyGameEntry,
   type LobbySource,
 } from "../../stores/multiplayerStore";
 import { assertNever } from "../../utils/assertNever";
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { ConnectionModeSwitch } from "./ConnectionModeSwitch";
 import { GameListItem } from "./GameListItem";
 import type { LobbyGame } from "./GameListItem";
 import { ServerFlag } from "./ServerFlag";
@@ -48,7 +50,11 @@ interface LobbyViewProps {
   ) => void;
   /** Watch a live server game or draft without joining as a player. */
   onSpectate?: (code: string, origin: LobbySource | null, context?: LobbyGame) => void;
-  connectionMode?: "server" | "p2p";
+  connectionMode?: ConnectionMode;
+  /** The page-level mode handler. Required, because an unwired switch would be
+   * a control that lies about what it does; the page owns the write so the
+   * anchor repair it performs is not duplicated per surface. */
+  onConnectionModeChange: (mode: ConnectionMode) => void;
   onServerOffline?: () => void;
 }
 
@@ -87,6 +93,7 @@ export function LobbyView({
   onJoinGame,
   onSpectate,
   connectionMode,
+  onConnectionModeChange,
   onServerOffline,
 }: LobbyViewProps) {
   const { t } = useTranslation("multiplayer");
@@ -468,6 +475,17 @@ export function LobbyView({
           {isP2P ? t("lobbyView.directConnection") : t("lobbyView.onlineLobby")}
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
+          {/* The mode switch sits with the server chip, not with the room-type
+              filter below: it governs which transport this client uses, not
+              which rows the list shows. */}
+          <span className="text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+            {t("connectionMode.label")}
+          </span>
+          <ConnectionModeSwitch
+            value={isP2P ? "p2p" : "server"}
+            onChange={onConnectionModeChange}
+            size="sm"
+          />
           {isServer && (
             <button
               type="button"
@@ -482,20 +500,6 @@ export function LobbyView({
                 />
               )}
               <span className="truncate whitespace-nowrap">{serverHost}</span>
-            </button>
-          )}
-          {/* In P2P mode the user has no other path back to ServerPicker —
-              the server-address chip above is hidden, and ServerOfflinePrompt
-              only fires when we tried to use a server. Offer an explicit
-              affordance so users who picked "P2P only" aren't trapped. */}
-          {isP2P && (
-            <button
-              type="button"
-              onClick={() => setServerPickerOpen(true)}
-              title={t("lobbyView.pickServerTitle")}
-              className="rounded-[7px] border border-white/10 bg-black/25 px-2.5 py-0.5 text-[10px] text-slate-300 backdrop-blur-sm transition-colors hover:border-white/20 hover:bg-white/5"
-            >
-              {t("lobbyView.pickServer")}
             </button>
           )}
           {isServer && playerCount > 0 && (
@@ -666,22 +670,16 @@ export function LobbyView({
               {t("lobbyView.hostDraft")}
             </button>
           )}
-          {isServer && (
-            <button
-              onClick={handleHost}
-              className={menuButtonClass({ tone: "emerald", size: "md" })}
-            >
-              {t("lobbyView.hostGame")}
-            </button>
-          )}
-          {isP2P && (
-            <button
-              onClick={onHostP2P}
-              className={menuButtonClass({ tone: "cyan", size: "md" })}
-            >
-              {t("lobbyView.hostP2PGame")}
-            </button>
-          )}
+          {/* One button; the mode switch above says which transport it opens,
+              and its tone follows that mode's accent. Each mode keeps its own
+              entry point: the server one seeds host-setup with the lobby's
+              active format filter, the P2P one does not. */}
+          <button
+            onClick={isP2P ? onHostP2P : handleHost}
+            className={menuButtonClass({ tone: isP2P ? "cyan" : "emerald", size: "md" })}
+          >
+            {t("lobbyView.hostGame")}
+          </button>
         </div>
       </div>
 

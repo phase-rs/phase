@@ -11,7 +11,10 @@ use engine::types::player::PlayerId;
 use rand::Rng;
 use tracing::{info, warn};
 
+use seat_reducer::types::DeckChoice;
+
 use crate::deck_resolve;
+use crate::deck_resolve::deck_data_from_payload;
 use crate::persist::{PersistedDraftSession, PersistedLobbyMeta};
 use crate::protocol::DeckData;
 use crate::reconnect::ReconnectManager;
@@ -645,15 +648,26 @@ impl DraftSessionManager {
                 .cloned()
                 .unwrap_or_else(|| format!("Player {}", seat1));
 
+            // A draft deck arrives already resolved, so each seat's provenance
+            // is recovered from its payload against the same database.
+            let choice0 = DeckChoice::DeckList(Box::new(deck_data_from_payload(db, &decks[0])));
+            let choice1 = DeckChoice::DeckList(Box::new(deck_data_from_payload(db, &decks[1])));
             let (game_code, _token0) = game_mgr.create_game_n_players(
                 decks[0].clone(),
+                Some(choice0),
                 name0,
                 None,
                 2,
                 match_config,
                 Some(format_config.clone()),
             )?;
-            let (_token1, _) = game_mgr.join_game_with_name(&game_code, decks[1].clone(), name1)?;
+            let (_token1, _) = game_mgr.join_game_with_name_and_reservation(
+                &game_code,
+                decks[1].clone(),
+                Some(choice1),
+                name1,
+                None,
+            )?;
 
             game_mgr
                 .sessions

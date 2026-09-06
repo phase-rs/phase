@@ -4775,7 +4775,13 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
         ReplacementCondition::OnlyExtraTurn => Axes::NONE,
         ReplacementCondition::TokenSubtypeMatches { subtypes: _ } => Axes::NONE,
         ReplacementCondition::TokenCoreTypeMatches { core_types: _ } => Axes::NONE,
-        ReplacementCondition::FirstTokenCreationEachTurn { player: _ } => Axes::NONE,
+        ReplacementCondition::FirstTokenCreationEachTurn { active_player_req } => {
+            let mut acc = Axes::NONE;
+            if let Some(x) = active_player_req {
+                acc = acc.or(scan_controller_ref(x));
+            }
+            acc
+        }
         ReplacementCondition::ExceptFirstDrawInDrawStep => Axes::NONE,
         ReplacementCondition::IfControlsMatching { filter, minimum: _ } => {
             let mut acc = Axes::NONE;

@@ -36,7 +36,7 @@ mod prelude {
     };
     pub(super) use super::super::oracle_target::{
         distribute_controller_to_or, parse_combat_status_prefix, parse_counter_suffix,
-        parse_mana_value_suffix, parse_target, parse_that_clause_suffix, parse_type_phrase,
+        parse_mana_value_suffix, parse_target, parse_that_clause_suffix, parse_type_phrase_folding,
         scope_target_spell_phrase,
     };
     pub(super) use super::super::oracle_util::{

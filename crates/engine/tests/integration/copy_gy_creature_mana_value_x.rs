@@ -1,7 +1,7 @@
 //! dq-f: "becomes a copy of target creature card in your graveyard with mana
 //! value X" (Lazav, the Multifarious; Likeness Looter). The copy target's
 //! mana-value clause TRAILS its zone clause ("… in your graveyard with mana value
-//! X"). Before the zone-then-mana-value second pass in `parse_type_phrase_with_ctx`,
+//! X"). Before the zone-then-mana-value second pass in `parse_type_phrase_folding_with_ctx`,
 //! the trailing "with mana value X" clause was dropped, so (a) the target filter
 //! carried no `FilterProp::Cmc` bound to the announced X, and (b) the leftover
 //! "with mana value X" fragment sat in front of the ", except …" body and blocked

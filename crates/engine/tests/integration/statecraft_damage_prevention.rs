@@ -77,7 +77,7 @@ fn free_cost() -> ManaCost {
 }
 
 /// "Creatures you control" / "enchanted creature" both resolve to
-/// `TargetFilter::Typed` populated by `parse_type_phrase` /
+/// `TargetFilter::Typed` populated by `parse_type_phrase_folding` /
 /// `parse_attached_host_subject`. `creatures_you_control()` is the shape
 /// Statecraft's subject parses to; used by the parser-shape reach-guards
 /// below to prove the shield actually exists before asserting a negative.

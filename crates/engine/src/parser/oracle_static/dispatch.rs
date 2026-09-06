@@ -80,7 +80,7 @@ fn parse_enchanted_is_copy_of_chosen(tp: &TextPair, text: &str) -> Option<Static
     // Subject type of the enchanted host (creature / permanent). Trim the
     // trailing period first so the donor phrase parses to an empty remainder.
     let subject_lower = rest.lower.trim_end_matches('.').trim();
-    let (subject_filter, after_subject) = parse_type_phrase(subject_lower);
+    let (subject_filter, after_subject) = parse_type_phrase_folding(subject_lower);
     let TargetFilter::Typed(mut subject) = subject_filter else {
         return None;
     };
@@ -90,7 +90,7 @@ fn parse_enchanted_is_copy_of_chosen(tp: &TextPair, text: &str) -> Option<Static
     // The donor type ("creature" / "permanent") must parse and fully consume the
     // remainder — a trailing rider (e.g. "except it has flying") is not modeled
     // by the marker, so bail rather than silently drop it.
-    let (_donor_filter, donor_rest) = parse_type_phrase(donor_lower);
+    let (_donor_filter, donor_rest) = parse_type_phrase_folding(donor_lower);
     if !donor_rest.trim().is_empty() {
         return None;
     }
@@ -284,9 +284,9 @@ fn parse_max_untap_per_type_static(tp: &TextPair<'_>, text: &str) -> Option<Stat
 
     let rest = nom_tag_tp(tp, "players can't untap more than ")?;
     let (after_count, count) = nom_primitives::parse_number(rest.lower).ok()?;
-    let (filter, remainder) = parse_type_phrase(after_count.trim_start());
+    let (filter, remainder) = parse_type_phrase_folding(after_count.trim_start());
     parse_during_their_untap_step_suffix(remainder).ok()?;
-    // Require a real permanent-type filter (parse_type_phrase returns a typed
+    // Require a real permanent-type filter (parse_type_phrase_folding returns a typed
     // filter for "creature"/"artifact"/"permanent"/"nonbasic land"); a bare
     // unrecognized subject would over-broaden the cap.
     if !matches!(&filter, TargetFilter::Typed(_)) {
@@ -336,10 +336,10 @@ fn parse_untaps_during_each_other_players_untap_step(
     // "Untap all/each <type> you control during each other player's untap
     // step." — Seedborn Muse prints "all"; Prop Room and Ivorytusk Fortress
     // print "each" for the same subject shape, so both tags share this arm.
-    // Delegate the subject to `parse_type_phrase`, which handles the full
+    // Delegate the subject to `parse_type_phrase_folding`, which handles the full
     // range of type + controller + property phrases.
     if let Some(rest) = nom_tag_tp(tp, "untap all ").or_else(|| nom_tag_tp(tp, "untap each ")) {
-        let (filter, remainder) = parse_type_phrase(rest.original);
+        let (filter, remainder) = parse_type_phrase_folding(rest.original);
         let remainder_lower = remainder.to_lowercase();
         let during_ok = nom_on_lower(
             remainder,
@@ -657,7 +657,7 @@ pub(crate) fn parse_damage_not_removed_during_cleanup(
     {
         (TargetFilter::SelfRef, rest)
     } else {
-        let (filter, rest) = parse_type_phrase(body);
+        let (filter, rest) = parse_type_phrase_folding(body);
         if matches!(&filter, TargetFilter::Any) {
             return None;
         }
@@ -1315,7 +1315,7 @@ pub(crate) fn parse_static_line_inner(
         tp.lower.trim_end_matches('.'),
         "you control enchanted ",
     ) {
-        let (type_filter, remainder) = parse_type_phrase(type_word);
+        let (type_filter, remainder) = parse_type_phrase_folding(type_word);
         if remainder.is_empty() {
             if let TargetFilter::Typed(mut tf) = type_filter {
                 tf.properties.push(FilterProp::EnchantedBy);
@@ -2260,14 +2260,14 @@ pub(crate) fn parse_static_line_inner(
                 // CR 105.4 + CR 608.2c (issue #327): Try the chosen-qualifier
                 // parser first so "creatures of that color" / "creatures of
                 // the chosen color" produces a filter with
-                // `FilterProp::IsChosenColor`. Falls back to `parse_type_phrase`
+                // `FilterProp::IsChosenColor`. Falls back to `parse_type_phrase_folding`
                 // for non-anaphor filter shapes.
                 let by_rest_tp = TextPair::new(by_rest, by_rest);
                 let (filter, remainder) =
                     if let Some(chosen) = parse_chosen_qualifier_subject(&by_rest_tp) {
                         (chosen, "")
                     } else {
-                        parse_type_phrase(by_rest)
+                        parse_type_phrase_folding(by_rest)
                     };
                 if !matches!(filter, TargetFilter::Any) {
                     let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
@@ -2969,7 +2969,7 @@ pub(crate) fn parse_static_line_inner(
         Ok((i, n as u8))
     }) {
         // Parse the affected filter from the beginning of the text (before "can boast")
-        let (affected, _) = parse_type_phrase(tp.original);
+        let (affected, _) = parse_type_phrase_folding(tp.original);
         return Some(
             StaticDefinition::new(StaticMode::ModifyActivationLimit {
                 keyword: "boast".to_string(),
@@ -3042,7 +3042,7 @@ pub(crate) fn parse_static_line_inner(
     // ("power-up", "exhaust", "boast", "outlast"); the static runtime gate
     // (`apply_static_activated_ability_cost_reduction`) matches the activating
     // ability's `AbilityTag::keyword_str()`. The `<subject>` filter is routed
-    // through `parse_type_phrase`, which handles the "other" self-exclusion.
+    // through `parse_type_phrase_folding`, which handles the "other" self-exclusion.
     //   - Hulk / Gamma Goliath: "Power-up abilities of other creatures you control…"
     //   - Boom Scholar: "Exhaust abilities of other permanents you control…"
     if let Some(((keyword, subject, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
@@ -3055,7 +3055,7 @@ pub(crate) fn parse_static_line_inner(
         let (i, _) = tag(" less to activate").parse(i)?;
         Ok((i, (keyword, subject.to_string(), amount)))
     }) {
-        let (affected, _rest) = parse_type_phrase(&subject);
+        let (affected, _rest) = parse_type_phrase_folding(&subject);
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
                 mode: CostModifyMode::Reduce,
@@ -3103,7 +3103,7 @@ pub(crate) fn parse_static_line_inner(
         {
             TargetFilter::SelfRef
         } else {
-            parse_type_phrase(&subject).0
+            parse_type_phrase_folding(&subject).0
         };
         let minimum_mana = matches!(mode, CostModifyMode::Reduce)
             .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
@@ -3135,7 +3135,7 @@ pub(crate) fn parse_static_line_inner(
         let (i, _) = tag(" can be activated an additional time").parse(i)?;
         Ok((i, subject.to_string()))
     }) {
-        let (affected, _rest) = parse_type_phrase(&subject);
+        let (affected, _rest) = parse_type_phrase_folding(&subject);
         return Some(
             StaticDefinition::new(StaticMode::ModifyActivationLimit {
                 keyword: "power-up".to_string(),
@@ -3163,7 +3163,7 @@ pub(crate) fn parse_static_line_inner(
         Ok((i, (prefix, filter_part.to_string(), amount)))
     }) {
         let filter_text = format!("{prefix}{filter_part}");
-        let (affected, _rest) = parse_type_phrase(&filter_text);
+        let (affected, _rest) = parse_type_phrase_folding(&filter_text);
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
                 mode: CostModifyMode::Reduce,
@@ -3235,7 +3235,7 @@ pub(crate) fn parse_static_line_inner(
             // CR 113.6 + CR 201.2: "sources with the chosen name" → HasChosenName,
             // shared with the CantBeActivated name-picker class. Otherwise a type phrase.
             let affected = parse_chosen_name_source_filter(&subject_filter)
-                .unwrap_or_else(|| parse_type_phrase(&subject_filter).0);
+                .unwrap_or_else(|| parse_type_phrase_folding(&subject_filter).0);
             // CR 118.7: a one-mana floor only applies to reductions.
             let minimum_mana = matches!(mode, CostModifyMode::Reduce)
                 .then(|| parse_activated_cost_reduction_minimum_mana(tp.lower))
@@ -3900,7 +3900,7 @@ fn parse_counters_cant_be_removed_static(
     // Composed grammar (CR 122.1d + CR 101.2):
     //   <counter_type> " counters can't be removed from " <subject> [.] EOF
     // Uses nom combinators for the counter-type prefix and the fixed anchor,
-    // then parse_type_phrase for the subject (same pattern as
+    // then parse_type_phrase_folding for the subject (same pattern as
     // parse_damage_not_removed_during_cleanup).
 
     // Step 1: Parse the counter type from the start of the lowercase text.
@@ -3917,7 +3917,7 @@ fn parse_counters_cant_be_removed_static(
     // offset as `body` within `tp.lower`.
     let consumed = tp.lower.len() - body.len();
     let subject_original = tp.original[consumed..].trim_end_matches('.').trim();
-    let (filter, remainder) = parse_type_phrase(subject_original);
+    let (filter, remainder) = parse_type_phrase_folding(subject_original);
     if matches!(&filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return None;
     }

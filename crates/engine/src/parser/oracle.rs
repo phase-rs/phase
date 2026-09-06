@@ -20,6 +20,7 @@ use crate::types::ability::{
 };
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card::DraftEffect;
+use crate::types::card_type::CoreType;
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
@@ -1561,6 +1562,7 @@ fn finalize_relation_syntheses(doc: &mut OracleDocIr, relations: &[DocumentRelat
 fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<DocumentRelationIr> {
     let mut relations = Vec::new();
     detect_linked_choice_etb_counter(items, &mut relations);
+    detect_linked_choice_constrained_card_type_static(items, &mut relations);
     detect_linked_choice_type_statics(items, types, &mut relations);
     detect_linked_choice_persisted_player(items, &mut relations);
     detect_linked_choice_copy_chosen_host(items, &mut relations);
@@ -1830,6 +1832,164 @@ fn append_sub_ability(chain: &mut AbilityDefinition, tail: AbilityDefinition) {
         cursor = next;
     }
     cursor.sub_ability = Some(Box::new(tail));
+}
+
+// --- CR 607.2d + CR 614.1c: as-enters card-type choice → static reader -----
+
+/// Return the exact card-type domain only for a persisted labeled chooser whose
+/// labels are distinct, parse as core types, and retain source order.
+fn persisted_labeled_card_type_options(def: &AbilityDefinition) -> Option<Vec<CoreType>> {
+    let Effect::Choose {
+        choice_type: ChoiceType::Labeled { options },
+        persist: true,
+        ..
+    } = def.effect.as_ref()
+    else {
+        return None;
+    };
+    let options = options
+        .iter()
+        .map(|label| label.parse::<CoreType>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (!options.is_empty()
+        && options
+            .iter()
+            .enumerate()
+            .all(|(index, card_type)| !options[..index].contains(card_type)))
+    .then_some(options)
+}
+
+/// Traverse both continuation and otherwise branches. The count is part of the
+/// proof: a replacement with multiple eligible producers fails closed rather
+/// than guessing which printed choice its static reads.
+fn collect_persisted_labeled_card_type_choices<'a>(
+    def: &'a AbilityDefinition,
+    choices: &mut Vec<&'a AbilityDefinition>,
+) {
+    if persisted_labeled_card_type_options(def).is_some() {
+        choices.push(def);
+    }
+    if let Some(sub) = def.sub_ability.as_deref() {
+        collect_persisted_labeled_card_type_choices(sub, choices);
+    }
+    if let Some(otherwise) = def.else_ability.as_deref() {
+        collect_persisted_labeled_card_type_choices(otherwise, choices);
+    }
+}
+
+fn static_reads_chosen_card_type(static_def: &StaticDefinition) -> bool {
+    let reads = |filter: &TargetFilter| {
+        target_filter_uses_filter_prop(filter, &|prop| matches!(prop, FilterProp::IsChosenCardType))
+    };
+    static_def.affected.as_ref().is_some_and(reads)
+        || matches!(
+            &static_def.mode,
+            StaticMode::ModifyCost {
+                spell_filter: Some(filter),
+                ..
+            } if reads(filter)
+        )
+}
+
+/// CR 607.2d: Pair exactly one persisted labeled card-type choice from an
+/// as-enters replacement with distinct static reader items. Bare labeled card
+/// lists (Turnabout, Storage Matrix) have no such reader and stay labeled;
+/// cards whose reader sits in a resolution effect rather than an as-enters
+/// replacement (Winding Way) are excluded by the replacement gate instead.
+/// Ordinary generic `CardType` choices need no promotion.
+fn detect_linked_choice_constrained_card_type_static(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let statics = items
+        .iter()
+        .filter(|item| item_static(item).is_some_and(static_reads_chosen_card_type))
+        .map(|item| item.id)
+        .collect::<Vec<_>>();
+    if statics.is_empty() {
+        return;
+    }
+    for item in items {
+        let Some(replacement) = item_replacement(item) else {
+            continue;
+        };
+        if replacement.event != ReplacementEvent::Moved
+            || replacement.destination_zone != Some(Zone::Battlefield)
+        {
+            continue;
+        }
+        let Some(execute) = replacement.execute.as_deref() else {
+            continue;
+        };
+        let mut choices = Vec::new();
+        collect_persisted_labeled_card_type_choices(execute, &mut choices);
+        if choices.len() == 1 {
+            let options = persisted_labeled_card_type_options(choices[0])
+                .expect("collected choices are checked before insertion");
+            relations.push(DocumentRelationIr::LinkedChoice(
+                LinkedChoiceKind::ConstrainedCardTypeStatic {
+                    chooser: item.id,
+                    statics: statics.clone(),
+                    options,
+                },
+            ));
+        }
+    }
+}
+
+fn promote_proven_card_type_choice(
+    def: &mut AbilityDefinition,
+    expected: &[CoreType],
+    promoted: &mut usize,
+) {
+    if persisted_labeled_card_type_options(def).as_deref() == Some(expected) {
+        if let Effect::Choose { choice_type, .. } = def.effect.as_mut() {
+            *choice_type = ChoiceType::card_type_from(expected.to_vec());
+            *promoted += 1;
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        promote_proven_card_type_choice(sub, expected, promoted);
+    }
+    if let Some(otherwise) = def.else_ability.as_deref_mut() {
+        promote_proven_card_type_choice(otherwise, expected, promoted);
+    }
+}
+
+/// Apply the relation only through the replacement identity track. The static
+/// IDs are also checked here, so a changed lower shape cannot promote a chooser
+/// after its proven reader disappeared.
+fn apply_linked_choice_constrained_card_type_static(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    replacement_ids: &[OracleItemId],
+    static_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::ConstrainedCardTypeStatic {
+            chooser,
+            statics,
+            options,
+        }) = relation
+        else {
+            continue;
+        };
+        if statics
+            .iter()
+            .any(|static_id| position_of(static_ids, *static_id).is_none())
+        {
+            continue;
+        }
+        let Some(position) = position_of(replacement_ids, *chooser) else {
+            continue;
+        };
+        let Some(execute) = result.replacements[position].execute.as_deref_mut() else {
+            continue;
+        };
+        let mut promoted = 0;
+        promote_proven_card_type_choice(execute, options, &mut promoted);
+        debug_assert_eq!(promoted, 1, "relation detection proved one chooser");
+    }
 }
 
 // --- CR 607.2d + CR 205.3: chosen-subtype source → self-chosen-type surfaces ---
@@ -3511,6 +3671,12 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // applications.
     apply_self_replacement_override(&mut result, &ir.relations, &mut ability_ids);
     apply_linked_choice_etb_counter(&mut result, &ir.relations, &mut replacement_ids);
+    apply_linked_choice_constrained_card_type_static(
+        &mut result,
+        &ir.relations,
+        &replacement_ids,
+        &static_ids,
+    );
     apply_linked_choice_type_statics(
         &mut result,
         &ir.relations,
@@ -8773,7 +8939,7 @@ fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
         ));
     }
 
-    let (filter, rest) = super::oracle_target::parse_type_phrase(descriptor);
+    let (filter, rest) = super::oracle_target::parse_type_phrase_folding(descriptor);
     if !rest.trim().is_empty() {
         return None;
     }

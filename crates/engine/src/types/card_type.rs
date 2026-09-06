@@ -161,12 +161,11 @@ impl CoreType {
         CoreType::Planeswalker,
     ];
 
-    /// CR 205.2a: The seven card types offered by a "choose a card type"
-    /// prompt (`ChoiceType::CardType`) — Battle, Kindred, Dungeon, and the
-    /// other supplemental types are never offered. Mirrors the `CARD_TYPES`
-    /// display-name list in `game/effects/choose.rs`; restricted enumerations
-    /// ("choose artifact, enchantment, instant, sorcery, or planeswalker")
-    /// compute their `excluded` set as the complement of this list.
+    /// Engine policy for generic "choose a card type" prompts
+    /// (`ChoiceType::CardType`). This intentionally differs from CR 205.2a's
+    /// broader card-type universe: Battle, Kindred, Dungeon, and other
+    /// supplemental types are not generic engine choices. Explicit
+    /// Oracle-listed choice domains carry their own ordered options.
     pub const CHOOSABLE_TYPES: [CoreType; 7] = [
         CoreType::Artifact,
         CoreType::Creature,
@@ -180,7 +179,7 @@ impl CoreType {
     /// CR 702.16a: The lowercase singular noun used to express "protection from
     /// [card type]" — e.g. "protection from creatures". Returns `None` for the
     /// supplemental types (Tribal/Kindred/Dungeon/Battle) which are never offered
-    /// as a chosen card type (`CARD_TYPES` in `choose.rs` offers only the seven
+    /// as a generic chosen card type (`CHOOSABLE_TYPES` offers only the seven
     /// main types); callers `continue`/skip on `None`.
     pub const fn protection_quality_str(self) -> Option<&'static str> {
         match self {
@@ -419,8 +418,8 @@ mod tests {
 
     /// CR 702.16a: `protection_quality_str` returns the lowercase singular
     /// protection noun for each card type the engine can offer as a chosen
-    /// card type, and `None` for the four supplemental types that can never
-    /// be chosen (`CARD_TYPES` offers only the seven main types).
+    /// generic card type, and `None` for the four supplemental types that are
+    /// outside `CHOOSABLE_TYPES`.
     #[test]
     fn protection_quality_str_covers_all_core_types() {
         // 7 Some — the main card types.

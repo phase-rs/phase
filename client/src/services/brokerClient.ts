@@ -13,6 +13,7 @@ import {
   openPhaseSocket,
   type PhaseSocket,
 } from "./openPhaseSocket";
+import { startSocketKeepalive } from "./socketKeepalive";
 
 /**
  * Structurally validate the `format_config` on a broker-sent `PeerInfo` /
@@ -151,9 +152,17 @@ export async function openBrokerClient(
   return makeBrokerClient(socket);
 }
 
-function makeBrokerClient(socket: PhaseSocket): BrokerClient {
+/**
+ * Exported for the same reason as `lookupJoinTargetOver` and friends: the
+ * socket-taking form is what a test can drive.
+ */
+export function makeBrokerClient(socket: PhaseSocket): BrokerClient {
   const { ws, serverInfo } = socket;
   let closed = false;
+  // Losing this socket to an idle-timeout makes the broker delist the room
+  // while the host still believes it is hosting.
+  const stopKeepalive = startSocketKeepalive(ws);
+  ws.addEventListener("close", stopKeepalive, { once: true });
 
   const registerHost = (req: RegisterHostRequest): Promise<RegisteredGame> => {
     return new Promise<RegisteredGame>((resolve, reject) => {
@@ -262,6 +271,7 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
     close: () => {
       if (closed) return;
       closed = true;
+      stopKeepalive();
       socket.close();
     },
   };

@@ -63,6 +63,7 @@ import {
   type ReconnectHandle,
   type ReconnectState,
 } from "../services/openPhaseSocket";
+import { startSocketKeepalive } from "../services/socketKeepalive";
 import {
   SERVER_PRESETS,
   isValidWebSocketUrl,
@@ -122,8 +123,21 @@ export type { DeckChoice, PlayerSlot, SeatKind, SeatMutation } from "../multipla
 type ConnectionStatus = "disconnected" | "connecting" | "connected";
 type HostingStatus = "idle" | "connecting" | "waiting";
 
+/**
+ * The transport a multiplayer session runs over: a dedicated server, or a
+ * direct peer-to-peer mesh. The player picks it explicitly in the lobby's
+ * connection switch, so it lives here rather than being derived from
+ * {@link MultiplayerState.hostingServer}.
+ */
+export type ConnectionMode = "server" | "p2p";
+
 // Module-level WebSocket ref (non-serializable, lives outside store)
 let hostWs: PhaseSocketTransport | null = null;
+// Stops the keepalive on whichever hosting socket is current. The two
+// store-owned teardowns below have no per-socket closure to read; the socket's
+// own `onclose` uses its closure's stopper instead, so a superseded socket
+// closing late cannot silence its replacement.
+let hostPingStop: (() => void) | null = null;
 // Module-level broker client for P2P LobbyOnly hosting. Survives page
 // navigations so the lobby entry stays alive while the tile is showing.
 let activeBroker: BrokerClient | null = null;
@@ -1147,6 +1161,18 @@ interface MultiplayerState {
    * `setHostingServer`, migration and hydration).
    */
   hostingServer: string | null;
+  /**
+   * The connection mode the player chose in the lobby's connection switch, or
+   * `null` when they have never chosen one. PERSISTED, so the choice survives
+   * a reload and the ordinary lobby → game → lobby round trip.
+   *
+   * `null` is the load-bearing "absent" sentinel: `MultiplayerPage` falls back
+   * to deriving the mode from {@link MultiplayerState.hostingServer} only
+   * while this is `null`, which is what lets a legacy blob with a `null`
+   * anchor still boot into P2P. A non-null initial would make "never chosen"
+   * indistinguishable from "chose server" and destroy that preference.
+   */
+  connectionMode: ConnectionMode | null;
   /** Hand-added lobby authorities. Persisted; built-in presets are derived
    * per session by {@link lobbySources} and are never stored here. */
   userLobbySources: LobbySource[];
@@ -1219,6 +1245,10 @@ interface MultiplayerActions {
    * Invalid URLs are ignored. Refreshes the global `serverInfo` from the
    * new target's live socket, if it has one. */
   setHostingServer: (url: string | null) => void;
+  /** Record the player's explicit connection-mode choice. The single writer of
+   * {@link MultiplayerState.connectionMode}; there is deliberately no action
+   * that restores the `null` "never chosen" sentinel. */
+  setConnectionMode: (mode: ConnectionMode) => void;
   /** Add a hand-added lobby source. Refuses malformed URLs, URLs already
    * derived as a source (presets included) and adds past the cap. */
   addUserLobbySource: (url: string) => AddLobbySourceResult;
@@ -1440,6 +1470,10 @@ function closeHostWebSocket(): void {
   if (hostReconnectTimer) {
     clearTimeout(hostReconnectTimer);
     hostReconnectTimer = null;
+  }
+  if (hostPingStop) {
+    hostPingStop();
+    hostPingStop = null;
   }
   if (hostWs) {
     hostWs.close();
@@ -2085,6 +2119,12 @@ function handleServerHostMessage(
     clearPregameHostMetadataFromWsSession();
     ws.close();
     hostWs = null;
+    // This arm performs the handoff itself and never routes through
+    // `closeHostWebSocket`, so the keepalive has to be stopped here.
+    if (hostPingStop) {
+      hostPingStop();
+      hostPingStop = null;
+    }
     const gameId = crypto.randomUUID();
     saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
     useGameStore.setState({ gameId });
@@ -2163,6 +2203,8 @@ async function openServerHostSocket(
 
   set({ serverInfo: socket.serverInfo });
   hostWs = socket.ws;
+  const stopPing = startSocketKeepalive(socket.ws);
+  hostPingStop = stopPing;
 
   socket.ws.onmessage = (event) => {
     const msg = JSON.parse(event.data as string) as {
@@ -2178,6 +2220,7 @@ async function openServerHostSocket(
     }
   };
   socket.ws.onclose = () => {
+    stopPing();
     if (!gameStartedFired && hostWs === socket.ws) {
       hostWs = null;
       onReopen();
@@ -2292,6 +2335,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       playerId: crypto.randomUUID(),
       displayName: "",
       hostingServer: DEFAULT_MULTIPLAYER_SERVER_URL as string | null,
+      connectionMode: null as ConnectionMode | null,
       userLobbySources: [] as LobbySource[],
       directorySources: [] as DirectorySource[],
       directoryFetchedAtMs: null as number | null,
@@ -2351,6 +2395,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         set({ hostingServer: url, serverInfo: live?.serverInfo ?? null });
       },
 
+      setConnectionMode: (mode) => set({ connectionMode: mode }),
+
       addUserLobbySource: (url) => {
         const source = userLobbySource(url);
         if (!source) return { ok: false, reason: "invalid_url" };
@@ -2382,7 +2428,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         // Hosting on a source the user no longer browses is unreachable: the
         // removed URL is absent from `lobbySources`, so the player's own
         // hosted game drops off the merged list and the picker's hosting
-        // section (presets + None) shows no active selection to change.
+        // section (the presets) shows no active selection to change.
         // Fall back to this build's official server through `setHostingServer`
         // so `serverInfo` is re-pointed with the choice.
         if (url === get().hostingServer) {
@@ -3007,6 +3053,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               // joining open their own sockets and keep the exact-match window.
               return openPhaseSocket(url, { surface: "lobby" })
                 .then((socket) => {
+                  // This socket is idle in both directions between room
+                  // churn, so the edge closes it and `withReconnect` re-dials
+                  // — blanking the visible player count each cycle.
+                  const stopKeepalive = startSocketKeepalive(socket.ws);
+                  socket.ws.addEventListener("close", stopKeepalive, {
+                    once: true,
+                  });
                   // FIRST attempt only. `scheduleRetry` bumps the index before
                   // re-invoking this factory, and a successful open resets it
                   // to 0 — so a re-dial always arrives as `attempt >= 1` and
@@ -3404,12 +3457,20 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               : saved.hostingServer === null
                 ? null
                 : current.hostingServer,
+          // Only the two modes are accepted; anything else (including an
+          // absent key) reads as "never chosen", so the page's
+          // `hostingServer`-derived fallback still applies.
+          connectionMode:
+            saved.connectionMode === "server" || saved.connectionMode === "p2p"
+              ? saved.connectionMode
+              : null,
         };
       },
       partialize: (state) => ({
         playerId: state.playerId,
         displayName: state.displayName,
         hostingServer: state.hostingServer,
+        connectionMode: state.connectionMode,
         userLobbySources: state.userLobbySources,
         // No persist version bump: an absent key hydrates through `merge` to
         // the initial `[]`, and an older build reading a newer blob spreads a

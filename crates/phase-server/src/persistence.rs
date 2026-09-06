@@ -1223,6 +1223,7 @@ mod tests {
                 next_ai_driver_fault_id: 1,
                 state: PersistedGameState::capture(GameState::new_two_player(7)),
                 player_tokens: vec!["player-0".to_string(), "player-1".to_string()],
+                deck_choices: vec![None, None],
                 display_names: vec!["P0".to_string(), "P1".to_string()],
                 timer_seconds: None,
                 player_count: 2,
@@ -1234,6 +1235,71 @@ mod tests {
                 lobby_meta: None,
             },
         }
+    }
+
+    /// A session with a live Full runtime, so `full_persist_snapshot` produces
+    /// the same shape production persists.
+    fn seeded_full_session(db: &GameDb) -> (server_core::session::SessionManager, String) {
+        use server_core::session::{FullRuntime, SessionManager};
+
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(Default::default(), None);
+        let key = db.create_full_session_key(&code).expect("full key");
+        let session = mgr.sessions.get_mut(&code).expect("session");
+        session.full_runtime = Some(FullRuntime {
+            key,
+            activation_epoch: None,
+        });
+        (mgr, code)
+    }
+
+    fn save(
+        db: &GameDb,
+        mgr: &server_core::session::SessionManager,
+        code: &str,
+    ) -> FullPersistDisposition {
+        let snapshot = mgr
+            .sessions
+            .get(code)
+            .expect("session")
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot");
+        db.save_full_session(&snapshot).expect("save")
+    }
+
+    /// The production symptom: a seat edit's snapshot must clear the
+    /// `mutation_revision` fence, or the write silently never lands.
+    #[test]
+    fn a_seat_edits_persist_is_accepted() {
+        use seat_reducer::types::{SeatDelta, SeatState};
+
+        let db = test_db();
+        let (mut mgr, code) = seeded_full_session(&db);
+        // Reach guard: a mis-seeded fixture would return
+        // `SupersededOrRetired` here for an unrelated reason.
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+
+        let session = mgr.sessions.get_mut(&code).expect("session");
+        let seat_state: SeatState = session.seat_state();
+        session.apply_seat_delta(
+            seat_state,
+            &SeatDelta::empty(),
+            &engine::database::CardDatabase::default(),
+        );
+
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+    }
+
+    #[test]
+    fn a_joins_persist_is_accepted() {
+        let db = test_db();
+        let (mut mgr, code) = seeded_full_session(&db);
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+
+        mgr.join_game(&code, Default::default(), None)
+            .expect("seat 1 is open");
+
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
     }
 
     #[test]

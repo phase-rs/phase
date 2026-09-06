@@ -154,7 +154,8 @@ fn parse_animation_spec	crates/engine/src/parser/oracle_effect/animation.rs
 fn try_parse_put_counter	crates/engine/src/parser/oracle_effect/counter.rs
 fn try_parse_add_mana_effect	crates/engine/src/parser/oracle_effect/mana.rs
 fn parse_target	crates/engine/src/parser/oracle_target.rs
-fn parse_type_phrase	crates/engine/src/parser/oracle_target.rs
+fn parse_type_phrase_folding(	crates/engine/src/parser/oracle_target.rs
+fn parse_type_phrase(	crates/engine/src/parser/oracle_nom/target.rs
 fn parse_number	crates/engine/src/parser/oracle_util.rs
 fn contains_possessive	crates/engine/src/parser/oracle_util.rs
 fn contains_object_pronoun	crates/engine/src/parser/oracle_util.rs

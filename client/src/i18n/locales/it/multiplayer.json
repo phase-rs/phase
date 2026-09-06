@@ -127,11 +127,14 @@
     "kindFull": "(server di gioco)",
     "kindLobbyOnly": "(broker lobby)"
   },
+  "connectionMode": {
+    "label": "Connessione",
+    "server": "Server ufficiale",
+    "p2p": "P2P"
+  },
   "serverPicker": {
     "title": "Server",
     "subtitle": "Scegli dove ospitare e quali lobby sfogliare.",
-    "noneLabel": "Nessuno (solo P2P)",
-    "directCodes": "codici diretti",
     "official": "Ufficiale",
     "selfHosted": "Self-hosted",
     "customUrlPlaceholder": "wss://tuo-server.esempio/ws",
@@ -179,8 +182,6 @@
   "lobbyView": {
     "directConnection": "Connessione diretta",
     "onlineLobby": "Lobby online",
-    "pickServerTitle": "Scegli un server per usare la modalità lobby online",
-    "pickServer": "Scegli server",
     "online": "{{count}} online",
     "format": "Formato",
     "allFormats": "Tutti i formati",
@@ -192,7 +193,7 @@
     "noFormatGames": "Nessuna partita {{format}} al momento.",
     "noOpenGames": "Nessuna partita aperta al momento.",
     "showAllFormats": "Mostra tutti i formati",
-    "p2pNotice": "Server dedicato non disponibile. Puoi comunque ospitare o unirti direttamente con un codice stanza di 5 caratteri.",
+    "p2pNotice": "Modalità peer-to-peer. Ospita o unisciti direttamente con un codice stanza di 5 caratteri.",
     "joinByCode": "Unisciti tramite codice",
     "joinATable": "Unisciti a un tavolo",
     "p2pCodePlaceholder": "Inserisci codice P2P di 5 caratteri",
@@ -203,7 +204,6 @@
     "hostServerDescription": "Apri una stanza e attendi i giocatori.",
     "hostDraft": "Ospita draft",
     "hostGame": "Ospita partita",
-    "hostP2PGame": "Ospita partita P2P",
     "passwordRequired": "Password richiesta",
     "passwordPlaceholder": "Inserisci password",
     "watch": "Watch",
@@ -213,7 +213,8 @@
   "hostSetup": {
     "hostDirectMatch": "Ospita partita diretta",
     "hostMatch": "Ospita partita",
-    "p2pNotice": "Il server dedicato non è disponibile, quindi questa stanza userà una connessione diretta.",
+    "p2pNotice": "Modalità peer-to-peer. Questa stanza collega i giocatori direttamente invece di girare su un server.",
+    "p2pSeatCap": "I tavoli P2P ospitano al massimo {{max}} giocatori, quindi il numero di posti è limitato.",
     "roomName": "Nome stanza",
     "optional": "(facoltativo)",
     "roomNamePlaceholder": "es. Commander del venerdì sera",

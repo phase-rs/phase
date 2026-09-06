@@ -175,20 +175,25 @@ describe("ServerPicker", () => {
     ]);
   });
 
-  it("switches the hosting server and back to direct codes", async () => {
-    useMultiplayerStore.setState({ userLobbySources: [userSource("play.example.com")] });
+  it("picks a server, and offers no way to pick none", async () => {
+    useMultiplayerStore.setState({
+      hostingServer: null,
+      userLobbySources: [userSource("play.example.com")],
+    });
     const user = userEvent.setup();
     render(<ServerPicker onClose={vi.fn()} />);
 
-    await user.click(screen.getByRole("button", { name: /None \(P2P only\)/ }));
-
-    expect(useMultiplayerStore.getState().hostingServer).toBeNull();
-    // Sources are a separate axis: switching to direct codes keeps them.
-    expect(useMultiplayerStore.getState().userLobbySources).toHaveLength(1);
+    // The picker is purely server selection now — connection mode moved to the
+    // lobby's switch, so the old "None (P2P only)" row is gone.
+    expect(
+      screen.queryByRole("button", { name: /None \(P2P only\)/ }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Official/ }));
 
     expect(useMultiplayerStore.getState().hostingServer).toBe(PRESET_URL);
+    // Sources are a separate axis: choosing a hosting server keeps them.
+    expect(useMultiplayerStore.getState().userLobbySources).toHaveLength(1);
   });
 
   it("uses a user source as the hosting server", async () => {
