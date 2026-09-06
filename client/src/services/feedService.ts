@@ -264,10 +264,11 @@ export async function initializeFeeds({ allowRefresh = true, signal }: Initializ
       const normalizedFeed = { ...feed, id: sub.sourceId, format: registrySource?.format ?? feed.format };
       const cachePersistence = setCachedFeed(sub.sourceId, normalizedFeed);
       syncFeedDecksToStorage(normalizedFeed);
+      const metadataChanged = sub.lastVersion !== feed.version || sub.error !== undefined;
       sub.lastVersion = feed.version;
-      sub.lastRefreshedAt = Date.now();
+      if (isStale) sub.lastRefreshedAt = Date.now();
       if (sub.error !== undefined) sub.error = undefined;
-      saveFeedSubscriptions(subs);
+      if (isStale || metadataChanged) saveFeedSubscriptions(subs);
       await cachePersistence;
     } catch (err) {
       if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) throw err;

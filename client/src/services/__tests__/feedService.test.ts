@@ -44,6 +44,8 @@ import {
 } from "../../constants/storage";
 import { set as idbSet, entries as idbEntries } from "idb-keyval";
 import { useConnectivityStore } from "../../stores/connectivityStore";
+import { FEED_REGISTRY } from "../../data/feedRegistry";
+import type { FeedSubscription } from "../../types/feed";
 
 const STARTER_FEED = {
   id: "starter-decks",
@@ -230,6 +232,30 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+async function seedFreshBundledSubscriptions(
+  additionalSubscriptions: FeedSubscription[] = [],
+): Promise<string> {
+  const now = Date.now();
+  const bundledSubscriptions = FEED_REGISTRY
+    .filter((source) => source.type === "bundled")
+    .map((source) => ({
+      sourceId: source.id,
+      url: source.url,
+      type: source.type,
+      subscribedAt: 1,
+      lastRefreshedAt: now,
+      lastVersion: 1,
+    }));
+
+  for (const sub of bundledSubscriptions) {
+    await setCachedFeed(sub.sourceId, { ...STARTER_FEED, id: sub.sourceId, decks: [] });
+  }
+
+  const raw = JSON.stringify([...bundledSubscriptions, ...additionalSubscriptions]);
+  localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, raw);
+  return raw;
+}
+
 describe("initializeFeeds", () => {
   it("subscribes to bundled feeds and seeds decks on first run", async () => {
     mockFetchByUrl(ALL_BUNDLED_FEEDS);
@@ -321,26 +347,67 @@ describe("initializeFeeds", () => {
     expect(getDeckFeedOrigin("Test Deck")).toBe("cached");
   });
 
-  it("fetches a freshly restored subscription when its device-local cache is missing", async () => {
+  it("hydrates a fresh restored subscription without changing identical portable metadata", async () => {
     const restoredFeed = {
       ...VALID_FEED,
       decks: [{ ...VALID_FEED.decks[0], name: "Restored Feed Deck" }],
     };
-    localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify([{
+    const originalSubscriptions = await seedFreshBundledSubscriptions([{
       sourceId: "restored",
       url: "https://example.com/restored.json",
       type: "remote",
       subscribedAt: 1,
       lastRefreshedAt: Date.now(),
       lastVersion: 1,
-    }]));
-    mockFetchByUrl({ ...ALL_BUNDLED_FEEDS, "restored.json": restoredFeed });
+    }]);
+    mockFetchByUrl({ "restored.json": restoredFeed });
 
     await initializeFeeds();
 
     expect(getCachedFeed("restored")).toMatchObject({ id: "restored", decks: restoredFeed.decks });
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Restored Feed Deck")).not.toBeNull();
     expect(getDeckFeedOrigin("Restored Feed Deck")).toBe("restored");
+    expect(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)).toBe(originalSubscriptions);
+  });
+
+  it("persists refresh metadata after a stale subscription refresh", async () => {
+    const staleSubscription = {
+      sourceId: "stale",
+      url: "https://example.com/stale.json",
+      type: "remote" as const,
+      subscribedAt: 1,
+      lastRefreshedAt: 0,
+      lastVersion: 1,
+    };
+    await seedFreshBundledSubscriptions([staleSubscription]);
+    mockFetchByUrl({ "stale.json": { ...VALID_FEED, version: 2 } });
+
+    await initializeFeeds();
+
+    const refreshed = listSubscriptions().find((sub) => sub.sourceId === "stale")!;
+    expect(refreshed.lastVersion).toBe(2);
+    expect(refreshed.lastRefreshedAt).toBeGreaterThan(0);
+    expect(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)).toContain('"lastVersion":2');
+  });
+
+  it("persists meaningful metadata from fresh cache hydration without advancing its timestamp", async () => {
+    const lastRefreshedAt = Date.now();
+    await seedFreshBundledSubscriptions([{
+      sourceId: "restored",
+      url: "https://example.com/restored.json",
+      type: "remote",
+      subscribedAt: 1,
+      lastRefreshedAt,
+      lastVersion: 1,
+      error: "previous failure",
+    }]);
+    mockFetchByUrl({ "restored.json": { ...VALID_FEED, version: 2 } });
+
+    await initializeFeeds();
+
+    const refreshed = listSubscriptions().find((sub) => sub.sourceId === "restored")!;
+    expect(refreshed).toMatchObject({ lastVersion: 2, lastRefreshedAt });
+    expect(refreshed).not.toHaveProperty("error");
   });
 
   it("does not commit a deferred online fetch after its generation is aborted", async () => {

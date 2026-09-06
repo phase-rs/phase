@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PREFERENCES_KEY } from "../../../constants/storage";
+import {
+  PREFERENCES_KEY,
+  STORAGE_KEY_PREFIX,
+} from "../../../constants/storage";
 import {
   watchUserStorage,
   withStorageWatchSuppressed,
@@ -57,6 +60,30 @@ describe("watchUserStorage", () => {
 
     expect(dirty).toHaveBeenCalledExactlyOnceWith(PREFERENCES_KEY);
     expect(observedValues).toEqual(["written-first"]);
+  });
+
+  it("does not notify for same-value sets or removing a missing key", () => {
+    localStorage.setItem(PREFERENCES_KEY, "unchanged");
+    const dirty = vi.fn();
+    watch(dirty);
+
+    localStorage.setItem(PREFERENCES_KEY, "unchanged");
+    localStorage.removeItem(STORAGE_KEY_PREFIX + "missing");
+
+    expect(dirty).not.toHaveBeenCalled();
+  });
+
+  it("notifies for changed values and removal of an existing key", () => {
+    localStorage.setItem(PREFERENCES_KEY, "before");
+    const dirty = vi.fn();
+    watch(dirty);
+
+    localStorage.setItem(PREFERENCES_KEY, "after");
+    localStorage.removeItem(PREFERENCES_KEY);
+
+    expect(dirty).toHaveBeenNthCalledWith(1, PREFERENCES_KEY);
+    expect(dirty).toHaveBeenNthCalledWith(2, PREFERENCES_KEY);
+    expect(dirty).toHaveBeenCalledTimes(2);
   });
 
   it("owns the shared prototype wrapper until the final cleanup, then can install again", () => {
