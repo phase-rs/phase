@@ -3426,9 +3426,9 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 /// `printed_cards::apply_back_face_to_object` (transform / specialize),
 /// `flip.rs` (CR 710.1b), and `morph.rs` (turn face down, CR 708.2a). Those three
 /// are shield-LOSS, not duplication, and are a known limitation rather than a
-/// correctness hazard; CR 611.2a argues the shield should survive them, which is
-/// recorded in `BACKLOG.md`. Do not restate the old "removed ONLY by an expiry
-/// prune or a zone change" claim — it is false.
+/// correctness hazard; CR 611.2a argues the shield should survive them, and this
+/// comment is that limitation's only record. Do not restate the old "removed ONLY
+/// by an expiry prune or a zone change" claim — it is false.
 ///
 /// The carried set is therefore invariant across all three IN-PASS rewrites, for
 /// every baseline the two callers can supply. That is why this function takes the

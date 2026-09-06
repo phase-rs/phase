@@ -2875,7 +2875,7 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
 /// those definitions falls back to `state.active_player` in the pending scan
 /// rather than to the installer (CR 113.8 / CR 109.5 would prefer the installer).
 /// That is PRE-EXISTING behavior, deliberately left alone by issue #8485 rather
-/// than changed late in that work, and it is recorded in `BACKLOG.md`. Routing
+/// than changed late in that work, and this comment is its only record. Routing
 /// those two arms through this authority is the clean end state.
 ///
 /// CR 113.7a: "Once activated or triggered, an ability exists on the stack

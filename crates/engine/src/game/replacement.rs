@@ -7577,7 +7577,7 @@ pub fn find_applicable_replacements(
                     // silently turning a scoped shield into a blanket one for
                     // the FIRST instant/sorcery-sourced population recipient.
                     //
-                    // CR 109.1 + CR 614.1a: `valid_card` is an OBJECT recipient filter, and a
+                    // CR 109.1: `valid_card` is an OBJECT recipient filter, and a
                     // player is not an object. The object scan already refuses a player-target
                     // damage event here (`replacement_valid_card_matches` falls through to
                     // `event.affected_object_id()`, which is `None` for
@@ -20594,7 +20594,7 @@ mod tests {
         );
     }
 
-    /// CR 109.1 + CR 614.1a (issue #8485): a card-shaped `valid_card` recipient
+    /// CR 109.1 (issue #8485): a card-shaped `valid_card` recipient
     /// filter must REFUSE a player-target damage event on the global store, exactly
     /// as it already did on the per-object store.
     ///
@@ -20606,7 +20606,7 @@ mod tests {
     /// damage dealt to players. CR 109.1 enumerates what an object is — "an ability
     /// on the stack, a card, a copy of a card, a token, a spell, a permanent, or an
     /// emblem" — and a player is not one of them, so a card-shaped recipient filter
-    /// cannot match a player; CR 614.1a scopes the filter to the damage RECIPIENT.
+    /// cannot match a player.
     /// The object scan has always refused this (`replacement_valid_card_matches`
     /// falls through to `event.affected_object_id()`, which is `None` for
     /// `Damage { target: TargetRef::Player(_) }`, then `.unwrap_or(false)`); the
