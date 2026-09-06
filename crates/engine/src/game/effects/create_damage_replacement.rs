@@ -695,12 +695,25 @@ mod tests {
         );
     }
 
-    /// CR 615.7 + CR 611.2c (issue #8485, matrix row 20): a `Next(n)` redirection
-    /// shield's DEPLETION survives a layer pass. This is the property dual-write
+    /// CR 611.2a + CR 611.2c (issue #8485, matrix row 20): a ONE-SHOT redirection
+    /// shield stays CONSUMED across a layer pass. This is the property dual-write
     /// cannot deliver — two copies plus mutable state means the pristine base twin
-    /// is re-seeded over the depleted live one on every pass.
+    /// is re-seeded over the spent live one on every pass.
+    ///
+    /// The fixture passes `redirect_amount: None`, which `resolve` turns into
+    /// `PreventionAmount::All` with `RedirectionLifetime::OneOpportunity`, so there
+    /// is no `Next(n)` depletion arithmetic here at all — the observable is
+    /// `is_consumed`, set once and never cleared. (This test previously claimed
+    /// `Next(n)` depletion and cited CR 615.7 for it; CR 615.7 is the *prevention*
+    /// shield-arithmetic rule and describes neither the shape nor the effect class.
+    /// CR 615.3 and CR 615.8, cited in the assertion below, are likewise scoped to
+    /// PREVENTION effects, while this is a REDIRECTION effect — CR 614.9. The rule
+    /// that actually governs the one-opportunity window is CR 611.2a: a continuous
+    /// effect from the resolution of a spell or ability "lasts as long as stated by
+    /// the spell or ability creating it", and "the next time" states exactly one
+    /// opportunity. One rule, used in both places.)
     #[test]
-    fn redirect_shield_depletion_survives_a_layer_pass() {
+    fn redirect_one_shot_stays_consumed_across_a_layer_pass() {
         let mut state = GameState::new_two_player(42);
         let source = create_creature(&mut state, PlayerId(0), "Redirector");
         let victim = create_creature(&mut state, PlayerId(1), "Victim");
@@ -742,7 +755,8 @@ mod tests {
         crate::game::layers::evaluate_layers(&mut state);
         assert!(
             state.objects[&source].replacement_definitions[0].is_consumed,
-            "CR 615.3: a layer pass must not un-spend the shield"
+            "CR 611.2a: the stated one-opportunity window is used up, and a layer \
+             pass has no authority to un-spend it"
         );
 
         let ctx = deal_damage::DamageContext::from_source(&state, source).unwrap();
