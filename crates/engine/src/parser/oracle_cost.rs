@@ -2047,11 +2047,11 @@ mod tests {
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
-    /// CR 205.2a + CR 601.2h: a sacrifice cost whose filter is a TYPE UNION with
-    /// an article-led right conjunct keeps BOTH legs — "Sacrifice another
-    /// creature or an artifact" (Mold Folk, Sivriss, Elite Headhunter, Street
-    /// Urchin) and "... or an enchantment" (Skophos Warleader, Slaughter-Priest
-    /// of Mogis).
+    /// CR 205.2a + CR 602.2b + CR 601.2h: a sacrifice cost whose filter is a TYPE
+    /// UNION with an article-led right conjunct keeps BOTH legs — "Sacrifice
+    /// another creature or an artifact" (Mold Folk, Sivriss, Elite Headhunter,
+    /// Street Urchin) and "... or an enchantment" (Skophos Warleader,
+    /// Slaughter-Priest of Mogis).
     ///
     /// Revert-failing: before the cost parser opted into
     /// `fold_article_led_type_union` this collapsed to
@@ -2156,9 +2156,14 @@ mod tests {
     /// tail means the parser consumed a union leg and then ran out of grammar:
     /// emitting the narrower filter there would reject payments the card plainly
     /// allows while still counting the card as SUPPORTED, so it yields an honest
-    /// `Unimplemented` instead (CR 601.2h — the cost is paid with permanents
-    /// matching the cost's filter, and a filter the parser could not finish reading
-    /// is not that filter).
+    /// `Unimplemented` instead.
+    ///
+    /// That last step is parser COVERAGE POLICY for an unconsumed tail, not a rule
+    /// the CR states. The rules premise it rests on is only this: CR 602.2b makes an
+    /// activated ability's cost pay like a spell's total cost (rules 601.2b-i), and
+    /// CR 601.2h pays that total cost with no partial payments. A cost the parser
+    /// could not finish reading cannot be presented as that total cost, so the
+    /// honest encoding is `Unimplemented` rather than a filter we cannot justify.
     ///
     /// No shipping card reaches the `Unimplemented` arm: all EIGHT cost-position
     /// union cards (Anje, Elite Headhunter, Mold Folk, Sivriss, Skophos Warleader,
