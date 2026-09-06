@@ -15,8 +15,7 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
 use super::oracle_target::{
-    distribute_shared_properties, parse_target, parse_target_with_article_led_type_union,
-    parse_type_phrase,
+    distribute_shared_properties, fold_article_led_type_union, parse_target, parse_type_phrase,
 };
 use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_creature_subtype;
@@ -766,18 +765,29 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // CR 205.2a: a sacrifice cost's filter may be a TYPE UNION whose right
         // conjunct leads with an indefinite article — "Sacrifice another creature
         // or an artifact" (Mold Folk, Elite Headhunter), "... or an enchantment"
-        // (Slaughter-Priest of Mogis), "... or a Treasure" (Skullport Merchant). The shared grammar leaves that tail as remainder because
-        // the same surface is an elided-verb clause elsewhere; a cost has no verb
-        // to elide, so it opts into the union reading. `ensure_another_sacrifice_
-        // filter` then distributes `Another` across BOTH legs, matching the
-        // article-less surface ("another creature or artifact") the shared
-        // grammar already unions.
-        let (filter, _) =
-            parse_target_with_article_led_type_union(&format!("target {}", filter_text));
-        return AbilityCost::Sacrifice(SacrificeCost::count(
-            ensure_another_sacrifice_filter(filter, &filter_text),
-            use_count,
-        ));
+        // (Slaughter-Priest of Mogis), "... or a Treasure" (Skullport Merchant).
+        // The shared grammar leaves that tail as remainder because the same
+        // surface is an elided-verb clause elsewhere; a cost has no verb to elide,
+        // so it opts into the union reading.
+        //
+        // ORDER IS LOAD-BEARING: `another` is applied to the LEFT conjunct and the
+        // union is folded AFTER. In this surface "another" scopes only the left
+        // conjunct — the right one carries its own determiner ("an"), so an
+        // artifact-ified source may still pay with itself (Elite Headhunter and
+        // Gut, True Soul Zealot both carry an official ruling saying exactly
+        // that). Folding first and distributing after would stamp `Another` onto
+        // the artifact leg and forbid it. The article-LESS surface is unaffected:
+        // there `parse_target` has already built the `Or` itself and
+        // `distribute_shared_properties` correctly reaches both legs, because that
+        // phrase has no second determiner.
+        let filter = {
+            let phrase = format!("target {}", filter_text);
+            let (base, rest) = parse_target(&phrase);
+            let base = ensure_another_sacrifice_filter(base, &filter_text);
+            let (folded, _) = fold_article_led_type_union(base, rest);
+            folded
+        };
+        return AbilityCost::Sacrifice(SacrificeCost::count(filter, use_count));
     }
 
     // "Pay N life" / "Pay life equal to <dynamic quantity>" / "N life"
@@ -2055,23 +2065,47 @@ mod tests {
                 .collect();
             assert!(legs[0].type_filters.contains(&TypeFilter::Creature));
             assert!(legs[1].type_filters.contains(&right));
-            // "another" scopes the whole choice, so it must reach BOTH legs —
-            // `ensure_another_sacrifice_filter` distributes it. Deliberately no CR
-            // number: the rules text defines no "another" entry, and this repo treats
-            // a wrong citation as worse than none. `FilterProp::Another` is the
-            // engine's model of the source-exclusion the word carries.
-            for leg in &legs {
+            // "another" scopes only the LEFT conjunct here: the right one carries
+            // its own determiner ("an artifact"), so it is not "another artifact".
+            // Official rulings — Elite Headhunter (2019-10-04): "If Elite Headhunter
+            // somehow becomes an artifact, you can sacrifice it to pay the cost of
+            // its activated ability"; Gut, True Soul Zealot (2022-06-10): "If Gut
+            // somehow becomes an artifact, you may sacrifice it to its own ability."
+            // Stamping `Another` on the right leg would forbid exactly that.
+            // Deliberately no CR number: the rules text defines no "another" entry,
+            // and this repo treats a wrong citation as worse than none.
+            assert!(
+                legs[0].properties.contains(&FilterProp::Another),
+                "\"another\" scopes the left conjunct: {:?}",
+                legs[0]
+            );
+            assert!(
+                !legs[1].properties.contains(&FilterProp::Another),
+                "the article-led right conjunct must NOT carry `Another` — an \
+                 artifact-ified source may pay with itself: {:?}",
+                legs[1]
+            );
+
+            // The ARTICLE-LESS twin is a different phrase in this respect: it has no
+            // second determiner, so its "another" does scope both legs and the
+            // shared grammar distributes it. The two surfaces therefore must NOT be
+            // equal — that expectation was the falsified premise.
+            let bare = parse_oracle_cost(article_less);
+            let AbilityCost::Sacrifice(SacrificeCost { target: bare_t, .. }) = &bare else {
+                panic!("expected a Sacrifice cost for {article_less:?}, got {bare:?}");
+            };
+            let TargetFilter::Or { filters: bare_legs } = bare_t else {
+                panic!("the article-less twin must union, got {bare_t:?}");
+            };
+            for leg in bare_legs {
+                let TargetFilter::Typed(tf) = leg else {
+                    panic!("expected Typed leg, got {leg:?}")
+                };
                 assert!(
-                    leg.properties.contains(&FilterProp::Another),
-                    "\"another\" must distribute to every leg: {leg:?}"
+                    tf.properties.contains(&FilterProp::Another),
+                    "the article-less surface DOES distribute `another` to both legs: {tf:?}"
                 );
             }
-
-            assert_eq!(
-                cost,
-                parse_oracle_cost(article_less),
-                "the article-led surface must lower exactly like its article-less twin"
-            );
         }
     }
 
@@ -2113,12 +2147,16 @@ mod tests {
                 "the right leg must be the {subtype} subtype: {:?}",
                 legs[1].type_filters
             );
-            for leg in &legs {
-                assert!(
-                    leg.properties.contains(&FilterProp::Another),
-                    "\"another\" must distribute to every leg: {leg:?}"
-                );
-            }
+            assert!(
+                legs[0].properties.contains(&FilterProp::Another),
+                "\"another\" scopes the left conjunct: {:?}",
+                legs[0]
+            );
+            assert!(
+                !legs[1].properties.contains(&FilterProp::Another),
+                "the article-led right conjunct must NOT carry `Another`: {:?}",
+                legs[1]
+            );
         }
     }
 

@@ -386,9 +386,29 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
     (filter, &rest[consumed..])
 }
 
-/// CR 205.2a + CR 601.2h: Parse a standalone FILTER phrase whose right conjunct
-/// may lead with an INDEFINITE ARTICLE — "another creature or an artifact"
+/// CR 205.2a + CR 601.2h: Fold an INDEFINITE-ARTICLE-led right conjunct onto an
+/// already-parsed left conjunct — "another creature or an artifact"
 /// (Mold Folk's `{1}, Sacrifice another creature or an artifact:`).
+///
+/// Takes `base` and `rest` rather than parsing the phrase itself, and that split
+/// is LOAD-BEARING, not a style choice. In this surface "another" scopes only the
+/// LEFT conjunct: the right one carries its own determiner ("an"), so it is not
+/// "another artifact". Two official rulings say so — Elite Headhunter
+/// (2019-10-04): "If Elite Headhunter somehow becomes an artifact, you can
+/// sacrifice it to pay the cost of its activated ability"; Gut, True Soul Zealot
+/// (2022-06-10): "If Gut somehow becomes an artifact, you may sacrifice it to its
+/// own ability." Stamping `FilterProp::Another` onto the right leg would make an
+/// artifact-ified source unable to pay with itself (`game::filter` enforces
+/// `Another` as `record.object_id != source.id`), which is reachable in play via
+/// Liquimetal Coating / Mycosynth Lattice / Karn, Silver Golem, and via Enchanted
+/// Evening for the enchantment leg.
+///
+/// The caller must therefore apply any `another`/`other` scoping to `base` BEFORE
+/// folding. The distinction cannot be made from the folded shape: the
+/// article-LESS surface ("another creature or artifact") has no second determiner,
+/// so its "another" genuinely does scope both legs and the shared grammar
+/// distributes it across the `Or` it builds. Only the caller knows which surface
+/// it had — hence `base` arrives already scoped.
 ///
 /// The shared grammar already unions the article-less surface: `parse_type_phrase`
 /// turns "another creature or artifact" into
@@ -425,8 +445,7 @@ pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFi
 /// Mirrors [`parse_target_with_disjunctive_restriction`] directly above: parse
 /// with the shared grammar, then fold a recognized remainder into a
 /// `TargetFilter::Or`.
-pub(crate) fn parse_target_with_article_led_type_union(text: &str) -> (TargetFilter, &str) {
-    let (base, rest) = parse_target(text);
+pub(crate) fn fold_article_led_type_union(base: TargetFilter, rest: &str) -> (TargetFilter, &str) {
     // Only a plain typed left conjunct can grow a type union. An anaphor, a
     // player filter or an already-built `Or` is returned untouched.
     if !matches!(base, TargetFilter::Typed(_)) {
@@ -15639,8 +15658,8 @@ mod tests {
     /// `Typed{[Creature], Another}` and the whole `or an artifact` leg is lost.
     #[test]
     fn article_led_type_union_matches_the_article_less_surface() {
-        let (with_article, rest) =
-            parse_target_with_article_led_type_union("target another creature or an artifact");
+        let (base_, tail_) = parse_target("target another creature or an artifact");
+        let (with_article, rest) = fold_article_led_type_union(base_, tail_);
         let (without_article, _) = parse_target("target another creature or artifact");
         assert_eq!(
             rest.trim(),
@@ -15714,7 +15733,8 @@ mod tests {
     #[test]
     fn article_led_type_union_refuses_non_type_disjuncts() {
         // Positive reach-guard, same test.
-        let (ok, _) = parse_target_with_article_led_type_union("target creature or an artifact");
+        let (base_, tail_) = parse_target("target creature or an artifact");
+        let (ok, _) = fold_article_led_type_union(base_, tail_);
         assert!(
             matches!(ok, TargetFilter::Or { .. }),
             "reach-guard: a real type union must still fold, got {ok:?}"
@@ -15722,15 +15742,16 @@ mod tests {
 
         // A BARE-card right conjunct is a keyword-membership branch folded at the
         // trigger layer (Shipwreck Sifters), never a type union.
-        let (bare_card, _) =
-            parse_target_with_article_led_type_union("target creature or a card with disturb");
+        let (base_, tail_) = parse_target("target creature or a card with disturb");
+        let (bare_card, _) = fold_article_led_type_union(base_, tail_);
         assert!(
             matches!(bare_card, TargetFilter::Typed(_)),
             "an article-led bare-card disjunct must not union, got {bare_card:?}"
         );
 
         // A non-type word after the article is not a leg either.
-        let (non_type, _) = parse_target_with_article_led_type_union("target creature or a player");
+        let (base_, tail_) = parse_target("target creature or a player");
+        let (non_type, _) = fold_article_led_type_union(base_, tail_);
         assert!(
             !matches!(non_type, TargetFilter::Or { .. }),
             "a non-type right conjunct must not union, got {non_type:?}"

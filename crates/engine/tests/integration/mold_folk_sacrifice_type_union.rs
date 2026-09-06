@@ -11,7 +11,16 @@
 //! or a land entered the battlefield under your control this turn", Earth Rumble Wrestlers). The
 //! sacrifice-cost parser now opts into the union reading via
 //! `parse_target_with_article_led_type_union`, so the cost's filter is
-//! `Or[Creature+Another, Artifact+Another]` rather than `Creature+Another` alone.
+//! `Or[Creature+Another, Artifact]` rather than `Creature+Another` alone.
+//!
+//! Note the ASYMMETRY, which is the rules-load-bearing part: "another" scopes only
+//! the LEFT conjunct. The right one carries its own determiner ("an artifact"), so
+//! it is not "another artifact" and the source may pay with ITSELF once it is an
+//! artifact. Official rulings — Elite Headhunter (2019-10-04): "If Elite Headhunter
+//! somehow becomes an artifact, you can sacrifice it to pay the cost of its
+//! activated ability"; Gut, True Soul Zealot (2022-06-10): "If Gut somehow becomes
+//! an artifact, you may sacrifice it to its own ability." The third test below
+//! drives exactly that.
 //!
 //! Before the fix the artifact leg was dropped, so a controller holding only an
 //! artifact could not pay a cost the card plainly allows. This drives the real
@@ -19,6 +28,7 @@
 //! resolution) rather than asserting a parsed filter shape.
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -119,5 +129,62 @@ fn mold_folk_still_pays_its_cost_by_sacrificing_a_creature() {
         state.objects[&source].zone,
         Zone::Battlefield,
         "\"another\" excludes the source itself"
+    );
+}
+
+/// CR 205.2a + the Elite Headhunter / Gut rulings: "another" scopes only the LEFT
+/// conjunct, so once the source itself is an artifact it satisfies the RIGHT leg
+/// and may be sacrificed to its own ability.
+///
+/// This is the discriminating case for the `Another` scoping, and it is reachable
+/// in real games — Liquimetal Coating, Mycosynth Lattice and Karn, Silver Golem
+/// all turn a creature into an artifact.
+///
+/// GUARD-FAILING: distribute `FilterProp::Another` onto the article-led right leg
+/// (i.e. fold the union *before* applying `another`, as an earlier revision did)
+/// and `game::filter`'s `Another => record.object_id != source.id` rejects the
+/// source, the cost becomes unpayable with nothing else on the battlefield, and
+/// the activation is refused.
+#[test]
+fn mold_folk_may_sacrifice_itself_once_it_is_an_artifact() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    // The source is an artifact creature, the state Liquimetal Coating / Mycosynth
+    // Lattice / Karn, Silver Golem all produce. Set as a fixture rather than
+    // parsed from a type-granting card: the subject here is the COST FILTER, and
+    // routing through a continuous effect would put the layer system in the path
+    // of a test that is not about it.
+    let source = {
+        let mut b = scenario.add_creature_from_oracle(P0, "Mold Folk", 1, 1, MOLD_FOLK);
+        b.as_artifact();
+        b.id()
+    };
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+
+    assert!(
+        runner.state().objects[&source]
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact),
+        "reach-guard: the source must really be an artifact, or this proves nothing"
+    );
+
+    // Nothing else is on the battlefield, so the ONLY legal payment is the source
+    // itself via the artifact leg.
+    let outcome = runner.activate(source, 0).pay_with(&[source]).resolve();
+    let state = outcome.state();
+    assert_eq!(
+        state.objects[&source].zone,
+        Zone::Graveyard,
+        "the source satisfies the article-led artifact leg and may pay with itself"
     );
 }
