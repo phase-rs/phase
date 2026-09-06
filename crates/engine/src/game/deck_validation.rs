@@ -8333,7 +8333,6 @@ mod tests {
         // through `evaluate_deck_compatibility`, the production entry point.
         let request = DeckCompatibilityRequest {
             main_deck: std::iter::repeat_n(whole.to_string(), 60).collect(),
-            default_deck_copy_limit: Some(DeckCopyLimit::Unlimited),
             ..Default::default()
         };
         let legality = evaluate_format_legality(&db, &request);
@@ -8475,7 +8474,7 @@ mod tests {
         let request = DeckCompatibilityRequest {
             main_deck: main,
             commander: vec!["Tovolar, Dire Overlord // Tovolar, the Midnight Scourge".to_string()],
-            selected_format: Some(GameFormat::Commander),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -8515,7 +8514,7 @@ mod tests {
         let request = DeckCompatibilityRequest {
             main_deck: main,
             commander: vec!["Tovolar, Dire Overlord".to_string()],
-            selected_format: Some(GameFormat::Commander),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -8551,7 +8550,7 @@ mod tests {
         let request = DeckCompatibilityRequest {
             main_deck: main,
             commander: vec!["Tovolar, Dire Overlord".to_string()],
-            selected_format: Some(GameFormat::Commander),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -8665,7 +8664,7 @@ mod tests {
             let request = DeckCompatibilityRequest {
                 main_deck: main.clone(),
                 commander: vec![composite.to_string()],
-                selected_format: Some(GameFormat::Commander),
+                selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
                 summary_only,
                 player_count: default_player_count(),
                 ..Default::default()
@@ -8709,7 +8708,7 @@ mod tests {
                 main_deck: main.clone(),
                 commander: vec!["Ob Front // Ob Back".to_string()],
                 signature_spell: vec!["Sig Front // Sig Back".to_string()],
-                selected_format: Some(GameFormat::Oathbreaker),
+                selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
                 summary_only,
                 player_count: default_player_count(),
                 ..Default::default()
@@ -8746,7 +8745,7 @@ mod tests {
             main_deck: main,
             commander: vec!["Ob Front".to_string()],
             signature_spell: vec!["Sig Front // Sig Back".to_string()],
-            selected_format: Some(GameFormat::Oathbreaker),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -8789,7 +8788,7 @@ mod tests {
             // Both command-zone slots resolve to the SAME card.
             commander: vec!["Ob Front".to_string()],
             signature_spell: vec!["Ob Front // Ob Back".to_string()],
-            selected_format: Some(GameFormat::Oathbreaker),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -8821,7 +8820,7 @@ mod tests {
             main_deck: main,
             commander: vec!["Ob Front".to_string()],
             signature_spell: vec!["Sig Front".to_string()],
-            selected_format: Some(GameFormat::Oathbreaker),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Oathbreaker)),
             player_count: default_player_count(),
             ..Default::default()
         };
@@ -8854,7 +8853,7 @@ mod tests {
         let request = DeckCompatibilityRequest {
             main_deck: main,
             commander: vec!["Fire".to_string()],
-            selected_format: Some(GameFormat::Standard),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Standard)),
             player_count: default_player_count(),
             ..Default::default()
         };

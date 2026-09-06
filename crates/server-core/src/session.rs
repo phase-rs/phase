@@ -2872,11 +2872,11 @@ mod tests {
     #[test]
     fn from_persisted_rejects_a_persisted_player_count_outside_the_format_registry_range() {
         let mut mgr = SessionManager::new();
-        let (code, _token) = mgr.create_game(make_deck());
+        let (code, _token) = mgr.create_game(make_deck(), None);
         let mut persisted = mgr.sessions.get(&code).unwrap().to_persisted();
         persisted.player_count = 5;
 
-        let error = GameSession::from_persisted(persisted, &CardDatabase::default())
+        let error = GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
             .err()
             .expect(
                 "a persisted player_count outside the format's registry range must be rejected",
@@ -3000,6 +3000,7 @@ mod tests {
         let err = mgr
             .create_game_n_players(
                 make_deck(),
+                None,
                 "Host".to_string(),
                 None,
                 3,
@@ -3028,6 +3029,7 @@ mod tests {
         let err = mgr
             .create_game_n_players(
                 make_deck(),
+                None,
                 "Host".to_string(),
                 None,
                 2,
