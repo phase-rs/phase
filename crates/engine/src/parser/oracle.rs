@@ -1620,6 +1620,19 @@ fn apply_self_replacement_override(
             inner: Box::new(condition),
         });
         let base = &mut result.abilities[base_pos];
+        // CR 614.15 + CR 111.1 + CR 608.2c: The override paragraph was lowered in
+        // isolation (its own single-ability `defs` slice), so
+        // `oracle_effect::assembly`'s `resolve_those_tokens_anaphors` pass had
+        // no antecedent to rewrite "create N of those tokens" against — the
+        // base's token creation lives in a SEPARATE document item until this
+        // fold stitches them together. Run the same single-authority rewrite
+        // now that both effects are in scope (Gather the Townsfolk's "Fateful
+        // hour — If you have 5 or less life, create five of those tokens
+        // instead.").
+        crate::parser::oracle_effect::lower::rewrite_those_tokens_from_antecedent(
+            &mut override_def.effect,
+            &base.effect,
+        );
         override_def.else_ability = base.sub_ability.take();
         base.sub_ability = Some(Box::new(override_def));
 

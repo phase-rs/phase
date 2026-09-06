@@ -308,6 +308,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
@@ -706,7 +707,11 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         // CR 302.6: reads the `summoning_sick` continuity flag, which layer 2
         // re-arms for every permanent whose controller changed (CR 613.1b).
         | FilterProp::ControlledContinuouslySinceTurnBegan
-        | FilterProp::CountersPutOnThisTurn { .. } => CharacteristicKinds::CONTROLLER,
+        | FilterProp::CountersPutOnThisTurn { .. }
+        // CR 303.4 + CR 301.5: scopes the attachment-to-player lookup by a
+        // `ControllerRef` (mirrors `Owned`/`ProtectorMatches` above) — layer 2
+        // can move the referenced player's board.
+        | FilterProp::AttachedToPlayer { .. } => CharacteristicKinds::CONTROLLER,
         // CR 702.95e: a pair breaks when either half changes controller (layer 2,
         // CR 613.1b) or stops being a creature (layer 4, CR 613.1d), so the
         // unpaired verdict reads both kinds.
@@ -975,6 +980,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
@@ -1714,6 +1720,7 @@ pub(crate) fn filter_prop_contains(
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -5020,6 +5027,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -6020,6 +6028,24 @@ fn matches_filter_prop(
             Some(recipient) => attached_to_referent(state, recipient, obj, object_id),
             None => attached_to_source_referent(state, source, obj, object_id),
         },
+        // CR 303.4 + CR 301.5: Player-referent attachment predicate — the
+        // candidate's `attached_to` must resolve to the SAME player that
+        // `player` (a `ControllerRef`) identifies. This is the player-referent
+        // counterpart of `AttachedToSource`/`AttachedToRecipient` (both resolve
+        // against an OBJECT referent); it reuses the single-authority
+        // `ControllerRef` resolver (`source_controller_ref_player`) every other
+        // player-scoped `FilterProp` arm threads through, so `EnchantedPlayer`,
+        // `TargetPlayer`, `You`, etc. all resolve identically here. Powers "the
+        // number of Curses attached to [enchanted player]" (Curse of Thirst,
+        // Curse of Surveillance): `player` is `ControllerRef::EnchantedPlayer`,
+        // resolved against the counting ability's own source — itself a Curse
+        // attached to the same player.
+        FilterProp::AttachedToPlayer { player } => obj
+            .attached_to
+            .and_then(|t| t.as_player())
+            .is_some_and(|attached_player| {
+                source_controller_ref_player(state, source, player) == Some(attached_player)
+            }),
         // CR 303.4 + CR 301.5: Attachment predicate. Matches objects that have
         // at least one attachment of the given kind whose controller satisfies
         // the optional `ControllerRef`. `exclude_source` preserves "another
@@ -6936,6 +6962,7 @@ fn zone_change_record_matches_property(
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::FaceDown
         | FilterProp::Transformed
         | FilterProp::Foretold
@@ -9959,6 +9986,106 @@ mod tests {
         assert!(
             !matches_target_filter(&state, kellan, &filter, kellan),
             "AttachedToSource must NOT match the source itself (it is not attached)"
+        );
+    }
+
+    /// CR 303.4 + CR 301.5: `FilterProp::AttachedToPlayer` — the player-referent
+    /// counterpart of `AttachedToSource`, needed because a Curse (unlike an
+    /// Aura/Equipment on a creature) is attached to a PLAYER, not an object.
+    /// Drives Curse of Thirst / Curse of Surveillance's "the number of Curses
+    /// attached to them"/"to that player".
+    ///
+    /// Covers the 0/1/2+ range at the building-block level (the integration
+    /// tests in `curse_of_thirst_attached_count.rs` cannot reach a literal 0,
+    /// because Curse of Thirst always counts itself): with no qualifying
+    /// candidate present the count is 0; a Curse attached to the SAME player
+    /// as the source raises it; a Curse attached to a DIFFERENT player never
+    /// does, regardless of how many of those exist.
+    #[test]
+    fn attached_to_player_matches_only_the_enchanted_players_attachments() {
+        let mut state = setup();
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        // The counting source: a Curse-like Aura attached to p1 (mirrors Curse
+        // of Thirst's own `EnchantedPlayer` referent — "them"/"that player" is
+        // the player THIS source enchants).
+        let curse_source = state.next_object_id;
+        let curse_source = create_object(
+            &mut state,
+            CardId(curse_source),
+            p0,
+            "Curse of Thirst".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&curse_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Player(p1));
+        }
+
+        let filter = TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+            FilterProp::AttachedToPlayer {
+                player: ControllerRef::EnchantedPlayer,
+            },
+        ]));
+
+        // Zero case: with no OTHER curse on the battlefield, nothing besides
+        // `curse_source` itself could match — and a bare unattached object
+        // must not match either.
+        let unattached = add_creature(&mut state, p0, "Unattached");
+        assert!(
+            !matches_target_filter(&state, unattached, &filter, curse_source),
+            "AttachedToPlayer must NOT match an object with no attachment at all"
+        );
+
+        // A Curse attached to the SAME player (p1) the source enchants matches.
+        let same_player_id = state.next_object_id;
+        let same_player_curse = create_object(
+            &mut state,
+            CardId(same_player_id),
+            p0,
+            "Extra Curse".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&same_player_curse).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Player(p1));
+        }
+        assert!(
+            matches_target_filter(&state, same_player_curse, &filter, curse_source),
+            "AttachedToPlayer must match a Curse attached to the same enchanted player"
+        );
+
+        // A Curse attached to a DIFFERENT player (p0) must never match, no
+        // matter how many exist — CR 303.4b scopes the count to the ONE
+        // enchanted player, not a global Curse tally.
+        let other_player_id = state.next_object_id;
+        let other_player_curse = create_object(
+            &mut state,
+            CardId(other_player_id),
+            p0,
+            "Elsewhere Curse".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other_player_curse).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Player(p0));
+        }
+        assert!(
+            !matches_target_filter(&state, other_player_curse, &filter, curse_source),
+            "AttachedToPlayer must NOT match a Curse attached to a DIFFERENT player"
+        );
+
+        // The source itself also satisfies its own filter (it IS a Curse
+        // attached to the player it enchants) — this is what makes 1 the
+        // real-game floor for Curse of Thirst's own trigger, per the
+        // integration tests.
+        assert!(
+            matches_target_filter(&state, curse_source, &filter, curse_source),
+            "the counting source is itself attached to the player it enchants"
         );
     }
 
@@ -15557,7 +15684,8 @@ mod characteristic_read_classification_tests {
             | FilterProp::HasAnyAttachmentOf { .. }
             | FilterProp::MostPrevalentCreatureTypeIn { .. }
             | FilterProp::AttackedThisTurn { .. }
-            | FilterProp::NameMatchesAnyPermanent { .. } => true,
+            | FilterProp::NameMatchesAnyPermanent { .. }
+            | FilterProp::AttachedToPlayer { .. } => true,
             // Everything else carries no `ControllerRef` of its own. Several
             // still read CONTROLLER for other reasons (`Unpaired` via CR
             // 702.95e, the CR 302.6 continuity props, the nested-filter
@@ -15761,6 +15889,9 @@ mod characteristic_read_classification_tests {
             },
             FilterProp::NameMatchesAnyPermanent {
                 controller: Some(ControllerRef::You),
+            },
+            FilterProp::AttachedToPlayer {
+                player: ControllerRef::You,
             },
         ];
         let mut sampled: Vec<String> = props.iter().map(variant_name).collect();

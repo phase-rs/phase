@@ -58995,7 +58995,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
 /// `CanEnchant` each box a whole `TargetFilter`, `ControllerMatches` boxes a
 /// `PlayerFilter`, and `AnyOf` / `Not` recurse into `FilterProp` itself — so a
 /// stamped prop can sit arbitrarily deep, and a `_ => false` here would answer
-/// "no" at every one of those depths. The 89 leaf variants in the final arm
+/// "no" at every one of those depths. The 90 leaf variants in the final arm
 /// carry no nested filter at all.
 fn prop_has_chosen_color(p: &FilterProp) -> bool {
     match p {
@@ -59050,6 +59050,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another

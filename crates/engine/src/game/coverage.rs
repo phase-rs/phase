@@ -843,6 +843,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
             FilterProp::AttachedToSource => parts.push("attached to self".into()),
             FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
+            FilterProp::AttachedToPlayer { player } => {
+                parts.push(format!("attached to {}", fmt_controller(player)))
+            }
             FilterProp::Unpaired => parts.push("unpaired".into()),
             FilterProp::HasAttachment {
                 kind,
@@ -8332,8 +8335,40 @@ fn strip_parenthesized_reminder(line: &str) -> String {
 /// execute body, an otherwise branch, a token-carried static, or a granted
 /// ability. They must not increase this count, or a supported nested detail
 /// could mask a different Oracle line that the parser silently dropped.
+///
+/// EXCEPTION -- CR 614.15: a child produced by folding a cross-line
+/// self-replacement override (Gather the Townsfolk's "Fateful hour -- If you
+/// have 5 or less life, create five of those tokens instead.") DOES
+/// correspond to its own separate printed Oracle line. `apply_self_replacement_override`
+/// (parser/oracle.rs) folds that paragraph into the base ability's
+/// `sub_ability` purely so the resolver can swap it in at resolution time --
+/// not because it is a structural detail of the base line, unlike the
+/// token-nested-static / modal-bullet children this function was hardened
+/// against crediting. Recognize the fold via the `AbilityCondition::ConditionInstead`
+/// marker, which `fmt_ability_condition` is the single authority for
+/// rendering as an "instead if (...)" conditional detail -- so the override
+/// is credited as its own effective line without resurrecting the general
+/// nested-child crediting that regressed other cards.
 fn count_effective_parsed_items(items: &[ParsedItem]) -> usize {
-    items.len()
+    items
+        .iter()
+        .map(|item| 1 + count_self_replacement_override_children(item))
+        .sum()
+}
+
+/// Direct children of `item` that fold a CR 614.15 self-replacement override
+/// (see `count_effective_parsed_items`) -- each is its own printed Oracle
+/// line and must be credited as such.
+fn count_self_replacement_override_children(item: &ParsedItem) -> usize {
+    item.children
+        .iter()
+        .filter(|child| {
+            child
+                .details
+                .iter()
+                .any(|(key, value)| key == "conditional" && value.starts_with("instead if ("))
+        })
+        .count()
 }
 
 /// Find Oracle text lines that have no corresponding parsed item by

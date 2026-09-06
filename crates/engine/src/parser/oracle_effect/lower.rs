@@ -2902,7 +2902,7 @@ fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
     false
 }
 
-/// CR 702.33d + CR 608.2c: Resolve "create [N] of those tokens [instead]"
+/// CR 111.1 + CR 608.2c: Resolve "create [N] of those tokens [instead]"
 /// anaphoric clauses. The clause refers back to the previous def's token
 /// creation effect (either `Token` or `CopyTokenOf`) and reproduces it with
 /// a new count. We walk `defs` looking for an `Unimplemented` clause whose
@@ -2967,10 +2967,22 @@ pub(super) fn resolve_populated_unsuspect_anaphors(defs: &mut [AbilityDefinition
     }
 }
 
-/// CR 702.33d + CR 707.10: If `cur` is an `Unimplemented` "create N of those
+/// CR 111.1 + CR 707.10: If `cur` is an `Unimplemented` "create N of those
 /// tokens" anaphor, rewrite it as a clone of the `antecedent` token-creation
 /// effect with count set to N. No-op when the shapes don't match.
-pub(super) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
+///
+/// `pub(crate)` (rather than `pub(super)`) so `oracle::apply_self_replacement_override`
+/// — a sibling module OUTSIDE `oracle_effect` — can call this same single
+/// authority. That binder folds a CR 614.15 cross-line ability-word override
+/// ("Fateful hour — If you have 5 or less life, create five of those tokens
+/// instead.") into the preceding ability AFTER this module's own
+/// `resolve_those_tokens_anaphors` pass has already run over the override's
+/// isolated one-ability `defs` slice (which has no antecedent to see, because
+/// the base "Create two ... tokens." clause is a separate document item until
+/// the binder stitches them together). Without a second call here, the
+/// override's effect is left as the raw `Unimplemented` placeholder and the
+/// "instead" swap never produces a real token count (Gather the Townsfolk).
+pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
     let Some(count) = match_create_of_those_tokens(cur) else {
         return;
     };

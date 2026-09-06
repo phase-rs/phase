@@ -5087,6 +5087,7 @@ fn prop_is_arrival_invariant(prop: &crate::types::ability::FilterProp) -> bool {
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         // CR 702.95a: an arriving creature pairs with a PRE-EXISTING unpaired one.
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject

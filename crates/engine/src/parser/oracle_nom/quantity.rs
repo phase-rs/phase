@@ -1956,8 +1956,22 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // CR 604.3: "<type> on the battlefield with <keyword>" — global CDA
         // count restricted to a keyword; must precede
         // `parse_number_of_controlled_type`, whose " you control" suffix does
-        // not match the battlefield-wide form.
-        parse_number_of_type_on_battlefield_with_keyword,
+        // not match the battlefield-wide form. Nested with the attachment-count
+        // sibling below to stay within nom's top-level `alt` arity (nom 8.0 max:
+        // 21 items).
+        //
+        // CR 301.5 + CR 303.4: "<type> attached to <referent>" (Curse of
+        // Thirst's "the number of Curses attached to them", Curse of
+        // Surveillance's "... attached to that player") — must precede
+        // `parse_number_of_controlled_type`, whose bare controller suffix does
+        // not recognize an "attached to" tail and would otherwise strand it as
+        // an unconsumed remainder. Shares `parse_for_each_attached_to_source`
+        // with the "for each" prefix path so both surface phrasings of the
+        // same count resolve identically.
+        alt((
+            parse_number_of_type_on_battlefield_with_keyword,
+            parse_for_each_attached_to_source,
+        )),
         // CR 121.1 + CR 701.9 + CR 603.4: "cards you've drawn this turn" and
         // "cards you've discarded this turn" — must precede generic
         // controlled-type arms whose type words could overlap. Nested together
@@ -6125,12 +6139,17 @@ fn creatures_died_this_turn_ref(controller: Option<ControllerRef>, nontoken: boo
 /// CR 301.5 + CR 303.4: Parse "<type> [and <type>]* attached to ~" — counts
 /// objects whose `attached_to` field references the source object. Used by
 /// "for each Aura and Equipment attached to ~" (Kellan, the Fae-Blooded) and
-/// any analogous boost that scales with attachments on the source.
+/// any analogous boost that scales with attachments on the source. Also
+/// handles the PLAYER-referent pronouns "them"/"that player" (Curse of
+/// Thirst, Curse of Surveillance), reached both from the "for each" prefix
+/// and — via the same function — from the "the number of" prefix in
+/// `parse_number_of_inner`, so the two surface phrasings of an identical
+/// count share one authority instead of drifting apart.
 ///
 /// Composes `parse_type_filter_word` for each type term, joined by " and ",
-/// then matches `" attached to ~"`. Returns a `QuantityRef::ObjectCount` over
-/// a `TypedFilter` whose type filters are the matched types and whose only
-/// property is `FilterProp::AttachedToSource`.
+/// then matches `" attached to <referent>"`. Returns a `QuantityRef::ObjectCount`
+/// over a `TypedFilter` whose type filters are the matched types and whose
+/// only property is the `FilterProp` the referent selects.
 fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRef> {
     let (mut rest, first) = parse_type_filter_word(input)?;
     let mut types = vec![first];
@@ -6139,7 +6158,7 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
         types.push(next);
         rest = after_type;
     }
-    // CR 301.5 + CR 303.4 + CR 613.4c: Two referents share the "<type>
+    // CR 301.5 + CR 303.4 + CR 613.4c: Three referents share the "<type>
     // [and <type>]* attached to <referent>" shape. The static parser already
     // normalizes the source's printed name to `~`, so a literal `~` referent
     // means "attached to the static's source object" (Kellan, the
@@ -6171,6 +6190,21 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
         value(
             FilterProp::AttachedToRecipient,
             alt((tag(" attached to it"), tag(" attached to that creature"))),
+        ),
+        // CR 303.4 + CR 301.5: player-referent pronoun/noun phrase — the
+        // singular-they "them" and the demonstrative "that player" both
+        // anaphor the ENCHANTED PLAYER already established by the surrounding
+        // trigger ("at the beginning of enchanted player's upkeep, ... equal
+        // to the number of Curses attached to them/that player"). The Curse
+        // itself is the counting ability's source and is attached to that
+        // same player, so `ControllerRef::EnchantedPlayer` resolved against
+        // the source is the correct referent (Curse of Thirst, Curse of
+        // Surveillance).
+        value(
+            FilterProp::AttachedToPlayer {
+                player: ControllerRef::EnchantedPlayer,
+            },
+            alt((tag(" attached to them"), tag(" attached to that player"))),
         ),
     ))
     .parse(rest)?;

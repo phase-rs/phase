@@ -729,6 +729,7 @@ impl EventObjectSnapshot {
             | FilterProp::SameNameAsExiledBySource
             | FilterProp::AttachedToSource
             | FilterProp::AttachedToRecipient
+            | FilterProp::AttachedToPlayer { .. }
             | FilterProp::Unpaired
             | FilterProp::OtherThanTriggerObject
             | FilterProp::MostPrevalentCreatureTypeIn { .. }

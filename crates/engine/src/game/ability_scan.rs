@@ -4447,6 +4447,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         }
         FilterProp::ProtectorMatches { controller } => scan_controller_ref(controller),
         FilterProp::Owned { controller } => scan_controller_ref(controller),
+        FilterProp::AttachedToPlayer { player } => scan_controller_ref(player),
         FilterProp::HasAttachment { controller, .. } => {
             controller.as_ref().map_or(Axes::NONE, scan_controller_ref)
         }

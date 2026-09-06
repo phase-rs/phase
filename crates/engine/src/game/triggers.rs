@@ -11804,6 +11804,11 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         FilterProp::Owned { controller } | FilterProp::ProtectorMatches { controller } => {
             controller_ref_binding_diverges(controller)
         }
+        // CR 303.4 + CR 301.5: the player referent is a `ControllerRef` like
+        // `Owned`/`ProtectorMatches` above — recurse into the same authority
+        // rather than bucketing with `AttachedToRecipient` (whose divergence is
+        // about the per-recipient `FilterContext` binding, a different axis).
+        FilterProp::AttachedToPlayer { player } => controller_ref_binding_diverges(player),
         FilterProp::MostPrevalentCreatureTypeIn { scope, .. } => {
             controller_ref_binding_diverges(scope)
         }
