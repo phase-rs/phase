@@ -7721,7 +7721,7 @@ fn check_silent_drops(
     };
 
     let lines = effective_oracle_lines(oracle_text);
-    let dropped = count_dropped_oracle_lines(&lines, card_name, parse_details);
+    let (dropped, _) = dropped_oracle_lines(&lines, card_name, parse_details);
 
     if dropped > 0 {
         let label = format!("SilentDrop:{}_of_{}", lines.len() - dropped, lines.len());
@@ -7731,7 +7731,13 @@ fn check_silent_drops(
     }
 }
 
-/// How many effective Oracle lines the parse tree demonstrably fails to represent.
+/// How many effective Oracle lines the parse tree demonstrably fails to represent,
+/// together with the uncovered lines that number was derived from.
+///
+/// Returning both keeps the count and the lines the audit blames on ONE call:
+/// recomputing them at the audit site repeated the whole normalization pass and
+/// left two call sites free to drift apart — the same failure this check exists
+/// to catch.
 ///
 /// Two independent measures must agree before a printed line is called dropped:
 ///
@@ -7747,21 +7753,21 @@ fn check_silent_drops(
 /// line went unrepresented, and can never fire on cardinality alone. It also makes
 /// the check monotone: because the ceiling *is* the historical rule, this can only
 /// ever withdraw a flag, never raise a new one.
-fn count_dropped_oracle_lines(
-    lines: &[String],
+fn dropped_oracle_lines<'a>(
+    lines: &'a [String],
     card_name: &str,
     parse_details: &[ParsedItem],
-) -> usize {
+) -> (usize, Vec<&'a str>) {
     let cardinality = lines
         .len()
         .saturating_sub(count_effective_parsed_items(parse_details));
     if cardinality == 0 {
-        return 0;
+        return (0, Vec::new());
     }
 
     // Only reached for cards the cardinality ceiling already suspects, so the
     // normalization inside stays off the hot path for the rest of the corpus.
-    let uncovered = uncovered_oracle_lines(lines, card_name, parse_details).len();
+    let uncovered = uncovered_oracle_lines(lines, card_name, parse_details);
 
     // A top-level item carrying no `source_text` — a bare keyword, an
     // `AdditionalCost`, a `SpellCastingOption` — represents a printed line the
@@ -7769,12 +7775,13 @@ fn count_dropped_oracle_lines(
     // line. Without this the check would flag every card with a keyword line.
     let anonymous = count_anonymous_parse_items(parse_details);
 
-    cardinality.min(uncovered.saturating_sub(anonymous))
+    let dropped = cardinality.min(uncovered.len().saturating_sub(anonymous));
+    (dropped, uncovered)
 }
 
 /// The effective Oracle lines with no representation anywhere in the parse tree.
 ///
-/// Shared by [`count_dropped_oracle_lines`] and the `missing_lines` of
+/// Shared by [`dropped_oracle_lines`] and the `missing_lines` of
 /// [`audit_silent_drops`], so the count and the lines it blames come from one
 /// filtered line set and one matcher. Deriving them separately let the audit name
 /// a line the count had already excluded and never held responsible — a casting
@@ -8189,14 +8196,11 @@ pub fn audit_silent_drops(summary: &CoverageSummary) -> Vec<SilentDropResult> {
         };
 
         let lines = effective_oracle_lines(oracle_text);
-        let dropped = count_dropped_oracle_lines(&lines, &card.card_name, &card.parse_details);
+        let (dropped, uncovered) =
+            dropped_oracle_lines(&lines, &card.card_name, &card.parse_details);
 
         if dropped > 0 {
-            let missing_lines =
-                uncovered_oracle_lines(&lines, &card.card_name, &card.parse_details)
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect();
+            let missing_lines = uncovered.into_iter().map(str::to_string).collect();
             results.push(SilentDropResult {
                 card_name: card.card_name.clone(),
                 oracle_lines: lines.len(),
@@ -8485,7 +8489,7 @@ fn strip_parenthesized_reminder(line: &str) -> String {
 ///
 /// The converse also holds — a child can carry its own printed line (a
 /// `sub_ability` chain, an ability-word branch) — so this count is only the
-/// ceiling in [`count_dropped_oracle_lines`], never a verdict on its own.
+/// ceiling in [`dropped_oracle_lines`], never a verdict on its own.
 fn count_effective_parsed_items(items: &[ParsedItem]) -> usize {
     items.len()
 }
@@ -14766,6 +14770,63 @@ mod tests {
         assert!(
             missing.is_empty(),
             "a chained ability whose source_text spans both printed lines is not a drop: {missing:?}"
+        );
+    }
+
+    /// CR 706.2: a roll's outcome rows are the resolution table of the line above
+    /// them, and the parser emits every row as a child of that one ability — so
+    /// they must fold into their header the way modal bullets fold into a
+    /// `choose` header. Without the fold a fully parsed roll counts N+1 printed
+    /// lines against 1 parse root and reads as a silent drop (measured: 21 such
+    /// cards, e.g. Arcane Investigator, Component Pouch, Herald of Hadar).
+    #[test]
+    fn outcome_rows_fold_into_their_header() {
+        const HEADER: &str = "Search the Room \u{2014} {5}{U}: Roll a d20.";
+        let oracle = format!(
+            "{HEADER}\n             1\u{2014}9 | Draw a card.\n             10\u{2014}20 | Draw two cards."
+        );
+
+        assert_eq!(
+            effective_oracle_lines(&oracle).len(),
+            1,
+            "three printed lines, but the two outcome rows belong to the roll above them"
+        );
+
+        // A level band ("2+ | ...") folds by the same rule.
+        let levels = format!("{HEADER}\n2+ | Draw a card.\n8+ | Draw two cards.");
+        assert_eq!(effective_oracle_lines(&levels).len(), 1);
+
+        // ...and a fully parsed roll is therefore not flagged.
+        let mut face = make_face();
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .description(HEADER.to_string()),
+        );
+        let parse_details = build_parse_details_for_face(&face);
+        let mut missing = Vec::new();
+        check_silent_drops(&Some(oracle), "Test Card", &parse_details, &mut missing);
+        assert!(
+            missing.is_empty(),
+            "outcome rows are covered by the ability their header produced: {missing:?}"
+        );
+    }
+
+    /// The fold must not swallow a row that OPENS a card: it has no header to
+    /// belong to, so it is a printed line in its own right. Without the
+    /// `!effective.is_empty()` guard this card would count ZERO effective lines
+    /// and every card shaped like it would be silently unfalsifiable.
+    #[test]
+    fn a_leading_outcome_row_still_counts_as_its_own_line() {
+        assert_eq!(
+            effective_oracle_lines("1\u{2014}9 | Draw a card.").len(),
+            1,
+            "a row with no preceding header is its own line, not a fold target"
         );
     }
 
