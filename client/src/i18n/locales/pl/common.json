@@ -62,6 +62,12 @@
     "updateIssue": "problem z aktualizacją",
     "updated": "zaktualizowano"
   },
+  "offlineBadge": {
+    "label": "Offline",
+    "servicesPaused": "Aktualizacje i usługi online są wstrzymane.",
+    "forced": "Tryb pracy offline jest włączony.",
+    "connection": "Brak połączenia sieciowego."
+  },
   "comboDetector": {
     "label": "Wykrywacz combosów (eksperymentalne)",
     "title": "Wykrywaj nieskończone pętle: automatycznie kończ obowiązkowe pętle i pokazuj zasoby ∞ (domyślnie wyłączone)",

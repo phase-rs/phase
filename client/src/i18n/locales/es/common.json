@@ -62,6 +62,12 @@
     "updateIssue": "problema de actualización",
     "updated": "actualizado"
   },
+  "offlineBadge": {
+    "label": "Sin conexión",
+    "servicesPaused": "Las actualizaciones y los servicios en línea están en pausa.",
+    "forced": "Trabajar sin conexión está activado.",
+    "connection": "No hay conexión de red."
+  },
   "comboDetector": {
     "label": "Detector de combos (experimental)",
     "title": "Detectar bucles infinitos: terminar bucles obligatorios automáticamente y mostrar recursos ∞ (desactivado por defecto)",

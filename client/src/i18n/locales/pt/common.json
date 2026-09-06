@@ -62,6 +62,12 @@
     "updateIssue": "problema na atualização",
     "updated": "atualizado"
   },
+  "offlineBadge": {
+    "label": "Offline",
+    "servicesPaused": "As atualizações e os serviços online estão pausados.",
+    "forced": "Trabalhar offline está ativado.",
+    "connection": "Sem conexão de rede."
+  },
   "comboDetector": {
     "label": "Detector de combos (experimental)",
     "title": "Detectar loops infinitos: encerrar loops obrigatórios automaticamente e mostrar recursos ∞ (desativado por padrão)",

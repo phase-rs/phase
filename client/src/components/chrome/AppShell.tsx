@@ -8,6 +8,7 @@ import { DraftSteps } from "../draft/DraftSteps";
 import { WhatsNewModal } from "../modal/WhatsNewModal";
 import { CardDataLoadingBar } from "./CardDataLoadingBar";
 import { ChromeControls } from "./ChromeControls";
+import { OfflineModeBadge } from "./OfflineModeBadge";
 import { Rail } from "./Rail";
 import { DraftShellChromeProvider, ShellProvider, type DraftShellChromeConfig } from "./ShellContext";
 import { SocialBar } from "./SocialBar";
@@ -60,6 +61,7 @@ export function AppShell() {
   return (
     <ShellProvider value={true}>
       <DraftShellChromeProvider value={setDraftChromeConfig}>
+        <OfflineModeBadge />
         {/* The scene IS the relative root (matching how each page mounts it). NOTE:
           `.menu-scene` is unlayered CSS, which in Tailwind v4 outranks utilities,
           so it must not share an element with a conflicting position utility —

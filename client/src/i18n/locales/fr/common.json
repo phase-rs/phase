@@ -62,6 +62,12 @@
     "updateIssue": "problème de mise à jour",
     "updated": "à jour"
   },
+  "offlineBadge": {
+    "label": "Hors ligne",
+    "servicesPaused": "Les mises à jour et services en ligne sont suspendus.",
+    "forced": "Travailler hors ligne est activé.",
+    "connection": "Aucune connexion réseau."
+  },
   "comboDetector": {
     "label": "Détecteur de combos (expérimental)",
     "title": "Détecter les boucles infinies : terminer automatiquement les boucles obligatoires et afficher les ressources ∞ (désactivé par défaut)",

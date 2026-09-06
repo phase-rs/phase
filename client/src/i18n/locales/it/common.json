@@ -62,6 +62,12 @@
     "updateIssue": "problema di aggiornamento",
     "updated": "aggiornato"
   },
+  "offlineBadge": {
+    "label": "Offline",
+    "servicesPaused": "Gli aggiornamenti e i servizi online sono in pausa.",
+    "forced": "Lavora offline è attivo.",
+    "connection": "Nessuna connessione di rete."
+  },
   "comboDetector": {
     "label": "Rilevatore di combo (sperimentale)",
     "title": "Rileva i loop infiniti: termina automaticamente i loop obbligatori e mostra le risorse ∞ (disattivato per impostazione predefinita)",
