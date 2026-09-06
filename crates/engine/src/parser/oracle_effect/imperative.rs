@@ -6046,12 +6046,18 @@ pub(super) fn parse_utility_imperative_ast(
                 // `BecomeCopy` and `CopyTokenOf` route through.
                 let rest_offset = text.len() - rest.len();
                 let card_name = ctx.card_name.clone().unwrap_or_default();
+                let rest_lower_full = &lower[rest_offset..];
                 let (rest, additional_modifications) =
-                    match super::become_copy_except::split_except_clause(rest, &card_name, ctx) {
+                    match super::become_copy_except::split_except_clause(
+                        rest,
+                        rest_lower_full,
+                        &card_name,
+                        ctx,
+                    ) {
                         Some((head, modifications)) => (head, modifications),
                         None => (rest, Vec::new()),
                     };
-                let rest_lower = &lower[rest_offset..rest_offset + rest.len()];
+                let rest_lower = &rest_lower_full[..rest.len()];
                 if tag::<_, _, OracleError<'_>>("that spell or ability")
                     .parse(rest_lower)
                     .is_ok()

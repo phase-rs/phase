@@ -343,6 +343,15 @@ fn apply_spell_copy_modifications(
             // CR 306.5b: seed the entering face's printed loyalty, not live
             // counters — stack objects lose counters at the zone-change boundary
             // (CR 122.2), and ETB reads loyalty from the face values.
+            //
+            // Ordering: this runs AFTER the delegated modifications above, which
+            // own the `SetStartingLoyalty { value }` arm (a FIXED override, e.g.
+            // "except its starting loyalty is 1"). The two are mutually
+            // exclusive by construction — casualty loyalty is DYNAMIC (the
+            // sacrificed creature's power, CR 702.153a) and is therefore carried
+            // by this flag rather than by a fixed modification, so no printed
+            // card can emit both. Running last is nonetheless the correct
+            // precedence: the casualty value is the card's own rider.
             copy_obj.base_loyalty = Some(loyalty);
             copy_obj.loyalty = Some(loyalty);
         }

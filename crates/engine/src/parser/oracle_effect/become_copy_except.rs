@@ -99,24 +99,32 @@ use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Sup
 /// keeps its own boundary because it additionally peels a literal `named <X>`
 /// rename off the body before delegating here.
 ///
+/// `lower` must be the pre-lowercased `text` (same byte length), matching the
+/// `(text, lower)` threading convention the effect parsers already use — this
+/// is why the boundary maps through
+/// [`split_once_on_lower`](super::super::oracle_nom::bridge::split_once_on_lower),
+/// the shared authority for "split mixed-case text at a lowercase separator",
+/// rather than re-deriving byte offsets here.
+///
 /// Returns `None` when the clause carries no except tail, so callers can leave
 /// their original text untouched.
 pub(crate) fn split_except_clause<'a>(
     text: &'a str,
+    lower: &str,
     card_name: &str,
     ctx: &ParseContext,
 ) -> Option<(&'a str, Vec<ContinuousModification>)> {
-    let lower = text.to_lowercase();
-    let (_, head_lower) = alt((
-        take_until::<_, _, OracleError<'_>>(", except "),
-        take_until(" except "),
-    ))
-    .parse(lower.as_str())
-    .ok()?;
-    // `to_lowercase` is length-preserving for the ASCII-plus-Latin-1 Oracle
-    // corpus this parser runs on, so the lowercase offset indexes `text`.
-    let head = text.get(..head_lower.len())?;
-    let (_, modifications) = parse_except_clause(lower.get(head_lower.len()..)?, card_name, ctx)?;
+    // Probe the comma'd separator first: both forms end in "except ", so the
+    // bare form would otherwise match one byte later inside the comma'd one and
+    // leave a stray "," on the head. Same ordering as the sibling boundary in
+    // `token.rs::parse_token_except_boundary`.
+    let (head, _) = [", except ", " except "]
+        .into_iter()
+        .find_map(|sep| split_once_on_lower(text, lower, sep))?;
+    // `parse_except_clause` owns the body grammar and expects its input to still
+    // carry the leading separator, so hand it the lowercase tail measured from
+    // the boundary rather than the post-separator remainder.
+    let (_, modifications) = parse_except_clause(lower.get(head.len()..)?, card_name, ctx)?;
     Some((head, modifications))
 }
 
@@ -3177,8 +3185,10 @@ mod tests {
     /// casing preserved) alongside the parsed modifications.
     #[test]
     fn split_except_clause_returns_head_and_modifications() {
+        let text = "it, except the copy isn't legendary";
         let (head, mods) = split_except_clause(
-            "it, except the copy isn't legendary",
+            text,
+            &text.to_lowercase(),
             "Iron Man, Bleeding Edge",
             &ParseContext::default(),
         )
@@ -3192,12 +3202,29 @@ mod tests {
         );
     }
 
+    /// CR 707.9a: the comma'd separator must win over the bare one — both end
+    /// in "except ", so probing " except " first would split one byte later and
+    /// leave a stray "," on the head.
+    #[test]
+    fn split_except_clause_head_excludes_the_separator_comma() {
+        let text = "that spell, except the copy isn't legendary";
+        let (head, _) =
+            split_except_clause(text, &text.to_lowercase(), "Card", &ParseContext::default())
+                .expect("clause carries an except tail");
+        assert_eq!(
+            head, "that spell",
+            "the head must not retain the separator's comma"
+        );
+    }
+
     /// `split_except_clause` must decline (not panic, not truncate) when the
     /// clause has no except tail, so the caller keeps its text unchanged.
     #[test]
     fn split_except_clause_declines_without_except_tail() {
+        let text = "target instant spell";
         assert!(
-            split_except_clause("target instant spell", "Card", &ParseContext::default()).is_none()
+            split_except_clause(text, &text.to_lowercase(), "Card", &ParseContext::default())
+                .is_none()
         );
     }
 }
