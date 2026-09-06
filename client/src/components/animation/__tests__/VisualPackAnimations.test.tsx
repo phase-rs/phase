@@ -14,6 +14,7 @@ import { buildGameState, buildPlayers } from "../../../test/factories/gameStateF
 import { AnimationOverlay } from "../AnimationOverlay.tsx";
 import { CastArcAnimation } from "../CastArcAnimation.tsx";
 import { MillRevealAnimation } from "../MillRevealAnimation.tsx";
+import { RippleRevealAnimation } from "../RippleRevealAnimation.tsx";
 import { RevealOverlay } from "../RevealOverlay.tsx";
 import { visibleAnimationImageSnapshot } from "../ResolvedAnimationImage.tsx";
 
@@ -331,6 +332,83 @@ describe("visual-pack animation consumers", () => {
       "mill-first",
       "mill-token",
     ]);
+  });
+
+  it("fans a Ripple reveal and completes after the hold", () => {
+    vi.useFakeTimers();
+    const cards = [70, 71, 72].map((id) =>
+      visibleObject({
+        id,
+        zone: "Library",
+        name: `Ripple Card ${id}`,
+        printed_ref: { oracle_id: `ripple-${id}`, face_name: `Ripple Card ${id}` },
+      }),
+    );
+    for (const card of cards) {
+      imageMock.results.set(`ripple-${card.id}`, {
+        src: `ripple-${card.id}.png`,
+        isLoading: false,
+        isRotated: false,
+        isFlip: false,
+      });
+    }
+    const complete = vi.fn();
+    render(
+      <RippleRevealAnimation
+        cards={cards.map((card) => ({
+          objectId: card.id,
+          snapshot: snapshot(card),
+          colors: ["#f59e0b"],
+        }))}
+        from={{ x: 0, y: 0 }}
+        onComplete={complete}
+      />,
+    );
+
+    expect(
+      screen
+        .getAllByAltText(/Ripple Card/)
+        .map((image) => image.getAttribute("src")),
+    ).toEqual(["ripple-70.png", "ripple-71.png", "ripple-72.png"]);
+
+    act(() => vi.advanceTimersByTime(4000));
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("drives a Ripple fan from a CardsRevealed step effect", () => {
+    vi.useFakeTimers();
+    const cards = [80, 81].map((id) =>
+      visibleObject({
+        id,
+        zone: "Library",
+        name: `Revealed ${id}`,
+        printed_ref: { oracle_id: `revealed-${id}`, face_name: `Revealed ${id}` },
+      }),
+    );
+    for (const card of cards) {
+      imageMock.results.set(`revealed-${card.id}`, {
+        src: `revealed-${card.id}.png`,
+        isLoading: false,
+        isRotated: false,
+        isFlip: false,
+      });
+    }
+    seedOverlay(
+      state(cards),
+      state(cards),
+      step({
+        type: "CardsRevealed",
+        data: {
+          player: 0,
+          card_ids: [80, 81],
+          card_names: ["Revealed 80", "Revealed 81"],
+        },
+      }),
+    );
+    render(<AnimationOverlay containerRef={containerRef} />);
+    expect(
+      screen.getAllByAltText(/Revealed 8/).map((image) => image.getAttribute("src")),
+    ).toEqual(["revealed-80.png", "revealed-81.png"]);
   });
 
   it("filters hidden reveal identity before resolving two public small snapshots", () => {

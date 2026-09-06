@@ -1518,7 +1518,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::Transform { .. } => {}
         Effect::FlipPermanent { .. } => {}
         Effect::SearchLibrary { .. } => {}
-        Effect::SearchOutsideGame { .. } => {}
+        Effect::SearchOutsideGame { .. } | Effect::OpenBoosterPack { .. } => {}
         Effect::RevealHand { .. } => {}
         Effect::Reveal { .. } => {}
         Effect::RevealTop { .. } => {}

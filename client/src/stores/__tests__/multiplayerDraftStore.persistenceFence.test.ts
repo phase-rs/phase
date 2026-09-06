@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
 
 const {
   clearDraftHostSession,
@@ -20,12 +21,15 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => {
     ...actual,
     DraftAdapter: vi.fn().mockImplementation(function () {
       return {
-        draftProcedure: vi.fn(async () => ({
+        draftProcedure: vi.fn(async () => draftProcedureFixture({
           pod_size: 8,
           human_seats: 8,
           min_pod_size: 2,
+          max_pod_size: 8,
+          allowed_pod_sizes: [2, 3, 4, 5, 6, 7, 8],
           packs_per_player: 3,
           cards_per_pick: 1,
+          distribution: "PickAndPass",
           min_deck_size: 40,
           match_config: { match_type: "Bo1" },
         })),

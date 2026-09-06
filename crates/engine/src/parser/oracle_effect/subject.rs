@@ -2068,9 +2068,20 @@ fn try_parse_subject_restriction_clause(
         // CR 605.1a: "unless they're mana abilities" exemption rides on the mode.
         let exemption = parse_cant_be_activated_exemption_in_text(&lower);
         // CR 611.2b + CR 110.5: "for as long as it remains tapped" (Braided Net)
-        // ties the prohibition to the target's tap state; without the suffix
-        // (Dovin Baan, Xathrid Gorgon) it keeps the default end-of-turn duration.
-        let duration = tapped_bound_prohibition_duration(&lower).or(Some(Duration::UntilEndOfTurn));
+        // ties the prohibition to the target's tap state. Without that suffix the
+        // window is UNSTATED here, and it must stay `None`.
+        //
+        // CR 611.2a: this value lands on BOTH the embedded `GenericEffect.duration`
+        // and the clause CARRIER below, so an injected `UntilEndOfTurn` default made
+        // both indistinguishable from a printed window and
+        // `with_clause_chain_duration` / `apply_duration_to_effect` declined to
+        // distribute the enclosing sentence's window into either. Measured: Dovin
+        // Baan, Edifice of Authority and Mythos of Vadrok print "until your next turn"
+        // on the head and had this prohibition end a full turn early. Emitting
+        // verbatim lets the head window reach it; the resolver
+        // (`game/effects/effect.rs`) remains the single authority for the fallback
+        // when nothing is printed anywhere.
+        let duration = tapped_bound_prohibition_duration(&lower);
         let mode = StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
@@ -6952,6 +6963,11 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
 /// Also used by `gap_analysis` to classify unimplemented effect text.
 pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "add",
+    // CR 701.47a: Amass — "its controller amasses Goblins X" (Azog, Moria's
+    // Ruin). Subject-shifted amass clauses route through the
+    // PredicateAst::ImperativeFallback arm in `lower_subject_predicate_ast`,
+    // mirroring "manifest" below.
+    "amass",
     "attack",
     "become",
     "block",

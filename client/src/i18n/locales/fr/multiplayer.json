@@ -113,16 +113,23 @@
     "draftBadge": "Draft {{setCode}}",
     "p2pBadgeTitle": "Partie pair-à-pair (l'hôte exécute le moteur)",
     "sandboxBadgeTitle": "Cette partie autorise les actions de débogage. À utiliser pour des tests — pas pour un match compétitif.",
+    "hintSlow": "LENT",
+    "hintSlowTitle": "Ce serveur répond lentement aux joueurs ces derniers temps.",
+    "hintUnreliable": "PEU FIABLE",
+    "hintUnreliableTitle": "Les joueurs ont souvent échoué à se connecter à ce serveur récemment.",
     "rankedBadgeTitle": "Salon classé",
     "rankedBadge": "CLASSÉ",
     "anonymous": "Anonyme",
     "by": "par {{name}}",
     "passwordProtected": "Protégé par mot de passe",
-    "join": "Rejoindre"
+    "join": "Rejoindre",
+    "originTitle": "Référencée par {{name}} {{kind}}",
+    "kindFull": "(serveur de jeu)",
+    "kindLobbyOnly": "(courtier de salon)"
   },
   "serverPicker": {
     "title": "Serveur",
-    "subtitle": "Choisissez une région, ou connectez-vous à une instance auto-hébergée.",
+    "subtitle": "Choisissez où vous hébergez, et quels salons vous parcourez.",
     "noneLabel": "Aucun (P2P uniquement)",
     "directCodes": "codes directs",
     "official": "Officiel",
@@ -133,7 +140,23 @@
     "urlError": "L'URL doit commencer par ws:// ou wss://",
     "connected": "Connecté",
     "connectionFailed": "Échec de la connexion",
-    "testing": "Test en cours…"
+    "testing": "Test en cours…",
+    "hostingServer": "Serveur d'hébergement",
+    "hostingServerHelp": "Où les parties que vous hébergez sont créées et enregistrées.",
+    "sources": "Sources de salon",
+    "sourcesHelp": "Les tables ouvertes de toutes les sources ci-dessous sont fusionnées en une seule liste.",
+    "addSource": "Ajouter une source",
+    "remove": "Retirer",
+    "useForHosting": "Utiliser pour héberger",
+    "sourceStatusConnecting": "Connexion…",
+    "sourceStatusDegraded": "Injoignable",
+    "sourceDuplicate": "Ce serveur est déjà une source de salon.",
+    "sourceCapReached": "Jusqu'à {{max}} sources peuvent être ajoutées.",
+    "directoryOrigin": "Annuaire",
+    "sourceScore": "Score {{score}}",
+    "enable": "Activer",
+    "disable": "Désactiver",
+    "incompatibleVersion": "Incompatible — version du serveur {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Aucune salle de draft disponible",
@@ -183,7 +206,9 @@
     "hostP2PGame": "Héberger une partie P2P",
     "passwordRequired": "Mot de passe requis",
     "passwordPlaceholder": "Saisissez le mot de passe",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Certaines sources de salon sont injoignables",
+    "invalidJoinServer": "L'adresse de serveur de ce code n'est pas valide."
   },
   "hostSetup": {
     "hostDirectMatch": "Héberger un match direct",
@@ -213,6 +238,10 @@
     "startWhenFull": "Démarrer une fois complet",
     "ranked": "Classé",
     "listInLobby": "Répertorier dans le salon",
+    "hostServer": "Héberger sur",
+    "hostServerHelp": "Quel serveur exécute cette partie. Vos réglages de navigation et de code direct ne changent pas.",
+    "hostServerScore": "{{name}} — santé {{score}}",
+    "hostServerUnscored": "{{name}} — pas encore évalué",
     "sandboxMode": "Mode bac à sable — autoriser les actions de débogage",
     "sandboxModeHelp": "L'hôte peut manipuler directement l'état de la partie (déplacer des cartes, modifier les points de vie, modifier les marqueurs) et accorder la permission de débogage à d'autres joueurs. À utiliser pour des tests ou du jeu bac à sable — pas pour des matchs compétitifs. Ce paramètre ne peut pas être modifié une fois la partie lancée.",
     "setPassword": "Définir un mot de passe",
@@ -220,7 +249,17 @@
     "back": "Retour",
     "opening": "Ouverture…",
     "hostP2PGame": "Héberger une partie P2P",
-    "hostGame": "Héberger une partie"
+    "hostGame": "Héberger une partie",
+    "savedFormats": "Formats personnalisés enregistrés",
+    "saveAsCustomFormat": "Enregistrer le format",
+    "customFormatNamePlaceholder": "Nommez ce format",
+    "useCustomFormat": "Utiliser",
+    "customFormatInUse": "Utilisé",
+    "deleteCustomFormat": "Supprimer",
+    "loadingCustomFormat": "Chargement du format…",
+    "noSavedCustomFormats": "Aucun format personnalisé enregistré.",
+    "customFormatResolveFailed": "Impossible de charger ce format enregistré.",
+    "customFormatHostingUnavailable": "Héberger avec un format personnalisé n'est pas encore pris en charge — la légalité du deck ne peut pas être vérifiée pour ce format. Enregistrez-le et prévisualisez-le pour l'instant."
   },
   "page": {
     "deckRejected": "Le deck a été refusé par l'hôte.",
@@ -243,6 +282,8 @@
     "descriptionDraftLobby": "En attente que des joueurs rejoignent le pod de draft.",
     "descriptionDeckSelectFormat": "Choisissez un deck pour {{format}}.",
     "descriptionDeckSelect": "Choisissez le deck que vous voulez amener en ligne.",
+    "offlineUnavailableTitle": "Le multijoueur n’est pas disponible hors ligne.",
+    "offlineUnavailableDescription": "Reconnectez-vous ou désactivez le mode hors ligne pour héberger ou rejoindre une partie multijoueur.",
     "eyebrow": "Multijoueur",
     "activeDeck": "Deck actif",
     "edit": "Modifier",
@@ -250,7 +291,8 @@
     "noDeckWarning": "Aucun deck sélectionné — vous devrez en choisir un avant d'héberger.",
     "pickDeck": "Choisir un deck",
     "anonymous": "Anonyme",
-    "joining": "Connexion"
+    "joining": "Connexion",
+    "joinNeedsServer": "Choisissez un serveur avant de rejoindre une partie."
   },
   "draftLobbyPanel": {
     "draftPod": "Pod de draft",

@@ -34,6 +34,7 @@ import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
+import { BoosterPackModal, boosterPackEntries } from "./BoosterPackModal.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
@@ -57,6 +58,7 @@ import {
   CoinFlipKeepModal,
   DigModal,
   RevealModal,
+  RippleBottomOrderModal,
   ScryModal,
   ArrangePlanarDeckTopModal,
   SurveilModal,
@@ -74,6 +76,8 @@ import {
 } from "./cardChoice/shared.tsx";
 import { manaValueOfObject } from "./cardChoice/manaValue.ts";
 import SelectableCardGrid from "./cardChoice/SelectableCardGrid.tsx";
+import { CardOrganizerToolbar } from "./cardChoice/CardOrganizerToolbar.tsx";
+import { useCardOrganizer } from "./cardChoice/useCardOrganizer.ts";
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type SearchPartitionChoice = Extract<
   WaitingFor,
@@ -131,6 +135,14 @@ export function CardChoiceModal() {
     case "ArrangePlanarDeckTopChoice":
       if (!canActForWaitingState) return null;
       return <ArrangePlanarDeckTopModal data={waitingFor.data} />;
+    case "RippleBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <RippleBottomOrderModal
+          key={waitingFor.data.cards.join("-")}
+          data={waitingFor.data}
+        />
+      );
     case "CoinFlipKeepChoice":
       if (!canActForWaitingState) return null;
       return <CoinFlipKeepModal data={waitingFor.data} />;
@@ -149,14 +161,28 @@ export function CardChoiceModal() {
     case "SearchPartitionChoice":
       if (!canActForWaitingState) return null;
       return <SearchPartitionModal data={waitingFor.data} />;
-    case "OutsideGameChoice":
+    case "OutsideGameChoice": {
       if (!canActForWaitingState) return null;
+      // CR 400.11b: an opened booster pack is an outside-the-game choice whose
+      // candidates are all revealed cards from one pack — shown as the pack
+      // itself rather than as the wishboard's name list.
+      const pack = boosterPackEntries(waitingFor.data.choices);
+      if (pack) {
+        return (
+          <BoosterPackModal
+            key={outsideGameChoiceKey(waitingFor.data)}
+            data={waitingFor.data}
+            entries={pack}
+          />
+        );
+      }
       return (
         <OutsideGameModal
           key={outsideGameChoiceKey(waitingFor.data)}
           data={waitingFor.data}
         />
       );
+    }
     case "ChooseFromZoneChoice":
       if (!canActForWaitingState) return null;
       // A "for each player, choose ..." iteration (Breach the Multiverse) emits
@@ -498,6 +524,11 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       )
     : data.cards;
   const selectableCards = new Set(data.cards);
+  const { sort, setSort, query, setQuery, ordered: visibleCards } =
+    useCardOrganizer({
+      cards: displayedCards,
+      objects: objects ?? {},
+    });
   const countValid = searchChoiceAllowsPartialFind(data)
     ? selectedOrder.length <= data.count
     : selectedOrder.length === data.count;
@@ -505,7 +536,8 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
 
   useEffect(() => {
     setSelectedOrder([]);
-  }, [data]);
+    setQuery("");
+  }, [data, setQuery]);
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
@@ -539,49 +571,64 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       subtitle={subtitle}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
-      <ScrollableCardStrip>
-        {displayedCards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const selectedIndex = selectedOrder.indexOf(id);
-          const isSelected = selectedIndex >= 0;
-          const isSelectable = selectableCards.has(id);
-          return (
-            <motion.button
-              key={id}
-              disabled={!isSelectable}
-              className={`relative shrink-0 rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-emerald-400/80"
-                  : isSelectable
-                    ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-                    : "cursor-not-allowed opacity-40 grayscale"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
-              onClick={() => isSelectable && toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
-                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {isOrdered
-                      ? formatTopdeckOrderLabel(selectedIndex, t)
-                      : t("cardChoice.badges.choose")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <CardOrganizerToolbar
+          className="mx-auto flex items-center gap-2 text-xs text-slate-300"
+          sort={sort}
+          onSortChange={setSort}
+          query={query}
+          onQueryChange={setQuery}
+          showSort={false}
+          showQuery
+        />
+        <ScrollableCardStrip>
+          {visibleCards.map((id, index) => {
+            const obj = objects[id];
+            if (!obj) return null;
+            const selectedIndex = selectedOrder.indexOf(id);
+            const isSelected = selectedIndex >= 0;
+            const isSelectable = selectableCards.has(id);
+            return (
+              <motion.button
+                key={id}
+                disabled={!isSelectable}
+                className={`relative shrink-0 rounded-lg transition ${
+                  isSelected
+                    ? "z-10 ring-2 ring-emerald-400/80"
+                    : isSelectable
+                      ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+                      : "cursor-not-allowed opacity-40 grayscale"
+                }`}
+                initial={{ opacity: 0, y: 60, scale: 0.85 }}
+                animate={{
+                  opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4,
+                  y: 0,
+                  scale: 1,
+                }}
+                transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+                whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
+                onClick={() => isSelectable && toggleSelect(id)}
+                {...hoverProps(id)}
+              >
+                <CardImage
+                  {...objectImageProps(obj)}
+                  size="normal"
+                  className={CHOICE_CARD_IMAGE_CLASS}
+                />
+                {isSelected && (
+                  <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                    <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+                      {isOrdered
+                        ? formatTopdeckOrderLabel(selectedIndex, t)
+                        : t("cardChoice.badges.choose")}
+                    </span>
+                  </div>
+                )}
+              </motion.button>
+            );
+          })}
+        </ScrollableCardStrip>
+      </div>
     </ChoiceOverlay>
   );
 }
@@ -700,6 +747,8 @@ function entryKey(entry: OutsideGameChoiceEntry): string {
       return `sb:${entry.source.data.sideboard_index}`;
     case "FaceUpExile":
       return `fx:${entry.source.data.object_id}`;
+    case "BoosterPack":
+      return `bp:${entry.source.data.pack_slot}`;
   }
 }
 
@@ -719,6 +768,11 @@ function entryToSelection(entry: OutsideGameChoiceEntry): OutsideGameSelection {
       return {
         type: "FaceUpExile",
         data: { object_id: entry.source.data.object_id },
+      };
+    case "BoosterPack":
+      return {
+        type: "BoosterPack",
+        data: { pack_slot: entry.source.data.pack_slot },
       };
   }
 }
@@ -807,7 +861,11 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
           const sourceLabel =
             entry.source.type === "FaceUpExile"
               ? t("outsideGame.fromExile")
-              : t("outsideGame.fromSideboard");
+              : entry.source.type === "BoosterPack"
+                ? t("outsideGame.fromBoosterPack", {
+                    setCode: entry.source.data.set_code,
+                  })
+                : t("outsideGame.fromSideboard");
           return (
             <button
               key={key}
@@ -3051,7 +3109,7 @@ function ManaSingleColorChoiceModal({
           ? t("cardChoice.manaColor.subtitleBatch")
           : t("cardChoice.manaColor.subtitle")
       }
-      widthClassName="w-fit max-w-full"
+      widthClassName="w-full lg:w-fit"
       maxWidthClassName="max-w-md"
       footer={
         <ConfirmButton
@@ -3061,7 +3119,7 @@ function ManaSingleColorChoiceModal({
         />
       }
     >
-      <div className="mx-auto flex w-fit items-center justify-center gap-3 px-4 py-4 sm:gap-5 sm:px-6 sm:py-6">
+      <div className="mx-auto flex w-full flex-wrap items-center justify-center gap-3 px-4 py-4 lg:w-fit lg:flex-nowrap sm:gap-5 sm:px-6 sm:py-6">
         {options.map((color, index) => {
           const isSelected = selected === color;
           return (
@@ -3077,6 +3135,7 @@ function ManaSingleColorChoiceModal({
               transition={{ delay: 0.05 + index * 0.05, duration: 0.25 }}
               whileHover={{ scale: 1.1 }}
               onClick={() => setSelected(isSelected ? null : color)}
+              aria-label={color}
             >
               <ManaSymbol shard={MANA_COLOR_SHARDS[color]} size="lg" />
             </motion.button>

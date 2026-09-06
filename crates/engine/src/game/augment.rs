@@ -90,6 +90,7 @@ pub fn resolve_combine_host(
                 up_to: false,
                 constraint: None,
                 source_id: ability.source_id,
+                reciprocal_role: None,
             };
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
@@ -156,6 +157,7 @@ pub fn resolve_choose_augment_and_combine(
                 up_to: false,
                 constraint: None,
                 source_id: ability.source_id,
+                reciprocal_role: None,
             };
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ChooseAugmentAndCombineWithHost,

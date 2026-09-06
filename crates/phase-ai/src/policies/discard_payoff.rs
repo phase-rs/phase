@@ -155,15 +155,20 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
             })
         }
         // CR 601.2 + CR 702.34a: cast-shaped siblings of the plain `CastSpell`
-        // seam. `PolicyContext::cast_facts` is populated only for the `CastSpell`
-        // announcement seam, so this policy has no AST to classify for these and
-        // must report neutral rather than guess.
+        // seam, all declined a discard credit — for two different reasons.
         //
-        // `CastSpellAsMadness` is listed here deliberately despite belonging to
-        // this archetype thematically: a madness cast is the payoff the DISCARD
-        // already earned, not a new discard. Crediting it would double-count one
-        // event. Listed explicitly, not wildcarded: if `cast_facts` later covers
-        // one of these, this arm is where the decision to credit it gets made.
+        // `Foretell` / `PlayFaceDown` / `ActivateNinjutsu` / `CastPreparedCopy` /
+        // `CastParadigmCopy` are outside the cast family, so
+        // `PolicyContext::cast_facts` is empty for them and this policy has no
+        // AST to classify — neutral rather than guess.
+        //
+        // The five alternative/free-cast variants DO carry `cast_facts` since
+        // the cast-family widening, so the AST is now available for them and
+        // this arm is where the decision to read it gets made. It stays `false`
+        // for now: widening this policy is its own change with its own test.
+        // `CastSpellAsMadness` stays `false` on the merits regardless — a
+        // madness cast is the payoff the DISCARD already earned, not a new
+        // discard, and crediting it would double-count one event.
         GameAction::Foretell { .. }
         | GameAction::PlayFaceDown { .. }
         | GameAction::ActivateNinjutsu { .. }

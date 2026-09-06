@@ -36,7 +36,9 @@ export function AppShell() {
   const [draftChromeConfig, setDraftChromeConfig] = useState<DraftShellChromeConfig>({ mode: "default" });
   const { mode: draftChromeMode, phoneAction, showProgress = true, topActions = [] } = draftChromeConfig;
   const phoneDraftChrome = draftChromeMode === "phone-drafting" || draftChromeMode === "phone-deckbuilding";
-  const draftTopRowChrome = phoneDraftChrome || draftChromeMode === "tablet-drafting";
+  const draftTopRowChrome = phoneDraftChrome
+    || draftChromeMode === "tablet-drafting"
+    || draftChromeMode === "tablet-deckbuilding";
   const responsiveDraftChrome = draftChromeMode !== "default";
   const shellDraftPhase = draftChromeMode === "phone-deckbuilding" || draftChromeMode === "tablet-deckbuilding"
     ? "deckbuilding"

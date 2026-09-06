@@ -113,16 +113,23 @@
     "draftBadge": "{{setCode}} Draft",
     "p2pBadgeTitle": "Peer-to-Peer-Spiel (der Host führt die Engine aus)",
     "sandboxBadgeTitle": "Dieses Spiel erlaubt Debug-Aktionen. Zum Testen nutzen — keine kompetitive Partie.",
+    "hintSlow": "LANGSAM",
+    "hintSlowTitle": "Dieser Server hat zuletzt langsam auf Spieler reagiert.",
+    "hintUnreliable": "UNZUVERLÄSSIG",
+    "hintUnreliableTitle": "Spieler konnten sich zuletzt oft nicht mit diesem Server verbinden.",
     "rankedBadgeTitle": "Ranglistenraum",
     "rankedBadge": "RANGLISTE",
     "anonymous": "Anonym",
     "by": "von {{name}}",
     "passwordProtected": "Passwortgeschützt",
-    "join": "Beitreten"
+    "join": "Beitreten",
+    "originTitle": "Gelistet von {{name}} {{kind}}",
+    "kindFull": "(Spielserver)",
+    "kindLobbyOnly": "(Lobby-Broker)"
   },
   "serverPicker": {
     "title": "Server",
-    "subtitle": "Wähle eine Region oder verbinde dich mit einer selbst gehosteten Instanz.",
+    "subtitle": "Wähle, wo du hostest und welche Lobbys du durchsuchst.",
     "noneLabel": "Keiner (nur P2P)",
     "directCodes": "direkte Codes",
     "official": "Offiziell",
@@ -133,7 +140,23 @@
     "urlError": "Die URL muss mit ws:// oder wss:// beginnen",
     "connected": "Verbunden",
     "connectionFailed": "Verbindung fehlgeschlagen",
-    "testing": "Wird getestet…"
+    "testing": "Wird getestet…",
+    "hostingServer": "Host-Server",
+    "hostingServerHelp": "Wo die von dir gehosteten Spiele erstellt und registriert werden.",
+    "sources": "Lobby-Quellen",
+    "sourcesHelp": "Offene Tische aller Quellen unten werden zu einer Liste zusammengeführt.",
+    "addSource": "Quelle hinzufügen",
+    "remove": "Entfernen",
+    "useForHosting": "Zum Hosten verwenden",
+    "sourceStatusConnecting": "Verbinde…",
+    "sourceStatusDegraded": "Nicht erreichbar",
+    "sourceDuplicate": "Dieser Server ist bereits eine Lobby-Quelle.",
+    "sourceCapReached": "Es können bis zu {{max}} Quellen hinzugefügt werden.",
+    "directoryOrigin": "Verzeichnis",
+    "sourceScore": "Punktzahl {{score}}",
+    "enable": "Aktivieren",
+    "disable": "Deaktivieren",
+    "incompatibleVersion": "Inkompatibel — Serverversion {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "Keine Draft-Räume verfügbar",
@@ -183,7 +206,9 @@
     "hostP2PGame": "P2P-Spiel hosten",
     "passwordRequired": "Passwort erforderlich",
     "passwordPlaceholder": "Passwort eingeben",
-    "watch": "Watch"
+    "watch": "Watch",
+    "sourcesDegraded": "Einige Lobby-Quellen sind nicht erreichbar",
+    "invalidJoinServer": "Die Serveradresse in diesem Beitrittscode ist ungültig."
   },
   "hostSetup": {
     "hostDirectMatch": "Direkte Partie hosten",
@@ -213,6 +238,10 @@
     "startWhenFull": "Starten, wenn voll",
     "ranked": "Rangliste",
     "listInLobby": "In Lobby listen",
+    "hostServer": "Hosten auf",
+    "hostServerHelp": "Welcher Server diese Partie ausführt. Deine Browsing- und Direktcode-Einstellungen ändern sich nicht.",
+    "hostServerScore": "{{name}} — Zustand {{score}}",
+    "hostServerUnscored": "{{name}} — noch nicht bewertet",
     "sandboxMode": "Sandbox-Modus — Debug-Aktionen erlauben",
     "sandboxModeHelp": "Der Host kann den Spielzustand direkt manipulieren (Karten verschieben, Leben ändern, Marken anpassen) und anderen Spielern Debug-Berechtigung erteilen. Zum Testen oder für Sandbox-Spiele nutzen — nicht für kompetitive Partien. Diese Einstellung kann nach dem Spielstart nicht mehr geändert werden.",
     "setPassword": "Passwort festlegen",
@@ -220,7 +249,17 @@
     "back": "Zurück",
     "opening": "Wird geöffnet…",
     "hostP2PGame": "P2P-Spiel hosten",
-    "hostGame": "Spiel hosten"
+    "hostGame": "Spiel hosten",
+    "savedFormats": "Gespeicherte eigene Formate",
+    "saveAsCustomFormat": "Format speichern",
+    "customFormatNamePlaceholder": "Format benennen",
+    "useCustomFormat": "Verwenden",
+    "customFormatInUse": "In Verwendung",
+    "deleteCustomFormat": "Löschen",
+    "loadingCustomFormat": "Format wird geladen…",
+    "noSavedCustomFormats": "Noch keine eigenen Formate gespeichert.",
+    "customFormatResolveFailed": "Dieses gespeicherte Format konnte nicht geladen werden.",
+    "customFormatHostingUnavailable": "Das Hosten mit einem eigenen Format wird noch nicht unterstützt — die Deck-Legalität kann dafür nicht geprüft werden. Speichere und sieh es dir vorerst nur an."
   },
   "page": {
     "deckRejected": "Das Deck wurde vom Host abgelehnt.",
@@ -243,6 +282,8 @@
     "descriptionDraftLobby": "Warten, bis Spieler dem Draft-Pod beitreten.",
     "descriptionDeckSelectFormat": "Wähle ein Deck für {{format}}.",
     "descriptionDeckSelect": "Wähle das Deck, das du online mitbringen möchtest.",
+    "offlineUnavailableTitle": "Mehrspieler ist offline nicht verfügbar.",
+    "offlineUnavailableDescription": "Stelle die Verbindung wieder her oder deaktiviere den Offline-Modus, um ein Mehrspielerspiel zu hosten oder ihm beizutreten.",
     "eyebrow": "Mehrspieler",
     "activeDeck": "Aktives Deck",
     "edit": "Bearbeiten",
@@ -250,7 +291,8 @@
     "noDeckWarning": "Kein Deck ausgewählt — du musst vor dem Hosten eines auswählen.",
     "pickDeck": "Deck wählen",
     "anonymous": "Anonym",
-    "joining": "Tritt bei"
+    "joining": "Tritt bei",
+    "joinNeedsServer": "Wähle einen Server, bevor du einem Spiel beitrittst."
   },
   "draftLobbyPanel": {
     "draftPod": "Draft-Pod",

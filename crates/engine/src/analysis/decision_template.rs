@@ -467,13 +467,11 @@ impl std::fmt::Display for RankingError {
 /// ONE slot. A one-element ranking IS the old constant pin; that is the parameterization,
 /// and it is why there is no `Ranked` sibling of [`TargetSchedule`].
 ///
-/// CONSUMED AT AN EPISODE BOUNDARY, NEVER MID-DRIVE. Within one accepted drive only
-/// [`Ranking::head`] is ever resolved (see `evaluate_schedule`): advancing to a later entry
-/// because a game event removed the head would be the conditional action CR 732.2a bars, and
-/// CR 732.2a also requires the sequence to END at a place where a player has priority —
-/// which the drive-end handback already is. The tail is a pre-declaration for the NEXT
-/// episode, validated by THAT episode's `validate_pins` against THAT episode's published
-/// legal set.
+/// ONLY [`Ranking::head`] IS EVER RESOLVED (see `evaluate_schedule`): advancing to a later
+/// entry because a game event removed the head would be the conditional action CR 732.2a bars.
+/// CR 732.2c therefore makes a longer ranking a proposal certifying a choice nobody takes, and
+/// `validate_pins` refuses one at DECLARE time. The type still admits one — a save written
+/// before that rule can carry it — so the defensive walks over the whole list stay correct.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "Vec<AnnouncementSubject>")]
 pub struct Ranking(Vec<AnnouncementSubject>);
@@ -596,9 +594,8 @@ pub enum IterationCount {
 /// carries a [`Ranking`] rather than a single subject: a variant consults the live legal set
 /// to **re-bind the declared subject** (CR 400.7); it never uses the live set to
 /// **substitute a different subject**. Selecting a different entry because a game event
-/// removed the first is exactly the conditional action CR 732.2a bars — which is why a
-/// `Ranking` is advanced only at an episode boundary, by a caller, never by
-/// `evaluate_schedule`.
+/// removed the first is exactly the conditional action CR 732.2a bars — which is why
+/// `evaluate_schedule` reads a step's [`Ranking::head`] and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TargetSchedule {
     Constant(Ranking),
@@ -783,12 +780,8 @@ fn resolve_pin(
         // NOT re-bind, the `Result` collect fails the whole template at every consumer; this
         // commit changes which sources re-bind, never that disposition. Where the same
         // template minus its `Order` pins is itself submittable, that drive was therefore
-        // already expressible by omitting them. It is NOT always submittable: `pin_slot`
-        // addresses an `Order` pin to `{source, index 0}` and `validate_pins`' `Order` arm is
-        // the one arm that checks nothing, so an `Order` pin can be the sole cover of a
-        // required point, and dropping it then fails `predictability_gate`. That shape is
-        // pre-existing and zone-independent — this commit changes only which sources can be
-        // spelled into it, never the shape itself.
+        // already expressible by omitting them — and since `validate_pins` refuses an `Order`
+        // pin outright (CR 603.3b), omitting them is the only submittable spelling.
         //
         // No template's ACCEPTANCE changes here: `declaration_conforms` is
         // `predictability_gate` + `validate_pins`, and neither reaches `resolve_pin`. What
@@ -1078,8 +1071,8 @@ pub(crate) fn resolve_ability_instance(
 ///
 /// HEAD-ONLY, and that is the CR 732.2a clause rather than a simplification: skipping to a
 /// later entry because the head became illegal is a conditional action ("the outcome of a
-/// game event determines the next action a player takes"). The tail is the NEXT episode's
-/// pre-declaration; only an episode boundary may advance it.
+/// game event determines the next action a player takes"). Nothing advances a ranking, so
+/// [`schedule_announces_every_declared_subject`] refuses a longer one at declare time.
 fn evaluate_schedule(
     sched: &TargetSchedule,
     slot: &DecisionSlot,
@@ -1136,6 +1129,40 @@ fn evaluate_schedule(
     })
 }
 
+/// CR 732.2a + CR 732.2c: whether every announcement subject `schedule` declares is one
+/// [`evaluate_schedule`] resolves at SOME index. The declare-time dual of that reader, derived
+/// from it arm by arm rather than restated — CR 732.2c makes every choice in an accepted
+/// proposal a choice that is taken, so a declared subject no index reaches would certify a
+/// choice nobody makes.
+///
+/// * a step's ranking is read through [`Ranking::head`] alone, so an entry past the head is one
+///   no count, no range and no schedule shape can make a drive read;
+/// * `Piecewise` selects the greatest start at or below the index, and `max_by_key` keeps the
+///   LAST of equal maxima, so a segment sharing a start with a later-declared one is selected at
+///   no index at all. Distinctness of the starts is therefore the property and their ORDER is no
+///   part of it: the comparison SORTS first, or a collision the declared order separates is
+///   admitted, and it compares with `!=`, never `<`, or a descending pair is refused although
+///   the drive reads both its segments.
+///
+/// A step the ACCEPTED COUNT does not reach is a DIFFERENT question and not this one: that
+/// subject is read at its own index under a longer count, and refusing it is the over-veto
+/// [`crate::game::engine::shortcut_validated_range`] exists to remove.
+fn schedule_announces_every_declared_subject(schedule: &TargetSchedule) -> bool {
+    // Short-circuiting on the SECOND entry: `count() == 1` would walk the whole list to answer
+    // a question about one element of it.
+    let states_one = |ranking: &Ranking| ranking.iter().nth(1).is_none();
+    match schedule {
+        TargetSchedule::Constant(ranking) => states_one(ranking),
+        TargetSchedule::RoundRobin(steps) => steps.iter().all(states_one),
+        TargetSchedule::Piecewise(steps) => {
+            let mut starts: Vec<u32> = steps.iter().map(|(start, _)| *start).collect();
+            starts.sort_unstable();
+            steps.iter().all(|(_, ranking)| states_one(ranking))
+                && starts.windows(2).all(|pair| pair[0] != pair[1])
+        }
+    }
+}
+
 /// CR 732.2a firewall: a `Scheduled` template may auto-drive a shortcut only if every
 /// free choice in the cycle is pinned (TOTAL COVERAGE).
 ///
@@ -1152,33 +1179,78 @@ fn evaluate_schedule(
 /// make reactively is one they cannot pin, which surfaces HERE as an unpinned slot.
 /// Per-iteration legality (CR 608.2b) is [`resolve`]'s re-check, run for each iteration
 /// up to the count by the caller (later phase).
+/// Coverage is per published POINT and KIND-AWARE ([`pin_answers_point`]), not per slot: a
+/// pin of a different CR choice kind at a point's slot leaves that point unpinned.
 pub fn predictability_gate(
     template: &DecisionTemplate,
-    required_slots: &[DecisionSlot],
+    required: &[DecisionPoint],
 ) -> Result<(), PredictabilityViolation> {
-    for slot in required_slots {
-        if !template.decisions.iter().any(|pin| &pin_slot(pin) == slot) {
-            return Err(PredictabilityViolation::UnpinnedChoice { slot: slot.clone() });
+    for point in required {
+        if !template
+            .decisions
+            .iter()
+            .any(|pin| pin_answers_point(pin, point))
+        {
+            return Err(PredictabilityViolation::UnpinnedChoice {
+                slot: point.slot.clone(),
+            });
         }
     }
     Ok(())
 }
 
-/// The slot a pin addresses. Exhaustive over `PinnedDecision` (no wildcard): an `Order`
-/// pin raises exactly one ordering decision per source, addressed by that source at
-/// sub-index 0; the other kinds carry an explicit slot.
-fn pin_slot(pin: &PinnedDecision) -> DecisionSlot {
+/// The loop-declaration slot a pin addresses, or `None` when it addresses none.
+///
+/// CR 603.3b: an `Order` pin is a choice about the APNAP order simultaneously-triggered
+/// abilities are put on the stack in — not one of the per-iteration choices a CR 732.2a
+/// shortcut declaration answers — so it addresses no slot here. Synthesizing
+/// `{source, index: 0}` for it collided with the sub-index [`DecisionSlot::target`]
+/// reserves, which let one ordering pin cover a published targeting point.
+fn pin_slot(pin: &PinnedDecision) -> Option<&DecisionSlot> {
     match pin {
-        PinnedDecision::Order { source, .. } => DecisionSlot {
-            source: source.clone(),
-            index: 0,
-        },
+        PinnedDecision::Order { .. } => None,
         PinnedDecision::Targets { slot, .. }
         | PinnedDecision::Mode { slot, .. }
         | PinnedDecision::MayChoice { slot, .. }
         | PinnedDecision::UnlessBreak { slot, .. }
         | PinnedDecision::ManaColor { slot, .. }
-        | PinnedDecision::ConvokeTaps { slot } => slot.clone(),
+        | PinnedDecision::ConvokeTaps { slot } => Some(slot),
+    }
+}
+
+/// CR 732.2a: whether `pin` answers `point` — same slot AND the 1:1 kind peer
+/// [`DecisionPointKind`]'s own doc asserts. Exhaustive and wildcard-free over the
+/// pin x point-kind product, so a new variant on either enum build-breaks into an explicit
+/// decision instead of silently satisfying coverage.
+fn pin_answers_point(pin: &PinnedDecision, point: &DecisionPoint) -> bool {
+    if pin_slot(pin) != Some(&point.slot) {
+        return false;
+    }
+    match (pin, &point.kind) {
+        (PinnedDecision::Targets { .. }, DecisionPointKind::Targets { .. })
+        | (PinnedDecision::Mode { .. }, DecisionPointKind::Mode { .. })
+        | (PinnedDecision::MayChoice { .. }, DecisionPointKind::MayChoice)
+        | (PinnedDecision::UnlessBreak { .. }, DecisionPointKind::UnlessBreak)
+        | (PinnedDecision::ManaColor { .. }, DecisionPointKind::ManaColor { .. })
+        | (PinnedDecision::ConvokeTaps { .. }, DecisionPointKind::ConvokeTaps { .. }) => true,
+        // A right-slot pin of the wrong kind answers a different question than the point
+        // asks. `Order` is unreachable here (`pin_slot` returned `None` above) and is listed
+        // so the product stays total.
+        (
+            PinnedDecision::Order { .. }
+            | PinnedDecision::Targets { .. }
+            | PinnedDecision::Mode { .. }
+            | PinnedDecision::MayChoice { .. }
+            | PinnedDecision::UnlessBreak { .. }
+            | PinnedDecision::ManaColor { .. }
+            | PinnedDecision::ConvokeTaps { .. },
+            DecisionPointKind::Targets { .. }
+            | DecisionPointKind::Mode { .. }
+            | DecisionPointKind::MayChoice
+            | DecisionPointKind::UnlessBreak
+            | DecisionPointKind::ManaColor { .. }
+            | DecisionPointKind::ConvokeTaps { .. },
+        ) => false,
     }
 }
 
@@ -1200,11 +1272,20 @@ pub enum PredictabilityViolation {
 pub enum PinValidation {
     /// The pin addresses a slot the offer never exposed (no matching `DecisionPoint`).
     UnexposedSlot { slot: DecisionSlot },
-    /// CR 608.2b: a `Targets` pin resolves to a value outside the slot's offered
-    /// `legal_targets` (or fails to resolve to a live legal object at all).
+    /// Raised for two reasons, which no production caller tells apart (see
+    /// [`declaration_conforms`]'s `bool` return):
+    ///
+    /// * CR 608.2b — a `Targets` pin resolves to a value outside the slot's offered
+    ///   `legal_targets`, or fails to resolve to a live legal object at all;
+    /// * CR 732.2c — a `Scheduled` pin declares an announcement no index resolves
+    ///   ([`schedule_announces_every_declared_subject`]).
     IllegalPinValue { slot: DecisionSlot },
     /// CR 700.2: a `Mode` pin names an index outside the slot's `available_modes`.
     IllegalModeIndex { slot: DecisionSlot },
+    /// CR 603.3b + CR 732.2a: the pin is a trigger-ordering choice, which is not one of the
+    /// per-iteration choices a loop declaration answers. It addresses no slot, so it carries
+    /// the source rather than a [`DecisionSlot`].
+    NotALoopDecision { source: DecisionSource },
 }
 
 /// Map a resolved concrete target to its wire-side [`TargetRef`] peer (the read-side
@@ -1240,7 +1321,8 @@ pub(crate) fn resolve_target_ref(
 /// COVERS the drive is the CALLER's obligation, discharged by
 /// `game::engine::shortcut_validated_range`, which reads the range off the declared count
 /// rather than off the schedule's own length. EXHAUSTIVE over [`PinnedDecision`] with no
-/// wildcard: `Order` (CR 603.3b trigger-ordering) is not a loop-declaration point;
+/// wildcard: `Order` (CR 603.3b trigger-ordering) is not a loop-declaration point and is
+/// refused as `NotALoopDecision`;
 /// `ConvokeTaps` must still address an exposed matching point even though its concrete taps are
 /// re-bound live by `select_convoke_taps`. Runs once at declare (the board is frozen through Accept); the drive's
 /// per-iteration [`resolve`] is the runtime CR 608.2b backstop.
@@ -1274,6 +1356,17 @@ pub fn validate_pins(
                 // require the concrete value to be an offered legal target. A scheduled pin
                 // that cannot resolve to a live legal object is itself an illegal value.
                 for t in targets {
+                    // CR 732.2a + CR 732.2c: a proposal states only announcements the drive
+                    // makes. The walk is STRUCTURAL over the pin's schedule — every step's
+                    // ranking — and never per resolved index: the loop below visits INDICES and
+                    // `resolve_target` answers each with a `ConcreteTarget`, never the
+                    // `&Ranking`, so a clause inside it cannot see a step no visited index
+                    // selects.
+                    if let TargetPin::Scheduled(schedule) = t {
+                        if !schedule_announces_every_declared_subject(schedule) {
+                            return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                        }
+                    }
                     // CR 732.2b + CR 732.2c: NO `.max(1)` FLOOR. A shortened proposal whose
                     // new ending point is the first deviating choice — CR 732.2b's "that
                     // place becomes the new ending point" — is a ZERO-repetition accepted
@@ -1374,8 +1467,14 @@ pub fn validate_pins(
                     return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
                 }
             }
-            // CR 603.3b: trigger-ordering pins are not loop-declaration points.
-            PinnedDecision::Order { .. } => {}
+            // CR 603.3b: a trigger-ordering pin is not a loop-declaration point, so it can
+            // never be a legal answer here. Refused rather than ignored, which is what keeps
+            // it out of `proposal.template`, where `resolve` would still resolve it.
+            PinnedDecision::Order { source, .. } => {
+                return Err(PinValidation::NotALoopDecision {
+                    source: source.clone(),
+                })
+            }
         }
     }
     Ok(())
@@ -1383,8 +1482,8 @@ pub fn validate_pins(
 
 /// CR 732.2a: THE SINGLE AUTHORITY for *"is this declaration a legal answer to this offer's
 /// schema?"* — [`predictability_gate`]'s COVERAGE half and [`validate_pins`]' VALUE half, run
-/// together against a `required` slot list derived HERE from `schema.points` rather than by
-/// each caller.
+/// together against `schema.points` itself rather than against a slot projection each caller
+/// derives.
 ///
 /// Three sites ask that question — `game::engine::handle_declare_shortcut` (the declare
 /// firewall), `game::interaction::materialize_loop_shortcut_response` (the human ingress) and
@@ -1395,24 +1494,17 @@ pub fn validate_pins(
 ///
 /// # `validated_range` STAYS A PARAMETER, and that is a measurement, not a hedge
 ///
-/// The two pre-existing call sites did NOT pass the same range, so folding one in would adopt
-/// one site's semantics for the other:
+/// The call sites do NOT pass the same range, so folding one in would adopt one site's
+/// semantics for the other:
 ///
-/// * the declare firewall passes `game::engine::shortcut_validated_range(&count, template)` —
-///   the range the ACCEPTED COUNT will drive;
-/// * the interaction decoder passes `1`, correct by construction there because it emits only
-///   ITERATION-INVARIANT pins. That is the property, stated as a property because the variant
-///   list has already moved once: the decoder emits [`TargetPin::ByIdentity`] (which
-///   [`resolve_target`] resolves without reading `iteration` at all) and
-///   [`TargetPin::Scheduled`] carrying [`TargetSchedule::Constant`], whose arm of
-///   [`evaluate_schedule`] selects its [`Ranking`] without consulting the index — unlike the
-///   `RoundRobin` / `Piecewise` arms beside it, which that decoder does not emit. Its verdict
-///   is therefore identical at any range ≥ 1.
-///
-/// Ranges are nested rather than contradictory — `0..n` re-checks are a superset of `0..m` for
-/// `m <= n`, so a wider range is strictly stricter — which is why a PUBLISHER must validate at
-/// the widest range it could be declared with: passing there implies passing at every count a
-/// declarer may name.
+/// * the declare firewall and the human ingress each pass
+///   `game::engine::shortcut_validated_range(&count, template)` — the range the ACCEPTED COUNT
+///   will drive;
+/// * the bounded PUBLISHER passes the same helper over the SCHEMA's own `iteration_count`, the
+///   widest count any declarer may name against it. Ranges nest — `0..n` re-checks are a
+///   superset of `0..m` for `m <= n`, so a publisher validating at its ceiling implies passing
+///   at every count a declarer could name, while a declarer must be checked at the count it
+///   actually named. Two questions, one helper, two arguments.
 ///
 /// # Returns `bool`, deliberately
 ///
@@ -1427,8 +1519,7 @@ pub fn declaration_conforms(
     validated_range: IterationIndex,
     state: &GameState,
 ) -> bool {
-    let required: Vec<DecisionSlot> = schema.points.iter().map(|p| p.slot.clone()).collect();
-    predictability_gate(template, &required).is_ok()
+    predictability_gate(template, &schema.points).is_ok()
         && validate_pins(schema, template, validated_range, state).is_ok()
 }
 
@@ -2147,7 +2238,21 @@ mod tests {
             source: this_obj(71, None),
             index: 0,
         };
-        let required = vec![slot_a.clone(), slot_b.clone()];
+        let required = vec![
+            DecisionPoint {
+                slot: slot_a.clone(),
+                kind: DecisionPointKind::MayChoice,
+            },
+            DecisionPoint {
+                slot: slot_b.clone(),
+                kind: DecisionPointKind::Targets {
+                    legal_targets: vec![],
+                    min_targets: 0,
+                    max_targets: 0,
+                    ordered: false,
+                },
+            },
+        ];
 
         // Pins only slot_a ⇒ slot_b is unpinned.
         let partial = DecisionTemplate {
@@ -2186,6 +2291,74 @@ mod tests {
         assert!(
             predictability_gate(&full, &required).is_ok(),
             "a fully-pinned template passes the gate"
+        );
+    }
+
+    /// T8b (CR 732.2a): COVERAGE is KIND-AWARE. A pin at a published point's slot whose CR
+    /// choice kind is not that point's answers a different question, and an ordering pin
+    /// (CR 603.3b) answers no loop-declaration point at all — both leave the point unpinned.
+    ///
+    /// Asserted on `predictability_gate` DIRECTLY, so no leg can be satisfied by
+    /// `validate_pins` instead.
+    #[test]
+    fn gate_coverage_is_kind_aware() {
+        let slot = DecisionSlot::target(this_obj(80, None));
+        let required = vec![DecisionPoint {
+            slot: slot.clone(),
+            kind: DecisionPointKind::Targets {
+                legal_targets: vec![],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: false,
+            },
+        }];
+        let template = |decisions| DecisionTemplate {
+            owner: PlayerId(0),
+            decisions,
+            replay: ReplayMode::Static,
+            key: tri_key(),
+        };
+
+        // PAIRED POSITIVE on the same point and the same call.
+        assert!(
+            predictability_gate(
+                &template(vec![PinnedDecision::Targets {
+                    slot: slot.clone(),
+                    targets: vec![],
+                }]),
+                &required
+            )
+            .is_ok(),
+            "the point's own kind at the point's own slot is its answer"
+        );
+
+        // CR 603.5 vs CR 601.2c: another choice kind at the SAME slot.
+        assert_eq!(
+            predictability_gate(
+                &template(vec![PinnedDecision::MayChoice {
+                    slot: slot.clone(),
+                    take: MayChoiceOption::Take,
+                }]),
+                &required
+            )
+            .unwrap_err(),
+            PredictabilityViolation::UnpinnedChoice { slot: slot.clone() },
+            "a `may` answer names no target, so the published targeting point stays unpinned"
+        );
+
+        // CR 603.3b: an ordering pin on the point's own SOURCE — the shape that used to cover
+        // it, because `pin_slot` synthesized `{source, index 0}` for it.
+        assert_eq!(
+            predictability_gate(
+                &template(vec![PinnedDecision::Order {
+                    source: slot.source.clone(),
+                    pos: 0,
+                }]),
+                &required
+            )
+            .unwrap_err(),
+            PredictabilityViolation::UnpinnedChoice { slot },
+            "an ordering pin addresses no loop-declaration slot, so it covers nothing"
         );
     }
 
@@ -2429,8 +2602,8 @@ mod tests {
     /// **Row R1-b — the head-only discriminator (CR 732.2a).** An illegal head is
     /// `IllegalTarget` even when a later entry is perfectly legal. Skipping to that later
     /// entry would be the conditional action CR 732.2a bars ("the outcome of a game event
-    /// determines the next action a player takes"), and it is the load-bearing guard for the
-    /// whole cross-episode consumption model: a ranking advances only at an episode boundary.
+    /// determines the next action a player takes"). Nothing advances a ranking, which is why
+    /// `schedule_announces_every_declared_subject` refuses a longer one at declare time.
     ///
     /// Both subject arms are exercised, because they fail through DIFFERENT predicates:
     /// `Object` through `resolve_source`'s `None`, `Seat` through `player_is_legal_target`'s

@@ -1,4 +1,5 @@
-import { isManaSymbolShard, ManaSymbol } from "./ManaSymbol.tsx";
+import { isManaSymbolShard } from "../../services/scryfall.ts";
+import { ManaSymbol } from "./ManaSymbol.tsx";
 
 interface RichLabelProps {
   text: string;

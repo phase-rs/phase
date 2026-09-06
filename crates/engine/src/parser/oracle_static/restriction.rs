@@ -704,6 +704,72 @@ pub(crate) fn parse_cant_cause_sacrifice_or_exile(
     )
 }
 
+/// CR 701.9a (discard) + CR 701.21a (sacrifice) + CR 109.5: One action phrase
+/// inside a "can't cause you to <action list>" forced-action prohibition. A
+/// future forced action (e.g. "can't cause you to pay life") slots in as an
+/// additional `alt()` branch here without restructuring the caller.
+fn parse_forced_action_phrase(input: &str) -> OracleResult<'_, CostCategory> {
+    alt((
+        value(
+            CostCategory::SacrificesPermanent,
+            tag("sacrifice permanents"),
+        ),
+        value(CostCategory::Discards, tag("discard cards")),
+    ))
+    .parse(input)
+}
+
+/// A list of 1+ forced-action phrases joined by ", "/" or "/" and " (Tamiyo,
+/// Collector of Tales: "discard cards or sacrifice permanents").
+fn parse_forced_action_list(input: &str) -> OracleResult<'_, Vec<CostCategory>> {
+    separated_list1(
+        alt((
+            tag(", and "),
+            tag(", or "),
+            tag(" and "),
+            tag(" or "),
+            tag(", "),
+        )),
+        parse_forced_action_phrase,
+    )
+    .parse(input)
+}
+
+/// CR 701.9a (discard) + CR 701.21a (sacrifice) + CR 609.3 + CR 109.5: Parse
+/// "Spells and abilities <scope> can't cause you to <action list>." statics —
+/// a player-level protection distinct from `CantCauseSacrificeOrExile` (The
+/// Master, Multiplied — triggered abilities ONLY, filtered to a specific
+/// affected-object subset): this protects the player wholesale against ANY
+/// spell or ability, regardless of which permanent/card would be affected.
+///
+/// Supported Oracle classes:
+/// - "Spells and abilities your opponents control can't cause you to
+///   sacrifice permanents." (Sigarda, Host of Herons; Tajuru Preserver)
+/// - "Spells and abilities your opponents control can't cause you to discard
+///   cards or sacrifice permanents." (Tamiyo, Collector of Tales)
+pub(crate) fn parse_cant_cause_forced_action(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let rest_tp = nom_tag_tp(tp, "spells and abilities ")?;
+    // Scope rides on the controller-possessive suffix, mirroring
+    // `parse_cant_search_library` (Ashiok class) and
+    // `parse_cant_cause_sacrifice_or_exile` (The Master, Multiplied class).
+    let (cause, predicate) = strip_controller_possessive_scope(rest_tp.original)?;
+    let predicate_lower = predicate.to_lowercase();
+    let (actions, _) = nom_on_lower(predicate, &predicate_lower, |i| {
+        let (i, _) = tag("can't cause you to ").parse(i)?;
+        let (i, actions) = parse_forced_action_list(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof(i)?;
+        Ok((i, actions))
+    })?;
+    Some(
+        StaticDefinition::new(StaticMode::CantCauseForcedAction { cause, actions })
+            .description(text.to_string()),
+    )
+}
+
 /// CR 603.2g + CR 603.6a + CR 700.4: Parse Torpor Orb / Hushbringer-class
 /// "Creatures entering [the battlefield] [and dying] don't cause abilities to trigger."
 ///
@@ -1937,6 +2003,43 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     if let Some(def) = try_parse_disjunctive_graveyard_cast_permission(text, lower) {
         return Some(def);
     }
+
+    // CR 611.2a + CR 514.2: Optional LEADING duration head — "Until end of
+    // turn, you may play lands and cast spells from your graveyard."
+    // (Yawgmoth's Will / Gaea's Will / Magus of the Will class). Without this
+    // head the whole permission body below is unreachable for any sentence
+    // that states its window up front; with it, the body is reachable under
+    // the ENTIRE duration grammar, not one hard-coded phrase.
+    //
+    // The phrase -> `Duration` mapping is owned by the single duration grammar
+    // (`oracle_nom::duration::parse_duration`); this site owns only the leading
+    // position and the ", " split. It is the general-duration sibling of the
+    // fixed "during your turn, " head immediately below.
+    //
+    // CR 611.2a's second sentence ("If no duration is stated, it lasts until
+    // the end of the game") is what makes the captured window load-bearing —
+    // but `StaticDefinition` has NO duration/expiry field, so there is no
+    // storage site at this layer. The value is therefore consumed and
+    // EXPLICITLY DISCARDED so the body below is reachable; its host is
+    // `Effect::GenericEffect { static_abilities, duration }`, and threading it
+    // there is deferred to a later phase. Measured safe: the cards carrying
+    // this shape reach the effect path rather than the static-line path, so
+    // this head produces no duration-less permission static today.
+    //
+    // CR 305.1 + CR 601.2a: the body below grants both the land play and the
+    // spell cast, so a single stated window scopes both halves.
+    //
+    // `opt`-shaped: text with no leading duration reaches the body
+    // byte-identically.
+    let lower = {
+        use crate::parser::oracle_nom::duration::parse_duration;
+        match nom_on_lower(lower, lower, |i| {
+            terminated(parse_duration, tag::<_, _, OracleError<'_>>(", ")).parse(i)
+        }) {
+            Some((_duration, rest)) => rest,
+            None => lower,
+        }
+    };
 
     // CR 117.1c: Optional "during your turn, " timing qualifier (Festival of
     // Embers). When present, the permission is gated to the source controller's

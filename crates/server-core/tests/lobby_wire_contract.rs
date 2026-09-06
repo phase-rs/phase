@@ -47,6 +47,7 @@ fn canonical_client_frames_parse_via_broker() {
         build_commit: "abc".into(),
         protocol_version: sc::PROTOCOL_VERSION,
         lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
+        wire_formats: Vec::new(),
     };
     let json = serde_json::to_string(&canonical).unwrap();
     match lb::parse_lobby_client_message(&json) {
@@ -190,6 +191,7 @@ fn server_hello_mode_byte_identical() {
         // None + skip_serializing_if keeps the wire identical to the lobby
         // broker's ServerHello, which has no public_url field.
         public_url: None,
+        wire_formats: Vec::new(),
     };
     assert_eq!(
         serde_json::to_string(&lb_hello).unwrap(),

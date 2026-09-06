@@ -176,6 +176,8 @@ fn choose_objects_runtime_rejects_fewer_than_required_minimum() {
             filter: TargetFilter::Typed(TypedFilter::creature()),
             min: 1,
             max: Some(2),
+            cardinality: None,
+            eligibility: None,
         },
     );
     let host = {

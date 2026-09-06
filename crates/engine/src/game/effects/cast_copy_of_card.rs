@@ -87,6 +87,7 @@ pub fn resolve(
                 up_to: true,
                 constraint: None,
                 source_id: ability.source_id,
+                reciprocal_role: None,
             };
             return Ok(());
         }

@@ -32,6 +32,15 @@ export interface DeckCoverage {
   unsupported_cards: UnsupportedCard[];
 }
 
+export type DeckColor = "White" | "Blue" | "Black" | "Red" | "Green";
+
+export interface DeckColorDistributionEntry {
+  color: DeckColor;
+  count: number;
+  percentage: number;
+  display_percentage: number;
+}
+
 export interface DeckCompatibilityResult {
   standard: CompatibilityCheck;
   commander: CompatibilityCheck;
@@ -41,6 +50,8 @@ export interface DeckCompatibilityResult {
   selected_format_reasons: string[];
   /** Combined color identity of all cards in the deck, in WUBRG order (e.g. ["W", "U", "R"]). */
   color_identity: string[];
+  /** Engine-authored main-deck color distribution in canonical WUBRG order. */
+  color_distribution: DeckColorDistributionEntry[];
   /** Engine coverage summary — how many unique cards are fully supported. */
   coverage?: DeckCoverage | null;
   /** Per-format legality: maps format key (e.g. "standard", "modern") to status ("legal", "not_legal", "banned"). */

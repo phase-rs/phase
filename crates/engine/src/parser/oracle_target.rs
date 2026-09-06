@@ -25,7 +25,7 @@ use crate::types::zones::Zone;
 use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, resolve_it_pronoun,
 };
-use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::context::{ChosenColorQualifierScope, ParseContext};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
@@ -2955,6 +2955,44 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 // is a keyword-membership branch folded at the trigger layer, not a
                 // type union, so it is excluded even though the left carried "card".
                 starts_with_type_word(after_trimmed)
+                    // CR 205.4a + CR 205.2a: a disjunct may lead with a SUPERTYPE
+                    // before its type word — "legendary creature", "basic land",
+                    // "snow permanent". `parse_type_phrase_with_ctx` already
+                    // consumes exactly this prefix on the LEFT of a separator (the
+                    // `parse_supertype_prefix` call in the prefix scan above), and
+                    // the COMMA branch already accepts it on the right via
+                    // `starts_with_or_article_type_segment` →
+                    // `starts_with_type_phrase_lead`. Only the bare "and"/"or"
+                    // branch did not, so "each Spider and legendary creature you
+                    // control" silently dropped the whole right conjunct AND the
+                    // shared trailing controller suffix, collapsing to
+                    // `Typed{[Subtype(Spider)]}` with no controller.
+                    //
+                    // NOTE the precise delta: the third disjunct below ALREADY
+                    // accepts a supertype-led right conjunct when the left conjunct
+                    // carried a "card" noun (`left_card_suffix`). What this adds is
+                    // the no-card-suffix case, and ONLY the supertype lead — not
+                    // the rest of `starts_with_type_phrase_lead` (color,
+                    // color-quality, combat-status, leading P/T). Those leads are
+                    // deliberately excluded: "tapped and attacking" / "tapped and
+                    // transformed" are conjoined STATUS adjectives, not a type
+                    // union, and admitting them here would put a heavily-pinned
+                    // combat-status family in the blast radius for no card's gain.
+                    //
+                    // The supertype must be FOLLOWED by a type-phrase lead. A
+                    // supertype word alone is an ADJECTIVE conjunction, not a type
+                    // union: Moritte of the Frost's "except it's legendary and snow
+                    // in addition to its other types" conjoins two supertypes that
+                    // qualify one object, and `become_copy_except.rs` owns that text
+                    // through its own `parse_is_supertype_in_addition`. Without this
+                    // second conjunct the branch builds `Or[Typed{[], Legendary},
+                    // Typed{[], Snow}]` — two legs with NO type filter, which
+                    // `names_enumerable_population` would then accept as a real
+                    // population. Requiring a lead keeps every genuine union site
+                    // (both subtype-led ones included: "legendary Turtle card",
+                    // "basic Plains card").
+                    || nom_target::parse_supertype_prefix(after_trimmed)
+                        .is_ok_and(|(rest, _)| starts_with_type_phrase_lead(rest))
                     || (left_card_suffix
                         && !is_article_led_bare_card(after_trimmed)
                         && starts_with_or_article_type_segment(after_trimmed))
@@ -3415,6 +3453,43 @@ pub fn parse_type_phrase_with_ctx<'a>(
         };
         properties.push(chosen_prop);
         pos += remaining_offset + of_chosen_len;
+    }
+
+    // CR 105.4 + CR 608.2c + CR 109.2: a trailing "of the color of your choice"
+    // qualifier restricts the described permanents to one colour. Sibling of the
+    // chosen-TYPE arm directly above: same position (after both controller
+    // passes, before the trailing CR 115.2 zone pass), same accumulator idiom,
+    // same whitespace handling, same ctx-provenance question.
+    //
+    // CONSUMPTION IS GATED. `FilterProp::IsChosenColor` is a fail-closed read of
+    // the source's `ChosenAttribute::Color` (both `game/filter.rs` arms are
+    // `is_some_and`), so stamping it where no chooser will exist turns an
+    // over-broad filter into one that matches NOTHING — silently, with no
+    // `Effect::Unimplemented` and therefore no coverage signal. `ChainBound` is
+    // WRITTEN only by the effect-chain chunk context, which is also the context
+    // that reads `pending_printed_color_choice` back and injects the
+    // `Effect::Choose(Color)`; so "consumed" and "supplied" are one decision.
+    // NOTE: `ParseContext` is `Clone`, so `ChainBound` is INHERITED by derived
+    // contexts. A derived context that is not merged back with `*ctx = ..` must
+    // reset this field to `Unbound` — see `ChosenColorQualifierScope`'s doc and
+    // the same discipline documented for `pending_damage_multi_target`.
+    // When the gate is closed the qualifier is LEFT IN THE REMAINDER — exactly
+    // today's behaviour — so the existing `target-fallback:` diagnostic stays
+    // honest.
+    let remaining = lower[pos..].trim_start();
+    let remaining_offset = lower[pos..].len() - remaining.len();
+    if let Ok((rest, prop)) = nom_filter::parse_printed_color_choice_qualifier(remaining) {
+        if matches!(
+            ctx.chosen_color_qualifier,
+            ChosenColorQualifierScope::ChainBound
+        ) {
+            properties.push(prop);
+            pos += remaining_offset + (remaining.len() - rest.len());
+            // CR 608.2c: the choice must resolve before the filter is evaluated.
+            // Declared per-clause provenance for the assembly-time injector —
+            // never a shape scan of the lowered tree.
+            ctx.pending_printed_color_choice = Some(ChoiceType::color());
+        }
     }
 
     // CR 115.2: A spell or ability may target an object in a zone other than
@@ -4634,7 +4709,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::DistinctFrom { .. }
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::DealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -6537,6 +6612,130 @@ fn rebind_bare_x_mana_value(prop: FilterProp, after: &str) -> (FilterProp, &str)
     )
 }
 
+/// CR 608.2k + CR 601.2c: Rebind a compound-target slot's default
+/// `ObjectScope::CostPaidObject` referent to `ObjectScope::Target`.
+///
+/// The relative-referent suffix parsers default an unqualified or demonstrative
+/// possessive to `ObjectScope::CostPaidObject`, correct for the single-referent
+/// trigger/cost class that dominates the grammar (CR 608.2k: "an ability's
+/// effect refers to a specific untargeted object previously referred to by that
+/// ability's cost or trigger condition") — 27 corpus cards. In a COMPOUND
+/// two-object-target phrase there is no cost-paid object and no usable trigger
+/// referent; English attaches the relative clause to the immediately preceding
+/// target phrase, whose antecedent is the ability's OTHER declared object target.
+///
+/// ENGINE CONVENTION, NOT A CR RULE: `ObjectScope::Target` denotes the FIRST
+/// object target. Authority = the four sites that implement it
+/// (`quantity::object_id_for_scope`, `quantity::resolve_object_mana_value`,
+/// `filter::parent_target_shared_quality_values`,
+/// `ability_utils::attach_host_enchant_filter`).
+///
+/// Like `rebind_anaphoric_object_scope`, this retargets WHICH object, never
+/// WHICH characteristic — so it applies uniformly to mana value (Puca's
+/// Mischief), power/toughness (Spawnbroker), counters and colour counts.
+///
+/// CALLER CONTRACT: invoke only on the non-first slot of a compound phrase whose
+/// FIRST slot surfaces a declared object target. `try_parse_exchange_control_
+/// targets` enforces this by mirroring `collect_target_slots`' ExchangeControl
+/// skip (`ability_utils.rs:2667`): a `TargetFilter::SelfRef` slot A surfaces no
+/// target, so there would be no first object target to bind to.
+pub(crate) fn rebind_compound_slot_referent_to_prior_target(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                rebind_compound_slot_referent_in_prop(prop);
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for filter in filters {
+                rebind_compound_slot_referent_to_prior_target(filter);
+            }
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            rebind_compound_slot_referent_to_prior_target(filter);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_compound_slot_referent_in_prop(prop: &mut FilterProp) {
+    match prop {
+        // CR 202.3 / CR 122.1 / CR 208.1: the quantity-carrying leaves whose
+        // threshold may hold a `QuantityRef` with an `ObjectScope`.
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => {
+            rebind_compound_slot_referent_in_quantity(value);
+        }
+        FilterProp::CanEnchant { target }
+        | FilterProp::DifferentNameFrom { filter: target }
+        | FilterProp::DistinctFrom { reference: target }
+        | FilterProp::TargetsOnly { filter: target }
+        | FilterProp::Targets { filter: target } => {
+            rebind_compound_slot_referent_to_prior_target(target);
+        }
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => rebind_compound_slot_referent_to_prior_target(reference),
+        FilterProp::AnyOf { props } => {
+            for prop in props {
+                rebind_compound_slot_referent_in_prop(prop);
+            }
+        }
+        FilterProp::Not { prop } => rebind_compound_slot_referent_in_prop(prop),
+        _ => {}
+    }
+}
+
+/// Rewrite `scope: CostPaidObject` to `scope: Target` on every
+/// `QuantityRef` leaf that carries an `ObjectScope`, recursing through every
+/// `QuantityExpr` composition arm. Matches `quantity_expr_contains_scope`'s
+/// (`quantity.rs:834-865`) arm set exactly, so detection and rewrite cannot
+/// drift.
+fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
+    fn rebind_ref(qty: &mut QuantityRef) {
+        let scope = match qty {
+            QuantityRef::Power { scope }
+            | QuantityRef::BasePower { scope }
+            | QuantityRef::Toughness { scope }
+            | QuantityRef::ObjectManaValue { scope }
+            | QuantityRef::ObjectColorCount { scope }
+            | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::ObjectTypelineComponentCount { scope }
+            | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+            | QuantityRef::CountersOn { scope, .. } => scope,
+            _ => return,
+        };
+        if *scope == ObjectScope::CostPaidObject {
+            *scope = ObjectScope::Target;
+        }
+    }
+    match expr {
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::Ref { qty } => rebind_ref(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => {
+            rebind_compound_slot_referent_in_quantity(inner);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for expr in exprs {
+                rebind_compound_slot_referent_in_quantity(expr);
+            }
+        }
+        QuantityExpr::UpTo { max } => rebind_compound_slot_referent_in_quantity(max),
+        QuantityExpr::Power { exponent, .. } => {
+            rebind_compound_slot_referent_in_quantity(exponent);
+        }
+        QuantityExpr::Difference { left, right } => {
+            rebind_compound_slot_referent_in_quantity(left);
+            rebind_compound_slot_referent_in_quantity(right);
+        }
+    }
+}
+
 fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
     type Vbe<'a> = OracleError<'a>;
     let (rest, comparator) = nom::sequence::preceded(
@@ -7595,7 +7794,9 @@ fn parse_shared_quality_reference<'a>(
     }
 
     if let Ok((rest, ())) = parse_word_bounded(input, "it") {
-        let mut ctx_mut = ctx.clone();
+        // Throwaway (`ChosenColorQualifierScope` rule 1) — only the resolved
+        // filter is kept.
+        let mut ctx_mut = ctx.clone_throwaway();
         return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
     }
 
@@ -7610,7 +7811,9 @@ fn parse_shared_quality_reference<'a>(
     // ("a creature you control") still parses as its own filter below.
     for demonstrative in ["that creature", "that permanent", "that card", "that token"] {
         if let Ok((rest, ())) = parse_word_bounded(input, demonstrative) {
-            let mut ctx_mut = ctx.clone();
+            // Throwaway (`ChosenColorQualifierScope` rule 1) — only the resolved
+            // filter is kept.
+            let mut ctx_mut = ctx.clone_throwaway();
             return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
         }
     }
@@ -7795,6 +7998,53 @@ pub(crate) fn attachment_kinds_filter_prop(
         },
         _ => FilterProp::HasAnyAttachmentOf { kinds, controller },
     }
+}
+
+/// CR 120.1 + CR 120.2a + CR 120.2b + CR 514.2: the active-voice damage-history
+/// relative clause — "dealt [combat|noncombat] damage [to you|to a player] this
+/// turn", with the leading "that " already consumed by the caller.
+///
+/// Composed along the two axes the printed clause varies on (damage class ×
+/// recipient) rather than enumerated as whole phrases, so all four printed
+/// combinations fall out of two `alt()` calls:
+///
+/// - "dealt damage this turn" — Red Guardian, Super-Soldier
+/// - "dealt damage to you this turn" — Reciprocate, Retaliate, Spear of Heliod,
+///   Giltspire Avenger, Otherworldly Escort
+/// - "dealt combat damage to you this turn" — Witch-king of Angmar
+/// - "dealt combat damage to a player this turn" — Night of the Flying Merfolk
+///
+/// CR 120.1 ("Objects can deal damage to … players") bounds the recipient axis
+/// to players. The object-recipient forms ("that dealt damage to it this turn",
+/// Brine Hag / Giant Albatross) bind to the trigger's event context rather than
+/// a player scope and are deliberately not handled here.
+fn parse_dealt_damage_clause(input: &str) -> OracleResult<'_, FilterProp> {
+    let (input, _) = tag("dealt ").parse(input)?;
+    // CR 120.2a / CR 120.2b: damage-class axis; absent means either class.
+    let (input, kind) = opt(alt((
+        value(DamageKindFilter::CombatOnly, tag("combat ")),
+        value(DamageKindFilter::NoncombatOnly, tag("noncombat ")),
+    )))
+    .parse(input)?;
+    let (input, _) = tag("damage").parse(input)?;
+    // CR 120.1: recipient axis; absent leaves the recipient unconstrained, which
+    // also admits the object recipients the player scopes below exclude.
+    let (input, recipient) = opt(preceded(
+        tag(" to "),
+        alt((
+            value(PlayerFilter::Controller, tag("you")),
+            value(PlayerFilter::All, tag("a player")),
+        )),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" this turn").parse(input)?;
+    Ok((
+        input,
+        FilterProp::DealtDamageThisTurn {
+            kind: kind.unwrap_or_default(),
+            recipient,
+        },
+    ))
 }
 
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
@@ -8037,6 +8287,15 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         ));
     }
 
+    // CR 120.1 + CR 120.2a + CR 514.2: "that dealt [combat] damage [to you]
+    // this turn" — the active-voice damage-history clause, parameterized on its
+    // two axes rather than enumerated. Placed before VERB_PHRASES because it
+    // subsumes the bare "dealt damage this turn" form; disjoint from the passive
+    // "was dealt damage this turn" row on the leading verb, so no shadowing.
+    if let Ok((rest, prop)) = parse_dealt_damage_clause(after_that) {
+        return Some((vec![prop], that_len + after_that.len() - rest.len()));
+    }
+
     // --- Verb-phrase patterns: match fixed phrases after "that " ---
     // CR 120.6 + CR 120.9: "that was dealt damage this turn"
     static VERB_PHRASES: &[(&str, FilterProp)] = &[
@@ -8044,9 +8303,6 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             "was dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
-        // CR 120.1: active voice — the creature dealt damage (was the source),
-        // distinct from the passive "was dealt damage" above (Red Guardian).
-        ("dealt damage this turn", FilterProp::DealtDamageThisTurn),
         (
             "entered the battlefield this turn",
             FilterProp::EnteredThisTurn,
@@ -8287,15 +8543,39 @@ fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResu
 /// `neg_type_filters`/`properties`. List items are Oxford-comma-tolerant via
 /// the existing `match_mass_union_separator`, reused rather than duplicated.
 ///
-/// Guard: `classify_negation`'s catch-all treats any unrecognized word as a
-/// negated Subtype (correct for its "non-<word>" prefix context — CR 205.3
-/// subtype negation like "nonZombie" is a real pattern). That fallback is
-/// UNSAFE here: "except for Mageta" or "except for commanders" would silently
-/// classify as `Non(Subtype("Mageta"))`, which no permanent has, making the
-/// exclusion a silent no-op that looks fixed but isn't. This function rejects
-/// the whole clause (returns `None`) if any item resolves to a negated
-/// Subtype, leaving those cards' existing (unhandled, honestly silent)
-/// behavior unchanged rather than mis-firing on a named/designation exception.
+/// The exclusion vocabulary gate: each list item's singular form is resolved
+/// through the CR 205.3 subtype vocabulary (`parse_subtype`) before being
+/// classified by `classify_negation`. `parse_subtype` answers two questions at
+/// once — what an item's singular is, and whether the item is in the CR 205.3
+/// vocabulary. One caveat, stated because the gate's value depends on it: the
+/// irregular `SUBTYPE_PLURALS` table is consulted FIRST and its singular is
+/// returned unvalidated, so an entry whose singular is absent from the
+/// vocabulary (e.g. "halves" -> "Half") would still be accepted here. No such
+/// exclusion is printed; widening the gate to re-validate that table's output
+/// is a separate change. `classify_negation`'s catch-all still
+/// treats any unrecognized word as a negated Subtype (correct for its
+/// "non-<word>" prefix context — CR 205.3 subtype negation like "nonZombie"
+/// is a real pattern), so this function still verifies every catch-all hit
+/// against the vocabulary before accepting it. Two promises hold: (a) a
+/// **name/designation** exception ("except for Mageta") still declines the
+/// whole clause — more precisely, any name OUTSIDE the CR 205.3 vocabulary
+/// does. CR 205.3j planeswalker types are themselves proper names ("Ajani",
+/// "Urza", "Bolas"), so an exclusion naming one is now accepted as a subtype
+/// where it previously declined; Mageta is not a planeswalker type. Pinned by
+/// `except_for_named_exception_does_not_misfire_as_subtype_negation` — rather
+/// than silently classifying as `Non(Subtype("Mageta"))`, which no permanent
+/// has; (b) a **mixed** list containing one unrecognised word still declines
+/// wholesale rather than partially applying.
+///
+/// The gate newly ACCEPTS what it used to decline: CR 205.3m creature-type
+/// exclusions ("except for Krakens, Leviathans, Octopuses, and Serpents";
+/// "except for artifacts, lands, and Phyrexians") and CR 205.3i basic
+/// land-type exclusions ("except for Islands"). Before this gate, a wholesale
+/// decline on a MIXED list — as on The Argent Etchings' "except for
+/// artifacts, lands, and Phyrexians" — silently dropped two correctly
+/// classified card-type exclusions (artifact, land) along with the one
+/// subtype exclusion (Phyrexian), because the whole clause was rejected the
+/// moment any single item resolved to an unrecognised negated Subtype.
 fn parse_except_for_type_list_suffix(
     text: &str,
 ) -> Option<(Vec<TypeFilter>, Vec<FilterProp>, usize)> {
@@ -8315,14 +8595,49 @@ fn parse_except_for_type_list_suffix(
             take_till1::<_, _, OracleError<'_>>(|c: char| !c.is_ascii_alphabetic())
                 .parse(rest)
                 .ok()?;
-        let singular = word.trim_end_matches('s');
-        match classify_negation(singular) {
+        // CR 205.3a + CR 205.3i + CR 205.3m: the SUBTYPE VOCABULARY is the single
+        // authority for both questions this item raises — "what is its singular?" and
+        // "is it a real subtype at all?". `parse_subtype` normalizes -s / -es / -ies
+        // and the irregulars (Octopuses -> Octopus, Elves -> Elf, Merfolk -> Merfolk);
+        // the legacy `trim_end_matches('s')` produced "Octopuse"/"Elve", which no
+        // lookup recognizes, so every genuine subtype exclusion declined. `word` is a
+        // whole alphabetic token from this function's own `take_till1`, and
+        // `parse_subtype_entry` (oracle_util.rs:1258) word-bounds every arm —
+        // `starts_with_word_ci` on the singular, an equivalent
+        // non-alphanumeric-follower guard on the `-s`/`-es`/`-ies` plurals — so a
+        // match here always consumes the whole word: "Serpentine" cannot match
+        // "Serpent".
+        //
+        // PRECEDENCE IS UNCHANGED: `classify_negation` still classifies, and still
+        // first. `parse_subtype` supplies the singular it classifies, and is consulted
+        // a second time only inside the catch-all arm, to tell a real CR 205.3a subtype
+        // ("Kraken", "Phyrexian", "Island") from a card name or designation ("Mageta",
+        // "commanders"). A vocabulary word whose singular IS a card type
+        // ("sorceries" -> "Sorcery") therefore reaches `classify_negation` as
+        // "sorcery" and is classified as CR 205.2a `TypeFilter::Sorcery`, not as a
+        // subtype.
+        let canonical_subtype = parse_subtype(word).map(|(canonical, _)| canonical);
+        let lowered_canonical = canonical_subtype.as_deref().map(str::to_lowercase);
+        // Byte-identical legacy fallback: every item that classifies today keeps
+        // classifying exactly as it does today.
+        let normalized: &str = lowered_canonical
+            .as_deref()
+            .unwrap_or_else(|| word.trim_end_matches('s'));
+        match classify_negation(normalized) {
             NegationResult::Type(TypeFilter::Non(inner))
                 if matches!(*inner, TypeFilter::Subtype(_)) =>
             {
-                // Unrecognized word (name, designation, etc.) — decline the
-                // whole clause rather than emit a silently-vacuous exclusion.
-                return None;
+                // CR 205.3a: an unrecognized word (a card NAME, a designation) still
+                // falls through `classify_negation`'s catch-all (:4013) to a negated
+                // Subtype that no permanent has — a silently vacuous exclusion.
+                // Decline the whole clause, as before ("except for Mageta").
+                let Some(canonical) = &canonical_subtype else {
+                    return None;
+                };
+                // CR 205.3a: a genuine subtype exclusion — emit it.
+                neg_types.push(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                    canonical.clone(),
+                ))));
             }
             NegationResult::Type(tf) => neg_types.push(tf),
             NegationResult::Prop(prop) => props.push(prop),
@@ -8357,6 +8672,221 @@ fn parse_except_for_type_list_suffix(
     }
 
     Some((neg_types, props, consumed))
+}
+
+/// CR 205.3a + CR 608.2c: AND an "except for `<type-list>`" exclusion
+/// onto an already-parsed mass population, for callers whose exclusion is
+/// separated from the type phrase by an intervening destination clause ("return
+/// all creatures TO THEIR OWNERS' HANDS except for Krakens, Leviathans,
+/// Octopuses, and Serpents" — Whelming Wave, Slinn Voda, Cyclone Summoner).
+/// CR 608.2c is what licenses reading the trailing clause as a modifier of the
+/// earlier population phrase across the intervening destination clause.
+///
+/// Same grammar and the same decline rules as the adjacent surface order:
+/// [`parse_except_for_type_list_suffix`] stays the single authority, so a named
+/// exception ("except for Mageta") and a mixed list containing an unrecognised
+/// word still decline rather than emitting a vacuous `Non(Subtype("Mageta"))`.
+/// A mixed list whose words are ALL in the vocabulary — "artifacts, lands, and
+/// Phyrexians" — parses; that is the same function's job, not an exception to
+/// it.
+///
+/// WHERE the decline happens decides whether it is honest, and the two sites
+/// differ. Declining HERE returns `None`, which propagates through `?` at the
+/// mass-return call sites, so no effect is built and the card is unsupported.
+/// Declining at the SUFFIX-POSITION site in `parse_type_phrase_with_ctx` only
+/// drops the clause — that caller still builds its effect, and because
+/// `swallow_check` has no "except for" detector the card keeps reporting
+/// supported (measured: "mageta the lion", "flame sweep", both of which decline
+/// there and never reach this function). Making the suffix-position residue red
+/// is a separate issue and is NOT claimed here.
+///
+/// The application is the `TargetFilter`-level form of the two lines the
+/// suffix-position call site in `parse_type_phrase_with_ctx` already runs
+/// (`neg_type_filters.extend(excl_types); properties.extend(excl_props);`).
+/// That site cannot call this function — it accumulates into local vectors
+/// *before* its `TypedFilter` exists — so what is shared is the grammar, and
+/// what is repeated is two `Vec::extend` calls, not logic.
+///
+/// `type_filters` are conjunctive in `game::filter`, so each `TypeFilter::Non`
+/// narrows the population by one exempted type — the De Morgan form of "except
+/// for A, B, or C" (evaluated at game/filter.rs:2378).
+///
+/// (CR 400.7 is deliberately NOT cited here: this function performs no zone
+/// change and says nothing about one — it only narrows a population filter. The
+/// zone change belongs to the `ReturnAll` construction in `imperative.rs`,
+/// which is where CR 400.7 is annotated.)
+///
+/// Narrows the population by the parsed exclusion, or declines.
+///
+/// THREE outcomes, and the distinction between the last two is load-bearing:
+///
+/// 1. **No `except for` tail** — returns `Some(filter)` unchanged. The path every
+///    mass return without an exclusion takes.
+/// 2. **Tail present and parsed** — the negations are pushed into the population
+///    by [`narrow_population_for_exclusion`], which distributes over `Or`/`And`
+///    legs and returns `None` for a shape it cannot narrow soundly (see that
+///    function's doc for the set identities and for why `Not` is excluded).
+/// 3. **Tail present and REJECTED** — returns `None`. `parse_except_for_type_list_suffix`
+///    declines a card name or designation ("except for Mageta"), a mixed list
+///    containing one, and trailing text it does not model. Treating that like case
+///    1 would emit a population BROADER than the card says while still reporting
+///    supported — Mageta's own spell would bounce Mageta.
+///
+/// In cases 2-declined and 3 the `None` propagates through `?` at the call sites,
+/// so the effect is not built and the card is honestly unsupported rather than
+/// silently widened.
+pub(crate) fn apply_except_for_type_list_exclusion(
+    filter: TargetFilter,
+    text: &str,
+) -> Option<TargetFilter> {
+    // Both callers of `parse_except_for_type_list_suffix` must hand it the same
+    // shape. The suffix-position site in `parse_type_phrase_with_ctx` passes a
+    // slice of the already-lowercased text; this one is handed the original-case
+    // `dest_remainder`. `classify_negation` matches lowercase literals only, so a
+    // capitalized core-type item ("except for Artifacts") would otherwise miss
+    // every arm, fall to the catch-all, fail the subtype vocabulary gate, and
+    // decline the whole clause. Normalizing here needs no offset remapping because
+    // this function discards the parser's `consumed` length; `parse_subtype` is
+    // case-insensitive and still yields the canonical capitalization
+    // ("krakens" -> "Kraken").
+    let lowered = text.trim_start().to_lowercase();
+    if let Some((neg_types, props, _consumed)) = parse_except_for_type_list_suffix(&lowered) {
+        return narrow_population_for_exclusion(filter, &neg_types, &props);
+    }
+    // `parse_except_for_type_list_suffix` returns `None` for TWO different
+    // situations, and conflating them is a silent-widening bug (raised in review
+    // of PR #8336):
+    //
+    //   1. There is no "except for" tail at all. The population is unchanged —
+    //      the path every mass return without an exclusion takes.
+    //   2. There IS a tail, and the parser REJECTED it: a card name or
+    //      designation ("except for Mageta"), a mixed list containing one, or
+    //      trailing text the grammar does not model.
+    //
+    // In case 2 the parser has recognized a rules-bearing exception and thrown it
+    // away. Returning the population unchanged would emit a mass return BROADER
+    // than the card says while still reporting supported — Mageta's own spell
+    // would bounce Mageta. `swallow_check` has no "except for" detector, so
+    // nothing downstream would flag it. Decline instead, so the caller declines
+    // and the card is honestly unsupported.
+    //
+    // The probe is a word-boundary SCAN, not a prefix test, and the difference is
+    // load-bearing. `parse_except_for_type_list_suffix` only attempts a tail at
+    // offset 0, so a clause the destination stripper leaves further along —
+    // "... to their owners' hands, except for <name>" yields a comma-prefixed
+    // remainder — is one the parser never even looks at. A prefix-only guard would
+    // not see it either, and the population would be returned unchanged: the same
+    // silent widening, reached by a different route. Scanning makes the guard
+    // strictly wider than the parser, which is the safe direction — every tail the
+    // parser could attempt is seen, plus the ones it structurally cannot.
+    //
+    // `scan_contains` matches at word starts only, so it cannot fire on "except
+    // for" embedded inside another word. Measured: the corpus has three mass
+    // returns carrying an exclusion (Whelming Wave, Slinn Voda, Cyclone Summoner)
+    // and all three sit at offset 0, so no currently-supported card is declined by
+    // the widening.
+    if nom_primitives::scan_contains(&lowered, "except for ") {
+        return None;
+    }
+    Some(filter)
+}
+
+/// CR 205.3a + CR 608.2c: push an `except for <type list>` exclusion down to every
+/// leg of a mass population, or refuse.
+///
+/// `type_filters` are conjunctive within a `Typed` leg (`game/filter.rs:2378`
+/// evaluates `TypeFilter::Non` as `!matches`), so appending the negations narrows
+/// that leg. For a disjunctive population the set identity is
+/// `(A ∪ B) \ Z == (A \ Z) ∪ (B \ Z)`, so distributing over the legs is exact, not
+/// an approximation; for a conjunctive one `(A ∩ B) \ Z == (A \ Z) ∩ (B \ Z)`
+/// holds equally, so the same distribution is sound there.
+///
+/// Returns `None` for any population shape the exclusion cannot be pushed into —
+/// `Not` above all, where `¬A \ Z` is NOT `¬(A \ Z)`, so distributing inward would
+/// invert the clause rather than narrow it. `None` makes the caller decline to
+/// build the effect, which leaves the card honestly unsupported. That is the
+/// deliberate alternative to returning the population untouched: an untouched
+/// population is WIDER than the card says and still reports as supported, which is
+/// the exact silent-widening defect issue #7451 exists to remove (raised in review
+/// of PR #8336). `swallow_check` has no "except for" detector, so nothing
+/// downstream would flag it.
+fn narrow_population_for_exclusion(
+    filter: TargetFilter,
+    neg_types: &[TypeFilter],
+    props: &[FilterProp],
+) -> Option<TargetFilter> {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed.type_filters.extend(neg_types.iter().cloned());
+            typed.properties.extend(props.iter().cloned());
+            Some(TargetFilter::Typed(typed))
+        }
+        TargetFilter::Or { filters } => filters
+            .into_iter()
+            .map(|leg| narrow_population_for_exclusion(leg, neg_types, props))
+            .collect::<Option<Vec<_>>>()
+            .map(|filters| TargetFilter::Or { filters }),
+        TargetFilter::And { filters } => filters
+            .into_iter()
+            .map(|leg| narrow_population_for_exclusion(leg, neg_types, props))
+            .collect::<Option<Vec<_>>>()
+            .map(|filters| TargetFilter::And { filters }),
+        // `¬A \ Z` is not `¬(A \ Z)`, so distributing the exclusion into a
+        // negation would invert the clause rather than narrowing it.
+        TargetFilter::Not { .. } => None,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => None,
+    }
 }
 
 /// CR 302.6 + CR 508.1a: a trailing continuity exemption on a target filter —
@@ -9544,6 +10074,125 @@ mod tests {
         );
     }
 
+    /// V3u — issue #7451 U2: "creatures except for Krakens, Leviathans,
+    /// Octopuses, and Serpents" (Slinn Voda class) must exclude the FULL
+    /// four-subtype list. Before the vocabulary gate, `trim_end_matches('s')`
+    /// singularised "Octopuses" to "Octopuse", which no subtype lookup
+    /// recognizes, so the whole clause declined and the exclusion was lost —
+    /// `Octopuses` is the revert-failing item; the other three singularise
+    /// correctly under the legacy fallback and would still pass on their own.
+    /// Sibling case (Slinn Voda's actual printed list): "Merfolk" has no
+    /// "-s" plural, pinning that the irregular-plural table is consulted for
+    /// every item in a list, not just the first.
+    #[test]
+    fn parse_type_phrase_except_for_subtype_list() {
+        let (filter, rest) =
+            parse_type_phrase("creatures except for Krakens, Leviathans, Octopuses, and Serpents");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        for subtype in ["Kraken", "Leviathan", "Octopus", "Serpent"] {
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        subtype.to_string()
+                    )))),
+                "missing Non(Subtype({subtype:?})) in {:?}",
+                tf.type_filters
+            );
+        }
+
+        let (filter, rest) = parse_type_phrase(
+            "creatures except for Merfolk, Krakens, Leviathans, Octopuses, and Serpents",
+        );
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        for subtype in ["Merfolk", "Kraken", "Leviathan", "Octopus", "Serpent"] {
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        subtype.to_string()
+                    )))),
+                "missing Non(Subtype({subtype:?})) in {:?}",
+                tf.type_filters
+            );
+        }
+    }
+
+    /// V3u-mixed — issue #7451 U2: The Argent Etchings' grammar, isolated
+    /// from its board (see `argent_etchings_iii_spares_artifacts_lands_and_phyrexians`
+    /// in the integration suite for the cast-pipeline form). A list mixing
+    /// two CR 205.2a core types with one CR 205.3m subtype must classify
+    /// each item through its own vocabulary and keep all three exclusions.
+    /// Revert-failing: today the whole clause declines the moment
+    /// "Phyrexians" resolves to an unrecognised negated Subtype, losing the
+    /// two correctly-classified core-type exclusions along with it.
+    #[test]
+    fn parse_type_phrase_except_for_mixed_core_types_and_subtype() {
+        let (filter, rest) =
+            parse_type_phrase("permanents except for artifacts, lands, and Phyrexians");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Artifact))));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Phyrexian".to_string()
+            )))));
+    }
+
+    /// V3u-land — CR 205.3i basic land-type exclusion. BUILDING-BLOCK
+    /// coverage only: no printed card reads "except for Islands" ("except
+    /// for basic lands" is a different phrase — a supertype negation that
+    /// declines on the trailing-text guard both before and after this
+    /// change, and is unaffected by it). Documents a deliberate
+    /// decline -> accept change: before the vocabulary gate, "Islands"
+    /// singularised to "Island" under the legacy fallback but "island" is
+    /// not one of `classify_negation`'s known words, so it fell through to
+    /// a negated Subtype that the old guard declined outright.
+    #[test]
+    fn parse_type_phrase_except_for_basic_land_type() {
+        let (filter, rest) = parse_type_phrase("permanents except for Islands");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Island".to_string()
+            )))));
+    }
+
+    /// V3u-sorc — the single measured collision between the CR 205.3 subtype
+    /// vocabulary and `classify_negation`'s keyword set: "sorceries"
+    /// singularises to "Sorcery" via the irregular-plural table, but Sorcery
+    /// is a CR 205.2a CORE type, not a subtype. Pins that precedence was not
+    /// reordered: `classify_negation` still classifies "sorcery" through its
+    /// own core-type arm, never falling into the catch-all that would emit a
+    /// vacuous `Non(Subtype("Sorcery"))`.
+    #[test]
+    fn parse_type_phrase_except_for_card_type_plural() {
+        let (filter, rest) = parse_type_phrase("permanents except for sorceries");
+        assert_eq!(rest.trim(), "");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Sorcery))));
+        assert!(
+            !tf.type_filters.iter().any(
+                |t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Subtype(_)))
+            ),
+            "must not misclassify 'sorceries' as a negated Subtype, got {:?}",
+            tf.type_filters
+        );
+    }
+
     /// GitHub #4710 hostile fixture (Mageta the Lion class): "except for
     /// Mageta" names a specific permanent, not a type. `classify_negation`'s
     /// catch-all treats any unrecognized word as a negated Subtype, which
@@ -9551,6 +10200,20 @@ mod tests {
     /// (no permanent has that subtype) that looks fixed but isn't. The suffix
     /// parser must decline the whole clause instead, leaving the base filter
     /// unchanged rather than mis-firing on a named exception it can't model.
+    /// V3u-neg (added): a MIXED list combining a genuine CR 205.3m subtype
+    /// ("Krakens") with a card-name exception ("Mageta") must still decline
+    /// wholesale, not partially apply the subtype exclusion while dropping
+    /// the name. The vocabulary gate resolves "Krakens" but "Mageta" is not
+    /// in the CR 205.3 vocabulary at all, so the whole clause is rejected via
+    /// the same `None` catch-all arm as the pure-name case above.
+    /// Word-boundary row: a word that merely CONTAINS a vocabulary subtype as a
+    /// prefix ("Serpentine" over "Serpent") must also decline. This is a
+    /// different risk from the two above — they exercise a word absent from the
+    /// vocabulary, this one exercises `parse_subtype_entry`'s word-boundary guard
+    /// (`starts_with_word_ci` on the singular arm, an equivalent
+    /// non-alphanumeric-follower check on the plural arms), which makes a match
+    /// consume the whole token. Without that guard the clause would silently exclude
+    /// Serpents from a spell that never mentioned them.
     #[test]
     fn except_for_named_exception_does_not_misfire_as_subtype_negation() {
         let (filter, rest) = parse_type_phrase("creatures except for Mageta");
@@ -9561,6 +10224,130 @@ mod tests {
                 .parse(rest.trim_start())
                 .is_ok(),
             "the unrecognized exception clause must be left unconsumed, got rest={rest:?}"
+        );
+
+        let (filter, rest) = parse_type_phrase("creatures except for Krakens and Mageta");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tag::<_, _, OracleError<'_>>("except for")
+                .parse(rest.trim_start())
+                .is_ok(),
+            "a mixed real-subtype + name list must be left unconsumed, got rest={rest:?}"
+        );
+
+        let (filter, rest) = parse_type_phrase("permanents except for Serpentine");
+        let tf = typed_leg(&filter).expect("expected typed filter");
+        assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+        assert!(
+            tag::<_, _, OracleError<'_>>("except for")
+                .parse(rest.trim_start())
+                .is_ok(),
+            "a word merely PREFIXED by a subtype must be left unconsumed, got rest={rest:?}"
+        );
+    }
+
+    /// CR 205.3a + CR 608.2c: an `except for` exclusion must reach EVERY leg of a
+    /// disjunctive mass population, not just a single `Typed` one.
+    ///
+    /// `(A ∪ B) \\ Z == (A \\ Z) ∪ (B \\ Z)`, so distributing the negations over the
+    /// legs is an exact rewrite. The population shape is reachable: "Return all
+    /// artifacts and enchantments to their owners\' hands" (Reduce to Dreams)
+    /// parses to `BounceAll` over a `TargetFilter::Or` and reaches this helper on
+    /// every parse — only the absence of a co-occurring `except for` clause kept
+    /// the branch cold. Returning such a population untouched left it WIDER than
+    /// the card says while still reporting supported (raised in review of #8336).
+    ///
+    /// The `Not` row pins the other half of the contract: `¬A \\ Z` is not
+    /// `¬(A \\ Z)`, so the helper refuses rather than inverting the clause, and the
+    /// caller declines to build the effect.
+    #[test]
+    fn except_for_exclusion_reaches_every_leg_of_a_disjunctive_population() {
+        let exclusion = " except for Krakens, Leviathans, Octopuses, and Serpents.";
+        let kraken = |f: &TypeFilter| matches!(f, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Subtype(ref s) if s == "Kraken"));
+
+        // Reach-guard: the single-leg case applies the exclusion, so a failure on
+        // the Or rows below cannot be blamed on the exclusion string.
+        let typed = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        let applied =
+            apply_except_for_type_list_exclusion(typed, exclusion).expect("Typed must narrow");
+        assert!(
+            typed_leg(&applied)
+                .expect("typed")
+                .type_filters
+                .iter()
+                .any(kraken),
+            "reach-guard: a Typed population must gain Non(Subtype(\"Kraken\"))"
+        );
+
+        // Every leg of an Or is narrowed.
+        let or = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    ..Default::default()
+                }),
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Enchantment],
+                    ..Default::default()
+                }),
+            ],
+        };
+        let narrowed = apply_except_for_type_list_exclusion(or, exclusion)
+            .expect("a disjunctive population must narrow, not be dropped");
+        let TargetFilter::Or { filters } = &narrowed else {
+            panic!("expected the Or shape to survive, got {narrowed:?}");
+        };
+        assert_eq!(filters.len(), 2, "both legs must survive: {narrowed:?}");
+        for (i, leg) in filters.iter().enumerate() {
+            let tf = typed_leg(leg).unwrap_or_else(|| panic!("leg {i} not Typed: {leg:?}"));
+            assert!(
+                tf.type_filters.iter().any(kraken),
+                "leg {i} must carry the exclusion, got {tf:?}"
+            );
+        }
+
+        // A shape the exclusion cannot be pushed into is REFUSED, not widened.
+        let negated = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                ..Default::default()
+            })),
+        };
+        assert!(
+            apply_except_for_type_list_exclusion(negated, exclusion).is_none(),
+            "a population the clause cannot narrow must be refused so the caller \
+             declines, never returned unchanged"
+        );
+
+        // A tail that IS present but REJECTED must decline, not pass through.
+        // This is the case the absent/rejected conflation used to widen.
+        let named = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        assert!(
+            apply_except_for_type_list_exclusion(named, " except for Mageta.").is_none(),
+            "a present-but-rejected exception tail must decline the effect, never \
+             return the population unchanged"
+        );
+
+        // No clause at all: the population passes through untouched.
+        let plain = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        let before = format!("{plain:?}");
+        let passthrough = apply_except_for_type_list_exclusion(plain, " to their owners' hands.")
+            .expect("a remainder with no exclusion clause must not decline the effect");
+        assert_eq!(
+            format!("{passthrough:?}"),
+            before,
+            "the no-clause path must return the population byte-identically — it is \
+             the path every mass return in the corpus takes"
         );
     }
 
@@ -14842,6 +15629,183 @@ mod tests {
         assert_eq!(rest.trim(), "");
     }
 
+    /// V5 building block (CR 205.4a + CR 205.2a): the bare "and"/"or" separator
+    /// branch must accept a SUPERTYPE-led right conjunct, exactly as the comma
+    /// branch already does. Comma/no-comma equivalence is the claim, so the two
+    /// forms of one grammar cannot drift.
+    ///
+    /// Revert-failing: without the `parse_supertype_prefix` disjunct the bare
+    /// form collapses to `Typed{[Subtype("Spider")]}` with `controller: None` —
+    /// it drops the whole right conjunct AND the shared trailing suffix.
+    #[test]
+    fn bare_and_supertype_led_conjunct_matches_comma_form() {
+        let (bare, bare_rest) = parse_type_phrase("Spider and legendary creature you control");
+        let (comma, comma_rest) = parse_type_phrase("Spider, and legendary creature you control");
+        assert_eq!(
+            bare, comma,
+            "the bare-\"and\" form must build the same union as the comma form"
+        );
+        assert_eq!(bare_rest.trim(), comma_rest.trim());
+
+        let TargetFilter::Or { ref filters } = bare else {
+            panic!("expected a two-leg Or union, got {bare:?}");
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf,
+                other => panic!("expected Typed leg, got {other:?}"),
+            })
+            .collect();
+        let legendary = FilterProp::HasSupertype {
+            value: Supertype::Legendary,
+        };
+        // CR 109.4: the trailing controller suffix is shared by both legs.
+        for leg in &legs {
+            assert_eq!(leg.controller, Some(ControllerRef::You), "{leg:?}");
+        }
+        assert!(legs[0]
+            .type_filters
+            .contains(&TypeFilter::Subtype("Spider".to_string())));
+        assert!(
+            !legs[0].properties.contains(&legendary),
+            "the supertype must not spread backwards onto the Spider leg: {:?}",
+            legs[0].properties
+        );
+        assert!(legs[1].type_filters.contains(&TypeFilter::Creature));
+        assert!(legs[1].properties.contains(&legendary));
+    }
+
+    /// V5 building block, second axis: the same disjunct serves "or" and every
+    /// supertype word in `parse_supertype_word`'s set, for any left conjunct.
+    #[test]
+    fn bare_or_supertype_led_conjunct_unions() {
+        for phrase in [
+            "Spider or legendary creature you control",
+            "artifact and legendary creature you control",
+            "land and basic land you control",
+        ] {
+            let (filter, _) = parse_type_phrase(phrase);
+            let TargetFilter::Or { ref filters } = filter else {
+                panic!("{phrase:?} must build an Or union, got {filter:?}");
+            };
+            assert_eq!(filters.len(), 2, "{phrase:?} -> {filters:?}");
+        }
+    }
+
+    /// V5's paired negative: the disjunct is deliberately narrowed to SUPERTYPE
+    /// leads. Colour, colour-quality, combat-status and leading-P/T leads (the
+    /// rest of `starts_with_type_phrase_lead`) stay OUT, so the heavily-pinned
+    /// "tapped and attacking" family is not in the blast radius; so do the
+    /// commander and article-led-non-card forms the condition layer folds one
+    /// level up.
+    #[test]
+    fn bare_and_non_supertype_lead_is_not_a_type_union() {
+        // Positive reach-guard in the SAME test: the harness does see a working
+        // union, so the negatives below are not vacuous.
+        let (positive, _) = parse_type_phrase("Spider and legendary creature you control");
+        assert!(
+            matches!(positive, TargetFilter::Or { .. }),
+            "reach-guard: the supertype lead must still union, got {positive:?}"
+        );
+
+        for phrase in [
+            "creature and tapped artifact you control",
+            "creature and each player",
+            "creature and each opponent",
+            "creature and commander you control",
+            "creature and a Plan you control",
+            // CR 205.4a: a SUPERTYPE lead not followed by a type-phrase lead is an
+            // ADJECTIVE conjunction qualifying one object, not a type union.
+            // Moritte of the Frost ("except it's legendary and snow in addition to
+            // its other types") is the only corpus instance; `become_copy_except.rs`
+            // owns that text. Without the `starts_with_type_phrase_lead` conjunct on
+            // the supertype disjunct this builds `Or[Typed{[], Legendary},
+            // Typed{[], Snow}]` — two legs carrying no type filter at all.
+            "legendary and snow in addition to its other types",
+            "legendary and snow",
+        ] {
+            let (filter, _) = parse_type_phrase(phrase);
+            assert!(
+                !matches!(filter, TargetFilter::Or { .. }),
+                "{phrase:?} must stay collapsed (no type union), got {filter:?}"
+            );
+        }
+    }
+
+    /// V5b (CR 205.4a + CR 702.21a): the SAME grammar fix, reached through a
+    /// completely different consumer — a Ward keyword cost, not a target phrase.
+    /// This is what makes U3 a building-block fix rather than a counter-doubling
+    /// special case.
+    ///
+    /// Revert-failing: today Sauron's Ward filter drops its `Creature` leg and
+    /// keeps only `Typed{[Artifact], Legendary}` (backlog root cause 6).
+    #[test]
+    fn sauron_the_dark_lord_ward_cost_unions_both_legendary_legs() {
+        use crate::types::keywords::{Keyword, WardCost};
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Ward—Sacrifice a legendary artifact or legendary creature.\n\
+             Whenever an opponent casts a spell, amass Orcs 1.\n\
+             Whenever an Army you control deals combat damage to a player, the Ring tempts you.\n\
+             Whenever the Ring tempts you, you may discard your hand. If you do, draw four cards.",
+            "Sauron, the Dark Lord",
+            &[],
+            &["Legendary".into(), "Creature".into()],
+            &["Avatar".into(), "Horror".into()],
+        );
+
+        let ward = parsed
+            .extracted_keywords
+            .iter()
+            .find_map(|k| match k {
+                Keyword::Ward(WardCost::Sacrifice { count, filter }) => Some((count, filter)),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "Ward—Sacrifice must be extracted: {:?}",
+                    parsed.extracted_keywords
+                )
+            });
+        assert_eq!(*ward.0, 1);
+        let TargetFilter::Or { filters } = ward.1 else {
+            panic!(
+                "the ward cost filter must union both legendary legs, got {:?}",
+                ward.1
+            );
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        let legendary = FilterProp::HasSupertype {
+            value: Supertype::Legendary,
+        };
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf,
+                other => panic!("expected Typed leg, got {other:?}"),
+            })
+            .collect();
+        assert!(legs[0].type_filters.contains(&TypeFilter::Artifact));
+        assert!(legs[0].properties.contains(&legendary));
+        assert!(legs[1].type_filters.contains(&TypeFilter::Creature));
+        assert!(
+            legs[1].properties.contains(&legendary),
+            "the dropped right conjunct is a LEGENDARY creature: {:?}",
+            legs[1].properties
+        );
+
+        // PAIRED POSITIVE: the rest of the card still parses, so a vanished
+        // keyword cannot masquerade as a passing assertion.
+        assert_eq!(
+            parsed.triggers.len(),
+            3,
+            "Sauron's three amass/Ring triggers must still parse: {:?}",
+            parsed.triggers.iter().map(|t| &t.mode).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn forest_land_subtype() {
         let (f, _) = parse_type_phrase("forest");
@@ -16686,10 +17650,14 @@ mod tests {
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
         assert_eq!(tf.controller, Some(ControllerRef::Opponent));
         assert!(
-            tf.properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::DealtDamageThisTurn)),
-            "Expected DealtDamageThisTurn (active), got: {:?}",
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: None
+                }
+            )),
+            "Expected unrestricted DealtDamageThisTurn (active), got: {:?}",
             tf.properties
         );
         assert!(
@@ -16697,6 +17665,77 @@ mod tests {
                 .iter()
                 .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
             "must NOT collapse to the passive WasDealtDamageThisTurn: {:?}",
+            tf.properties
+        );
+        assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");
+    }
+
+    // CR 120.1 + CR 120.2a: the damage-class and recipient axes of the
+    // active-voice clause are independent, so all four printed combinations must
+    // fall out of the same combinator. Exercised at the building-block level
+    // (the axis pair), not per card.
+    #[test]
+    fn dealt_damage_clause_parses_both_axes() {
+        for (clause, expected) in [
+            (
+                "dealt damage this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: None,
+                },
+            ),
+            (
+                // Reciprocate, Retaliate, Spear of Heliod, Giltspire Avenger.
+                "dealt damage to you this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::Any,
+                    recipient: Some(PlayerFilter::Controller),
+                },
+            ),
+            (
+                // Witch-king of Angmar.
+                "dealt combat damage to you this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::CombatOnly,
+                    recipient: Some(PlayerFilter::Controller),
+                },
+            ),
+            (
+                // Night of the Flying Merfolk.
+                "dealt combat damage to a player this turn",
+                FilterProp::DealtDamageThisTurn {
+                    kind: DamageKindFilter::CombatOnly,
+                    recipient: Some(PlayerFilter::All),
+                },
+            ),
+        ] {
+            let (rest, prop) = parse_dealt_damage_clause(clause)
+                .unwrap_or_else(|e| panic!("{clause:?} must parse: {e:?}"));
+            assert_eq!(prop, expected, "wrong props for {clause:?}");
+            assert!(rest.is_empty(), "{clause:?} left remainder {rest:?}");
+        }
+
+        // Negative control: the passive voice must not be consumed by the
+        // active-voice combinator (it routes to `WasDealtDamageThisTurn`).
+        assert!(parse_dealt_damage_clause("was dealt damage this turn").is_err());
+    }
+
+    // CR 120.1: the restrictive clause must reach the target filter's
+    // `properties`. Before this was wired, "that dealt combat damage to you this
+    // turn" was silently discarded and every creature became eligible (#8445).
+    #[test]
+    fn dealt_damage_to_you_clause_reaches_target_filter() {
+        let (filter, rest) =
+            parse_target("target creature that dealt combat damage to you this turn");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::CombatOnly,
+                recipient: Some(PlayerFilter::Controller),
+            }),
+            "restrictive clause dropped, got: {:?}",
             tf.properties
         );
         assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");
@@ -19879,6 +20918,116 @@ mod tests {
                 && pop.type_filters.contains(&TypeFilter::Permanent),
             "the population must carry the SAME type set as the candidates, got {:?}",
             pop.type_filters
+        );
+    }
+
+    /// V-CONTAIN (SHAPE) — CR 105.4. The printed chosen-colour qualifier arm is
+    /// gated on `ChosenColorQualifierScope::ChainBound`, and the gate must hold
+    /// in BOTH directions.
+    ///
+    /// Reverting the gate in either direction fails this test: dropping the
+    /// `ChainBound` check makes the negative half stamp `IsChosenColor` on a
+    /// throwaway `ParseContext::default()`; dropping the arm entirely makes the
+    /// positive half stop stamping it.
+    #[test]
+    fn printed_color_choice_qualifier_is_gated_on_chain_bound_scope() {
+        const PHRASE: &str = "permanents of the color of your choice";
+
+        // NEGATIVE — the exact throwaway call every `parse_type_phrase` call
+        // site makes (the wrapper builds a fresh `ParseContext::default()`).
+        let (unbound_filter, unbound_rest) = parse_type_phrase(PHRASE);
+        let unbound = typed_leg(&unbound_filter).expect("typed");
+        assert!(
+            !unbound
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "an Unbound context must NOT stamp IsChosenColor, got {:?}",
+            unbound.properties
+        );
+        assert_eq!(
+            unbound_rest.trim_start(),
+            "of the color of your choice",
+            "when the gate is closed the qualifier stays in the remainder so the \
+             existing target-fallback diagnostic stays honest"
+        );
+
+        // POSITIVE REACH-GUARD, same test — the arm does fire under ChainBound,
+        // so the negative above cannot pass because the arm is unreachable.
+        let mut bound_ctx = ParseContext {
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        let (bound_filter, bound_rest) = parse_type_phrase_with_ctx(PHRASE, &mut bound_ctx);
+        let bound = typed_leg(&bound_filter).expect("typed");
+        assert!(
+            bound
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "a ChainBound context MUST stamp IsChosenColor, got {:?}",
+            bound.properties
+        );
+        assert_eq!(bound_rest, "", "the qualifier must be fully consumed");
+        assert!(
+            matches!(
+                bound_ctx.pending_printed_color_choice,
+                Some(ChoiceType::Color { .. })
+            ),
+            "the arm must declare per-clause provenance for the assembly injector, got {:?}",
+            bound_ctx.pending_printed_color_choice
+        );
+
+        // WHITESPACE CASE — an upstream suffix arm that already consumed the
+        // separating space must not defeat the space-free tag.
+        let mut ws_ctx = ParseContext {
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        let (ws_filter, _) =
+            parse_type_phrase_with_ctx("permanents  of the color of your choice", &mut ws_ctx);
+        let ws = typed_leg(&ws_filter).expect("typed");
+        assert!(
+            ws.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "extra separating whitespace must not defeat the arm, got {:?}",
+            ws.properties
+        );
+
+        // ANAPHOR NEGATIVE — `ChainBound` must not widen the arm to the anaphor
+        // forms; those stay with `parse_pre_controller_chosen_filter_suffix`.
+        let mut anaphor_ctx = ParseContext {
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        let (anaphor_filter, anaphor_rest) =
+            parse_type_phrase_with_ctx("permanents of the chosen color", &mut anaphor_ctx);
+        let anaphor = typed_leg(&anaphor_filter).expect("typed");
+        assert!(
+            !anaphor
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor)),
+            "the anaphor form must NOT be consumed by this arm, got {:?}",
+            anaphor.properties
+        );
+        assert_eq!(anaphor_rest.trim_start(), "of the chosen color");
+        assert!(anaphor_ctx.pending_printed_color_choice.is_none());
+
+        // CLONE CASE — `ParseContext` derives `Clone`, so `ChainBound` is
+        // INHERITED by derived contexts (documented honestly on the enum), while
+        // a `..Default::default()`-constructed context is not.
+        let cloned = bound_ctx.clone();
+        assert_eq!(
+            cloned.chosen_color_qualifier,
+            ChosenColorQualifierScope::ChainBound,
+            "a clone inherits ChainBound — this is the documented hazard, not a bug"
+        );
+        assert_eq!(
+            ParseContext::default().chosen_color_qualifier,
+            ChosenColorQualifierScope::Unbound,
+            "a freshly defaulted context leaves the gate closed"
         );
     }
 }

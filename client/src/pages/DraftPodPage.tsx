@@ -61,16 +61,19 @@ import {
 } from "../components/draft/workspace/workspaceProjection";
 import { DialogShell } from "../components/modal/DialogShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
-import { MenuShell } from "../components/menu/MenuShell";
+import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import {
   draftPodScreen,
+  DRAFT_OFFLINE_ERROR,
   intergamePromptKey,
+  isMultiplayerDraftPodLive,
   useMultiplayerDraftStore,
   type DraftPodScreen,
   type GuestDraftResumeOutcome,
 } from "../stores/multiplayerDraftStore";
 import type { DraftPickDestination, DraftPickPlacementHint } from "../stores/draftStore";
 import { useDraftPodStore } from "../stores/draftPodStore";
+import { useEffectiveOffline } from "../stores/connectivityStore";
 
 // ── Setup Mode ────────────────────────────────────────────────────────
 
@@ -97,6 +100,7 @@ function subscribePickInteraction(listener: () => void): () => void {
 
 function PodSetup() {
   const { t } = useTranslation("draft");
+  const effectiveOffline = useEffectiveOffline();
   const [mode, setMode] = useState<SetupMode>("choose");
 
   const config = useDraftPodStore((s) => s.config);
@@ -113,18 +117,34 @@ function PodSetup() {
   const loadingPool = useDraftPodStore((s) => s.loadingPool);
   const poolMode = useDraftPodStore((s) => s.poolMode);
   const setPoolMode = useDraftPodStore((s) => s.setPoolMode);
+  const setDraftMode = useDraftPodStore((s) => s.setDraftMode);
+  const setSetDraftMode = useDraftPodStore((s) => s.setSetDraftMode);
   const setCubeForm = useDraftPodStore((s) => s.setCubeForm);
+  const allowedPodSizes = useDraftPodStore((s) =>
+    s.procedureCacheKey?.kind === s.config.kind
+    && s.procedureCacheKey.tournamentFormat === s.config.tournamentFormat
+      ? s.allowedPodSizes
+      : null,
+  );
+  const packDistribution = useDraftPodStore((s) => s.packDistribution);
   const packsPerPlayer = useDraftPodStore((s) => s.packsPerPlayer);
+  const cubeMinDeckSize = useDraftPodStore((s) =>
+    s.procedureCacheKey?.kind === s.config.kind
+    && s.procedureCacheKey.tournamentFormat === s.config.tournamentFormat
+      ? s.cubeMinDeckSize
+      : null,
+  );
   const refreshProcedure = useDraftPodStore((s) => s.refreshProcedure);
 
   // The kind radios record intent (`setConfig`) but publish nothing, so the
-  // ENGINE's per-kind axes — booster count and seat floor — are re-read here
+  // ENGINE's per-kind axes — booster count and allowed seat set — are re-read here
   // whenever the selected kind changes. Without this the set selector would
   // have no booster count to build a pack list against on the default entry,
   // which reaches this page with no `?kind=` deep link to load one.
   useEffect(() => {
+    if (effectiveOffline) return;
     void refreshProcedure();
-  }, [refreshProcedure, config.kind]);
+  }, [effectiveOffline, refreshProcedure, config.kind, config.tournamentFormat]);
   // Total over `DraftKind`: a future kind is a TS2741 at this literal rather than a
   // blank line under the radios. Values are already-resolved strings because
   // `react-i18next.d.ts` types `t`'s key against the `en` catalog, so a `t(variable)`
@@ -143,16 +163,41 @@ function PodSetup() {
     : t("podSetup.policyCasualDesc");
   const podSizeDescription = t("podSetup.podSizeDesc", { count: config.podSize });
   const podSizeItems = useMemo(
-    () =>
-      [4, 6, 8].map((n) => ({
-        value: String(n),
-        label: t("podSetup.playerCount", { count: n }),
-      })),
-    [t],
+    () => (allowedPodSizes ?? []).map((podSize) => ({
+      value: String(podSize),
+      label: t("podSetup.playerCount", { count: podSize }),
+    })),
+    [allowedPodSizes, t],
   );
   const podSizeLabel =
     podSizeItems.find((item) => item.value === String(config.podSize))?.label ??
     t("podSetup.playerCount", { count: config.podSize });
+  const configErrorMessage = configError === DRAFT_OFFLINE_ERROR
+    ? t("offline.startUnavailable")
+    : configError;
+
+  if (effectiveOffline) {
+    return (
+      <div className="mx-auto flex w-full max-w-2xl flex-col gap-6">
+        {mode !== "choose" && (
+          <button
+            onClick={() => setMode("choose")}
+            className="w-fit text-sm text-white/50 hover:text-white/80"
+          >
+            {t("podSetup.back")}
+          </button>
+        )}
+        <div className="rounded-card border border-amber-400/20 bg-amber-400/5 px-5 py-4 text-sm text-amber-100">
+          {t("offline.unavailableDescription")}
+        </div>
+        {configErrorMessage && (
+          <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
+            {configErrorMessage}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (mode === "choose") {
     return (
@@ -349,6 +394,7 @@ function PodSetup() {
             label={podSizeLabel}
             selectedValue={String(config.podSize)}
             items={podSizeItems}
+            disabled={allowedPodSizes === null}
             onSelect={(value) => setConfig({ podSize: Number(value) })}
             menuLayout="dropdown"
             fitContainer
@@ -374,7 +420,7 @@ function PodSetup() {
           <button
             type="button"
             onClick={() => setPoolMode("cube")}
-            disabled={config.kind === "Sealed"}
+            disabled={packDistribution === "AllAtOnce"}
             className={
               poolMode === "cube"
                 ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
@@ -385,18 +431,51 @@ function PodSetup() {
           </button>
         </div>
 
-        {poolMode === "set" || config.kind === "Sealed" ? (
+        {poolMode === "set" || packDistribution === "AllAtOnce" ? (
           <>
-            {/* Set selector — reuse the Quick Draft component */}
-            <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
-              {t("podSetup.setSelectorHint")}
+            <div className="flex flex-col gap-1">
+              <span className="text-sm font-medium text-white/60">{t("podSetup.setDraftMode")}</span>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 text-sm text-white/70">
+                  <input
+                    type="radio"
+                    name="setDraftMode"
+                    checked={setDraftMode === "uniform"}
+                    onChange={() => setSetDraftMode("uniform")}
+                    className="accent-emerald-400"
+                  />
+                  {t("podSetup.uniformPacks")}
+                </label>
+                <label className="flex items-center gap-2 text-sm text-white/70">
+                  <input
+                    type="radio"
+                    name="setDraftMode"
+                    checked={setDraftMode === "chaos"}
+                    onChange={() => setSetDraftMode("chaos")}
+                    className="accent-emerald-400"
+                  />
+                  {t("podSetup.chaosPacks")}
+                </label>
+              </div>
+              <p className="text-xs text-white/40">
+                {setDraftMode === "chaos"
+                  ? t("podSetup.chaosSelectorHint")
+                  : t("podSetup.setSelectorHint")}
+              </p>
             </div>
-            {/* A pod carries a pack-ordered SEQUENCE to the host, so the host
-                arranges one set per booster exactly as a local draft does.
+            <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
+              {setDraftMode === "chaos"
+                ? t("podSetup.chaosSelectorDetail")
+                : t("podSetup.setSelectorHint")}
+            </div>
+            {/* A Uniform pod carries a pack-ordered SEQUENCE to the host, so the host
+                arranges one set per booster exactly as a local draft does. Chaos
+                reuses this selector as a distinct candidate-set chooser; draft-wasm
+                privately resolves the seat-by-round assignments from the host seed.
                 `packsPerPlayer` is the ENGINE's per-kind booster count, so a
-                Sealed pod asks for six and a draft pod for three without this
-                page knowing either number; until it loads the list is locked
-                at zero rather than guessing one. Deliberately NOT
+                Uniform Sealed pod asks for six and a Uniform draft pod for three
+                without this page knowing either number; until it loads the list is
+                locked at zero rather than guessing one. Deliberately NOT
                 `fixedPackCount`: naming one set still fills every booster (a
                 short sequence repeats its last entry), so the old one-click
                 single-set pod survives alongside the arranged one. */}
@@ -406,6 +485,7 @@ function PodSetup() {
               <SetSelector
                 defaultPackCount={packsPerPlayer}
                 startLabel={t("podSetup.createPod")}
+                candidatePool={setDraftMode === "chaos"}
                 onStartDraft={(packs) => {
                   if (packs.length === 0) return;
                   setConfig({
@@ -424,14 +504,15 @@ function PodSetup() {
               setCubeForm({ cubeName, cubeListText, settings });
               void createPod();
             }}
-            disabled={loadingPool}
+            minimumDeckSize={cubeMinDeckSize ?? undefined}
+            disabled={loadingPool || cubeMinDeckSize === null}
           />
         )}
 
         {/* Error */}
-        {configError && (
+        {configErrorMessage && (
           <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
-            {configError}
+            {configErrorMessage}
           </div>
         )}
 
@@ -483,9 +564,9 @@ function PodSetup() {
       </div>
 
       {/* Error */}
-      {configError && (
+      {configErrorMessage && (
         <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
-          {configError}
+          {configErrorMessage}
         </div>
       )}
 
@@ -746,7 +827,7 @@ function BetweenGamesView({
               capabilities: { kind: "fixed-pool" },
               onWorkspaceChange: setIntergameWorkspaceState,
               onPreferencesChange: handlePreferencesChange,
-              onSubmitDeck: () => {
+              onSubmitDeck: (_commanders) => {
                 const partition = projectWorkspacePartition(intergameWorkspace, view.pool);
                 submitSideboard(
                   sideboardPrompt.matchId,
@@ -910,12 +991,11 @@ function DraftingPhaseContent({
   ]);
 
   if (!introDismissed) {
-    // CR 903.13a/b: the Commander procedure differs from the other pod kinds, so the
-    // intro copy does too. BOTH the variant and the player count come from the
-    // ENGINE-published view, never from `draftPodStore.config` — a guest's local
-    // config is never populated from the host's pod, so it still holds this client's
-    // own `kind: "Premier", podSize: 8` defaults. Reading the kind from the view and
-    // the count from the config would render "8 players" over a 4-seat Commander pod.
+    // The engine procedure authorizes the Commander variant, and its seat list
+    // supplies the player count. Both come from the view, never from
+    // `draftPodStore.config` — a guest's local config is never populated from
+    // the host's pod, so it still holds this client's own defaults. Reading a
+    // kind label or the count from that config would render the wrong intro.
     //
     // `phase` can reach "drafting" from a `statusChanged` event that carries no view,
     // so `view` is genuinely nullable here. In that window the seat count is unknown
@@ -925,7 +1005,7 @@ function DraftingPhaseContent({
 
     return (
       <DraftIntro
-        mode={view.kind === "CommanderDraft" ? "commander" : "pod"}
+        mode={view.launch_capability === "CommanderMultiplayer" ? "commander" : "pod"}
         podSize={view.seats.length}
         packCount={view.pack_count}
         cardsPerPack={view.cards_per_pack}
@@ -1056,10 +1136,10 @@ function CompleteView({ onLeave }: { onLeave: () => void }) {
   const view = useMultiplayerDraftStore((s) => s.view);
   const role = useMultiplayerDraftStore((s) => s.role);
   const launchCommanderGame = useMultiplayerDraftStore((s) => s.launchCommanderGame);
-  // CR 903.13a: only a Commander pod has a multiplayer game to launch, and only
-  // the host holds the session the decks are assembled from. The four
-  // CR 905.1a kinds render exactly as they do today.
-  const canLaunch = view?.kind === "CommanderDraft" && role === "host";
+  // The engine procedure authorizes this launch; the page must not infer it
+  // from a draft-kind label. Only the host holds the session the decks are
+  // assembled from.
+  const canLaunch = view?.launch_capability === "CommanderMultiplayer" && role === "host";
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 py-8">
       {/* `launchCommanderGame` reports a payload refusal by writing `error` and
@@ -1175,7 +1255,7 @@ function phaseContent(
 
 // ── Page ───────────────────────────────────────────────────────────────
 
-export function DraftPodPage() {
+function DraftPodPageContent() {
   const { t } = useTranslation("draft");
   const phase = useMultiplayerDraftStore((s) => s.phase);
   const screen = useMultiplayerDraftStore(draftPodScreen);
@@ -1191,16 +1271,18 @@ export function DraftPodPage() {
   const resumeDraft = useMultiplayerDraftStore((s) => s.resumeDraft);
   const resetPod = useDraftPodStore((s) => s.reset);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
-  const enterKind = useDraftPodStore((s) => s.enterKind);
+  const enterKindForEntry = useDraftPodStore((s) => s.enterKindForEntry);
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const entryGeneration = useRef(0);
   const retryController = useRef<AbortController | null>(null);
   const entry = searchParams.get("entry");
+  const commanderDraftRequested = searchParams.get("kind") === COMMANDER_DRAFT_ENTRY;
+  const resumeRequested = searchParams.get("resume") === "1";
   const entryMode = entry === "host" || entry === "guest" || entry === "auto"
     ? entry
-    : searchParams.get("resume") === "1" ? "host" : "auto";
+    : resumeRequested ? "host" : "auto";
   const [responsiveViewport, setResponsiveViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -1246,7 +1328,7 @@ export function DraftPodPage() {
     onClick: handleEndDraft,
   }), [endingDraft, handleEndDraft, t]);
   const hostDraftTopActions = useHostDraftTopActions({
-    enabled: phase === "drafting",
+    enabled: phase === "drafting" || phase === "deckbuilding",
     endDraftAction,
   });
   const betweenGamesEditorActive = screen === "betweenGames"
@@ -1367,10 +1449,10 @@ export function DraftPodPage() {
   useEffect(() => {
     // A resumed pod's kind comes from its persisted session, which is the higher
     // authority — a URL intent must never overwrite it.
-    if (searchParams.get("resume") === "1") return;
-    if (searchParams.get("kind") !== COMMANDER_DRAFT_ENTRY) return;
-    void enterKind("CommanderDraft");
-  }, [enterKind, searchParams]);
+    if (resumeRequested) return;
+    if (!commanderDraftRequested) return;
+    void enterKindForEntry("CommanderDraft");
+  }, [commanderDraftRequested, enterKindForEntry, resumeRequested]);
 
   const handleLeave = useCallback(async () => {
     await leave(false);
@@ -1445,7 +1527,7 @@ export function DraftPodPage() {
         </DialogShell>
       )}
 
-      {!(phase === "drafting" && compactHostControlsLayout) && (
+      {!((phase === "drafting" || phase === "deckbuilding") && compactHostControlsLayout) && (
         <HostControls
           draftTopActions={hostDraftTopActions}
           endDraftAction={endDraftAction}
@@ -1453,4 +1535,37 @@ export function DraftPodPage() {
       )}
     </div>
   );
+}
+
+function DraftPodOfflineUnavailable() {
+  const { t } = useTranslation(["draft", "menu"]);
+  const navigate = useNavigate();
+
+  return (
+    <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+      <MenuShell
+        title={t("offline.unavailableTitle", { ns: "draft" })}
+        description={t("offline.unavailableDescription", { ns: "draft" })}
+        layout="stacked"
+      >
+        <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col items-start gap-4 px-5 py-6">
+          <button
+            onClick={() => navigate("/")}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            {t("nav.home", { ns: "menu" })}
+          </button>
+        </MenuPanel>
+      </MenuShell>
+    </div>
+  );
+}
+
+export function DraftPodPage() {
+  const effectiveOffline = useEffectiveOffline();
+  const draftPodLive = useMultiplayerDraftStore(isMultiplayerDraftPodLive);
+
+  if (effectiveOffline && !draftPodLive) return <DraftPodOfflineUnavailable />;
+
+  return <DraftPodPageContent />;
 }

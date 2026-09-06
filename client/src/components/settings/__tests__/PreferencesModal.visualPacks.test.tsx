@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PreferencesModal } from "../PreferencesModal.tsx";
 
 const manager = vi.hoisted(() => ({ mounts: vi.fn(), unmounts: vi.fn() }));
+const DESKTOP_BODY_HEIGHT_CLASS = "lg:h-[36rem]";
 vi.mock("../visual-packs/VisualPackManager.tsx", () => ({
   VisualPackManager: () => {
     useEffect(() => {
@@ -18,6 +19,14 @@ vi.mock("../visual-packs/VisualPackManager.tsx", () => ({
 function Harness() {
   const [open, setOpen] = useState(true);
   return open ? <PreferencesModal onClose={() => setOpen(false)} /> : null;
+}
+
+function preferencesBody() {
+  const body = Array.from(screen.getByRole("dialog").children).find((element) =>
+    element.classList.contains(DESKTOP_BODY_HEIGHT_CLASS),
+  );
+  expect(body).toBeDefined();
+  return body!;
 }
 
 describe("PreferencesModal visual packs", () => {
@@ -48,5 +57,19 @@ describe("PreferencesModal visual packs", () => {
     view.unmount();
     expect(manager.mounts).toHaveBeenCalledTimes(2);
     expect(manager.unmounts).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps its desktop body geometry while switching categories", () => {
+    render(<Harness />);
+    const body = preferencesBody();
+
+    expect(body).toHaveClass(DESKTOP_BODY_HEIGHT_CLASS);
+    expect(body).not.toHaveClass("h-[36rem]", "md:h-[36rem]");
+
+    for (const tab of ["Visual", "Pacing", "Audio", "Multiplayer", "Data", "Gameplay"]) {
+      fireEvent.click(screen.getByRole("button", { name: tab }));
+      expect(preferencesBody()).toBe(body);
+      expect(body).toHaveClass(DESKTOP_BODY_HEIGHT_CLASS);
+    }
   });
 });

@@ -205,6 +205,37 @@ pub struct DraftPoolGroups {
     pub workspace_row_classification: DraftWorkspaceRowClassification,
 }
 
+/// A source description that may cross a player or spectator boundary.
+///
+/// This is deliberately distinct from [`DraftSource`]. A persisted Chaos
+/// source contains every seat's future booster assignments; that authoritative
+/// layout belongs to the host snapshot, never to an ordinary draft view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DraftSourceView {
+    Set { layout: SetLayoutView },
+    Cube { id: String, name: String },
+}
+
+/// The view-safe portion of a set source.
+///
+/// `Chaos` records the candidate intent everywhere, the viewer's currently
+/// opened booster while drafting, and their completed sequence only after all
+/// picks are over. It intentionally has no representation for another seat's
+/// assignment or any unopened booster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SetLayoutView {
+    UniformByRound {
+        codes: Vec<String>,
+    },
+    Chaos {
+        candidate_codes: Vec<String>,
+        current_pack_code: Option<String>,
+        completed_own_pack_codes: Option<Vec<String>>,
+        actual_set_codes: Option<Vec<String>>,
+    },
+}
+
 impl DraftPoolGroups {
     /// Builds the engine-owned ordering, grouping, and duplicate counts for a
     /// limited pool display.
@@ -320,6 +351,17 @@ pub struct DraftPlayerView {
     pub status: DraftStatus,
     /// Draft kind (Quick/Premier/Traditional/Sealed)
     pub kind: DraftKind,
+    /// View-safe source metadata. This is never the persisted `DraftSource`:
+    /// Chaos assignment matrices remain host-only.
+    pub source: DraftSourceView,
+    /// Engine-authorized post-draft game launch. This is a procedure-derived
+    /// capability, not a client inference from the draft-kind label: a
+    /// completed pod only offers a game when the procedure says it can.
+    pub launch_capability: DraftLaunchCapability,
+    /// CR 903.3 / CR 903.13f: number of commanders the deck must designate
+    /// under this draft procedure. This is a count, not a boolean, because
+    /// Commander deck construction can require multiple designated cards.
+    pub commanders_required: u8,
     /// Which pack round (0, 1, 2)
     pub current_pack_number: u8,
     /// Which pick within the current pack
@@ -444,17 +486,163 @@ pub struct DraftPlayerView {
     pub match_config: MatchConfig,
 }
 
-/// Re-export SpectatorVisibility from types for convenience.
-pub use crate::types::SpectatorVisibility;
+/// Re-export view-facing types from `types` for convenience.
+pub use crate::types::{DraftLaunchCapability, SpectatorVisibility};
+
+/// Whether the draft has finished assigning boosters. Only then may a player
+/// learn their completed Chaos sequence and the actual pod-wide set union.
+/// Lobby, drafting, paused, and abandoned sessions can still contain unopened
+/// boosters, so those states deliberately retain only the candidate intent.
+fn chaos_assignments_are_complete(status: DraftStatus) -> bool {
+    matches!(
+        status,
+        DraftStatus::Deckbuilding
+            | DraftStatus::Pairing
+            | DraftStatus::MatchInProgress
+            | DraftStatus::RoundComplete
+            | DraftStatus::Complete
+    )
+}
+
+fn set_source_view_for_player(
+    layout: &SetLayout,
+    status: DraftStatus,
+    seat_index: u8,
+    current_pack_number: u8,
+    current_pack_origin: Option<u8>,
+) -> SetLayoutView {
+    match layout {
+        SetLayout::UniformByRound { codes } => SetLayoutView::UniformByRound {
+            codes: codes.clone(),
+        },
+        SetLayout::Chaos {
+            candidate_codes,
+            assignments,
+        } => {
+            let assignments_complete = chaos_assignments_are_complete(status);
+            SetLayoutView::Chaos {
+                candidate_codes: candidate_codes.clone(),
+                current_pack_code: (status == DraftStatus::Drafting)
+                    .then(|| {
+                        current_pack_origin.and_then(|origin| {
+                            assignments
+                                .get(usize::from(origin))
+                                .and_then(|rounds| rounds.get(usize::from(current_pack_number)))
+                                .cloned()
+                        })
+                    })
+                    .flatten(),
+                completed_own_pack_codes: assignments_complete
+                    .then(|| assignments.get(usize::from(seat_index)).cloned())
+                    .flatten(),
+                actual_set_codes: assignments_complete.then(|| {
+                    layout
+                        .actual_set_codes()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                }),
+            }
+        }
+    }
+}
+
+fn source_view_for_player(session: &DraftSession, seat_index: u8) -> DraftSourceView {
+    match &session.config.source {
+        DraftSource::Set { layout } => DraftSourceView::Set {
+            layout: set_source_view_for_player(
+                layout,
+                session.status,
+                seat_index,
+                session.current_pack_number,
+                current_pack_origin(session, seat_index),
+            ),
+        },
+        DraftSource::Cube { id, name } => DraftSourceView::Cube {
+            id: id.clone(),
+            name: name.clone(),
+        },
+    }
+}
+
+/// The opening seat of a player's live booster. A Chaos assignment belongs to
+/// this origin, not the seat holding the booster after a pass.
+fn current_pack_origin(session: &DraftSession, seat_index: u8) -> Option<u8> {
+    session
+        .current_pack
+        .get(usize::from(seat_index))
+        .and_then(Option::as_ref)
+        .filter(|pack| !pack.0.is_empty())?;
+    session
+        .current_pack_origins
+        .get(usize::from(seat_index))
+        .copied()
+        .flatten()
+}
+
+fn source_view_for_spectator(session: &DraftSession) -> DraftSourceView {
+    match &session.config.source {
+        DraftSource::Set { layout } => DraftSourceView::Set {
+            layout: match layout {
+                SetLayout::UniformByRound { codes } => SetLayoutView::UniformByRound {
+                    codes: codes.clone(),
+                },
+                SetLayout::Chaos {
+                    candidate_codes, ..
+                } => SetLayoutView::Chaos {
+                    candidate_codes: candidate_codes.clone(),
+                    current_pack_code: None,
+                    completed_own_pack_codes: None,
+                    actual_set_codes: None,
+                },
+            },
+        },
+        DraftSource::Cube { id, name } => DraftSourceView::Cube {
+            id: id.clone(),
+            name: name.clone(),
+        },
+    }
+}
+
+/// Legacy progress metadata that remains safe for every viewer.
+///
+/// Uniform drafts expose their round sequence as before. Chaos intentionally
+/// returns no sequence: callers must use `DraftSourceView`'s scoped values
+/// instead of accidentally treating seat zero's schedule as public.
+fn visible_pack_set_codes(session: &DraftSession) -> Vec<String> {
+    match &session.config.source {
+        DraftSource::Set {
+            layout: SetLayout::UniformByRound { .. },
+        }
+        | DraftSource::Cube { .. } => session.pack_set_code_sequence(),
+        DraftSource::Set {
+            layout: SetLayout::Chaos { .. },
+        } => Vec::new(),
+    }
+}
+
+fn visible_chaos_concessions(session: &DraftSession) -> bool {
+    !matches!(
+        &session.config.source,
+        DraftSource::Set {
+            layout: SetLayout::Chaos { .. }
+        }
+    ) || chaos_assignments_are_complete(session.status)
+}
 
 /// Filtered view for spectators watching a draft.
 ///
 /// Public mode hides all private information (pools, packs).
-/// Omniscient mode exposes all pools and current packs for all seats.
+/// Omniscient mode exposes all pools and current packs for all seats, except
+/// Chaos sources: a spectator connection is not an authenticated host export,
+/// so Chaos keeps every assignment-bearing card view private.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectatorDraftView {
     pub status: DraftStatus,
     pub kind: DraftKind,
+    /// View-safe source metadata. A Chaos spectator receives candidate intent,
+    /// never any seat's assignment or future booster identity.
+    pub source: DraftSourceView,
     pub current_pack_number: u8,
     pub pick_number: u8,
     pub pass_direction: PassDirection,
@@ -476,8 +664,8 @@ pub struct SpectatorDraftView {
     pub min_deck_size: usize,
     pub addable_cards: Vec<String>,
     /// CR 903.13e: every commander filler this draft's booster sets grant, and
-    /// each one's cap. Mirrors `DraftPlayerView`'s field; see that one for why
-    /// it is separate from `addable_cards` and why it is plural.
+    /// each one's cap. Chaos spectators receive an empty list: those grants
+    /// are published only to a deckbuilding owner once all assignments finish.
     pub grantable_commander_fillers: Vec<GrantableCommanderFiller>,
     pub standings: Vec<StandingEntry>,
     pub current_round: u8,
@@ -557,9 +745,15 @@ pub fn filter_for_spectator(
     let standings = compute_standings(session);
     let pairings = compute_pairing_views(session);
 
-    let (pools, current_packs) = match visibility {
-        SpectatorVisibility::Public => (None, None),
-        SpectatorVisibility::Omniscient => {
+    let chaos_source = matches!(
+        &session.config.source,
+        DraftSource::Set {
+            layout: SetLayout::Chaos { .. }
+        }
+    );
+    let (pools, current_packs) = match (visibility, chaos_source) {
+        (_, true) | (SpectatorVisibility::Public, false) => (None, None),
+        (SpectatorVisibility::Omniscient, false) => {
             let pools = Some(session.pools.clone());
             let packs = Some(
                 session
@@ -575,13 +769,14 @@ pub fn filter_for_spectator(
     SpectatorDraftView {
         status: session.status,
         kind: session.kind,
+        source: source_view_for_spectator(session),
         current_pack_number: session.current_pack_number,
         pick_number: session.pick_number,
         pass_direction: session.pass_direction,
         seats,
         cards_per_pack: session.cards_in_pack(session.current_pack_number),
         pack_sizes: session.pack_size_sequence(),
-        pack_set_codes: session.pack_set_code_sequence(),
+        pack_set_codes: visible_pack_set_codes(session),
         pack_pick_steps: session.pack_pick_step_sequence(),
         pick_steps_per_pack: session
             .kind
@@ -591,7 +786,14 @@ pub fn filter_for_spectator(
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
         // CR 903.13e: read from the latch, never re-derived here.
-        grantable_commander_fillers: session_concessions(session).fillers,
+        grantable_commander_fillers: matches!(
+            &session.config.source,
+            DraftSource::Set {
+                layout: SetLayout::Chaos { .. }
+            }
+        )
+        .then(Vec::new)
+        .unwrap_or_else(|| session_concessions(session).fillers),
         standings,
         current_round: session.current_round,
         tournament_format: session.config.tournament_format,
@@ -730,6 +932,9 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
     DraftPlayerView {
         status: session.status,
         kind: session.kind,
+        source: source_view_for_player(session, seat_index),
+        launch_capability: session.kind.procedure().launch_capability(),
+        commanders_required: session.kind.procedure().commanders_required,
         current_pack_number: session.current_pack_number,
         pick_number: session.pick_number,
         pass_direction: session.pass_direction,
@@ -743,7 +948,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         seats,
         cards_per_pack: session.cards_in_pack(session.current_pack_number),
         pack_sizes: session.pack_size_sequence(),
-        pack_set_codes: session.pack_set_code_sequence(),
+        pack_set_codes: visible_pack_set_codes(session),
         pack_pick_steps: session.pack_pick_step_sequence(),
         pick_steps_per_pack: session
             .kind
@@ -753,13 +958,21 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
         // CR 903.13e: read from the latch, never re-derived here.
-        grantable_commander_fillers: session_concessions(session).fillers,
+        grantable_commander_fillers: if visible_chaos_concessions(session) {
+            session_concessions(session).fillers
+        } else {
+            Vec::new()
+        },
         // CR 903.13f(3): the same latch, published for the engine's partner
         // query. Owned strings because the view is owned.
-        draft_set_codes: concession_set_codes(session)
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+        draft_set_codes: if visible_chaos_concessions(session) {
+            concession_set_codes(session)
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        },
         timer_remaining_ms: None,
         standings,
         current_round: session.current_round,
@@ -1945,7 +2158,9 @@ mod tests {
     fn the_player_view_publishes_the_shape_and_set_of_every_booster() {
         let (mut session, source) = test_session(2);
         session.config.source = DraftSource::Set {
-            codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+            layout: SetLayout::UniformByRound {
+                codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+            },
         };
         session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
         // Pretend the table has moved on to the second booster.
@@ -1961,6 +2176,237 @@ mod tests {
         );
         // `cards_per_pack` tracks the booster in play, not a session-wide size.
         assert_eq!(view.cards_per_pack, 14);
+    }
+
+    #[test]
+    fn chaos_source_views_publish_only_viewer_scoped_assignment_metadata() {
+        let (mut session, source) = test_session(2);
+        session.config.source = DraftSource::Set {
+            layout: SetLayout::Chaos {
+                candidate_codes: vec!["AAA".to_string(), "BBB".to_string()],
+                assignments: vec![
+                    vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+                    vec!["BBB".to_string(), "AAA".to_string(), "BBB".to_string()],
+                ],
+            },
+        };
+
+        let lobby = filter_for_player(&session, 0);
+        assert!(lobby.pack_set_codes.is_empty());
+        assert!(matches!(
+            lobby.source,
+            DraftSourceView::Set {
+                layout: SetLayoutView::Chaos {
+                    current_pack_code: None,
+                    completed_own_pack_codes: None,
+                    actual_set_codes: None,
+                    ..
+                }
+            }
+        ));
+
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        session.current_pack_number = 1;
+        let player_zero = filter_for_player(&session, 0);
+        let player_one = filter_for_player(&session, 1);
+        let source_for = |view: DraftPlayerView| match view.source {
+            DraftSourceView::Set {
+                layout:
+                    SetLayoutView::Chaos {
+                        candidate_codes,
+                        current_pack_code,
+                        completed_own_pack_codes,
+                        actual_set_codes,
+                    },
+            } => (
+                candidate_codes,
+                current_pack_code,
+                completed_own_pack_codes,
+                actual_set_codes,
+            ),
+            _ => panic!("expected a Chaos source view"),
+        };
+        let (candidate_codes, current_pack_code, completed_codes, actual_codes) =
+            source_for(player_zero);
+        assert_eq!(candidate_codes, vec!["AAA".to_string(), "BBB".to_string()]);
+        assert_eq!(current_pack_code, Some("BBB".to_string()));
+        assert_eq!(completed_codes, None);
+        assert_eq!(actual_codes, None);
+        assert_eq!(source_for(player_one).1, Some("AAA".to_string()));
+
+        session.current_pack[0] = None;
+        session.current_pack_origins[0] = None;
+        let after_pick = filter_for_player(&session, 0);
+        assert!(matches!(
+            after_pick.source,
+            DraftSourceView::Set {
+                layout: SetLayoutView::Chaos {
+                    current_pack_code: None,
+                    ..
+                }
+            }
+        ));
+        session.current_pack[0] = session.current_pack[1].clone();
+        session.current_pack_origins[0] = session.current_pack_origins[1];
+
+        let spectator = filter_for_spectator(&session, SpectatorVisibility::Public);
+        assert!(spectator.pack_set_codes.is_empty());
+        assert!(matches!(
+            spectator.source,
+            DraftSourceView::Set {
+                layout: SetLayoutView::Chaos {
+                    current_pack_code: None,
+                    completed_own_pack_codes: None,
+                    actual_set_codes: None,
+                    ..
+                }
+            }
+        ));
+        let omniscient = filter_for_spectator(&session, SpectatorVisibility::Omniscient);
+        assert!(omniscient.pools.is_none());
+        assert!(omniscient.current_packs.is_none());
+        assert!(matches!(
+            omniscient.source,
+            DraftSourceView::Set {
+                layout: SetLayoutView::Chaos {
+                    current_pack_code: None,
+                    completed_own_pack_codes: None,
+                    actual_set_codes: None,
+                    ..
+                }
+            }
+        ));
+
+        session.status = DraftStatus::Deckbuilding;
+        let deckbuilder = filter_for_player(&session, 0);
+        match &deckbuilder.source {
+            DraftSourceView::Set {
+                layout:
+                    SetLayoutView::Chaos {
+                        completed_own_pack_codes,
+                        actual_set_codes,
+                        ..
+                    },
+            } => {
+                assert_eq!(
+                    completed_own_pack_codes,
+                    &Some(vec![
+                        "AAA".to_string(),
+                        "BBB".to_string(),
+                        "AAA".to_string()
+                    ])
+                );
+                assert_eq!(
+                    actual_set_codes,
+                    &Some(vec!["AAA".to_string(), "BBB".to_string()])
+                );
+            }
+            _ => panic!("expected a Chaos source view"),
+        }
+
+        let serialized = serde_json::to_value(deckbuilder).expect("serialize player view");
+        assert!(
+            serialized
+                .pointer("/source/data/layout/Chaos/assignments")
+                .is_none(),
+            "the source view must have no assignment matrix to leak"
+        );
+    }
+
+    #[test]
+    fn chaos_commander_concessions_wait_for_the_deckbuilding_view() {
+        let (mut session, _) = test_session(2);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        session.config.source = DraftSource::Set {
+            layout: SetLayout::Chaos {
+                candidate_codes: vec!["CMM".to_string(), "CLB".to_string()],
+                assignments: vec![
+                    vec!["CMM".to_string(), "CLB".to_string(), "CMM".to_string()],
+                    vec!["CLB".to_string(), "CMM".to_string(), "CLB".to_string()],
+                ],
+            },
+        };
+        session.status = DraftStatus::Drafting;
+
+        let drafting = filter_for_player(&session, 0);
+        assert!(drafting.draft_set_codes.is_empty());
+        assert!(drafting.grantable_commander_fillers.is_empty());
+
+        session.status = DraftStatus::Deckbuilding;
+        let deckbuilding = filter_for_player(&session, 0);
+        assert_eq!(
+            deckbuilding.draft_set_codes,
+            vec!["CMM".to_string(), "CLB".to_string()]
+        );
+        assert_eq!(
+            deckbuilding.grantable_commander_fillers,
+            engine::game::deck_validation::draft_set_concessions_for(["CMM", "CLB"]).fillers
+        );
+
+        let spectator = filter_for_spectator(&session, SpectatorVisibility::Public);
+        assert!(
+            spectator.grantable_commander_fillers.is_empty(),
+            "a spectator is not a deckbuilding owner"
+        );
+    }
+
+    #[test]
+    fn chaos_current_pack_code_follows_the_packs_opening_seat_after_a_pass() {
+        let (mut session, source) = test_session(2);
+        session.config.source = DraftSource::Set {
+            layout: SetLayout::Chaos {
+                candidate_codes: vec!["AAA".to_string(), "BBB".to_string()],
+                assignments: vec![
+                    vec!["AAA".to_string(), "AAA".to_string(), "AAA".to_string()],
+                    vec!["BBB".to_string(), "BBB".to_string(), "BBB".to_string()],
+                ],
+            },
+        };
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        let current_code = |view: DraftPlayerView| match view.source {
+            DraftSourceView::Set {
+                layout:
+                    SetLayoutView::Chaos {
+                        current_pack_code: Some(code),
+                        ..
+                    },
+            } => code,
+            _ => panic!("expected a current Chaos pack code"),
+        };
+        assert_eq!(current_code(filter_for_player(&session, 0)), "AAA");
+        assert_eq!(current_code(filter_for_player(&session, 1)), "BBB");
+
+        for seat in 0..2 {
+            let card_instance_id = session.current_pack[seat]
+                .as_ref()
+                .expect("each seat begins with a pack")
+                .0[0]
+                .instance_id
+                .clone();
+            session::apply(
+                &mut session,
+                DraftAction::Pick {
+                    seat: seat as u8,
+                    card_instance_ids: vec![card_instance_id],
+                },
+                None,
+            )
+            .expect("the second pick passes both boosters");
+        }
+
+        assert_eq!(session.current_pack_origins, vec![Some(1), Some(0)]);
+        assert_eq!(
+            current_code(filter_for_player(&session, 0)),
+            "BBB",
+            "seat 0 now holds the booster that seat 1 opened"
+        );
+        assert_eq!(
+            current_code(filter_for_player(&session, 1)),
+            "AAA",
+            "seat 1 now holds the booster that seat 0 opened"
+        );
     }
 
     #[test]
@@ -2625,7 +3071,9 @@ mod tests {
         // builder that published only the first would red on this pair.
         let mut mixed = commander_draft_session("CMM");
         mixed.config.source = DraftSource::Set {
-            codes: vec!["CMM".to_string(), "CLB".to_string()],
+            layout: SetLayout::UniformByRound {
+                codes: vec!["CMM".to_string(), "CLB".to_string()],
+            },
         };
         let union =
             engine::game::deck_validation::draft_set_concessions_for(["CMM", "CLB"]).fillers;
@@ -2684,7 +3132,9 @@ mod tests {
         let mixed = session_with(
             DraftKind::CommanderDraft,
             DraftSource::Set {
-                codes: vec!["CMM".to_string(), "CLB".to_string(), "CMM".to_string()],
+                layout: SetLayout::UniformByRound {
+                    codes: vec!["CMM".to_string(), "CLB".to_string(), "CMM".to_string()],
+                },
             },
         );
         assert_eq!(
@@ -2772,6 +3222,54 @@ mod tests {
                 .procedure()
                 .pick_steps_per_pack(15),
             8
+        );
+    }
+
+    #[test]
+    fn player_view_publishes_the_procedure_owned_launch_capability() {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::Quick;
+        session.config.kind = DraftKind::Quick;
+        assert_eq!(
+            filter_for_player(&session, 0).launch_capability,
+            DraftLaunchCapability::None,
+            "complete-immediately alone must not authorize a multiplayer pod game"
+        );
+
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        assert_eq!(
+            filter_for_player(&session, 0).launch_capability,
+            DraftLaunchCapability::CommanderMultiplayer,
+            "the Commander procedure's post-draft and designation axes authorize its pod game"
+        );
+
+        session.kind = DraftKind::Premier;
+        session.config.kind = DraftKind::Premier;
+        assert_eq!(
+            filter_for_player(&session, 0).launch_capability,
+            DraftLaunchCapability::None,
+            "in-session tournament pairings must not expose an external game launch"
+        );
+    }
+
+    #[test]
+    fn player_view_publishes_the_procedure_owned_commander_count() {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::Quick;
+        assert_eq!(
+            filter_for_player(&session, 0).commanders_required,
+            1,
+            "the projection follows the active procedure, not unrelated config identity"
+        );
+
+        session.kind = DraftKind::Premier;
+        session.config.kind = DraftKind::CommanderDraft;
+        assert_eq!(
+            filter_for_player(&session, 0).commanders_required,
+            0,
+            "a CommanderDraft config label must not leak designation into a Premier view"
         );
     }
 

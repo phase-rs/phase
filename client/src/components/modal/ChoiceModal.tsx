@@ -13,6 +13,17 @@ export interface ChoiceOption {
   description?: string;
   /** Optional glyph rendered before the label (e.g. a loyalty badge). */
   icon?: ReactNode;
+  /**
+   * Rendered as a non-selectable row (e.g. an ability whose cost the player
+   * can't pay right now).
+   *
+   * Uses `aria-disabled`, NOT the native `disabled` attribute: `description`
+   * renders as a `<p>` INSIDE the `<button>`, so a native `disabled` would drop
+   * the explanatory reason out of the tab order and out of interactive
+   * screen-reader navigation — exactly for the users who need it. The no-op
+   * `onClick` guard is the real selection guard.
+   */
+  disabled?: boolean;
 }
 
 interface ChoiceModalProps {
@@ -63,8 +74,15 @@ export function ChoiceModal({
           {options.map((opt) => (
             <button
               key={opt.id}
-              onClick={() => onChoose(opt.id)}
-              className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/40"
+              aria-disabled={opt.disabled || undefined}
+              onClick={() => {
+                if (!opt.disabled) onChoose(opt.id);
+              }}
+              className={
+                opt.disabled
+                  ? "min-h-11 cursor-not-allowed rounded-[16px] border border-white/8 bg-white/[0.02] px-4 py-3 text-left opacity-60"
+                  : "min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/40"
+              }
             >
               <span
                 className={`flex items-center gap-2 ${opt.labelTone === "secondary" ? "text-xs font-normal text-slate-400" : "font-semibold text-white"}`}

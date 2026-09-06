@@ -30,7 +30,7 @@ interface CardPoolColumnProps {
   dragController?: DraftWorkspaceDragController;
   touchDragEnabled?: boolean;
   touchScrollEnabled?: boolean;
-  registerRoot?: RefCallback<HTMLElement>;
+  registerCardArea?: RefCallback<HTMLElement>;
   showHeader: boolean;
   canRemove: boolean;
   registerCard(instanceId: string): RefCallback<HTMLButtonElement>;
@@ -123,7 +123,7 @@ export function CardPoolColumn({
   dragController,
   touchDragEnabled = false,
   touchScrollEnabled = false,
-  registerRoot,
+  registerCardArea,
   showHeader,
   canRemove,
   registerCard,
@@ -159,11 +159,10 @@ export function CardPoolColumn({
 
   return (
     <section
-      ref={registerRoot}
       style={column.rows.length === 2 ? { borderColor: "transparent", gridTemplateRows: "subgrid" } : undefined}
       className={`h-full min-w-0 select-none overflow-visible border caret-transparent ${column.rows.length === 2
         ? "row-span-3 grid grid-rows-subgrid bg-transparent shadow-none"
-        : "rounded-[8px] border-hairline bg-black/28 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] transition-colors hover:border-hairline-hover"
+        : "flex flex-col rounded-[8px] border-hairline bg-black/28 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] transition-colors hover:border-hairline-hover"
       }`}
       data-board-column={column.column}
       data-drop-state={column.drop.state}
@@ -181,7 +180,7 @@ export function CardPoolColumn({
         <header
           ref={registerHeader(column.column)}
           tabIndex={-1}
-          className="relative row-start-1 flex h-8 min-h-8 items-center gap-1 overflow-hidden whitespace-nowrap rounded-t-[7px] border-b border-hairline bg-white/[0.045] px-2 text-xs text-fg-muted"
+          className="relative z-10 row-start-1 flex h-8 min-h-8 items-center gap-1 overflow-hidden whitespace-nowrap rounded-t-[7px] border-b border-hairline bg-white/[0.045] px-2 text-xs text-fg-muted"
           aria-label={headerName}
         >
           <span data-card-count aria-hidden="true" className="shrink-0 font-mono text-sm tabular-nums text-fg">{column.header.count}</span>
@@ -210,41 +209,31 @@ export function CardPoolColumn({
         </header>
       )}
       <div
+        ref={registerCardArea}
         data-card-area
-        className={column.rows.length === 2 ? "contents" : "relative grid flex-1 gap-2"}
+        className={`${column.rows.length === 2
+          ? `relative row-start-2 row-span-2 grid min-h-0 min-w-0 grid-rows-subgrid ${showHeader ? "rounded-b-[8px]" : "rounded-[8px]"} border border-hairline bg-black/28`
+          : `relative grid min-h-0 flex-1 gap-2 ${showHeader ? "rounded-b-[7px]" : "rounded-[7px]"}`
+        } ${column.drop.active ? "draft-card-area-drop-active" : ""}`}
         style={column.rows.length === 2
-          ? undefined
+          ? { gridTemplateRows: "subgrid" }
           : { gridTemplateRows: `repeat(${column.rows.length}, minmax(0, 1fr))` }
         }
       >
-        {column.drop.active && column.rows.length === 1 && (
-          <span
-            aria-hidden="true"
-            data-drop-highlight="active"
-            className="pointer-events-none absolute inset-0 z-20 border-2 border-white"
-          />
-        )}
         {column.rows.map((row) => (
             <div
               key={row.key}
-              className={`${column.rows.length === 2 ? `${row.row === 1 ? "mt-2 rounded-[7px]" : "rounded-b-[7px]"} border border-hairline bg-black/28` : ""} relative grid min-w-0`}
-              style={column.rows.length === 2 ? { gridRow: row.row + 2 } : undefined}
+              className={`${column.rows.length === 2 ? `${row.row === 1 ? "mt-2 rounded-[7px]" : ""} border border-hairline` : ""} relative grid min-w-0`}
+              style={column.rows.length === 2 ? { gridRow: row.row + 1 } : undefined}
               data-board-row={row.row}
               data-drop-state={row.drop.state}
               aria-describedby={row.drop.active ? `${row.key}:drop-description` : undefined}
             >
               <span aria-hidden="true" data-card-height-baseline className="block aspect-[488/680] w-full self-start [grid-area:1/1]" />
               {row.drop.active && (
-                <>
-                  <span id={`${row.key}:drop-description`} className="sr-only">
-                    {t(row.drop.descriptionKey!)}
-                  </span>
-                  <span
-                    aria-hidden="true"
-                    data-drop-highlight="active"
-                    className={`pointer-events-none absolute inset-0 z-20 border-2 border-white ${row.row === 1 ? "rounded-[6px]" : "rounded-b-[6px]"}`}
-                  />
-                </>
+                <span id={`${row.key}:drop-description`} className="sr-only">
+                  {t(row.drop.descriptionKey!)}
+                </span>
               )}
               <div data-card-stack className="min-w-0 [grid-area:1/1]">
                 {row.cards.map((card, stackIndex) => (

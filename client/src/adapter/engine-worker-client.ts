@@ -24,7 +24,11 @@ import {
   AdapterErrorCode,
   isActionRejection,
 } from "./types";
-import type { InteractionSubmission } from "./generated/interaction";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
@@ -224,6 +228,20 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
   }
 
+  /** Always-definite deck/format verdict for ENFORCING callers. See
+   *  `WasmAdapter.evaluateDeckFormatGate`. */
+  async evaluateDeckFormatGate(request: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "evaluateDeckFormatGate", request });
+  }
+
+  async customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "customFormatFromLobbyConfig", name, formatConfig });
+  }
+
+  async formatConfigForCustomRules(customRules: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "formatConfigForCustomRules", customRules });
+  }
+
   async getCardFaceData(cardName: string): Promise<unknown> {
     return this.request<unknown>({ type: "getCardFaceData", cardName });
   }
@@ -309,6 +327,16 @@ export class EngineWorkerClient {
   async previewManaPayment(actor: number, action: GameAction): Promise<number[]> {
     return this.request<number[]>(
       { type: "previewManaPayment", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async previewInteraction(
+    actor: number,
+    request: InteractionPreviewRequest,
+  ): Promise<InteractionPreview> {
+    return this.request<InteractionPreview>(
+      { type: "previewInteraction", actor, request },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

@@ -113,16 +113,23 @@
     "draftBadge": "{{setCode}} Draft",
     "p2pBadgeTitle": "Peer-to-peer game (host runs the engine)",
     "sandboxBadgeTitle": "This game allows debug actions. Use for testing — not a competitive match.",
+    "hintSlow": "SLOW",
+    "hintSlowTitle": "This server has been answering slowly for players recently.",
+    "hintUnreliable": "UNRELIABLE",
+    "hintUnreliableTitle": "Players have often failed to connect to this server recently.",
     "rankedBadgeTitle": "Ranked room",
     "rankedBadge": "RANKED",
     "anonymous": "Anonymous",
     "by": "by {{name}}",
     "passwordProtected": "Password protected",
-    "join": "Join"
+    "join": "Join",
+    "originTitle": "Listed by {{name}} {{kind}}",
+    "kindFull": "(game server)",
+    "kindLobbyOnly": "(lobby broker)"
   },
   "serverPicker": {
     "title": "Server",
-    "subtitle": "Pick a region, or connect to a self-hosted instance.",
+    "subtitle": "Choose where you host, and which lobbies you browse.",
     "noneLabel": "None (P2P only)",
     "directCodes": "direct codes",
     "official": "Official",
@@ -133,7 +140,23 @@
     "urlError": "URL must start with ws:// or wss://",
     "connected": "Connected",
     "connectionFailed": "Connection failed",
-    "testing": "Testing…"
+    "testing": "Testing…",
+    "hostingServer": "Hosting server",
+    "hostingServerHelp": "Where the games you host are created and registered.",
+    "sources": "Lobby sources",
+    "sourcesHelp": "Open tables from every source below are merged into one list.",
+    "addSource": "Add a source",
+    "remove": "Remove",
+    "useForHosting": "Use for hosting",
+    "sourceStatusConnecting": "Connecting…",
+    "sourceStatusDegraded": "Unreachable",
+    "sourceDuplicate": "That server is already a lobby source.",
+    "sourceCapReached": "Up to {{max}} sources can be added.",
+    "directoryOrigin": "Directory",
+    "sourceScore": "Score {{score}}",
+    "enable": "Enable",
+    "disable": "Disable",
+    "incompatibleVersion": "Incompatible — server version {{version}}"
   },
   "lobbyDraftRooms": {
     "noRooms": "No draft rooms available",
@@ -183,7 +206,9 @@
     "hostGame": "Host Game",
     "hostP2PGame": "Host P2P Game",
     "passwordRequired": "Password Required",
-    "passwordPlaceholder": "Enter password"
+    "passwordPlaceholder": "Enter password",
+    "sourcesDegraded": "Some lobby sources are unreachable",
+    "invalidJoinServer": "That join code's server address isn't valid."
   },
   "hostSetup": {
     "hostDirectMatch": "Host Direct Match",
@@ -213,6 +238,10 @@
     "startWhenFull": "Start when full",
     "ranked": "Ranked",
     "listInLobby": "List in lobby",
+    "hostServer": "Host on",
+    "hostServerHelp": "Which server runs this match. Your browsing and direct-code settings don't change.",
+    "hostServerScore": "{{name}} — health {{score}}",
+    "hostServerUnscored": "{{name}} — not yet rated",
     "sandboxMode": "Sandbox Mode — allow debug actions",
     "sandboxModeHelp": "The host can directly manipulate the game state (move cards, change life, modify counters) and grant debug permission to other players. Use for testing or sandbox play — not for competitive matches. This setting cannot be changed once the game starts.",
     "setPassword": "Set password",
@@ -220,7 +249,17 @@
     "back": "Back",
     "opening": "Opening…",
     "hostP2PGame": "Host P2P Game",
-    "hostGame": "Host Game"
+    "hostGame": "Host Game",
+    "savedFormats": "Saved Custom Formats",
+    "saveAsCustomFormat": "Save format",
+    "customFormatNamePlaceholder": "Name this format",
+    "useCustomFormat": "Use",
+    "customFormatInUse": "In use",
+    "deleteCustomFormat": "Delete",
+    "loadingCustomFormat": "Loading format…",
+    "noSavedCustomFormats": "No saved custom formats yet.",
+    "customFormatResolveFailed": "Could not load that saved format.",
+    "customFormatHostingUnavailable": "Hosting with a custom format isn't supported yet — deck legality can't be checked for it. Save and preview it for now."
   },
   "page": {
     "deckRejected": "Deck was rejected by the host.",
@@ -243,6 +282,8 @@
     "descriptionDraftLobby": "Waiting for players to join the draft pod.",
     "descriptionDeckSelectFormat": "Pick a deck for {{format}}.",
     "descriptionDeckSelect": "Pick the deck you want to bring online.",
+    "offlineUnavailableTitle": "Multiplayer is unavailable while offline.",
+    "offlineUnavailableDescription": "Reconnect or turn off Offline Mode to host or join a multiplayer game.",
     "eyebrow": "Multiplayer",
     "activeDeck": "Active Deck",
     "edit": "Edit",
@@ -250,7 +291,8 @@
     "noDeckWarning": "No deck selected — you'll need to pick one before hosting.",
     "pickDeck": "Pick Deck",
     "anonymous": "Anonymous",
-    "joining": "Joining"
+    "joining": "Joining",
+    "joinNeedsServer": "Pick a server before joining a game."
   },
   "draftLobbyPanel": {
     "draftPod": "Draft Pod",

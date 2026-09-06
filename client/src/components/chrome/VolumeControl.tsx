@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { audioManager } from "../../audio/AudioManager.ts";
-import { useAudioHealthStore } from "../../stores/audioHealthStore.ts";
+import { type AudioUnavailableReason, useAudioHealthStore } from "../../stores/audioHealthStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 
 function SpeakerIcon({ className }: { className?: string }) {
@@ -29,6 +29,12 @@ function SpeakerLowIcon({ className }: { className?: string }) {
   );
 }
 
+/** The message that explains each way boot can leave audio switched off. */
+const UNAVAILABLE_MESSAGE = {
+  "device-wedged": "volume.deviceBlocked",
+  "media-unavailable": "volume.mediaUnavailable",
+} as const satisfies Record<AudioUnavailableReason, string>;
+
 interface VolumeControlProps {
   /** "chrome" = ScreenChrome style (menu pages), "game" = GameMenu style (in-game) */
   variant: "chrome" | "game";
@@ -38,13 +44,13 @@ export function VolumeControl({ variant }: VolumeControlProps) {
   const { t } = useTranslation();
   const masterVolume = usePreferencesStore((s) => s.masterVolume);
   const masterMuted = usePreferencesStore((s) => s.masterMuted);
-  const deviceBlocked = useAudioHealthStore((s) => s.deviceBlocked);
+  const unavailable = useAudioHealthStore((s) => s.unavailable);
   const setMasterVolume = usePreferencesStore((s) => s.setMasterVolume);
   const setMasterMuted = usePreferencesStore((s) => s.setMasterMuted);
   const [expanded, setExpanded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const blockedStatusId = useId();
+  const unavailableStatusId = useId();
 
   const handleToggleMute = useCallback(() => {
     const next = !masterMuted;
@@ -109,19 +115,22 @@ export function VolumeControl({ variant }: VolumeControlProps) {
   }, []);
 
   const effectiveVolume = masterMuted ? 0 : masterVolume;
-  const Icon = deviceBlocked || masterMuted || effectiveVolume === 0
+  const Icon = unavailable !== null || masterMuted || effectiveVolume === 0
     ? SpeakerMutedIcon
     : effectiveVolume < 50
       ? SpeakerLowIcon
       : SpeakerIcon;
 
-  // A wedged OS audio server means boot skipped audio entirely; the muted
-  // icon plus the tooltip is the user-visible explanation for the silence.
-  // The accessible name stays the button's ACTION (mute/unmute); the blocked
-  // status is exposed as a description (sr-only span + aria-describedby) so
-  // touch/AT users can reach it without a hover-only title.
+  // Boot skipped audio entirely — a wedged OS audio server, or a media
+  // pipeline that cannot decode sound at all; the muted icon plus the tooltip
+  // is the user-visible explanation for the silence, and the message names
+  // which fault it was. The accessible name stays the button's ACTION
+  // (mute/unmute); the unavailable status is exposed as a description (sr-only
+  // span + aria-describedby) so touch/AT users can reach it without a
+  // hover-only title.
   const actionLabel = masterMuted ? t("volume.unmute") : t("volume.mute");
-  const muteTitle = deviceBlocked ? t("volume.deviceBlocked") : actionLabel;
+  const unavailableMessage = unavailable === null ? null : t(UNAVAILABLE_MESSAGE[unavailable]);
+  const muteTitle = unavailableMessage ?? actionLabel;
 
   const sliderValue = masterMuted ? 0 : masterVolume;
   const sliderLabel = `${masterMuted ? 0 : masterVolume}%`;
@@ -139,12 +148,12 @@ export function VolumeControl({ variant }: VolumeControlProps) {
           onClick={handleToggleMute}
           className="flex h-7 w-7 shrink-0 items-center justify-center text-gray-400 transition-colors hover:text-gray-200"
           aria-label={actionLabel}
-          aria-describedby={deviceBlocked ? blockedStatusId : undefined}
+          aria-describedby={unavailableMessage ? unavailableStatusId : undefined}
           title={muteTitle}
         >
           <Icon className="h-4 w-4" />
         </button>
-        {deviceBlocked && <span id={blockedStatusId} className="sr-only">{t("volume.deviceBlocked")}</span>}
+        {unavailableMessage && <span id={unavailableStatusId} className="sr-only">{unavailableMessage}</span>}
         <div
           className="flex items-center gap-2 pr-3 transition-opacity duration-200"
           style={{ opacity: expanded ? 1 : 0 }}
@@ -181,12 +190,12 @@ export function VolumeControl({ variant }: VolumeControlProps) {
         onClick={handleToggleMute}
         className="flex min-h-9 min-w-9 shrink-0 items-center justify-center text-white/46 transition-colors hover:text-white/72"
         aria-label={actionLabel}
-        aria-describedby={deviceBlocked ? blockedStatusId : undefined}
+        aria-describedby={unavailableMessage ? unavailableStatusId : undefined}
         title={muteTitle}
       >
         <Icon />
       </button>
-      {deviceBlocked && <span id={blockedStatusId} className="sr-only">{t("volume.deviceBlocked")}</span>}
+      {unavailableMessage && <span id={unavailableStatusId} className="sr-only">{unavailableMessage}</span>}
       <div
         className="flex items-center gap-2 pl-3 transition-opacity duration-200"
         style={{ opacity: expanded ? 1 : 0 }}

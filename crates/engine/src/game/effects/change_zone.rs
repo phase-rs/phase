@@ -665,7 +665,7 @@ pub fn resolve(
             });
     }
     let filter_controller =
-        crate::game::effects::controller_for_relative_filter(ability, target_filter);
+        crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
@@ -1810,7 +1810,7 @@ pub fn resolve_all(
     let player_scope = change_zone_all_player_scope(state, ability, &target_filter);
 
     let filter_controller =
-        crate::game::effects::controller_for_relative_filter(ability, &target_filter);
+        crate::game::effects::controller_for_relative_filter(state, ability, &target_filter);
     let target_filter = owner_scoped_nonbattlefield_mass_filter(target_filter, &origin_zones);
 
     // Use a permissive default filter if the effect's target is None
@@ -1903,12 +1903,15 @@ pub fn resolve_all(
         // keyed by *owner*, not controller — only a card on the battlefield is a
         // permanent (CR 110.1) and thus has a controller; ownership (CR 108.3)
         // is the player who started the game with the card. A creature stolen
-        // via Mind Control retains
-        // `obj.controller = thief` even after dying into its owner's graveyard
-        // (`reset_for_battlefield_exit` does not reset controller; only the
-        // layer pass over `battlefield_phased_in_ids` does, and it skips zones
-        // off the battlefield). Filtering by owner is therefore both rules-
-        // correct and robust to that state divergence. For battlefield-origin
+        // via Mind Control has its controller reset to the owner fallback by
+        // `zones::apply_zone_exit_cleanup` on the way into the graveyard
+        // (`reset_for_battlefield_exit` does not reset controller itself; the
+        // CR 109.4 reset alongside it in `apply_zone_exit_cleanup` does — the
+        // stack/off-battlefield-exit counterpart to the layers pass's own
+        // `battlefield_phased_in_ids`-scoped reset for permanents still ON the
+        // battlefield). Filtering by owner is therefore both rules-correct and
+        // robust to any state divergence in a hand-built or serialized state.
+        // For battlefield-origin
         // mass moves ("exile all permanents you control"), `obj.controller`
         // is authoritative, so we keep that filter for the battlefield case.
         state
@@ -4861,12 +4864,14 @@ mod tests {
     #[test]
     fn change_zone_all_exile_target_player_graveyard_includes_stolen_then_died() {
         // CR 404.2 + CR 110.2: A creature stolen via Mind Control / Bribery
-        // dies into its *owner's* graveyard, but `obj.controller` retains the
-        // thief's PlayerId because `reset_for_battlefield_exit` does not reset
-        // controller and the layer pass only re-applies controller modifications
-        // to permanents that are still on the battlefield. "Exile target
-        // player's graveyard" must filter by `obj.owner`, not `obj.controller`,
-        // so the stolen-then-died corpse is not silently left behind.
+        // dies into its *owner's* graveyard, and `zones::apply_zone_exit_cleanup`
+        // resets `obj.controller` back to the owner fallback on that exit (via
+        // `revert_layered_characteristics_to_base`). "Exile target player's
+        // graveyard" must still filter by `obj.owner`, not `obj.controller`, as
+        // defence-in-depth for a hand-built or serialized state where the two
+        // have diverged (e.g. loaded from an older save, or constructed directly
+        // as this test does) — the filter must not depend on `obj.controller`
+        // having been correctly reset.
         //
         // Regression for the bug shipped in 08ab17b97: `create_object` sets
         // `controller = owner`, so the original test could not exercise this

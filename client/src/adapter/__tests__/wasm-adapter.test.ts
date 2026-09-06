@@ -1,6 +1,14 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { WasmAdapter, getHostAdapter, getSharedAdapter } from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+} from "../generated/interaction";
 import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
@@ -13,6 +21,7 @@ import { buildGameState, gameStateFactory } from "../../test/factories/gameState
 const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const resumeRestoredGameState = vi.hoisted(() => vi.fn());
 const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
+const previewInteractionJs = vi.hoisted(() => vi.fn());
 
 vi.mock("../../services/cardData", () => ({
   ensureWasmInit,
@@ -22,6 +31,7 @@ vi.mock("../../services/cardData", () => ({
 vi.mock("@wasm/engine", () => ({
   resume_restored_game_state: resumeRestoredGameState,
   resume_multiplayer_host_state: resumeMultiplayerHostState,
+  preview_interaction_js: previewInteractionJs,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -32,7 +42,13 @@ const mockWorkerClient = {
   buildAiCardSubset: vi.fn(),
   evaluateDeckCompatibility: vi
     .fn()
-    .mockResolvedValue({ standard: { compatible: true, reasons: [] } }),
+    .mockResolvedValue({
+      standard: { compatible: true, reasons: [] },
+      color_distribution: [],
+    }),
+  evaluateDeckFormatGate: vi.fn().mockResolvedValue({ compatible: true, reasons: [] }),
+  customFormatFromLobbyConfig: vi.fn().mockResolvedValue({ label: "My Format" }),
+  formatConfigForCustomRules: vi.fn().mockResolvedValue({ format: "Custom:0" }),
   getCardFaceData: vi.fn().mockResolvedValue({ name: "Lightning Bolt" }),
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
@@ -44,6 +60,7 @@ const mockWorkerClient = {
     .mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
   submitInteraction: vi.fn().mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
   previewManaPayment: vi.fn().mockResolvedValue([]),
+  previewInteraction: vi.fn(),
   resolveAll: vi.fn().mockResolvedValue({ items_resolved: 0 }),
   getAiActionProposal: vi.fn(),
   getAiActionProposalWithDiagnostics: vi.fn(),
@@ -498,7 +515,108 @@ describe("WasmAdapter", () => {
       const result = await adapter.checkDeckCompatibility(request);
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
       expect(mockWorkerClient.evaluateDeckCompatibility).toHaveBeenCalledWith(request);
-      expect(result).toEqual({ standard: { compatible: true, reasons: [] } });
+      expect(result).toEqual({
+        standard: { compatible: true, reasons: [] },
+        color_distribution: [],
+      });
+    });
+  });
+
+  // The pool that actually broke the live site was fetched fine and then
+  // rejected by serde, so these pin the distinction the old code lost: a
+  // schema-rejected database must not be reported as an uncalled loader.
+  describe("card database load failure reaches the caller", () => {
+    const SCHEMA_ERROR =
+      "Failed to parse card database: unknown variant `Tap`, expected one of `DealDamage`, `SetTapState`";
+
+    it("reports the underlying cause, not a missing-loader message", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error(SCHEMA_ERROR));
+      const err = await adapter
+        .checkDeckCompatibility({ main_deck: ["Forest"] })
+        .then(() => null, (e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).toContain("unknown variant `Tap`");
+      expect(err!.message).not.toContain("Call loadCardDb");
+    });
+
+    it("does not consult the worker once the database is known to be absent", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error(SCHEMA_ERROR));
+      await expect(
+        adapter.checkDeckCompatibility({ main_deck: ["Forest"] }),
+      ).rejects.toThrow();
+      expect(mockWorkerClient.evaluateDeckCompatibility).not.toHaveBeenCalled();
+    });
+
+    // The discriminator: without this, every assertion above would still pass
+    // if the strict gate simply rejected unconditionally.
+    it("still delegates normally when the database loads", async () => {
+      const request = { main_deck: ["Forest"] };
+      await expect(adapter.checkDeckCompatibility(request)).resolves.toEqual({
+        standard: { compatible: true, reasons: [] },
+        color_distribution: [],
+      });
+      expect(mockWorkerClient.evaluateDeckCompatibility).toHaveBeenCalledWith(request);
+    });
+
+    // serde names every variant it rejected, which is thousands of characters.
+    it("trims a very long cause but keeps the diagnostic head", async () => {
+      const longCause = `${SCHEMA_ERROR}${", `Filler`".repeat(400)}`;
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error(longCause));
+      const err = await adapter
+        .checkDeckCompatibility({ main_deck: ["Forest"] })
+        .then(() => null, (e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err!.message).toContain("unknown variant `Tap`");
+      expect(err!.message).toMatch(/…$/);
+      expect(err!.message.length).toBeLessThan(longCause.length);
+      // The full text stays reachable for diagnosis even though the message is trimmed.
+      expect((err as Error & { cause?: Error }).cause?.message).toBe(longCause);
+    });
+
+    it("applies to game creation too, not only the compatibility chip", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error(SCHEMA_ERROR));
+      await adapter.initialize();
+      await expect(
+        adapter.initializeGame({ main_deck: ["Forest"] }),
+      ).rejects.toThrow("unknown variant `Tap`");
+      expect(mockWorkerClient.initializeGame).not.toHaveBeenCalled();
+    });
+  });
+
+  // Symmetric with the block above, and load-bearing for exactly one reason: a
+  // copy-paste slip inside `evaluateDeckFormatGate`'s real implementation —
+  // calling `evaluateDeckCompatibility` instead of `evaluateDeckFormatGate` —
+  // would silently restore the UI-hint path's "no opinion" answer on the
+  // security gate, and every fully-mocked `p2p-adapter` test would still pass.
+  // This is the only layer that can catch it.
+  describe("evaluateDeckFormatGate", () => {
+    it("ensures the DB is loaded then delegates to the gate worker method", async () => {
+      const request = { main_deck: ["Forest"], sideboard: [], selected_format: "Custom:0" };
+      const result = await adapter.evaluateDeckFormatGate(request);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.evaluateDeckFormatGate).toHaveBeenCalledWith(request);
+      // The UI-hint method must NOT be what a gate call reaches.
+      expect(mockWorkerClient.evaluateDeckCompatibility).not.toHaveBeenCalled();
+      expect(result).toEqual({ compatible: true, reasons: [] });
+    });
+  });
+
+  describe("custom format save/select", () => {
+    it("delegates a lobby-config save to the engine", async () => {
+      const config = { format: "Commander" };
+      const result = await adapter.customFormatFromLobbyConfig("My Format", config);
+      expect(mockWorkerClient.customFormatFromLobbyConfig).toHaveBeenCalledWith(
+        "My Format",
+        config,
+      );
+      expect(result).toEqual({ label: "My Format" });
+    });
+
+    it("delegates custom-rule resolution to the engine's own resolver", async () => {
+      const rules = { id: 0 };
+      const result = await adapter.formatConfigForCustomRules(rules);
+      expect(mockWorkerClient.formatConfigForCustomRules).toHaveBeenCalledWith(rules);
+      expect(result).toEqual({ format: "Custom:0" });
     });
   });
 
@@ -957,5 +1075,328 @@ describe("releaseHostSession", () => {
     await expect(host.getState()).rejects.toThrow(AdapterError);
     // A private release must never post the shared engine's flag clear.
     expect(mockWorkerClient.setMultiplayerMode).not.toHaveBeenCalled();
+  });
+});
+
+const request = {
+  requestId: "req-1" as InteractionPreviewRequest["requestId"],
+  interactionId: "int-1" as InteractionPreviewRequest["interactionId"],
+  response: { type: "shortcut", data: { decision: { type: "acceptSuggested" }, pins: [] } },
+} as InteractionPreviewRequest;
+
+const answer = {
+  requestId: request.requestId,
+  interactionId: request.interactionId,
+  status: { type: "confirmable" },
+  progress: { selected: 1, minimum: 1, maximum: 1, aggregate: null, confirmable: true },
+  outcome: "advanced",
+  summaries: [],
+  shortcutPreview: {
+    count: 4,
+    entries: [{ family: "life", player: 2, amount: -8 }],
+    allocation: [{ choiceId: "int-1.k0", amount: 3 }, { choiceId: "int-1.k1", amount: 1 }],
+  },
+} as unknown as InteractionPreview;
+
+describe("WasmAdapter.previewInteraction", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockWorkerClient.previewInteraction.mockResolvedValue(answer);
+  });
+
+  it("forwards the whole engine answer through the worker client", async () => {
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    const preview = await adapter.previewInteraction!(request, 1);
+
+    expect(mockWorkerClient.previewInteraction).toHaveBeenCalledExactlyOnceWith(1, request);
+    expect(preview).toEqual(answer);
+    expect(preview.shortcutPreview?.entries).toEqual(answer.shortcutPreview?.entries);
+    expect(preview.requestId).toBe(request.requestId);
+  });
+
+  it("round-trips an answer that carries no payload", async () => {
+    const { shortcutPreview: _dropped, ...withoutPayload } = answer;
+    mockWorkerClient.previewInteraction.mockResolvedValue(withoutPayload as InteractionPreview);
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    const preview = await adapter.previewInteraction!(request, 1);
+
+    // Paired positive for the leg above: the adapter is forwarding the ANSWER, so it cannot be
+    // passing the payload leg by having dropped everything else.
+    expect(preview.shortcutPreview).toBeUndefined();
+    expect(preview.requestId).toBe(request.requestId);
+    expect(preview.status).toEqual({ type: "confirmable" });
+  });
+
+  it("carries the capability on the main-thread fallback too", async () => {
+    previewInteractionJs.mockReturnValue({ status: "applied", result: answer });
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    const preview = await adapter.previewInteraction!(request, 1);
+
+    expect(previewInteractionJs).toHaveBeenCalledExactlyOnceWith(1, request);
+    expect(mockWorkerClient.previewInteraction).not.toHaveBeenCalled();
+    expect(preview).toEqual(answer);
+  });
+
+  it("surfaces a rejected fallback envelope as an AdapterError", async () => {
+    previewInteractionJs.mockReturnValue({
+      status: "rejected",
+      rejection: {
+        code: "invalid_interaction_response",
+        disposition: "invalid",
+        message: "That response is not valid.",
+        related_object_ids: [],
+      },
+    });
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    await expect(adapter.previewInteraction!(request, 1)).rejects.toBeInstanceOf(AdapterError);
+  });
+});
+
+// ── The worker envelope's `type` literal, both ends. ─────────────────────────────────────────
+//
+// `request()` takes a `Record<string, unknown>` and the dispatch switch has no `default:`, so
+// nothing in the compiler relates the string one end posts to the one the other end handles.
+// This row reads both modules as TEXT and compares them; it proves `type`-literal agreement and
+// never that either body runs.
+
+/** Every `type` literal `EngineWorkerClient` posts through `request()`, typed or untyped. */
+function postedMessageTypes(source: string): string[] {
+  return Array.from(
+    source.matchAll(/this\.request\b[^(]*\(\s*\{\s*type:\s*"([A-Za-z0-9_]+)"/g),
+    (m) => m[1],
+  );
+}
+
+/** Call sites, so a call shape the extractor cannot read reds the row instead of shrinking it. */
+function requestCallSites(source: string): number {
+  return Array.from(source.matchAll(/this\.request\b/g)).length;
+}
+
+/** The body of the dispatch `switch (msg.type)`, brace-matched. */
+function dispatchSwitchBody(source: string): string | null {
+  const at = source.indexOf("switch (msg.type)");
+  if (at < 0) return null;
+  const open = source.indexOf("{", at);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) return source.slice(open + 1, i);
+  }
+  return null;
+}
+
+/** `case` labels at the dispatch switch's own brace depth. */
+function handledMessageTypes(source: string): string[] {
+  const body = dispatchSwitchBody(source);
+  if (body === null) return [];
+  const out: string[] = [];
+  let depth = 0;
+  for (const line of body.split("\n")) {
+    if (depth === 0) {
+      const m = /^\s*case "([A-Za-z0-9_]+)":/.exec(line);
+      if (m) out.push(m[1]);
+    }
+    for (const c of line) depth += c === "{" ? 1 : c === "}" ? -1 : 0;
+  }
+  return out;
+}
+
+function lockstepVerdict(clientSource: string, workerSource: string) {
+  const posted = postedMessageTypes(clientSource);
+  const handled = new Set(handledMessageTypes(workerSource));
+  return {
+    walkedAll: posted.length === requestCallSites(clientSource),
+    reach: ["previewInteraction", "submitInteraction"].filter((type) => posted.includes(type)),
+    missing: [...new Set(posted.filter((type) => !handled.has(type)))],
+  };
+}
+
+const isGreen = (verdict: ReturnType<typeof lockstepVerdict>): boolean =>
+  verdict.walkedAll && verdict.missing.length === 0;
+
+describe("worker message lockstep", () => {
+  const adapterDir = dirname(fileURLToPath(import.meta.url));
+  const clientSource = readFileSync(resolve(adapterDir, "..", "engine-worker-client.ts"), "utf8");
+  const workerSource = readFileSync(resolve(adapterDir, "..", "engine-worker.ts"), "utf8");
+
+  it("posts only message types the worker's dispatch switch handles", () => {
+    const verdict = lockstepVerdict(clientSource, workerSource);
+
+    // Each leg separately, so a failure names which one fell.
+    expect(verdict.walkedAll).toBe(true);
+    expect(verdict.reach).toEqual(["previewInteraction", "submitInteraction"]);
+    expect(verdict.missing).toEqual([]);
+  });
+
+  const handledFirst = handledMessageTypes(workerSource)[0];
+  const outsideDispatch = Array.from(
+    workerSource.matchAll(/case "([A-Za-z0-9_]+)":/g),
+    (m) => m[1],
+  ).find((label) => !handledMessageTypes(workerSource).includes(label));
+
+  const insertIntoDispatchBody = (source: string, snippet: string): string => {
+    const at = source.indexOf("switch (msg.type)");
+    const open = source.indexOf("{", at);
+    return `${source.slice(0, open + 1)}${snippet}${source.slice(open + 1)}`;
+  };
+
+  it.each([
+    [
+      "a worker case misspelled relative to the posted literal",
+      () => ({
+        client: clientSource,
+        worker: workerSource.replace(`case "${handledFirst}":`, `case "${handledFirst}Xx":`),
+      }),
+    ],
+    [
+      "an untyped post with no worker case",
+      () => ({
+        client: `${clientSource}\nvoid this.request({ type: "ghostUntypedMessage" });\n`,
+        worker: workerSource,
+      }),
+    ],
+    [
+      "a posted type equal to a case in an unrelated switch",
+      () => ({
+        client: `${clientSource}\nvoid this.request<void>({ type: "${outsideDispatch}" });\n`,
+        worker: workerSource,
+      }),
+    ],
+    [
+      "a case reachable only inside a nested switch",
+      () => ({
+        client: `${clientSource}\nvoid this.request<void>({ type: "nestedGhost" });\n`,
+        worker: insertIntoDispatchBody(
+          workerSource,
+          [
+            "",
+            '      case "nestedGhostOuter": {',
+            "        switch (msg.id) {",
+            '          case "nestedGhost": {',
+            "            break;",
+            "          }",
+            "        }",
+            "        break;",
+            "      }",
+          ].join("\n"),
+        ),
+      }),
+    ],
+    [
+      "a request call site the extractor cannot read",
+      () => ({
+        client: `${clientSource}\nvoid this.request<void>(unreadableMessage);\n`,
+        worker: workerSource,
+      }),
+    ],
+    [
+      "a request-prefixed identifier paired with an unreadable call site",
+      () => ({
+        client:
+          `${clientSource}\n` +
+          `this.requestQueue.push({ type: "${handledFirst}" });\n` +
+          `void this.request<void>(hiddenMessage);\n`,
+        worker: workerSource,
+      }),
+    ],
+  ])("refuses %s", (_name, mutate) => {
+    const { client, worker } = mutate();
+
+    // A mutation that changed nothing would pass as a silent no-op, so the control asserts it
+    // landed before it asserts what it produced.
+    expect(client !== clientSource || worker !== workerSource).toBe(true);
+    expect(isGreen(lockstepVerdict(client, worker))).toBe(false);
+  });
+});
+
+// ── The preview envelope's FIELD names, both ends. ───────────────────────────────────────────
+//
+// `request()` takes a `Record<string, unknown>`, so nothing relates the keys `EngineWorkerClient`
+// posts to the ones `engine-worker.ts` reads off `msg`. The row above compares only the `type`
+// literal. This one runs the REAL client method against a stubbed `Worker` and compares the keys
+// it actually posts against the reads that case performs, taken from the worker module as text.
+// It executes the client body only; the worker's own body still has no test.
+
+/** The distinct `msg.<field>` names one dispatch case reads. */
+function caseFieldReads(workerSource: string, type: string): string[] {
+  const body = dispatchSwitchBody(workerSource);
+  if (body === null) return [];
+  const at = body.indexOf(`case "${type}":`);
+  if (at < 0) return [];
+  let depth = 0;
+  for (let i = body.indexOf("{", at); i < body.length; i++) {
+    if (body[i] === "{") depth++;
+    else if (body[i] === "}" && --depth === 0) {
+      const reads = body.slice(at, i).matchAll(/\bmsg\.([A-Za-z0-9_]+)/g);
+      return [...new Set(Array.from(reads, (m) => m[1]))];
+    }
+  }
+  return [];
+}
+
+/** Captures what the client posts and lets a test reply, like the worker-client suite's stub. */
+class StubWorker {
+  static last: StubWorker | undefined;
+  onmessage: ((e: MessageEvent) => void) | null = null;
+  onerror: ((e: ErrorEvent) => void) | null = null;
+  readonly posted: Array<Record<string, unknown>> = [];
+
+  constructor() {
+    StubWorker.last = this;
+  }
+
+  postMessage(msg: Record<string, unknown>): void {
+    this.posted.push(msg);
+  }
+
+  terminate(): void {}
+
+  replyResult(id: number, data: unknown): void {
+    this.onmessage?.({ data: { type: "result", id, data } } as MessageEvent);
+  }
+}
+
+describe("worker preview envelope", () => {
+  const workerSource = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "..", "engine-worker.ts"),
+    "utf8",
+  );
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("posts exactly the fields the worker's previewInteraction case reads", async () => {
+    vi.stubGlobal("Worker", StubWorker);
+    const { EngineWorkerClient: RealClient } = await vi.importActual<
+      typeof import("../engine-worker-client")
+    >("../engine-worker-client");
+    const client = new RealClient();
+    const worker = StubWorker.last!;
+
+    const pending = client.previewInteraction(1, request);
+    const posted = worker.posted[0];
+
+    // Renaming a field on either side moves exactly one of these two sets.
+    expect(new Set(Object.keys(posted))).toEqual(
+      new Set(["type", ...caseFieldReads(workerSource, "previewInteraction")]),
+    );
+    expect(posted.actor).toBe(1);
+    expect(posted.request).toEqual(request);
+
+    worker.replyResult(posted.id as number, answer);
+
+    await expect(pending).resolves.toEqual(answer);
+    client.dispose();
   });
 });

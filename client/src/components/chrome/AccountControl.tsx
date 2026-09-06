@@ -108,6 +108,7 @@ export function AccountControl() {
   const { t } = useTranslation("settings");
   const identity = useCloudSyncStore((s) => s.identity);
   const sessionResolved = useCloudSyncStore((s) => s.sessionResolved);
+  const paused = useCloudSyncStore((s) => s.paused);
   const status = useCloudSyncStore((s) => s.status);
   const error = useCloudSyncStore((s) => s.error);
   const lastSyncedAt = useCloudSyncStore((s) => s.lastSyncedAt);
@@ -147,7 +148,7 @@ export function AccountControl() {
   // statically evaluate to `false` and the button is never mounted at all.
   if (!isSupabaseConfigured()) return null;
 
-  const syncing = status === "syncing";
+  const syncing = !paused && status === "syncing";
 
   // State lives in the cloud-icon color only — the button shell matches its
   // chrome neighbors so it doesn't shout. Semantics, brightest to dimmest:
@@ -166,23 +167,25 @@ export function AccountControl() {
   // restore. `identity` alone is insufficient — it's null in both "unknown"
   // and "confirmed signed-out" cases.
   const signedOut = sessionResolved && !identity;
-  const synced = Boolean(identity) && !syncing && !dirty && !conflict && status !== "error";
+  const synced = Boolean(identity) && !paused && !syncing && !dirty && !conflict && status !== "error";
   const iconColor = !identity
     ? "text-slate-400"
     : status === "error"
       ? "text-rose-400"
       : conflict
         ? "text-amber-500"
-        : syncing
-          ? "text-cyan-300"
-          : dirty
-            ? "text-amber-400"
-            : "text-emerald-300";
+        : dirty
+          ? "text-amber-400"
+          : paused
+            ? "text-slate-400"
+            : syncing
+              ? "text-cyan-300"
+              : "text-emerald-300";
   const iconGlow = synced
     ? "drop-shadow-[0_0_5px_rgba(52,211,153,0.55)]"
     : "";
 
-  const statusLine =
+  const statusDetail =
     status === "error" ? (
       <span className="text-rose-400">
         {t("sync.statusError")}
@@ -197,6 +200,8 @@ export function AccountControl() {
           : t("sync.never"),
       })
     );
+
+  const statusLine = paused ? t("sync.statusPaused") : statusDetail;
 
   return (
     <div ref={ref} className="relative">
@@ -243,11 +248,15 @@ export function AccountControl() {
             // Session restore in flight — keep the popover content empty
             // rather than guess at a signed-in/out shape we don't know yet.
             // Same async window the icon swap is guarding against.
-            <p className="mt-3 text-xs text-slate-500">{t("sync.statusSyncing")}</p>
+            <p className="mt-3 text-xs text-slate-500">
+              {paused ? statusLine : t("sync.statusSyncing")}
+            </p>
           ) : !identity ? (
             <div className="mt-3 flex flex-col gap-2">
+              {paused && <p className="text-xs text-slate-500">{statusLine}</p>}
               <button
                 className={POPOVER_BTN}
+                disabled={paused}
                 onClick={() => void signIn("discord")}
               >
                 <span className="flex items-center justify-center gap-2">
@@ -259,6 +268,7 @@ export function AccountControl() {
               </button>
               <button
                 className={POPOVER_BTN}
+                disabled={paused}
                 onClick={() => void signIn("google")}
               >
                 <span className="flex items-center justify-center gap-2">
@@ -320,18 +330,21 @@ export function AccountControl() {
                   <div className="flex flex-col gap-2">
                     <button
                       className={POPOVER_BTN}
+                      disabled={paused}
                       onClick={() => void resolveConflict("cloud")}
                     >
                       {t("sync.keepCloud")}
                     </button>
                     <button
                       className={POPOVER_BTN}
+                      disabled={paused}
                       onClick={() => void resolveConflict("local")}
                     >
                       {t("sync.keepLocal")}
                     </button>
                     <button
                       className={POPOVER_BTN}
+                      disabled={paused}
                       onClick={() => void resolveConflict("merge")}
                     >
                       {t("sync.keepBothDecks")}
@@ -341,7 +354,7 @@ export function AccountControl() {
               ) : (
                 <button
                   className={POPOVER_BTN}
-                  disabled={syncing}
+                  disabled={syncing || paused}
                   onClick={() => void syncNow()}
                 >
                   <span className="flex items-center justify-center gap-2">
@@ -351,10 +364,14 @@ export function AccountControl() {
                 </button>
               )}
 
-              <p className="text-xs text-slate-500">{statusLine}</p>
+              <div className="flex flex-col gap-1 text-xs text-slate-500">
+                <p>{statusLine}</p>
+                {paused && <p>{statusDetail}</p>}
+              </div>
 
               <button
                 className={`${POPOVER_BTN} text-slate-400`}
+                disabled={paused}
                 onClick={() => void signOut()}
               >
                 {t("sync.signOut")}

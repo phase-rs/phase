@@ -15,7 +15,7 @@ use engine::types::ability::{
     CardSelectionMode, ContinuousModification, CopyRetargetPermission, Effect, QuantityExpr,
     QuantityModification, ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef,
 };
-use engine::types::actions::{GameAction, PrecastCopyShortcutResponse};
+use engine::types::actions::{GameAction, PrecastCopyShortcutResponse, ResolveAllScope};
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -518,7 +518,10 @@ fn precast_shorten_requires_meaningful_divergence_before_manual_or_auto_pass() {
         .expect("shorten at the issued boundary");
 
     assert!(runner
-        .act(GameAction::BeginResolveAll { max_resolutions: 7 })
+        .act(GameAction::BeginResolveAll {
+            max_resolutions: 7,
+            scope: ResolveAllScope::Own
+        })
         .is_err());
     assert!(matches!(
         runner.state().waiting_for,

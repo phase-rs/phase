@@ -3,9 +3,16 @@
     "badge": "Zablokowana",
     "cantBeActivated": "Tej zdolności nie można aktywować",
     "cantActivateDuring": "Nie można teraz aktywować",
-    "prohibited": "Aktywacja tej zdolności jest zabroniona"
+    "prohibited": "Aktywacja tej zdolności jest zabroniona",
+    "costNotPayableNow": "Nie możesz teraz zapłacić tego kosztu"
   },
-  "manaSourceSelection": { "title": "Wybierz źródło many", "description": "Ta zdolność many wymaga poświęcenia permanenta.", "sacrifice": "Poświęć", "back": "Wróć do płatności many", "unknownSource": "Źródło many" },
+  "manaSourceSelection": {
+    "title": "Wybierz źródło many",
+    "description": "Ta zdolność many wymaga poświęcenia permanenta.",
+    "sacrifice": "Poświęć",
+    "back": "Wróć do płatności many",
+    "unknownSource": "Źródło many"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -21,10 +28,27 @@
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
     "countAria": "Number of iterations",
+    "countDecreaseAria": "Zmniejsz liczbę powtórzeń",
+    "countIncreaseAria": "Zwiększ liczbę powtórzeń",
     "previewTitle_one": "Repeating once produces:",
     "previewTitle_other": "Repeating {{count}} times produces:",
     "previewEntry": "{{amount}} {{resource}}",
     "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
+    "allocationTitle": "Rozdziel powtórzenia pomiędzy cele:",
+    "allocationAria": "Powtórzenia dla {{subject}}",
+    "allocationDecreaseAria": "Zmniejsz powtórzenia dla {{subject}}",
+    "allocationIncreaseAria": "Zwiększ powtórzenia dla {{subject}}",
+    "allocationSum": "Przydzielono {{allocated}} z {{total}} powtórzeń.",
+    "evenSplit": "Przywróć równy podział",
+    "customDistribution": "Własny podział — silnik nie przygotował podglądu tego podziału.",
+    "announceTitle": "Wybierz cel ogłaszany w każdym powtórzeniu:",
+    "announce": "Ogłoś",
+    "announceAria": "Ogłoś {{subject}}",
+    "mayTitle": "Zdolność opcjonalna {{group}} — powtórzyć ten wybór w każdej iteracji?",
+    "mayTake": "Skorzystaj",
+    "mayDecline": "Odrzuć",
+    "mayTakeAria": "Skorzystaj ze zdolności opcjonalnej {{group}}",
+    "mayDeclineAria": "Odrzuć zdolność opcjonalną {{group}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -32,6 +56,13 @@
       "ImmediateWin": "This loop wins the game.",
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
+    },
+    "respondDeclaredTitle": "Proponowana deklaracja:",
+    "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
+    "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondDecision": {
+      "take": "{{subject}} — wykorzystanie w każdej iteracji",
+      "decline": "{{subject}} — odrzucenie w każdej iteracji"
     }
   },
   "precastShortcut": {
@@ -46,9 +77,23 @@
   },
   "restoredAutomation": {
     "dismiss": "Zamknij",
-    "noop": {"title": "Wczytano zapisaną grę", "summary_one": "Nie trzeba było wznawiać automatyzacji stosu.", "summary_other": "Nie trzeba było wznawiać automatyzacji stosu."},
-    "progressed": {"title": "Wznowiono automatyzację stosu", "summary_one": "Silnik ukończył {{count}} automatyczne rozpatrzenie.", "summary_other": "Silnik ukończył {{count}} automatyczne rozpatrzenia.", "omitted_one": "Pominięto {{count}} zdarzenie pośrednie.", "omitted_other": "Pominięto {{count}} zdarzeń pośrednich."},
-    "zeroResolutionRepair": {"title": "Naprawiono automatyzację stosu", "summary_one": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry.", "summary_other": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry."}
+    "noop": {
+      "title": "Wczytano zapisaną grę",
+      "summary_one": "Nie trzeba było wznawiać automatyzacji stosu.",
+      "summary_other": "Nie trzeba było wznawiać automatyzacji stosu."
+    },
+    "progressed": {
+      "title": "Wznowiono automatyzację stosu",
+      "summary_one": "Silnik ukończył {{count}} automatyczne rozpatrzenie.",
+      "summary_other": "Silnik ukończył {{count}} automatyczne rozpatrzenia.",
+      "omitted_one": "Pominięto {{count}} zdarzenie pośrednie.",
+      "omitted_other": "Pominięto {{count}} zdarzeń pośrednich."
+    },
+    "zeroResolutionRepair": {
+      "title": "Naprawiono automatyzację stosu",
+      "summary_one": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry.",
+      "summary_other": "Zapisana automatyzacja została bezpiecznie naprawiona przed wznowieniem gry."
+    }
   },
   "resolveAllConsent": {
     "eyebrow": "Rozpatrz wszystko",
@@ -513,6 +558,8 @@
     "unboundedConditionalYouTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; może pozostać nieograniczone, a jeśli nie — podasz liczbę",
     "unboundedMixedTooltip": "Nieograniczone: {{resource}} (∞) — część tej grupy ma oczekujące zwinięcie; część pozostaje nieograniczona",
     "unboundedConditionalGlyph": "∞→?",
+    "boundedLoopGlyph": "≤{{bound}}×",
+    "boundedLoopTooltip": "{{resource}} z wykrytej pętli, maksymalnie {{bound}} powtórzeń",
     "unboundedManaPoolMarker": "Nieograniczona mana (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "życie",
@@ -605,6 +652,8 @@
     "chooseXInputAria": "Wpisz wartość X",
     "decreaseX": "Zmniejsz wartość X",
     "increaseX": "Zwiększ wartość X",
+    "maximum": "Maks.",
+    "setXToMaximum": "Ustaw X na maksimum",
     "minMax": "min {{min}} / maks {{max}}",
     "maxOnly": "maks {{max}}",
     "amountOutOfRange": "Wpisz liczbę całkowitą od {{min}} do {{max}}",
@@ -660,7 +709,9 @@
   },
   "storm": {
     "copies_one": "Sztorm: {{count}} kopia",
-    "copies_other": "Sztorm: {{count}} kopie"
+    "copies_other": "Sztorm: {{count}} kopie",
+    "count_one": "Licznik sztormu: {{count}} kopia",
+    "count_other": "Licznik sztormu: {{count}} kopie"
   },
   "opponentHud": {
     "ally": "Sojusznik",
@@ -822,6 +873,8 @@
   },
   "log": {
     "title": "Dziennik gry",
+    "dockLeft": "Zadokuj dziennik gry po lewej",
+    "dockRight": "Zadokuj dziennik gry po prawej",
     "noEvents": "Brak zdarzeń",
     "closeLog": "Zamknij dziennik gry",
     "verbosityFull": "pełny",
@@ -1104,7 +1157,10 @@
       "subtitlePreparedCopy": "Rzucić przygotowany czar?",
       "subtitleActivate": "Aktywować tę zdolność?",
       "subtitlePlay": "Wybierz, jak zagrać tę kartę",
-      "subtitleChoose": "Wybierz zdolność do aktywowania"
+      "subtitleChoose": "Wybierz zdolność do aktywowania",
+      "unlockThisDoor": "Odblokuj te drzwi",
+      "unlockHalf": "Odblokuj {{name}}",
+      "unlockHalfWithCost": "Odblokuj {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Przekręć, aby dodać manę",
@@ -1616,6 +1672,9 @@
       "selectAll": "Zaznacz wszystko",
       "invert": "Odwróć",
       "clear": "Wyczyść",
+      "searchLabel": "Filtruj",
+      "searchPlaceholder": "Nazwa karty",
+      "searchCardsAria": "Filtruj karty według nazwy",
       "sortLabel": "Sortuj",
       "groupLabel": "Grupuj",
       "optNone": "Brak",
@@ -1717,6 +1776,12 @@
     "untapSubset": {
       "title": "Choose permanents to untap",
       "subtitle": "Untap up to {{count}} of these permanents."
+    },
+    "rippleBottom": {
+      "title": "Order the rest on the bottom",
+      "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
+      "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
+      "hint": "Drag to reorder · position 1 ends up on top of this pile"
     }
   },
   "specializeColor": {
@@ -2214,8 +2279,21 @@
   "replacement": {
     "eyebrow": "Kolejność rozpatrywania",
     "title": "Efekty zastępujące",
-    "subtitle": "Wybierz, który efekt zastępujący zastosować jako pierwszy.",
-    "candidateFallback": "Efekt zastępujący {{number}}"
+    "orderSubtitle": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustalić kolejność — ostatni zastosowany efekt jest tym, który zadziała (CR 616.1).",
+    "appliedFirst": "Zastosowany pierwszy (zostanie nadpisany)",
+    "appliedLast": "Zastosowany ostatni — ten zadziała",
+    "resultLabel": "Wynik: {{outcome}}",
+    "confirmOrder": "Potwierdź kolejność",
+    "dragHint": "Przeciągnij, aby zmienić kolejność, lub użyj strzałek.",
+    "chooseSubtitle": "Wybierz, który efekt zastępujący zastosować.",
+    "candidateFallback": "Efekt zastępujący {{number}}",
+    "orderSubtitleComposing": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustawić kolejność ich zastosowania — każdy zostanie zastosowany, więc kolejność zmienia wynik (CR 616.1).",
+    "appliedEarlier": "Zastosowany wcześniej",
+    "appliedLater": "Zastosowany później",
+    "composesNote": "Każdy efekt zostaje zastosowany — kolejność zmienia sposób ich połączenia.",
+    "moveUpNamed": "Przenieś {{name}} wcześniej",
+    "moveDownNamed": "Przenieś {{name}} później",
+    "positionAnnounce": "Pozycja {{position}} z {{total}}"
   },
   "retargetChoice": {
     "title": "Zmień cel",
@@ -2294,7 +2372,15 @@
   },
   "outsideGame": {
     "fromExile": "Z wygnania",
-    "fromSideboard": "Z zaplecza"
+    "fromSideboard": "Z zaplecza",
+    "fromBoosterPack": "Z boostera {{setCode}}"
+  },
+  "boosterPack": {
+    "title": "Booster {{setCode}}",
+    "subtitleExact_one": "Wybierz {{count}} kartę do zatrzymania – reszta zostaje usunięta z gry",
+    "subtitleExact_other": "Wybierz {{count}} kart do zatrzymania – reszta zostaje usunięta z gry",
+    "subtitleUpTo_one": "Wybierz do {{count}} karty do zatrzymania – reszta zostaje usunięta z gry",
+    "subtitleUpTo_other": "Wybierz do {{count}} kart do zatrzymania – reszta zostaje usunięta z gry"
   },
   "phaseName": {
     "Untap": "Odwracanie",
@@ -2435,5 +2521,14 @@
       "priority": "Priority",
       "thinking": "Thinking"
     }
+  },
+  "rippleReveal": {
+    "eyebrow": "Ripple",
+    "title": "Reveal the top of your library?",
+    "subtitle_one": "You may reveal the top {{count}} card. Same-named cards can be cast free; the rest go to the bottom.",
+    "subtitle_other": "You may reveal the top {{count}} cards. Same-named cards can be cast free; the rest go to the bottom.",
+    "reveal_one": "Reveal {{count}} card",
+    "reveal_other": "Reveal {{count}} cards",
+    "decline": "Don't reveal"
   }
 }

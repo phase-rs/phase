@@ -29,6 +29,7 @@ import {
   type VerificationResponse,
   type VisualPackErrorKind,
 } from "../../../services/visualPacks/types.ts";
+import { getEffectiveOffline } from "../../../stores/connectivityStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 
 export type ManagerAvailability =
@@ -317,6 +318,13 @@ export function useVisualPackManager(): VisualPackManagerState {
     setPendingActions(new Set(pendingRef.current));
     return true;
   }, []);
+  // The rendered disabled state is only advisory: a click queued before an
+  // offline render commits must not begin a backend operation or publish a
+  // pending state. Network-starting paths share this imperative boundary.
+  const beginOnlinePending = useCallback((value: string): boolean => {
+    if (getEffectiveOffline()) return false;
+    return beginPending(value);
+  }, [beginPending]);
   const endPending = useCallback((value: string) => {
     pendingRef.current.delete(value);
     setPendingActions(new Set(pendingRef.current));
@@ -721,7 +729,7 @@ export function useVisualPackManager(): VisualPackManagerState {
 
   const refresh = useCallback(async () => {
     const backend = backendRef.current;
-    if (!backend || !beginPending("refresh")) return;
+    if (!backend || !beginOnlinePending("refresh")) return;
     clearActionError();
     const generation = ++requestRef.current.summary;
     try {
@@ -732,7 +740,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     } finally {
       if (mountedRef.current) endPending("refresh");
     }
-  }, [acceptSummary, beginPending, clearActionError, endPending, reportActionError]);
+  }, [acceptSummary, beginOnlinePending, clearActionError, endPending, reportActionError]);
 
   /**
    * Ask the backend what "curated" currently means.
@@ -743,7 +751,7 @@ export function useVisualPackManager(): VisualPackManagerState {
    */
   const resolveCuratedSelector = useCallback(async () => {
     const backend = backendRef.current;
-    if (!backend || !beginPending("curated")) return;
+    if (!backend || !beginOnlinePending("curated")) return;
     clearActionError();
     const generation = ++requestRef.current.curated;
     try {
@@ -758,11 +766,11 @@ export function useVisualPackManager(): VisualPackManagerState {
   // This identity changes only when a stale Curated request releases its slot,
   // so PackSelector gets one fresh selected-radio attempt without letting a
   // Deck-library completion or failure retry Curated.
-  }, [beginPending, clearActionError, endPending, reportActionError, staleCuratedSelectorRetry]);
+  }, [beginOnlinePending, clearActionError, endPending, reportActionError, staleCuratedSelectorRetry]);
 
   const resolveDeckLibrarySelector = useCallback(async () => {
     const backend = backendRef.current;
-    if (!backend || !beginPending("deck_library")) return;
+    if (!backend || !beginOnlinePending("deck_library")) return;
     clearActionError();
     const generation = ++requestRef.current.deckLibrary;
     try {
@@ -775,7 +783,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       if (mountedRef.current) endPending("deck_library");
     }
   // Equivalent retry release for Deck library, independently of Curated.
-  }, [beginPending, clearActionError, endPending, reportActionError, staleDeckLibrarySelectorRetry]);
+  }, [beginOnlinePending, clearActionError, endPending, reportActionError, staleDeckLibrarySelectorRetry]);
 
   const recoverDeckLibraryConflict = useCallback((selectionGeneration: number, estimateGeneration: number): boolean => {
     if (selectionGeneration !== requestRef.current.deckLibrary) return false;
@@ -805,7 +813,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     // the one already running, so the in-flight estimate's own `finally` would
     // no longer recognise itself and would leave the scan-progress section on
     // screen for ever. A refused request must change nothing.
-    if (!beginPending("estimate")) return;
+    if (!beginOnlinePending("estimate")) return;
     const generation = ++requestRef.current.estimate;
     const deckLibrarySelectionGeneration = selector.kind === "deck_library"
       ? requestRef.current.deckLibrary
@@ -842,7 +850,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       if (mountedRef.current && generation === requestRef.current.estimate) setEstimateProgress(null);
       if (mountedRef.current) endPending("estimate");
     }
-  }, [beginPending, clearActionError, endPending, recoverDeckLibraryConflict, reportActionError]);
+  }, [beginOnlinePending, clearActionError, endPending, recoverDeckLibraryConflict, reportActionError]);
 
   const trackStarted = useCallback(async (operationId: OperationStatus["operationId"], root: OperationStatus["catalogRoot"]) => {
     const backend = backendRef.current;
@@ -894,7 +902,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       || bound.value.catalogRoot !== current.catalogRoot
       || bound.value.installedRevision !== current.installedRevision
     ) return;
-    if (!beginPending("install")) return;
+    if (!beginOnlinePending("install")) return;
     const deckLibrarySelectionGeneration = selector.kind === "deck_library"
       ? requestRef.current.deckLibrary
       : null;
@@ -930,7 +938,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       clearStartEventBuffer();
       if (mountedRef.current) endPending("install");
     }
-  }, [adoptStartedOperation, beginPending, beginStartEventBuffer, clearActionError, clearStartEventBuffer, endPending, estimate, recoverDeckLibraryConflict, refreshSummary, reportActionError, trackStarted]);
+  }, [adoptStartedOperation, beginOnlinePending, beginStartEventBuffer, clearActionError, clearStartEventBuffer, endPending, estimate, recoverDeckLibraryConflict, refreshSummary, reportActionError, trackStarted]);
 
   const cancel = useCallback(async () => {
     const backend = backendRef.current;
@@ -985,7 +993,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       || !selected
       || (selected.state !== "downloading" && selected.state !== "finalizing")
       || progressRef.current?.phase !== "failed"
-      || !beginPending("resume")
+      || !beginOnlinePending("resume")
     ) return;
     clearActionError();
     const previousOutcome = { ...progressOutcomeRef.current };
@@ -1021,7 +1029,7 @@ export function useVisualPackManager(): VisualPackManagerState {
     } finally {
       if (mountedRef.current) endPending("resume");
     }
-  }, [beginPending, clearActionError, endPending, refreshSummary, reportActionError, trackStarted]);
+  }, [beginOnlinePending, clearActionError, endPending, refreshSummary, reportActionError, trackStarted]);
 
   const verify = useCallback(async (mode: VerificationMode) => {
     const backend = backendRef.current;
@@ -1089,7 +1097,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       !backend
       || packIds.length === 0
       || operationIsDurableMutation(operationRef.current)
-      || !beginPending("repair")
+      || !beginOnlinePending("repair")
     ) return;
     clearActionError();
     beginStartEventBuffer();
@@ -1112,7 +1120,7 @@ export function useVisualPackManager(): VisualPackManagerState {
       clearStartEventBuffer();
       if (mountedRef.current) endPending("repair");
     }
-  }, [adoptStartedOperation, beginPending, beginStartEventBuffer, clearActionError, clearStartEventBuffer, endPending, refreshSummary, reportActionError, trackStarted]);
+  }, [adoptStartedOperation, beginOnlinePending, beginStartEventBuffer, clearActionError, clearStartEventBuffer, endPending, refreshSummary, reportActionError, trackStarted]);
 
   const runRemoval = useCallback(async (selector: RemovalSelector, mode: RemovalMode) => {
     const backend = backendRef.current;

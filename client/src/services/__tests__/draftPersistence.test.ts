@@ -19,6 +19,7 @@ import {
   clearActiveDraftPod,
   clearActiveDraftPodIfCurrent,
   clearActiveDraftGuest,
+  clearActiveDraftGuestIfCurrent,
   clearDraftGuestRecovery,
   clearDraftGuestSession,
   clearDraftDeckSubmission,
@@ -26,6 +27,7 @@ import {
   loadActiveDraftPod,
   loadActiveDraftGuest,
   inspectActiveDraftPod,
+  inspectActiveDraftGuest,
   loadDraftGuestSession,
   loadDraftDeckSubmission,
   loadDraftHostSession,
@@ -190,6 +192,25 @@ describe("draftPersistence", () => {
       expect(loaded?.poolInput.type).toBe("Cube");
     });
 
+    it("retains a Chaos candidate input for host-local recovery", async () => {
+      const chaosSession: PersistedDraftHostSession = {
+        ...testSession,
+        poolInput: {
+          type: "Chaos",
+          data: {
+            pools: [{ code: "ISD" }, { code: "DKA" }],
+            candidate_codes: ["ISD", "DKA"],
+          },
+        },
+      };
+      await saveDraftHostSession("chaos-1", chaosSession);
+
+      await expect(loadDraftHostSession("chaos-1")).resolves.toEqual({
+        ...chaosSession,
+        perSeatWorkspaceSnapshots: {},
+      });
+    });
+
     it("retains durable deck-submission receipts alongside workspace snapshots", async () => {
       const session = {
         ...testSession,
@@ -205,7 +226,7 @@ describe("draftPersistence", () => {
       await expect(loadDraftHostSession("receipt-and-workspace")).resolves.toEqual(session);
     });
 
-    it("rejects persisted Set and Cube snapshots missing data used by resume", async () => {
+    it("rejects persisted Set, Chaos, and Cube snapshots missing data used by resume", async () => {
       mockStore.set("phase-draft-host:bad-set", {
         ...testSession,
         poolInput: { type: "Set", data: {} },
@@ -221,9 +242,14 @@ describe("draftPersistence", () => {
           },
         },
       });
+      mockStore.set("phase-draft-host:bad-chaos", {
+        ...testSession,
+        poolInput: { type: "Chaos", data: { pools: [], candidate_codes: [] } },
+      });
 
       await expect(loadDraftHostSession("bad-set")).resolves.toBeNull();
       await expect(loadDraftHostSession("bad-cube")).resolves.toBeNull();
+      await expect(loadDraftHostSession("bad-chaos")).resolves.toBeNull();
     });
 
     /**
@@ -701,6 +727,72 @@ describe("draftPersistence", () => {
       expect(loadActiveDraftGuest()).toBeNull();
       await expect(loadDraftGuestSession("phase2-HOST1")).resolves.toBeNull();
       clearActiveDraftGuest();
+    });
+
+    it("inspects guest locators without mutation and only clears the exact captured locator", () => {
+      saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: "phase2-HOST1" });
+      const active = inspectActiveDraftGuest();
+      expect(active.type).toBe("present");
+      expect(localStorage.getItem("phase-active-draft-guest")).not.toBeNull();
+      if (active.type !== "present") throw new Error("expected guest locator");
+
+      saveActiveDraftGuest({ roomCode: "FGHJK", displayName: "Bob", hostPeerId: "phase2-HOST2" });
+      clearActiveDraftGuestIfCurrent(active.capture);
+
+      expect(inspectActiveDraftGuest()).toMatchObject({
+        type: "present",
+        meta: { roomCode: "FGHJK", hostPeerId: "phase2-HOST2" },
+      });
+    });
+
+    it.each([
+      ["malformed", "{not-json"],
+      ["expired", JSON.stringify({
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        hostPeerId: "phase2-HOST1",
+        timestamp: Date.now() - 5 * 60 * 60 * 1000,
+      })],
+    ])("keeps a %s guest locator intact during inspection, then load performs ordinary cleanup", (_label, raw) => {
+      const removeItem = vi.spyOn(localStorage, "removeItem");
+      localStorage.setItem("phase-active-draft-guest", raw);
+
+      const inspected = inspectActiveDraftGuest();
+
+      expect(inspected.type).toBe("invalid");
+      expect(localStorage.getItem("phase-active-draft-guest")).toBe(raw);
+      expect(removeItem).not.toHaveBeenCalledWith("phase-active-draft-guest");
+
+      expect(loadActiveDraftGuest()).toBeNull();
+      expect(removeItem).toHaveBeenCalledWith("phase-active-draft-guest");
+      expect(localStorage.getItem("phase-active-draft-guest")).toBeNull();
+
+      removeItem.mockRestore();
+    });
+
+    it("does not clear a same-timestamp locator whose display identity changed", () => {
+      const timestamp = Date.now();
+      localStorage.setItem("phase-active-draft-guest", JSON.stringify({
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        hostPeerId: "phase2-HOST1",
+        timestamp,
+      }));
+      const active = inspectActiveDraftGuest();
+      if (active.type !== "present") throw new Error("expected guest locator");
+
+      localStorage.setItem("phase-active-draft-guest", JSON.stringify({
+        roomCode: "ABCDE",
+        displayName: "Alicia",
+        hostPeerId: "phase2-HOST1",
+        timestamp,
+      }));
+      clearActiveDraftGuestIfCurrent(active.capture);
+
+      expect(inspectActiveDraftGuest()).toMatchObject({
+        type: "present",
+        meta: { displayName: "Alicia", timestamp },
+      });
     });
   });
 });

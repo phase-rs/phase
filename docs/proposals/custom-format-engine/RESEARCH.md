@@ -214,12 +214,12 @@ but not fully in the *mechanism*); round 2's fix itself was then found
 incomplete (round 3). Both rounds' findings, current state only:
 
 - **It's life loss, not damage** (round 2, still correct). Modern CR: **mana
-  burn is obsolete.** `docs/MagicCompRules.txt:8277-8278` glossary "Mana Burn
-  (Obsolete)": "Older versions of the rules stated that unspent mana caused a
-  player to **lose life**… That rule no longer exists." (Removed by the 2010
-  "M10" rules update.) Life loss and damage are behaviorally distinct in this
-  engine (damage can be prevented/redirected and fires "dealt damage"
-  triggers; life loss does neither).
+  burn is obsolete.** Glossary "Mana Burn (Obsolete)": "Older versions of the
+  rules stated that unspent mana caused a player to **lose life**… That rule
+  no longer exists." (Removed by the 2010 "M10" rules update.) Life loss and
+  damage are behaviorally distinct in this engine (damage can be
+  prevented/redirected and fires "dealt damage" triggers; life loss does
+  neither).
 - **It's per real MTG phase, not per engine `Phase` transition — and this
   requires the mana POOL to persist across intra-phase-group steps, not just
   the burn CHECK to skip them (round 2 only did the latter; round 3 caught
@@ -285,9 +285,9 @@ gating a side-effect on an unconditionally-firing event:**
 ## 6. "Damage uses the stack" — LARGE / deep; honest assessment
 
 - Modern combat damage is **simultaneous and explicitly does NOT use the
-  stack**: `docs/MagicCompRules.txt:2406` "CR 510.2 … This turn-based action
-  doesn't use the stack. No player has the chance to cast spells or activate
-  abilities between the time combat damage is assigned and the time it's dealt."
+  stack**: "CR 510.2 … This turn-based action doesn't use the stack. No player
+  has the chance to cast spells or activate abilities between the time combat
+  damage is assigned and the time it's dealt."
 - The engine implements exactly this modern model in
   `game/combat_damage.rs` (**3,658 lines**) as a simultaneous batch
   (`resolve_combat_damage`, `combat_damage.rs:102`; batch/replacement machinery
@@ -383,14 +383,12 @@ made exile a *defined in-game zone*. Sources:
   a card from the sideboard **or** a card that had been "removed from the game";
   after M10, only the sideboard qualifies.
 - Current CR confirms the *modern* boundary this flag reverts:
-  - `docs/MagicCompRules.txt:1982` — **CR 400.11**: "An object is outside the
-    game if it isn't in any of the game's zones. **Outside the game is not a
-    zone.**"
-  - `docs/MagicCompRules.txt:1984` — **CR 400.11a**: "Cards in a player's
-    sideboard are outside the game."
-  - `docs/MagicCompRules.txt:3486` — **CR 701.23j**: "If an effect instructs a
-    player to search outside the game for a card, that player may choose an
-    appropriate card they own from outside the game."
+  - **CR 400.11**: "An object is outside the game if it isn't in any of the
+    game's zones. **Outside the game is not a zone.**"
+  - **CR 400.11a**: "Cards in a player's sideboard are outside the game."
+  - **CR 701.23j**: "If an effect instructs a player to search outside the
+    game for a card, that player may choose an appropriate card they own from
+    outside the game."
   - Exile (CR 406) is a normal in-game zone, so exiled cards are *not* "outside
     the game" and are ineligible for a modern Wish.
 
@@ -562,24 +560,23 @@ rules-tips "M14 Rules changes! Legendary permanents"
 The legend rule is a **state-based action**, CR **704.5j** (verified by grep;
 the number is not guessed):
 
-- `docs/MagicCompRules.txt:5510` — **CR 704.5j**: "If two or more legendary
-  permanents with the same name are controlled by the same player, that player
-  chooses one of them, and the rest are put into their owners' graveyards. This
-  is called the 'legend rule.'" (Note "**by the same player**" — the modern
-  per-controller scope, in the rule text itself.)
-- `docs/MagicCompRules.txt:8187-8188` — glossary "Legend Rule": "…causes a
-  player who controls two or more legendary permanents with the same name to put
-  all but one into their owners' graveyards."
-- `docs/MagicCompRules.txt:1459` — **CR 205.4d** cross-references 704.5j.
+- **CR 704.5j**: "If two or more legendary permanents with the same name are
+  controlled by the same player, that player chooses one of them, and the rest
+  are put into their owners' graveyards. This is called the 'legend rule.'"
+  (Note "**by the same player**" — the modern per-controller scope, in the rule
+  text itself.)
+- Glossary "Legend Rule": "…causes a player who controls two or more legendary
+  permanents with the same name to put all but one into their owners'
+  graveyards."
+- **CR 205.4d** cross-references 704.5j.
 - **Planeswalker uniqueness is confirmed obsolete in the current CR:**
-  `docs/MagicCompRules.txt:1721` — **CR 306.4**: "Previously, planeswalkers were
-  subject to a 'planeswalker uniqueness rule'… This rule has been removed and
-  planeswalker cards printed before this change have received errata… to have the
-  legendary supertype… they are subject to the 'legend rule' (see rule 704.5j)."
-  And `docs/MagicCompRules.txt:8580-8581` — glossary "Planeswalker Uniqueness
-  Rule (Obsolete)".
-- (Contrast: the world rule, CR 704.5k, `docs/MagicCompRules.txt:5512`, is a
-  distinct global/choiceless SBA — a useful structural precedent, see §10d.)
+  **CR 306.4**: "Previously, planeswalkers were subject to a 'planeswalker
+  uniqueness rule'… This rule has been removed and planeswalker cards printed
+  before this change have received errata… to have the legendary supertype… they
+  are subject to the 'legend rule' (see rule 704.5j)." And the glossary entry
+  "Planeswalker Uniqueness Rule (Obsolete)".
+- (Contrast: the world rule, CR 704.5k, is a distinct global/choiceless SBA —
+  a useful structural precedent, see §10d.)
 
 ### 10c. Is it a REAL functional difference? — YES
 

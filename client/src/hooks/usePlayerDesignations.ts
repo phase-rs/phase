@@ -161,3 +161,9 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
 export function useHasEnduringStory(playerId: PlayerId): boolean {
   return useGameStore((state) => state.gameState?.enduring_story?.includes(playerId) ?? false);
 }
+
+/** CR 732.2a: the engine-published repetition ceiling of the open loop-shortcut window, or
+ *  `null` when none is open. Seat-free: `waiting_for` holds at most one such window. */
+export function useBoundedLoopRepetitions(): number | null {
+  return useGameStore((s) => s.gameState?.derived?.bounded_loop_max_repetitions ?? null);
+}

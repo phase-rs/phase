@@ -8,17 +8,18 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
     DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
-    TriggerOrderTemplateOp,
+    ResolveAllScope, TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
+    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError, PriorityPassingMode,
     ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
-    StackEntry, StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
-    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, WaitingFor,
+    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
+    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
+    StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -2830,7 +2831,6 @@ fn certified_bounded_cycle_offer<'a>(
         certified_period_touch, PeriodCertification, PeriodTouch, PeriodicDelta, ResourceVector,
     };
 
-    let cur = ResourceVector::snapshot(state);
     // Written as an explicit newest-first walk rather than `find_map` because the candidate
     // body now threads `&mut verdicts` and carries an owned per-candidate `PeriodTouch` out.
     let mut basis_a: Option<(
@@ -2853,7 +2853,10 @@ fn certified_bounded_cycle_offer<'a>(
         // over the CERTIFIED PERIOD's announced pairs rather than over the offer-beat stack.
         let points = bounded_cycle_pin_slots_for_window(&touch_cover, proposer);
         let slots: Vec<DecisionSlot> = points.iter().map(|p| p.slot.clone()).collect();
-        let delta = ResourceVector::delta(&ResourceVector::snapshot(prior), &cur);
+        // `period` re-snapshots `state` once per candidate — accepted: the walk is bounded by
+        // the ring's length, and a hoisted snapshot cannot be handed to the single authority
+        // without splitting it back into the two-snapshot form it exists to remove.
+        let delta = ResourceVector::period(prior, state);
         // The existing disjunction, written as an `if / else if` that RECORDS the matching
         // disjunct instead of discarding it. Semantics are byte-for-byte the `||` it
         // replaces: the equality arm is still evaluated first and `_pinned` still runs only
@@ -2906,6 +2909,7 @@ fn certified_bounded_cycle_offer<'a>(
                 frames_per_period: span,
                 delta,
                 victim_slot: Vec::new(),
+                declarable_victims: Vec::new(),
             },
         ));
         break;
@@ -2993,6 +2997,7 @@ fn certified_bounded_cycle_offer<'a>(
                     frames_per_period: k,
                     delta,
                     victim_slot: Vec::new(),
+                    declarable_victims: Vec::new(),
                 },
             )
         }
@@ -3078,7 +3083,7 @@ fn certified_bounded_cycle_offer<'a>(
         v.dedup();
         v
     };
-    // CR 704.5a: what ONE repetition charges to whichever seat a slot's pin names. The
+    // CR 119.3: what ONE repetition charges to whichever seat a slot's pin names. The
     // max-vs-sum reasoning, the gain clamp and the fail-closed direction live on the
     // function; `elimination_bounds` then sums the charged slots per declarable victim.
     // Extracted rather than inlined so the fork has a callable seam. ⚠ THE "`victim_slot` IS
@@ -3094,6 +3099,10 @@ fn certified_bounded_cycle_offer<'a>(
         .iter()
         .map(|(slot, _)| (slot.clone(), worst_seat_life_loss))
         .collect();
+    // CR 704.5a: the SAME seat set `elimination_bounds` is handed two statements below,
+    // carried on the certificate so the per-cycle conformance check confines its lift to what
+    // the bound actually reserved instead of re-deriving a domain from the driven board.
+    periodic.declarable_victims = declarable_victims.clone();
     // `.cloned()`, not `.copied()`: `(DecisionSlot, i64)` is not `Copy`.
     let slot_magnitude: std::collections::BTreeMap<DecisionSlot, i64> =
         periodic.victim_slot.iter().cloned().collect();
@@ -3191,10 +3200,10 @@ fn certified_bounded_cycle_offer<'a>(
 ///
 /// FAIL-CLOSED on every uncertainty, because a wrong pin is worse than no offer:
 ///
-/// * an empty point set publishes no declaration at all — a declaration against an empty
-///   schema would be the one shape `handle_declare_shortcut` validates neither
-///   `predictability_gate` nor `validate_pins` against (both live inside its
-///   `if !offer.schema.points.is_empty()` block);
+/// * an empty point set publishes no declaration at all — `handle_declare_shortcut` validates
+///   every declaration it resolves, whatever the schema published, so one minted against an
+///   exposed-nothing schema is refused on any slot-addressing pin it carries and states nothing
+///   without one; either way `declaration.is_some()` would stop meaning "the handler takes this";
 /// * `None` (that seat never answered this slot) and [`LoopAnswer::Conflicted`] (it answered
 ///   two ways — see that type: an engine-capability refusal, NOT a CR 732.2a mandate) are the
 ///   SAME disposition here, because neither names a single answer to pin;
@@ -3474,7 +3483,7 @@ pub(crate) struct EntryPinSlots {
 ///
 /// THE TWO QUESTIONS THIS TYPE KEEPS APART, because conflating them was a measured
 /// fail-OPEN. PUBLICATION answers CR 732.2a — *is this a game choice the player makes?* —
-/// and shapes the schema. CHARGING answers CR 704.5a — *which seat is charged, and how
+/// and shapes the schema. CHARGING answers CR 119.3 — *which seat is charged, and how
 /// much?* — and shapes the bound. A forced announcement is not a choice, so it is withheld
 /// from the schema; its victim still loses the life, so it is still charged. Deriving the
 /// bound from the PUBLISHED point set made the CR 732.2a withhold silently drop the forced
@@ -3538,7 +3547,7 @@ pub(crate) enum TargetAnnouncement {
     ///   routes to `AutoAssigned`), so no prompt is ever raised and a pin would be a
     ///   designation the RNG contradicts at drive time.
     ///
-    /// CHARGED ALL THE SAME: CR 704.5a asks which seat loses how much life, and nobody having
+    /// CHARGED ALL THE SAME: CR 119.3 asks which seat loses how much life, and nobody having
     /// made the choice changes neither who pays nor how much. Only the CR 732.2a publication
     /// reader acts on this value.
     NotProposerChoice,
@@ -3548,7 +3557,7 @@ pub(crate) enum TargetAnnouncement {
 /// BEFORE the CR 732.2a question of how much of it is a published game choice.
 ///
 /// THE SINGLE ACCEPTANCE AUTHORITY. Both [`entry_publishes_pin_slots`] (publication) and
-/// [`bounded_cycle_charged_targets_for_window`] (CR 704.5a charging) are thin readers of
+/// [`bounded_cycle_charged_targets_for_window`] (CR 119.3 charging) are thin readers of
 /// this one function, so the two can never disagree about WHICH entries are in the cycle —
 /// only about which of their announcements is a published choice. Two independent
 /// acceptance chains that could disagree is exactly the shape gate (3)'s single-authority
@@ -3564,7 +3573,7 @@ struct EntryAnnouncement {
 /// A THIN READER of [`entry_announces`], which owns every acceptance conjunct documented
 /// below; this function contributes exactly one thing on top of it — the CR 732.2a
 /// publication decision (a `Forced` announcement is not a game choice, so no point is
-/// published for it). The CR 704.5a charging reader
+/// published for it). The CR 119.3 charging reader
 /// ([`bounded_cycle_charged_targets_for_window`]) reads the SAME announcement, so the two
 /// cannot disagree about which entries are in the cycle.
 ///
@@ -3637,7 +3646,7 @@ pub(crate) fn entry_publishes_pin_slots(
 /// Every acceptance conjunct documented on [`entry_publishes_pin_slots`] lives here. What
 /// does NOT live here is the CR 732.2a publication decision: this function reports whether
 /// the announcement is `Chosen` or `Forced` and lets its two readers apply that fact to the
-/// question each is answering — the schema (publication) or the bound (CR 704.5a charging).
+/// question each is answering — the schema (publication) or the bound (CR 119.3 charging).
 fn entry_announces(
     state: &GameState,
     entry: &StackEntry,
@@ -3795,7 +3804,7 @@ fn entry_announces(
     // inherited from the `may` expression, which is `None` without it. A `may` the three
     // conjunct groups above suppressed leaves shape (B) with NO slot at all, so the whole
     // entry publishes `None` — the fail-closed direction, now applied by the publication
-    // reader rather than restated here. Shape (B) also charges NOTHING under CR 704.5a:
+    // reader rather than restated here. Shape (B) also charges NOTHING under CR 119.3:
     // there is no announced target, so there is no seat a declaration could aim at.
     if slots.is_empty() {
         if !ability.targets.is_empty() {
@@ -3836,9 +3845,9 @@ fn entry_announces(
     // `WaitingFor::TriggerTargetSelection` is ever raised, so `record_trigger_target_answer`
     // — whose only two call sites are that prompt's reducer arms — never runs. A point
     // published here would demand a `predictability_gate` answer no writer can produce, and
-    // one unanswerable point makes the WHOLE offer undeclarable (the gate's `required` set is
-    // every published point). Journalling the auto-selection instead would model a decision
-    // the player never made.
+    // since the gate's `required` set is every published point, one such point leaves the
+    // offer with no declaration the engine can publish. Journalling the auto-selection instead
+    // would model a decision the player never made.
     //
     // THE SAME AUTHORITY AS THE RELIEF, exported rather than re-derived: gate (3)'s
     // `stack_entry_has_no_ordering_input` asks `forced_unique_targeting` about this same
@@ -3888,7 +3897,7 @@ fn entry_announces(
     // a defect this commit introduced.
     //
     // ⚠ WITHHELD FROM THE SCHEMA IS NOT UNCHARGED, and the two used to be the same act.
-    // CR 704.5a asks which seat loses how much life, and a forced victim loses it exactly as
+    // CR 119.3 asks which seat loses how much life, and a forced victim loses it exactly as
     // a chosen one does — nobody having made the choice changes who pays, not how much.
     // Reporting the shape here rather than dropping the announcement is what lets
     // [`bounded_cycle_charged_targets_for_window`] charge it while
@@ -4062,17 +4071,18 @@ pub(crate) fn bounded_cycle_pin_slots_for_window(
     points
 }
 
-/// CR 704.5a: what ONE CERTIFIED PERIOD CHARGES — the announcement slot of every accepted
+/// CR 119.3: what ONE CERTIFIED PERIOD CHARGES — the announcement slot of every accepted
 /// entry, paired with the seats that announcement may name, whether or not CR 732.2a
 /// publishes it as a decision point.
 ///
 /// DELIBERATELY NOT A FILTER OVER [`bounded_cycle_pin_slots_for_window`]'s OUTPUT, and that
 /// is the entire reason this exists as its own reader. Publication answers CR 732.2a — "a
 /// sequence of game choices, for all players" — so a FORCED announcement publishes nothing.
-/// Charging answers CR 704.5a — "if a player has 0 or less life, that player loses the
-/// game" — and the victim loses that life whether or not anybody chose it. Deriving the
-/// bound from the published set therefore let the CR 732.2a withhold silently drop a forced
-/// victim into `ResourceVector::elimination_bounds`' cheaper `observed_life_loss` arm,
+/// Charging answers CR 119.3 — "if an effect causes a player to gain life or
+/// lose life, that player's life total is adjusted accordingly" — and the victim
+/// loses that life whether or not anybody chose it. Deriving the bound from the
+/// published set therefore let the CR 732.2a withhold silently drop a forced victim
+/// into `ResourceVector::elimination_bounds`' cheaper `observed_life_loss` arm,
 /// RAISING `max_iterations`: the offer would state more legal repetitions than CR 732.2a
 /// permits, on the very operator whose job is to prove the proposed sequence "may be legally
 /// taken based on the current game state".
@@ -4538,29 +4548,22 @@ fn until_lethal_fallback(
 /// is a `Ranking`, which lives INSIDE the step and never changes the count — this seam is
 /// type-only across that parameterization.
 ///
-/// DORMANT for every Stage-2 crownable loop (Ruling B) — and the REASON has now been restated
-/// TWICE, because each restatement was falsified by the next commit and the history is the
-/// useful part. (i) It was "`TargetSchedule` rotates DecisionSource objects, not players";
-/// parameterizing a step's subject admitted `AnnouncementSubject::Seat` and killed that.
-/// (ii) It was then "no in-tree producer emits a `Seat` into a schedule", which is FALSE as of
-/// the provenance split: `record_trigger_target_answer` and
-/// `game::interaction::materialize_loop_shortcut_response` both mint
-/// `Scheduled(TargetSchedule::Constant(Ranking::one(AnnouncementSubject::Seat(..))))` for a
-/// CR 601.2c announced seat.
-///
-/// (iii) The property that actually holds, and the one this function's return value depends on,
-/// is about ROTATION rather than about subjects: **no in-tree producer emits a multi-STEP
-/// schedule** (`RoundRobin` / `Piecewise`) **or a multi-entry `Ranking`**. Every seat-carrying
-/// schedule the engine mints is a one-step `Constant`, which lands on the `1` arm of the match
-/// below — the same `1` a `TargetPin::Player` lands on, so the split moved the spelling and not
-/// the period. `live_mandatory_loop_winner` crowns on PLAYER fallers, and a loop whose targets
-/// do not rotate produces no NEW player faller per cycle to aggregate. The only crownable >2p
-/// player drain pins ALL opponents every cycle (constant, period 1 — via the
-/// `Scheduled(Constant(_))` arm below since the split, via `TargetPin::Player(_)` before it,
-/// and those two arms return the same `1`). The seam is built for generality and a multi-cycle
-/// aggregation is fail-safe either way (a loop reaching the arm measures 1 cycle, finds no
-/// faller, does not crown), so a future ROTATING producer changes what must be re-argued here,
-/// not what this function returns.
+/// DORMANT for every Stage-2 crownable loop (Ruling B). The producer
+/// `game::interaction::materialize_loop_shortcut_response` emits a ONE-entry `Constant` on an
+/// `UntilLethal` offer and a `Piecewise` on a `Fixed` one, and NEITHER MOVES THIS FUNCTION'S
+/// ANSWER OFF 1 — the reason is which consumer sees which. This function's two consumers are
+/// [`shortcut_validated_range`]'s `UntilLethal` arm and `apply_until_lethal_shortcut`, both
+/// UNTIL-LETHAL paths, and the multi-STEP shape is minted only under a FIXED count, which reads
+/// its range off the count and never consults a schedule. A MULTI-entry `Constant` can still
+/// reach here from a decoded save — `declaration_conforms` refuses one at DECLARE, not at load —
+/// and it lands on the same `Constant(_)` arm and returns 1, correctly, since
+/// `evaluate_schedule` resolves `head()` only. The argument therefore rests on the schedule's
+/// SHAPE rather than on any producer's arity. `live_mandatory_loop_winner` crowns on PLAYER
+/// fallers, and a loop whose targets do not rotate produces no NEW player faller per cycle to
+/// aggregate. The seam is built for generality and a multi-cycle aggregation is fail-safe either
+/// way (a loop reaching the arm measures 1 cycle, finds no faller, does not crown), so a future
+/// ROTATING producer on an until-lethal path changes what must be re-argued here, not what this
+/// function returns.
 ///
 /// CR 732.2a SAFETY LIMIT: the returned period is clamped to `MAX_SHORTCUT_CYCLES`. Both
 /// consumers derive their `0..period` range from this one helper (`validate_pins` and
@@ -4619,14 +4622,17 @@ fn shortcut_drive_period(
 /// and at a count of 1 over a length-2 rotation `Ok` is the CORRECT answer. Do not re-derive
 /// and re-add that term.
 ///
-/// PRECONDITION, discharged at its call site: the count is already cap-checked, because
-/// `handle_declare_shortcut` runs the `MAX_SHORTCUT_CYCLES` / `max_iterations` match ABOVE
-/// the pin-validation block. Without that ordering a hostile `Fixed(4e9)` would become a
-/// four-billion-iteration validation loop. Exactly ONE call site consumes this helper.
+/// PRECONDITION, DISCHARGED BY EACH CALLER: the count handed in is already bounded. A caller
+/// that has not bounded it must not call this — an unchecked `Fixed(4e9)` becomes a
+/// four-billion-iteration validation loop. `handle_declare_shortcut` discharges it by running
+/// the `MAX_SHORTCUT_CYCLES` / `max_iterations` match above its pin-validation block;
+/// `build_bounded_declaration` by passing the schema's own `iteration_count`; the interaction
+/// decoder by the count-spec projection, which computes
+/// `max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES)` and admits only that window.
 ///
 /// Exhaustive over `IterationCount` with no wildcard, so a future variant build-breaks here
 /// and forces a range decision instead of silently inheriting one.
-fn shortcut_validated_range(
+pub(crate) fn shortcut_validated_range(
     count: &crate::analysis::decision_template::IterationCount,
     template: Option<&crate::analysis::decision_template::DecisionTemplate>,
 ) -> crate::analysis::decision_template::IterationIndex {
@@ -5151,13 +5157,18 @@ fn materialize_fixed_shortcut(
                 // remaining repetitions could carry a seat past a threshold inside the
                 // proposal. Measured before commit, on the same axes the bound reads, and
                 // fail-closed: a divergent cycle is dropped whole and the drive hands back
-                // to manual play with the last conforming cycle intact.
+                // to manual play with the last conforming cycle intact. The comparison is
+                // victim-INVARIANT rather than exact: CR 601.2c lets one declaration aim an
+                // announced slot at a different seat each iteration, and `conforms` states
+                // both what that licenses and what it still refuses.
                 if let Some(pd) = per_cycle {
-                    let actual = crate::analysis::resource::ResourceVector::delta(
-                        &crate::analysis::resource::ResourceVector::snapshot(&committed),
-                        &crate::analysis::resource::ResourceVector::snapshot(&s),
-                    );
-                    if actual != pd.delta {
+                    let pins = template
+                        .as_ref()
+                        .map_or(&[][..], |t| t.decisions.as_slice());
+                    if !pd.conforms(
+                        &crate::analysis::resource::ResourceVector::period(&committed, &s),
+                        pins,
+                    ) {
                         break 'cycles;
                     }
                 }
@@ -5213,12 +5224,6 @@ fn materialize_fixed_shortcut(
     // priority, though it need not be the player proposing the shortcut." THIS BLOCK IS
     // THAT ENDING POINT, and it is the ending point for BOTH entry paths above — `n`
     // cycles done with no cross-lethal, and `break 'cycles`.
-    //
-    // What the boundary means for a declared `Ranking`: within one accepted drive only its
-    // HEAD is ever resolved (`evaluate_schedule`), so this seam is where the NEXT episode
-    // may legitimately re-evaluate the tail. The reasoning is not restated here — it lives
-    // on `analysis::decision_template::Ranking` ("CONSUMED AT AN EPISODE BOUNDARY, NEVER
-    // MID-DRIVE"), and a second copy is the drift the R1 doc sweep exists to prevent.
     //
     // PROBE-PINNED (probe arm `MUT_SEAM`): the window clear here is load-bearing, not a
     // backstop. MEASURED — skipping it on the f4 accepted drive leaves `loop_detect_ring`
@@ -5941,7 +5946,7 @@ fn normalize_recast_frame(
 ///
 /// ONE test, TWO readers: the class derivation and the producer's token-axis feed, which must
 /// publish the count the boundary mint will reproduce.
-fn minted_battlefield_ids(before: &GameState, after: &GameState) -> Vec<ObjectId> {
+pub(crate) fn minted_battlefield_ids(before: &GameState, after: &GameState) -> Vec<ObjectId> {
     after
         .battlefield
         .iter()
@@ -6965,11 +6970,15 @@ fn handle_declare_shortcut(
     // once at declare suffices: the board is frozen through Accept (apply_confirmed_shortcut
     // doc), and the drive's per-iteration `resolve` (CR 608.2b) is the runtime backstop.
     //
-    // A CHOICE-FREE offer (empty schema — a non-targeted drain) exposes no decisions to
-    // validate: its win derivation is pin-independent (the E1 measure is the authority), and
-    // any template the caller supplies is inert for the drive (the loop raises no target
-    // prompt). This preserves the established `Fixed(N)` drain behavior (the resolve-firewall
-    // materialize tests drive a synthetic pin against the empty drain schema).
+    // A CHOICE-FREE offer (empty schema — a non-targeted drain) exposes no decision to pin, so
+    // a declaration against it may carry no SLOT-ADDRESSING pin: its win derivation is
+    // pin-independent (the E1 measure is the authority), and a template that pinned a choice
+    // would fix one this offer never stated. That refusal needs no test of its own here —
+    // `declaration_conforms` already rejects a SLOT-ADDRESSING pin naming a slot no published
+    // point matches, whatever the schema's size — and for those kinds it is what keeps a
+    // client-supplied pin out of `proposal.template`, which the drive's per-cycle conformance
+    // check reads. The established `Fixed(N)` drain behavior is untouched: its declaration
+    // carries no pins.
     // ⚠ ORDER IS LOAD-BEARING: the count cap runs BEFORE the pin validation below, because
     // `shortcut_validated_range` derives the validated range FROM the declared count and so
     // must not be handed an unchecked one — a `Fixed(4_000_000_000)` would otherwise become
@@ -7071,11 +7080,10 @@ fn handle_declare_shortcut(
     // compares an attacker-chosen value against itself. `offer.proposer` is engine state,
     // copied from `WaitingFor::LoopShortcut { proposer }`.
     //
-    // PLACEMENT IS LOAD-BEARING: this sits OUTSIDE the `!offer.schema.points.is_empty()`
-    // block below, so it is reached for every declaration regardless of schema emptiness —
-    // an empty-schema offer skips `predictability_gate` / `validate_pins` entirely and would
-    // otherwise reach the proposal with an unvalidated owner. It is the SIXTH sibling of the
-    // five refusal arms and lands on their single authority (`reject_shortcut_declaration`),
+    // Runs on EVERY resolved declaration, whatever the schema published, and it is the SOLE
+    // refuser of a foreign owner: `declaration_conforms` below reads no `owner` at all, so no
+    // arm of the match can catch one. It is the SIXTH sibling of the five refusal arms and
+    // lands on their single authority (`reject_shortcut_declaration`),
     // so no row can observe which refusal fired first — the "sixth reject path added later"
     // that authority's doc anticipates. Defence in depth for the RESTORE ingress (a persisted
     // `WaitingFor::RespondToShortcut` never runs this handler) lives on
@@ -7084,54 +7092,74 @@ fn handle_declare_shortcut(
         reject_shortcut_declaration(state, &mut result);
         return Ok(result);
     }
-    if !offer.schema.points.is_empty() {
-        match &template {
-            Some(t) => {
-                // CR 732.2a: validate over the range the ACCEPTED COUNT will drive, not
-                // over the schedule's own period. `shortcut_drive_period` answers a
-                // different question (how many cycles one measurement must aggregate), and
-                // using it here both ACCEPTED a pin whose driven image leaves the published
-                // set at an index the count reaches, and REFUSED conforming declarations
-                // whose count is shorter than the schedule.
-                let validated_range = shortcut_validated_range(&count, Some(t));
-                // Coverage + value legality via the shared authority, so the predicate this
-                // handler ACCEPTS under is the same one `build_bounded_declaration` PUBLISHES
-                // under and the human ingress EMITS under. The range is this site's own.
-                if !crate::analysis::decision_template::declaration_conforms(
-                    offer.schema,
-                    t,
-                    validated_range,
-                    state,
-                ) {
-                    reject_shortcut_declaration(state, &mut result);
-                    return Ok(result);
-                }
-            }
-            // CR 732.2a: a `template: None` declaration against a NON-EMPTY schema skips the
-            // validation above entirely — the pins the offer published are never checked. That
-            // is legitimate for exactly one drive shape: the object-growth route, which
-            // re-derives its template from `state.last_loop_action_sequence` (the same routing
-            // discriminant `materialize` dispatches on) and never reads `proposal.template`.
-            // With nothing this proposer can re-derive from, a pin-consuming drive would run with
-            // no pins at all — fail closed into the same manual-play handback the validation
-            // failure above uses. Both conjuncts are required: keying on `template.is_none()`
-            // alone breaks the shipped object-growth declarations.
-            //
-            // SITE F (CR 732.2a) — THE STRICTEST LOCKSTEP CONSTRAINT ON SITE B, because it is the
-            // one direction in which relaxing (1b) would make the engine LESS safe than before.
-            // "Re-derivable" means the period is THIS offer's proposer's own — the same test
-            // `materialize` dispatches on. A merely non-empty test would let a FOREIGN period take
-            // the sibling `None => {}` arm, which performs ZERO pin validation, and open the APNAP
-            // window on a client-supplied declaration against a schema with published points. So
-            // this arm must reject unless the period is the proposer's, not merely unless one
-            // exists. `None` from a heterogeneous run also rejects, which is the fail-closed
-            // direction: nothing can be re-derived from a period that is nobody's.
-            None if state.loop_period_controller() != Some(offer.proposer) => {
+    // CR 732.2a: a declaration cannot pin choices the offer published none of. Every
+    // `Some(t)` meets `declaration_conforms` whatever the schema published — its
+    // `PinValidation::UnexposedSlot` arm is that refusal for every SLOT-ADDRESSING pin, so a
+    // points-empty offer needs no second predicate for those.
+    //
+    // SLOT-ADDRESSING is this path's term throughout, in `pin_slot`'s own sense: a pin that
+    // CARRIES an explicit `DecisionSlot` (`Targets` / `Mode` / `MayChoice` / `UnlessBreak` /
+    // `ManaColor` / `ConvokeTaps`) and is therefore looked up against `schema.points`.
+    // `pin_slot` synthesizes no slot for `Order`, so the term is exact rather than approximate.
+    //
+    // CLOSED FOR `PinnedDecision::Order`, ON EVERY SCHEMA SIZE. `pin_slot` returns `None` for
+    // an ordering pin, so it covers no published point — coverage is kind-aware via
+    // `pin_answers_point` — and `validate_pins` refuses it outright as `NotALoopDecision`
+    // (CR 603.3b: trigger ordering is a different decision kind from the CR 732.2a
+    // per-iteration choices a loop declaration answers). `PinnedDecision` derives
+    // `Deserialize` and rides `GameAction::DeclareShortcut` verbatim, so that refusal is what
+    // stands between the wire and `proposal.template`.
+    //
+    // Only the `None` arm's re-derivation test is conditioned on the schema having points: an
+    // offer publishing none exposes nothing to re-derive.
+    match &template {
+        Some(t) => {
+            // CR 732.2a: validate over the range the ACCEPTED COUNT will drive, not
+            // over the schedule's own period. `shortcut_drive_period` answers a
+            // different question (how many cycles one measurement must aggregate), and
+            // using it here both ACCEPTED a pin whose driven image leaves the published
+            // set at an index the count reaches, and REFUSED conforming declarations
+            // whose count is shorter than the schedule.
+            let validated_range = shortcut_validated_range(&count, Some(t));
+            // Coverage + value legality via the shared authority, so the predicate this
+            // handler ACCEPTS under is the same one `build_bounded_declaration` PUBLISHES
+            // under and the human ingress EMITS under. The range is this site's own.
+            if !crate::analysis::decision_template::declaration_conforms(
+                offer.schema,
+                t,
+                validated_range,
+                state,
+            ) {
                 reject_shortcut_declaration(state, &mut result);
                 return Ok(result);
             }
-            None => {}
         }
+        // CR 732.2a: a `template: None` declaration against a NON-EMPTY schema skips the
+        // validation above entirely — the pins the offer published are never checked. That
+        // is legitimate for exactly one drive shape: the object-growth route, which
+        // re-derives its template from `state.last_loop_action_sequence` (the same routing
+        // discriminant `materialize` dispatches on) and never reads `proposal.template`.
+        // With nothing this proposer can re-derive from, a pin-consuming drive would run with
+        // no pins at all — fail closed into the same manual-play handback the validation
+        // failure above uses. Every conjunct is required: keying on `template.is_none()`
+        // alone breaks the shipped object-growth declarations.
+        //
+        // SITE F (CR 732.2a) — THE STRICTEST LOCKSTEP CONSTRAINT ON SITE B, because it is the
+        // one direction in which relaxing (1b) would make the engine LESS safe than before.
+        // "Re-derivable" means the period is THIS offer's proposer's own — the same test
+        // `materialize` dispatches on. A merely non-empty test would let a FOREIGN period take
+        // the sibling `None => {}` arm, which performs ZERO pin validation, and open the APNAP
+        // window on a client-supplied declaration against a schema with published points. So
+        // this arm must reject unless the period is the proposer's, not merely unless one
+        // exists. `None` from a heterogeneous run also rejects, which is the fail-closed
+        // direction: nothing can be re-derived from a period that is nobody's.
+        None if !offer.schema.points.is_empty()
+            && state.loop_period_controller() != Some(offer.proposer) =>
+        {
+            reject_shortcut_declaration(state, &mut result);
+            return Ok(result);
+        }
+        None => {}
     }
     let proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
@@ -7973,6 +8001,24 @@ enum AutoPassDecision {
 /// interrupt logic is boundary-agnostic — both `EndOfCurrentTurn` and
 /// `MyNextTurnStart` behave identically within a priority window.
 fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassDecision {
+    // CR 117.1 + CR 723.5: Full Control is the player's standing refusal to have
+    // any window taken from them, and it outranks every auto-pass session —
+    // including one another player installed, which is what reaches this loop
+    // without ever consulting the frontend. Checked BEFORE the no-session `Exit`
+    // arm because `Exit` itself falls through to a pass when someone else holds
+    // a live `UntilStackEmpty` session. Preference ownership follows the
+    // authorized submitter, as it does in `auto_pass_recommended`.
+    if state.priority_passing_mode(turn_control::authorized_submitter_for_player(state, player))
+        == PriorityPassingMode::FullControl
+    {
+        // `Finish` also drops a stale session this player owns; both variants
+        // break the loop, so either way the window is theirs.
+        return if state.auto_pass.contains_key(&player) {
+            AutoPassDecision::Finish
+        } else {
+            AutoPassDecision::Break
+        };
+    }
     let Some(mode) = state.auto_pass.get(&player) else {
         return AutoPassDecision::Exit;
     };
@@ -8315,6 +8361,20 @@ fn stack_resolution_session_priority_decision(
         let Some(session) = state.stack_resolution_session.as_ref() else {
             return StackResolutionSessionPriorityDecision::NotActive;
         };
+        // CR 117.1: a Full Control holder is never auto-passed by a session —
+        // theirs or anyone else's. Scoped to `Automatic`: an EXPLICIT
+        // PassPriority is that player's own deliberate decision and still drives
+        // the session. This is the only gate covering a session REPRESENTATIVE,
+        // whose windows are otherwise passed without even the meaningful-action
+        // check below. (The no-session case is handled one layer out, by
+        // `priority_auto_pass_decision`.)
+        if matches!(pass_kind, StackResolutionSessionPassKind::Automatic)
+            && state
+                .priority_passing_mode(turn_control::authorized_submitter_for_player(state, holder))
+                == PriorityPassingMode::FullControl
+        {
+            return StackResolutionSessionPriorityDecision::Pause;
+        }
 
         let current_representatives = super::topology::canonical_priority_representatives(
             state,
@@ -8862,6 +8922,7 @@ fn begin_resolve_all_consent(
     state: &mut GameState,
     priority_player: PlayerId,
     max_resolutions: u32,
+    scope: ResolveAllScope,
 ) -> Result<WaitingFor, EngineError> {
     match state
         .stack_resolution_session
@@ -8870,8 +8931,8 @@ fn begin_resolve_all_consent(
     {
         // An AI-issued recheck is an internal, provisional shortcut. An
         // explicit Resolve All proposal is the priority holder's replacement
-        // shortcut, so restore the saved preferences before asking every
-        // representative for the new proposal's consent.
+        // shortcut, so restore the saved preferences before installing the
+        // requester's own session below.
         Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction) => {
             take_and_restore_stack_resolution_session(state);
         }
@@ -8885,6 +8946,10 @@ fn begin_resolve_all_consent(
     super::priority::pass_priority_legality(state, priority_player)?;
     let current_representative =
         super::topology::priority_pass_representative(state, priority_player);
+    // CR 117.3d: `Own` binds the requester alone (no consent to ask,
+    // so nobody can block it); `Shared` opens the table-wide compression
+    // proposal, rotated so the requester is first and self-granted. See
+    // `ResolveAllScope`.
     let mut representatives = super::topology::priority_pass_participants(state);
     let Some(current_index) = representatives
         .iter()
@@ -8894,7 +8959,10 @@ fn begin_resolve_all_consent(
             "Resolve All requires a live priority representative".to_string(),
         ));
     };
-    representatives.rotate_left(current_index);
+    match scope {
+        ResolveAllScope::Own => representatives = vec![current_representative],
+        ResolveAllScope::Shared => representatives.rotate_left(current_index),
+    }
 
     let epoch = state.next_resolve_all_consent_epoch;
     let next_epoch = epoch.checked_add(1).ok_or_else(|| {
@@ -8907,6 +8975,7 @@ fn begin_resolve_all_consent(
     state.resolve_all_consent_run = Some(ResolveAllConsentRun {
         epoch,
         max_resolutions: StackResolutionBudget::from_legacy_max_resolutions(max_resolutions),
+        scope,
         priority_snapshot: ResolveAllPrioritySnapshot {
             waiting_player: priority_player,
             priority_player: state.priority_player,
@@ -8933,6 +9002,9 @@ fn begin_resolve_all_consent(
         ),
     });
 
+    // An `Own` run is single-participant and self-granted, so it materializes on
+    // the spot and never raises a consent prompt. A `Shared` run queues the
+    // remaining representatives for the table-wide compression proposal.
     if state
         .resolve_all_consent_run
         .as_ref()
@@ -9357,6 +9429,14 @@ fn apply_action(
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            // CR 702.60a + CR 701.20a: Ripple's revealed top-of-library cards
+            // stay in the library and remain public while the controller works
+            // through the same-named free-cast offers and the bottom-order step.
+            | WaitingFor::CastOffer {
+                kind: crate::types::game_state::CastOfferKind::Ripple { .. },
+                ..
+            }
+            | WaitingFor::RippleBottomOrder { .. }
     ) {
         state.revealed_cards.clear();
     }
@@ -9831,9 +9911,13 @@ fn apply_action(
             }
             return pass_installed_auto_pass_priority(state, *player, &mut events);
         }
-        (WaitingFor::Priority { player }, GameAction::BeginResolveAll { max_resolutions }) => {
-            begin_resolve_all_consent(state, *player, max_resolutions)?
-        }
+        (
+            WaitingFor::Priority { player },
+            GameAction::BeginResolveAll {
+                max_resolutions,
+                scope,
+            },
+        ) => begin_resolve_all_consent(state, *player, max_resolutions, scope)?,
         (
             WaitingFor::ResolveAllConsent {
                 epoch,
@@ -14150,8 +14234,9 @@ fn apply_action(
                 stack_entry_index,
                 scope,
                 current_targets,
+                slots,
+                slot_pools,
                 legal_new_targets,
-                ..
             },
             GameAction::RetargetSpell { new_targets },
         ) => apply_retarget(
@@ -14162,6 +14247,8 @@ fn apply_action(
                 stack_entry_index: *stack_entry_index,
                 scope,
                 current_targets,
+                slots,
+                slot_pools,
                 legal_new_targets,
                 new_targets,
             },
@@ -14177,8 +14264,9 @@ fn apply_action(
                 stack_entry_index,
                 scope: RetargetScope::Single,
                 current_targets,
+                slots,
+                slot_pools,
                 legal_new_targets,
-                ..
             },
             GameAction::ChooseTarget { target: Some(t) },
         ) => apply_retarget(
@@ -14189,6 +14277,8 @@ fn apply_action(
                 stack_entry_index: *stack_entry_index,
                 scope: &RetargetScope::Single,
                 current_targets,
+                slots,
+                slot_pools,
                 legal_new_targets,
                 new_targets: vec![t],
             },
@@ -14429,6 +14519,8 @@ struct RetargetSubmission<'a> {
     stack_entry_index: usize,
     scope: &'a RetargetScope,
     current_targets: &'a [TargetRef],
+    slots: &'a [RetargetSlotAddress],
+    slot_pools: &'a [Vec<TargetRef>],
     legal_new_targets: &'a [TargetRef],
     new_targets: Vec<TargetRef>,
 }
@@ -14447,9 +14539,91 @@ fn apply_retarget(
         stack_entry_index,
         scope,
         current_targets,
+        slots,
+        slot_pools,
         legal_new_targets,
         new_targets,
     } = submission;
+
+    // CR 115.7d + CR 601.2c: derived here (rather than only after the match
+    // below) because H3's outer-empty re-derivation needs it before
+    // `pool_for` is built. The address space the player was OFFERED must be
+    // the one their submission is validated, admitted and written against;
+    // the payload snapshots it, `chain_retarget_slots` re-derives it.
+    let derived = state
+        .stack
+        .get(stack_entry_index)
+        .and_then(|entry| entry.ability())
+        .map(crate::game::ability_utils::chain_retarget_slots)
+        .unwrap_or_default();
+
+    // CR 115.7d, INVARIANT SC + N16 (phase-rs/phase#8355 round-8 review
+    // finding H3): an OUTER-empty `slot_pools` means a `#[serde(default)]`
+    // payload predating the field (or version-skewed). Falling back to the
+    // flat `legal_new_targets` UNION for every position — as `retarget_slot_
+    // violation` alone would — restores BASE's write but not BASE's per-slot
+    // validation: it degrades every position to the same set and can no
+    // longer tell a candidate legal for slot 1 from one legal only for slot 0,
+    // reopening round-5 defect B2. Re-derive REAL per-position pools from the
+    // freshly-derived `derived` bindings instead, using the SAME one
+    // computation (`change_targets::slot_pool`, via `derive_slot_pools`) a
+    // live prompt would have used. An empty INNER pool at a given position is
+    // NOT re-derived here — `slot_pools.get(idx)` already returns `Some(&[])`
+    // for it, which correctly admits nothing (N16's sibling: an all-empty
+    // INNER `slot_pools` of the right length must admit nothing, not fall
+    // back to the union).
+    let derived_pools;
+    let effective_pools: &[Vec<TargetRef>] = if !slot_pools.is_empty() {
+        slot_pools
+    } else {
+        derived_pools = match state
+            .stack
+            .get(stack_entry_index)
+            .and_then(|entry| entry.ability().map(|ability| (entry, ability)))
+        {
+            Some((entry, stack_ability)) => {
+                crate::game::effects::change_targets::derive_slot_pools(
+                    state,
+                    entry,
+                    stack_ability,
+                    &derived,
+                )
+            }
+            None => Vec::new(),
+        };
+        // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review finding
+        // H1, second pass): a re-derived per-position pool can disagree with
+        // the compat payload's OWN `legal_new_targets` — measured on a B10-
+        // shaped Hallow board, where the declared source spell had left the
+        // stack: `derive_slot_pools` returns `[[]]` (outer non-empty, inner
+        // empty), `pool_for(0)` then admits nothing including the unchanged
+        // current target, and `Single` has no unchanged-position exemption —
+        // an unconditional hang. `retarget_prompt_is_dischargeable` asks
+        // EXACTLY the question `resolve` asks before parking a fresh prompt;
+        // when the re-derived pools fail it here too, trust them no further
+        // and fall back to `legal_new_targets`, which is what the field's own
+        // doc already promises ("behaves as at BASE").
+        if crate::game::effects::change_targets::retarget_prompt_is_dischargeable(
+            scope,
+            &derived_pools,
+            legal_new_targets,
+        ) {
+            &derived_pools
+        } else {
+            &[]
+        }
+    };
+
+    // EMPTY OUTER `effective_pools` (bindings could not be derived, e.g. the
+    // stack entry has no ability) falls back to `legal_new_targets`, exactly
+    // as the outer-empty payload case did before H3. An empty INNER pool is
+    // NOT a fallback — `get(idx)` returns `Some(&[])` and the position
+    // correctly admits nothing.
+    let pool_for = |idx: usize| -> &[TargetRef] {
+        effective_pools
+            .get(idx)
+            .map_or(legal_new_targets, Vec::as_slice)
+    };
 
     match scope {
         RetargetScope::Single => {
@@ -14458,7 +14632,7 @@ fn apply_retarget(
                     "Retarget: single-target change requires exactly one target".to_string(),
                 ));
             }
-            if !legal_new_targets.contains(&new_targets[0]) {
+            if !pool_for(0).contains(&new_targets[0]) {
                 return Err(EngineError::InvalidAction(
                     "Retarget: chosen target not in legal alternatives".to_string(),
                 ));
@@ -14471,6 +14645,34 @@ fn apply_retarget(
                         .to_string(),
                 ));
             }
+            // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review
+            // finding MED-1): `pool_for`'s union fallback is PER-INDEX
+            // (`.get(idx)`), so a NON-EMPTY `effective_pools` shorter than
+            // `current_targets` would silently mix two authorities inside
+            // ONE submission — positions within bounds enforced against
+            // their real per-position pool, positions past the end
+            // degrading individually to the flat union. Measured: a
+            // length-3 compat `All` payload against a 2-binding node
+            // enforced position 0 narrowly, admitted position 2 from the
+            // union, and the compat write path (`slots.is_empty()`, below)
+            // then wrote all three positions onto a 2-slot node. A real
+            // per-position address space is never shorter than
+            // `current_targets` — `derive_slot_pools`/a stored payload both
+            // map 1:1 over the node's OWN bindings — so a shorter, non-empty
+            // `effective_pools` means the address space no longer matches
+            // this entry: the same "no longer applicable" case
+            // `retarget_slots_aligned` exists to catch, just for the
+            // outer-empty compat shape that check can't see (its own
+            // `slots`/`derived` comparison is vacuously true when `slots` is
+            // empty). Reject the WHOLE submission rather than enforce it
+            // unevenly. `effective_pools.is_empty()` is excluded here: that
+            // is the DELIBERATE uniform fallback (H1/H3 — every position
+            // reads `legal_new_targets` alike), not a mix.
+            if !effective_pools.is_empty() && effective_pools.len() < current_targets.len() {
+                return Err(EngineError::InvalidAction(
+                    "Retarget: prompt per-position pools no longer cover every target".to_string(),
+                ));
+            }
             // CR 115.7d: For "choose new targets", unchanged targets may remain
             // unchanged even if they are no longer legal. Changed targets still
             // must be legal alternatives.
@@ -14478,7 +14680,7 @@ fn apply_retarget(
                 if current_targets.get(idx) == Some(target) {
                     continue;
                 }
-                if !legal_new_targets.contains(target) {
+                if !pool_for(idx).contains(target) {
                     return Err(EngineError::InvalidAction(
                         "Retarget: chosen target not in legal alternatives".to_string(),
                     ));
@@ -14491,6 +14693,23 @@ fn apply_retarget(
             ));
         }
     }
+
+    // CR 115.7d + CR 601.2c: the address space the player was OFFERED must be
+    // the one their submission is validated, admitted and written against.
+    // The payload snapshots it; `derived` (computed above, before `pool_for`
+    // was built) re-derives it. Pin them equal here (M5) via the single
+    // alignment authority also consulted by `ai_support::candidates::
+    // retarget_actions`, so the two cannot disagree about whether a payload
+    // is still applicable.
+    if !crate::game::ability_utils::retarget_slots_aligned(&derived, slots) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: prompt slot addresses no longer match the stack entry".into(),
+        ));
+    }
+    debug_assert!(
+        slot_pools.is_empty() || slot_pools.len() == slots.len(),
+        "slot_pools must be aligned 1:1 with slots or absent",
+    );
 
     // CR 115.7a: "each target can be changed only to another legal target." The
     // `legal_new_targets` pool checked above is flat, so for a multi-slot node it
@@ -14505,54 +14724,197 @@ fn apply_retarget(
     // `Single`-scope retarget (Bolt Bend) of that shape therefore does run
     // this per-slot validation — CR 115.7a-correct, and the reason the check
     // is wired for both scopes rather than only `All`.
-    if let Some(ability) = state
-        .stack
-        .get(stack_entry_index)
-        .and_then(|entry| entry.ability())
-    {
-        if let Some(slot) = crate::game::ability_utils::retarget_slot_violation(
-            state,
-            ability,
-            current_targets,
-            &new_targets,
-        ) {
-            return Err(EngineError::InvalidAction(format!(
-                "Retarget: chosen target is not legal for target slot {slot}"
-            )));
-        }
+    //
+    // `effective_pools` (H3), not the raw payload `slot_pools`: an
+    // outer-empty payload must still be checked against REAL per-position
+    // pools, not degrade to the flat union here too.
+    if let Some(slot) = crate::game::ability_utils::retarget_slot_violation(
+        &derived,
+        effective_pools,
+        legal_new_targets,
+        current_targets,
+        &new_targets,
+    ) {
+        return Err(EngineError::InvalidAction(format!(
+            "Retarget: chosen target is not legal for target slot {slot}"
+        )));
     }
 
-    if stack_entry_index < state.stack.len() {
-        let target_pins: Vec<_> = state
-            .stack
-            .get(stack_entry_index)
-            .and_then(|entry| entry.ability())
-            .map(|ability| {
-                current_targets
-                    .iter()
-                    .zip(new_targets.iter())
-                    .filter(|(old, new)| {
-                        ability.retarget_target_requires_pin_refresh(old, new, state)
-                    })
-                    .filter_map(|(_, target)| match target {
-                        TargetRef::Object(id) => {
-                            state.objects.get(id).map(ObjectIncarnationRef::from_object)
-                        }
-                        TargetRef::Player(_) => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Some(ability) = state.stack[stack_entry_index].ability_mut() {
-            ability.targets = new_targets;
-            for pin in target_pins {
-                ability.update_selected_target_incarnation(pin);
-            }
-        }
-    } else {
+    if stack_entry_index >= state.stack.len() {
         return Err(EngineError::InvalidAction(
             "Invalid stack entry index for retargeting".to_string(),
         ));
+    }
+
+    // CR 115.7d: "choose new targets" is an operation on the SPELL, so it
+    // writes every chain node that owns an addressed slot, not only the root
+    // — and the target-incarnation pin refresh follows the same address,
+    // because `selected_target_incarnations` is a field of the OWNING
+    // `ResolvedAbility` (phase-rs/phase#8355).
+    //
+    // CR 115.7d again (phase-rs/phase#8355 round-8 review finding MED-3,
+    // correcting a comment that contradicted the write loop below and could
+    // lead a future edit to silently revert H2): only CHANGED positions are
+    // VALIDATED against their slot's pool (`retarget_slot_violation`, above)
+    // — an unchanged position is exempt from THAT check, which is what lets
+    // an unchanged-but-illegal target stay illegal. The write loop below
+    // addresses EVERY position in `new_targets` unconditionally, changed or
+    // not; whether a given position's PIN is refreshed is decided
+    // separately, per position, by `retarget_target_requires_pin_refresh` —
+    // never by raw `TargetRef` (in)equality (H2). A same-ID retarget can
+    // still be a genuine re-incarnation (the object left and returned) whose
+    // pin is stale, and that function is the only thing that can tell a true
+    // no-op apart from one; skipping a position on `TargetRef` equality would
+    // make that case unreachable again. `capture_target_incarnations_
+    // recursive` must NOT be used here either — it blanket re-pins every
+    // position regardless of that per-position decision.
+    let Some(mut mutated) = state.stack[stack_entry_index].ability().cloned() else {
+        return Err(EngineError::InvalidAction(
+            "Retarget: stack entry has no ability to retarget".to_string(),
+        ));
+    };
+    if slots.is_empty() {
+        // M9/N16 compatibility fallback: an empty OUTER `slots` means a
+        // payload predating the field, and BASE's write was an unconditional
+        // root-level `ability.targets = new_targets` with a pin refresh
+        // computed by zipping EVERY position (not gated on "changed" — CR 400.7:
+        // a same-ID retarget with a stale incarnation must still refresh).
+        // Falling back to that exact write (rather than silently writing
+        // nothing) is what keeps this case "behaves as at BASE" rather than a
+        // silently-accepted no-op.
+        let target_pins: Vec<_> = current_targets
+            .iter()
+            .zip(new_targets.iter())
+            .filter(|(old, new)| mutated.retarget_target_requires_pin_refresh(old, new, state))
+            .filter_map(|(_, target)| match target {
+                TargetRef::Object(id) => {
+                    state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                }
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+        mutated.targets = new_targets.clone();
+        for pin in target_pins {
+            mutated.update_selected_target_incarnation(pin);
+        }
+    } else {
+        // CR 400.7 + CR 603.7c (mirrors `write_retarget_position`'s forced-path
+        // semantics, incl. its `exposed.len() == 1` exemption): do NOT skip a
+        // position on raw `TargetRef` equality. A same-ID retarget can still be
+        // a genuine re-incarnation (the object left and returned) whose pin is
+        // stale, and only `retarget_target_requires_pin_refresh` can tell that
+        // apart from a true no-op — skipping the whole branch here made that
+        // case unreachable and left `update_selected_target_incarnation` uncalled
+        // on the interactive path (phase-rs/phase#8355 round-8 review finding
+        // H2). Writing the same `TargetRef` back is harmless; the pin decision
+        // is the part that must not be shortcut.
+        for (i, new_target) in new_targets.iter().enumerate() {
+            let Some(address) = slots.get(i) else {
+                continue;
+            };
+            let Some(node) = crate::game::ability_utils::node_at_mut(&mut mutated, &address.path)
+            else {
+                return Err(EngineError::InvalidAction(
+                    "Retarget: prompt slot address no longer resolves".to_string(),
+                ));
+            };
+            let Some(old) = node.targets.get(address.slot).cloned() else {
+                continue;
+            };
+            let refresh = node.retarget_target_requires_pin_refresh(&old, new_target, state);
+            node.targets[address.slot] = new_target.clone();
+            if refresh {
+                let pin = match new_target {
+                    TargetRef::Object(id) => {
+                        state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                    }
+                    TargetRef::Player(_) => None,
+                };
+                if let Some(pin) = pin {
+                    node.update_selected_target_incarnation(pin);
+                }
+            }
+        }
+    }
+    crate::game::ability_utils::restamp_derived_chain_targets(&mut mutated);
+
+    // CR 115.7d (second clause) + CR 115.7e ("only the final set of targets is
+    // evaluated"): after the write, every UNCHANGED addressed slot that was
+    // LEGAL before the change must still be legal. A slot that was ALREADY
+    // illegal stays accepted — that is CR 115.7d's FIRST clause and must not
+    // be disturbed. Evaluated on the post-write chain and transactionally so a
+    // violation rolls back: the ability is only put back on the stack once
+    // this pass succeeds. `Legacy` bindings are skipped: they have no filter,
+    // and BASE applies no per-slot check to them. Uses the SAME constructor
+    // and controller as the pool builder (`slot_pool`), not
+    // `validate_targets_for_ability` (which would reintroduce round-5 defect
+    // B8's `ability.controller`).
+    let pool_controller = crate::game::effects::change_targets::retarget_pool_controller(
+        state,
+        &state.stack[stack_entry_index],
+        &mutated,
+    );
+    // `pre_write` is the ability as it stood before this call's write loop —
+    // `state.stack[stack_entry_index]` has not been overwritten yet (that
+    // happens below, only once this whole pass succeeds).
+    let pre_write = state.stack[stack_entry_index].ability().cloned();
+    for (i, binding) in derived.iter().enumerate() {
+        // A position this submission itself addressed and changed is already
+        // validated by the per-slot check above (CR 115.7d's FIRST clause);
+        // this pass is only for positions the submission left UNCHANGED,
+        // including every position beyond the exposed prefix.
+        let changed = i < new_targets.len() && current_targets.get(i) != new_targets.get(i);
+        if changed {
+            continue;
+        }
+        let crate::game::ability_utils::SlotEnforcement::Filtered(filter) = &binding.enforcement
+        else {
+            continue;
+        };
+        let Some(pre_node) = pre_write
+            .as_ref()
+            .and_then(|a| crate::game::ability_utils::node_at(a, &binding.address.path))
+        else {
+            continue;
+        };
+        let Some(pre_current) = pre_node.targets.get(binding.address.slot) else {
+            continue;
+        };
+        let was_legal = crate::game::targeting::find_legal_targets_for_ability_with_controller(
+            state,
+            filter,
+            pre_node,
+            pool_controller,
+        )
+        .contains(pre_current);
+        if !was_legal {
+            // CR 115.7d FIRST clause: an already-illegal unchanged target
+            // stays accepted.
+            continue;
+        }
+        let Some(post_node) = crate::game::ability_utils::node_at(&mutated, &binding.address.path)
+        else {
+            continue;
+        };
+        let Some(post_current) = post_node.targets.get(binding.address.slot) else {
+            continue;
+        };
+        let still_legal = crate::game::targeting::find_legal_targets_for_ability_with_controller(
+            state,
+            filter,
+            post_node,
+            pool_controller,
+        )
+        .contains(post_current);
+        if !still_legal {
+            return Err(EngineError::InvalidAction(
+                "Retarget: the change would make an unchanged target illegal".to_string(),
+            ));
+        }
+    }
+
+    if let Some(stack_ability_mut) = state.stack[stack_entry_index].ability_mut() {
+        *stack_ability_mut = mutated;
     }
 
     events.push(GameEvent::EffectResolved {
@@ -16662,6 +17024,14 @@ pub fn start_game_with_starting_player(
     state.active_player = starting_player;
     state.priority_player = starting_player;
     state.current_starting_player = starting_player;
+    // CR 103.8 + CR 500: the starting player takes their first turn HERE — turn 1
+    // is established inline rather than through `turns::start_next_turn`, which is
+    // where every later turn's per-player count is incremented. Without this the
+    // starting player's `turns_taken` stays one behind every other seat for the
+    // whole game, so `QuantityRef::TurnsTaken` ("the number of turns you've taken
+    // this game") and every "your Nth turn" condition read low for exactly the
+    // player who has taken the MOST turns.
+    state.players[starting_player.0 as usize].turns_taken += 1;
     // First-game default chooser is the starting player; BO3 restarts can pre-set this.
     if state.next_game_chooser.is_none() {
         state.next_game_chooser = Some(starting_player);
@@ -16718,6 +17088,10 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     state.active_player = starting_player;
     state.priority_player = starting_player;
     state.current_starting_player = starting_player;
+    // CR 103.8 + CR 500: see the matching increment in
+    // `start_game_with_starting_player` — turn 1 bypasses `turns::start_next_turn`,
+    // so the starting player's own first turn must be counted here.
+    state.players[starting_player.0 as usize].turns_taken += 1;
     state.phase = Phase::Untap;
 
     events.push(GameEvent::TurnStarted {
@@ -17138,7 +17512,7 @@ mod resolve_all_consent_session_tests {
         let mut state = GameState::new(FormatConfig::free_for_all(), 1, 0x51_1E);
         state.stack.push_back(no_op_entry(1, P0));
 
-        let waiting = begin_resolve_all_consent(&mut state, P0, 1)
+        let waiting = begin_resolve_all_consent(&mut state, P0, 1, ResolveAllScope::Shared)
             .expect("the sole representative is already unanimous");
 
         assert!(matches!(waiting, WaitingFor::Priority { player: P0 }));
@@ -17155,7 +17529,7 @@ mod resolve_all_consent_session_tests {
     fn two_headed_giant_final_grant_overlays_only_canonical_team_representatives() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0x2A6);
         state.stack.push_back(no_op_entry(1, P0));
-        let waiting = begin_resolve_all_consent(&mut state, P0, 7)
+        let waiting = begin_resolve_all_consent(&mut state, P0, 7, ResolveAllScope::Shared)
             .expect("the active team representative begins consent");
         let WaitingFor::ResolveAllConsent {
             epoch,
@@ -18121,9 +18495,11 @@ mod bounded_declaration_tests {
 
     /// **Row D4 — an empty schema publishes NO declaration.**
     ///
-    /// LOAD-BEARING, not tidiness: `predictability_gate` and `validate_pins` both live inside
-    /// `handle_declare_shortcut`'s `if !offer.schema.points.is_empty()` block, so a declaration
-    /// minted against an empty schema would travel the one declare path that runs NEITHER gate.
+    /// LOAD-BEARING, not tidiness: an empty schema exposes no slot, so a declaration minted
+    /// against one that pinned a SLOT-ADDRESSING choice would be refused by the handler that
+    /// has to accept it — `validate_pins` matches those pins to a published point. Publishing
+    /// one would make `declaration.is_some()`, the predicate `ai_support::candidates` gates
+    /// its declare candidate on, mean the opposite of what it says.
     /// The invariant is also staged at fixture level by
     /// `tests/integration/loop_shortcut.rs::r28_empty_schema_offer`, which passes
     /// `declaration: None` for this reason.
@@ -18264,9 +18640,8 @@ mod bounded_declaration_tests {
                     DecisionKind::LoopChoice,
                 ),
             };
-            let required: Vec<_> = schema.points.iter().map(|p| p.slot.clone()).collect();
             assert!(
-                predictability_gate(&as_published, &required).is_ok(),
+                predictability_gate(&as_published, &schema.points).is_ok(),
                 "[{label}] reach-guard: COVERAGE passes on this template — every published slot \
                  is pinned — so the handler's verdict below is the VALUE half's"
             );
@@ -20025,9 +20400,9 @@ mod stage2_injector_tests {
     /// # What this does NOT measure
     ///
     /// ACCEPTANCE. Whether `mixed_no_order` is *submittable* is `declaration_conforms`'
-    /// question; no row here asks it, and the answer is not always yes (an `Order` pin can be
-    /// the sole cover of a required point, in which case dropping it fails
-    /// `predictability_gate` — pre-existing and zone-independent).
+    /// question, and no row here asks it. `mixed` itself is not submittable — `validate_pins`
+    /// refuses its `Order` element as `NotALoopDecision` (CR 603.3b) — which is why these rows
+    /// drive `resolve` directly.
     ///
     /// REVERT-PROBES: reverting the `Order` arm to `resolve_source` ⇒ rows **R** and **P**
     /// fail; **N**, **N2** and **P-minus** are deliberately revert-insensitive.
@@ -20470,7 +20845,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            44,
+            46,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -20478,9 +20853,12 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 9, 30),
+            (5, 9, 32),
             "the partition, not just the total: five PRODUCTION producers, nine PRODUCTION \
-             readers (they read `state.waiting_for` and never write it), 30 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+             readers (they read `state.waiting_for` and never write it), 32 `#[cfg(test)]` lines \
+             (the 31st is `sba.rs`'s paused-resolution fixture for the CR 704.4 safety-net guard; \
+             the 32nd is `triggers.rs`'s positive reach-guard row for \
+             `resolution_frame_is_live_off_priority`).\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(
@@ -21234,9 +21612,16 @@ mod stage2_injector_tests {
         }
     }
 
-    /// A live `LoopShortcut` offer with an EMPTY schema, proposed by P0 on `state`.
-    fn u4_park_on_offer(state: &mut GameState) {
-        use crate::analysis::decision_template::ShortcutDecisionSchema;
+    /// A live `LoopShortcut` offer proposed by P0 on `state`, publishing the one CR 603.5
+    /// `MayChoice` point [`u4_may_template`] pins.
+    ///
+    /// CR 732.2a: a declaration may pin only choices the offer published, so an offer exposing
+    /// no point refuses a template carrying any SLOT-ADDRESSING pin — which would take the
+    /// `owner` axis out of the measurement below rather than isolate it.
+    fn u4_park_on_offer(state: &mut GameState, src: ObjectId) {
+        use crate::analysis::decision_template::{
+            DecisionPoint, DecisionPointKind, ShortcutDecisionSchema,
+        };
         use crate::analysis::loop_check::{LoopCertificate, WinKind};
         use crate::analysis::resource::BoardDelta;
         state.waiting_for = WaitingFor::LoopShortcut {
@@ -21249,7 +21634,16 @@ mod stage2_injector_tests {
                 residual_board_delta: BoardDelta::default(),
                 per_cycle: None,
             },
-            schema: ShortcutDecisionSchema::default(),
+            schema: ShortcutDecisionSchema {
+                points: vec![DecisionPoint {
+                    slot: DecisionSlot {
+                        source: this_object(src),
+                        index: 1,
+                    },
+                    kind: DecisionPointKind::MayChoice,
+                }],
+                ..ShortcutDecisionSchema::default()
+            },
             declaration: None,
         };
     }
@@ -21314,7 +21708,7 @@ mod stage2_injector_tests {
         for owner in [P1, P0] {
             let (mut state, offer_src) = u4_may_board(P0);
             assert_eq!(offer_src, src, "one fixture feeds both halves");
-            u4_park_on_offer(&mut state);
+            u4_park_on_offer(&mut state, offer_src);
             apply_action(
                 &mut state,
                 P0,

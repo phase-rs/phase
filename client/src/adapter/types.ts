@@ -1,6 +1,8 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   InteractionActionId,
+  InteractionPreview,
+  InteractionPreviewRequest,
   InteractionSubmission,
   ViewerInteraction,
 } from "./generated/interaction";
@@ -65,7 +67,13 @@ export interface DungeonRoomView {
 
 // ── Game Format ─────────────────────────────────────────────────────────
 
-export type GameFormat =
+/**
+ * The engine's built-in formats — every `GameFormat` variant that carries no
+ * payload and appears in `getFormatRegistry`. Split out from `GameFormat` so
+ * registry-shaped lookups (`FORMAT_DEFAULTS`, per-format metadata) can say they
+ * only cover built-ins.
+ */
+export type BuiltInGameFormat =
   | "Standard"
   | "Commander"
   | "Pioneer"
@@ -89,6 +97,145 @@ export type GameFormat =
   | "Limited"
   | "Momir"
   | "CommanderDraft";
+
+/**
+ * Wire form of `GameFormat::Custom(CustomFormatId)`.
+ *
+ * The engine's `GameFormat` has a HAND-WRITTEN `Serialize`/`Deserialize` (not a
+ * derive) that round-trips through `Display`/`FromStr` as a plain string, so
+ * `GameFormat::Custom(CustomFormatId(5))` is the literal string `"Custom:5"` on
+ * the wire — not a tagged object. See `crates/engine/src/types/format.rs`.
+ */
+export type CustomGameFormat = `Custom:${number}`;
+
+/**
+ * True when `format` is an engine custom format rather than a built-in.
+ *
+ * Takes `unknown` on purpose: both real callers narrow a value that came off an
+ * untrusted `JSON.parse` boundary (persisted storage, a broker frame), where
+ * the static type is `string` at best. It narrows an already-typed `GameFormat`
+ * to `CustomGameFormat` just the same.
+ */
+export function isCustomGameFormat(format: unknown): format is CustomGameFormat {
+  return typeof format === "string" && format.startsWith("Custom:");
+}
+
+export type GameFormat = BuiltInGameFormat | CustomGameFormat;
+
+// ── Custom formats ──────────────────────────────────────────────────────
+//
+// Read-only mirrors of `crates/engine/src/types/custom_format.rs`, for display
+// and for round-tripping a saved definition back to the engine. The client
+// NEVER evaluates these rules: `FormatConfig::for_custom_rules` (exposed as
+// `formatConfigForCustomRules`) is the single authority that turns them into an
+// active config, and the engine's own `FormatConfig` deserializer re-derives
+// with that same function and demands equality at every ingress — so a
+// hand-assembled config would be rejected at the next boundary it crossed.
+//
+// These reference `DeckSizeRule` / `SideboardPolicy` / `DeckCopyLimit` /
+// `RangeOfInfluenceConfig`, declared just below with the rest of the format
+// vocabulary they are shared with.
+
+/** Serde-transparent newtype over `u16`. */
+export type CustomFormatId = number;
+
+/** An MTGJSON-style set code, e.g. "MH3". Serde-transparent over `String`. */
+export type SetCode = string;
+
+/** No mana burn (post-M10) vs. the pre-M10 rule. Schema only — unenforced. */
+export type ManaBurnPolicy = "Modern" | "Obsolete";
+
+/** CR 510: modern unified damage step vs. the pre-6th-edition on-stack
+ *  procedure. Schema only — unenforced. */
+export type CombatDamageTiming = "Modern" | "OnStack";
+
+/** CR 400.11 / CR 400.11a: what a "Wish" effect can reach outside the game.
+ *  Schema only — unenforced. */
+export type WishOutsideGameScope = "PostM10SideboardOnly" | "PreM10ReachesExile";
+
+/** CR 704.5j: per-controller-with-choice (post-M14) vs. the historical
+ *  all-controllers form. Schema only — unenforced. */
+export type LegendRuleScope = "Modern" | "PreM14AnyController";
+
+export interface LegacyRuleSet {
+  mana_burn: ManaBurnPolicy;
+  damage_timing: CombatDamageTiming;
+  wish_scope: WishOutsideGameScope;
+  legend_rule_scope: LegendRuleScope;
+}
+
+/** CR 903.3 and the Tiny Leaders / Oathbreaker / Brawl deck-construction
+ *  rules: which commander-eligibility test a custom format applies. */
+export type CommanderEligibilityRule =
+  | "Standard"
+  | "TinyLeaders"
+  | "OathbreakerSignatureSpell"
+  | "BrawlColorIdentity";
+
+/**
+ * Whether a custom format uses the command zone (CR 903) and, if so, its
+ * commander-damage threshold and eligibility predicate. Externally tagged like
+ * the engine enum: a unit variant is the bare string, a struct variant is
+ * `{ Enabled: { ... } }`. Always narrow before reading the payload.
+ */
+export type CommandZoneMode =
+  | "Disabled"
+  | {
+      Enabled: {
+        commander_damage_threshold: number | null;
+        eligibility_rule: CommanderEligibilityRule;
+      };
+    };
+
+/** Structural game parameters captured by an Axis-A lobby save. Every field
+ *  mirrors a `FormatConfig` field 1:1. */
+export interface StructuralRules {
+  starting_life: number;
+  min_players: number;
+  max_players: number;
+  deck_size: DeckSizeRule;
+  singleton: boolean;
+  command_zone_mode: CommandZoneMode;
+  range_of_influence?: RangeOfInfluenceConfig | null;
+  team_based: boolean;
+  sideboard_policy: SideboardPolicy;
+  default_deck_copy_limit: DeckCopyLimit;
+}
+
+/** `legal_sets: null` means unrestricted; a list restricts to exactly it. */
+export interface LegalityRules {
+  legal_sets: SetCode[] | null;
+  banned: string[];
+  restricted: string[];
+  legacy: LegacyRuleSet;
+}
+
+export interface CustomFormatRules {
+  id: CustomFormatId;
+  structural: StructuralRules;
+  legality: LegalityRules;
+}
+
+export type ReprintPolicy =
+  | "OriginalPrintingsOnly"
+  | "AllowSpecialReprintSets"
+  | "AllowAnyPrinting";
+
+export type PrintingFidelity = "NotApplicable" | "SetCodeApproximation";
+
+/**
+ * A saved custom-format definition, as produced by
+ * `customFormatFromLobbyConfig`. Client-persisted in this phase; there is no
+ * server-side registry write path.
+ */
+export interface CustomFormatDef {
+  rules: CustomFormatRules;
+  label: string;
+  short_label: string;
+  description: string;
+  reprint_policy: ReprintPolicy | null;
+  printing_fidelity: PrintingFidelity;
+}
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
 
@@ -170,6 +317,19 @@ export interface FormatConfig {
    * of a session.
    */
   allow_debug_actions: boolean;
+  /**
+   * Present exactly when `format` is a `Custom:<id>` string, and then
+   * `custom_rules.id` must equal that id — the engine's
+   * `validate_custom_rules_consistency` enforces the biconditional in both
+   * directions and rejects a built-in format that carries rules. Absent (the
+   * engine skips serializing `None`) for every built-in format.
+   *
+   * Display and round-trip only. Never derive a runtime field from it
+   * client-side: the engine re-derives the WHOLE config from these rules via
+   * `FormatConfig::for_custom_rules` on deserialization and refuses anything
+   * that differs.
+   */
+  custom_rules?: CustomFormatRules | null;
 }
 
 /**
@@ -348,7 +508,11 @@ export interface DeckPoolEntry {
  */
 export type OutsideGameChoiceSource =
   | { type: "Sideboard"; data: { sideboard_index: number; card: CardFacePartial } }
-  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } }
+  | {
+      type: "BoosterPack";
+      data: { pack_slot: number; set_code: string; card: CardFacePartial };
+    };
 
 export interface OutsideGameChoiceEntry {
   source: OutsideGameChoiceSource;
@@ -362,7 +526,8 @@ export interface OutsideGameChoiceEntry {
  */
 export type OutsideGameSelection =
   | { type: "Sideboard"; data: { sideboard_index: number } }
-  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } }
+  | { type: "BoosterPack"; data: { pack_slot: number } };
 
 export interface OutsideGameCardUse {
   player: PlayerId;
@@ -455,7 +620,13 @@ export interface PhaseStop {
 }
 
 /** Standing engine preference for ordinary priority recommendations. */
-export type PriorityPassingMode = "Standard" | "SkipLowUseWindows";
+export type PriorityPassingMode = "Standard" | "SkipLowUseWindows" | "FullControl";
+
+/** CR 117.3d: which priority representatives a Resolve All request binds.
+ *  `Own` is the player-facing button — it pre-commits only the requester and so
+ *  can never be blocked by another seat. `Shared` opens the table-wide consent
+ *  protocol the engine uses for stack compression. */
+export type ResolveAllScope = { type: "Own" } | { type: "Shared" };
 
 export type Zone =
   | "Library"
@@ -563,6 +734,22 @@ export type CoreType =
 
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
 export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise" | "Delve";
+/** CR 709.5b: one printed Room half's identity — the name and mana cost it
+ *  contributes while unlocked (CR 709.5), and the cost its door demands to
+ *  unlock (CR 709.5e). Mirrors `engine::types::ability::RoomHalfIdentity`. */
+export interface RoomHalfIdentityView {
+  name: string;
+  mana_cost: ManaCost;
+}
+
+/** CR 709.5b: a Room's two halves in PRINTED order. `right` is absent on a Room
+ *  printed without a second half. Mirrors
+ *  `engine::types::ability::RoomCopiableHalves`. */
+export interface RoomHalvesView {
+  left: RoomHalfIdentityView;
+  right?: RoomHalfIdentityView | null;
+}
+
 export type RoomDoor = "Left" | "Right";
 
 // CR 709.5f-g: Operation a lock/unlock-door effect performs on a Room door
@@ -1113,14 +1300,22 @@ export type PhaseStatus =
   | { status: "PhasedOut"; cause: "Directly" | "Indirectly" };
 
 /**
- * CR 602.5: Why one of an object's activated abilities is blocked from
- * activation. Mirrors the Rust `AbilityBlockKind` (serde `tag = "type"`).
+ * CR 602.5 + CR 118.3: Why one of an object's activated abilities is blocked
+ * from activation. Mirrors the Rust `AbilityBlockKind` (serde `tag = "type"`).
  * Display only.
+ *
+ * **Two channels, one union.** The first three members arrive on
+ * `GameObject.blocked_abilities` (the CR 602.5 prohibition sweep).
+ * `"CostNotPayableNow"` arrives ONLY on the legal-actions payload
+ * (`LegalActionsResult.activationBlockReasons`), is scoped to the acting
+ * player, and never appears on `blocked_abilities`. A consumer of one channel
+ * will never observe the other's members.
  */
 export type AbilityBlockKind =
   | "CantBeActivated"
   | "CantActivateDuring"
-  | "Prohibited";
+  | "Prohibited"
+  | "CostNotPayableNow";
 
 /**
  * CR 602.5: A single blocked-ability read-out entry. `ability_index` indexes the
@@ -1440,6 +1635,12 @@ export interface LibrarySearchCardView {
 /** Partial typing of engine CardFace — only fields the frontend currently reads. */
 export interface CardFacePartial {
   name: string;
+  /**
+   * Scryfall oracle id, when the engine recorded one for the face. Lets choice
+   * modals resolve card art for a face that has no in-game `GameObject` yet
+   * (wishboard entries, booster-pack cards).
+   */
+  scryfall_oracle_id?: string | null;
 }
 
 export interface CompanionInfo {
@@ -1637,6 +1838,10 @@ export interface StackEntryDisplay {
   paid?: StackPaidFactView[];
   trigger_context?: TriggerContextDisplay[];
   provenance?: SyntheticTriggerProvenance;
+  /** The live controller (CR 112.2 + CR 613.1b). `StackEntry.controller` stays the
+   * by-default caster; optional because `PlayerId::default()` is a real seat rather
+   * than a sentinel, so a missing value must fall back to `entry.controller`, not seat 0. */
+  controller?: PlayerId;
 }
 
 // ── Pending Cast (for target selection) ──────────────────────────────────
@@ -1767,6 +1972,22 @@ export interface ReplacementCandidateSummary {
   description: string;
 }
 
+// CR 616.1: which kind of decision a ReplacementChoice is asking for. One
+// WaitingFor serves three structurally different prompts and the candidate list
+// alone cannot distinguish them (an accept/decline pair and a two-effect
+// ordering prompt are both "two candidates"). Engine-owned — never infer this
+// from label text.
+//   Order                  - CR 616.1e: arrange competing effects. CR 616.1f
+//                            applies them in sequence, so the LAST one applied
+//                            is the one whose write survives.
+//   OptionalBranch         - CR 614.1: a "you may" yes/no; index 0 accepts,
+//                            index 1 declines. Never a sortable list.
+//   SearchFoundDestination - alternative destinations for a found card.
+export type ReplacementChoiceKind =
+  | { type: "Order" }
+  | { type: "OptionalBranch" }
+  | { type: "SearchFoundDestination" };
+
 export type EmergeSacrificeQuality =
   | { type: "Artifact" }
   | { type: "Battle" }
@@ -1879,7 +2100,7 @@ export type WaitingFor =
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[]; valid_attack_targets_by_attacker?: Record<string, AttackTarget[]>; attacker_constraints?: Record<string, CombatRequirement> } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, BlockRequirementInfo>; blocker_constraints?: Record<string, CombatRequirement> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
-  | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[] } }
+  | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[]; kind?: ReplacementChoiceKind; last_applied_decides?: boolean } }
   | { type: "EntryControllerChoice"; data: { player: PlayerId; candidates: PlayerId[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" } } }
@@ -1890,6 +2111,8 @@ export type WaitingFor =
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
   | { type: "SaddleMount"; data: { player: PlayerId; mount_id: ObjectId; saddle_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
+  | { type: "RippleRevealChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
+  | { type: "RippleBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[]; final_cast?: ObjectId | null } }
   | { type: "ArrangePlanarDeckTopChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_on_top: number } }
   | { type: "RedistributeLifeTotals"; data: { player: PlayerId; options: { assignment: [PlayerId, number][] }[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
@@ -2002,7 +2225,7 @@ export type WaitingFor =
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
   | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; pending_effect: unknown } }
-  | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId } }
+  | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId; reciprocal_role?: "Produce" | "Consume" | null } }
   | { type: "BeholdChoice"; data: { player: PlayerId; choices: ObjectId[] } }
   | { type: "EffectZoneChoice"; data: {
       player: PlayerId;
@@ -2025,7 +2248,7 @@ export type WaitingFor =
       track_exiled_by_source?: boolean;
     } }
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
-  | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
+  | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; slots: RetargetSlotAddress[]; slot_pools: TargetRef[][]; legal_new_targets: TargetRef[] } }
   | { type: "ProliferateChoice"; data: { player: PlayerId; eligible: TargetRef[] } }
   | { type: "TimeTravelChoice"; data: { player: PlayerId; eligible: TargetRef[]; phase: "Remove" | "Add" } }
   | { type: "AssistChoosePlayer"; data: { player: PlayerId; candidates: PlayerId[]; max_generic: number; convoke_mode?: ConvokeMode } }
@@ -2038,7 +2261,7 @@ export type WaitingFor =
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
   // CR 608.2d: "an opponent chooses" from a zone (multiplayer) — the controller
   // picks WHICH opponent makes the choice before the zone choice is presented.
-  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
+  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
@@ -2222,6 +2445,19 @@ export type RetargetScope =
   | { type: "All" }
   | { type: "ForcedTo"; data: TargetRef };
 
+// CR 601.2c: one descent step from a stack entry's root ResolvedAbility
+// toward a node that owns declared targets. Mirrors `ChainStep`
+// (crates/engine/src/types/game_state.rs).
+export type ChainStep = "SubAbility" | "ElseAbility";
+
+// CR 115.7d: the address of ONE declared-target slot inside a resolved
+// chain. Mirrors `RetargetSlotAddress`
+// (crates/engine/src/types/game_state.rs).
+export interface RetargetSlotAddress {
+  path: ChainStep[];
+  slot: number;
+}
+
 // ── Log Types ────────────────────────────────────────────────────────────
 
 export const LOG_CATEGORIES = [
@@ -2400,7 +2636,7 @@ export type PrecastCopyShortcutResponse =
 
 export type GameAction =
   | { type: "PassPriority" }
-  | { type: "BeginResolveAll"; data: { max_resolutions: number } }
+  | { type: "BeginResolveAll"; data: { max_resolutions: number; scope: ResolveAllScope } }
   | {
       type: "RespondResolveAllConsent";
       data: { epoch: number; decision: { type: "Grant" } | { type: "Decline" } };
@@ -3248,6 +3484,12 @@ export interface DerivedViews {
    */
   stack_entry_details?: Record<string, StackEntryDisplay>;
   /**
+   * CR 702.40a: public, table-wide number of copies the current Storm trigger
+   * will create, or a newly cast Storm spell would create. Engine-authored;
+   * spell copies do not count.
+   */
+  storm_count?: number;
+  /**
    * CR 702.40a: prospective Storm copy counts for the viewing player's own
    * hand, keyed by hand object id. The engine owns qualification and counting.
    */
@@ -3266,6 +3508,23 @@ export interface DerivedViews {
    *  own hand (incl. granted). Keyed by hand ObjectId (string). Mirrors
    *  engine::game::derived_views::DerivedViews::web_slinging_costs. */
   web_slinging_costs?: Record<string, ManaCost>;
+  /** CR 709.3 + CR 712.11b: for each card the viewing player may cast whose
+   *  player chooses a spell face at cast time (a split card such as a Room, a
+   *  spell//spell MDFC), the live cost of the OTHER face — `spellCosts` reports
+   *  the live face only. Keyed by ObjectId (string). Presence is the engine's
+   *  statement that the card has two payable spell faces. Mirrors
+   *  `engine::game::derived_views::DerivedViews::back_face_spell_costs`. */
+  back_face_spell_costs?: Record<string, ManaCost>;
+  /**
+   * CR 709.5b + CR 709.5e + CR 707.2: both halves of each battlefield Room, in
+   * printed order, resolved by the engine — a permanent that is a COPY of a
+   * Room reports the halves it COPIED. Keyed by battlefield ObjectId (string).
+   * The unlock special action names a half and costs that half's mana cost,
+   * and for a copy neither is on the recipient's own printed card. Face-down
+   * permanents are absent (CR 708.2a). Mirrors
+   * `engine::game::derived_views::DerivedViews::room_half_identities`.
+   */
+  room_half_identities?: Record<string, RoomHalvesView>;
   /**
    * Player-affecting continuous conditions (can't gain life, can't cast, etc.)
    * the HUD renders as status icons. Engine-aggregated from static abilities +
@@ -3334,6 +3593,12 @@ export interface DerivedViews {
    * Mirrors `engine::game::derived_views::DerivedViews::unbounded_pile`.
    */
   unbounded_pile?: ObjectId[];
+  /**
+   * CR 732.2a: the open loop-shortcut window's repetition ceiling. Absent when no window is
+   * open, or when the engine never narrowed the bound. Render it; never re-derive it.
+   * Mirrors `engine::game::derived_views::DerivedViews::bounded_loop_max_repetitions`.
+   */
+  bounded_loop_max_repetitions?: number;
   /**
    * CR 122.1 + CR 732.2a: the COMPLETE per-object counter-display projection, keyed by
    * ObjectId-as-string — every counter row every display surface renders, for every
@@ -4026,6 +4291,13 @@ export interface LegalActionsResult {
    * availability from objects.
    */
   legalActionsByObject?: Record<string, ObjectAction[]>;
+  /**
+   * CR 118.3: per-object read-out of activated abilities the ACTING player is
+   * not being offered solely because they can't pay the cost right now, keyed by
+   * object_id string. Empty for any viewer without action authority. Display
+   * only — these entries are deliberately NOT dispatchable.
+   */
+  activationBlockReasons?: Record<string, AbilityBlockEntry[]>;
   /** Engine progress-wedge diagnostic: present only when the current decision is wedged. */
   stuckDiagnostic?: StuckDecisionDiagnostic;
   /** Engine-authored, viewer-scoped interaction opportunities for this snapshot. */
@@ -4048,6 +4320,8 @@ export interface ViewerSnapshot {
   manaPaymentShortcutActions?: GameAction[];
   spellCosts?: Record<string, ManaCost>;
   legalActionsByObject?: Record<string, ObjectAction[]>;
+  /** CR 118.3: mirrored from `LegalActionsResult` — see the doc there. */
+  activationBlockReasons?: Record<string, AbilityBlockEntry[]>;
   /**
    * Engine progress-wedge diagnostic, mirrored from `LegalActionsResult` for
    * shape parity. Currently inert on this path: the store's `stuckDiagnostic`
@@ -4212,6 +4486,14 @@ export interface EngineAdapter {
    * offered by the engine. Unsupported transports omit this capability.
    */
   previewManaPayment?(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
+  /**
+   * Read-only preview of an interaction response the engine has not committed.
+   * Unsupported transports omit this capability.
+   */
+  previewInteraction?(
+    request: InteractionPreviewRequest,
+    actor: PlayerId,
+  ): Promise<InteractionPreview>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
   /**

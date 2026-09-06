@@ -1261,6 +1261,34 @@ mod tests {
         assert_eq!(changes[0].label, "Mill");
     }
 
+    #[test]
+    fn token_static_child_is_reported_as_an_added_parse_item() {
+        let token = |with_must_attack: bool| ParsedItem {
+            category: ParseCategory::Ability,
+            label: "Token".into(),
+            source_text: Some("create The Void".into()),
+            supported: true,
+            details: vec![],
+            children: with_must_attack
+                .then(|| ParsedItem {
+                    category: ParseCategory::Static,
+                    label: "MustAttack".into(),
+                    source_text: Some("The Void attacks each combat if able.".into()),
+                    supported: true,
+                    details: vec![("affects".into(), "self".into())],
+                    children: vec![],
+                })
+                .into_iter()
+                .collect(),
+        };
+
+        let changes = diff(&[token(false)], &[token(true)]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, ChangeKind::ItemAdded);
+        assert_eq!(changes[0].category, "static");
+        assert_eq!(changes[0].label, "MustAttack");
+    }
+
     /// The two required positionals plus whatever flags the case is exercising.
     fn argv(flags: &[&str]) -> std::vec::IntoIter<String> {
         let mut v = vec!["base.json".to_string(), "head.json".to_string()];

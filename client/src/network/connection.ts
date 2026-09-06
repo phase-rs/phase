@@ -1,5 +1,5 @@
 import Peer from "peerjs";
-import type { DataConnection } from "peerjs";
+import type { DataConnection, PeerConnectOption } from "peerjs";
 
 /** Unambiguous characters -- no 0/O, 1/I/L confusion */
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -30,6 +30,73 @@ export function stripPeerIdPrefix(peerId: string): string {
     ? peerId.slice(PEER_ID_PREFIX.length)
     : peerId;
 }
+
+/**
+ * The options **every** `peer.connect(...)` dial in the app must pass. Single
+ * authority — a dial that omits these is a defect, not a shortcut.
+ *
+ * - `serialization: "binary"` selects PeerJS's BinaryPack connection, which
+ *   packs our `Uint8Array` wire bytes through BinaryPack and applies its
+ *   `_sendChunks` chunker for SCTP fragmentation (max 16,300 B per frame) —
+ *   what carries our gzip-compressed `encodeWireMessage` payloads.
+ *   It is stated **explicitly rather than because it changes anything**:
+ *   `bundler.mjs:1463-1468` maps `binary`, `binary-utf8` AND `default` to that
+ *   same class, and `connect()` already defaults to `"default"`
+ *   (`bundler.mjs:1655-1658`), so passing it is a no-op documenting intent.
+ *   (It is NOT MsgPack — that is a separate class at `bundler.mjs:1851`,
+ *   reachable only via `options.serializers`.) The corollary matters for the
+ *   bug this constant fixes: the two dials that previously passed no options
+ *   were never on a different wire format, so the defect was ordering-only.
+ * - `reliable: true` is the option that actually changes behaviour — PeerJS
+ *   maps it to the data channel's **ordering**
+ *   guarantee: the originator stores it (`bundler.mjs:1160`) and the negotiator
+ *   passes it straight through as `createDataChannel(label, { ordered:
+ *   !!options.reliable })` (`bundler.mjs:741-743`). Omit it and the channel is
+ *   built UNORDERED — harmless on a direct path where reordering is rare, but
+ *   routinely wrong over a TURN relay, and silently assumed by every downstream
+ *   revision guard (which compares revisions and drops anything that looks
+ *   stale, so a reordered frame is *discarded*, not resequenced).
+ *
+ * The options live on `PeerConnectOption`, not `PeerOptions`; the host adopts
+ * whatever the dialing guest declares (verified at `peerjs/bundler.mjs:1597`).
+ */
+export const PEER_CONNECT_OPTIONS: PeerConnectOption = {
+  serialization: "binary",
+  reliable: true,
+};
+
+/**
+ * Budget for a first-contact dial (`joinRoom`). A relayed ICE negotiation —
+ * TURN allocation, candidate exchange, connectivity checks — routinely needs
+ * well over the ~2s a direct path takes, so this is deliberately generous.
+ *
+ * It does NOT slow down feedback for a mistyped room code: a nonexistent peer
+ * fails immediately via `peer-unavailable`, which the pre-open `peer.on("error")`
+ * handler below rejects on. This budget only applies once the peer exists and
+ * ICE is still negotiating.
+ */
+export const JOIN_CONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * Budget for a *reconnect* dial, shared by the game guest and the draft guest.
+ * Deliberately shorter than {@link JOIN_CONNECT_TIMEOUT_MS}, and sized against
+ * the tighter of the two consumers: the GAME host renders a
+ * `DisconnectChoiceDialog` counting down `DEFAULT_GRACE_PERIOD_MS` (30s), and a
+ * 30s reconnect dial would let attempt 1 consume the entire visible window.
+ * (The draft host's window is `DRAFT_GRACE_PERIOD_MS`, 60s, with no such
+ * dialog — it is the looser constraint, so it does not bind this value.)
+ * Not an auto-concede risk — the host arms
+ * `timer: null` and the dialog's expiry path dismisses without conceding — the
+ * cost is host *visibility*: the dialog closes before the guest's first attempt
+ * even finishes. With `RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, …]` a 15s
+ * budget puts attempt 1's completion at ~16s and attempt 2's at ~33s, i.e. one
+ * completed attempt plus one in flight inside the 30s dialog.
+ *
+ * Note this stretches the reconnect cadence generally: `RECONNECT_BACKOFF_MS`
+ * schedules the *gap between* attempts and was written when each attempt cost at
+ * most the old 10s budget, so total elapsed time per attempt grows by 5s.
+ */
+export const RECONNECT_DIAL_TIMEOUT_MS = 15_000;
 
 // ICE configuration. PeerJS's bundled TURN servers are broken, so we always
 // supply our own. Credentials are minted on demand (short-lived) by the lobby
@@ -441,9 +508,13 @@ export async function hostRoom(
  * Guest joins a room by code. Returns the `Peer` separately from the
  * `DataConnection` so the guest adapter can keep the `Peer` alive across
  * `DataConnection` drops and attempt auto-reconnect via
- * `peer.connect(hostPeerId)`.
+ * `peer.connect(hostPeerId, PEER_CONNECT_OPTIONS)`.
  */
-export async function joinRoom(code: string, signal?: AbortSignal, timeoutMs = 30_000): Promise<JoinResult> {
+export async function joinRoom(
+  code: string,
+  signal?: AbortSignal,
+  timeoutMs = JOIN_CONNECT_TIMEOUT_MS,
+): Promise<JoinResult> {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const config = await getPeerConfig();
   return new Promise((resolve, reject) => {
@@ -471,14 +542,7 @@ export async function joinRoom(code: string, signal?: AbortSignal, timeoutMs = 3
       }
       traceP2P("Guest", "peer-open", { peerId });
       console.log("[P2P Guest] registered on signaling server, connecting to:", peerId);
-      // `serialization: "binary"` switches PeerJS to its MsgPackBinaryConnection,
-      // which packs our `Uint8Array` wire bytes through BinaryPack (~3–6 byte
-      // msgpack envelope) and retains BinaryPack's `_sendChunks` chunker for
-      // SCTP fragmentation (max 16,300 B per frame). Required so we can send
-      // gzip-compressed `encodeWireMessage` payloads over the channel.
-      // The option lives on `PeerConnectOption`, not `PeerOptions`; host adopts
-      // whatever the guest declares (verified at peerjs/bundler.mjs:1597).
-      const conn = peer.connect(peerId, { serialization: "binary", reliable: true });
+      const conn = peer.connect(peerId, PEER_CONNECT_OPTIONS);
       traceP2P("Guest", "connect-called", { peerId, connOpen: conn.open });
 
       const timeout = setTimeout(() => {

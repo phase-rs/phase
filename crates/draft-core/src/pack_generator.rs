@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 
 use crate::pack_source::PackSource;
 use crate::set_pool::{
@@ -12,17 +13,24 @@ use crate::types::{entry_for_pack, DraftCardInstance, DraftError, DraftPack};
 /// Set-specific exceptions (bonus sheets, Mystical Archive, etc.) are expressed
 /// as different sheet configurations in the pool data — no special-case code.
 ///
-/// A draft opens one booster per pack round, and which set that booster comes
-/// from is a per-pack property: a block or chaos draft mixes sets, and may
-/// repeat one. The generator therefore holds the distinct pools it can draw
-/// from plus the pack-ordered sequence naming which pool fills each booster.
+/// A draft opens one booster per seat and pack round. Uniform layouts select
+/// one set per round; Chaos layouts persist one set per `(seat, round)`. The
+/// generator therefore holds distinct pools plus resolved pool indexes.
 pub struct PackGenerator {
     /// Distinct set pools this generator can draw from.
     pools: Vec<LimitedSetPool>,
-    /// Index into `pools` for each booster, in pack order. Shorter than the
-    /// session's pack count repeats its last entry, so a single-set generator
-    /// is a one-element sequence.
-    sequence: Vec<usize>,
+    layout: GeneratorLayout,
+}
+
+/// Pool indexes rather than codes keep generation's hot path to a direct
+/// lookup while [`PackGenerator`] construction remains the one boundary that
+/// resolves pool identities.
+enum GeneratorLayout {
+    /// Every seat opens the same set in a round; a short sequence repeats its
+    /// last entry for the legacy single-set shorthand.
+    UniformByRound(Vec<usize>),
+    /// Exact `(seat, round)` pool indexes persisted by `SetLayout::Chaos`.
+    Chaos(Vec<Vec<usize>>),
 }
 
 impl PackGenerator {
@@ -30,7 +38,7 @@ impl PackGenerator {
     pub fn new(set_pool: LimitedSetPool) -> Self {
         Self {
             pools: vec![set_pool],
-            sequence: vec![0],
+            layout: GeneratorLayout::UniformByRound(vec![0]),
         }
     }
 
@@ -59,15 +67,133 @@ impl PackGenerator {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             pools,
-            sequence: resolved,
+            layout: GeneratorLayout::UniformByRound(resolved),
         })
     }
 
-    /// The pool filling booster `pack_number`.
-    fn pool_for_pack(&self, pack_number: u8) -> &LimitedSetPool {
-        let index = entry_for_pack(&self.sequence, pack_number).copied().expect(
-            "PackGenerator is constructed with a non-empty sequence, so every pack resolves",
-        );
+    /// Deterministically choose one candidate set for every `(seat, round)`.
+    /// Assignment uses its own seeded stream so changing card collation cannot
+    /// change which sets an already-created Chaos pod contained.
+    pub fn chaos_assignments(
+        candidate_codes: &[String],
+        seat_count: u8,
+        pack_count: u8,
+        rng_seed: u64,
+    ) -> Result<Vec<Vec<String>>, DraftError> {
+        if candidate_codes.is_empty() {
+            return Err(DraftError::InvalidPackSequence {
+                reason: "a Chaos draft must name at least one candidate set".to_string(),
+            });
+        }
+        let mut rng = ChaCha20Rng::seed_from_u64(rng_seed);
+        Ok((0..seat_count)
+            .map(|_| {
+                (0..pack_count)
+                    .map(|_| candidate_codes[rng.random_range(0..candidate_codes.len())].clone())
+                    .collect()
+            })
+            .collect())
+    }
+
+    /// A Chaos generator indexed by its persisted `(seat, round)` assignment.
+    /// The candidate list is checked even when a deterministic draw happened
+    /// not to select one of its entries, so no selectable pool can evade
+    /// preflight at the construction boundary.
+    pub fn for_chaos(
+        pools: Vec<LimitedSetPool>,
+        candidate_codes: &[String],
+        assignments: &[Vec<String>],
+        seat_count: u8,
+        pack_count: u8,
+    ) -> Result<Self, DraftError> {
+        if candidate_codes.is_empty() {
+            return Err(DraftError::InvalidPackSequence {
+                reason: "a Chaos draft must name at least one candidate set".to_string(),
+            });
+        }
+        if assignments.len() != usize::from(seat_count)
+            || assignments
+                .iter()
+                .any(|rounds| rounds.len() != usize::from(pack_count))
+        {
+            return Err(DraftError::InvalidPackSequence {
+                reason: "Chaos assignments must be exact seat-by-round entries".to_string(),
+            });
+        }
+
+        let pool_index = |code: &str| {
+            pools
+                .iter()
+                .position(|pool| pool.code.eq_ignore_ascii_case(code))
+                .ok_or_else(|| DraftError::InvalidPackSequence {
+                    reason: format!("no pool data was supplied for set '{code}'"),
+                })
+        };
+        let mut declared_pack_size = None;
+        for candidate in candidate_codes {
+            let index = pool_index(candidate)?;
+            let size = pools[index].cards_per_pack().ok_or_else(|| {
+                DraftError::InvalidPackSequence {
+                    reason: format!(
+                        "Chaos candidate set '{}' has no single MTGJSON pack size across its booster variants",
+                        pools[index].code
+                    ),
+                }
+            })?;
+            if let Some(expected) = declared_pack_size {
+                if expected != size {
+                    return Err(DraftError::InvalidPackSequence {
+                        reason: format!(
+                            "Chaos candidate sets must share one MTGJSON pack size; {} has {size}, expected {expected}",
+                            pools[index].code
+                        ),
+                    });
+                }
+            } else {
+                declared_pack_size = Some(size);
+            }
+        }
+        let resolved = assignments
+            .iter()
+            .enumerate()
+            .map(|(seat, rounds)| {
+                rounds
+                    .iter()
+                    .map(|code| {
+                        if !candidate_codes
+                            .iter()
+                            .any(|candidate| candidate.eq_ignore_ascii_case(code))
+                        {
+                            return Err(DraftError::InvalidPackSequence {
+                                reason: format!(
+                                    "Chaos assignment '{code}' for seat {seat} is not a candidate set"
+                                ),
+                            });
+                        }
+                        pool_index(code)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            pools,
+            layout: GeneratorLayout::Chaos(resolved),
+        })
+    }
+
+    /// The pool filling this seat's booster for `pack_number`.
+    fn pool_for_pack(&self, seat: u8, pack_number: u8) -> &LimitedSetPool {
+        let index = match &self.layout {
+            GeneratorLayout::UniformByRound(sequence) => entry_for_pack(sequence, pack_number)
+                .copied()
+                .expect("PackGenerator is constructed with a non-empty sequence"),
+            GeneratorLayout::Chaos(assignments) => assignments
+                .get(usize::from(seat))
+                .and_then(|rounds| rounds.get(usize::from(pack_number)))
+                .copied()
+                .expect("PackGenerator validates exact Chaos assignment dimensions"),
+        };
         &self.pools[index]
     }
 
@@ -128,7 +254,7 @@ impl PackGenerator {
 
 impl PackSource for PackGenerator {
     fn generate_pack(&self, rng: &mut dyn rand::RngCore, seat: u8, pack_number: u8) -> DraftPack {
-        let pool = self.pool_for_pack(pack_number);
+        let pool = self.pool_for_pack(seat, pack_number);
         let variant = self.select_variant(rng, pool);
 
         // A booster always contains a fixed number of cards. Some sheets a variant
@@ -464,6 +590,40 @@ mod tests {
             packs.iter().map(|pack| pack.0.len()).collect::<Vec<_>>(),
             [15, 14, 15]
         );
+    }
+
+    #[test]
+    fn chaos_assignments_are_deterministic_and_replayable() {
+        let candidates = vec!["AAA".to_string(), "BBB".to_string(), "CCC".to_string()];
+        let first = PackGenerator::chaos_assignments(&candidates, 4, 3, 99).unwrap();
+        let replay = PackGenerator::chaos_assignments(&candidates, 4, 3, 99).unwrap();
+
+        assert_eq!(first, replay);
+        assert_eq!(first.len(), 4);
+        assert!(first.iter().all(|rounds| rounds.len() == 3));
+        assert!(first.iter().flatten().all(|code| candidates.contains(code)));
+    }
+
+    #[test]
+    fn chaos_generator_uses_the_exact_seat_and_round_assignment() {
+        let assignments = vec![
+            vec!["AAA".to_string(), "BBB".to_string()],
+            vec!["BBB".to_string(), "AAA".to_string()],
+        ];
+        let generator = PackGenerator::for_chaos(
+            vec![sized_pool("AAA", 15), sized_pool("BBB", 15)],
+            &["AAA".to_string(), "BBB".to_string()],
+            &assignments,
+            2,
+            2,
+        )
+        .unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+
+        assert_eq!(generator.generate_pack(&mut rng, 0, 0).0[0].set_code, "AAA");
+        assert_eq!(generator.generate_pack(&mut rng, 0, 1).0[0].set_code, "BBB");
+        assert_eq!(generator.generate_pack(&mut rng, 1, 0).0[0].set_code, "BBB");
+        assert_eq!(generator.generate_pack(&mut rng, 1, 1).0[0].set_code, "AAA");
     }
 
     #[test]

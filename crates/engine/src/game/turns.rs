@@ -1116,7 +1116,15 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
             && state.resolution_stack.is_empty()
             && state.resolving_stack_entry.is_none()
             && matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "start_next_turn requires an empty stack, no pending resolution carrier, and a settled Priority window"
+        "start_next_turn requires an empty stack, no pending resolution carrier, and a settled \
+         Priority window (turn {}, phase {:?}, stack {}, waiting_for {:?}, carrier {:?}, \
+         resolution_stack {:?})",
+        state.turn_number,
+        state.phase,
+        state.stack.len(),
+        state.waiting_for,
+        state.resolving_stack_entry,
+        state.resolution_stack,
     );
     // CR 805.4b: defensively drop any stale draw-step queue entries. The
     // queue is normally drained to empty before a turn ends, but a turn
@@ -3213,7 +3221,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
                 return AutoAdvanceStep::waiting(prompt);
             }
-            // CR 504.3 + CR 117.1c: The active player ALWAYS receives priority
+            // CR 504.2 + CR 117.1c: The active player ALWAYS receives priority
             // during the draw step (after the turn-based draw and any triggers).
             // See the Upkeep arm above for the rationale — same pattern.
             return AutoAdvanceStep::waiting(WaitingFor::Priority {
@@ -3483,7 +3491,10 @@ mod tests {
                 .downcast_ref::<&str>()
                 .copied()
                 .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
-            assert_eq!(message, Some(MESSAGE));
+            assert!(
+                message.is_some_and(|message| message.starts_with(MESSAGE)),
+                "unexpected panic payload: {message:?}"
+            );
             assert_eq!(
                 serde_json::to_vec(&state).expect("serialize rejected state"),
                 before

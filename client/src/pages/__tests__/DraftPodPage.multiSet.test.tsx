@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
 
 /**
  * The pod host's set selection, end to end through the page.
@@ -114,6 +115,13 @@ function hostedPoolInput(): { type: string; data: { pools: unknown[]; sequence: 
   return config.poolInput;
 }
 
+function hostedChaosPoolInput(): { type: string; data: { pools: unknown[]; candidate_codes: string[] } } {
+  const [config] = mocks.multiplayerState.hostDraft.mock.calls[0] as unknown as [
+    { poolInput: { type: string; data: { pools: unknown[]; candidate_codes: string[] } } },
+  ];
+  return config.poolInput;
+}
+
 /** Walk the host setup form as far as the set selector. */
 async function openHostSetup(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   render(
@@ -140,15 +148,18 @@ describe("DraftPodPage host set selection", () => {
     mocks.multiplayerState.view = null;
     mocks.multiplayerState.role = null;
     mocks.multiplayerState.roomCode = null;
-    mocks.draftProcedure.mockResolvedValue({
+    mocks.draftProcedure.mockResolvedValue(draftProcedureFixture({
       pod_size: 8,
       human_seats: 1,
       min_pod_size: 3,
+      max_pod_size: 8,
+      allowed_pod_sizes: [3, 4, 5, 6, 7, 8],
       packs_per_player: 3,
       cards_per_pick: 1,
+      distribution: "PickAndPass",
       min_deck_size: 40,
-      match_config: { best_of: 1 },
-    });
+      match_config: { match_type: "Bo1" },
+    }));
     stubFetch();
     useDraftPodStore.getState().reset();
   });
@@ -206,5 +217,25 @@ describe("DraftPodPage host set selection", () => {
 
     await waitFor(() => expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce());
     expect(hostedPoolInput().data.sequence).toEqual(["ISD", "ISD", "ISD"]);
+  });
+
+  it("creates a Chaos pod from candidate sets without serializing assignments", async () => {
+    const user = userEvent.setup();
+    await openHostSetup(user);
+
+    await user.click(screen.getByRole("radio", { name: "Chaos Draft" }));
+    await user.click(screen.getByRole("button", { name: /Add Innistrad as a candidate/ }));
+    await user.click(screen.getByRole("button", { name: /Add Dark Ascension as a candidate/ }));
+    await user.click(screen.getByRole("button", { name: "Create Pod" }));
+
+    await waitFor(() => expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce());
+    const poolInput = hostedChaosPoolInput();
+    expect(poolInput.type).toBe("Chaos");
+    expect(poolInput.data.candidate_codes).toEqual(["ISD", "DKA"]);
+    expect(poolInput.data.pools).toEqual([
+      { code: "ISD", name: "Innistrad" },
+      { code: "DKA", name: "Dark Ascension" },
+    ]);
+    expect(poolInput.data).not.toHaveProperty("assignments");
   });
 });

@@ -1247,7 +1247,9 @@ mod tests {
                 filter: Some(TargetFilter::And {
                     filters: vec![nonland_filter(), TargetFilter::ExiledBySource],
                 }),
-                chooser: Chooser::Opponent,
+                chooser: Chooser::Opponent.into(),
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
                 up_to: false,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,
@@ -1451,7 +1453,9 @@ mod tests {
                     filter: Some(TargetFilter::And {
                         filters: vec![nonland_filter(), TargetFilter::ExiledBySource],
                     }),
-                    chooser: Chooser::Opponent,
+                    chooser: Chooser::Opponent.into(),
+                    candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                    reciprocal_role: None,
                     up_to: false,
                     selection: CardSelectionMode::Chosen,
                     constraint: None,
@@ -1621,7 +1625,9 @@ mod tests {
                 filter: Some(TargetFilter::And {
                     filters: vec![nonland_filter(), TargetFilter::ExiledBySource],
                 }),
-                chooser: Chooser::Opponent,
+                chooser: Chooser::Opponent.into(),
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                reciprocal_role: None,
                 up_to: false,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,

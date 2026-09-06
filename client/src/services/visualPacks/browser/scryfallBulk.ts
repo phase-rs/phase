@@ -1,13 +1,13 @@
 import { Gunzip } from "fflate";
 
 import { VisualPackBackendError } from "../backend.ts";
-import { cardBackCandidate, cardCandidateGroups, setIconCandidate } from "../candidateKeys.ts";
+import { cardBackCandidate, cardCandidateGroups, manaSymbolCandidate, setIconCandidate } from "../candidateKeys.ts";
 import { curatedDescriptors } from "../curatedPack.ts";
 import { planDeckLibraryPack } from "../deckLibraryPack.ts";
 import { assetKey, catalogRoot, packId, type CatalogRoot, type CatalogScanProgress, type InstallSelector, type PackId } from "../types.ts";
 import { descriptor, englishDescriptors } from "./descriptors.ts";
 import type { CardIdentity, ScryfallAssetDescriptor } from "./descriptors.ts";
-import { CARD_BACK_URL } from "../../scryfall.ts";
+import { CARD_BACK_URL, MANA_SYMBOL_SHARDS, manaSymbolCode, manaSymbolSourceUrl } from "../../scryfall.ts";
 
 // `ScryfallAssetDescriptor` moved to `descriptors.ts` alongside the builders
 // that produce it; re-exported so existing importers of this module are
@@ -149,14 +149,30 @@ function imageCount(card: CardIdentity, faceLimit = card.faces.length): number {
   return count;
 }
 
-function coreDescriptors(): ScryfallAssetDescriptor[] {
-  return [{
+/** Every finite mana-shard SVG (`{W}`, `{2/U}`, `{∞}`, …) — set- and
+ *  deck-independent, so it belongs in `core` alongside the card back rather
+ *  than any per-printing pack. */
+function manaSymbolDescriptors(): ScryfallAssetDescriptor[] {
+  return MANA_SYMBOL_SHARDS.map((shard) => ({
     packId: packId("core"),
-    assetKey: assetKey("asset:v1:card_back:default"),
-    candidateKeys: [cardBackCandidate()],
-    sourceUrl: CARD_BACK_URL,
-    media: "image/jpeg",
-  }];
+    assetKey: assetKey(`asset:v1:mana_symbol:${manaSymbolCode(shard)}`),
+    candidateKeys: [manaSymbolCandidate(shard)],
+    sourceUrl: manaSymbolSourceUrl(shard),
+    media: "image/svg+xml",
+  }));
+}
+
+function coreDescriptors(): ScryfallAssetDescriptor[] {
+  return [
+    {
+      packId: packId("core"),
+      assetKey: assetKey("asset:v1:card_back:default"),
+      candidateKeys: [cardBackCandidate()],
+      sourceUrl: CARD_BACK_URL,
+      media: "image/jpeg",
+    },
+    ...manaSymbolDescriptors(),
+  ];
 }
 
 function setIconDescriptor(selectedPack: PackId, set: string): ScryfallAssetDescriptor {

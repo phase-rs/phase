@@ -15,6 +15,12 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Per-deployment configuration, loaded before the bundle so the app can
+         read it at startup. A self-hoster replaces this file; the copy shipped
+         here is an empty placeholder, so official builds keep their build-time
+         defaults. Classic script, not a module: it must run first, and modules
+         are deferred. -->
+    <script src="/config.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

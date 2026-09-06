@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
+import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -208,6 +209,7 @@ export function MobileHandDrawer() {
                     isToken={obj.display_source === "Token"}
                     tokenImageRef={obj.token_image_ref}
                     manaCost={obj.mana_cost}
+                    backFaceManaCost={obj.back_face?.mana_cost}
                     isPlayable={isPlayable}
                     hasPriority={hasPriority}
                     stormCopyCount={prospectiveStormCounts[String(obj.id)]}
@@ -232,6 +234,7 @@ interface DrawerCardProps {
   isToken: boolean;
   tokenImageRef?: GameObject["token_image_ref"];
   manaCost: ManaCost;
+  backFaceManaCost?: ManaCost;
   isPlayable: boolean;
   hasPriority: boolean;
   stormCopyCount?: number;
@@ -247,6 +250,7 @@ const DrawerCard = memo(function DrawerCard({
   isToken,
   tokenImageRef,
   manaCost,
+  backFaceManaCost,
   isPlayable,
   hasPriority,
   stormCopyCount,
@@ -264,6 +268,7 @@ const DrawerCard = memo(function DrawerCard({
     tokenImageRef,
   });
   const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
+  const backFace = useBackFaceSpellCost(objectId, backFaceManaCost);
 
   // Mouse hover (desktop) + long-press (touch) both open the card preview, and
   // the hook tags the element with `data-card-hover` so usePreviewDismiss's
@@ -324,7 +329,7 @@ const DrawerCard = memo(function DrawerCard({
       {/* @container overlay sized to the card so the pips scale in cqi with the
           drawer card's width instead of a fixed px size. */}
       <div className="pointer-events-none absolute inset-0 @container">
-        <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
+        <ManaCostPips cost={displayCost} isReduced={isReduced} backFace={backFace} size="fluid" />
       </div>
       {stormCopyCount !== undefined && (
         <StormCopyBadge count={stormCopyCount} variant="drawer" />

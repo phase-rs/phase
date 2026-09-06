@@ -643,6 +643,7 @@ mod tests {
                     phase: Phase::End,
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 effect: Box::new(recall_inner),
                 uses_tracked_set: true,

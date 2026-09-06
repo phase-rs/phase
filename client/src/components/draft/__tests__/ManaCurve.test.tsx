@@ -4,6 +4,11 @@ import { render, within } from "@testing-library/react";
 import type { DraftCardInstance } from "../../../adapter/draft-adapter";
 import { ManaCurve } from "../ManaCurve";
 
+const DISTRIBUTION = [
+  { color: "Blue" as const, count: 1, percentage: 50, display_percentage: 50 },
+  { color: "Red" as const, count: 1, percentage: 50, display_percentage: 50 },
+];
+
 const POOL: DraftCardInstance[] = [
   {
     instance_id: "one-drop",
@@ -25,6 +30,16 @@ const POOL: DraftCardInstance[] = [
     cmc: 3,
     type_line: "Creature",
   },
+  {
+    instance_id: "land",
+    name: "Red Land",
+    set_code: "tst",
+    collector_number: "3",
+    rarity: "common" as const,
+    colors: [],
+    cmc: 0,
+    type_line: "Land",
+  },
 ];
 
 function meterSemantics(curve: HTMLElement) {
@@ -40,8 +55,8 @@ describe("ManaCurve", () => {
   it("keeps all seven meter semantics in the compact presentation", () => {
     const { container } = render(
       <>
-        <ManaCurve pool={[...POOL]} cards={["One Drop", "Three Drop"]} />
-        <ManaCurve pool={[...POOL]} cards={["One Drop", "Three Drop"]} presentation="compact" />
+        <ManaCurve pool={[...POOL]} cards={["One Drop", "Three Drop"]} colorDistribution={DISTRIBUTION} />
+        <ManaCurve pool={[...POOL]} cards={["One Drop", "Three Drop"]} colorDistribution={DISTRIBUTION} presentation="compact" />
       </>,
     );
 
@@ -55,8 +70,8 @@ describe("ManaCurve", () => {
   it("uses explicit compact geometry while retaining the full curve labels", () => {
     const { container } = render(
       <>
-        <ManaCurve pool={[...POOL]} cards={["One Drop"]} />
-        <ManaCurve pool={[...POOL]} cards={["One Drop"]} presentation="compact" />
+        <ManaCurve pool={[...POOL]} cards={["One Drop"]} colorDistribution={DISTRIBUTION} />
+        <ManaCurve pool={[...POOL]} cards={["One Drop"]} colorDistribution={DISTRIBUTION} presentation="compact" />
       </>,
     );
 
@@ -74,5 +89,25 @@ describe("ManaCurve", () => {
       .toEqual(["0", "1", "2", "3", "4", "5", "6+"]);
     expect(compactCurve.querySelector("[data-mana-curve-meter='1'] [data-mana-curve-count]"))
       .toHaveTextContent("1");
+  });
+
+  it("renders the supplied engine distribution independently of the mana curve", () => {
+    const { container } = render(
+      <ManaCurve
+        pool={POOL}
+        cards={["One Drop", "Red Land"]}
+        colorDistribution={[
+          { color: "Blue", count: 1, percentage: 33.25, display_percentage: 33 },
+          { color: "Red", count: 2, percentage: 66.75, display_percentage: 67 },
+        ]}
+      />,
+    );
+
+    expect(container.querySelector("[data-mana-curve-meter='0']"))
+      .toHaveAttribute("aria-valuenow", "0");
+    expect(container.querySelector("[data-mana-curve-meter='1']"))
+      .toHaveAttribute("aria-valuenow", "1");
+    expect(container.querySelector("[data-color-distribution]")).toHaveTextContent("U 33%");
+    expect(container.querySelector("[data-color-distribution]")).toHaveTextContent("R 67%");
   });
 });

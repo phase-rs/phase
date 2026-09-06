@@ -6,15 +6,22 @@ name: Helm chart
 #
 # No secrets, no cluster: this only runs `helm lint` and `helm template`.
 
+# `crates/phase-server/src/main.rs` is here because tests/assert-web-routing.sh
+# reads the axum router out of it to derive the routes the chart must expose. A
+# router-only change is exactly the case that assertion exists to catch, so
+# without this path the check would not run when it matters most. The script
+# asserts its own inputs are listed here, so the two cannot drift apart.
 on:
   pull_request:
     paths:
       - 'deploy/helm/**'
+      - 'crates/phase-server/src/main.rs'
       - '.github/workflows/helm-chart.yml'
   push:
     branches: [main]
     paths:
       - 'deploy/helm/**'
+      - 'crates/phase-server/src/main.rs'
       - '.github/workflows/helm-chart.yml'
 
 permissions:
@@ -35,6 +42,15 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v3.16.3
+
+      - name: assert web routing
+        # Renders what it needs itself: the SPA topology is several distinct
+        # value combinations, and one leg reads the axum router to check that
+        # every path the server mounts is still routed around the site's
+        # catch-all. Placed before the render steps rather than after them so
+        # that independence is structural — reordering or breaking them cannot
+        # stop this assertion running.
+        run: deploy/helm/phase-server/tests/assert-web-routing.sh
 
       - name: helm lint (default values)
         run: helm lint deploy/helm/phase-server
@@ -83,6 +99,9 @@ jobs:
           grep -q 'kind: PrometheusRule' /tmp/scaleout-render.yaml
           grep -q 'kind: PodMonitor' /tmp/scaleout-render.yaml
           grep -q 'kind: ServiceMonitor' /tmp/scaleout-render.yaml
+
+      - name: assert compression boundary
+        run: deploy/helm/phase-server/tests/assert-compression-boundary.sh /tmp/default.yaml /tmp/scaleout-render.yaml
 
       # With no prometheus-operator CRDs the operator path must FAIL rather than
       # render: hpa.yaml would otherwise install an HPA whose only producer of

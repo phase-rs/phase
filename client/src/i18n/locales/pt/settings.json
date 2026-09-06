@@ -26,7 +26,7 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Pular janelas de prioridade pouco usadas (experimental)",
     "skipLowUsePriorityWindowsDescription": "Passe automaticamente suas próprias janelas de prioridade com a pilha vazia durante a manutenção, a etapa de compra e a etapa final. As paradas de fase e o Controle total continuam pausando.",
-    "logDefault": "Registro Padrão",
+    "logDockSide": "Posição do registro do jogo",
     "spellPayment": "Pagamento de Mágicas",
     "manualManaPayment": "Pagamento manual de mana para mágicas",
     "spellPaymentOptions": { "auto": "Automático", "autoExceptSacrificialMana": "Perguntar antes de sacrificar", "manual": "Manual" },
@@ -56,9 +56,9 @@
       "medium": "Médio",
       "large": "Grande"
     },
-    "logDefaultOptions": {
-      "open": "Aberto",
-      "closed": "Fechado"
+    "logDockSideOptions": {
+      "left": "Esquerda",
+      "right": "Direita"
     }
   },
   "visual": {
@@ -172,6 +172,7 @@
     "signedInAs": "Sessão iniciada como {{name}}",
     "syncNow": "Sincronizar agora",
     "statusSyncing": "A sincronizar…",
+    "statusPaused": "A sincronização na nuvem está em pausa enquanto está offline.",
     "statusError": "Falha na sincronização",
     "lastSynced": "Última sincronização {{time}}",
     "never": "nunca",
@@ -211,6 +212,7 @@
   "visualPacks": {
     "title": "Catálogo visual off-line",
     "description": "Escolha quais imagens de cartões confiáveis serão mantidas neste dispositivo ou instale o catálogo atual completo.",
+    "offlineUnavailable": "Os downloads de rede não estão disponíveis off-line. Reconecte-se para atualizar o catálogo ou instalar, sincronizar, reparar ou retomar imagens.",
     "availability": {
       "loading": "Verificando o suporte do catálogo visual off-line…",
       "browser": "Os downloads de imagens offline não estão configurados nesta compilação.",
@@ -399,6 +401,23 @@
       "combat": "Tempo do dano de combate — quanto tempo bloqueadores e atacantes permanecem antes de o dano ser resolvido.",
       "banners": "Exibição do banner de início de turno."
     }
+  },
+  "offlinePreparation": {
+    "title": "Preparação offline",
+    "description": "Prepare este dispositivo para jogo local offline antes de ativar Trabalhar offline.",
+    "prepare": "Preparar para offline",
+    "preparing": "Preparando…",
+    "workOffline": "Trabalhar offline",
+    "checklistLabel": "Lista de preparação offline",
+    "visualWarning": "Os pacotes visuais instalados precisam de atenção. Abra Pacotes visuais para repará-los; o jogo local continua disponível.",
+    "cardArtMissing": "Nenhuma imagem de carta instalada. As cartas serão exibidas sem arte offline — instale um pacote em Pacotes visuais, abaixo.",
+    "cardArtInstalled": "Imagens de cartas em cache: {{packs}}",
+    "incompleteTitle": "A preparação offline está incompleta",
+    "incompleteMessage": "Falta: {{capabilities}}. Ativar Trabalhar offline mesmo assim?",
+    "confirmOffline": "Ativar Trabalhar offline",
+    "states": { "needs-preparation": "Prepare este dispositivo antes de trabalhar offline.", "preparing": "Preparando capacidades de jogo local…", "ready": "Este dispositivo está pronto para jogo local offline.", "failed": "Algumas capacidades necessárias não estão prontas.", "reconnect-required": "Reconecte-se antes de preparar o jogo offline.", "reload-or-relaunch-required": "Recarregue o aplicativo ou reinicie o desktop e tente novamente." },
+    "capabilities": { "appShell": "Aplicativo", "browserEngine": "Motor do navegador e banco de cartas", "scryfallSearch": "Dados de busca", "preconCatalog": "Decks pré-construídos", "bundledAiCatalog": "Catálogo de decks de IA", "deckLibrary": "Biblioteca de decks instalada", "coreVisuals": "Verso da carta e símbolos de mana", "nativeEngine": "Motor nativo" },
+    "capabilityStates": { "ready": "Pronto", "not-ready": "Não pronto", "reload-required": "Recarga necessária", "not-applicable": "Não aplicável", "not-installed": "Não instalado" }
   },
   "artChain": {
     "emptyState": "Usando a arte padrão do Scryfall. Adicione regras abaixo para personalizar.",

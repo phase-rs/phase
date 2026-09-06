@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4710
-- **Total card appearances across root causes:** 4743 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4706
+- **Total card appearances across root causes:** 4739 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -12,12 +12,12 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 746 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 1 | Relative-clause / filter restriction on target dropped | 745 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
 | 2 | Dropped intervening-if / gating condition (condition: null) | 584 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 329 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 238 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 6 | Disjunctive (or-list) collapsed to first branch | 233 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 209 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
@@ -25,7 +25,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 157 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 138 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 132 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
-| 14 | Granted/quoted ability or continuous modification dropped | 95 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
+| 14 | Granted/quoted ability or continuous modification dropped | 96 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 83 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
@@ -38,7 +38,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 28 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
-| 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
+| 27 | Cross-target group / shared-quality constraint dropped | 19 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 13 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 10 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 5 | manual triage |
@@ -47,7 +47,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (746 cards)
+### 1. Relative-clause / filter restriction on target dropped  (745 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -598,7 +598,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Roar of Jukai
 - Rocket Launcher
 - Rofellos's Gift
-- Root Greevil
 - Rooting Moloch
 - Rosheen, Roaring Prophet
 - Rotted Ones, Lay Siege
@@ -1404,7 +1403,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 ### 3. Anaphor bound to wrong referent  (404 cards)
 
-**Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k).
+**Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
 **Fix hint.** oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring
 
@@ -1680,6 +1679,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Pollen Lullaby
 - Precipitous Drop
 - Price of Progress
+- Prismatic Strands
 - Prison Sentence
 - Prison Term
 - Promise of Loyalty
@@ -1736,7 +1736,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Soul Scourge
 - Soul Seizer
 - Spark of Creativity
-- Spawnbroker
 - Spectacular Showdown
 - Spectral Grasp
 - Spellbane Centaur
@@ -2556,7 +2555,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (238 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (233 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2617,7 +2616,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Deathgazer
 - Deathmark
 - Deeproot Wayfinder
-- Definitely Not a Turtle
 - Degavolver
 - Dire-Strain Anarchist
 - Donna Noble
@@ -2675,7 +2673,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Jodah's Avenger
 - Jukai Trainee
 - Kaalia, Zenith Seeker
-- Kamahl's Druidic Vow
 - Kami of Mourning
 - Kastral, the Windcrested
 - Katara's Reversal
@@ -2736,7 +2733,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rock Basilisk
 - Sarah's Wings
 - Sarkhan the Masterless
-- Sauron, the Dark Lord
 - Savai Triome
 - Sawback Manticore
 - Scarred Puma
@@ -2779,7 +2775,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Track Down
 - Training Compound
 - Traveling Chocobo
-- Ultimate Spider-Man
 - Umara Mystic
 - Umara Wizard
 - Underground Sea
@@ -2792,7 +2787,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Vodalian Mindsinger
 - Volatile Arsonist
 - War Falcon
-- Wash Out
 - Watery Grave
 - West Wind Avatar
 - Windrider Wizard
@@ -4006,7 +4000,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Harbor Serpent
 - Haunting Wind
 - Havengul Mystery
-- Havi, the All-Father
 - Intercessor's Arrest
 - Intrepid Ace
 - Invader Parasite
@@ -4077,7 +4070,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 14. Granted/quoted ability or continuous modification dropped  (95 cards)
+### 14. Granted/quoted ability or continuous modification dropped  (96 cards)
 
 **Signature.** A static-grant modification list omits a granted activated/triggered ability, keyword, color, subtype, or P/T conjunct that the Oracle conjoins ('is a … with "<ability>"', 'and has flying').
 
@@ -4161,6 +4154,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - True-Faith Censer
 - U.S.Agent, John Walker
 - Ultima, Origin of Oblivion
+- Ultimate Spider-Man
 - Unable to Scream
 - Uncontrolled Infestation
 - Unexpected Potential
@@ -5004,7 +4998,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 27. Cross-target group / shared-quality constraint dropped  (16 cards)
+### 27. Cross-target group / shared-quality constraint dropped  (15 cards)
 
 **Signature.** A multi-target group constraint ('from a single graveyard', 'with different names', same controller, parity) is not carried; the FilterProp/SharedQuality linkage is missing.
 
@@ -5019,7 +5013,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Echoing Echo
 - Echoing Return
 - Eerie Ultimatum
-- Puca's Mischief
 - Rain of Riches
 - Rashmi, Eternities Crafter
 - Soundwave, Superior Captain
@@ -5087,3 +5080,235 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - The Great Mound
 
 </details>
+
+## Named follow-ups — the chosen-colour class
+
+Filed by the Wash Out / chosen-colour work. F7 (chosen-colour anaphor bound the
+earlier choice on a reused source) is CLOSED — not by the replace-on-rechoose
+arm (deleted; a source's chosen colours now ACCUMULATE), but by the accessor
+split: `crates/engine/src/game/game_object.rs::GameObject::chosen_color`
+(CR 607.2d, oldest-since-entry) is the read a linked anaphor uses, so a reused
+source's LINKED reader still binds the earlier choice regardless of how many
+later colours the source has since accumulated. Regressed by
+`crates/engine/tests/integration/chosen_color_rechoose_same_source.rs`.
+
+**F1 — `persist: false` colour choosers write nothing.** `ChoiceType::Color` is
+absent from the `persist:` match in
+`crates/engine/src/parser/oracle_effect/imperative.rs` (and from
+`needs_choice_source_context` in `crates/engine/src/types/ability.rs`), so a
+printed `Choose a color.` writes no `ChosenAttribute::Color`. Every downstream
+`FilterProp::IsChosenColor` / `HexproofFrom(ChosenColor)` read is fail-closed
+(`is_some_and`), so it matches NOTHING — with no `Effect::Unimplemented` and no
+parse warning. Observably wrong on **Skrelv, Defector Mite** and **Sungold
+Sentinel** ("can't be blocked by creatures of that color"). Measured blast
+radius: 51 cards carry a `persist: false` colour chooser. The natural hazard —
+flipping 51 choosers to persisted makes them WRITE to their source, and eight of
+them (Akroma's Blessing, Brave the Elements, Bathe in Light, Reverent Mantra,
+Prismatic Boon, Glory, Aven Warcraft, Kabira Evangel) can choose repeatedly — is
+removed by the accessor split, not by a single-current-colour invariant: each of
+the three accessors over `ChosenAttribute::Color`
+(`GameObject::chosen_color` / `choose::resolution_chosen_color` /
+`GameObject::current_chosen_color`) reads a well-defined end of the
+accumulated list regardless of how many prior choices the source holds, so a
+newly-persisted repeated chooser's writes stay unambiguous by construction.
+**F1's *code* fix is out of scope for the chosen-colour work; this entry
+records it, not implements it.** Four riders, added by the follow-up phase that
+built the per-clause chosen-colour provenance channel:
+(a) `ChoiceType::Color` is also absent from
+`types/ability.rs::needs_choice_source_context`, so `named_choice_authority`
+returns `(None, None)` and a `persist: false` colour choice writes no
+`ChosenAttribute::Color` anywhere, confirming the gap is not merely the
+`persist:` match.
+(b) A distinct sub-population from the 51 above: of the pool cards whose
+chosen-colour grant reaches
+`game/effects/effect.rs::snapshot_transient_modifications`, some have no
+persisting colour chooser at all — Akroma's Blessing, Aven Warcraft, Bathe in
+Light, Brave the Elements, Glory, Mondo Gecko, Prismatic Boon, Reverent Mantra,
+Skrelv, Sungold Sentinel, and trigger-borne Kabira Evangel. The 51 counts
+printed `persist: false` colour choosers pool-wide; this named set counts
+latched-grant cards lacking a persisting chooser — a different denominator
+entirely. Regenerate with `bin/pool.rs census` before citing a count; an
+earlier round's **47** here was measured, independently, to overstate the
+candidate's own card data by 3 cards, so no number is repeated here.
+(c) The recommended shape: mark a printed colour chooser `persist: true`
+exactly when the document contains a reader of it, reusing the per-clause
+provenance channel `ClauseIr.chosen_color_grant` this phase built for the
+CR 607.2d linkage seam (`parser/oracle_nom/filter.rs::classify_chosen_color_grant`).
+(d) When F1 lands, the `AddStaticMode { … IsChosenColor }` arm of
+`snapshot_transient_modifications` must land with it, phase 1's
+`None => modification.clone()` fallback gains its first discriminating test at
+the same moment, and **Chromatic Armor** becomes the first pool permanent able
+to hold two persisting colour answers.
+
+**F6 — wrap the printed colour choice at the CARRYING clause's own node.**
+`inject_printed_color_choice_filter`
+(`crates/engine/src/parser/oracle_effect/mod.rs`) can only wrap the chain HEAD,
+so `PrintedColorCarrierScope::LaterClause` and
+`PrintedColorCarrierScope::ChainHeadOfMany` are REFUSED (CR 608.2c) rather than
+silently reordered. Wrapping at the carrying clause's own arena node makes both
+wrappable and also removes the decorated-head field-moving limitation on
+`wrap_in_color_choice`.
+
+**F8 — CLOSED (channel) — declared per-clause provenance for keyword grants.**
+`crates/engine/src/types/keywords.rs::parse_protection_target` /
+`parse_hexproof_filter` map BOTH the printed qualifier ("of the color of your
+choice") and the anaphor ("the chosen color") onto
+`ProtectionTarget::ChosenColor` / `HexproofFilter::ChosenColor`, so the
+keyword-grant injector cannot tell them apart from the lowered shape. The
+document relation `LinkedChoiceKind::LinkedColorChoice` recovers the distinction
+for the cross-item case (CR 607.2d). **The per-clause provenance channel this
+entry called for now exists**: `ClauseIr.chosen_color_grant`
+(`parser/oracle_ir/effect_chain.rs`), derived at `ClauseDraft::push` — the
+sealed single construction gate — from the clause's own verbatim `source_text`
+via `parser/oracle_nom/filter.rs::classify_chosen_color_grant`, mirroring
+`ClauseIr.printed_color_choice`'s shape exactly. The `ParseContext` route stays
+blocked for the reason this entry already gave:
+`parse_protection_target` / `parse_hexproof_filter` (nee
+`parse_granted_keyword_fragment`) are pure, context-free functions with ten call
+sites including `crates/engine/src/database/synthesis.rs`, so there is no ctx
+channel to lift — deriving from `source_text` at the sealed mint point sidesteps
+that entirely. Residual this closes: a card printing BOTH its own `choose a
+color` and a genuinely independent `of the color of your choice` grant on
+another ability would have had its second chooser wrongly suppressed before
+this channel existed. **Still measured at zero cards**: printed supplier
+("choose a/one/another color") ∧ `(protection|hexproof) from (the |a )?color of
+your choice` on one face → 0 of 35,961 faces (MTGJSON `5.3.0+20260828`),
+reach-guard: printed supplier alone → 110 cards. (Secondary, narrower census:
+both an anaphoric "the chosen color" reader and an independent grant on one
+face → also 0, reach-guards 31 / 22.)
+
+**F9 — "the last chosen color" falls through to `ProtectionTarget::CardType`,
+and two sibling keyword-mapper asymmetries.**
+`parse_protection_target` has no arm for the CR 607.2d "the last chosen [value]"
+phrasing, so **Sanctuary Blade** lowers to
+`Protection(CardType("the last chosen color"))` and its equipped creature's
+protection reads no colour at all — silently, with no `Effect::Unimplemented`.
+Three riders, added by the follow-up phase that audited both keyword mappers
+line-by-line while building F8's provenance channel:
+(a) `parse_protection_target` has no `"that color"` arm, while
+`parse_hexproof_filter` does — so "protection from that color" falls through to
+`ProtectionTarget::CardType("that color")` on a card that would otherwise print
+a valid CR 607.2d anaphor, the same silent failure mode as the "last chosen
+color" phrasing above but on the more common wording.
+(b) `"the last chosen color"` reaches **neither** mapper —
+`grep -rn "last chosen color" crates/engine/src/` returns zero — so
+**Sanctuary Blade** and **Chromatic Armor**'s prevention phrasing are outside
+the `ChosenColor` class entirely, which is exactly what keeps this phase's own
+combinator (`parser/oracle_nom/filter.rs::parse_anaphoric_chosen_color_grant`,
+which keeps a defensive `"the last chosen color"` alternative for CR 607.2d
+completeness) honest: the alternative can never fire on a grant either keyword
+mapper produces.
+(c) **Pippin, Guard of the Citadel** ("protection from the card type of your
+choice") and **Avacyn, Guardian Angel** ("sources of the color of your choice",
+measured to lower NO colour chooser at all — see the standalone entry below)
+are the same family of missing "…of your choice" aliases, on the card-type and
+prevention routes respectively rather than the protection/hexproof route this
+entry otherwise covers.
+
+**F10 — CLOSED. CR 608.2h per-grant colour latching.** Two
+continuous grants created by two activations of the SAME source that are
+simultaneously live used to both bake from the source's CURRENT chosen colour
+at layer-apply time (`crates/engine/src/game/layers.rs`'s `chosen_color`
+pre-read), rather than each locking the answer its own resolution produced.
+Common by design: Cartel Aristocrat, Jareth, Leonine Titan, Resilient Wanderer
+and Knight of Dawn all grant to themselves and are built for repeated
+activation in one turn.
+
+Fixed by latching the colour into the `ContinuousModification::AddKeyword`
+payload at resolution time
+(`crates/engine/src/game/effects/effect.rs::snapshot_transient_modifications`),
+CR 608.2h's "the answer is determined only once, when the effect is applied",
+scoped by CR 611.3a so a printed STATIC ability's grant (which is never
+"locked in") keeps reading live. (CR 611.2d was cited here in an earlier
+revision and is wrong for this: its body covers "a variable such as X" and
+defers to 608.2h, so it does not describe latching a chosen colour.) Regressed by
+`knight_of_dawn_two_live_grants_keep_their_own_colors` (T1),
+`armored_guardian_two_recipients_keep_their_own_colors` (T2), and
+`armored_guardian_grants_gate_aura_attachment_per_grant_color` (T3) in
+`crates/engine/tests/integration/chosen_color_rechoose_same_source.rs`.
+
+**Reopening rider.** The fix is scoped to `ContinuousModification::AddKeyword`
+carrying `Protection(ChosenColor)` / `HexproofFrom(ChosenColor)`. The same
+"two simultaneously live grants both read the CURRENT answer" residual is
+STILL LIVE on two sibling axes that were deliberately left unlatched this
+round because the pool has no constructible two-simultaneously-live-grants
+member for either: `ProtectionTarget::ChosenCardType` (Serra's Emissary
+carries the grant on a `static_abilities` entry, so CR 611.3a exempts it) and
+`ProtectionTarget::ChosenPlayer` (True-Name Nemesis also carries the grant on
+a `static_abilities` entry, exempted the same way; Guardian Archon carries it
+on an activated ability instead, gated "Activate only once"). A future
+printing that repeats either grant in one turn reopens F10 for that axis
+specifically.
+
+**F14 — `mana_abilities.rs`'s own `ChosenAttribute::Color` retain is
+NARROWER than its comment claims, and must not be read as bounding the
+general list.** `grep -rn "ChosenAttribute::Color(_)" crates/engine/src/ |
+grep retain` finds exactly two retain sites:
+`game/effects/choose.rs::apply_choice_attributes` (deleted by this phase —
+colours now accumulate there) and `game/mana_abilities.rs:777`. The latter is
+untouched and still retain-then-pushes, but it fires only inside its own gate
+(`chain_references_chosen_color(...)` + `sole_produced_color(...)`), which
+bounds exactly the `ContinuousModification::AddChosenColor` "becomes that
+colour" class — Foraging Wickermaw, Mondo Gecko, Puca's Eye. Its own comment
+citing "`chosen_color()` returns the FIRST match" is still TRUE for that one
+accessor (`chosen_color()` is unchanged, still oldest-since-entry), but must
+not be cited as evidence that any OTHER `ChosenAttribute::Color` reader in the
+crate sees at most one entry — that invariant no longer holds anywhere else.
+Filed so a future reader of `mana_abilities.rs:777` does not generalize its
+local retain into a crate-wide assumption the accessor split just removed.
+
+**F11 — Faith's Shield's player half has neither a producer nor a
+consumer.** The fateful-hour branch's "you and each permanent you control gain
+protection …" creates one continuous effect PER CONTROLLED PERMANENT and NONE
+for the controlling player — measured, `transient_continuous_effects.len()`
+equals the controlled-permanent count with every `affected` a `SpecificObject`,
+never the player. Even given a player-scoped effect,
+`game/static_abilities.rs::player_protection_from_object` scans only
+`game_functioning_statics` for `StaticMode::PlayerProtection`, its transient
+authority `player_has_protection_from_everything` matches
+`ProtectionTarget::Everything` and nothing else, and `types/player.rs` has no
+`keywords` field to hold a coloured grant if one were latched. BOTH halves are
+needed. The comment on `player_protection_from_object`'s
+`ProtectionTarget::Color(_)` arm ("no card grants these qualities to a player")
+is factually wrong on Faith's Shield's own text and should be corrected when
+this is fixed. Labelled: measured `false` on every tree tested; there is no
+positive control for `player_protection_from_object` returning `true` for a
+colour.
+
+**F12 — a CR 614.15 override's non-fateful branch installs zero continuous
+effects. Mechanism is a HYPOTHESIS, not diagnosed to the line.** Fact, measured
+on three trees (the pre-fix base, the fix candidate, and the fix reverted):
+Faith's Shield at life above 5 records the chosen colour (one counted colour
+prompt, the answer recorded on the spell object) and installs ZERO transient
+continuous effects — this is PRE-EXISTING and unrelated to the CR 614.15
+chooser-suppression fix. Fact about the tree: the lowered `else_ability` node
+(the base, non-fateful branch) DOES carry its own target; its parent (the
+`ConditionInstead` node) carries `target: null`. An earlier hypothesis — that
+the target-bearing node sitting below a targetless `ConditionInstead` node is
+the cause — is REFUTED by this fact. Undiagnosed: Stave Off's working narrow
+grant has the identical node shape (a target-bearing leaf below a targetless
+`ConditionInstead`); the only structural difference from Faith's Shield here is
+`else_ability` vs `sub_ability`. HYPOTHESIS, explicitly not measured: targets
+are announced by walking the resolution chain from the root, and the
+`else_ability` slot's own target slot is never announced or bound during that
+walk, so its `ParentTarget` resolves to nothing and no continuous effect is
+ever created to bind a colour into. Filed rather than fixed; out of scope for
+the chosen-colour work.
+
+**F13 — Sudden Demise drops the chosen-colour FILTER, not just the
+binding.** Its lowered shape is `Choose { Color, persist: false }` →
+`DamageAll { Typed { properties: ["Creature"], .. } }` — the colour filter
+itself is dropped at lowering, not merely left unbound. Persisting the choice
+(F1's fix) would NOT repair this card, because there is no
+`FilterProp::HasColor` in the lowered filter for a persisted colour to bind
+into. Same family as the Wash Out / Root Greevil object-filter route this PR's
+earlier work fixed (a printed colour choice must reach the object filter, not
+just the keyword-grant path), and a DISTINCT item from F1 — the two entries
+must not be conflated as the same fix. Filed rather than fixed; out of scope
+for the chosen-colour work.
+
+**Avacyn, Guardian Angel — `by sources of the color of your choice` is dropped.**
+Both activated abilities export `Effect::PreventDamage` with NO
+`damage_source_filter`, so they prevent all damage from every source — with no
+`Effect::Unimplemented` and no parse warning. Same seam as root cause 11
+(replacement / prevention effect mis-modeled), not the object-filter seam.

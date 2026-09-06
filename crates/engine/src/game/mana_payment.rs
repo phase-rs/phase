@@ -161,7 +161,12 @@ pub fn refill_infinite_mana(state: &mut GameState) {
     super::public_state::mark_mana_display_dirty(state);
 }
 
-fn mana_type_to_demand_index(mt: ManaType) -> Option<usize> {
+/// WUBRG slot a mana type occupies in a [`ColorDemand`], or `None` for
+/// colorless — which has no colored-demand slot (CR 107.4c). The single
+/// authority for the index order every `ColorDemand` producer and consumer
+/// shares, so callers outside this module read a demand array by the same
+/// mapping that builds one.
+pub fn mana_type_to_demand_index(mt: ManaType) -> Option<usize> {
     match mt {
         ManaType::White => Some(0),
         ManaType::Blue => Some(1),

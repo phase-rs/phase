@@ -13,6 +13,7 @@ function makeResult(
     unknown_cards: [],
     selected_format_reasons: [],
     color_identity: [],
+    color_distribution: [],
     ...overrides,
   };
 }

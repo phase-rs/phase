@@ -1,6 +1,42 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-import { logSelectedIceCandidate } from "../connection";
+// Shared with the hoisted `vi.mock("peerjs")` factory below so the dial made
+// inside `joinRoom` is observable. `vi.mock` is hoisted above imports, so the
+// factory cannot close over ordinary module scope.
+const peerState = vi.hoisted(() => ({
+  peersCreated: 0,
+  peerHandlers: new Map<string, (arg?: unknown) => void>(),
+  connHandlers: new Map<string, (arg?: unknown) => void>(),
+  dials: [] as Array<{ peerId: string; options: unknown }>,
+}));
+
+vi.mock("peerjs", () => {
+  class FakePeer {
+    constructor() {
+      peerState.peersCreated += 1;
+    }
+    on(event: string, handler: (arg?: unknown) => void): void {
+      peerState.peerHandlers.set(event, handler);
+    }
+    once(event: string, handler: (arg?: unknown) => void): void {
+      peerState.peerHandlers.set(event, handler);
+    }
+    off(): void {}
+    destroy(): void {}
+    connect(peerId: string, options: unknown): unknown {
+      peerState.dials.push({ peerId, options });
+      return {
+        open: false,
+        on: (event: string, handler: (arg?: unknown) => void) => {
+          peerState.connHandlers.set(event, handler);
+        },
+      };
+    }
+  }
+  return { default: FakePeer };
+});
+
+import { PEER_CONNECT_OPTIONS, joinRoom, logSelectedIceCandidate } from "../connection";
 
 // Fake RTCStatsReport: a Map<string, {type, ...}> with a forEach that matches
 // the browser API shape.
@@ -116,5 +152,50 @@ describe("logSelectedIceCandidate", () => {
     await promise;
 
     expect((console.log as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+  });
+});
+
+// Characterization: `joinRoom` has always passed these options. The test exists
+// so the guarantee is pinned rather than assumed — every revision guard
+// downstream depends on the channel being ordered, and the option that produces
+// that ordering is a single word inside an object literal.
+describe("joinRoom", () => {
+  beforeEach(() => {
+    peerState.peersCreated = 0;
+    peerState.peerHandlers.clear();
+    peerState.connHandlers.clear();
+    peerState.dials.length = 0;
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ iceServers: [{ urls: "stun:stun.example:3478" }] }),
+    })));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // Real timers: `joinRoom` awaits the ICE-credential fetch before it ever
+  // constructs its `Peer`, so a macrotask hop is what flushes that chain.
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("dials the host peer with the shared ordered-channel connect options", async () => {
+    const joined = joinRoom("ABCDE");
+    await flush();
+
+    expect(peerState.peersCreated).toBe(1);
+    peerState.peerHandlers.get("open")!();
+
+    expect(peerState.dials).toEqual([
+      { peerId: "phase2-ABCDE", options: PEER_CONNECT_OPTIONS },
+    ]);
+    expect(PEER_CONNECT_OPTIONS.reliable).toBe(true);
+
+    peerState.connHandlers.get("open")!();
+    await expect(joined).resolves.toMatchObject({ conn: { open: false } });
   });
 });

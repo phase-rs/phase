@@ -18,8 +18,7 @@ use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
-    parse_type_phrase_with_ctx, TargetSyntax,
+    parse_target, parse_target_with_ctx, parse_type_phrase, parse_type_phrase_with_ctx,
 };
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::lower::parse_for_each_multiplier_prefix;
@@ -473,9 +472,10 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
 /// on <recipient> [if it doesn't have a counter of that kind on it]" →
 /// `Effect::PutChosenCounter`. Anaphoric recipients bind to `ParentTarget` (The
 /// Caves of Androzani); declared typed recipients use the shared target parser
-/// (Aven Courier). A source-self recipient remains unsupported because its
-/// producer may be a random counter-kind choice that is not yet bound to
-/// resolution state (Crystalline Giant). The optional suffix becomes an
+/// (Aven Courier). A source-self recipient IS supported: its producer — the
+/// printed-population random choice — now binds a concrete kind into
+/// resolution state before this clause runs (Crystalline Giant), which is the
+/// binding the earlier strict gap was waiting for. The optional suffix becomes an
 /// explicit EQ-zero predicate over each resolved target's count of the chosen
 /// kind. Combinator-based and fully consuming; `input` has already had the
 /// leading "put " stripped.
@@ -498,7 +498,10 @@ pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
         (TargetFilter::ParentTarget, remainder)
     } else {
         let (target, remainder) = parse_target(recipient_text);
-        if matches!(target, TargetFilter::Any | TargetFilter::SelfRef) {
+        // `Any` is this parser's "no recipient recognized", not a legal
+        // recipient. `SelfRef` is a real one — "on ~" — and its kind is bound
+        // by the preceding choice like every other producer's.
+        if matches!(target, TargetFilter::Any) {
             return None;
         }
         (target, remainder)
@@ -1089,6 +1092,53 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     })
 }
 
+/// CR 115.1d + CR 122.1: Extract the fixed resolution-time selection in
+/// "remove … from each of two creatures you control". The surrounding remove
+/// parser remains the authority for the counter phrase and object filter; this
+/// nom-shaped probe preserves only the untargeted cardinality that `Effect`
+/// cannot represent by itself.
+pub(super) fn remove_counter_exact_selection_count(lower: &str) -> Option<u32> {
+    let descriptor = remove_counter_each_of_descriptor(lower)?;
+    parse_fixed_count_descriptor(descriptor).map(|(count, _)| count)
+}
+
+/// CR 601.2c: Recover the announced target cardinality in the targeted
+/// counterpart, "remove … from each of two target creatures". This stays
+/// distinct from the untargeted exact-selection descriptor above.
+pub(super) fn remove_counter_exact_target_multi_target(lower: &str) -> Option<MultiTargetSpec> {
+    let descriptor = remove_counter_each_of_descriptor(lower)?;
+    let (remainder, count) = super::parse_multi_target_count_expr(descriptor).ok()?;
+    nom_on_lower(remainder, remainder, |input| {
+        value((), preceded(space1, tag("target "))).parse(input)
+    })
+    .map(|_| MultiTargetSpec::exact(count))
+}
+
+/// Extract the descriptor following a remove-counter "from each of" phrase.
+/// Keeping the structural prefix parser shared prevents target and untargeted
+/// exact-count recognition from drifting.
+fn remove_counter_each_of_descriptor(lower: &str) -> Option<&str> {
+    let ((), descriptor) = nom_on_lower(lower, lower, |input| {
+        preceded(
+            take_until(" from each of "),
+            value((), tag(" from each of ")),
+        )
+        .parse(input)
+    })?;
+    Some(descriptor)
+}
+
+/// Parse the non-targeted descriptor after "each of". Targeted fixed-count
+/// wording remains in the ordinary target-selection pipeline (CR 601.2c).
+fn parse_fixed_count_descriptor(input: &str) -> Option<(u32, &str)> {
+    let (count, remainder) = nom_on_lower(input, input, nom_primitives::parse_number)?;
+    let is_targeted = nom_on_lower(remainder, remainder, |i| {
+        value((), preceded(space1, tag("target "))).parse(i)
+    })
+    .is_some();
+    (!is_targeted && count > 0).then_some((count, remainder.trim_start()))
+}
+
 /// Normalize oracle-text counter type strings to canonical engine names.
 ///
 /// - `+1/+1` / `-1/-1` map to the canonical `P1P1` / `M1M1` keys.
@@ -1115,6 +1165,14 @@ fn strip_remove_counter_each_of_any_number(input: &str) -> Option<&str> {
     .map(|((), rest)| rest.trim_start())
 }
 
+/// CR 115.1d + CR 122.1: Strip the fixed-count counterpart of the variable
+/// distribution prefix. The number is carried by the imperative AST; this
+/// helper leaves the object phrase for the normal typed-filter parser.
+fn strip_remove_counter_each_of_fixed_number(input: &str) -> Option<&str> {
+    let ((), after_each_of) = nom_on_lower(input, input, |i| value((), tag("each of ")).parse(i))?;
+    parse_fixed_count_descriptor(after_each_of).map(|(_, remainder)| remainder)
+}
+
 /// CR 122.1 + CR 115.1d: Resolve the "from <objects>" clause of a remove-counter
 /// effect. The optional "each of any number of" prefix denotes a variable-count
 /// non-target distribution — strip it and parse the remainder as a type phrase
@@ -1128,7 +1186,9 @@ fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> Tar
         // CR 608.2k: Bare pronoun — context-dependent
         return resolve_it_pronoun(ctx);
     }
-    if let Some(filter_text) = strip_remove_counter_each_of_any_number(text) {
+    if let Some(filter_text) = strip_remove_counter_each_of_any_number(text)
+        .or_else(|| strip_remove_counter_each_of_fixed_number(text))
+    {
         let (t, _rem) = parse_type_phrase_with_ctx(filter_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, filter_text);
@@ -1137,58 +1197,33 @@ fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> Tar
     resolve_counter_target(text, ctx)
 }
 
-/// Classification of a counter target phrase, distinguishing forms the runtime
-/// can resolve (`Supported`) from a non-targeted descriptor scope
-/// (`NonTargetedDescriptor`) that a targeted-only effect cannot enumerate.
-///
-/// Both arms carry a `TargetFilter`: `resolve_counter_target` unwraps them
-/// uniformly (put/remove/multiply counters resolve identically either way),
-/// while the counter-doubling arm of `try_parse_double_effect` consults the
-/// discriminant to gate the non-targeted mass form to an honest `Unimplemented`
-/// (CR 701.10e — see there).
-enum CounterTargetKind {
-    Supported(TargetFilter),
-    NonTargetedDescriptor(TargetFilter),
-}
-
-/// Classify a counter target from text: self-ref, pronoun, trigger anaphor, or a
-/// parsed target phrase. The anaphor guards run FIRST and in this exact order
-/// (order is load-bearing: `it`/`that creature` resolve against the parse
-/// context before any descriptor fallback), each yielding a single-object
-/// `Supported` filter. A parsed phrase is `Supported` only when it used the
-/// "target" keyword (CR 115.1 `TargetKeyword`); a bare descriptor scope is
-/// `NonTargetedDescriptor`.
-///
-/// The fallback parses with a fresh `ParseContext` so it stays byte-for-byte
-/// equivalent to the prior `parse_target(text)` call — the shared `ctx` is read
-/// only by the anaphor guards, exactly as before.
-fn classify_counter_target(text: &str, ctx: &mut ParseContext) -> CounterTargetKind {
-    if is_self_ref(text) {
-        CounterTargetKind::Supported(TargetFilter::SelfRef)
-    } else if is_it_pronoun(text) {
-        // CR 608.2k: Bare pronoun — context-dependent
-        CounterTargetKind::Supported(resolve_it_pronoun(ctx))
-    } else if resolve_that_creature_in_trigger(text, ctx).is_some() {
-        // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
-        CounterTargetKind::Supported(TargetFilter::TriggeringSource)
-    } else {
-        let (t, _rem, syntax) = parse_target_with_syntax(text, &mut ParseContext::default());
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, text);
-        match syntax {
-            TargetSyntax::TargetKeyword => CounterTargetKind::Supported(t),
-            TargetSyntax::Descriptor => CounterTargetKind::NonTargetedDescriptor(t),
-        }
-    }
-}
-
-/// Resolve a counter target from text: self-ref, pronoun, or parsed target.
-/// Shared by put/remove/multiply counter parsers, which resolve identically for
-/// both target classes — so the `CounterTargetKind` discriminant is unwrapped.
+/// CR 608.2c + CR 608.2k + CR 115.10a: resolve a counter recipient
+/// from text — self-ref, bare pronoun, trigger-context "that creature", else a
+/// parsed phrase. The anaphor guards run FIRST and in this exact order (order is
+/// load-bearing: `it` / `that creature` resolve against the parse context before
+/// any descriptor fallback). Shared by put/remove/multiply/double counter
+/// parsers, which resolve identically for a targeted and a described recipient —
+/// the "target" keyword only changes WHEN the recipient is chosen
+/// (CR 115.1 / CR 608.2d), which `lower::target_choice_timing_for_clause` owns.
 fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
-    match classify_counter_target(text, ctx) {
-        CounterTargetKind::Supported(t) | CounterTargetKind::NonTargetedDescriptor(t) => t,
+    if is_self_ref(text) {
+        return TargetFilter::SelfRef;
     }
+    if is_it_pronoun(text) {
+        // CR 608.2k: Bare pronoun — context-dependent.
+        return resolve_it_pronoun(ctx);
+    }
+    if resolve_that_creature_in_trigger(text, ctx).is_some() {
+        // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
+        return TargetFilter::TriggeringSource;
+    }
+    // The fallback parses with a fresh `ParseContext` so it stays byte-for-byte
+    // equivalent to a bare `parse_target(text)` call — the shared `ctx` is read
+    // only by the anaphor guards above.
+    let (t, _rem) = parse_target(text);
+    #[cfg(debug_assertions)]
+    assert_no_compound_remainder(_rem, text);
+    t
 }
 
 /// CR 608.2k + CR 301.5a: Returns `Some(remainder)` when `text` begins with
@@ -1396,6 +1431,101 @@ fn contains_target_word(input: &str) -> bool {
         .any(|word| word == "target")
 }
 
+/// CR 115.10a + CR 608.2d + CR 701.10e: may a counter-multiplication effect be
+/// emitted with this recipient? Two admissible shapes: a deterministic anaphor
+/// (`SelfRef` / `TriggeringSource` / `ParentTarget` / ... — resolved by the
+/// resolver's own tiers) or a DESCRIBED population the resolver can enumerate.
+/// Anything else is a phrase the parser failed to classify at all; emitting an
+/// effect for it would hand the mass tier a filter that matches every permanent
+/// both players control, so it stays an honest `Effect::unimplemented` instead.
+fn counter_recipient_is_resolvable(target: &TargetFilter) -> bool {
+    target.is_context_ref()
+        || (target.names_enumerable_population() && recipient_zone_is_battlefield(target))
+}
+
+/// CR 400.1 + CR 701.10e: the non-targeted population tier
+/// (`counters::nontargeted_counter_population_ids`) enumerates the BATTLEFIELD
+/// only, so a zone-qualified recipient ("each creature in your graveyard")
+/// resolves to nothing there. Refuse it at the parser so the clause stays an
+/// honest `Effect::unimplemented` instead of lowering to an effect that silently
+/// does nothing. `None` means the filter imposes no zone constraint — the
+/// battlefield default — and is admissible. The resolver's gate carries the same
+/// conjunct as an independent second guard; widening this to a zone-aware
+/// enumeration must move BOTH.
+fn recipient_zone_is_battlefield(target: &TargetFilter) -> bool {
+    matches!(
+        target.extract_in_zone(),
+        None | Some(crate::types::zones::Zone::Battlefield)
+    )
+}
+
+/// CR 115.10a + CR 608.2d + CR 701.10e: the single admissibility test both
+/// counter-multiplication parsers apply to a recipient phrase — the typed form
+/// ("+1/+1 counters", `MultiplyCounter`) and the untyped one ("each kind of
+/// counter", `Double { DoubleTarget::Counters }`). One rule, one shape.
+///
+/// A recipient is admissible when the parser could classify it at all
+/// (`counter_recipient_is_resolvable`) AND it is not a singular indefinite
+/// descriptor the resolver would wrongly enumerate. The second conjunct is
+/// scoped as narrowly as the rules allow: an anaphor is bound by the resolver's
+/// own tiers, and a chosen TARGET (CR 115.10a — the text says "target") is bound
+/// at announcement, so neither can reach the mass tier and neither is tested for
+/// singularity. Only a bare descriptor is, and only a singular indefinite
+/// determiner refuses it — see `recipient_is_singular_indefinite` for the
+/// determiner set and for why the test is "definitely singular?" rather than
+/// "definitely distributive?".
+///
+/// Wiring counter multiplication into `effects::needs_resolution_object_choice`
+/// so the singular form resolves as the choice of one it actually is, rather
+/// than staying an honest red, is the real fix and is deliberately out of this
+/// change's scope.
+fn counter_recipient_is_admissible(target: &TargetFilter, recipient_text: &str) -> bool {
+    counter_recipient_is_resolvable(target)
+        && (target.is_context_ref()
+            || contains_target_word(recipient_text)
+            || !recipient_is_singular_indefinite(recipient_text))
+}
+
+/// CR 608.2d: does this untargeted recipient phrase name a SINGLE indefinite
+/// object ("a creature you control", "an artifact you control") rather than a
+/// population?
+///
+/// The distinction is rules-load-bearing. A plural or distributive phrase
+/// ("each creature you control", "creatures you control") names every matching
+/// permanent, which the mass tier enumerates correctly. A singular indefinite
+/// phrase is a choice of ONE made while the effect is applied, which the engine
+/// models with a resolution-time object choice
+/// (`effects::needs_resolution_object_choice`) that counter multiplication is
+/// not wired into — enumerating it would double counters across the whole
+/// population where the card says one.
+///
+/// The test is deliberately phrased as "is this definitely singular?" rather
+/// than "is this definitely distributive?". Refusing everything that does not
+/// lead with `each `/`all ` would also refuse a bare plural descriptor
+/// ("on creatures you control"), which IS distributive under CR 608.2d and
+/// which the mass tier already resolves correctly — turning a working shape
+/// into a silent no-op. Only a leading singular determiner is unambiguous
+/// evidence of singularity, so only that is refused.
+///
+/// The determiner set mirrors the one `oracle_target.rs`'s type-phrase parser
+/// already strips for this exact purpose (`alt((tag("a "), tag("an "),
+/// tag("any ")))`, composed through `"other "`/`"another "`), so the two agree on
+/// what counts as a singular indefinite noun phrase. "any creature you control"
+/// is documented there as an untargeted SINGULAR controller choice (CR 115.10a,
+/// the Kathril class), not a population, and "another creature you control" is
+/// the same shape carrying `FilterProp::Another`. Each of the four leading forms
+/// is matched with its trailing space, so none of them can match a longer word.
+fn recipient_is_singular_indefinite(text: &str) -> bool {
+    nom_on_lower(text, text, |i| {
+        value(
+            (),
+            alt((tag("a "), tag("an "), tag("any "), tag("another "))),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
 /// CR 701.10e: Parse "double the number of {type} counters on {target}".
 pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let ((), rest) = nom_on_lower(lower, lower, |i| {
@@ -1416,6 +1546,9 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) ->
     })?;
 
     let target = resolve_counter_target(target_text, ctx);
+    if !counter_recipient_is_admissible(&target, target_text) {
+        return Some(Effect::unimplemented("double_counters_nontargeted", lower));
+    }
 
     Some(Effect::MultiplyCounter {
         counter_type,
@@ -1429,28 +1562,34 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) ->
 pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     // CR 701.10e: "double the number of each kind of counter on ..." → all counter
     // kinds. The doubled amount is intrinsic to the resolver ("give as many of
-    // those counters as already present"), never a `QuantityExpr` carrier — the
-    // same reasoning as the `MultiplyCounter` escape hatch in swallow_check.
+    // those counters as already present"), never a `QuantityExpr` carrier.
     //
-    // `Effect::Double` is targeted-only (there is no battlefield-enumeration tier
-    // in `targeting::resolved_targets`), so a NON-targeted descriptor target such
-    // as "each creature you control" would double nothing at runtime. Gate that
-    // mass form to an honest `Unimplemented` until the DoubleCountersAll mass
-    // runtime exists; the targeted form resolves normally.
+    // CR 115.1 + CR 115.10a: the recipient is a TARGET only when the text uses
+    // the word "target". A bare descriptor ("each Spider and legendary creature
+    // you control") is a POPULATION resolved while the effect is applied
+    // (CR 608.2d): `lower::target_choice_timing_for_clause` stamps
+    // `TargetChoiceTiming::Resolution` so no stack target slot is built, and
+    // `counters::nontargeted_counter_population_ids` enumerates it at
+    // resolution — identical treatment to the typed sibling
+    // `try_parse_multiply_counter` below. One rule, one shape.
+    //
+    // The honest-red gate is now keyed on the FILTER VALUE, not on the
+    // targeted/descriptor syntax split: a descriptor that names a real
+    // population is supported, one the parser could not classify is not.
     if let Some(((), rest)) = nom_on_lower(lower, lower, |i| {
         value((), tag("double the number of each kind of counter on ")).parse(i)
     }) {
-        return match classify_counter_target(rest, ctx) {
-            CounterTargetKind::Supported(target) => Some(Effect::Double {
+        let target = resolve_counter_target(rest, ctx);
+        return Some(if counter_recipient_is_admissible(&target, rest) {
+            Effect::Double {
                 target_kind: DoubleTarget::Counters { counter_type: None },
                 target,
-            }),
+            }
+        } else {
             // Fragment is the full lowercased clause (diagnostics-only); the
             // parser receives no original-case copy at this dispatch depth.
-            CounterTargetKind::NonTargetedDescriptor(_) => {
-                Some(Effect::unimplemented("double_counters_nontargeted", lower))
-            }
-        };
+            Effect::unimplemented("double_counters_nontargeted", lower)
+        });
     }
 
     // Counter doubling: "double the number of ..."
@@ -1672,7 +1811,7 @@ fn parse_mana_color_from_text(text: &str) -> Option<ManaColor> {
 mod tests {
     use super::*;
     use crate::types::ability::TargetChoiceTiming;
-    use crate::types::{ControllerRef, FilterProp, TypedFilter};
+    use crate::types::{ControllerRef, FilterProp, TypeFilter, TypedFilter};
 
     fn default_ctx() -> ParseContext {
         ParseContext::default()
@@ -1721,15 +1860,23 @@ mod tests {
         ));
     }
 
-    /// Crystalline Giant's random counter-kind producer is not represented by
-    /// `ChoiceType::CounterKind`, so its source-self consumer must stay outside
-    /// the supported `PutChosenCounter` grammar until that binding exists.
+    /// CR 608.2c: Crystalline Giant's source-self consumer. This was a
+    /// deliberate strict gap for as long as its producer — the printed-list
+    /// random choice — could not bind a kind into resolution state. That
+    /// binding now exists (`CounterKindDomain::Printed` +
+    /// `CounterKindChooser::Random`), so "on ~" is an ordinary recipient and
+    /// the gap is closed rather than merely widened.
     #[test]
-    fn put_chosen_counter_rejects_unbound_source_self_consumer() {
-        assert!(
-            try_parse_put_chosen_counter("a counter of that kind on ~.").is_none(),
-            "an unbound random counter kind must remain a strict parser gap"
-        );
+    fn put_chosen_counter_accepts_source_self_consumer() {
+        let effect = try_parse_put_chosen_counter("a counter of that kind on ~.")
+            .expect("source-self recipient is supported once the producer binds a kind");
+        assert!(matches!(
+            effect,
+            Effect::PutChosenCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
     }
 
     /// CR 115.1d + CR 608.2c + CR 608.2d: Full-card reach guard for Aven
@@ -1777,6 +1924,7 @@ mod tests {
             choose.effect.as_ref(),
             Effect::ChooseCounterKind {
                 target: TargetFilter::Typed(filter),
+                ..
             } if filter.type_filters == vec![crate::types::ability::TypeFilter::Permanent]
                 && filter.controller == Some(ControllerRef::You)
         ));
@@ -1860,6 +2008,7 @@ mod tests {
             choose.effect.as_ref(),
             Effect::ChooseCounterKind {
                 target: TargetFilter::Typed(filter),
+                ..
             } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
                 && filter.controller == Some(ControllerRef::You)
         ));
@@ -1898,36 +2047,74 @@ mod tests {
         ));
     }
 
-    /// §5 honest-red gate (CR 701.10e): `Effect::Double` is targeted-only, so a
-    /// NON-targeted descriptor population ("... on each creature you control")
-    /// has no runtime path and must lower to an honest `Effect::Unimplemented`;
-    /// the targeted form ("... on target creature") still lowers to
-    /// `Effect::Double`.
+    /// CR 115.1 + CR 608.2d + CR 701.10e: the non-targeted "each kind of counter
+    /// on <descriptor>" form names a POPULATION, not a target. It must lower to a
+    /// real `Effect::Double { DoubleTarget::Counters }` (never an honest-red
+    /// `Unimplemented`) and be stamped `TargetChoiceTiming::Resolution` so no
+    /// stack target slot is built; the targeted form keeps `Stack`.
+    ///
+    /// Revert-failing: before the mass runtime tier existed, all three descriptor
+    /// forms below were gated to `Effect::Unimplemented`.
     #[test]
-    fn double_each_kind_counter_gates_nontargeted_mass_form_to_unimplemented() {
+    fn double_each_kind_counter_nontargeted_mass_form_is_resolution_timed() {
+        use crate::parser::oracle::parse_oracle_text;
+
         let mass = try_parse_double_effect(
             "double the number of each kind of counter on each creature you control",
             &mut default_ctx(),
         );
         assert!(
-            matches!(mass, Some(Effect::Unimplemented { .. })),
-            "non-targeted mass form must be honest-red Unimplemented, got {mass:?}"
+            matches!(
+                mass,
+                Some(Effect::Double {
+                    target_kind: DoubleTarget::Counters { counter_type: None },
+                    ..
+                })
+            ),
+            "the non-targeted mass form must lower to Effect::Double, got {mass:?}"
         );
 
-        // The §5 gate keys on `Descriptor` ALONE (no plurality sub-condition), so a
-        // SINGULAR non-targeted descriptor must gate identically to the plural mass
-        // form — `Effect::Double` is targeted-only and would double nothing at
-        // runtime for either. Pins against a future plurality branch
-        // (`if plural { NonTargetedDescriptor } else { Supported }`) that would
-        // silently re-support the singular form as a non-functional `Effect::Double`.
+        // CR 608.2d: a SINGULAR indefinite recipient is a choice of ONE made while
+        // the effect is applied, NOT a population. The engine models that with a
+        // resolution-time object choice (`effects::needs_resolution_object_choice`),
+        // which counter multiplication is not wired into — so enumerating it would
+        // double counters on the whole population where the card says one. It stays
+        // an honest red rather than shipping a silently rules-wrong effect.
+        //
+        // This is the boundary of what this change claims: the DISTRIBUTIVE form is
+        // now supported, the singular form is deliberately not. Reverting the
+        // distributive conjunct in `try_parse_double_effect` turns this row green
+        // while making the sweep rules-wrong, which is exactly what it guards.
         let singular = try_parse_double_effect(
             "double the number of each kind of counter on a creature you control",
             &mut default_ctx(),
         );
         assert!(
-            matches!(singular, Some(Effect::Unimplemented { .. })),
-            "singular non-targeted descriptor form must gate identically to the mass \
-             form (honest-red Unimplemented), got {singular:?}"
+            matches!(
+                singular,
+                // allow-noncombinator: test assertion on emitted Unimplemented category name
+                Some(Effect::Unimplemented { ref name, .. }) if name == "double_counters_nontargeted"
+            ),
+            "a singular indefinite recipient must stay an honest Unimplemented, got {singular:?}"
+        );
+
+        // Positive reach-guard for the negative above: the SAME phrase with a
+        // distributive quantifier IS supported, proving the refusal is the
+        // plurality conjunct and not an upstream parse failure of "creature you
+        // control".
+        let distributive = try_parse_double_effect(
+            "double the number of each kind of counter on each creature you control",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(
+                distributive,
+                Some(Effect::Double {
+                    target_kind: DoubleTarget::Counters { counter_type: None },
+                    ..
+                })
+            ),
+            "the distributive twin of the singular phrase must be supported, got {distributive:?}"
         );
 
         let targeted = try_parse_double_effect(
@@ -1943,6 +2130,352 @@ mod tests {
                 })
             ),
             "targeted form must still resolve to Effect::Double, got {targeted:?}"
+        );
+
+        // CR 115.10a + CR 608.2d, at the LOWERING seam: no literal "target" word
+        // ⇒ Resolution timing ⇒ `collect_target_slots_inner` builds no slot.
+        let descriptor = parse_oracle_text(
+            "Double the number of each kind of counter on each creature you control.",
+            "Descriptor Counter Doubler",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(
+            descriptor.abilities[0].target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "a described population is chosen while the effect is applied"
+        );
+        assert!(
+            descriptor.abilities[0].multi_target.is_none(),
+            "a described population declares no variable-count target bound"
+        );
+
+        let target_word = parse_oracle_text(
+            "Double the number of each kind of counter on target creature.",
+            "Targeted Counter Doubler",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(
+            target_word.abilities[0].target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "the literal word \"target\" keeps the CR 601.2c stack-time choice"
+        );
+        assert!(
+            target_word.abilities[0].multi_target.is_none(),
+            "a single required target declares no MultiTargetSpec"
+        );
+    }
+
+    /// CR 608.2d — SIBLING PARITY. `counter_recipient_is_admissible` is the single
+    /// authority for BOTH counter-multiplication parsers, so the typed form
+    /// (`MultiplyCounter`) draws the singular/distributive line in exactly the same
+    /// place as the untyped one. A singular indefinite recipient is a choice of ONE
+    /// made while the effect is applied, which counter multiplication is not wired
+    /// into (`effects::needs_resolution_object_choice` lists only `PutCounter` /
+    /// `ChooseCounterKind`), so enumerating it would double counters across the
+    /// whole population where the card says one.
+    ///
+    /// Each negative below is paired with its own positive reach-guard, so a refusal
+    /// caused by an upstream parse failure rather than by the plurality conjunct
+    /// would fail the test rather than pass it silently.
+    #[test]
+    fn typed_counter_multiplication_draws_the_same_singular_distributive_line() {
+        for (singular, distributive) in [
+            (
+                "double the number of +1/+1 counters on a creature you control",
+                "double the number of +1/+1 counters on each creature you control",
+            ),
+            (
+                "double the number of charge counters on an artifact you control",
+                "double the number of charge counters on each artifact you control",
+            ),
+        ] {
+            let refused = try_parse_multiply_counter(singular, &mut default_ctx());
+            assert!(
+                matches!(
+                    refused,
+                    Some(Effect::Unimplemented { ref name, .. })
+                        // allow-noncombinator: test assertion on emitted Unimplemented category name
+                        if name == "double_counters_nontargeted"
+                ),
+                "singular indefinite recipient must stay an honest Unimplemented \
+                 for the TYPED form too, got {refused:?} from {singular:?}"
+            );
+
+            let accepted = try_parse_multiply_counter(distributive, &mut default_ctx());
+            assert!(
+                matches!(accepted, Some(Effect::MultiplyCounter { .. })),
+                "reach-guard: the distributive twin must parse, so the refusal above \
+                 is the plurality conjunct and not an upstream parse failure; \
+                 got {accepted:?} from {distributive:?}"
+            );
+        }
+
+        // REGRESSION GUARD (CR 608.2d): a bare PLURAL descriptor carries no
+        // quantifier and no article, and is distributive — the mass tier already
+        // resolves it correctly. Phrasing the conjunct as "definitely singular?"
+        // rather than "definitely distributive?" is what keeps this shape working;
+        // an `each`/`all`-only test would silently turn it into a no-op.
+        let plural = try_parse_multiply_counter(
+            "double the number of +1/+1 counters on creatures you control",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(plural, Some(Effect::MultiplyCounter { .. })),
+            "a bare plural descriptor is distributive and must stay admissible, got {plural:?}"
+        );
+
+        // CR 115.10a: "any ..." and "another ..." are singular indefinite noun
+        // phrases exactly like "a ...", so they are refused for the same reason —
+        // the determiner set here mirrors the one `oracle_target.rs` strips.
+        // Each is paired with a distributive twin, so a refusal caused by an
+        // upstream parse failure would fail the test rather than pass it.
+        for (singular, distributive) in [
+            (
+                "double the number of +1/+1 counters on any creature you control",
+                "double the number of +1/+1 counters on each creature you control",
+            ),
+            (
+                "double the number of +1/+1 counters on another creature you control",
+                "double the number of +1/+1 counters on each other creature you control",
+            ),
+        ] {
+            let refused = try_parse_multiply_counter(singular, &mut default_ctx());
+            assert!(
+                matches!(
+                    refused,
+                    Some(Effect::Unimplemented { ref name, .. })
+                        // allow-noncombinator: test assertion on emitted Unimplemented category name
+                        if name == "double_counters_nontargeted"
+                ),
+                "a singular indefinite determiner must be refused, got {refused:?} \
+                 from {singular:?}"
+            );
+
+            let accepted = try_parse_multiply_counter(distributive, &mut default_ctx());
+            assert!(
+                matches!(accepted, Some(Effect::MultiplyCounter { .. })),
+                "reach-guard: the distributive twin must parse, got {accepted:?} \
+                 from {distributive:?}"
+            );
+        }
+
+        // The other two admissible classes are unaffected by the conjunct.
+        let targeted = try_parse_multiply_counter(
+            "double the number of +1/+1 counters on target creature",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(targeted, Some(Effect::MultiplyCounter { .. })),
+            "CR 115.1: a chosen target stays admissible, got {targeted:?}"
+        );
+
+        let mut ctx = default_ctx();
+        ctx.subject = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let anaphor =
+            try_parse_multiply_counter("double the number of +1/+1 counters on it", &mut ctx);
+        assert!(
+            matches!(
+                anaphor,
+                Some(Effect::MultiplyCounter {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                })
+            ),
+            "CR 608.2k: a trigger-context anaphor stays admissible, got {anaphor:?}"
+        );
+    }
+
+    /// V4b (CR 115.1 + CR 608.2d): the parser stays honest-red on BOTH
+    /// counter-multiplication forms when the recipient phrase names no
+    /// enumerable population. `TargetFilter::names_enumerable_population` is the
+    /// single authority; without it the typed form emitted a sweeping
+    /// `MultiplyCounter { Typed{} }` that doubles every counter on every
+    /// permanent BOTH players control.
+    ///
+    /// Revert-failing on the typed half: `…+1/+1 counters on each frobnicator you
+    /// control` currently yields `Effect::MultiplyCounter`, not `Unimplemented`.
+    #[test]
+    fn counter_multiplication_with_unresolvable_recipient_stays_unimplemented() {
+        let unresolvable = [
+            // A phrase the parser cannot classify at all → contentless `Typed`.
+            "each frobnicator you control",
+            // CR 115.1: `TargetFilter::Any` matches every object.
+            "everything",
+        ];
+        for phrase in unresolvable {
+            let untyped = try_parse_double_effect(
+                &format!("double the number of each kind of counter on {phrase}"),
+                &mut default_ctx(),
+            );
+            assert!(
+                matches!(
+                    untyped,
+                    // allow-noncombinator: test assertion on emitted Unimplemented category name
+                    Some(Effect::Unimplemented { ref name, .. }) if name == "double_counters_nontargeted"
+                ),
+                "untyped form must stay honest-red for {phrase:?}, got {untyped:?}"
+            );
+            let typed = try_parse_double_effect(
+                &format!("double the number of +1/+1 counters on {phrase}"),
+                &mut default_ctx(),
+            );
+            assert!(
+                matches!(
+                    typed,
+                    // allow-noncombinator: test assertion on emitted Unimplemented category name
+                    Some(Effect::Unimplemented { ref name, .. }) if name == "double_counters_nontargeted"
+                ),
+                "typed form must stay honest-red for {phrase:?}, got {typed:?}"
+            );
+        }
+
+        // PAIRED POSITIVE REACH-GUARD: a describable population is NOT refused on
+        // either form, so the negatives above cannot pass because the whole
+        // dispatch short-circuited.
+        let untyped_ok = try_parse_double_effect(
+            "double the number of each kind of counter on each creature you control",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(
+                untyped_ok,
+                Some(Effect::Double {
+                    target_kind: DoubleTarget::Counters { counter_type: None },
+                    ..
+                })
+            ),
+            "describable population must still lower on the untyped form, got {untyped_ok:?}"
+        );
+        let typed_ok = try_parse_double_effect(
+            "double the number of +1/+1 counters on each creature you control",
+            &mut default_ctx(),
+        );
+        let Some(Effect::MultiplyCounter {
+            target: TargetFilter::Typed(ref tf),
+            ..
+        }) = typed_ok
+        else {
+            panic!("describable population must still lower on the typed form, got {typed_ok:?}");
+        };
+        assert!(tf
+            .type_filters
+            .contains(&crate::types::ability::TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+
+        // HOSTILE FIXTURE: a deterministic anaphor is admitted by the OTHER half of
+        // `counter_recipient_is_resolvable` (`is_context_ref`), not by the
+        // population predicate — it must not be swept up by the refusal.
+        let mut ctx = default_ctx();
+        ctx.subject = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let anaphor =
+            try_parse_double_effect("double the number of each kind of counter on it", &mut ctx);
+        assert!(
+            matches!(
+                anaphor,
+                Some(Effect::Double {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                })
+            ),
+            "a trigger-context anaphor stays supported, got {anaphor:?}"
+        );
+
+        // DISCLOSED NON-CLAIM (measured): a PARTIALLY classified recipient is
+        // ACCEPTED. The predicate's contract is "this filter names SOME
+        // population", never "the RIGHT population" — asserting this red would
+        // over-claim the gate. `each permanent that isn't a creature you control`
+        // parses to `Typed{[Permanent], controller: None}` and still resolves
+        // against both players' permanents; that is a pre-existing recipient
+        // misparse (backlog root cause 6), out of scope here.
+        let partial = try_parse_double_effect(
+            "double the number of each kind of counter on each permanent that isn't a creature you control",
+            &mut default_ctx(),
+        );
+        // The MEASURED shape is pinned, not merely the acceptance. The gate's
+        // contract is "this filter names SOME population"; what bounds the sweep
+        // is which population `parse_target` actually produced. Asserting only
+        // `Effect::Double { .. }` would let a future `parse_target` change widen
+        // that population silently — e.g. dropping the `Permanent` type filter
+        // would turn this into a both-players, every-object sweep while the test
+        // stayed green. Pin the two axes that bound it.
+        let Some(Effect::Double {
+            target: TargetFilter::Typed(ref recipient),
+            ..
+        }) = partial
+        else {
+            panic!("a partially classified recipient is accepted, not refused, got {partial:?}");
+        };
+        assert_eq!(
+            recipient.type_filters,
+            vec![TypeFilter::Permanent],
+            "measured recipient type filter changed — re-audit the sweep scope: {partial:?}"
+        );
+        assert_eq!(
+            recipient.controller, None,
+            "measured recipient controller scope changed — re-audit the sweep scope: {partial:?}"
+        );
+    }
+
+    /// CR 400.1 + CR 701.10e: a ZONE-QUALIFIED recipient stays honest red. The
+    /// non-targeted population tier enumerates the BATTLEFIELD only, so "each
+    /// creature in your graveyard" would lower to an effect that silently does
+    /// nothing. `recipient_zone_is_battlefield` refuses it at the parser instead.
+    ///
+    /// The reach-guard is what makes this non-vacuous: it asserts the recipient
+    /// really does parse to a graveyard-qualified filter, so the refusal is the
+    /// zone conjunct and not an upstream parse failure.
+    #[test]
+    fn counter_multiplication_with_zone_qualified_recipient_stays_unimplemented() {
+        use crate::types::zones::Zone;
+
+        let recipient = "each creature in your graveyard";
+        let parsed_recipient = resolve_counter_target(recipient, &mut default_ctx());
+        assert_eq!(
+            parsed_recipient.extract_in_zone(),
+            Some(Zone::Graveyard),
+            "reach-guard: the recipient must really carry a graveyard zone \
+             constraint, got {parsed_recipient:?}"
+        );
+        assert!(
+            parsed_recipient.names_enumerable_population(),
+            "reach-guard: it must otherwise look like a real population, so the \
+             refusal below is the ZONE conjunct: {parsed_recipient:?}"
+        );
+
+        for clause in [
+            format!("double the number of each kind of counter on {recipient}"),
+            format!("double the number of +1/+1 counters on {recipient}"),
+        ] {
+            let effect = try_parse_double_effect(&clause, &mut default_ctx());
+            assert!(
+                matches!(
+                    effect,
+                    // allow-noncombinator: test assertion on emitted Unimplemented category name
+                    Some(Effect::Unimplemented { ref name, .. }) if name == "double_counters_nontargeted"
+                ),
+                "a zone-qualified recipient must stay honest red, got {effect:?} from {clause:?}"
+            );
+        }
+
+        // PAIRED POSITIVE: the same phrase WITHOUT the zone qualifier is admitted,
+        // so the refusal is the zone conjunct alone.
+        let battlefield = try_parse_double_effect(
+            "double the number of each kind of counter on each creature you control",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(
+                battlefield,
+                Some(Effect::Double {
+                    target_kind: DoubleTarget::Counters { counter_type: None },
+                    ..
+                })
+            ),
+            "the unqualified twin must still lower, got {battlefield:?}"
         );
     }
 
@@ -1969,14 +2502,169 @@ mod tests {
         );
     }
 
-    /// §5 real-card (CR 701.10e): Ultimate Spider-Man's back-face "Whenever you
-    /// attack, double the number of each kind of counter on each Spider and
-    /// legendary creature you control" is a NON-targeted descriptor population.
-    /// The YouAttack trigger's effect must be the honest-red Unimplemented from
-    /// the mass gate, not a silently non-functional `Effect::Double`.
+    /// V6 PIN (CR 608.2c + CR 115.10a) — the anaphor classes keep their current
+    /// lowering. The new `Double { DoubleTarget::Counters }` arm in
+    /// `lower::target_choice_timing_for_clause` carries `!target.is_context_ref()`,
+    /// which the sibling `MultiplyCounter` arm deliberately does NOT: retro-fitting
+    /// it there would flip THIRTY-ONE shipping cards from `Resolution` to `Stack`
+    /// across FOUR anaphor classes — the census measured over the full corpus and
+    /// listed card-by-card on that arm in `lower.rs`. The rows below are one
+    /// exemplar per class, not the population; do not read their count as the
+    /// blast radius. This test is what makes the "separate arms" decision
+    /// auditable — unify them and it flips.
+    ///
+    /// Committed runtime anchors for the `ParentTarget` class:
+    /// `crates/engine/tests/integration/scythecat_cub_second_resolution.rs`
+    /// (`scythecat_cub_doubles_counters_on_second_landfall_resolution`) and
+    /// `crates/engine/src/game/effects/mod.rs` (`turtle_van_doubles_counters_on_matching_crewer`).
     #[test]
-    fn ultimate_spider_man_mass_double_counter_trigger_is_honest_unimplemented() {
+    fn counter_multiplication_anaphor_recipients_keep_their_lowered_timing() {
         use crate::parser::oracle::parse_oracle_text;
+
+        fn trigger_execute_timing(oracle: &str, name: &str) -> TargetChoiceTiming {
+            let parsed = parse_oracle_text(oracle, name, &[], &["Creature".to_string()], &[]);
+            parsed
+                .triggers
+                .iter()
+                .find_map(|t| t.execute.as_ref())
+                .map(|a| a.target_choice_timing)
+                .unwrap_or_else(|| panic!("{name}: trigger must lower an execute ability"))
+        }
+
+        // (i) `Double { Counters, TriggeringSource }` — the NEW arm's context-ref
+        // conjunct holds it at Stack, exactly where it already works today.
+        assert_eq!(
+            trigger_execute_timing(
+                "Whenever another creature enters, double the number of each kind of counter on it.",
+                "Untyped Anaphor Doubler",
+            ),
+            TargetChoiceTiming::Stack,
+            "a context-ref recipient on the untyped form keeps Stack timing"
+        );
+
+        // (ii) `MultiplyCounter { SelfRef }` — Primordial Hydra / Level Up / Lily Bowen.
+        assert_eq!(
+            trigger_execute_timing(
+                "At the beginning of your upkeep, double the number of +1/+1 counters on this creature.",
+                "SelfRef Anaphor Doubler",
+            ),
+            TargetChoiceTiming::Resolution,
+            "the MultiplyCounter arm has no context-ref conjunct — SelfRef stays Resolution"
+        );
+
+        // (iii) `MultiplyCounter { TriggeringSource }` — Aragorn / Fractal Harness.
+        assert_eq!(
+            trigger_execute_timing(
+                "Whenever another creature enters, double the number of +1/+1 counters on it.",
+                "TriggeringSource Anaphor Doubler",
+            ),
+            TargetChoiceTiming::Resolution,
+            "TriggeringSource stays Resolution on the MultiplyCounter arm"
+        );
+
+        // (iv) `MultiplyCounter { ParentTarget }` — Scythecat Cub / Turtle Van. The
+        // chained shape is what the two real cards produce: a typed targeted parent
+        // clause followed by a bare-anaphor counter clause, rebound to
+        // `TargetFilter::ParentTarget` by the counter-anaphor fixup in
+        // `oracle_effect/mod.rs`.
+        let chained = parse_oracle_text(
+            "Whenever a land you control enters, put a +1/+1 counter on target creature you control. \
+             If you control a Cat, double the number of +1/+1 counters on that creature instead.",
+            "ParentTarget Anaphor Doubler",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let mut multiply_timings = Vec::new();
+        fn walk(
+            def: &crate::types::ability::AbilityDefinition,
+            out: &mut Vec<(TargetFilter, TargetChoiceTiming)>,
+        ) {
+            if let Effect::MultiplyCounter { target, .. } = &*def.effect {
+                out.push((target.clone(), def.target_choice_timing));
+            }
+            if let Some(sub) = &def.sub_ability {
+                walk(sub, out);
+            }
+            if let Some(other) = &def.else_ability {
+                walk(other, out);
+            }
+        }
+        for trigger in &chained.triggers {
+            if let Some(execute) = &trigger.execute {
+                walk(execute, &mut multiply_timings);
+            }
+        }
+        let parent_target_timing = multiply_timings
+            .iter()
+            .find(|(target, _)| matches!(target, TargetFilter::ParentTarget))
+            .map(|(_, timing)| *timing)
+            .unwrap_or_else(|| {
+                panic!("chained clause must lower a MultiplyCounter{{ParentTarget}}: {multiply_timings:?}")
+            });
+        assert_eq!(
+            parent_target_timing,
+            TargetChoiceTiming::Resolution,
+            "ParentTarget stays Resolution — a Stack-timed anaphor with no chooser would \
+             ask collect_target_slots_inner to build a player-chosen slot"
+        );
+
+        // (v) `MultiplyCounter { TrackedSet }` — Biogenic Upgrade / Omnivorous
+        // Flytrap. The FOURTH anaphor class, and the one a variant-name census
+        // misses: `is_context_ref()` covers `TrackedSet`, so "distribute three
+        // +1/+1 counters among one, two, or three target creatures, then double
+        // the number of +1/+1 counters on each of those creatures" binds its
+        // recipient to the distributed-among set, not to a fresh target slot.
+        // The card's SENTENCE contains the word "target", but the effect's own
+        // clause does not: `", then "` is a `ClauseBoundary::Then` split, so the
+        // `MultiplyCounter` node gets its own fragment — "double the number of
+        // +1/+1 counters on each of those creatures" — which carries no
+        // "target ". The `MultiplyCounter` arm's `scan_contains` therefore yields
+        // `Resolution` on its own, exactly as it does for Omnivorous Flytrap's
+        // separate sentence. Do not read this row as evidence that the arm's scan
+        // is insufficient for the class.
+        let biogenic = parse_oracle_text(
+            "Distribute three +1/+1 counters among one, two, or three target creatures, \
+             then double the number of +1/+1 counters on each of those creatures.",
+            "Biogenic Upgrade",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let mut tracked = Vec::new();
+        for ability in &biogenic.abilities {
+            walk(ability, &mut tracked);
+        }
+        let tracked_timing = tracked
+            .iter()
+            .find(|(target, _)| matches!(target, TargetFilter::TrackedSet { .. }))
+            .map(|(_, timing)| *timing)
+            .unwrap_or_else(|| {
+                panic!("Biogenic Upgrade must lower a MultiplyCounter{{TrackedSet}}: {tracked:?}")
+            });
+        assert_eq!(
+            tracked_timing,
+            TargetChoiceTiming::Resolution,
+            "TrackedSet stays Resolution — it is bound from the distribution, not chosen"
+        );
+    }
+
+    /// V2 real-card (CR 701.10e + CR 205.4a + CR 115.10a): Ultimate Spider-Man's
+    /// back-face "Whenever you attack, double the number of each kind of counter
+    /// on each Spider and legendary creature you control" is a NON-targeted
+    /// DESCRIBED population. It must lower to a real
+    /// `Effect::Double { DoubleTarget::Counters }`, stamped
+    /// `TargetChoiceTiming::Resolution` (no stack target slot), over the two-leg
+    /// union `Or[ Typed{Spider, You}, Typed{Creature + Legendary, You} ]`.
+    ///
+    /// Revert-failing on three independent seams: the parser gate (was
+    /// `Unimplemented`), the lowering arm (no `Double{Counters}` arm existed) and
+    /// the grammar (the bare-"and" branch dropped the supertype-led right
+    /// conjunct AND the shared trailing controller suffix).
+    #[test]
+    fn ultimate_spider_man_mass_double_counter_trigger_lowers_to_resolution_timed_double() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::triggers::TriggerMode;
 
         let parsed = parse_oracle_text(
             "First strike, haste\n\
@@ -1988,23 +2676,184 @@ mod tests {
             &[],
         );
 
-        let has_mass_double_unimplemented = parsed.triggers.iter().any(|t| {
-            t.execute.as_ref().is_some_and(|ability| {
-                matches!(
-                    &*ability.effect,
-                    // allow-noncombinator: test assertion on emitted Unimplemented category name
-                    Effect::Unimplemented { name, .. } if name == "double_counters_nontargeted"
-                )
-            })
-        });
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::YouAttack)
+            .expect("the back face must parse a YouAttack trigger");
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("the YouAttack trigger must lower an execute ability");
+
+        // CR 115.10a + CR 608.2d: described population ⇒ resolution-time choice.
+        assert_eq!(
+            execute.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "the descriptor population must not declare a stack target slot"
+        );
         assert!(
-            has_mass_double_unimplemented,
-            "USM's YouAttack mass counter-double must be an honest Unimplemented; triggers: {:?}",
+            execute.multi_target.is_none(),
+            "a descriptor population declares no variable-count target bound"
+        );
+
+        let Effect::Double {
+            target_kind: DoubleTarget::Counters { counter_type: None },
+            target,
+        } = &*execute.effect
+        else {
+            panic!(
+                "USM's YouAttack trigger must lower to an untyped counter doubling, got {:?}",
+                execute.effect
+            );
+        };
+
+        // CR 205.2a + CR 205.4a + CR 109.4: BOTH legs survive the union and BOTH
+        // carry the shared trailing "you control" suffix; only the right leg
+        // carries the `Legendary` supertype.
+        let TargetFilter::Or { filters } = target else {
+            panic!("the population must be a two-leg Or union, got {target:?}");
+        };
+        assert_eq!(filters.len(), 2, "exactly two legs: {filters:?}");
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf,
+                other => panic!("each leg must be a Typed filter, got {other:?}"),
+            })
+            .collect();
+        for leg in &legs {
+            assert_eq!(
+                leg.controller,
+                Some(ControllerRef::You),
+                "the trailing \"you control\" scopes both legs: {leg:?}"
+            );
+        }
+        let legendary = FilterProp::HasSupertype {
+            value: crate::types::card_type::Supertype::Legendary,
+        };
+        assert!(
+            legs[0]
+                .type_filters
+                .contains(&crate::types::ability::TypeFilter::Subtype(
+                    "Spider".to_string()
+                )),
+            "the left leg is the Spider subtype: {:?}",
+            legs[0].type_filters
+        );
+        assert!(
+            !legs[0].properties.contains(&legendary),
+            "the Legendary supertype must NOT spread onto the Spider leg: {:?}",
+            legs[0].properties
+        );
+        assert!(
+            legs[1]
+                .type_filters
+                .contains(&crate::types::ability::TypeFilter::Creature),
+            "the right leg is a creature: {:?}",
+            legs[1].type_filters
+        );
+        assert!(
+            legs[1].properties.contains(&legendary),
+            "the right leg carries the Legendary supertype: {:?}",
+            legs[1].properties
+        );
+
+        // REACH-GUARD, scoped to the trigger's OWN execute sub-tree. A card-wide
+        // "zero Unimplemented" assertion would be false both before AND after this
+        // change: with no MTGJSON keyword names supplied, the "First strike, haste"
+        // line is itself an `Unimplemented` node (a loader-input artefact).
+        fn count_unimplemented(def: &crate::types::ability::AbilityDefinition) -> usize {
+            let mut total = usize::from(matches!(&*def.effect, Effect::Unimplemented { .. }));
+            if let Some(sub) = &def.sub_ability {
+                total += count_unimplemented(sub);
+            }
+            if let Some(other) = &def.else_ability {
+                total += count_unimplemented(other);
+            }
+            total
+        }
+        assert_eq!(
+            count_unimplemented(execute),
+            0,
+            "the trigger's execute sub-tree must be fully supported"
+        );
+
+        // POSITIVE REACH-GUARD: the rest of the card still parses, so the trigger
+        // assertions above cannot pass because the card failed to parse at all.
+        assert!(
+            parsed.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )),
+            "the Camouflage activated ability must still lower a PutCounter on the source: {:?}",
             parsed
-                .triggers
+                .abilities
                 .iter()
-                .map(|t| t.execute.as_ref().map(|a| &a.effect))
+                .map(|a| &a.effect)
                 .collect::<Vec<_>>()
+        );
+
+        // DISCLOSED, PINNED GAP (backlog root cause 14) — NOT fixed by this change.
+        // The Camouflage line's "He gains hexproof and becomes colorless until end
+        // of turn" conjoins a keyword grant with a COLOUR change, and only the
+        // keyword survives: `oracle_effect/subject.rs`'s
+        // `try_parse_become_color_modification` has no "colorless" arm (it handles
+        // "all colors" / "every color" / a chosen colour), so the colour conjunct is
+        // dropped silently. That is a different root cause from this change's
+        // counter doubling, at a different seam, and is left for its own fix — the
+        // card is listed under root cause 14 in `docs/parser-misparse-backlog.md`
+        // precisely so it is not lost.
+        //
+        // The measured shape is pinned rather than merely described: when a
+        // colour-setting arm lands, the second assertion FAILS and whoever adds it
+        // is told to drop the backlog entry in the same change. Without this the
+        // card reads as fully modelled (`cargo coverage` reports it supported once
+        // the trigger is fixed) while still being wrong about colour.
+        fn collect_mods(
+            def: &crate::types::ability::AbilityDefinition,
+            out: &mut Vec<crate::types::ability::ContinuousModification>,
+        ) {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*def.effect
+            {
+                for st in static_abilities {
+                    out.extend(st.modifications.iter().cloned());
+                }
+            }
+            if let Some(sub) = &def.sub_ability {
+                collect_mods(sub, out);
+            }
+            if let Some(other) = &def.else_ability {
+                collect_mods(other, out);
+            }
+        }
+        let mut grants = Vec::new();
+        for ability in &parsed.abilities {
+            collect_mods(ability, &mut grants);
+        }
+        assert!(
+            grants.iter().any(|m| matches!(
+                m,
+                crate::types::ability::ContinuousModification::AddKeyword { keyword }
+                    if *keyword == crate::types::keywords::Keyword::Hexproof
+            )),
+            "reach-guard: the hexproof half of the Camouflage grant must parse, or the              colour assertion below is vacuous: {grants:?}"
+        );
+        assert!(
+            !grants.iter().any(|m| matches!(
+                m,
+                crate::types::ability::ContinuousModification::SetColor { .. }
+            )),
+            "KNOWN GAP (parser-misparse-backlog root cause 14): the `becomes colorless` conjunct \
+             is still dropped. If this assertion now FAILS, a colour-setting arm landed — \
+             remove Ultimate Spider-Man from root cause 14 in \
+             docs/parser-misparse-backlog.md as part of that change: {grants:?}"
         );
     }
 
@@ -2208,6 +3057,21 @@ mod tests {
             panic!("expected RemoveCounter, got {:?}", clause.effect);
         };
         assert!(matches!(target, TargetFilter::Typed(_)));
+    }
+
+    /// CR 601.2c: Fixed-count wording with `target` still announces its
+    /// targets. It must not be reclassified as the untargeted tracked-set
+    /// selection used by "each of two creatures".
+    #[test]
+    fn remove_counter_each_of_two_target_creatures_keeps_multi_targeting() {
+        let text = "remove a +1/+1 counter from each of two target creatures";
+        assert_eq!(remove_counter_exact_selection_count(text), None);
+        let clause = super::super::parse_effect_clause(text, &mut default_ctx());
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
+        );
+        assert!(matches!(clause.effect, Effect::RemoveCounter { .. }));
     }
 
     #[test]

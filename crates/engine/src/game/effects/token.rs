@@ -3892,6 +3892,28 @@ fn shard_ability() -> AbilityDefinition {
     })
 }
 
+/// CR 111.10 (Reality Fracture): Heartwood — "{T}: Add {R} or {G}." A
+/// two-color-choice mana rock, structurally identical to Treasure/Gold's
+/// `ManaProduction::AnyOneColor` choice restricted to the token's own printed
+/// colors, with Powerstone's plain-tap (no sacrifice) cost shape.
+fn heartwood_ability() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::AnyOneColor {
+                count: QuantityExpr::Fixed { value: 1 },
+                color_options: vec![ManaColor::Red, ManaColor::Green],
+                contribution: ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap)
+}
+
 /// CR 111.10: Predefined token abilities keyed by subtype.
 /// Returns ability definitions to inject for the given subtype, or empty if none.
 pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
@@ -3909,6 +3931,7 @@ pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
         "Junk" => vec![junk_ability()],
         "Incubator" => vec![incubator_ability()],
         "Shard" => vec![shard_ability()],
+        "Heartwood" => vec![heartwood_ability()],
         _ => vec![],
     }
 }

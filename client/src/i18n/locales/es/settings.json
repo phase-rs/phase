@@ -26,7 +26,7 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Omitir ventanas de prioridad de poco uso (experimental)",
     "skipLowUsePriorityWindowsDescription": "Pasa automáticamente tus propias ventanas de prioridad con la pila vacía durante el mantenimiento, el paso de robar y el paso final. Las paradas de fase y el Control total siguen pausando.",
-    "logDefault": "Registro predeterminado",
+    "logDockSide": "Posición del registro de la partida",
     "spellPayment": "Pago de hechizos",
     "manualManaPayment": "Pago manual de maná para hechizos",
     "spellPaymentOptions": { "auto": "Automático", "autoExceptSacrificialMana": "Preguntar antes de sacrificar", "manual": "Manual" },
@@ -56,9 +56,9 @@
       "medium": "Mediano",
       "large": "Grande"
     },
-    "logDefaultOptions": {
-      "open": "Abierto",
-      "closed": "Cerrado"
+    "logDockSideOptions": {
+      "left": "Izquierda",
+      "right": "Derecha"
     }
   },
   "visual": {
@@ -172,6 +172,7 @@
     "signedInAs": "Sesión iniciada como {{name}}",
     "syncNow": "Sincronizar ahora",
     "statusSyncing": "Sincronizando…",
+    "statusPaused": "La sincronización en la nube está en pausa mientras estás sin conexión.",
     "statusError": "Error de sincronización",
     "lastSynced": "Última sincronización: {{time}}",
     "never": "nunca",
@@ -211,6 +212,7 @@
   "visualPacks": {
     "title": "Catálogo visual sin conexión",
     "description": "Elige las imágenes que quieres conservar en este dispositivo. El catálogo de tarjetas se almacena en caché desde Scryfall y cada imagen se descarga directamente desde Scryfall.",
+    "offlineUnavailable": "Las descargas de red no están disponibles sin conexión. Vuelve a conectarte para actualizar el catálogo o instalar, sincronizar, reparar o reanudar imágenes.",
     "availability": {
       "loading": "Comprobando el soporte del catálogo visual sin conexión...",
       "browser": "Este navegador no ofrece las funciones de almacenamiento local necesarias para descargar imágenes sin conexión.",
@@ -221,7 +223,7 @@
     },
     "selector": {
       "title": "Selección de catálogo",
-      "core": "Reverso de carta",
+      "core": "Reverso de carta y símbolos de maná",
       "printing": "Impresiones de la colección",
       "complete": "Todas las imágenes actuales de cartas en inglés",
       "curated": "Una imagen por carta",
@@ -341,7 +343,7 @@
       "catalog_state": "No se pudo recuperar el estado del catálogo histórico"
     },
     "packs": {
-      "core": "Reverso de carta",
+      "core": "Reverso de carta y símbolos de maná",
       "complete": "Todas las imágenes actuales de cartas en inglés",
       "curated": "Una imagen por carta",
       "deckLibrary": "Biblioteca de mazos",
@@ -399,6 +401,23 @@
       "combat": "Tiempo del daño de combate: cuánto permanecen bloqueadores y atacantes antes de que se resuelva el daño.",
       "banners": "Visualización del cartel de inicio de turno."
     }
+  },
+  "offlinePreparation": {
+    "title": "Preparación sin conexión",
+    "description": "Prepara este dispositivo para juego local sin conexión antes de activar Trabajar sin conexión.",
+    "prepare": "Preparar sin conexión",
+    "preparing": "Preparando…",
+    "workOffline": "Trabajar sin conexión",
+    "checklistLabel": "Lista de preparación sin conexión",
+    "visualWarning": "Los paquetes visuales instalados necesitan atención. Ábrelos para repararlos; el juego local sigue disponible.",
+    "cardArtMissing": "No hay imágenes de cartas instaladas. Las cartas se mostrarán sin ilustración sin conexión: instala un paquete en Paquetes visuales, abajo.",
+    "cardArtInstalled": "Imágenes de cartas en caché: {{packs}}",
+    "incompleteTitle": "La preparación sin conexión está incompleta",
+    "incompleteMessage": "Falta: {{capabilities}}. ¿Activar Trabajar sin conexión de todos modos?",
+    "confirmOffline": "Activar Trabajar sin conexión",
+    "states": { "needs-preparation": "Prepara este dispositivo antes de trabajar sin conexión.", "preparing": "Preparando capacidades de juego local…", "ready": "Este dispositivo está listo para jugar sin conexión.", "failed": "Algunas capacidades necesarias no están listas.", "reconnect-required": "Vuelve a conectarte antes de preparar el juego sin conexión.", "reload-or-relaunch-required": "Recarga la aplicación o reinicia el escritorio y vuelve a preparar." },
+    "capabilities": { "appShell": "Aplicación", "browserEngine": "Motor y base de cartas", "scryfallSearch": "Datos de búsqueda", "preconCatalog": "Mazos preconstruidos", "bundledAiCatalog": "Catálogo de mazos de IA", "deckLibrary": "Biblioteca de mazos instalada", "coreVisuals": "Reverso de carta y símbolos de maná", "nativeEngine": "Motor nativo" },
+    "capabilityStates": { "ready": "Listo", "not-ready": "No listo", "reload-required": "Debe recargarse", "not-applicable": "No aplicable", "not-installed": "No instalado" }
   },
   "artChain": {
     "emptyState": "Usando la ilustración predeterminada de Scryfall. Añade reglas a continuación para personalizar.",

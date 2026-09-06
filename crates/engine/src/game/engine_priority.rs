@@ -278,6 +278,14 @@ fn run_post_action_pipeline_from_with_policy(
         // the disjunct is inert at the reducer's own pipeline call and bites only
         // at the unguarded `pass_priority_once_with_pipeline` seam.
         if super::engine_resolution_choices::handles(&state.waiting_for)
+            // CR 603.3b + CR 608.2d: a resolution paused on one of its own
+            // choices has not reached a priority boundary, so its earlier
+            // siblings' triggers must not be ordered yet. `handles` is an
+            // action-dispatch predicate and misses the direct-choice frame
+            // family (`OptionalEffectChoice`, `OpponentMayChoice`,
+            // `ProliferateChoice`, the resolution `PayCost`); the frame stack
+            // answers structurally for all of them.
+            || triggers::resolution_frame_is_live_off_priority(state)
             || state.pending_replacement.is_some()
             || state.pending_resolution_completion.is_some()
             || deferred_trigger_batch_was_sba_choice_parked

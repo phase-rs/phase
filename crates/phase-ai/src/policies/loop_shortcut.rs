@@ -675,6 +675,7 @@ mod tests {
                 ..Default::default()
             },
             victim_slot: vec![],
+            declarable_victims: vec![],
         }
     }
 
@@ -690,6 +691,7 @@ mod tests {
                 ..Default::default()
             },
             victim_slot: vec![],
+            declarable_victims: vec![],
         }
     }
 

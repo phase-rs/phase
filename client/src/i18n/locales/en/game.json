@@ -3,7 +3,8 @@
     "badge": "Blocked",
     "cantBeActivated": "This ability can't be activated",
     "cantActivateDuring": "Can't be activated right now",
-    "prohibited": "Activating this ability is prohibited"
+    "prohibited": "Activating this ability is prohibited",
+    "costNotPayableNow": "You can't pay this cost right now"
   },
   "manaSourceSelection": {
     "title": "Choose a mana source",
@@ -27,10 +28,27 @@
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
     "countAria": "Number of iterations",
+    "countDecreaseAria": "Decrease the number of iterations",
+    "countIncreaseAria": "Increase the number of iterations",
     "previewTitle_one": "Repeating once produces:",
     "previewTitle_other": "Repeating {{count}} times produces:",
     "previewEntry": "{{amount}} {{resource}}",
     "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
+    "allocationTitle": "Split the repetitions across targets:",
+    "allocationAria": "Repetitions for {{subject}}",
+    "allocationDecreaseAria": "Decrease repetitions for {{subject}}",
+    "allocationIncreaseAria": "Increase repetitions for {{subject}}",
+    "allocationSum": "{{allocated}} of {{total}} repetitions allocated.",
+    "evenSplit": "Reset to the even split",
+    "customDistribution": "Custom distribution — the engine has not previewed this split.",
+    "announceTitle": "Choose the target every repetition announces:",
+    "announce": "Announce",
+    "announceAria": "Announce {{subject}}",
+    "mayTitle": "Optional ability {{group}} — repeat this choice each iteration?",
+    "mayTake": "Take it",
+    "mayDecline": "Decline it",
+    "mayTakeAria": "Take optional ability {{group}}",
+    "mayDeclineAria": "Decline optional ability {{group}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -38,6 +56,13 @@
       "ImmediateWin": "This loop wins the game.",
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
+    },
+    "respondDeclaredTitle": "Proposed declaration:",
+    "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
+    "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondDecision": {
+      "take": "{{subject}} — taken each iteration",
+      "decline": "{{subject}} — declined each iteration"
     }
   },
   "precastShortcut": {
@@ -566,6 +591,8 @@
     "unboundedConditionalYouTooltip": "Unbounded {{resource}} (∞) — collapse pending; this may stay unbounded, and you'll name the count if it doesn't",
     "unboundedMixedTooltip": "Unbounded {{resource}} (∞) — part of this group has a pending collapse; part remains unbounded",
     "unboundedConditionalGlyph": "∞→?",
+    "boundedLoopGlyph": "≤{{bound}}×",
+    "boundedLoopTooltip": "{{resource}} from a detected loop, bounded at {{bound}} repetitions",
     "unboundedManaPoolMarker": "Unbounded mana (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "life",
@@ -658,6 +685,8 @@
     "chooseXInputAria": "Enter X value",
     "decreaseX": "Decrease X value",
     "increaseX": "Increase X value",
+    "maximum": "Max",
+    "setXToMaximum": "Set X to maximum",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
     "amountOutOfRange": "Enter a whole number between {{min}} and {{max}}",
@@ -713,7 +742,9 @@
   },
   "storm": {
     "copies_one": "Storm: {{count}} copy",
-    "copies_other": "Storm: {{count}} copies"
+    "copies_other": "Storm: {{count}} copies",
+    "count_one": "Storm count: {{count}} copy",
+    "count_other": "Storm count: {{count}} copies"
   },
   "opponentHud": {
     "ally": "Ally",
@@ -875,6 +906,8 @@
   },
   "log": {
     "title": "Game Log",
+    "dockLeft": "Dock game log on the left",
+    "dockRight": "Dock game log on the right",
     "noEvents": "No events yet",
     "closeLog": "Close game log",
     "verbosityFull": "full",
@@ -1157,7 +1190,10 @@
       "subtitlePreparedCopy": "Cast the prepared spell?",
       "subtitleActivate": "Activate this ability?",
       "subtitlePlay": "Choose how to play this card",
-      "subtitleChoose": "Choose an ability to activate"
+      "subtitleChoose": "Choose an ability to activate",
+      "unlockThisDoor": "Unlock this door",
+      "unlockHalf": "Unlock {{name}}",
+      "unlockHalfWithCost": "Unlock {{name}} ({{cost}})"
     },
     "manaRestrictions": {
       "tapForMana": "Tap for mana",
@@ -1687,6 +1723,9 @@
       "filterCreatures": "Creatures",
       "filterLands": "Lands",
       "filterNonland": "Nonland",
+      "searchLabel": "Filter",
+      "searchPlaceholder": "Card name",
+      "searchCardsAria": "Filter cards by name",
       "counterDiscard": "Discard {{selected}} of {{cap}}",
       "counterKeep": "Keep {{selected}} of {{cap}}",
       "keepInstead": "Keep instead",
@@ -1775,6 +1814,12 @@
     "untapSubset": {
       "title": "Choose permanents to untap",
       "subtitle": "Untap up to {{count}} of these permanents."
+    },
+    "rippleBottom": {
+      "title": "Order the rest on the bottom",
+      "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
+      "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
+      "hint": "Drag to reorder · position 1 ends up on top of this pile"
     }
   },
   "specializeColor": {
@@ -2272,8 +2317,21 @@
   "replacement": {
     "eyebrow": "Resolution Order",
     "title": "Replacement Effects",
-    "subtitle": "Choose which replacement effect applies first.",
-    "candidateFallback": "Replacement Effect {{number}}"
+    "orderSubtitle": "These effects all change how this event happens. Drag to set the order they apply in — the last one applied is the one that takes effect (CR 616.1).",
+    "appliedFirst": "Applied first (overwritten)",
+    "appliedLast": "Applied last — this wins",
+    "resultLabel": "Result: {{outcome}}",
+    "confirmOrder": "Confirm Order",
+    "dragHint": "Drag to reorder, or use the arrows.",
+    "chooseSubtitle": "Choose which replacement effect to apply.",
+    "candidateFallback": "Replacement Effect {{number}}",
+    "orderSubtitleComposing": "These effects all change how this event happens. Drag to set the order they apply in — each one applies, so the order changes the result (CR 616.1).",
+    "appliedEarlier": "Applied earlier",
+    "appliedLater": "Applied later",
+    "composesNote": "Every effect applies — the order changes how they combine.",
+    "moveUpNamed": "Move {{name}} earlier",
+    "moveDownNamed": "Move {{name}} later",
+    "positionAnnounce": "Position {{position}} of {{total}}"
   },
   "retargetChoice": {
     "title": "Change Target",
@@ -2352,7 +2410,15 @@
   },
   "outsideGame": {
     "fromExile": "From exile",
-    "fromSideboard": "From sideboard"
+    "fromSideboard": "From sideboard",
+    "fromBoosterPack": "From {{setCode}} booster pack"
+  },
+  "boosterPack": {
+    "title": "{{setCode}} Booster Pack",
+    "subtitleExact_one": "Choose {{count}} card to keep — the rest are removed from the game",
+    "subtitleExact_other": "Choose {{count}} cards to keep — the rest are removed from the game",
+    "subtitleUpTo_one": "Choose up to {{count}} card to keep — the rest are removed from the game",
+    "subtitleUpTo_other": "Choose up to {{count}} cards to keep — the rest are removed from the game"
   },
   "phaseName": {
     "Untap": "Untap",
@@ -2455,5 +2521,14 @@
       "priority": "Priority",
       "thinking": "Thinking"
     }
+  },
+  "rippleReveal": {
+    "eyebrow": "Ripple",
+    "title": "Reveal the top of your library?",
+    "subtitle_one": "You may reveal the top {{count}} card. Same-named cards can be cast free; the rest go to the bottom.",
+    "subtitle_other": "You may reveal the top {{count}} cards. Same-named cards can be cast free; the rest go to the bottom.",
+    "reveal_one": "Reveal {{count}} card",
+    "reveal_other": "Reveal {{count}} cards",
+    "decline": "Don't reveal"
   }
 }

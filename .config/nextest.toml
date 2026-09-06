@@ -15,8 +15,20 @@ fail-fast = false
 # .github/workflows/ci.yml). This profile adds two CI-appropriate behaviors:
 #   - fail-fast = false: a shard reports every failure, not just the first one.
 #   - slow-timeout: warn on any test running past 60s and hard-kill it after
-#     4 periods (240s) as a runaway/hang guard. The slowest legitimate test is
-#     ~12s, so this never trips on healthy tests.
+#     4 periods (240s) as a runaway/hang guard. Every legitimate test but the
+#     one overridden below finishes well inside that.
 [profile.ci]
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 4 }
+
+# `loop_shortcut::an_evicting_beat_mints_without_growing_the_ring` drives 120
+# beats of a four-player Commander dump through production `apply()` until the
+# loop-detect ring reaches capacity. Measured at ~140s on an M-series laptop
+# with a warm cache (both on main and on a branch, so it is the drive, not a
+# regression), it lands past the 240s kill on a hosted runner sharing the box
+# with three other test threads (PR #8301, shard 2/4). Give that one drive the
+# room it needs instead of letting it fail unrelated PRs at the threshold; the
+# hang guard stays in force for everything else.
+[[profile.ci.overrides]]
+filter = 'test(=loop_shortcut::an_evicting_beat_mints_without_growing_the_ring)'
+slow-timeout = { period = "60s", terminate-after = 10 }

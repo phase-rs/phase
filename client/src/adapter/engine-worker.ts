@@ -30,6 +30,9 @@ import init, {
   load_card_database,
   build_ai_card_subset,
   evaluate_deck_compatibility_js,
+  evaluateDeckFormatGate,
+  customFormatFromLobbyConfig,
+  formatConfigForCustomRules,
   apply_seat_mutation,
   project_seat_view,
   export_game_state_json,
@@ -44,13 +47,17 @@ import init, {
   replay_seek_js,
   clear_replay_playback,
   preview_mana_payment_js,
+  preview_interaction_js,
   get_card_face_data,
   get_card_parse_details,
   get_card_rulings,
 } from "@wasm/engine";
 
 import { isActionOutcome, type ActionRejection, type AiActionProposal, type GameAction } from "./types";
-import type { InteractionSubmission } from "./generated/interaction";
+import type {
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
 
@@ -82,6 +89,7 @@ type EngineRequest =
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
+  | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
   | { type: "getLegalActions"; id: number }
@@ -103,6 +111,9 @@ type EngineRequest =
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
+  | { type: "evaluateDeckFormatGate"; id: number; request: unknown }
+  | { type: "customFormatFromLobbyConfig"; id: number; name: string; formatConfig: unknown }
+  | { type: "formatConfigForCustomRules"; id: number; customRules: unknown }
   | { type: "getCardFaceData"; id: number; cardName: string }
   | { type: "getCardParseDetails"; id: number; cardName: string }
   | { type: "getCardRulings"; id: number; cardName: string }
@@ -239,6 +250,34 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      // The ENFORCING sibling of `evaluateDeckCompatibility`: always returns a
+      // definite `{ compatible, reasons }`, never a tri-state. Used by the P2P
+      // host's per-guest deck-kick gate, which must not inherit the UI-hint
+      // path's "no opinion" answer for Custom formats.
+      case "evaluateDeckFormatGate": {
+        if (!cardDbLoaded) {
+          error(
+            msg.id,
+            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
+          );
+          break;
+        }
+        result(msg.id, evaluateDeckFormatGate(msg.request));
+        break;
+      }
+
+      // Custom-format save/select. Neither call touches the card database —
+      // they are pure format-schema conversions — so neither gates on it.
+      case "customFormatFromLobbyConfig": {
+        result(msg.id, customFormatFromLobbyConfig(msg.name, msg.formatConfig));
+        break;
+      }
+
+      case "formatConfigForCustomRules": {
+        result(msg.id, formatConfigForCustomRules(msg.customRules));
+        break;
+      }
+
       case "getCardFaceData": {
         result(msg.id, get_card_face_data(msg.cardName));
         break;
@@ -362,6 +401,24 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "previewManaPayment": {
         const outcome = preview_mana_payment_js(msg.actor, msg.action);
+        if (typeof outcome === "string") {
+          error(msg.id, outcome);
+          break;
+        }
+        if (!isActionOutcome(outcome)) {
+          malformedOutcomeError(msg.id);
+          break;
+        }
+        if (outcome.status === "rejected") {
+          rejectionError(msg.id, outcome.rejection);
+          break;
+        }
+        result(msg.id, outcome.result);
+        break;
+      }
+
+      case "previewInteraction": {
+        const outcome = preview_interaction_js(msg.actor, msg.request);
         if (typeof outcome === "string") {
           error(msg.id, outcome);
           break;

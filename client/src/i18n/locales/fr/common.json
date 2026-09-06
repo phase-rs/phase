@@ -82,7 +82,8 @@
     "clickModeButton": "Bouton mode clic",
     "shown": "Affiché",
     "hidden": "Masqué",
-    "resume": "Reprendre",
+    "openGameLog": "Ouvrir le journal de partie",
+    "closeGameLog": "Fermer le journal de partie",
     "settings": "Paramètres",
     "boardLayoutSplit": "Divisé",
     "boardLayoutLegacy": "Legacy",
@@ -106,6 +107,7 @@
   },
   "volume": {
     "deviceBlocked": "Audio indisponible — le serveur audio du système ne répond pas. Redémarrez l'application pour réessayer.",
+    "mediaUnavailable": "Audio indisponible — les composants multimédias nécessaires à la lecture du son sont absents de ce système. Installez les paquets de greffons GStreamer de votre distribution, puis redémarrez l'application.",
     "mute": "Couper le son",
     "unmute": "Rétablir le son",
     "volume": "Volume"

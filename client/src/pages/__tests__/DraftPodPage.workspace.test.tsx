@@ -43,7 +43,7 @@ const store = vi.hoisted(() => {
     { instance_id: "copy-a", name: "Shared", set_code: "TST", collector_number: "1", rarity: "mythic", colors: [], cmc: 1, type_line: "Card" },
   ];
   const view = {
-    status: "Drafting", kind: "Premier", pool: cards, current_pack: cards, draft_effects: [],
+    status: "Drafting", kind: "Premier", commanders_required: 0, pool: cards, current_pack: cards, draft_effects: [],
     pool_groups: {
       color_groups: [], type_groups: [], cmc_groups: [], rarity_groups: [],
       type_filter_options: [], color_filter_options: [],
@@ -105,7 +105,8 @@ const podStore = vi.hoisted(() => ({
 
 const router = vi.hoisted(() => ({ navigate: vi.fn() }));
 
-vi.mock("../../stores/multiplayerDraftStore", () => {
+vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../stores/multiplayerDraftStore")>();
   const hook = Object.assign(
     (selector: (state: typeof store.state) => unknown) => selector(store.state),
     {
@@ -114,6 +115,7 @@ vi.mock("../../stores/multiplayerDraftStore", () => {
     },
   );
   return {
+    ...actual,
     useMultiplayerDraftStore: hook,
     draftPodScreen: (state: typeof store.state) => state.phase,
     intergamePromptKey: () => null,
@@ -176,10 +178,15 @@ vi.mock("../../components/draft/HostControls", () => ({
   }): readonly DraftShellTopAction[] => {
     captured.hostActionsEnabled.push(enabled);
     captured.hostEndActions.push(endDraftAction);
-    return enabled && store.state.role === "host" ? [
-      { id: "pause-resume", label: "Pause Draft", tone: "neutral", onClick: vi.fn() },
-      endDraftAction,
-    ] : [];
+    if (!enabled || store.state.role !== "host") return [];
+    if (store.state.phase === "drafting") {
+      return [
+        { id: "pause-resume", label: "Pause Draft", tone: "neutral", onClick: vi.fn() },
+        endDraftAction,
+      ];
+    }
+    if (store.state.phase === "deckbuilding") return [endDraftAction];
+    return [];
   },
 }));
 vi.mock("../../components/draft/SeatStatusRing", () => ({ SeatStatusRing: () => <div data-testid="seat-status-ring" /> }));
@@ -250,6 +257,8 @@ describe("DraftPodPage workspace", () => {
     captured.hostPresentations = [];
     store.state.phase = "drafting";
     store.state.role = "host";
+    store.state.view.kind = "Premier";
+    store.state.view.commanders_required = 0;
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 900 });
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });
@@ -292,6 +301,33 @@ describe("DraftPodPage workspace", () => {
     expect(screen.getByTestId("deckbuilder")).toBeInTheDocument();
     expect(captured.deckbuilder?.workspace).toBe(store.state.workspaceState);
     expect(captured.deckbuilder?.capabilities).toEqual({ kind: "editable-pool", suggestions: false });
+  });
+
+  it("forwards the engine commander requirement independently of draft kind", () => {
+    store.state.phase = "deckbuilding";
+    const rendered = render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+
+    expect(captured.deckbuilder?.view.commanders_required).toBe(0);
+
+    act(() => {
+      store.state.view.kind = "Premier";
+      store.state.view.commanders_required = 1;
+    });
+    rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    expect(captured.deckbuilder?.view).toMatchObject({
+      kind: "Premier",
+      commanders_required: 1,
+    });
+
+    act(() => {
+      store.state.view.kind = "CommanderDraft";
+      store.state.view.commanders_required = 0;
+    });
+    rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    expect(captured.deckbuilder?.view).toMatchObject({
+      kind: "CommanderDraft",
+      commanders_required: 0,
+    });
   });
 
   it("forwards explicit preview settings in match pool review", () => {
@@ -367,9 +403,11 @@ describe("DraftPodPage workspace", () => {
     expect(captured.shellMode).toBe("phone-deckbuilding");
     expect(captured.phoneAction).toBeUndefined();
     expect(captured.builderLayout).toBe(responsiveLayout);
-    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(false);
-    expect(captured.topActions).toEqual([]);
-    expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
+    expect(captured.topActions).toHaveLength(1);
+    expect(captured.topActions[0].id).toBe("end-draft");
+    expect(captured.topActions.some(({ id }) => id === "pause-resume")).toBe(false);
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
   });
 
   it.each([
@@ -429,11 +467,13 @@ describe("DraftPodPage workspace", () => {
     expect(captured.showProgress).toBe(true);
     expect(captured.builderLayout).toBe(responsiveLayout);
     expect(captured.menuShell).toMatchObject({ compactTopPadding: true });
-    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(false);
-    expect(captured.topActions).toEqual([]);
+    expect(captured.hostActionsEnabled[captured.hostActionsEnabled.length - 1]).toBe(true);
+    expect(captured.topActions).toHaveLength(1);
+    expect(captured.topActions[0].id).toBe("end-draft");
+    expect(captured.topActions.some(({ id }) => id === "pause-resume")).toBe(false);
     expect(captured.phoneAction).toBeUndefined();
     expect(screen.queryByRole("dialog", { name: "Pod Draft in Progress" })).not.toBeInTheDocument();
-    expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
   });
 
   it("keeps desktop drafting controls floating while guest and non-drafting states stay gated", () => {
@@ -458,8 +498,8 @@ describe("DraftPodPage workspace", () => {
       store.state.phase = "deckbuilding";
     });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
-    expect(captured.topActions).toEqual([]);
-    expect(captured.floatingActions).toEqual([]);
+    expect(captured.topActions.map(({ id }) => id)).toEqual(["end-draft"]);
+    expect(captured.floatingActions.map(({ id }) => id)).toEqual(["end-draft"]);
     expect(captured.floatingEndAction).toBe(captured.hostEndActions[captured.hostEndActions.length - 1]);
     expect(screen.getByTestId("host-controls-floating")).toBeInTheDocument();
   });
@@ -491,7 +531,7 @@ describe("DraftPodPage workspace", () => {
     });
   });
 
-  it("keeps a pending compact end action disabled after the phase moves to floating controls", () => {
+  it("keeps a pending compact end action disabled after the phase moves to deckbuilding", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1024 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 768 });
     vi.stubGlobal("confirm", vi.fn(() => true));
@@ -505,10 +545,11 @@ describe("DraftPodPage workspace", () => {
 
     act(() => { store.state.phase = "deckbuilding"; });
     rendered.rerender(<MemoryRouter><DraftPodPage /></MemoryRouter>);
-    const floatingEndAction = captured.floatingEndAction;
-    expect(screen.getByTestId("host-controls-floating")).toBeDisabled();
-    expect(floatingEndAction).toMatchObject({ disabled: true });
-    act(() => floatingEndAction?.onClick());
+    const deckbuildingEndAction = captured.topActions.find(({ id }) => id === "end-draft");
+    expect(captured.topActions.some(({ id }) => id === "pause-resume")).toBe(false);
+    expect(deckbuildingEndAction).toMatchObject({ disabled: true });
+    expect(screen.queryByTestId("host-controls-floating")).not.toBeInTheDocument();
+    act(() => deckbuildingEndAction?.onClick());
     expect(store.state.leave).toHaveBeenCalledOnce();
   });
 
