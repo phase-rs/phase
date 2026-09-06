@@ -7760,7 +7760,35 @@ fn count_dropped_oracle_lines(
     }
 
     // Only reached for cards the cardinality ceiling already suspects, so the
-    // normalization below stays off the hot path for the rest of the corpus.
+    // normalization inside stays off the hot path for the rest of the corpus.
+    let uncovered = uncovered_oracle_lines(lines, card_name, parse_details).len();
+
+    // A top-level item carrying no `source_text` — a bare keyword, an
+    // `AdditionalCost`, a `SpellCastingOption` — represents a printed line the
+    // parser never attached text to, so each can stand in for one uncovered
+    // line. Without this the check would flag every card with a keyword line.
+    let anonymous = count_anonymous_parse_items(parse_details);
+
+    cardinality.min(uncovered.saturating_sub(anonymous))
+}
+
+/// The effective Oracle lines with no representation anywhere in the parse tree.
+///
+/// Shared by [`count_dropped_oracle_lines`] and the `missing_lines` of
+/// [`audit_silent_drops`], so the count and the lines it blames come from one
+/// filtered line set and one matcher. Deriving them separately let the audit name
+/// a line the count had already excluded and never held responsible — a casting
+/// restriction, a deck-construction sentence, a draft-procedure line.
+///
+/// Matching is `~`-normalized on both sides via [`normalize_for_matching`]: a
+/// parse item's `source_text` renders self-references as `~` while the printed
+/// line spells the card's name ("Shower of Coals deals 2 damage…" against
+/// "~ deals 2 damage…"), and raw containment misses every such pair.
+fn uncovered_oracle_lines<'a>(
+    lines: &'a [String],
+    card_name: &str,
+    parse_details: &[ParsedItem],
+) -> Vec<&'a str> {
     let card_name_lower = card_name.to_lowercase();
     let mut source_texts = Vec::new();
     collect_source_texts(parse_details, &mut source_texts);
@@ -7769,33 +7797,34 @@ fn count_dropped_oracle_lines(
         .map(|src| normalize_for_matching(&src.to_lowercase(), &card_name_lower))
         .collect();
 
-    let uncovered = lines
+    lines
         .iter()
         .filter(|line| {
-            let line = normalize_for_matching(&line.to_lowercase(), &card_name_lower);
+            let norm = normalize_for_matching(&line.to_lowercase(), &card_name_lower);
             !sources
                 .iter()
-                .any(|src| src.contains(&line) || line.contains(src.as_str()))
+                .any(|src| src.contains(&norm) || norm.contains(src.as_str()))
         })
-        .count();
-
-    // An item carrying no `source_text` — a bare keyword, an unlabeled chained
-    // effect — could be the representation of any one uncovered line, so each
-    // offsets one. Without this the check would flag every card whose behavior
-    // parses into items the parser never attached printed text to.
-    let anonymous = count_anonymous_parse_items(parse_details);
-
-    cardinality.min(uncovered.saturating_sub(anonymous))
+        .map(String::as_str)
+        .collect()
 }
 
-/// Count parse-tree items, at any depth, that carry no `source_text`.
+/// Count TOP-LEVEL parse items that carry no `source_text`.
+///
+/// Deliberately not recursive, matching the granularity
+/// [`count_effective_parsed_items`] uses for the cardinality ceiling. A top-level
+/// anonymous item is anonymous *by design* — keywords, `AdditionalCost` and
+/// `SpellCastingOption` items never carry printed text — and stands for a real
+/// printed line. A descendant that merely happens to lack `source_text` (an
+/// undescribed `sub_ability` link, a modal branch, a nested static) is detail for
+/// a line its parent already covers; counting it would let an unrelated nested
+/// node absorb the offset owed to a by-design item and so mask a genuinely
+/// dropped line elsewhere on the card.
 fn count_anonymous_parse_items(items: &[ParsedItem]) -> usize {
     items
         .iter()
-        .map(|item| {
-            usize::from(item.source_text.is_none()) + count_anonymous_parse_items(&item.children)
-        })
-        .sum()
+        .filter(|item| item.source_text.is_none())
+        .count()
 }
 
 /// Flag cards whose parsed features aren't handled by any runtime resolver.
@@ -8134,7 +8163,10 @@ pub struct SilentDropResult {
     pub parsed_items: usize,
     /// Printed lines with no representation anywhere in the parse tree.
     pub delta: usize,
-    /// Oracle lines with no corresponding parse item (best-effort match).
+    /// The uncovered lines themselves, from the same filtered set and matcher
+    /// that produced `delta`. `delta` of them are unexplained once the
+    /// `source_text`-less top-level items have been offset, so this may be the
+    /// longer list — but every entry is a real candidate for the flag.
     pub missing_lines: Vec<String>,
 }
 
@@ -8160,7 +8192,11 @@ pub fn audit_silent_drops(summary: &CoverageSummary) -> Vec<SilentDropResult> {
         let dropped = count_dropped_oracle_lines(&lines, &card.card_name, &card.parse_details);
 
         if dropped > 0 {
-            let missing_lines = find_missing_lines(oracle_text, &card.parse_details);
+            let missing_lines =
+                uncovered_oracle_lines(&lines, &card.card_name, &card.parse_details)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
             results.push(SilentDropResult {
                 card_name: card.card_name.clone(),
                 oracle_lines: lines.len(),
@@ -8233,6 +8269,17 @@ fn effective_oracle_lines(oracle_text: &str) -> Vec<String> {
         // Non-bullet line ends the modal section
         if in_modal && !stripped.starts_with('\u{2022}') {
             in_modal = false;
+        }
+
+        // CR 706.2 (rolling a die) / CR 701.51: an outcome row ("1—9 | Draw a
+        // card.", "20 | …", a level band) is the resolution table of the line
+        // above it, and the parser emits every row as a child of that one
+        // ability. Fold rows into their header exactly as modal bullets fold
+        // into their `choose` header, so a fully parsed roll is not counted as
+        // N+1 lines against 1 root. The `!effective.is_empty()` guard keeps a
+        // row that opens a card (no header to belong to) countable.
+        if !effective.is_empty() && (is_attraction_line(&lower) || is_level_effect_line(&lower)) {
+            continue;
         }
 
         effective.push(stripped.to_string());
@@ -8441,37 +8488,6 @@ fn strip_parenthesized_reminder(line: &str) -> String {
 /// ceiling in [`count_dropped_oracle_lines`], never a verdict on its own.
 fn count_effective_parsed_items(items: &[ParsedItem]) -> usize {
     items.len()
-}
-
-/// Find Oracle text lines that have no corresponding parsed item by
-/// matching against source_text fields in the parse tree.
-fn find_missing_lines(oracle_text: &str, parse_details: &[ParsedItem]) -> Vec<String> {
-    let mut source_texts: Vec<String> = Vec::new();
-    collect_source_texts(parse_details, &mut source_texts);
-
-    let source_lower: Vec<String> = source_texts.iter().map(|s| s.to_lowercase()).collect();
-
-    oracle_text
-        .split('\n')
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .filter(|line| {
-            let lower = line.to_lowercase();
-            let stripped = strip_parenthesized_reminder(&lower);
-            let stripped = stripped.trim();
-            if stripped.is_empty() {
-                return false;
-            }
-            if is_commander_permission_sentence(stripped) {
-                return false;
-            }
-            // A line is "missing" if no source_text contains it or is contained by it
-            !source_lower
-                .iter()
-                .any(|src| src.contains(stripped) || stripped.contains(src.as_str()))
-        })
-        .map(|l| l.to_string())
-        .collect()
 }
 
 /// Recursively collect all source_text values from the parse tree.
@@ -14751,6 +14767,53 @@ mod tests {
             missing.is_empty(),
             "a chained ability whose source_text spans both printed lines is not a drop: {missing:?}"
         );
+    }
+
+    /// A nested `source_text`-less node must NOT absorb the offset owed to a
+    /// by-design anonymous top-level item. Here the keyword line ("Flash") is
+    /// anonymous by design, the ability's undescribed `sub_ability` link is
+    /// anonymous incidentally, and the third printed line is a genuine drop.
+    /// Counting anonymity recursively made `anonymous` 2 against `uncovered` 2
+    /// and silently cleared the card; scoping the offset to top-level items —
+    /// the same granularity as the cardinality ceiling — keeps the drop visible.
+    #[test]
+    fn a_nested_anonymous_node_does_not_absorb_a_genuine_drop() {
+        const COVERED: &str = "Target creature gets +2/+2 until end of turn.";
+        let oracle = format!("Flash\n{COVERED}\nThis line was silently dropped.");
+
+        let mut face = make_face();
+        face.keywords.push(Keyword::Flash);
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Pump {
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    target: TargetFilter::Any,
+                },
+            )
+            .description(COVERED.to_string())
+            // Undescribed link: incidentally anonymous, and detail for the line
+            // its parent already covers.
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )),
+        );
+
+        let parse_details = build_parse_details_for_face(&face);
+        assert_eq!(
+            count_anonymous_parse_items(&parse_details),
+            1,
+            "only the by-design keyword item is anonymous at top level"
+        );
+
+        let mut missing = Vec::new();
+        check_silent_drops(&Some(oracle), "Test Card", &parse_details, &mut missing);
+        assert_eq!(missing, vec!["SilentDrop:2_of_3"]);
     }
 
     /// CR 601.3: a "Cast this spell only ..." line — with or without an ability
