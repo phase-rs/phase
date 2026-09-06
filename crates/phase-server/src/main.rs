@@ -13397,6 +13397,25 @@ mod full_create_guard_tests {
         assert!(err.contains("archenemy_player"));
     }
 
+    /// The `format_config.validate_for_player_count(pc)?` call
+    /// (`guard_full_create_game_settings_inbound`, line 1265) is one of the
+    /// five production call sites; `fields()`'s `player_count: 2` clamps to
+    /// `pc == 2`, which falls outside `CommanderDraft`'s own registry range
+    /// (3-8) — this is a retryable wire rejection (the client can resubmit
+    /// with a corrected `player_count`), unlike the same check's use at
+    /// `server_core::session::GameSession::from_persisted`.
+    #[test]
+    fn full_create_guard_rejects_player_count_outside_format_registry_range() {
+        let deck = deck();
+        let mut fields = fields(&deck, None, None);
+        let format_config = engine::types::format::FormatConfig::commander_draft();
+        fields.format_config = Some(&format_config);
+
+        let err = guard_full_create_game_settings_inbound(fields, &[]).unwrap_err();
+
+        assert!(err.contains("player_count"));
+    }
+
     #[test]
     fn full_create_guard_rejects_limited_range_until_supported() {
         let deck = deck();
@@ -14619,7 +14638,14 @@ mod refused_auto_start_join_tests {
                     // nothing and the create is refused.
                     deck: Some(DeckChoice::DeckList(Box::default())),
                 }],
-                format_config: None,
+                // Phase 1d: `validate_for_player_count` now bounds `player_count`
+                // against the format's registry range, and Standard is 2..=2.
+                // This test is about the cEDH bracket gate (which keys on AI
+                // difficulty, not format) and needs three seats, so it opens
+                // with Free-for-All (registry 2..=6, same IndividualSeats
+                // topology) rather than relying on Standard's old unenforced
+                // default.
+                format_config: Some(engine::types::format::FormatConfig::free_for_all()),
                 room_name: None,
                 host_peer_id: None,
                 draft_metadata: None,

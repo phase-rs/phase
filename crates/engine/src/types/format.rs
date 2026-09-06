@@ -213,6 +213,31 @@ pub enum SideboardPolicy {
     Unlimited,
 }
 
+impl SideboardPolicy {
+    /// CR 100.4 / CR 100.4a / CR 903.5e: whether `self` can never admit a
+    /// larger sideboard than `ceiling` would. `Forbidden` (no sideboard at
+    /// all) permits no more than anything; `Unlimited` permits no more than
+    /// `Unlimited` only; `Limited(n)` permits no more than any equal-or-looser
+    /// ceiling. A pure permissiveness comparison — never use it to decide
+    /// "which format is bigger" in any other sense.
+    ///
+    /// The single authority `built_in_axes_no_looser_than_rules` uses to
+    /// reject a built-in format's payload from declaring a sideboard
+    /// allowance looser than `GameFormat::sideboard_policy()` actually
+    /// permits. `Forbidden` is the bottom element, which is exactly
+    /// `default_sideboard_policy_fallback()` — so a payload serialized
+    /// before that field existed is admitted rather than hard-rejected.
+    pub fn permits_no_more_than(self, ceiling: Self) -> bool {
+        match (self, ceiling) {
+            (SideboardPolicy::Forbidden, _) => true,
+            (_, SideboardPolicy::Unlimited) => true,
+            (SideboardPolicy::Unlimited, _) => false,
+            (SideboardPolicy::Limited(_), SideboardPolicy::Forbidden) => false,
+            (SideboardPolicy::Limited(n), SideboardPolicy::Limited(m)) => n <= m,
+        }
+    }
+}
+
 /// A deck-construction copy ceiling for one card name: either unbounded or
 /// capped at `n`. Used at both levels of the rule — the format's default
 /// (see [`GameFormat::default_deck_copy_limit`]) and a card's printed override.
@@ -306,6 +331,51 @@ impl DeckSizeRule {
         match self {
             DeckSizeRule::Minimum(min) => format!("at least {min}"),
             DeckSizeRule::Exactly(exact) => format!("exactly {exact}"),
+        }
+    }
+}
+
+/// Who fixes a format's deck-size MAGNITUDE: the rules, or the table.
+///
+/// This type carries magnitudes ONLY — never a `DeckSizeRule`. The
+/// `Minimum`/`Exactly` DISCRIMINANT is never a table agreement: CR 100.5's
+/// "minimum deck size … no maximum deck size for non-Commander decks" and
+/// CR 903.5a's "the minimum deck size and the maximum deck size are both 100"
+/// are different rules, not looser restatements of each other, and both are
+/// live (`DeckSizeRule::accepts`, `DeckSizeRule::min_cards`). Because this
+/// type cannot express a discriminant, no registry entry can delegate one even
+/// by mistake; the discriminant is pinned structurally by the gate's tuple
+/// match instead. The two halves are deliberately separated.
+///
+/// The magnitude set is CLOSED, never open. `FormatConfig.deck_size` reaches
+/// deck admission (`DeckSizeRule::accepts` in `game::deck_validation`) and the
+/// between-games sideboard floor (`DeckSizeRule::min_cards` in
+/// `game::match_flow`), so an unbounded magnitude would let a host publish a
+/// lobby with an arbitrarily low deck floor that every joiner's engine then
+/// honors — the same class of hole as a forged `sideboard_policy`.
+///
+/// Deliberately NOT a `DeckSizeRule` variant and NOT a `FormatConfig` field:
+/// this is a registry fact about a format, not part of any format's
+/// serialized rules. Keeping it off the wire is what makes it unforgeable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeckSizeAuthority {
+    /// CR 100.2a / CR 100.2b / CR 903.5a: the magnitude is fixed by the
+    /// Comprehensive Rules or by the sanctioned format's own rules.
+    RulesFixed,
+    /// The magnitude is agreed at the table before play begins; the host picks
+    /// one of these. The discriminant stays rules-fixed.
+    HostChoiceAmong(&'static [u16]),
+}
+
+impl DeckSizeAuthority {
+    /// The magnitudes a host may choose. `RulesFixed` returns the empty
+    /// slice — the registry value is then the only admissible magnitude, and
+    /// any consumer asking "may a host pick here?" can read that as
+    /// `options().is_empty()`.
+    pub fn options(self) -> &'static [u16] {
+        match self {
+            DeckSizeAuthority::RulesFixed => &[],
+            DeckSizeAuthority::HostChoiceAmong(options) => options,
         }
     }
 }
@@ -499,6 +569,455 @@ impl Serialize for FormatConfig {
     }
 }
 
+/// Ceiling on a declared `starting_life` that the built-in-format gate's
+/// `HostChoiceWithin` row admits (see that row, below). This is an ENGINE
+/// INVARIANT, not a Comprehensive Rules limit — no CR caps how high a
+/// variant's starting life total may be, so this constant is never cited
+/// with a `CR` annotation. It exists because life-total arithmetic is raw,
+/// non-saturating `i32` (e.g. `player.life += (frames - i) as i32;` in
+/// `game::engine`'s SBA/effect application), so a `starting_life` admitted
+/// at or near `i32::MAX` would overflow the very first time any effect adds
+/// to it. The value only bounds the STARTING dial — it leaves the rest of
+/// the `i32` range free for in-game life gain/loss to grow into, which is
+/// the property that actually matters; it does not re-cap `Player::life`
+/// itself. 1,000,000 comfortably clears every real starting total in the
+/// registry (Standard 20, Commander/Archenemy 40, Two-Headed Giant 30 shared
+/// / 15 per seat) with vast headroom left for house-rule variant play (e.g.
+/// a "gigantic life total" casual variant), while leaving over two billion
+/// of `i32`'s range for subsequent gameplay-driven life changes. This ceiling
+/// — and the CR 704.5a / CR 810.8c playability floor beside it — is enforced
+/// by `validate_starting_life_bounds`, which is the single shared authority
+/// for both bounds: neither a built-in payload's `starting_life` nor a
+/// Custom payload's `custom_rules.structural.starting_life` may cross either
+/// bound, regardless of which of that function's call sites checks it.
+pub const MAX_STARTING_LIFE: i32 = 1_000_000;
+
+/// CR 704.5a / CR 810.8c playability floor, and the `MAX_STARTING_LIFE`
+/// overflow-safety ceiling, on a resolved `FormatConfig`. This is the single
+/// shared authority for both bounds. `FormatConfig::deserialize` calls it
+/// from both of its arms:
+///
+/// - the built-in (`None`) arm, via `built_in_axes_no_looser_than_rules`'s
+///   `starting_life` `HostChoiceWithin` row;
+/// - the Custom (`Some(rules)`) arm, directly, on the config resolved from
+///   `custom_rules.structural.starting_life` — that arm's blanket-equality
+///   check against `FormatConfig::for_custom_rules` only proves internal
+///   self-consistency, not that the declared life total is playable or
+///   within the engine's arithmetic-safety ceiling, so this call is what
+///   actually bounds it.
+///
+/// Two more callers bound a `FormatConfig` before it ever reaches
+/// `deserialize`, each as defense in depth rather than a closing gate: a
+/// config that skipped this earlier check would still be caught by
+/// `deserialize` itself, but failing early here gives a readable
+/// lobby-level message instead of a raw `deserialize` error at game start.
+/// Namely, `engine-wasm`'s `format_config_for_custom_rules` (the resolver
+/// the frontend calls when a player selects a saved custom format out of
+/// localStorage) and `server-core`'s `SessionManager::create_game_n_players`
+/// (defense in depth alongside its existing `validate_for_player_count`/
+/// `reject_unimplemented_range_of_influence` calls).
+///
+/// CR 103.4 licenses a VARIANT starting life total; it does not by itself
+/// hand the number to a host. What does is the product: the shipped host UI
+/// has always exposed `starting_life` for every format, and
+/// `server-core`'s `create_game_honors_a_configured_starting_life` documents
+/// it as supported. The one real bound is playability: CR 704.5a ("If a
+/// player has 0 or less life, that player loses the game") and, for
+/// shared-life team formats, CR 810.8c ("If a team's life total is 0 or
+/// less, the team loses the game"). A total resolving to 0 or less per seat
+/// means every seat loses at the first state-based-action check and no game
+/// can start.
+///
+/// Checked through `starting_life_for_seat` rather than the raw field, and
+/// rather than `starting_life_for_player` (what `GameState::new` actually
+/// calls) — see `built_in_axes_no_looser_than_rules`'s history for the full
+/// rationale, which still applies unchanged: the two agree on
+/// `IndividualSeats`/`FixedTeams` (the only topologies where this field is
+/// live), and `starting_life_for_seat` is strictly more conservative on
+/// `OneVsMany`.
+///
+/// The ceiling is a sibling engineering invariant, not a rules row — see
+/// `MAX_STARTING_LIFE`'s own doc comment. It is checked against the raw
+/// declared field, not `starting_life_for_seat`, because the floor's
+/// playability concern (a seat that cannot survive the first SBA check) is a
+/// per-seat question but the overflow concern is about the field's own
+/// magnitude before it is ever divided.
+///
+/// `pub` (not `pub(crate)`): both of the two additional callers above are
+/// separate crates from `engine`.
+pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String> {
+    if config.starting_life_for_seat() < 1 {
+        return Err(format!(
+            "FormatConfig.starting_life is {}, which resolves to {} per seat for {} — every seat \
+             must begin above 0 life or the game ends immediately at the first \
+             state-based-action check (CR 704.5a; CR 810.8c for shared-life team formats)",
+            config.starting_life,
+            config.starting_life_for_seat(),
+            config.format,
+        ));
+    }
+    if config.starting_life > MAX_STARTING_LIFE {
+        return Err(format!(
+            "FormatConfig.starting_life is {}, but the engine caps a declared starting life at \
+             {MAX_STARTING_LIFE} to keep in-game life-total arithmetic (raw i32) from overflowing \
+             — this is an engine invariant, not a Comprehensive Rules limit",
+            config.starting_life,
+        ));
+    }
+    Ok(())
+}
+
+/// CR 100.2a / CR 100.4a / CR 903.5a / CR 903.5b / CR 904.2a: a BUILT-IN
+/// format's rules are fixed by the Comprehensive Rules and the engine
+/// registry except where the CR itself grants a host a choice — CR 103.4's
+/// variant life totals, CR 806's rule-free Free-for-All deck construction,
+/// and the seat count no CR fixes (CR 100.1a / CR 100.1b / CR 800.1 fix only
+/// that a game begins with two players or with more than two). Re-derive the
+/// authoritative config with `FormatConfig::for_format` and check every one
+/// of this struct's 17 fields against it under one of six verdicts:
+///
+/// - Locked: must equal the registry value exactly.
+/// - NoLooserThan: must be no more permissive than the registry value,
+///   under that axis's own permissiveness order whose BOTTOM element is
+///   that axis's `#[serde(default…)]` fallback. That is what keeps legacy
+///   payloads (saves, replays, persisted game states) deserializing: they
+///   resolve to the bottom, which is never looser.
+/// - Derived: a function of Locked fields; re-derived and compared.
+/// - HostChoice: a per-session capability orthogonal to format; free.
+/// - ShapeLocked(direction): the field's rules-bearing discriminant must
+///   match the registry's. `bidirectional` = may neither invent nor delete.
+///   `one-directional` = may not invent, may decline. Any value the shape
+///   carries is governed by that row's second verdict, stated alongside.
+///   Applies to: `deck_size` (bidirectional, the `DeckSizeRule` discriminant),
+///   `commander_damage_threshold` (bidirectional, the `Option` discriminant),
+///   `archenemy_player` (one-directional, the `Option` discriminant — behavior
+///   unchanged, this is a relabel of its existing row).
+/// - HostChoiceWithin(set): free inside a stated admissible set; each row
+///   names its set and the set's source. Applies to: `max_players` (registry
+///   range `min_players..=max_players`), `deck_size`'s magnitude (the
+///   registry's closed option list), `commander_damage_threshold`'s magnitude
+///   (`>= 1`, playability), `starting_life` (resolved per-seat total `>= 1`
+///   for playability; raw declared value `<= MAX_STARTING_LIFE` as an engine
+///   overflow-safety invariant, not a rules bound).
+///
+/// `validate_for_player_count` is the runtime pair of the `max_players` row:
+/// that row bounds the format invariant a payload may declare, the other
+/// bounds the seat count a session is actually built with.
+///
+/// The Custom counterpart is the `Some(rules)` arm below, which can demand
+/// blanket equality because no Custom payload has ever been accepted at this
+/// boundary and there are therefore no legacy Custom payloads to keep
+/// compatible with. This function is the built-in half of the same idea.
+fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), String> {
+    let rules = FormatConfig::for_format(config.format).map_err(|e| e.0)?;
+
+    // format: Locked — discharged by construction. `config.format` is the
+    // very key `for_format` was looked up by, so equality is tautological.
+
+    // starting_life: HostChoiceWithin — free, except that every seat must be
+    // able to start the game (CR 704.5a; CR 810.8c for shared-life team
+    // formats) and the declared value must not cross the engine's
+    // arithmetic-safety ceiling (`MAX_STARTING_LIFE`, no CR — it is not a
+    // rules bound). Both bounds are enforced by `validate_starting_life_
+    // bounds`, the single shared authority called from BOTH arms of
+    // `FormatConfig::deserialize` — see that function's own doc comment for
+    // the full rationale, including why the floor is checked through
+    // `starting_life_for_seat` rather than the raw field or
+    // `starting_life_for_player`.
+    validate_starting_life_bounds(config)?;
+
+    // min_players: Locked — no serde default.
+    if config.min_players != rules.min_players {
+        return Err(format!(
+            "FormatConfig.min_players is {}, but {} requires exactly {} — a built-in format's \
+             player-count floor is fixed by the engine's format registry",
+            config.min_players, config.format, rules.min_players,
+        ));
+    }
+
+    // max_players: HostChoiceWithin `rules.min_players..=rules.max_players`.
+    //
+    // The seat count a host opens a table at is a per-session choice, not a
+    // rule: CR 100.1a / CR 100.1b and CR 800.1 fix only that a two-player
+    // game begins with two players and a multiplayer game with more than two.
+    // No CR seats Commander at six — the registry ceiling is an
+    // engine/product convention, so the old message's "fixed by the
+    // Comprehensive Rules" was false.
+    //
+    // The admissible set is the registry's own inclusive range. Its floor is
+    // `rules.min_players`, which the Locked row above has already forced
+    // `config.min_players` to equal, so a payload can never declare a ceiling
+    // below its own floor.
+    //
+    // This field is load-bearing, not decorative: the browser host path
+    // submits the chosen seat count through it and reads it straight back out
+    // as the wire `player_count`, and `seat_reducer::types::seat_team_info`
+    // reads it as the seat-index bound on the Archenemy arm. When
+    // `player_count` and this field disagree, `player_count` wins —
+    // `create_game_n_players` sizes every per-seat vector from it and
+    // `GameState::new` seats exactly that many. That is safe ONLY because
+    // `validate_for_player_count` now bounds `player_count` against this same
+    // registry range (see that function); the two checks are a pair and must
+    // not be separated. This row additionally covers the boundaries that see
+    // a `FormatConfig` with no `player_count` beside it — save/replay restore
+    // and deck-compatibility requests.
+    if !(rules.min_players..=rules.max_players).contains(&config.max_players) {
+        return Err(format!(
+            "FormatConfig.max_players is {}, but {} seats {}-{} — a built-in format's seat count \
+             is a host choice inside the engine registry's own range for that format, never \
+             outside it",
+            config.max_players, config.format, rules.min_players, rules.max_players,
+        ));
+    }
+
+    // deck_size: ShapeLocked(bidirectional) on the DeckSizeRule DISCRIMINANT,
+    // plus HostChoiceWithin the registry's closed option list on the
+    // MAGNITUDE. The two halves are checked separately and neither can
+    // substitute for the other.
+    //
+    // DISCRIMINANT — always locked, in both directions. CR 100.5's "minimum
+    // with no maximum" and CR 903.5a's "exactly 100" are not comparable under
+    // any sound permissiveness order, and CR 903.13f(1) makes Commander Draft
+    // a command-zone format with a minimum, so the discriminant cannot be
+    // inferred from any other field either. It is pinned STRUCTURALLY by the
+    // tuple match below: the two cross arms return `false` unconditionally
+    // and are NEVER routed through the option list. `DeckSizeAuthority`
+    // carries bare `u16` magnitudes precisely so that no registry entry can
+    // express a discriminant change even by accident. Concretely:
+    // Free-for-All's `HostChoiceAmong(&[60, 40])` admits `Minimum(40)` and
+    // rejects `Exactly(40)`.
+    //
+    // MAGNITUDE — locked too, EXCEPT where the registry declares the
+    // format's deck size a table agreement
+    // (`GameFormat::deck_size_authority`), whose option list is a CLOSED set.
+    // Today only Free-for-All delegates, to {60, 40}. The set must stay
+    // closed because this field is live in `DeckSizeRule::accepts`
+    // (`game::deck_validation`) and `DeckSizeRule::min_cards`
+    // (`game::match_flow`).
+    let deck_size_ok = match (config.deck_size, rules.deck_size) {
+        // Same discriminant: fall through to the magnitude rule.
+        (DeckSizeRule::Minimum(declared), DeckSizeRule::Minimum(registry))
+        | (DeckSizeRule::Exactly(declared), DeckSizeRule::Exactly(registry)) => {
+            declared == registry
+                || config
+                    .format
+                    .deck_size_authority()
+                    .options()
+                    .contains(&declared)
+        }
+        // Different discriminant: refused outright, never consulted against
+        // the option list. This is the arm that makes the magnitude set safe.
+        (DeckSizeRule::Minimum(_), DeckSizeRule::Exactly(_))
+        | (DeckSizeRule::Exactly(_), DeckSizeRule::Minimum(_)) => false,
+    };
+    if !deck_size_ok {
+        return Err(format!(
+            "FormatConfig.deck_size is {:?}, but {} requires {:?}{} — a built-in format's \
+             Minimum/Exactly rule shape is fixed by the Comprehensive Rules and is never a host \
+             choice; only the count may vary, only where the format's deck size is a table \
+             agreement, and only to a listed option",
+            config.deck_size,
+            config.format,
+            rules.deck_size,
+            match config.format.deck_size_authority().options() {
+                [] => String::new(),
+                options => format!(" (count may also be one of {options:?})"),
+            },
+        ));
+    }
+
+    // singleton: Locked — no serde default.
+    if config.singleton != rules.singleton {
+        return Err(format!(
+            "FormatConfig.singleton is {}, but {} requires exactly {} — a built-in format's \
+             singleton rule is fixed by the Comprehensive Rules",
+            config.singleton, config.format, rules.singleton,
+        ));
+    }
+
+    // command_zone: Locked — CR 408.1. No default.
+    if config.command_zone != rules.command_zone {
+        return Err(format!(
+            "FormatConfig.command_zone is {}, but {} requires exactly {} — a built-in format's \
+             command-zone usage is fixed by the Comprehensive Rules",
+            config.command_zone, config.format, rules.command_zone,
+        ));
+    }
+
+    // commander_damage_threshold: ShapeLocked(bidirectional) on the Option
+    // discriminant, plus HostChoiceWithin `>= 1` on the magnitude.
+    //
+    // The SHAPE is the rules fact (CR 903.10a / CR 704.6c): either the format
+    // has the commander-damage state-based action or it does not. `None` is
+    // not a "looser threshold" — it DELETES the SBA (the commander-damage
+    // loss collectors both return early on `None`) and flips the Derived
+    // `uses_commander` row below, so a payload declaring both `None` and
+    // `uses_commander: false` would otherwise be self-consistent and slip
+    // past every other row. A payload may neither invent nor delete it.
+    //
+    // The MAGNITUDE is a house-rule dial, exposed by the shipped host UI
+    // whenever the format has a threshold at all and unvalidated on this path
+    // before this gate existed. CR 903.10a fixes 21 for sanctioned Commander;
+    // the engine treats only the SBA's EXISTENCE as rules-fixed and reads the
+    // number straight from the config, so a table playing to 30 is as
+    // well-defined as one playing to 21. Zero is not: `damage >= 0` holds for
+    // any tracked entry, making `Some(0)` an immediate CR 704.6c loss rather
+    // than a threshold.
+    match (
+        config.commander_damage_threshold,
+        rules.commander_damage_threshold,
+    ) {
+        (Some(declared), None) => {
+            return Err(format!(
+                "FormatConfig.commander_damage_threshold is Some({declared}), but {} does not \
+                 use the commander-damage state-based action at all — only commander-damage \
+                 formats may declare this field",
+                config.format,
+            ));
+        }
+        (None, Some(registry)) => {
+            return Err(format!(
+                "FormatConfig.commander_damage_threshold is null, but {} loses a player to \
+                 {registry} combat damage from one commander (CR 903.10a / CR 704.6c) — a \
+                 payload may set the threshold but never remove it",
+                config.format,
+            ));
+        }
+        (Some(0), Some(_)) => {
+            return Err(format!(
+                "FormatConfig.commander_damage_threshold is Some(0) for {} — a zero threshold \
+                 makes any tracked commander damage an immediate loss (CR 704.6c), so the \
+                 threshold must be at least 1",
+                config.format,
+            ));
+        }
+        (Some(_), Some(_)) | (None, None) => {}
+    }
+
+    // range_of_influence: Deferred, NOT checked here — a hard equality row
+    // was tried and reverted. It's unsound: legacy payloads don't only omit
+    // this field (which would resolve to the `None` default and be safe),
+    // they can also carry the OLD LEGACY SCALAR SHAPE that
+    // `RangeOfInfluenceConfigWire::Legacy` (this file, ~line 380) exists
+    // specifically to deserialize and migrate into `Some(RangeOfInfluenceConfig
+    // { .. })` — see `legacy_scalar_range_of_influence_deserializes_and_
+    // remains_rejected` in this file's own test module. A hard equality check
+    // here would turn that legitimate legacy payload into a `FormatConfig::
+    // deserialize` failure instead of letting it deserialize and then be
+    // cleanly rejected downstream. Admission for this field is the sole
+    // responsibility of the existing single authority,
+    // `reject_unimplemented_range_of_influence`, which already runs at every
+    // real ingress boundary (engine-wasm, lobby-broker, phase-server,
+    // server-core, game_state) — not re-checked here.
+
+    // team_based: Locked — no serde default.
+    if config.team_based != rules.team_based {
+        return Err(format!(
+            "FormatConfig.team_based is {}, but {} requires exactly {} — a built-in format's \
+             team structure is fixed by the Comprehensive Rules",
+            config.team_based, config.format, rules.team_based,
+        ));
+    }
+
+    // archenemy_player: ShapeLocked(one-directional) on the Option
+    // discriminant — a built-in outside the Archenemy family may not invent
+    // one — plus HostChoice on the seat index itself, bound `Deferred` to
+    // `FormatConfig::validate_for_player_count`. Behavior and the check below
+    // are unchanged; this is a comment-only relabel for taxonomy consistency.
+    // CR 904.2a / CR 904.6 only fix that an archenemy exists and takes the
+    // first turn — not which numbered seat holds it. Which seat is designated
+    // is per-seating-table state (see `custom_format::validate_custom_rules_
+    // consistency`'s doc comment on this same field), and the engine already
+    // supports a non-zero archenemy seat: `FormatConfig::validate_for_
+    // player_count` bounds-checks a *variable* seat index against the actual
+    // player count, and both `lobby-broker::inbound_guard` and
+    // `phase-server::main` carry tests for the non-zero-seat path. Seat 0
+    // being the only reachable value today is a client-side limitation
+    // (`client/src/data/formatRegistry.ts` hardcodes it), not an engine
+    // invariant this gate should encode as a hard rejection.
+    //
+    // The one thing still worth rejecting: a built-in format outside the
+    // Archenemy family (whose registry value is always `None`) declaring a
+    // seat at all, since only Archenemy-family formats use this field.
+    if rules.archenemy_player.is_none() && config.archenemy_player.is_some() {
+        return Err(format!(
+            "FormatConfig.archenemy_player is {:?}, but {} does not use an archenemy \
+             designation at all — only Archenemy-family formats may declare this field",
+            config.archenemy_player, config.format,
+        ));
+    }
+
+    // uses_commander: Derived — command_zone && commander_damage_threshold
+    // is_some(), both Locked above, so for a built-in the derivation
+    // coincides with registry equality. No serde default, so no legacy
+    // concern.
+    let derived_uses_commander = config.command_zone && config.commander_damage_threshold.is_some();
+    if config.uses_commander != derived_uses_commander {
+        return Err(format!(
+            "FormatConfig.uses_commander is {}, but command_zone ({}) and \
+             commander_damage_threshold ({:?}) derive {} — uses_commander must always equal that \
+             derivation",
+            config.uses_commander,
+            config.command_zone,
+            config.commander_damage_threshold,
+            derived_uses_commander,
+        ));
+    }
+
+    // supplies_fixed_deck: NoLooserThan over false <= true. true is the
+    // permissive value (it bypasses deck-selection gates); false demands
+    // more of the player. Fallback false is the bottom, so this is
+    // migratable now.
+    if config.supplies_fixed_deck && !rules.supplies_fixed_deck {
+        return Err(format!(
+            "FormatConfig.supplies_fixed_deck is true, but {} does not supply a fixed deck — a \
+             built-in format's fixed-deck status is fixed by the Comprehensive Rules; a payload \
+             may declare false but never true",
+            config.format,
+        ));
+    }
+
+    // sideboard_policy: NoLooserThan over Forbidden < Limited(n) <=
+    // Limited(m>=n) < Unlimited. Fallback Forbidden is the bottom, so this
+    // is migratable now. CR 100.4 / CR 100.4a / CR 903.5e.
+    if !config
+        .sideboard_policy
+        .permits_no_more_than(rules.sideboard_policy)
+    {
+        return Err(format!(
+            "FormatConfig.sideboard_policy is {:?}, which is more permissive than {} allows \
+             ({:?}) — a built-in format's sideboard policy is fixed by the Comprehensive Rules; \
+             a payload may declare an equal-or-stricter value but never a looser one",
+            config.sideboard_policy, config.format, rules.sideboard_policy,
+        ));
+    }
+
+    // default_deck_copy_limit: NoLooserThan via the existing
+    // DeckCopyLimit::permits_no_more_than. Fallback UpTo(1) is the bottom.
+    // CR 100.2a / CR 100.2b / CR 903.5b.
+    if !config
+        .default_deck_copy_limit
+        .permits_no_more_than(rules.default_deck_copy_limit)
+    {
+        return Err(format!(
+            "FormatConfig.default_deck_copy_limit is {:?}, which is more permissive than {} \
+             allows ({:?}) — a built-in format's default copy limit is fixed by the \
+             Comprehensive Rules; a payload may declare an equal-or-stricter value but never a \
+             looser one",
+            config.default_deck_copy_limit, config.format, rules.default_deck_copy_limit,
+        ));
+    }
+
+    // allow_debug_actions: HostChoice — session capability, orthogonal to
+    // format. Free.
+
+    // custom_rules: Locked (None) — the built-in arm is defined by
+    // custom_rules == None; the biconditional is established upstream by
+    // validate_custom_rules_consistency.
+
+    Ok(())
+}
+
 impl<'de> Deserialize<'de> for FormatConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -571,46 +1090,31 @@ impl<'de> Deserialize<'de> for FormatConfig {
                         expected.range_of_influence.is_some(),
                     )));
                 }
+                // The equality check above only proves `config` is internally
+                // self-consistent with its own `custom_rules.structural` — it
+                // does not bound the declared `starting_life` itself. Apply
+                // the same floor/ceiling a built-in payload gets (see
+                // `validate_starting_life_bounds`'s own doc comment), so a
+                // Custom format cannot post an unplayable (CR 704.5a / CR
+                // 810.8c) or overflow-prone (`MAX_STARTING_LIFE`) starting
+                // life just because it is internally consistent about it.
+                validate_starting_life_bounds(&config).map_err(serde::de::Error::custom)?;
             }
+            // A built-in format's rules are fixed by the Comprehensive Rules
+            // and the engine registry, except where the CR itself grants a
+            // host a choice (see `built_in_axes_no_looser_than_rules`'s own
+            // doc comment for the full verdict list, now six: Locked,
+            // NoLooserThan, Derived, HostChoice, ShapeLocked, and
+            // HostChoiceWithin). `built_in_axes_no_looser_than_rules`
+            // re-derives the authoritative config via `FormatConfig::for_format`
+            // and checks every one of this struct's 17 fields against it —
+            // absorbing what was previously a single ad hoc
+            // `default_deck_copy_limit` check as one of its 17 rows, rather
+            // than adding a parallel second check. `range_of_influence`'s row
+            // is a documented `Deferred` non-check (see that function's own
+            // comment on the field), not an omission.
             None => {
-                // CR 100.2a / CR 100.2b / CR 903.5b: a built-in format's
-                // default deck-copy ceiling is fixed by the Comprehensive
-                // Rules, not by the payload. Reject a declared value more
-                // permissive than GameFormat::default_deck_copy_limit() —
-                // without this, a client could submit
-                // {"format":"Standard","default_deck_copy_limit":{"type":"Unlimited"},...}
-                // and have every consumer that reads this stored field
-                // (starting with max_deck_copies, and after this same PR's
-                // admission fix, every evaluate_*/quick_* dispatch function
-                // too) disclose or enforce that forged, looser ceiling.
-                //
-                // Deliberately NOT a strict-equality check:
-                // default_deck_copy_limit ships its own
-                // #[serde(default = "default_deck_copy_limit_fallback")]
-                // fallback (UpTo(1)) for payloads serialized before this
-                // field existed. UpTo(1) is never looser than any real format
-                // default, so permits_no_more_than accepts it — a
-                // strict-equality reject would instead turn every legacy
-                // Standard/Pioneer/.../Planechase/Archenemy save, replay, or
-                // persisted game state into a hard deserialize failure, which
-                // is worse than the bug this check exists to close. (The
-                // Custom branch above CAN demand strict equality: no Custom
-                // FormatConfig has ever been accepted at this boundary, so
-                // there are no legacy Custom payloads to keep compatible
-                // with.)
-                let real_limit = config.format.default_deck_copy_limit();
-                if !config
-                    .default_deck_copy_limit
-                    .permits_no_more_than(real_limit)
-                {
-                    return Err(serde::de::Error::custom(format!(
-                        "FormatConfig.default_deck_copy_limit is {:?}, which is more permissive \
-                         than {} allows ({real_limit:?}) — a built-in format's default copy limit \
-                         is fixed by the Comprehensive Rules; a payload may declare an \
-                         equal-or-stricter value but never a looser one",
-                        config.default_deck_copy_limit, config.format,
-                    )));
-                }
+                built_in_axes_no_looser_than_rules(&config).map_err(serde::de::Error::custom)?
             }
         }
         Ok(config)
@@ -629,6 +1133,98 @@ impl FormatTopology {
                 ..
             }
         )
+    }
+}
+
+/// The format a deck-compatibility request is being validated against.
+///
+/// Wire-Inertness Invariant — the load-bearing security property of this
+/// type, stated here as four checkable clauses:
+///
+/// (1) This type's wire form is the bare `GameFormat` tag in BOTH
+///     directions. `Resolved` has no JSON representation. `Serialize`
+///     delegates to `self.tag().serialize(s)`; `Deserialize` is
+///     `GameFormat::deserialize(d).map(SelectedFormat::Tag)`. Both impls are
+///     hand-written, never derived, so serde never emits or accepts an
+///     externally-tagged `{"Tag":…}` / `{"Resolved":…}` envelope.
+///
+/// (2) The complete, exhaustive list of places `SelectedFormat::Resolved` is
+///     CONSTRUCTED is exactly one: `validate_name_deck_for_format_full` in
+///     `game::deck_validation`, trusted Rust that already holds a
+///     `&FormatConfig` supplied by its caller. After any change touching
+///     this type, run `grep -rn "SelectedFormat::Resolved" --include=*.rs
+///     crates/` and manually triage every hit into one of three buckets: the
+///     single production construction site above; a `match`/pattern-match
+///     arm that only READS an already-existing value (e.g. `tag()`'s and
+///     `rules()`'s own arms in this file, and this doc comment's own prose)
+///     — expected and unlimited in count, never a violation; or a
+///     `#[cfg(test)] mod tests` block. A naive `grep -v
+///     "tests/\|#\[cfg(test)\]"` text filter looks appealing but does NOT
+///     work here: `deck_validation.rs` and this very file each have their
+///     own `#[cfg(test)] mod tests` block thousands of lines above their
+///     in-module test construction sites, and a line-based `grep -v` cannot
+///     see "this line lives inside that module" — it can only filter lines
+///     that literally contain the attribute text. Do not trust a bare
+///     non-test-directory line count from this command; read each hit.
+///
+/// (3) The gate `built_in_axes_no_looser_than_rules` runs at every
+///     `FormatConfig` construction site with no exceptions, because every
+///     `FormatConfig` an in-memory `Resolved` can carry was itself produced
+///     by `FormatConfig::for_format` (registry-authored) or
+///     `FormatConfig::deserialize` (the gated ingress).
+///
+/// (4) Therefore every untrusted `DeckCompatibilityRequest` WASM boundary
+///     can only ever receive `SelectedFormat::Tag` — safe by construction,
+///     not by the absence of a test failure. A `Tag(Custom(_))` arriving
+///     there yields `rules() == Err`, which every consumer already handles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectedFormat {
+    /// A format NAME, and nothing more. The only variant any deserializer
+    /// can ever produce.
+    Tag(GameFormat),
+    /// A fully-resolved rule set, constructible ONLY by trusted Rust — see
+    /// the Wire-Inertness Invariant above. Boxed for the same
+    /// `large_enum_variant` reason `custom_rules` and `range_of_influence`
+    /// are (`:463-473` above).
+    Resolved(Box<FormatConfig>),
+}
+
+impl SelectedFormat {
+    /// The format name, regardless of whether this is a bare tag or a fully
+    /// resolved config.
+    pub fn tag(&self) -> GameFormat {
+        match self {
+            SelectedFormat::Tag(format) => *format,
+            SelectedFormat::Resolved(config) => config.format,
+        }
+    }
+
+    /// `Err` only for `Tag(Custom(_))`: a bare tag cannot resolve a custom
+    /// format's rules. `Resolved` is always `Ok`, INCLUDING for Custom —
+    /// that is the entire point of the variant.
+    pub fn rules(&self) -> Result<Cow<'_, FormatConfig>, FormatConfigError> {
+        match self {
+            SelectedFormat::Tag(format) => FormatConfig::for_format(*format).map(Cow::Owned),
+            SelectedFormat::Resolved(config) => Ok(Cow::Borrowed(config)),
+        }
+    }
+}
+
+impl Serialize for SelectedFormat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.tag().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SelectedFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        GameFormat::deserialize(deserializer).map(SelectedFormat::Tag)
     }
 }
 
@@ -772,6 +1368,61 @@ impl GameFormat {
             // rules were never consulted. Phase 1b migrates real callers to
             // read FormatConfig's resolved field instead of this method.
             GameFormat::Custom(_) => DeckCopyLimit::UpTo(1),
+        }
+    }
+
+    /// Whether this format's deck-size MAGNITUDE is rules-fixed or agreed at
+    /// the table, and if agreed, the closed set a host may choose from. The
+    /// `Minimum`/`Exactly` discriminant is always rules-fixed — see
+    /// [`DeckSizeAuthority`], which cannot express one.
+    ///
+    /// `RulesFixed` for every sanctioned format: CR 100.2a's 60-card
+    /// constructed minimum, CR 100.2b's 40-card limited minimum, CR 903.5a's
+    /// exact 100, and the supplementary-deck formats that build a constructed
+    /// deck (CR 100.2d).
+    ///
+    /// `HostChoiceAmong(&[60, 40])` for Free-for-All alone. CR 806
+    /// ("Free-for-All Variant") specifies seating, attack options and range of
+    /// influence, and CR 806.2 states that "any multiplayer options used are
+    /// determined before play begins" — it imposes NO deck-construction rule,
+    /// so the registry's `Minimum(60)` is a default convention, not a rule.
+    /// The engine already treats Free-for-All as non-constructed elsewhere:
+    /// `default_deck_copy_limit` returns `Unlimited` for it, deliberately not
+    /// CR 100.2a's `UpTo(4)`.
+    ///
+    /// This list is the SINGLE place these magnitudes exist in the repository.
+    pub fn deck_size_authority(self) -> DeckSizeAuthority {
+        match self {
+            GameFormat::FreeForAll => DeckSizeAuthority::HostChoiceAmong(&[60, 40]),
+            GameFormat::Standard
+            | GameFormat::Limited
+            | GameFormat::Commander
+            | GameFormat::Pioneer
+            | GameFormat::Modern
+            | GameFormat::Premodern
+            | GameFormat::Legacy
+            | GameFormat::Vintage
+            | GameFormat::Historic
+            | GameFormat::Timeless
+            | GameFormat::Pauper
+            | GameFormat::PauperCommander
+            | GameFormat::DuelCommander
+            | GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
+            | GameFormat::Brawl
+            | GameFormat::HistoricBrawl
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Archenemy
+            | GameFormat::Planechase
+            | GameFormat::Momir
+            | GameFormat::CommanderDraft => DeckSizeAuthority::RulesFixed,
+            // R6 (review round 3): exhaustive, no wildcard. Unreachable by
+            // construction from the admission gate: `for_format` returns Err
+            // for Custom before any verdict row runs, and a Custom payload is
+            // settled by the `Some(rules)` arm's blanket equality against
+            // `FormatConfig::for_custom_rules`. `RulesFixed` is the
+            // total-function answer for other callers, not a policy choice.
+            GameFormat::Custom(_) => DeckSizeAuthority::RulesFixed,
         }
     }
 
@@ -1285,6 +1936,11 @@ impl FormatConfig {
         }
     }
 
+    /// NOTE: `validate_starting_life_bounds` (shared by both
+    /// `FormatConfig::deserialize` arms) depends on this function's
+    /// `FixedTeams` division behavior (declared life divided by
+    /// `team_size`) to floor every seat above 0 — see that function's own
+    /// comment and the pinning test on this function.
     pub fn starting_life_for_seat(&self) -> i32 {
         match self.topology() {
             FormatTopology::IndividualSeats => self.starting_life,
@@ -1320,7 +1976,94 @@ impl FormatConfig {
         }
     }
 
+    /// Bounds a runtime seat count against this format's registry range. Owns
+    /// the seat-count bound and is the runtime pair of the `max_players`
+    /// admission row in `built_in_axes_no_looser_than_rules`: that row bounds
+    /// the format invariant a payload may declare, this one bounds the seat
+    /// count a session is actually built with.
+    ///
+    /// No protocol-version bump accompanies this: no wire *shape* changed (no
+    /// new field on any `Serialize`/`Deserialize` type), but this IS a
+    /// behavioral tightening — a `player_count` outside the format's range
+    /// that an older server would have accepted is now rejected.
+    ///
+    /// Five production call sites reach this check, and they split into
+    /// three groups by what they are validating:
+    ///
+    /// - Retryable wire rejections, validating a player_count just supplied
+    ///   on an inbound request against a *declared* `FormatConfig`: both
+    ///   ingress guards (`lobby_broker::inbound_guard::guard_create_game_
+    ///   settings_inbound` for `ServerMode::LobbyOnly`, and `phase-server`'s
+    ///   own `guard_full_create_game_settings_inbound` for `ServerMode::Full`,
+    ///   which clamps to `MAX_FULL_GAME_PLAYER_COUNT`), and the WASM
+    ///   `initialize_game_impl`'s `validate_external_format_config`. The
+    ///   client resubmits a corrected request and no state is lost.
+    /// - Session creation itself: `server_core::session::SessionManager::
+    ///   create_game_n_players` re-checks the same bound the ingress guard
+    ///   in front of it already checked, as defense in depth.
+    /// - Checked against a PERSISTED `player_count` instead — a game that
+    ///   already exists, not a fresh request. `server_core::session::
+    ///   GameSession::from_persisted` is a hard rejection here: a session
+    ///   already saved with a `player_count` outside its format's registry
+    ///   range can never be restored again through that path (see
+    ///   `from_persisted_rejects_a_persisted_player_count_outside_the_
+    ///   format_registry_range`). This is reachable, not merely
+    ///   hypothetical — e.g. a `CommanderDraft` session (registry range
+    ///   3..=8) persisted with `player_count` 2 from before this bound
+    ///   existed on whichever path created it.
+    ///
+    /// The WASM restore boundary (`decode_and_rehydrate_restored_game_state`,
+    /// shared by `restore_game_state` and `resume_multiplayer_host_state`) is
+    /// NOT a call site of this function, even though it also handles
+    /// persisted, already-exists state. Rejecting there — or repairing by
+    /// widening the restored `format_config`'s `min_players`/`max_players`
+    /// before calling this validator — was tried and reverted; see that
+    /// closure's own comment for why widening is actively unsafe (a widened
+    /// `min_players` fails `FormatConfig::deserialize`'s own admission gate
+    /// on the very next load, since `min_players` is a Locked row in
+    /// `built_in_axes_no_looser_than_rules`). This asymmetry with
+    /// `from_persisted` is deliberate and accepted as-is; this paragraph is
+    /// disclosure only.
     pub fn validate_for_player_count(&self, player_count: u8) -> Result<(), String> {
+        // CR 100.1a / CR 100.1b / CR 800.1: a two-player game begins with two
+        // players and a multiplayer game with more than two; the exact seat
+        // count a format admits is the engine registry's, not the
+        // Comprehensive Rules'. This is the runtime half of the `max_players`
+        // admission row in `built_in_axes_no_looser_than_rules`, and the two
+        // are a PAIR: that row bounds the format invariant a payload may
+        // declare, this one bounds the seat count a session is actually built
+        // with. Without this check, loosening `max_players` from Locked to a
+        // range would leave the seat-count axis unenforced — a payload could
+        // declare `max_players: 2` (admissible) alongside `player_count: 8`
+        // (previously bounded only by a global clamp that is not
+        // format-relative), and session creation would allocate eight seats
+        // for a six-seat format.
+        //
+        // This function is the single authority already called at every site
+        // where a seat count meets a `FormatConfig` — both ingress guards,
+        // the WASM session boundary, session creation, and `from_persisted`
+        // — which is why the bound belongs here rather than in a new
+        // per-caller check.
+        //
+        // A format whose floor exceeds two (Commander Draft's three,
+        // Two-Headed Giant's four per CR 810.1's "two teams of two players
+        // each") will now reject a request that a global clamp previously
+        // floored at two. That is a correct rejection: such a session was
+        // structurally broken before (a 2-seat "Two-Headed Giant" game is not
+        // a Two-Headed Giant game). The ingress `clamp(2, MAX_PLAYER_COUNT)`
+        // guards only ever RAISE a sub-2 value — they cannot produce a
+        // sub-`min_players` `player_count` from otherwise-legitimate traffic,
+        // so they are not the source of this rejection; a request naming a
+        // seat count below a format's own floor is what triggers it. If a
+        // caller is found to depend on the old behavior, that caller must
+        // pass the format's own `min_players` — this bound must not be
+        // weakened.
+        if player_count < self.min_players || player_count > self.max_players {
+            return Err(format!(
+                "player_count {player_count} is outside {}'s seat range {}-{}",
+                self.format, self.min_players, self.max_players,
+            ));
+        }
         if self.format == GameFormat::Archenemy {
             let archenemy = self.archenemy_player().unwrap_or(PlayerId(0));
             if archenemy.0 >= player_count {
@@ -1949,6 +2692,165 @@ mod tests {
     }
 
     #[test]
+    fn sideboard_policy_permits_no_more_than_is_a_sound_permissiveness_order() {
+        use SideboardPolicy::*;
+        assert!(Forbidden.permits_no_more_than(Forbidden));
+        assert!(Forbidden.permits_no_more_than(Limited(15)));
+        assert!(Forbidden.permits_no_more_than(Unlimited));
+        assert!(!Limited(15).permits_no_more_than(Forbidden));
+        assert!(Limited(1).permits_no_more_than(Limited(15)));
+        assert!(Limited(15).permits_no_more_than(Limited(15)));
+        assert!(!Limited(16).permits_no_more_than(Limited(15)));
+        assert!(Limited(15).permits_no_more_than(Unlimited));
+        assert!(Unlimited.permits_no_more_than(Unlimited));
+        assert!(!Unlimited.permits_no_more_than(Limited(15)));
+        assert!(!Unlimited.permits_no_more_than(Forbidden));
+    }
+
+    /// Registry-completeness guard for `DeckSizeAuthority`: every
+    /// `HostChoiceAmong` option list contains that format's OWN registry
+    /// magnitude (so `for_format`'s own output always passes its own gate),
+    /// `RulesFixed.options()` is empty, and the set is neither empty nor
+    /// all-`HostChoiceAmong` — a real building block, not a one-format
+    /// special case masquerading as one.
+    ///
+    /// Deliberately does NOT pin which format(s) or how many delegate their
+    /// deck-size magnitude to the table (formerly `GameFormat::FreeForAll`
+    /// and exactly one) — that was a frozen-count/frozen-identity assertion
+    /// on a set this phase's own registry is designed to grow (e.g. a future
+    /// `HostChoiceAmong` preset), not a property the building block actually
+    /// requires. See the R4 review note on this test.
+    #[test]
+    fn deck_size_authority_registry_completeness() {
+        let mut host_choice_count = 0;
+        let mut rules_fixed_count = 0;
+        for meta in GameFormat::registry() {
+            let authority = meta.format.deck_size_authority();
+            match authority {
+                DeckSizeAuthority::HostChoiceAmong(options) => {
+                    host_choice_count += 1;
+                    let registry_magnitude = meta.default_config.deck_size.min_cards();
+                    assert!(
+                        options.contains(&registry_magnitude),
+                        "{:?}'s own registry magnitude {registry_magnitude} must be in its own \
+                         option list {options:?}, or for_format's own output would fail this gate",
+                        meta.format
+                    );
+                }
+                DeckSizeAuthority::RulesFixed => {
+                    rules_fixed_count += 1;
+                    assert!(authority.options().is_empty());
+                }
+            }
+        }
+        assert!(rules_fixed_count > 0, "the set must not be empty");
+        assert!(
+            host_choice_count > 0,
+            "at least one format must delegate — the building block must not go dead"
+        );
+        assert!(
+            host_choice_count < GameFormat::registry().len(),
+            "the set must not be all-HostChoiceAmong"
+        );
+
+        // Unreachable-by-construction from the admission gate (see S2/R6):
+        // `for_format` returns `Err` for `Custom` before any verdict row
+        // runs, and a Custom payload is settled by the `Some(rules)` arm's
+        // blanket equality against `FormatConfig::for_custom_rules`.
+        // `RulesFixed` is the total-function answer for other callers, not a
+        // policy choice — not a behavior claim about any reachable path.
+        assert_eq!(
+            GameFormat::Custom(CustomFormatId(0)).deck_size_authority(),
+            DeckSizeAuthority::RulesFixed
+        );
+    }
+
+    /// Compiler-enforced completeness guard for `built_in_axes_no_looser_
+    /// than_rules`: adding a field to `FormatConfig` without updating this
+    /// exhaustive destructure is a compile error, which forces the author to
+    /// also confirm the new field is classified (Locked / NoLooserThan /
+    /// HostChoice / Derived / ShapeLocked / HostChoiceWithin) in that gate.
+    /// Replaces a prior arithmetic guard (`serialized_json_object.len() + 2
+    /// == 17`) that a future field sharing `archenemy_player`/`custom_rules`'s
+    /// `skip_serializing_if`-when-`None` shape could silently defeat without
+    /// moving the count.
+    #[test]
+    fn format_config_field_destructure_is_exhaustive() {
+        let config = FormatConfig::standard();
+        let FormatConfig {
+            format: _,
+            starting_life: _,
+            min_players: _,
+            max_players: _,
+            deck_size: _,
+            singleton: _,
+            command_zone: _,
+            commander_damage_threshold: _,
+            range_of_influence: _,
+            team_based: _,
+            archenemy_player: _,
+            uses_commander: _,
+            supplies_fixed_deck: _,
+            sideboard_policy: _,
+            default_deck_copy_limit: _,
+            allow_debug_actions: _,
+            custom_rules: _,
+        } = config;
+    }
+
+    /// V1 (Verification Matrix): `SelectedFormat`'s wire form is the bare
+    /// `GameFormat` tag in BOTH directions.
+    #[test]
+    fn selected_format_tag_round_trips_as_a_bare_game_format_string() {
+        let from_wire: SelectedFormat =
+            serde_json::from_value(serde_json::json!("Standard")).unwrap();
+        assert_eq!(from_wire, SelectedFormat::Tag(GameFormat::Standard));
+
+        let to_wire = serde_json::to_value(SelectedFormat::Tag(GameFormat::Standard)).unwrap();
+        assert_eq!(to_wire, serde_json::json!("Standard"));
+
+        let custom: SelectedFormat = serde_json::from_value(serde_json::json!("Custom:7")).unwrap();
+        assert_eq!(
+            custom,
+            SelectedFormat::Tag(GameFormat::Custom(
+                crate::types::custom_format::CustomFormatId(7)
+            ))
+        );
+
+        assert!(serde_json::from_value::<SelectedFormat>(serde_json::json!("Nonsense")).is_err());
+    }
+
+    /// V2: `Resolved` has NO JSON representation — it serializes to exactly
+    /// the bare tag, and round-tripping it back always yields `Tag`, never
+    /// `Resolved`. This is the structural half of the Wire-Inertness
+    /// Invariant: the resolved payload cannot survive a wire round-trip.
+    #[test]
+    fn selected_format_resolved_serializes_to_the_bare_tag_and_returns_as_tag() {
+        let mut config = FormatConfig::standard();
+        config.default_deck_copy_limit = DeckCopyLimit::UpTo(1);
+        let resolved = SelectedFormat::Resolved(Box::new(config));
+
+        let wire = serde_json::to_value(&resolved).unwrap();
+        assert_eq!(wire, serde_json::json!("Standard"));
+
+        let round_tripped: SelectedFormat = serde_json::from_value(wire).unwrap();
+        assert_eq!(round_tripped, SelectedFormat::Tag(GameFormat::Standard));
+    }
+
+    /// V3: neither externally-tagged envelope shape deserializes.
+    #[test]
+    fn selected_format_rejects_both_externally_tagged_envelopes() {
+        assert!(
+            serde_json::from_value::<SelectedFormat>(serde_json::json!({"Tag": "Standard"}))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<SelectedFormat>(serde_json::json!({
+            "Resolved": serde_json::to_value(FormatConfig::standard()).unwrap()
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn format_config_standard() {
         let config = FormatConfig::standard();
         assert_eq!(config.starting_life, 20);
@@ -2353,6 +3255,169 @@ mod tests {
             .validate_for_player_count(4)
             .expect_err("a range cannot exceed the table radius")
             .contains("at most 2"));
+    }
+
+    /// The new S7 seat-count bound: every registry format admits every seat
+    /// count in its own `min_players..=max_players` range.
+    #[test]
+    fn validate_for_player_count_accepts_every_seat_in_the_registry_range() {
+        for meta in GameFormat::registry() {
+            for n in meta.default_config.min_players..=meta.default_config.max_players {
+                assert!(
+                    meta.default_config.validate_for_player_count(n).is_ok(),
+                    "{:?}: {n} is within {}..={} and must be accepted",
+                    meta.format,
+                    meta.default_config.min_players,
+                    meta.default_config.max_players,
+                );
+            }
+        }
+    }
+
+    /// Commander's own registry range (2-6) rejects outside it.
+    #[test]
+    fn validate_for_player_count_rejects_outside_commander_range() {
+        let config = FormatConfig::commander();
+        assert!(config.validate_for_player_count(7).is_err());
+        assert!(config.validate_for_player_count(1).is_err());
+    }
+
+    /// The residual-hazard case named in the plan's S7 comment: Two-Headed
+    /// Giant's registry range (CR 810.1's "two teams of two players each") is
+    /// the single point 4..=4, so both a below-floor 2-seat request and an
+    /// above-ceiling 5-seat request must be rejected. Neither rejection
+    /// traces to the ingress `clamp(2, MAX_PLAYER_COUNT)` guards: those only
+    /// ever RAISE a sub-2 value, which cannot explain the 5-seat rejection,
+    /// and produces exactly 2 for a sub-2 input — never reaching this
+    /// format's own floor check on a value the clamp already handled. Both
+    /// rejections are deliberate consequences of the format's own registry
+    /// range, not an ingress-clamp artifact.
+    #[test]
+    fn validate_for_player_count_two_headed_giant_rejects_outside_its_registry_range() {
+        let config = FormatConfig::two_headed_giant();
+        assert!(config.validate_for_player_count(4).is_ok());
+        assert!(config.validate_for_player_count(2).is_err());
+        assert!(config.validate_for_player_count(5).is_err());
+    }
+
+    /// The admission gate and the runtime seat-count validator are
+    /// INDEPENDENT layers: the gate admits a config that is internally
+    /// consistent with the registry, but a caller can still hand that config
+    /// an inconsistent runtime `player_count` — this is exactly what S7
+    /// closes and this test proves the two checks are not the same check.
+    #[test]
+    fn deserialize_admission_and_validate_for_player_count_are_independent_layers() {
+        let mut host_config = FormatConfig::commander();
+        host_config.max_players = 2;
+        let json = serde_json::to_value(&host_config).unwrap();
+        let config: FormatConfig =
+            serde_json::from_value(json).expect("max_players: 2 is within Commander's own range");
+
+        assert!(config.validate_for_player_count(2).is_ok());
+        assert!(
+            config.validate_for_player_count(8).is_err(),
+            "the deserialize gate admitting the config must not imply every runtime \
+             player_count is admitted too"
+        );
+    }
+
+    /// Pins both ends of the `starting_life` admission row: the existing
+    /// floor (a per-seat total that cannot survive the first SBA check) and
+    /// the new `MAX_STARTING_LIFE` ceiling (an engine overflow-safety
+    /// invariant, not a rules bound). Exercised through the same
+    /// `serde_json` round trip as `deserialize_admission_and_validate_for_
+    /// player_count_are_independent_layers`, since `built_in_axes_no_looser_
+    /// than_rules` runs inside `FormatConfig::deserialize`.
+    #[test]
+    fn starting_life_admission_gate_pins_both_bounds() {
+        let mut floor_config = FormatConfig::standard();
+        floor_config.starting_life = 0;
+        let floor_json = serde_json::to_value(&floor_config).unwrap();
+        let floor_err = serde_json::from_value::<FormatConfig>(floor_json)
+            .expect_err("0 starting life loses every seat at the first SBA check");
+        assert!(floor_err.to_string().contains("must begin above 0"));
+
+        let mut at_ceiling = FormatConfig::standard();
+        at_ceiling.starting_life = MAX_STARTING_LIFE;
+        let at_ceiling_json = serde_json::to_value(&at_ceiling).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(at_ceiling_json).is_ok(),
+            "MAX_STARTING_LIFE itself must remain admissible"
+        );
+
+        let mut over_ceiling = FormatConfig::standard();
+        over_ceiling.starting_life = MAX_STARTING_LIFE + 1;
+        let over_ceiling_json = serde_json::to_value(&over_ceiling).unwrap();
+        let over_ceiling_err = serde_json::from_value::<FormatConfig>(over_ceiling_json)
+            .expect_err("MAX_STARTING_LIFE + 1 must be rejected");
+        assert!(over_ceiling_err.to_string().contains("engine caps"));
+    }
+
+    /// The Custom counterpart of `starting_life_admission_gate_pins_both_
+    /// bounds`: review-impl round 5 found that the `Some(rules)` arm of
+    /// `FormatConfig::deserialize` settled by blanket equality against
+    /// `FormatConfig::for_custom_rules` alone, which copies
+    /// `structural.starting_life` through unchanged with no magnitude bound
+    /// of its own — so a self-consistent Custom payload could declare
+    /// `starting_life: 0` or `i32::MAX` and be admitted. Pins that
+    /// `validate_starting_life_bounds` is now called from that arm too, via
+    /// a payload built entirely from `FormatConfig::for_custom_rules` (so
+    /// the blanket-equality check trivially passes and only the bounds check
+    /// can fail it).
+    #[test]
+    fn starting_life_admission_gate_pins_both_bounds_for_custom_format() {
+        let def = crate::types::custom_format::CustomFormatDef::from_lobby_config(
+            "Test Custom Format".to_string(),
+            &FormatConfig::standard(),
+        )
+        .expect("Standard has no unrepresentable auxiliary deck component");
+        let rules = def.rules;
+
+        let build = |starting_life: i32| {
+            let mut rules = rules.clone();
+            rules.structural.starting_life = starting_life;
+            FormatConfig::for_custom_rules(&rules)
+        };
+
+        let floor_json = serde_json::to_value(build(0)).unwrap();
+        let floor_err = serde_json::from_value::<FormatConfig>(floor_json)
+            .expect_err("0 starting life loses every seat at the first SBA check");
+        assert!(floor_err.to_string().contains("must begin above 0"));
+
+        let at_ceiling_json = serde_json::to_value(build(MAX_STARTING_LIFE)).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(at_ceiling_json).is_ok(),
+            "MAX_STARTING_LIFE itself must remain admissible for a Custom format"
+        );
+
+        let over_ceiling_json = serde_json::to_value(build(MAX_STARTING_LIFE + 1)).unwrap();
+        let over_ceiling_err = serde_json::from_value::<FormatConfig>(over_ceiling_json)
+            .expect_err("MAX_STARTING_LIFE + 1 must be rejected for a Custom format");
+        assert!(over_ceiling_err.to_string().contains("engine caps"));
+    }
+
+    /// Pin `starting_life_for_seat`'s `FixedTeams` division behavior: the
+    /// `starting_life` admission gate row depends on it dividing the declared
+    /// total evenly across `team_size`, and a future change to that behavior
+    /// must break this test loudly rather than silently changing the gate.
+    #[test]
+    fn starting_life_for_seat_pins_fixed_teams_division() {
+        let config = FormatConfig::two_headed_giant();
+        assert_eq!(config.starting_life, 30);
+        assert_eq!(
+            config.topology(),
+            FormatTopology::FixedTeams {
+                team_size: 2,
+                team_count: 2,
+                turn_structure: TurnStructure::SharedTeamTurns,
+            }
+        );
+        assert_eq!(
+            config.starting_life_for_seat(),
+            config.starting_life / 2,
+            "FixedTeams must divide the declared total evenly by team_size"
+        );
+        assert_eq!(config.starting_life_for_seat(), 15);
     }
 
     #[test]

@@ -13,8 +13,11 @@ use engine::types::custom_format::{
     WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
 };
 use engine::types::format::{
-    DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, SideboardPolicy,
+    DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
+    SideboardPolicy,
 };
+use engine::types::player::PlayerId;
+use std::collections::BTreeMap;
 
 fn sample_structural() -> StructuralRules {
     StructuralRules {
@@ -452,7 +455,7 @@ fn custom_format_deck_compatibility_summary_reports_no_opinion() {
 
     let db = CardDatabase::from_json_str("{}").expect("empty card database");
     let request = DeckCompatibilityRequest {
-        selected_format: Some(GameFormat::Custom(CustomFormatId(1))),
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
         summary_only: true,
         ..Default::default()
     };
@@ -468,7 +471,7 @@ fn custom_format_deck_compatibility_reports_no_opinion() {
 
     let db = CardDatabase::from_json_str("{}").expect("empty card database");
     let request = DeckCompatibilityRequest {
-        selected_format: Some(GameFormat::Custom(CustomFormatId(1))),
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
         summary_only: false,
         ..Default::default()
     };
@@ -520,7 +523,7 @@ fn companion_candidates_returns_empty_for_custom_format_without_panicking() {
 
     let db = CardDatabase::from_json_str("{}").expect("empty card database");
     let request = DeckCompatibilityRequest {
-        selected_format: Some(GameFormat::Custom(CustomFormatId(1))),
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Custom(CustomFormatId(1)))),
         ..Default::default()
     };
     // Exercises the exact guard added to companion_candidates: without it,
@@ -794,6 +797,531 @@ fn format_config_deserialization_accepts_a_stricter_than_truth_copy_limit() {
     assert!(serde_json::from_value::<FormatConfig>(json).is_ok());
 }
 
+/// V5 (Verification Matrix): `built_in_axes_no_looser_than_rules` rejects a
+/// forged looser `sideboard_policy` on a built-in Commander-family format —
+/// the newly-found live hole from Step 3.5 finding 1 (CR 903.5e: Commander
+/// games do not use sideboards).
+#[test]
+fn format_config_deserialization_rejects_a_forged_looser_sideboard_policy() {
+    let mut forged = FormatConfig::commander();
+    forged.sideboard_policy = SideboardPolicy::Limited(15);
+    let json = serde_json::to_value(&forged).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("a Commander payload forging a 15-card sideboard must be rejected");
+    assert!(
+        error.to_string().contains("sideboard_policy"),
+        "expected the sideboard_policy rejection message, got: {error}"
+    );
+}
+
+/// V6: `built_in_axes_no_looser_than_rules` rejects a forged
+/// `supplies_fixed_deck: true` on formats that don't supply one — the
+/// pre-existing live hole this phase's gate closes.
+#[test]
+fn format_config_deserialization_rejects_forged_supplies_fixed_deck() {
+    for builder in [
+        FormatConfig::standard,
+        FormatConfig::commander,
+        FormatConfig::archenemy,
+    ] {
+        let mut forged = builder();
+        forged.supplies_fixed_deck = true;
+        let json = serde_json::to_value(&forged).unwrap();
+        let error = serde_json::from_value::<FormatConfig>(json)
+            .expect_err("a payload forging supplies_fixed_deck: true must be rejected");
+        assert!(
+            error.to_string().contains("supplies_fixed_deck"),
+            "expected the supplies_fixed_deck rejection message, got: {error}"
+        );
+    }
+}
+
+/// V7: `archenemy_player` is `HostChoice`, not `Locked`/`NoLooserThan` — CR
+/// 904.2a / CR 904.6 only fix that an archenemy exists and takes the first
+/// turn, not which numbered seat holds it. Any seat (including a non-zero
+/// one, bounds-checked separately by `FormatConfig::validate_for_player_
+/// count`) is admitted on an Archenemy-family format; only a built-in that
+/// is never Archenemy (e.g. Standard) rejects a declared `Some` at all.
+#[test]
+fn format_config_deserialization_archenemy_player_is_a_free_host_choice_on_archenemy() {
+    let mut none_declared = FormatConfig::archenemy();
+    none_declared.archenemy_player = None;
+    let json = serde_json::to_value(&none_declared).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "None must always be admitted"
+    );
+
+    let mut different_seat = FormatConfig::archenemy();
+    different_seat.archenemy_player = Some(PlayerId(2));
+    let json = serde_json::to_value(&different_seat).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "a different, valid non-zero archenemy seat must be admitted — the seat is per-seating- \
+         table state, not a value the built-in-axes gate locks to the registry default"
+    );
+
+    let mut forged_on_standard = FormatConfig::standard();
+    forged_on_standard.archenemy_player = Some(PlayerId(0));
+    let json = serde_json::to_value(&forged_on_standard).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_err(),
+        "Standard never designates an archenemy; any declared Some must be rejected"
+    );
+}
+
+/// V8: positive control — every registry built-in's untouched, real config
+/// must still round-trip through the gate. Iterates `GameFormat::registry()`
+/// dynamically so this stays correct as formats are added.
+#[test]
+fn format_config_deserialization_accepts_every_builtin_untouched() {
+    for meta in GameFormat::registry() {
+        let config = FormatConfig::for_format(meta.format).unwrap();
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "{:?}: an untouched, real config must always be accepted",
+            meta.format
+        );
+    }
+}
+
+/// V9: legacy compatibility (D4) — a hand-built payload omitting every
+/// `#[serde(default...)]` field must still deserialize, with each field
+/// resolving to its documented fallback. The same payload with one of those
+/// fallbacks overridden to a looser value must be rejected.
+#[test]
+fn format_config_deserialization_legacy_payload_omitting_defaulted_fields_still_accepted() {
+    let mut legacy = serde_json::to_value(FormatConfig::standard()).unwrap();
+    for field in [
+        "sideboard_policy",
+        "supplies_fixed_deck",
+        "archenemy_player",
+        "range_of_influence",
+        "allow_debug_actions",
+        "custom_rules",
+        "default_deck_copy_limit",
+    ] {
+        legacy.as_object_mut().unwrap().remove(field);
+    }
+    let restored: FormatConfig = serde_json::from_value(legacy.clone())
+        .expect("a legacy payload omitting every defaulted field must still deserialize");
+    assert_eq!(restored.sideboard_policy, SideboardPolicy::Forbidden);
+    assert!(!restored.supplies_fixed_deck);
+    assert_eq!(restored.archenemy_player, None);
+    assert_eq!(restored.default_deck_copy_limit, DeckCopyLimit::UpTo(1));
+
+    // The same payload, but now ALSO declaring a looser sideboard_policy
+    // than the omitted fallback would have given, must still be rejected.
+    legacy.as_object_mut().unwrap().insert(
+        "sideboard_policy".to_string(),
+        serde_json::to_value(SideboardPolicy::Unlimited).unwrap(),
+    );
+    assert!(
+        serde_json::from_value::<FormatConfig>(legacy).is_err(),
+        "a looser explicit value must still be rejected even alongside other omitted fields"
+    );
+}
+
+/// V9b: legacy compatibility, the OTHER historical shape — real legacy data
+/// doesn't only OMIT `range_of_influence` (V9's `None`/omitted-field arm
+/// above), it can also carry the field PRESENT in the old legacy scalar wire
+/// shape (a bare integer, migrated by `RangeOfInfluenceConfigWire::Legacy` —
+/// see `format.rs`'s own `legacy_scalar_range_of_influence_deserializes_and_
+/// remains_rejected` unit test, which this fixture mirrors). That shape must
+/// still deserialize successfully on a built-in format even though the
+/// built-in's registry value is `None` — admission for this field is
+/// deferred entirely to `reject_unimplemented_range_of_influence`, not to
+/// `built_in_axes_no_looser_than_rules`.
+#[test]
+fn format_config_deserialization_legacy_scalar_range_of_influence_still_accepted() {
+    let mut legacy = serde_json::to_value(FormatConfig::standard()).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .insert("range_of_influence".to_string(), serde_json::json!(1));
+
+    let restored: FormatConfig = serde_json::from_value(legacy)
+        .expect("a legacy scalar range_of_influence payload must still deserialize");
+    assert_eq!(
+        restored.range_of_influence,
+        Some(Box::new(RangeOfInfluenceConfig {
+            default_range: 1,
+            player_overrides: BTreeMap::new(),
+        }))
+    );
+}
+
+/// V10: every `NoLooserThan` axis admits a stricter-than-truth value —
+/// paired positive control for V5/V6's negatives.
+#[test]
+fn format_config_deserialization_accepts_stricter_than_truth_on_every_no_looser_than_axis() {
+    let mut stricter_sideboard = FormatConfig::standard();
+    stricter_sideboard.sideboard_policy = SideboardPolicy::Limited(1);
+    assert!(serde_json::from_value::<FormatConfig>(
+        serde_json::to_value(&stricter_sideboard).unwrap()
+    )
+    .is_ok());
+
+    let mut forbidden_sideboard = FormatConfig::standard();
+    forbidden_sideboard.sideboard_policy = SideboardPolicy::Forbidden;
+    assert!(serde_json::from_value::<FormatConfig>(
+        serde_json::to_value(&forbidden_sideboard).unwrap()
+    )
+    .is_ok());
+
+    let mut stricter_copies = FormatConfig::standard();
+    stricter_copies.default_deck_copy_limit = DeckCopyLimit::UpTo(1);
+    assert!(serde_json::from_value::<FormatConfig>(
+        serde_json::to_value(&stricter_copies).unwrap()
+    )
+    .is_ok());
+}
+
+/// V11: `Locked` axes reject any inequality against the registry value,
+/// even when the declared value is not obviously "looser" — equality is
+/// the only honest verdict for these axes (see `built_in_axes_no_looser_than_rules`).
+#[test]
+fn format_config_deserialization_rejects_any_inequality_on_locked_axes() {
+    // starting_life is no longer Locked (Phase 1d makes it HostChoiceWithin —
+    // see the starting_life tests below); min_players and team_based take its
+    // place here as still-Locked axes.
+    let mut wrong_min_players = FormatConfig::commander();
+    wrong_min_players.min_players = 3;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_min_players).unwrap())
+            .is_err(),
+        "min_players is Locked; any declared inequality must be rejected"
+    );
+
+    let mut wrong_team_based = FormatConfig::standard();
+    wrong_team_based.team_based = true;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_team_based).unwrap())
+            .is_err(),
+        "team_based is Locked; any declared inequality must be rejected"
+    );
+
+    let mut wrong_deck_size = FormatConfig::standard();
+    wrong_deck_size.deck_size = DeckSizeRule::Exactly(100);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_deck_size).unwrap())
+            .is_err(),
+        "deck_size is Locked; Minimum(60) vs Exactly(100) must be rejected, not compared"
+    );
+
+    let mut wrong_singleton = FormatConfig::standard();
+    wrong_singleton.singleton = true;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&wrong_singleton).unwrap())
+            .is_err(),
+        "singleton is Locked; any declared inequality must be rejected"
+    );
+}
+
+// Phase 1d: `max_players`, `starting_life`, `deck_size`'s magnitude, and
+// `commander_damage_threshold`'s magnitude move from Locked to
+// HostChoiceWithin a bounded set. These tests close the round-3 review
+// finding that the old Locked rows broke real shipped host-configuration
+// behavior (a Commander host at any seat count other than exactly 6, a
+// non-20 starting life, etc.) — every case below drives the real
+// `FormatConfig::deserialize` path via a `serde_json` round trip.
+
+/// (a) every registry format admits every seat count in its own
+/// `min_players..=max_players` range through the real deserialize gate.
+#[test]
+fn format_config_deserialization_accepts_every_registry_max_players_range() {
+    let mut accepted = 0;
+    for meta in GameFormat::registry() {
+        for n in meta.default_config.min_players..=meta.default_config.max_players {
+            let mut config = meta.default_config.clone();
+            config.max_players = n;
+            let json = serde_json::to_value(&config).unwrap();
+            assert!(
+                serde_json::from_value::<FormatConfig>(json).is_ok(),
+                "{:?}: max_players {n} is within {}..={} and must be accepted",
+                meta.format,
+                meta.default_config.min_players,
+                meta.default_config.max_players,
+            );
+            accepted += 1;
+        }
+    }
+    assert!(accepted > 0, "the loop must not vacuously pass");
+}
+
+/// (b) Commander's max_players ceiling: 7 is rejected (naming the field and
+/// the registry range), 1 and 0 are rejected, and the boundary values (2, 6)
+/// are accepted in the same test.
+#[test]
+fn format_config_deserialization_commander_max_players_boundaries() {
+    for boundary in [2u8, 6] {
+        let mut config = FormatConfig::commander();
+        config.max_players = boundary;
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "Commander max_players {boundary} is a boundary of its own registry range and must \
+             be accepted"
+        );
+    }
+    for (bad, expect_range) in [(7u8, true), (1u8, false), (0u8, false)] {
+        let mut config = FormatConfig::commander();
+        config.max_players = bad;
+        let json = serde_json::to_value(&config).unwrap();
+        let error = serde_json::from_value::<FormatConfig>(json)
+            .expect_err(&format!("Commander max_players {bad} must be rejected"));
+        assert!(
+            error.to_string().contains("max_players"),
+            "expected the max_players rejection message, got: {error}"
+        );
+        if expect_range {
+            assert!(
+                error.to_string().contains("2-6"),
+                "expected the registry range in the message, got: {error}"
+            );
+        }
+    }
+}
+
+/// (a) every registry format admits `starting_life: 25` through the real
+/// deserialize gate.
+#[test]
+fn format_config_deserialization_accepts_starting_life_25_for_every_registry_format() {
+    for meta in GameFormat::registry() {
+        let mut config = meta.default_config;
+        config.starting_life = 25;
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "{:?}: starting_life 25 must be accepted",
+            meta.format
+        );
+    }
+}
+
+/// (b) Standard rejects a starting_life resolving to 0 or less; Two-Headed
+/// Giant's per-seat halving means `starting_life: 1` resolves to 0 per seat
+/// and must be rejected, while `starting_life: 2` (resolving to 1 per seat)
+/// must be accepted — this pair is what proves the check reads the resolved
+/// per-seat value, not the raw field.
+#[test]
+fn format_config_deserialization_rejects_non_positive_resolved_starting_life() {
+    let mut zero_life = FormatConfig::standard();
+    zero_life.starting_life = 0;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&zero_life).unwrap()).is_err(),
+        "Standard starting_life: 0 must be rejected"
+    );
+
+    let mut negative_life = FormatConfig::standard();
+    negative_life.starting_life = -5;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&negative_life).unwrap())
+            .is_err(),
+        "Standard starting_life: -5 must be rejected"
+    );
+
+    let mut thg_one = FormatConfig::two_headed_giant();
+    thg_one.starting_life = 1;
+    let error = serde_json::from_value::<FormatConfig>(serde_json::to_value(&thg_one).unwrap())
+        .expect_err(
+            "Two-Headed Giant starting_life: 1 resolves to 0 per seat and must be rejected",
+        );
+    assert!(error.to_string().contains("per seat"), "got: {error}");
+
+    let mut thg_two = FormatConfig::two_headed_giant();
+    thg_two.starting_life = 2;
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&thg_two).unwrap()).is_ok(),
+        "Two-Headed Giant starting_life: 2 resolves to 1 per seat and must be accepted"
+    );
+}
+
+/// (a) Commander accepts a house-ruled commander_damage_threshold magnitude.
+#[test]
+fn format_config_deserialization_accepts_commander_damage_threshold_house_rules() {
+    for magnitude in [30u8, 1] {
+        let mut config = FormatConfig::commander();
+        config.commander_damage_threshold = Some(magnitude);
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "Commander commander_damage_threshold Some({magnitude}) must be accepted"
+        );
+    }
+}
+
+/// (b) `None` is rejected on a format that uses the SBA (paired with a
+/// self-consistent forgery that also flips `uses_commander: false`, which the
+/// `Derived` `uses_commander` row alone does NOT catch); `Some` is rejected
+/// on a format that does not use the SBA at all.
+#[test]
+fn format_config_deserialization_rejects_commander_damage_threshold_shape_mismatches() {
+    let mut none_but_still_commander = FormatConfig::commander();
+    none_but_still_commander.commander_damage_threshold = None;
+    none_but_still_commander.uses_commander = false;
+    let json = serde_json::to_value(&none_but_still_commander).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json).expect_err(
+        "a self-consistent forgery (None threshold AND uses_commander: false) must still be \
+         rejected on Commander",
+    );
+    assert!(
+        error.to_string().contains("commander_damage_threshold"),
+        "got: {error}"
+    );
+
+    let mut standard_with_threshold = FormatConfig::standard();
+    standard_with_threshold.commander_damage_threshold = Some(21);
+    let json = serde_json::to_value(&standard_with_threshold).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("Standard does not use the commander-damage SBA at all");
+    assert!(
+        error.to_string().contains("commander_damage_threshold"),
+        "got: {error}"
+    );
+}
+
+/// (c) `Some(0)` is rejected (naming the floor) and `Some(1)` is accepted in
+/// the same test, pinning the floor exactly at 1.
+#[test]
+fn format_config_deserialization_commander_damage_threshold_floor_is_exactly_one() {
+    let mut zero = FormatConfig::commander();
+    zero.commander_damage_threshold = Some(0);
+    let json = serde_json::to_value(&zero).unwrap();
+    let error = serde_json::from_value::<FormatConfig>(json)
+        .expect_err("commander_damage_threshold Some(0) must be rejected");
+    assert!(error.to_string().contains("at least 1"), "got: {error}");
+
+    let mut one = FormatConfig::commander();
+    one.commander_damage_threshold = Some(1);
+    let json = serde_json::to_value(&one).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "commander_damage_threshold Some(1) must be accepted"
+    );
+}
+
+/// (a) Free-for-All's own registry magnitudes, both admitted.
+#[test]
+fn format_config_deserialization_free_for_all_deck_size_own_magnitudes() {
+    for minimum in [40u16, 60] {
+        let mut config = FormatConfig::free_for_all();
+        config.deck_size = DeckSizeRule::Minimum(minimum);
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_ok(),
+            "FreeForAll Minimum({minimum}) is a listed option and must be accepted"
+        );
+    }
+}
+
+/// (b) Free-for-All rejects a magnitude outside its closed option list.
+#[test]
+fn format_config_deserialization_free_for_all_deck_size_rejects_unlisted_magnitude() {
+    for minimum in [1u16, 59, 100] {
+        let mut config = FormatConfig::free_for_all();
+        config.deck_size = DeckSizeRule::Minimum(minimum);
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            serde_json::from_value::<FormatConfig>(json).is_err(),
+            "FreeForAll Minimum({minimum}) is not in the closed option list and must be rejected"
+        );
+    }
+}
+
+/// (c) B-2's direct fix: Free-for-All rejects `Exactly(40)` (the discriminant
+/// is never a host choice) while accepting `Minimum(40)` (the identical
+/// magnitude, correct discriminant) in the SAME test — proving the rejection
+/// is about the discriminant, not the magnitude.
+#[test]
+fn format_config_deserialization_free_for_all_deck_size_discriminant_is_never_a_host_choice() {
+    let mut wrong_discriminant = FormatConfig::free_for_all();
+    wrong_discriminant.deck_size = DeckSizeRule::Exactly(40);
+    let json = serde_json::to_value(&wrong_discriminant).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_err(),
+        "FreeForAll Exactly(40) must be rejected — the Minimum/Exactly discriminant is never a \
+         host choice, even though 40 is a listed magnitude"
+    );
+
+    let mut right_discriminant = FormatConfig::free_for_all();
+    right_discriminant.deck_size = DeckSizeRule::Minimum(40);
+    let json = serde_json::to_value(&right_discriminant).unwrap();
+    assert!(
+        serde_json::from_value::<FormatConfig>(json).is_ok(),
+        "FreeForAll Minimum(40) must be accepted"
+    );
+}
+
+/// (d) Other formats never delegate — the closed option list is per-format,
+/// not a global bypass.
+#[test]
+fn format_config_deserialization_deck_size_delegation_does_not_leak_to_other_formats() {
+    let mut standard = FormatConfig::standard();
+    standard.deck_size = DeckSizeRule::Minimum(40);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&standard).unwrap()).is_err(),
+        "Standard must not accept FreeForAll's Minimum(40) option"
+    );
+
+    let mut limited = FormatConfig::limited();
+    limited.deck_size = DeckSizeRule::Minimum(60);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&limited).unwrap()).is_err(),
+        "Limited must not accept FreeForAll's Minimum(60) option"
+    );
+
+    let mut commander = FormatConfig::commander();
+    commander.deck_size = DeckSizeRule::Exactly(99);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&commander).unwrap()).is_err(),
+        "Commander must not accept a house-ruled deck size at all — it is not a table-agreement \
+         format"
+    );
+
+    let mut momir = FormatConfig::momir();
+    momir.deck_size = DeckSizeRule::Exactly(59);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&momir).unwrap()).is_err(),
+        "Momir must not accept a house-ruled deck size at all — it is not a table-agreement \
+         format"
+    );
+}
+
+/// (e) Per-format lookup, not a global allowlist: Limited's own registry
+/// magnitude (40) is accepted for Limited, but the identical number is
+/// rejected for Standard, whose registry magnitude is 60.
+#[test]
+fn format_config_deserialization_deck_size_option_lookup_is_per_format() {
+    let mut limited_forty = FormatConfig::limited();
+    limited_forty.deck_size = DeckSizeRule::Minimum(40);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&limited_forty).unwrap())
+            .is_ok(),
+        "Limited's own registry magnitude (40) must be accepted for Limited"
+    );
+
+    let mut standard_forty = FormatConfig::standard();
+    standard_forty.deck_size = DeckSizeRule::Minimum(40);
+    assert!(
+        serde_json::from_value::<FormatConfig>(serde_json::to_value(&standard_forty).unwrap())
+            .is_err(),
+        "the identical magnitude (40) must be rejected for Standard, whose own registry \
+         magnitude is 60 and which is not a table-agreement format"
+    );
+}
+
+// V19: the gate is exhaustive over every `FormatConfig` field — enforced by
+// `format_config_field_destructure_is_exhaustive` in
+// `engine::types::format`'s own `#[cfg(test)] mod tests`, which exhaustively
+// destructures the (private-module-adjacent) struct so a future field added
+// without updating that pattern is a compile error. That replaces this
+// test's prior JSON-object-length arithmetic (`serialized_json_object.len()
+// + 2 == 17`), which a future field sharing `archenemy_player`/
+// `custom_rules`'s `skip_serializing_if`-when-`None` shape could silently
+// defeat without moving the count.
+
 #[test]
 fn persisted_game_state_restore_accepts_a_normal_built_in_game() {
     // Paired positive control for the rejection test below: a normal
@@ -807,6 +1335,39 @@ fn persisted_game_state_restore_accepts_a_normal_built_in_game() {
     assert!(
         serde_json::from_value::<PersistedGameState>(json).is_ok(),
         "restoring a persisted built-in-format GameState must succeed"
+    );
+}
+
+/// Phase 1d: a persisted `GameState` carrying a HOST-CHOSEN (not registry-
+/// default) built-in `FormatConfig` — a smaller Commander seat ceiling, a
+/// custom starting life, a house-ruled commander-damage threshold, and
+/// separately a Free-for-All table-agreement deck size — must still restore
+/// through the real `PersistedGameState` round trip.
+#[test]
+fn persisted_game_state_restore_accepts_a_host_chosen_built_in_config() {
+    use engine::types::game_state::{GameState, PersistedGameState};
+
+    let mut commander_config = FormatConfig::commander();
+    commander_config.max_players = 2;
+    commander_config.starting_life = 25;
+    commander_config.commander_damage_threshold = Some(30);
+    let commander_state = GameState::new(commander_config, 2, 42);
+    let persisted = PersistedGameState::capture(commander_state);
+    let json = serde_json::to_value(&persisted).unwrap();
+    assert!(
+        serde_json::from_value::<PersistedGameState>(json).is_ok(),
+        "restoring a persisted host-chosen Commander config (max_players: 2, starting_life: 25, \
+         commander_damage_threshold: Some(30)) must succeed"
+    );
+
+    let mut ffa_config = FormatConfig::free_for_all();
+    ffa_config.deck_size = DeckSizeRule::Minimum(40);
+    let ffa_state = GameState::new(ffa_config, 2, 42);
+    let persisted = PersistedGameState::capture(ffa_state);
+    let json = serde_json::to_value(&persisted).unwrap();
+    assert!(
+        serde_json::from_value::<PersistedGameState>(json).is_ok(),
+        "restoring a persisted Free-for-All config with deck_size: Minimum(40) must succeed"
     );
 }
 
