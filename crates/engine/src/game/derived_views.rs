@@ -604,7 +604,9 @@ pub struct DungeonRoomView {
     pub rooms: Vec<DungeonRoomNodeView>,
 }
 
-/// CR 309.1: The printed dungeon card, as the client looks it up on Scryfall.
+/// The printed dungeon card, as the client looks it up on Scryfall.
+///
+/// Identity plumbing, not a rule — deliberately unannotated.
 ///
 /// Both ids ride along because the five dungeons are not indexed uniformly by
 /// the client's Scryfall sidecars — Undercity is a `double_faced_token` that
@@ -1225,7 +1227,7 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     ))
 }
 
-/// CR 309.1: Project the printed dungeon card's Scryfall identity.
+/// Project the printed dungeon card's Scryfall identity.
 fn dungeon_card_view(dungeon: crate::game::dungeon::DungeonId) -> DungeonCardView {
     let card = crate::game::dungeon::card_ref(dungeon);
     DungeonCardView {
@@ -3282,6 +3284,69 @@ mod tests {
         assert_eq!(room.room.name, "Mine Tunnels");
         assert_eq!(room.room.text, "Create a Treasure token.");
         assert_eq!(room.room_count, 7);
+
+        // The card identity and the room graph are the two fields the client
+        // cannot function without: the popover destructures `card` to resolve
+        // the art and indexes `rooms` to place the venture marker. They are
+        // also the fields that forced the protocol bump, so a silent
+        // regression here is a wire break, not a cosmetic one.
+        assert_eq!(room.card.oracle_id, "5c446a7f-0301-4343-b0df-146cf2db605b");
+        assert_eq!(
+            room.card.scryfall_id,
+            "59b11ff8-f118-4978-87dd-509dc0c8c932"
+        );
+        assert_eq!(room.card.face_name, "Lost Mine of Phandelver");
+
+        assert_eq!(
+            room.rooms.len(),
+            7,
+            "the whole graph ships, not just the current room"
+        );
+        // CR 309.5a: Mine Tunnels (index 2) leads to Dark Pool and Fungi Cavern.
+        let current = &room.rooms[2];
+        assert_eq!(current.room.name, "Mine Tunnels");
+        assert_eq!(current.next_rooms, vec![4, 5]);
+        // The bottommost room has no outgoing arrows (CR 309.5).
+        assert!(room.rooms[6].next_rooms.is_empty());
+        // Every room carries a marker inside the card face.
+        for node in &room.rooms {
+            assert!(node.marker.x_permille <= 1000 && node.marker.y_permille <= 1000);
+        }
+    }
+
+    /// The double-faced dungeon is the reason `DungeonCardView` carries two ids
+    /// rather than one: `Undercity // The Initiative` is a `double_faced_token`,
+    /// which `gen-scryfall-images.sh` excludes from `scryfall-data.json`, so the
+    /// client resolves it through the token table by printing id. If this
+    /// projection ever emitted only an oracle id, Undercity would render artless
+    /// and nothing else would fail.
+    #[test]
+    fn dungeon_rooms_projects_the_double_faced_undercity_card_identity() {
+        use crate::game::dungeon::{DungeonId, DungeonProgress};
+
+        let mut state = GameState::new_two_player(42);
+        state.dungeon_progress.insert(
+            PlayerId(0),
+            DungeonProgress {
+                current_dungeon: Some(DungeonId::Undercity),
+                current_room: 0,
+                ..Default::default()
+            },
+        );
+
+        let views = derive_views(&state, None);
+        let room = views
+            .dungeon_rooms
+            .get(&PlayerId(0))
+            .expect("venturing player is projected");
+
+        assert_eq!(
+            room.card.scryfall_id,
+            "2c65185b-6cf0-451d-985e-56aa45d9a57d"
+        );
+        // Selects the dungeon half of `Undercity // The Initiative`.
+        assert_eq!(room.card.face_name, "Undercity");
+        assert_eq!(room.rooms.len(), 9);
     }
 
     /// CR 309.7: a completed dungeon leaves a `current_dungeon: None` entry

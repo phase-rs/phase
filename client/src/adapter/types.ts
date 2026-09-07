@@ -63,7 +63,7 @@ export interface DungeonRoomView {
   room: RoomPreview;
   /** Total rooms on the dungeon card, for "room 3 of 7". */
   room_count: number;
-  /** The printed dungeon card's Scryfall identity (CR 309.1). */
+  /** The printed dungeon card's Scryfall identity. */
   card: DungeonCardView;
   /** Every room on the card in printed order, with edges and card geometry. */
   rooms: DungeonRoomNodeView[];
