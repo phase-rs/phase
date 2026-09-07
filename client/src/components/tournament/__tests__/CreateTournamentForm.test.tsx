@@ -38,52 +38,73 @@ describe("CreateTournamentForm", () => {
     });
   });
 
-  // V20a — untouched scoring follows the arity. `default_for_arity` is
-  // `2n-1`, so arity 4 must prefill 7, not stay at 3.
-  it("re-prefills untouched scoring when the arity changes", () => {
+  // V20a — scoring defaults to "Automatic": the form submits `scoring: null`
+  // and the broker applies its own `default_for_arity` (lobby protocol v6).
+  // The form computes no default itself — that duplicate is exactly what the
+  // resolved `TournamentSummary.scoring` field exists to delete.
+  it("submits null scoring when left automatic", () => {
     const onSubmit = vi.fn();
     render(<CreateTournamentForm onSubmit={onSubmit} />);
 
-    expect(screen.getByLabelText("Win")).toHaveValue(3);
+    fireEvent.click(submitButton());
 
+    expect(onSubmit.mock.calls[0][0].scoring).toBeNull();
+  });
+
+  // The scoring inputs are disabled while Automatic is on — the form never
+  // presents a client-computed default for the organizer to accept.
+  it("disables the scoring inputs while automatic", () => {
+    render(<CreateTournamentForm onSubmit={vi.fn()} />);
+
+    expect(screen.getByLabelText("Win")).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText("Automatic"));
+
+    expect(screen.getByLabelText("Win")).toBeEnabled();
+  });
+
+  // V20b — the paired opposite of V20a. Turning Automatic off submits the
+  // explicit override verbatim, and it is INDEPENDENT of arity: the form no
+  // longer couples scoring to the arity at all.
+  it("submits an explicit scoring override, unchanged by a later arity change", () => {
+    const onSubmit = vi.fn();
+    render(<CreateTournamentForm onSubmit={onSubmit} />);
+
+    fireEvent.click(screen.getByLabelText("Automatic"));
+    fireEvent.change(screen.getByLabelText("Win"), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText("Draw"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Loss"), { target: { value: "1" } });
     fireEvent.change(screen.getByLabelText("Players per match"), {
       target: { value: "4" },
     });
 
-    expect(screen.getByLabelText("Win")).toHaveValue(7);
-
     fireEvent.click(submitButton());
     expect(onSubmit.mock.calls[0][0].scoring).toEqual({
-      win_points: 7,
-      draw_points: 1,
-      loss_points: 0,
+      win_points: 5,
+      draw_points: 2,
+      loss_points: 1,
     });
   });
 
-  // V20b — the paired opposite of V20a. Without both, one implementation
-  // satisfies the other vacuously.
-  it("keeps an organizer's edited scoring across an arity change", () => {
+  // Regression: the scoring inputs are string-backed and parsed at submit, like
+  // the rounds field. The prior numeric `value` + `parsedOr(current)` inputs
+  // reverted an emptied field to its previous value, so a draw of 1 could not
+  // be cleared and retyped as 2 — the reported bug.
+  it("lets a scoring field be cleared and retyped", () => {
     const onSubmit = vi.fn();
     render(<CreateTournamentForm onSubmit={onSubmit} />);
 
-    fireEvent.change(screen.getByLabelText("Win"), { target: { value: "4" } });
-    fireEvent.change(screen.getByLabelText("Players per match"), {
-      target: { value: "4" },
-    });
+    fireEvent.click(screen.getByLabelText("Automatic"));
+    const draw = screen.getByLabelText("Draw");
 
-    expect(screen.getByLabelText("Win")).toHaveValue(4);
+    fireEvent.change(draw, { target: { value: "1" } });
+    fireEvent.change(draw, { target: { value: "" } });
+    // Emptied, not snapped back to "1".
+    expect(draw).toHaveValue(null);
 
+    fireEvent.change(draw, { target: { value: "2" } });
     fireEvent.click(submitButton());
-    expect(onSubmit.mock.calls[0][0].scoring).toEqual({
-      win_points: 4,
-      draw_points: 1,
-      loss_points: 0,
-    });
-  });
-
-  it("prefills from the initial arity", () => {
-    render(<CreateTournamentForm onSubmit={vi.fn()} initialArity={4} />);
-    expect(screen.getByLabelText("Win")).toHaveValue(7);
+    expect(onSubmit.mock.calls[0][0].scoring.draw_points).toBe(2);
   });
 
   // V21 — "Automatic" is the wire's `total_rounds: null`, the one

@@ -5,7 +5,7 @@ import type { TournamentPairingView } from "../../adapter/types";
 import {
   decisiveGameWins,
   gameWinsEntries,
-  isReportable,
+  isPairingReportable,
   outcomeLabelKey,
 } from "../../pages/tournamentPageState";
 
@@ -72,15 +72,17 @@ export function PairingsList({ pairings, onReport }: PairingsListProps) {
                     <span className="text-xs text-gray-500">
                       {t("pairings.table", { id: pairing.id })}
                     </span>
-                    {/* Arm-gated, not merely prop-gated. `report_result`
-                        (`crates/lobby-broker/src/tournament.rs:1741-1753`)
-                        refuses `Bye` and `Forfeit` unconditionally before any
-                        validation runs, so offering the action there would
-                        build a request that can never succeed. An already
-                        `Reported` pairing IS reportable again (`:1752`,
-                        overwritten at `:1755`) — correcting a mistyped tally
-                        is a legitimate organizer action — so the guard is
-                        arm-selective, never "unresolved only". */}
+                    {/* Broker-gated, not merely prop-gated.
+                        `isPairingReportable` consumes the broker's own
+                        per-pairing `report_gate` (lobby protocol v6), which
+                        refuses `Bye` and `Forfeit` — offering the action there
+                        would build a request that can never succeed — and,
+                        unlike the outcome-only fallback, also refuses an
+                        already-`Reported` pairing once the event is terminal
+                        (`ReportGate::TournamentNotRunning`). An already
+                        `Reported` pairing on a RUNNING event stays reportable,
+                        because correcting a mistyped tally is a legitimate
+                        organizer action. */}
                     {/* The one interactive control this component renders, and
                         therefore the only one the >= 44pt touch-target rule
                         applies to. `min-h-[44px]` is this repo's established
@@ -91,7 +93,7 @@ export function PairingsList({ pairings, onReport }: PairingsListProps) {
                         `sm` size would otherwise have supplied `min-h-11`.
                         `inline-flex items-center` keeps the label centred once
                         the box is taller than its text. */}
-                    {onReport && isReportable(pairing.outcome) && (
+                    {onReport && isPairingReportable(pairing) && (
                       <button
                         type="button"
                         onClick={() => onReport(pairing)}

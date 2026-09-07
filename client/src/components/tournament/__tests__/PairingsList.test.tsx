@@ -211,6 +211,59 @@ describe("PairingsList report affordance", () => {
   });
 });
 
+// report_gate consumption (lobby protocol v6): when the broker supplies a
+// per-pairing gate it — not the outcome heuristic — decides the affordance.
+// This is the fix for the reported bug: a reported pairing on a finished event,
+// whose outcome ALONE still looks re-reportable, is refused via
+// `TournamentNotRunning`.
+describe("PairingsList report_gate", () => {
+  const reported: PairingOutcome = {
+    Reported: { Decisive: { winner: "p0", game_wins: { p0: 2, p1: 1 } } },
+  };
+
+  it("hides the report action for a reported pairing once the tournament is not running", () => {
+    render(
+      <PairingsList
+        pairings={[
+          {
+            id: 1,
+            round: 1,
+            players: seatsOf(2),
+            outcome: reported,
+            report_gate: "TournamentNotRunning",
+          },
+        ]}
+        onReport={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryAllByRole("button", { name: "Report Result" }),
+    ).toHaveLength(0);
+  });
+
+  it("shows it for the same reported pairing while the gate is Open (a correction)", () => {
+    render(
+      <PairingsList
+        pairings={[
+          {
+            id: 1,
+            round: 1,
+            players: seatsOf(2),
+            outcome: reported,
+            report_gate: "Open",
+          },
+        ]}
+        onReport={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("button", { name: "Report Result" }),
+    ).toHaveLength(1);
+  });
+});
+
 // The >= 44pt touch-target rule from `.coderabbit.yaml`'s `client/src/**` path
 // instructions. `min-h-[44px]` is this repo's spelling of it
 // (`components/lobby/LobbyView.tsx:332,348`, `components/lobby/HostSetup.tsx:664`),
