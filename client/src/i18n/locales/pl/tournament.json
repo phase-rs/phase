@@ -52,6 +52,10 @@
     "winPointsLabel": "Wygrana",
     "drawPointsLabel": "Remis",
     "lossPointsLabel": "Przegrana",
+    "formatLabel": "Format",
+    "formatNone": "Nieokreślony",
+    "plusRoundsLabel": "Dodatkowe rundy",
+    "plusRoundsHint": "Dodawane do automatycznej liczby rund (Szwajcarski plus N). Obowiązuje tylko, gdy Rundy pozostają automatyczne.",
     "submit": "Utwórz turniej",
     "submitting": "Tworzenie…"
   },

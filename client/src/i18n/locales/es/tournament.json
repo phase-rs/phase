@@ -52,6 +52,10 @@
     "winPointsLabel": "Victoria",
     "drawPointsLabel": "Empate",
     "lossPointsLabel": "Derrota",
+    "formatLabel": "Formato",
+    "formatNone": "Sin especificar",
+    "plusRoundsLabel": "Rondas adicionales",
+    "plusRoundsHint": "Se añaden al número de rondas automático (Suizo más N). Solo se aplica si Rondas se deja en automático.",
     "submit": "Crear torneo",
     "submitting": "Creando…"
   },

@@ -40,6 +40,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use engine::types::format::GameFormat;
+
 use crate::env::BrokerEnv;
 
 // ---------------------------------------------------------------------------
@@ -737,6 +739,16 @@ pub struct CreateTournamentRequest {
     /// [`TournamentMeta::resolved_total_rounds`] once round 1 is paired, so
     /// a drop cannot shorten a schedule that is already being played.
     pub total_rounds: Option<u32>,
+    /// "Automatic + N": add N to the bracket- and arity-derived default round
+    /// count. Mutually exclusive with `total_rounds` (an EXACT override);
+    /// supplying both is rejected before this request is built. `None` adds
+    /// nothing. The base default stays server-owned — see
+    /// [`TournamentMeta::total_rounds`].
+    pub plus_rounds: Option<u32>,
+    /// The event's game-format label (display metadata only — the tournament
+    /// enforces no deck legality and never touches `GameState`). `None` names
+    /// no format.
+    pub format: Option<GameFormat>,
 }
 
 /// One tournament's durable record.
@@ -772,7 +784,22 @@ pub struct TournamentMeta {
     /// ceiling in [`TournamentManager::generate_pairings`] would then refuse
     /// the bracket's own final. The schedule an event started under is the
     /// schedule it finishes under.
+    ///
+    /// The latched value ALREADY folds in [`Self::plus_rounds`]: it is
+    /// [`Self::total_rounds`]'s live result at round 1, and that resolver adds
+    /// the "+N" to the base default. So the "+N" survives a mid-event drop for
+    /// the same reason the base does, with no special handling here.
     pub resolved_total_rounds: Option<u32>,
+    /// "Automatic + N": how many rounds to add on top of the bracket- and
+    /// arity-derived default. `None`/`Some(0)` add nothing. Ignored entirely
+    /// when [`Self::total_rounds_override`] is set — an exact count wins outright
+    /// (and the two are mutually exclusive at create-validation). Read through
+    /// [`Self::total_rounds`].
+    pub plus_rounds: Option<u32>,
+    /// The event's game-format label (Standard, Commander, …), or `None`.
+    /// Display metadata only: the tournament enforces no deck legality and
+    /// never touches `GameState`. Surfaced on [`crate::protocol::TournamentSummary::format`].
+    pub format: Option<GameFormat>,
     pub current_round: u32,
     pub status: TournamentStatus,
     pub players: Vec<TournamentPlayer>,
@@ -798,18 +825,24 @@ impl TournamentMeta {
     ///    must not shorten a schedule that is already being played (see that
     ///    field for the single-elimination case it would otherwise break).
     /// 3. Otherwise the live bracket- and arity-selected default for the
-    ///    current active-player count — the right answer for an event that
-    ///    has not started yet, whose field is still growing.
+    ///    current active-player count, plus [`Self::plus_rounds`] — the right
+    ///    answer for an event that has not started yet, whose field is still
+    ///    growing.
     ///
-    /// All three inputs to that last tier go through the single
+    /// The `plus_rounds` "+N" applies only to tier 3. An exact override (tier 1)
+    /// already names the total, and the tier-2 latch captured tier 3's result
+    /// (base + N) at round 1, so the "+N" is folded in there too.
+    ///
+    /// All three inputs to the base of that last tier go through the single
     /// [`default_total_rounds`] authority rather than being branched on here,
     /// so a caller holding a bare `(bracket, arity, player_count)` gets the
-    /// same answer this does.
+    /// same base this does.
     pub fn total_rounds(&self) -> u32 {
         self.total_rounds_override
             .or(self.resolved_total_rounds)
             .unwrap_or_else(|| {
                 default_total_rounds(self.bracket, self.arity, self.active_player_count())
+                    .saturating_add(self.plus_rounds.unwrap_or(0))
             })
     }
 
@@ -1860,6 +1893,8 @@ impl TournamentManager {
                 // Nothing is latched until round 1 is paired: no round has
                 // been scheduled yet, and the field is still empty.
                 resolved_total_rounds: None,
+                plus_rounds: req.plus_rounds,
+                format: req.format,
                 current_round: 0,
                 status: TournamentStatus::Registration,
                 players: Vec::new(),
@@ -2441,6 +2476,8 @@ mod tests {
                 scoring: ScoringPolicy::default_for_arity(a),
                 bracket,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
             },
             env,
         )
@@ -2477,6 +2514,8 @@ mod tests {
                 scoring: ScoringPolicy::default_for_arity(a),
                 bracket: BracketShape::Swiss,
                 total_rounds: Some(total_rounds),
+                plus_rounds: None,
+                format: None,
             },
             env,
         )
@@ -2728,6 +2767,8 @@ mod tests {
                     scoring,
                     bracket: BracketShape::Swiss,
                     total_rounds: Some(4),
+                    plus_rounds: None,
+                    format: None,
                 },
                 &env,
             )
@@ -2766,6 +2807,8 @@ mod tests {
                     scoring: ScoringPolicy::default(),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
                 },
                 &env,
             )
@@ -2800,6 +2843,8 @@ mod tests {
                 scoring: ScoringPolicy::default_for_arity(arity(seats)),
                 bracket: BracketShape::SingleElimination,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
             };
             assert!(
                 mgr.create_tournament(&format!("SE{seats}"), request, &env)
@@ -2817,6 +2862,8 @@ mod tests {
                     scoring: ScoringPolicy::default(),
                     bracket: BracketShape::SingleElimination,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
                 },
                 &env,
             )
@@ -2830,6 +2877,8 @@ mod tests {
                     scoring: ScoringPolicy::default_for_arity(MatchArity::COMMANDER_POD),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
                 },
                 &env,
             )
@@ -4248,6 +4297,76 @@ mod tests {
         assert!(err.contains("already at round 4"), "{err}");
     }
 
+    /// "Automatic + N" adds N to the live default, and the round-1 latch carries
+    /// the "+N" the same way it carries the base — a later drop cannot strip it.
+    #[test]
+    fn plus_rounds_adds_to_the_default_and_latches_with_it() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        mgr.create_tournament(
+            "T",
+            CreateTournamentRequest {
+                name: "Plus".to_string(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default(),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+                plus_rounds: Some(2),
+                format: None,
+            },
+            &env,
+        )
+        .expect("create");
+        join_n(&mut mgr, "T", 8, &env);
+
+        let base = default_total_rounds(BracketShape::Swiss, MatchArity::HEAD_TO_HEAD, 8);
+        assert_eq!(
+            mgr.get("T").expect("t").total_rounds(),
+            base + 2,
+            "the live default carries the +N addend"
+        );
+
+        // Round 1 latches base + N; a later drop must not strip the +N.
+        mgr.generate_pairings("T", &env).expect("round 1");
+        mgr.drop_player("T", &key(7), &env).expect("drop");
+        assert_eq!(
+            mgr.get("T").expect("t").total_rounds(),
+            base + 2,
+            "the latched schedule keeps the +N across a drop"
+        );
+    }
+
+    /// The game-format label is stored on the meta and projected onto the
+    /// summary unchanged — the tournament carries the label, nothing more.
+    #[test]
+    fn format_is_stored_on_the_meta_and_projected_to_the_summary() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        mgr.create_tournament(
+            "T",
+            CreateTournamentRequest {
+                name: "Commander Night".to_string(),
+                arity: MatchArity::COMMANDER_POD,
+                scoring: ScoringPolicy::default_for_arity(MatchArity::COMMANDER_POD),
+                bracket: BracketShape::Swiss,
+                total_rounds: None,
+                plus_rounds: None,
+                format: Some(GameFormat::Commander),
+            },
+            &env,
+        )
+        .expect("create");
+
+        let meta = mgr.get("T").expect("t");
+        assert_eq!(meta.format, Some(GameFormat::Commander));
+        let summary = crate::protocol::TournamentSummary::from(meta);
+        assert_eq!(
+            summary.format,
+            Some(GameFormat::Commander),
+            "the From<&TournamentMeta> projection carries the label"
+        );
+    }
+
     /// The three resolution tiers, at the one point where they can disagree.
     /// The organizer's override outranks a latched default exactly as it
     /// outranks a live one, and an event created with an override latches
@@ -4547,6 +4666,8 @@ mod tests {
             bracket: BracketShape::Swiss,
             total_rounds_override: None,
             resolved_total_rounds: Some(3),
+            plus_rounds: None,
+            format: None,
             current_round: 1,
             status,
             players: undropped(&["a", "b"]),
@@ -4858,6 +4979,8 @@ mod tests {
                     scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
                 },
                 &env,
             )
@@ -4896,6 +5019,8 @@ mod tests {
                     scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
                 },
                 &env,
             )
@@ -4942,6 +5067,8 @@ mod tests {
                     scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
                 },
                 &env,
             )
@@ -4976,6 +5103,8 @@ mod tests {
                     scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
                 },
                 &env,
             )
@@ -5036,6 +5165,8 @@ mod tests {
                     scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
                 },
                 &env,
             )

@@ -471,6 +471,18 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
+ * 7 — Tournament game-format label and an "automatic + N" round option. Three
+ *     fields added to CreateTournament, all optional (`#[serde(default)]`):
+ *     `format` (a GameFormat display label, mirroring the one a LobbyGame
+ *     listing already carries), `plus_rounds` (add N to the auto-derived round
+ *     count — the "Swiss plus N" shape, mutually exclusive with `total_rounds`),
+ *     and `format` is echoed back resolved on TournamentSummary. Purely ADDITIVE
+ *     in BOTH directions, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below stays at
+ *     2 and — unlike 6's scoring relaxation — NO client-side floor is needed:
+ *     a client sending `format`/`plus_rounds` to a pre-7 broker has them
+ *     ignored as unknown fields (a silent capability loss, not a parse error),
+ *     and a pre-7 broker's summary omitting `format` is inert against this
+ *     client, whose consumer is `JSON.parse`.
  * 6 — Broker-owned tournament action legality, broker-owned default scoring,
  *     and expiring/rotating tournament credentials. Two lobby variants added —
  *     RenewTournamentCredential and TournamentCredentialRenewed — which alone
@@ -523,7 +535,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 6;
+export const LOBBY_PROTOCOL_VERSION = 7;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.

@@ -11,6 +11,7 @@
 //! dispatch (and the mode-agnostic Subscribe/Ping arms, whose behavior is
 //! identical across modes), so every entry the core sees is a P2P entry.
 
+use engine::types::format::GameFormat;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -517,6 +518,8 @@ impl Broker {
                 scoring,
                 bracket,
                 total_rounds,
+                plus_rounds,
+                format,
             } => self.handle_create_tournament(
                 conn,
                 name,
@@ -524,6 +527,8 @@ impl Broker {
                 scoring,
                 bracket,
                 total_rounds,
+                plus_rounds,
+                format,
                 env,
             ),
 
@@ -1240,6 +1245,8 @@ impl Broker {
         scoring: Option<ScoringPolicy>,
         bracket: BracketShape,
         total_rounds: Option<u32>,
+        plus_rounds: Option<u32>,
+        format: Option<GameFormat>,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
         // Registry capacity, checked before a code or a token is minted and
@@ -1275,6 +1282,8 @@ impl Broker {
                 scoring,
                 bracket,
                 total_rounds,
+                plus_rounds,
+                format,
             },
             env,
         ) {
@@ -2529,6 +2538,8 @@ mod tests {
                 scoring: Some(ScoringPolicy::default()),
                 bracket,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
             },
             env,
         );
@@ -2685,6 +2696,8 @@ mod tests {
                 scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
             },
             &env,
         );
@@ -3063,6 +3076,8 @@ mod tests {
                 scoring: Some(ScoringPolicy::default_for_arity(arity)),
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
             },
             env,
         );
@@ -4235,6 +4250,8 @@ mod tests {
                 scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
             },
             &env,
         );
@@ -4420,6 +4437,8 @@ mod tests {
                 scoring,
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
             },
             env,
         );

@@ -52,6 +52,10 @@
     "winPointsLabel": "Win",
     "drawPointsLabel": "Draw",
     "lossPointsLabel": "Loss",
+    "formatLabel": "Format",
+    "formatNone": "Unspecified",
+    "plusRoundsLabel": "Extra rounds",
+    "plusRoundsHint": "Added on top of the automatic round count (Swiss plus N). Applies only when Rounds is left automatic.",
     "submit": "Create Tournament",
     "submitting": "Creating…"
   },

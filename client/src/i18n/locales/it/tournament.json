@@ -52,6 +52,10 @@
     "winPointsLabel": "Vittoria",
     "drawPointsLabel": "Pareggio",
     "lossPointsLabel": "Sconfitta",
+    "formatLabel": "Formato",
+    "formatNone": "Non specificato",
+    "plusRoundsLabel": "Turni aggiuntivi",
+    "plusRoundsHint": "Aggiunti al numero di turni automatico (Svizzero più N). Si applica solo se Turni è lasciato automatico.",
     "submit": "Crea torneo",
     "submitting": "Creazione…"
   },

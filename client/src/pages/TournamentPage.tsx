@@ -9,6 +9,7 @@ import type {
   TournamentView,
 } from "../adapter/types";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { formatMetadata } from "../data/formatRegistry";
 import { useInShell } from "../components/chrome/ShellContext";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
@@ -409,6 +410,16 @@ export function TournamentPage() {
                 <span className="rounded-[5px] border border-indigo-300/20 bg-indigo-500/15 px-1.5 py-0.5 font-semibold text-indigo-200">
                   {t(`bracket.${view.summary.bracket}`)}
                 </span>
+                {/* The game-format label, resolved to its human name through the
+                    shared registry (the engine is the source of truth for the
+                    list). Absent when the organizer named none, or against a
+                    pre-v7 broker. Never recomputed — a display label only. */}
+                {view.summary.format !== undefined && (
+                  <span className="rounded-[5px] border border-sky-300/20 bg-sky-500/15 px-1.5 py-0.5 font-semibold text-sky-200">
+                    {formatMetadata(view.summary.format)?.label ??
+                      view.summary.format}
+                  </span>
+                )}
                 <span className="text-slate-400">
                   {"seats" in arity
                     ? t(arity.key, { seats: arity.seats })

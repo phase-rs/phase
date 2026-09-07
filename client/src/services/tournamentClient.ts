@@ -1,5 +1,6 @@
 import type {
   BracketShape,
+  GameFormat,
   MatchArity,
   PairingId,
   PodOutcome,
@@ -539,6 +540,19 @@ export interface CreateTournamentRequest {
   scoring: ScoringPolicy;
   bracket: BracketShape;
   totalRounds?: number | null;
+  /**
+   * "Automatic + N": add N to the broker's auto-derived round count. Mutually
+   * exclusive with `totalRounds` (an exact count) — the broker rejects both.
+   * `null`/omitted adds nothing. Additive in lobby protocol 7; ignored by a
+   * pre-v7 broker.
+   */
+  plusRounds?: number | null;
+  /**
+   * The event's game-format label. Display metadata only — the tournament
+   * enforces no deck legality. `null`/omitted names no format. Additive in
+   * lobby protocol 7; ignored by a pre-v7 broker.
+   */
+  format?: GameFormat | null;
 }
 
 /** `CreateTournament` → `TournamentCreated` (point reply, carries the token). */
@@ -557,6 +571,8 @@ export function createTournamentOver(
         scoring: req.scoring,
         bracket: req.bracket,
         total_rounds: req.totalRounds ?? null,
+        plus_rounds: req.plusRounds ?? null,
+        format: req.format ?? null,
       },
     },
     matchReply<TournamentCreatedReply>("TournamentCreated", null),

@@ -107,6 +107,46 @@ describe("CreateTournamentForm", () => {
     expect(onSubmit.mock.calls[0][0].totalRounds).toBe(5);
   });
 
+  // Protocol v7: a chosen format is submitted verbatim; "Unspecified" is null.
+  it("submits the chosen game format, or null when unspecified", () => {
+    const onSubmit = vi.fn();
+    render(<CreateTournamentForm onSubmit={onSubmit} />);
+
+    // Default is "Unspecified".
+    fireEvent.click(submitButton());
+    expect(onSubmit.mock.calls[0][0].format).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Format"), {
+      target: { value: "Commander" },
+    });
+    fireEvent.click(submitButton());
+    expect(onSubmit.mock.calls[1][0].format).toBe("Commander");
+  });
+
+  // "Automatic + N": extra rounds ride as `plusRounds` while the count is
+  // automatic, and are dropped when an exact count is set (mutually exclusive).
+  it("submits extra rounds as plusRounds only while the count is automatic", () => {
+    const onSubmit = vi.fn();
+    render(<CreateTournamentForm onSubmit={onSubmit} />);
+
+    fireEvent.change(screen.getByLabelText("Extra rounds"), {
+      target: { value: "2" },
+    });
+    fireEvent.click(submitButton());
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      totalRounds: null,
+      plusRounds: 2,
+    });
+
+    // With an exact round count set, the addend is dropped, never sent both.
+    fireEvent.change(screen.getByLabelText("Rounds"), { target: { value: "5" } });
+    fireEvent.click(submitButton());
+    expect(onSubmit.mock.calls[1][0]).toMatchObject({
+      totalRounds: 5,
+      plusRounds: null,
+    });
+  });
+
   it("submits the name exactly as typed", () => {
     const onSubmit = vi.fn();
     render(<CreateTournamentForm onSubmit={onSubmit} />);

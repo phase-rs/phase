@@ -285,7 +285,7 @@ const HELPERS: HelperCase[] = [
         opts,
       ),
     frame:
-      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3}}',
+      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null}}',
     gated: false,
     reply: CREATED_REPLY,
   },
@@ -394,7 +394,34 @@ describe("tournament request frames", () => {
 
     // `Option<u32>` with `#[serde(default)]` and no `skip_serializing_if`.
     expect(ws.send).toHaveBeenCalledWith(
-      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":4,"scoring":{"win_points":7,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":null}}',
+      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":4,"scoring":{"win_points":7,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":null,"plus_rounds":null,"format":null}}',
+    );
+
+    controller.abort();
+    await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+  });
+
+  // Protocol v7: an event-format label and an "automatic + N" round addend ride
+  // the frame as `format` and `plus_rounds`, in that declaration order.
+  it("puts format and plus_rounds on the wire when supplied", async () => {
+    const ws = new MockWebSocket();
+    const controller = new AbortController();
+    const promise = createTournamentOver(
+      makePhaseSocket(ws),
+      {
+        name: "Friday Night",
+        arity: 2,
+        scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+        bracket: "Swiss",
+        totalRounds: null,
+        plusRounds: 2,
+        format: "Commander",
+      },
+      { signal: controller.signal },
+    );
+
+    expect(ws.send).toHaveBeenCalledWith(
+      '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":null,"plus_rounds":2,"format":"Commander"}}',
     );
 
     controller.abort();

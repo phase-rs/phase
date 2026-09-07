@@ -193,9 +193,16 @@ pub fn guard_client_message_before_dispatch(
         // validation the broker crate cannot depend on. The identical calls
         // appear in `guard_broker_projection_inbound`; `both_inbound_guards_agree_
         // on_every_tournament_variant` is what keeps the two from drifting.
-        ClientMessage::CreateTournament { name, .. } => {
-            validate_create_tournament_fields(CreateTournamentFields { name })
-        }
+        ClientMessage::CreateTournament {
+            name,
+            total_rounds,
+            plus_rounds,
+            ..
+        } => validate_create_tournament_fields(CreateTournamentFields {
+            name,
+            total_rounds: *total_rounds,
+            plus_rounds: *plus_rounds,
+        }),
         ClientMessage::JoinTournament {
             code,
             player_key,
@@ -461,9 +468,16 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         // map into the broker, so anything unbounded here is an unbounded
         // clone — the same hazard `UpdateLobbyMetadata`'s arm above exists to
         // prevent.
-        ClientMessage::CreateTournament { name, .. } => {
-            validate_create_tournament_fields(CreateTournamentFields { name })
-        }
+        ClientMessage::CreateTournament {
+            name,
+            total_rounds,
+            plus_rounds,
+            ..
+        } => validate_create_tournament_fields(CreateTournamentFields {
+            name,
+            total_rounds: *total_rounds,
+            plus_rounds: *plus_rounds,
+        }),
         ClientMessage::JoinTournament {
             code,
             player_key,
@@ -837,6 +851,8 @@ mod tests {
                     scoring: Some(ScoringPolicy::default()),
                     bracket: BracketShape::Swiss,
                     total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
                 },
             ),
             (
@@ -919,6 +935,8 @@ mod tests {
                 scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: Some(3),
+                plus_rounds: None,
+                format: None,
             },
             ClientMessage::JoinTournament {
                 code: "TOUR01".into(),

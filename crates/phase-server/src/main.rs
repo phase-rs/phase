@@ -3255,6 +3255,8 @@ mod lifecycle_tests {
                 scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
             },
             &env,
         );
@@ -4593,12 +4595,16 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             scoring,
             bracket,
             total_rounds,
+            plus_rounds,
+            format,
         } => L::CreateTournament {
             name: name.clone(),
             arity: *arity,
             scoring: *scoring,
             bracket: *bracket,
             total_rounds: *total_rounds,
+            plus_rounds: *plus_rounds,
+            format: *format,
         },
         ClientMessage::JoinTournament {
             code,
@@ -14995,6 +15001,8 @@ mod mode_gate_tests {
                 scoring: Some(ScoringPolicy::default_for_arity(MatchArity::COMMANDER_POD)),
                 bracket: BracketShape::Swiss,
                 total_rounds: Some(4),
+                plus_rounds: None,
+                format: None,
             },
             ClientMessage::JoinTournament {
                 code: "TOUR01".into(),
@@ -15079,6 +15087,8 @@ mod mode_gate_tests {
                     TournamentAction::EndTournament,
                     TournamentAction::Drop,
                 ]),
+                // A concrete label, so the round-trip cannot pass by dropping it.
+                format: Some(engine::types::format::GameFormat::Commander),
             },
             players: vec![alice.clone(), bob.clone()],
             // Every `PairingOutcome` shape, so the round-trip cannot pass by
@@ -15865,6 +15875,8 @@ mod handshake_tests {
                 scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
             },
             &env,
         );

@@ -52,6 +52,10 @@
     "winPointsLabel": "Victoire",
     "drawPointsLabel": "Égalité",
     "lossPointsLabel": "Défaite",
+    "formatLabel": "Format",
+    "formatNone": "Non spécifié",
+    "plusRoundsLabel": "Rondes supplémentaires",
+    "plusRoundsHint": "Ajoutées au nombre de rondes automatique (Suisse plus N). Ne s'applique que si Rondes est laissé automatique.",
     "submit": "Créer le tournoi",
     "submitting": "Création…"
   },

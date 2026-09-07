@@ -4797,6 +4797,14 @@ export interface TournamentSummary {
    */
   total_rounds: number;
   created_at: number;
+  /**
+   * The event's game-format label (Standard, Commander, …), a display label
+   * only — the tournament enforces no deck legality. `undefined` when the
+   * organizer named none, or when talking to a pre-v7 broker that omits the
+   * field (lobby protocol 7 added it). Mirrors the `format` a {@link LobbyGame}
+   * listing already carries; resolve its human label through `FORMAT_REGISTRY`.
+   */
+  format?: GameFormat;
 }
 
 /**
