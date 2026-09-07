@@ -1956,6 +1956,7 @@ impl GameObject {
                 // kind is installed. A wildcard would let a widened gate record
                 // the modification in `perpetual_mods` while installing nothing.
                 use crate::types::ability::TargetFilter;
+                use crate::types::statics::StaticMode;
                 self.sync_missing_base_characteristics();
                 for granted in modifications {
                     match granted {
@@ -1968,9 +1969,43 @@ impl GameObject {
                             }
                         }
                         PerpetualGrantModification::AddStaticMode { mode } => {
-                            let synthetic =
+                            let mut synthetic =
                                 crate::types::ability::StaticDefinition::new(mode.clone())
                                     .affected(TargetFilter::SelfRef);
+                            // CR 113.6 + CR 601.2f: a granted self-spell cost
+                            // modifier (a quoted "This spell costs {N}
+                            // less/more to cast." body, classified here via
+                            // `classify_quoted_inner`'s static-line path --
+                            // Chronicler of Worship's own granted text is this
+                            // exact shape, though Chronicler's OWN card fails
+                            // closed upstream in `parse_perpetual_self_subject`
+                            // for lack of a legitimate "it" antecedent and so
+                            // never actually reaches this arm; see the runtime
+                            // test `perpetual_grant_modify_cost_after_conjure_installs_on_conjured_object_and_reduces_cast_cost`
+                            // in `effects/perpetual.rs` for a card shape that
+                            // DOES reach it) must function from every zone the
+                            // recipient card could be CAST from -- hand, and
+                            // the other alternative-cast zones -- not just the
+                            // battlefield-only default (CR 113.6b): the
+                            // recipient is a card sitting in a non-battlefield
+                            // zone, and `self_spell_cost_modifier_applies_before_targets`
+                            // (casting.rs) gates on `active_zones` containing
+                            // the spell's current zone before it ever reads
+                            // the static's `StaticMode::ModifyCost` payload.
+                            // Without this opt-in the installed static is a
+                            // silent no-op -- Blocker 1 (review round on PR
+                            // #8494). Mirrors the sibling
+                            // `PerpetualModification::ModifyCost` arm above
+                            // verbatim. Scoped to the `ModifyCost` shape only:
+                            // other `StaticMode` kinds this arm installs (a
+                            // granted "can't block" restriction, CR 509.1b)
+                            // are legitimately battlefield-only and must keep
+                            // the empty (battlefield-default) `active_zones`.
+                            if matches!(mode, StaticMode::ModifyCost { .. }) {
+                                synthetic = synthetic.active_zones(
+                                    crate::types::zones::self_spell_cost_mod_active_zones(),
+                                );
+                            }
                             self.static_definitions.push(synthetic.clone());
                             Arc::make_mut(&mut self.base_static_definitions).push(synthetic);
                         }

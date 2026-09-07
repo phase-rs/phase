@@ -13914,9 +13914,14 @@ pub enum PerpetualGrantModification {
         #[serde(deserialize_with = "crate::types::statics::deserialize_static_mode_fwd")]
         mode: StaticMode,
     },
-    /// A full spell/activated ability body (Agent of Raffine's "You may spend
-    /// mana as though it were mana of any color to cast this spell.") — installed
-    /// onto `abilities` + `base_abilities`.
+    /// A full spell/activated ability body (Topsoil Turner's "{T}: Add {G}{G}."
+    /// and Ethereal Grasp's "{8}: Untap this creature.") — installed onto
+    /// `abilities` + `base_abilities`. Agent of Raffine's superficially similar
+    /// "You may spend mana as though it were mana of any color to cast this
+    /// spell." is REJECTED before it ever reaches this variant — see
+    /// `TryFrom<ContinuousModification>`'s `GenericEffect`-static gate below,
+    /// which fails the whole grant closed rather than install a board-wide
+    /// mana concession under a "this spell only" card.
     GrantAbility { definition: Box<AbilityDefinition> },
 }
 
@@ -14091,10 +14096,9 @@ pub enum PerpetualModification {
     /// Digital-only Alchemy (no CR entry for "perpetually"): "[object] perpetually
     /// gains \"<ability text>\"[ and \"<ability text>\"]*" — a permanent grant of
     /// one or more FULL abilities (not just evergreen keywords or a self-cost
-    /// modifier), e.g. Agent of Raffine's conjured duplicate perpetually gaining
-    /// "You may spend mana as though it were mana of any color to cast this
-    /// spell." (CR 609.4b: an any-color/type mana concession affects only how
-    /// a cost is paid) or Karlach, Tiefling Berserker's returned creature
+    /// modifier), e.g. Ethereal Grasp's targeted creature perpetually gaining
+    /// "This creature doesn't untap during your untap step" and "{8}: Untap
+    /// this creature." or Karlach, Tiefling Berserker's returned creature
     /// perpetually gaining "~ can't block." (CR 509.1b blocking restriction).
     ///
     /// Each quoted ability text is classified through the SAME single authority
@@ -14107,8 +14111,16 @@ pub enum PerpetualModification {
     /// (`parse_perpetual_self_subject`) to the correct antecedent: the
     /// ability's own parent target for a bare self-referential grant (Karlach),
     /// or `TargetFilter::LastCreated` when the immediately preceding clause in
-    /// the same chain created the object being granted to (a conjured
-    /// duplicate — Agent of Raffine and siblings).
+    /// the same chain created the object being granted to. Agent of Raffine's
+    /// conjured duplicate is the architectural motivator for that LastCreated
+    /// antecedent, but Agent of Raffine's OWN granted ability text ("You may
+    /// spend mana as though it were mana of any color to cast this spell.") is
+    /// currently REJECTED by `PerpetualGrantModification::try_from`'s
+    /// `GenericEffect`-static gate (see its doc comment), so Agent of Raffine
+    /// does not itself reach `Effect::ApplyPerpetual` — it fails closed to
+    /// `Effect::Unimplemented` — a future card whose conjured-duplicate grant
+    /// classifies to an installable kind would exercise this binding end to
+    /// end.
     ///
     /// Typed as [`PerpetualGrantModification`] — the closed set of kinds the
     /// perpetual runtime can install onto a persistent baseline — rather than
@@ -33540,6 +33552,40 @@ mod tests {
         let json = serde_json::to_string(&mods).unwrap();
         let deserialized: Vec<ContinuousModification> = serde_json::from_str(&json).unwrap();
         assert_eq!(mods, deserialized);
+    }
+
+    /// Non-blocking item 3 (review round on PR #8494, matthewevans): the
+    /// `AbilityCost::Unimplemented` half of `PerpetualGrantModification::
+    /// try_from`'s `ContinuousModification::GrantAbility` fail-closed gate
+    /// (see its doc comment) had no dedicated test -- only the
+    /// `Effect::Unimplemented` half was exercised end-to-end via the Agent of
+    /// Raffine runtime test in `effects/perpetual.rs`. A granted ability whose
+    /// COST half never parsed (an unrecognized leading cost verb, CR 113.3b)
+    /// must fail the whole grant closed exactly like an unparsed EFFECT would
+    /// -- checking only `d.effect` would leave this shape green.
+    #[test]
+    fn perpetual_grant_modification_try_from_rejects_unimplemented_cost() {
+        let granted = AbilityDefinition {
+            cost: Some(AbilityCost::Unimplemented {
+                description: "some unrecognized cost verb".to_string(),
+            }),
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: default_quantity_one(),
+                    target: default_target_filter_controller(),
+                },
+            )
+        };
+        let modification = ContinuousModification::GrantAbility {
+            definition: Box::new(granted),
+        };
+        let result = PerpetualGrantModification::try_from(modification.clone());
+        assert_eq!(
+            result,
+            Err(modification),
+            "a granted ability with an unparsed COST must fail the whole perpetual grant closed, not install an ability that silently ignores its own printed cost"
+        );
     }
 
     #[test]

@@ -11077,16 +11077,60 @@ fn parse_perpetual_self_subject<'a>(
         ))
         .parse(rest)
         .ok()?;
-        // CR 608.2c: a bare "it" binds to the chain's most-recently CREATED
-        // object (Agent of Raffine's conjured duplicate) when the immediately
-        // preceding clause in the same chain created one — reusing the same
-        // chain-created-referent authority the counter anaphor combinators use
-        // for "put a counter on it" (`counter::counter_anaphor_created_token_binding`).
-        // Falls back to the legacy parent-target antecedent (a prior
-        // chosen/tracked object, not a created one) when no such referent
-        // exists, preserving the existing standalone-clause default.
-        let target = counter::counter_anaphor_created_token_binding("it", ctx)
-            .unwrap_or(TargetFilter::ParentTarget);
+        // CR 608.2c: a bare "it" must have a legitimate antecedent -- it must
+        // NEVER silently default to the ability's own source (Blocker 2,
+        // review round on PR #8494). Three antecedent shapes are recognized,
+        // nearest first:
+        //
+        //  1. The chain's most-recently CREATED object (Agent of Raffine's
+        //     conjured duplicate) -- `counter::counter_anaphor_created_token_binding`.
+        //  2. An earlier SAME-CHAIN typed/chosen referent -- a prior "choose a
+        //     card in your hand" clause (`ctx.parent_target_available`) or an
+        //     immediately preceding `Effect::ChooseFromZone`
+        //     (`ctx.pending_tracked_set_origin`) -- mirrors
+        //     `parse_bound_it_perpetual_gain_cost_subject`'s own gate exactly,
+        //     since this is the identical same-chain-referent question the
+        //     cost-grant sibling arm already answers correctly.
+        //  3. The TRIGGER's own non-self subject (Gitrog, Horror of Zhava's
+        //     "whenever a land enters under your control"; Effluence
+        //     Devourer's "whenever you sacrifice ~ or another creature") --
+        //     the SAME exclusion set `resolve_it_pronoun` and
+        //     `oracle_target::resolve_pronoun_target` already use to decide
+        //     whether a bare "it"/"them" has a trigger-subject antecedent
+        //     (`SelfRef`/`Any`/`CostPaidObject` are the ONLY subjects that
+        //     leave a bare pronoun with no antecedent), reused here rather
+        //     than re-derived. A genuinely non-self trigger subject stays
+        //     bound to the triggering object via `ParentTarget`'s own
+        //     `GameEvent::ZoneChanged`-guarded resolution (targeting.rs),
+        //     which already discriminates "the entering/dying/sacrificed
+        //     object" from "the ability's own source" per-event at runtime.
+        //
+        // A SELF trigger (Chronicler of Worship's own ETB: the trigger's
+        // `object_id == source_id`) has none of these three -- the trigger
+        // condition names no object other than the source itself, so
+        // `ParentTarget` would resolve right back to the source
+        // (targeting.rs's `ZoneChanged` guard fails when the entering object
+        // IS the source), silently installing the grant on the WRONG object
+        // when the effect clearly names a different one (the randomly-drawn
+        // Shrine card). That shape has no antecedent and fails the clause
+        // closed, falling through to `Effect::Unimplemented` -- an honest gap
+        // rather than a wrong install.
+        let has_typed_trigger_subject = ctx.subject.as_ref().is_some_and(|subject| {
+            !matches!(
+                subject,
+                TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::CostPaidObject
+            )
+        });
+        let target = match counter::counter_anaphor_created_token_binding("it", ctx) {
+            Some(target) => target,
+            None if ctx.parent_target_available
+                || ctx.pending_tracked_set_origin.is_some()
+                || has_typed_trigger_subject =>
+            {
+                TargetFilter::ParentTarget
+            }
+            None => return None,
+        };
         return Some((rest, target));
     }
 
@@ -22183,7 +22227,21 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         | Effect::ChangeZoneAll { target, .. }
         | Effect::TargetOnly { target, .. }
         | Effect::CastFromZone { target, .. }
-        | Effect::Counter { target, .. } => target,
+        | Effect::Counter { target, .. }
+        // CR 608.2c regression (review round on PR #8494): `Effect::SetLifeTotal`
+        // is also the "a stat becomes equal to/becomes N" setter for a NAMED
+        // TARGET object, not only a player's life total (Baffling Defenses:
+        // "Target creature's base power perpetually becomes 0"; Teyo, Aegis
+        // Adept: "Up to one target creature's base power perpetually becomes
+        // equal to its toughness. It perpetually gains ...") -- its `target`
+        // field carries the SAME chosen-referent shape as every sibling arm
+        // above. Without this arm, Teyo's chained "It perpetually gains ..."
+        // lost its same-chain typed referent under the new bare-"it"
+        // fail-closed gate (`parse_perpetual_self_subject`), regressing a
+        // previously-correct card from `Effect::ApplyPerpetual` to
+        // `Effect::Unimplemented` -- discovered via a fresh coverage-parse-diff
+        // run against this PR's own fix, not assumed.
+        | Effect::SetLifeTotal { target, .. } => target,
         Effect::GenericEffect {
             target: Some(target),
             ..

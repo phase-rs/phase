@@ -40785,15 +40785,20 @@ fn perpetual_parser_maps_grant_keywords() {
         } if keywords == vec![Keyword::Flying]
     ));
 
+    // Regression (Blocker 2, review round on PR #8494, matthewevans): a bare
+    // "it" with NO antecedent (fresh/default ParseContext, as parse_effect
+    // supplies here -- no chain-created object, no same-chain typed/chosen
+    // referent, no non-self trigger subject) must fail the whole clause
+    // closed rather than silently default to TargetFilter::ParentTarget.
+    // This standalone fragment previously asserted the pre-fix fallback
+    // behavior; see perpetual_grant_ability_rejects_standalone_bare_it_with_no_antecedent
+    // for the equivalent GrantAbility-path regression test (both arms funnel
+    // through the same parse_perpetual_self_subject gate).
     let e = parse_effect("it perpetually gains haste.");
-    assert!(matches!(
-        e,
-        Effect::ApplyPerpetual {
-            target: TargetFilter::ParentTarget,
-            modification: PerpetualModification::GrantKeywords { keywords },
-            ..
-        } if keywords == vec![Keyword::Haste]
-    ));
+    assert!(
+        matches!(e, Effect::Unimplemented { .. }),
+        "a bare 'it' with no antecedent must fail the whole clause closed, got {e:?}"
+    );
 }
 
 #[test]
@@ -41055,6 +41060,37 @@ fn perpetual_grant_ability_rejects_unsupported_triggered_body() {
 /// as a green `Effect::ApplyPerpetual` wrapping a no-op nested ability (the
 /// coverage-invisible gap the blocker described); the fail-closed gate must now
 /// reject it exactly like the sibling triggered-ability rejection above.
+/// Regression (Blocker 2, review round on PR #8494, matthewevans): a bare
+/// "it" with NO antecedent at all -- no chain-created object, no earlier
+/// same-chain typed/chosen referent, and no non-self trigger subject -- must
+/// fail the clause closed rather than silently default to
+/// `TargetFilter::ParentTarget` (which the runtime's general use-self
+/// fallback, CR 608.2c, would then resolve right back to the ability's own
+/// source). This is Chronicler of Worship's exact granted-ability clause in
+/// isolation: "When Chronicler of Worship enters the battlefield, put a
+/// random Shrine card from among the top seven cards of your library into
+/// your hand. It perpetually gains \"This spell costs {1} less to cast.\"
+/// Then shuffle." -- the ETB trigger's subject is `SelfRef` (Chronicler
+/// triggers on its own entry) and the "put a random ... into your hand"
+/// clause is a non-targeted, non-tracked random pick (no `ChooseFromZone`,
+/// no typed target), so NONE of the three recognized antecedent shapes
+/// apply. A fresh/default `ParseContext` (as `parse_effect` supplies)
+/// reproduces exactly this no-antecedent shape. Before this fix, the clause
+/// installed the discount onto Chronicler itself instead of the
+/// randomly-drawn Shrine card -- see
+/// `perpetual_grant_modify_cost_after_conjure_installs_on_conjured_object_and_reduces_cast_cost`
+/// (`effects/perpetual.rs`) for the sibling positive case (a LEGITIMATE
+/// antecedent) proving the correctly-targeted install actually reduces cast
+/// cost once Blocker 1's `active_zones` fix is also in place.
+#[test]
+fn perpetual_grant_ability_rejects_standalone_bare_it_with_no_antecedent() {
+    let e = parse_effect("it perpetually gains \"This spell costs {1} less to cast.\"");
+    assert!(
+        matches!(e, Effect::Unimplemented { .. }),
+        "a bare 'it' with no antecedent (Chronicler of Worship's shape) must fail the whole clause closed rather than silently install on the ability's own source, got {e:?}"
+    );
+}
+
 #[test]
 fn perpetual_grant_ability_rejects_boareskyr_tollkeeper_enters_tapped() {
     let e = parse_effect("that card perpetually gains \"~ enters tapped.\"");
