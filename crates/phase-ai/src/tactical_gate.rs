@@ -410,6 +410,8 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
     if object.zone != Zone::Hand
         || object.controller != ctx.ai_player
         || object.owner != ctx.ai_player
+        || object.modal.is_some()
+        || !object.parse_warnings.is_empty()
         || !(object.card_types.core_types.contains(&CoreType::Instant)
             || object.card_types.core_types.contains(&CoreType::Sorcery))
         || object.additional_cost.is_some()
@@ -472,7 +474,7 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
     facts.cost_mode == CastCostMode::Printed
         && facts.immediate_etb_triggers.is_empty()
         && facts.immediate_replacements.is_empty()
-        && !facts.primary_effects.is_empty()
+        && facts.primary_effects.len() == 1
         && facts.primary_effects.iter().all(|definition| {
             definition_is_componentwise_known_zero(
                 ctx.state,
@@ -486,9 +488,6 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
 }
 
 fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: ObjectId) -> bool {
-    if spell_cost_is_payable_from_pool(state, caster, spell_id) {
-        return true;
-    }
     let Some(cost) = effective_spell_cost(state, caster, spell_id) else {
         return false;
     };
@@ -497,6 +496,9 @@ fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: O
             != engine::game::mana_payment::PaymentClassification::Unambiguous
     {
         return false;
+    }
+    if spell_cost_is_payable_from_pool(state, caster, spell_id) {
+        return true;
     }
     engine::game::mana_sources::activatable_mana_source_selections(state, caster)
         .iter()
@@ -1286,10 +1288,12 @@ mod tests {
     use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::game::zones::create_object;
+    use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use engine::types::ability::{
-        BounceSelection, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-        ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter,
-        REMOVE_COUNTER_COST_X,
+        BounceSelection, Comparator, CountScope, CounterCostSelection, DelayedTriggerCondition,
+        Duration, EffectKind, FilterProp, ManaProduction, ModalChoice, MultiTargetSpec,
+        PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition,
+        SubAbilityLink, TargetFilter, REMOVE_COUNTER_COST_X,
     };
     use engine::types::ability::{
         QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
@@ -1376,17 +1380,6 @@ mod tests {
                 GameAction::CastSpell { object_id, .. } if object_id == spell
             )
         })
-    }
-
-    fn cast_is_retained_with_any_payment_mode(state: &GameState, spell: ObjectId) -> bool {
-        let issued = engine::ai_support::candidate_actions(state);
-        assert!(issued.iter().any(|candidate| {
-            matches!(
-                candidate.action,
-                GameAction::CastSpell { object_id, .. } if object_id == spell
-            )
-        }));
-        cast_is_retained_from_issued(state, spell, issued)
     }
 
     fn zero_cast_with_payment_mode_is_retained(
@@ -1657,6 +1650,40 @@ mod tests {
                 },
             )
             .cost(AbilityCost::Tap),
+        );
+        state.battlefield.push_back(source);
+        source
+    }
+
+    fn add_sacrificial_mana_source(state: &mut GameState, card_id: u64) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(card_id),
+            P0,
+            "Sacrificial mana source".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&source)
+            .expect("sacrificial mana source exists");
+        object.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut object.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(
+                engine::types::ability::SacrificeCost::count(TargetFilter::SelfRef, 1),
+            )),
         );
         state.battlefield.push_back(source);
         source
@@ -1995,6 +2022,64 @@ mod tests {
     }
 
     #[test]
+    fn zero_cast_contextual_cast_and_target_hooks_use_production_gate() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let nonmatching = add_battlefield_trigger(&mut state, 91_000, TriggerMode::SpellCast);
+        state
+            .objects
+            .get_mut(&nonmatching)
+            .unwrap()
+            .trigger_definitions[0]
+            .definition
+            .valid_card = Some(TargetFilter::Typed(TypedFilter::creature()));
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "a structurally nonmatching cast hook is irrelevant at the gate"
+        );
+        state
+            .objects
+            .get_mut(&nonmatching)
+            .unwrap()
+            .trigger_definitions[0]
+            .definition
+            .valid_card = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)));
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a matching cast hook retains the engine-issued cast"
+        );
+        state
+            .objects
+            .get_mut(&nonmatching)
+            .unwrap()
+            .trigger_definitions
+            .clear();
+
+        let target_hook = add_battlefield_trigger(&mut state, 91_004, TriggerMode::BecomesTarget);
+        state
+            .objects
+            .get_mut(&target_hook)
+            .unwrap()
+            .trigger_definitions[0]
+            .definition
+            .valid_source = Some(TargetFilter::Typed(TypedFilter::creature()));
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "a structurally nonmatching target hook is irrelevant at the gate"
+        );
+        state
+            .objects
+            .get_mut(&target_hook)
+            .unwrap()
+            .trigger_definitions[0]
+            .definition
+            .valid_source = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)));
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a matching target hook retains the engine-issued cast"
+        );
+    }
+
+    #[test]
     fn zero_cast_commit_crime_trigger_survives_but_attacks_is_irrelevant() {
         let (mut state, congregate) = funded_zero_congregate_state();
         assert!(!zero_cast_is_retained(&state, congregate));
@@ -2114,14 +2199,171 @@ mod tests {
             "the production source census includes the tapped, indexed deferred Slagheap ability"
         );
         assert!(
-            cast_is_retained_with_any_payment_mode(&unfunded, congregate),
-            "a counter-removing mana source makes pre-cast payment nontrivial"
+            zero_cast_is_retained(&unfunded, congregate),
+            "the engine-issued Auto root remains available when the same Slagheap makes payment impure"
+        );
+
+        let mut plain_only = unfunded.clone();
+        plain_only.objects.remove(&slagheap);
+        plain_only.battlefield.retain(|id| *id != slagheap);
+        assert!(
+            !zero_cast_is_retained(&plain_only, congregate),
+            "the paired Auto root is rejected when only ordinary tap-for-mana sources remain"
+        );
+
+        let sacrificial = add_sacrificial_mana_source(&mut plain_only, 91_406);
+        assert!(
+            engine::game::mana_sources::activatable_mana_source_selections(&plain_only, P0)
+                .iter()
+                .any(|selection| {
+                    selection.source.object_id == sacrificial
+                        && selection.penalty == ManaSourcePenalty::Sacrifices
+                }),
+            "the production census exposes the available sacrifice-for-mana penalty"
+        );
+        assert!(
+            zero_cast_is_retained(&plain_only, congregate),
+            "an available sacrificial source keeps the engine-issued Auto cast fail-open even though ordinary lands can pay"
+        );
+        plain_only.objects.remove(&sacrificial);
+        plain_only.battlefield.retain(|id| *id != sacrificial);
+        assert!(
+            !zero_cast_is_retained(&plain_only, congregate),
+            "removing only the sacrificial source restores the pure-land Auto rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_funded_ambiguous_mana_cost_survives() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        for (label, shards) in [
+            ("Phyrexian", vec![ManaCostShard::PhyrexianWhite]),
+            ("hybrid", vec![ManaCostShard::WhiteBlue]),
+            ("X", vec![ManaCostShard::X]),
+        ] {
+            state.objects.get_mut(&congregate).unwrap().mana_cost =
+                ManaCost::Cost { generic: 3, shards };
+            assert!(
+                spell_cost_is_payable_from_pool(&state, P0, congregate),
+                "the funded {label} fixture reaches the public pool authority"
+            );
+            let issued = engine::ai_support::candidate_actions(&state);
+            assert!(issued.iter().any(|candidate| matches!(
+                candidate.action,
+                GameAction::CastSpell { object_id, payment_mode: CastPaymentMode::Auto, .. }
+                    if object_id == congregate
+            )));
+            assert!(
+                cast_is_retained_from_issued(&state, congregate, issued),
+                "pool affordability does not erase an unresolved {label} payment choice"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_cast_unsupported_object_and_root_shapes_survive() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        assert!(!zero_cast_is_retained(&state, congregate));
+
+        state.objects.get_mut(&congregate).unwrap().modal = Some(ModalChoice::default());
+        assert!(zero_cast_is_retained(&state, congregate));
+        state.objects.get_mut(&congregate).unwrap().modal = None;
+        assert!(!zero_cast_is_retained(&state, congregate));
+
+        state
+            .objects
+            .get_mut(&congregate)
+            .unwrap()
+            .parse_warnings
+            .push(OracleDiagnostic::IgnoredRemainder {
+                text: "unmodeled rider".to_string(),
+                parser: "test".to_string(),
+                line_index: 0,
+            });
+        assert!(zero_cast_is_retained(&state, congregate));
+        state
+            .objects
+            .get_mut(&congregate)
+            .unwrap()
+            .parse_warnings
+            .clear();
+        assert!(!zero_cast_is_retained(&state, congregate));
+
+        Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)
+            .push(zero_gain_definition());
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "multiple primary roots cannot share one root recipient proof"
+        );
+    }
+
+    #[test]
+    fn zero_cast_nested_quantity_and_multitarget_metadata_survive() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let unknown_x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        let nested_filter_x = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: unknown_x,
+                    },
+                ])),
+            },
+        };
+        let spell_ledger = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        };
+        for amount in [nested_filter_x, spell_ledger] {
+            let object = state.objects.get_mut(&congregate).unwrap();
+            let definition = Arc::make_mut(&mut object.abilities).first_mut().unwrap();
+            *definition.effect = Effect::GainLife {
+                amount,
+                player: TargetFilter::Player,
+            };
+            assert!(
+                zero_cast_is_retained(&state, congregate),
+                "an unsupported nested or ledger quantity remains outside the root veto"
+            );
+        }
+
+        let object = state.objects.get_mut(&congregate).unwrap();
+        Arc::make_mut(&mut object.abilities)
+            .first_mut()
+            .unwrap()
+            .multi_target = Some(MultiTargetSpec::fixed(1, 2));
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "multi-target metadata prevents a one-recipient zero proof"
+        );
+    }
+
+    #[test]
+    fn zero_cast_independent_subability_metadata_survives() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let mut root = zero_gain_definition();
+        root.sub_ability = Some(Box::new(zero_gain_definition()));
+        root.sub_link = SubAbilityLink::SequentialSibling;
+        *Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)
+            .first_mut()
+            .expect("Congregate has one primary spell definition") = root;
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "an independent sibling cannot inherit the root target proof"
         );
     }
 
     #[test]
     fn zero_cast_off_zone_archive_and_command_hooks_are_paired() {
         let (mut state, congregate) = funded_zero_congregate_state();
+        let slagheap = add_tapped_slagheap_mana_source(&mut state);
         assert!(!zero_cast_is_retained(&state, congregate));
 
         let solitude = add_zone_trigger(
@@ -2129,25 +2371,40 @@ mod tests {
             91_201,
             "Solitude",
             Zone::Graveyard,
-            engine::types::ability::TriggerDefinition::new(TriggerMode::ChangesZone),
+            engine::types::ability::TriggerDefinition::new(TriggerMode::ChangesZone)
+                .trigger_zones(vec![Zone::Battlefield]),
+        );
+        state
+            .objects
+            .get_mut(&solitude)
+            .unwrap()
+            .trigger_definitions
+            .push(engine::types::ability::TriggerDefinition::new(
+                TriggerMode::ChangesZone,
+            ));
+        assert!(spell_cost_is_payable_from_pool(&state, P0, congregate));
+        assert!(
+            engine::game::mana_sources::activatable_mana_source_selections(&state, P0)
+                .iter()
+                .any(|selection| {
+                    selection.source.object_id == slagheap
+                        && selection.ability_index == Some(2)
+                        && selection.output == ManaSourceOutput::DeferredColorChoice
+                }),
+            "the funded archive context retains the indexed Slagheap source"
         );
         assert!(
-            !trigger_definition_functions_in_zone(
-                state.objects[&solitude]
-                    .trigger_definitions
-                    .first()
-                    .unwrap()
-                    .definition(),
-                Zone::Graveyard,
-            ),
-            "a default trigger definition is battlefield-only"
+            state.objects[&solitude].trigger_definitions.iter_unchecked().all(|entry| {
+                !trigger_definition_functions_in_zone(&entry.definition, Zone::Graveyard)
+            }),
+            "both the explicit-Battlefield and default Solitude definitions are inert in the graveyard"
         );
         assert!(
             !zero_cast_is_retained(&state, congregate),
             "a graveyard card whose trigger cannot function there is irrelevant"
         );
 
-        let carnarium = add_zone_trigger(
+        let _carnarium = add_zone_trigger(
             &mut state,
             91_202,
             "Rakdos Carnarium",
@@ -2160,13 +2417,6 @@ mod tests {
             !zero_cast_is_retained(&state, congregate),
             "a scalar self-ETB cannot observe an unrelated instant cast"
         );
-        state
-            .objects
-            .get_mut(&carnarium)
-            .expect("Carnarium exists")
-            .trigger_definitions
-            .clear();
-
         let command = add_zone_trigger(
             &mut state,
             91_203,
@@ -2188,6 +2438,20 @@ mod tests {
         assert!(
             !zero_cast_is_retained(&state, congregate),
             "removing only the command-zone hook restores rejection"
+        );
+
+        let hand_to_stack = add_battlefield_trigger(&mut state, 91_204, TriggerMode::ChangesZone);
+        let definition = &mut state
+            .objects
+            .get_mut(&hand_to_stack)
+            .unwrap()
+            .trigger_definitions[0]
+            .definition;
+        definition.destination = Some(Zone::Stack);
+        definition.valid_card = Some(TargetFilter::Typed(TypedFilter::card()));
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a battlefield hand-to-stack hook is not mistaken for the scalar self-ETB exception"
         );
     }
 
@@ -2266,22 +2530,62 @@ mod tests {
     #[test]
     fn zero_cast_opponent_imposed_cost_is_caster_conditional_and_paired() {
         let (mut state, congregate) = funded_zero_congregate_state();
+        state.players[P1.0 as usize].life = 5;
         let producer = add_battlefield_static_for_controller(
             &mut state,
             91_350,
             P1,
             StaticDefinition::new(StaticMode::ImposeAdditionalCost {
-                cost: AbilityCost::Tap,
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Sacrifice(engine::types::ability::SacrificeCost::count(
+                            TargetFilter::SelfRef,
+                            1,
+                        )),
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            selection: engine::types::ability::CardSelectionMode::Chosen,
+                            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
+                },
                 spell_filter: None,
                 action: AdditionalCostTaxAction::Cast,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::default().controller(engine::types::ability::ControllerRef::Opponent),
-            )),
+            ))
+            .condition(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            }),
         );
         assert!(
+            game_functioning_statics(&state).any(|(source, _)| source.id == producer),
+            "the conservative presence iterator reaches the source before condition application"
+        );
+        assert!(
+            !game_active_statics(&state).any(|(source, _)| source.id == producer),
+            "the active iterator applies the false source-controller condition"
+        );
+        state.objects.get_mut(&producer).unwrap().controller = P0;
+        assert!(
+            game_active_statics(&state).any(|(source, _)| source.id == producer),
+            "the engine condition evaluator admits the same condition for P0's life total"
+        );
+        state.objects.get_mut(&producer).unwrap().controller = P1;
+        assert!(
             zero_cast_is_retained(&state, congregate),
-            "the P0 caster is an opponent of the P1 tax source and the cost applies"
+            "the functioning-source guard keeps the engine-issued cast when this external authority exists"
         );
         state
             .objects
