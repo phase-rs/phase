@@ -6104,6 +6104,7 @@ mod tests {
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
         let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        add_creature(&mut state, PlayerId(1), 2, 2);
         if goaded {
             state
                 .objects
@@ -6943,9 +6944,16 @@ mod tests {
             other => panic!("expected one scored DeclareAttackers action, got {other:?}"),
         };
         assert_eq!(
-            crate::combat_ai::expanded_comparison_counters(),
-            (1, 0, 0),
-            "K=3 dispatches one pre-expired root with zero comparison pairs"
+            crate::combat_ai::expanded_comparison_receipt(),
+            crate::combat_ai::ExpandedComparisonReceipt {
+                entries: 1,
+                attacker_evaluations: 0,
+                pairs: 0,
+                completed_proposals: 0,
+                grouping_passes: 1,
+                cached_value_evaluations: 0,
+            },
+            "K=3 dispatches one pre-expired root without attacker or blocker work"
         );
         engine::game::engine::apply_as_current(&mut state, action)
             .expect("the engine accepts the mandatory fallback declaration");
@@ -6963,25 +6971,31 @@ mod tests {
 
         crate::combat_ai::reset_expanded_comparison_counters();
         let k0_scores = score_candidates_with_session(&state, PlayerId(0), &k0, &session);
-        let k0_counts = crate::combat_ai::expanded_comparison_counters();
+        let k0_receipt = crate::combat_ai::expanded_comparison_receipt();
         crate::combat_ai::reset_expanded_comparison_counters();
         let k3_scores = score_candidates_with_session(&state, PlayerId(0), &k3, &session);
-        let k3_counts = crate::combat_ai::expanded_comparison_counters();
+        let k3_receipt = crate::combat_ai::expanded_comparison_receipt();
 
         assert!(matches!(
             k0_scores.as_slice(),
             [(GameAction::DeclareAttackers { attacks, .. }, 1.0)] if attacks.iter().any(|(id, _)| *id == attacker)
         ));
         assert_eq!(
-            k0_counts.0, 1,
+            k0_receipt.entries, 1,
             "K=0 reaches one measurement comparison root"
         );
         assert!(
-            k0_counts.2 >= 2,
-            "K=0's measurement deadline is not pre-expired"
+            k0_receipt.attacker_evaluations > 0 && k0_receipt.pairs > 0,
+            "the live root evaluates attackers and a real blocker"
         );
-        assert_eq!(k3_counts.0, 1, "K=3 is dispatched before the sample loop");
-        assert!(k3_counts.2 >= 2, "measurement ignores time_budget_ms=0");
+        assert!(
+            k0_receipt.attacker_evaluations + k0_receipt.pairs <= 4096,
+            "the root preserves the single comparison work ceiling"
+        );
+        assert_eq!(
+            k3_receipt, k0_receipt,
+            "K=3 is dispatched before the sample loop"
+        );
         assert_eq!(
             k3_scores, k0_scores,
             "measurement K=0/K=3 keeps the identical public combat action and score"
@@ -7007,7 +7021,7 @@ mod tests {
         crate::combat_ai::reset_expanded_comparison_counters();
         let baseline =
             score_candidates_with_session(&state, PlayerId(0), &config, &baseline_session);
-        let baseline_counts = crate::combat_ai::expanded_comparison_counters();
+        let baseline_receipt = crate::combat_ai::expanded_comparison_receipt();
 
         let hidden_object = state.objects.get_mut(&hidden).expect("hidden card exists");
         hidden_object.name = "Hidden Identity B".to_string();
@@ -7023,23 +7037,19 @@ mod tests {
         let mutated_session = AiSession::arc_from_game(&state);
         crate::combat_ai::reset_expanded_comparison_counters();
         let mutated = score_candidates_with_session(&state, PlayerId(0), &config, &mutated_session);
-        let mutated_counts = crate::combat_ai::expanded_comparison_counters();
+        let mutated_receipt = crate::combat_ai::expanded_comparison_receipt();
 
         assert!(matches!(
             baseline.as_slice(),
             [(GameAction::DeclareAttackers { attacks, .. }, 1.0)] if attacks.iter().any(|(id, _)| *id == attacker)
         ));
-        assert_eq!(
-            baseline_counts.0, 1,
-            "K=3 dispatches one public root comparison"
-        );
-        assert_eq!(
-            mutated_counts.0, 1,
-            "the changed hidden payload still dispatches once"
-        );
         assert!(
-            baseline_counts.2 >= 2 && mutated_counts.2 >= 2,
-            "both roots complete their public defender proposals"
+            baseline_receipt.attacker_evaluations > 0 && baseline_receipt.pairs > 0,
+            "the public root includes real attacker/blocker comparison work"
+        );
+        assert_eq!(
+            mutated_receipt, baseline_receipt,
+            "hidden identity leaves every public comparison work count unchanged"
         );
         assert_eq!(
             mutated, baseline,

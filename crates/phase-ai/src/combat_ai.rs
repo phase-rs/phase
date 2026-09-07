@@ -269,6 +269,13 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline(
             })
             .collect()
     };
+    // The engine accepts an empty declaration when no attacker is eligible.
+    // Return before the free-for-all comparison's static/blocker/value setup:
+    // a wide opposing board must not turn an empty legal choice into unbounded
+    // comparison work.
+    if candidates.is_empty() {
+        return Vec::new();
+    }
     // CR 508.1d / CR 701.15b: creatures with a live must-attack requirement
     // (goad, "attacks each combat if able", lure statics) MUST be declared as
     // attackers or the engine rejects the whole declaration. Partition them out
@@ -304,6 +311,17 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline(
             FormatTopology::IndividualSeats
         )
         && opponents.len() > 1;
+
+    // This local budget covers comparison-specific setup as well as the charged
+    // proposal loops. Start it before collecting static/blocker data, then pass
+    // it through to the comparison for checks before value hoisting and work.
+    let comparison_local_deadline = comparison_enabled
+        .then(|| {
+            targeting
+                .comparison_deadline
+                .and_then(|deadline| deadline.remaining().map(|_| Deadline::after(10)))
+        })
+        .flatten();
 
     // CR 508.1 / CR 509.1 / CR 510.1: promote only an exact lethal
     // declaration the engine has reducer-replayed against every bounded legal
@@ -368,6 +386,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline(
                     valid_attack_targets: targeting.valid_attack_targets,
                     valid_attack_targets_by_attacker: targeting.valid_attack_targets_by_attacker,
                     shared_deadline: deadline,
+                    local_deadline: comparison_local_deadline,
                 },
             )
         })
@@ -716,6 +735,7 @@ thread_local! {
     static EXPANDED_COMPARISON_COMPLETED_PROPOSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static EXPANDED_COMPARISON_GROUPING_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static EXPANDED_COMPARISON_VALUE_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EXPANDED_COMPARISON_GROUPED_BLOCKERS: std::cell::RefCell<HashMap<PlayerId, Vec<ObjectId>>> = std::cell::RefCell::new(HashMap::new());
     static EXPANDED_PROPOSAL_ACCOUNTING: std::cell::RefCell<Vec<ProposalAccounting>> = const { std::cell::RefCell::new(Vec::new()) };
     static EXPANDED_COMPARISON_FORCE_EXPIRE_AT_WORK: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
@@ -741,6 +761,7 @@ pub(crate) fn reset_expanded_comparison_counters() {
     EXPANDED_COMPARISON_COMPLETED_PROPOSALS.with(|counter| counter.set(0));
     EXPANDED_COMPARISON_GROUPING_PASSES.with(|counter| counter.set(0));
     EXPANDED_COMPARISON_VALUE_EVALUATIONS.with(|counter| counter.set(0));
+    EXPANDED_COMPARISON_GROUPED_BLOCKERS.with(|groups| groups.borrow_mut().clear());
     EXPANDED_PROPOSAL_ACCOUNTING.with(|accounting| accounting.borrow_mut().clear());
     EXPANDED_COMPARISON_FORCE_EXPIRE_AT_WORK.with(|limit| limit.set(None));
 }
@@ -793,6 +814,11 @@ pub(crate) fn expanded_comparison_receipt() -> ExpandedComparisonReceipt {
     }
 }
 
+#[cfg(test)]
+fn expanded_grouped_blockers() -> HashMap<PlayerId, Vec<ObjectId>> {
+    EXPANDED_COMPARISON_GROUPED_BLOCKERS.with(|groups| groups.borrow().clone())
+}
+
 struct ExpandedMultiplayerChoice {
     defender: PlayerId,
     attackers: Option<Vec<ObjectId>>,
@@ -814,6 +840,7 @@ struct ExpandedComparisonInput<'a> {
     valid_attack_targets: Option<&'a [AttackTarget]>,
     valid_attack_targets_by_attacker: Option<&'a HashMap<ObjectId, Vec<AttackTarget>>>,
     shared_deadline: Deadline,
+    local_deadline: Option<Deadline>,
 }
 
 #[derive(Clone, Copy)]
@@ -845,6 +872,8 @@ fn group_untapped_creature_blockers(
                 .push(id);
         }
     }
+    #[cfg(test)]
+    EXPANDED_COMPARISON_GROUPED_BLOCKERS.with(|recorded| *recorded.borrow_mut() = groups.clone());
     groups
 }
 
@@ -884,6 +913,19 @@ fn expanded_multiplayer_choice(
         return None;
     }
 
+    if input.shared_deadline.expired()
+        || input
+            .local_deadline
+            .is_some_and(|deadline| deadline.expired())
+    {
+        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
+            |defender| ExpandedMultiplayerChoice {
+                defender,
+                attackers: None,
+            },
+        );
+    }
+
     let work_upper_bound = input
         .candidates
         .len()
@@ -906,10 +948,17 @@ fn expanded_multiplayer_choice(
         );
     }
 
-    let local_deadline = input
-        .shared_deadline
-        .remaining()
-        .map(|_| Deadline::after(10));
+    if input
+        .local_deadline
+        .is_some_and(|deadline| deadline.expired())
+    {
+        return fallback_multiplayer_defender(state, player, &reachable_opponents).map(
+            |defender| ExpandedMultiplayerChoice {
+                defender,
+                attackers: None,
+            },
+        );
+    }
     let mut values = HashMap::new();
     for &id in input
         .candidates
@@ -942,7 +991,9 @@ fn expanded_multiplayer_choice(
             break;
         }
         if input.shared_deadline.expired()
-            || local_deadline.is_some_and(|deadline| deadline.expired())
+            || input
+                .local_deadline
+                .is_some_and(|deadline| deadline.expired())
         {
             break;
         }
@@ -966,7 +1017,9 @@ fn expanded_multiplayer_choice(
                 break;
             }
             if input.shared_deadline.expired()
-                || local_deadline.is_some_and(|deadline| deadline.expired())
+                || input
+                    .local_deadline
+                    .is_some_and(|deadline| deadline.expired())
                 || attacker_evaluations + inspected_pairs >= MULTIPLAYER_COMPARISON_WORK_LIMIT
             {
                 complete = false;
@@ -999,7 +1052,9 @@ fn expanded_multiplayer_choice(
                     break;
                 }
                 if input.shared_deadline.expired()
-                    || local_deadline.is_some_and(|deadline| deadline.expired())
+                    || input
+                        .local_deadline
+                        .is_some_and(|deadline| deadline.expired())
                     || attacker_evaluations + inspected_pairs >= MULTIPLAYER_COMPARISON_WORK_LIMIT
                 {
                     complete = false;
@@ -3928,6 +3983,7 @@ mod tests {
                 valid_attack_targets: None,
                 valid_attack_targets_by_attacker: None,
                 shared_deadline: Deadline::none(),
+                local_deadline: None,
             },
         );
         let accounting = expanded_proposal_accounting();
@@ -4003,6 +4059,211 @@ mod tests {
     }
 
     #[test]
+    fn voluntary_menace_uses_no_block_treatment_before_race_selection() {
+        let mut state = setup_multiplayer(3);
+        state.players[1].life = 3;
+        state.players[2].life = 20;
+        let attacker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Voluntary menace",
+            3,
+            3,
+            vec![Keyword::Menace],
+        );
+        let blocker = add_creature(&mut state, PlayerId(1), "Lone 5/5", 5, 5, vec![]);
+        let slices = BlockLegalitySlices::collect(&state);
+        let lone_block = defender_best_block_from_eligible(
+            &state,
+            attacker,
+            evaluate_creature(&state, attacker),
+            &[blocker],
+            |id| evaluate_creature(&state, id),
+        )
+        .expect("the hostile hypothetical block exists");
+        assert_eq!(
+            engine::game::combat::min_blockers_required_from_precomputed(
+                &state,
+                attacker,
+                &slices.block_restriction,
+            ),
+            2,
+            "menace requires two blockers"
+        );
+        assert!(!lone_block.attacker_survives && lone_block.blocker_value > 0.0);
+        assert!(
+            !should_attack_given_objective(
+                CombatObjective::Race,
+                lone_block.kills_blocker && lone_block.attacker_survives,
+                lone_block.kills_blocker
+                    && evaluate_creature(&state, attacker) <= lone_block.blocker_value,
+                false,
+                3,
+                lone_block.attacker_survives,
+                false,
+            ),
+            "the illegal one-block hypothetical would reject Race"
+        );
+
+        reset_expanded_comparison_counters();
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        let p1 = expanded_proposal_accounting()
+            .into_iter()
+            .find(|proposal| proposal.defender == PlayerId(1))
+            .expect("P1 proposal completed");
+        assert_eq!(p1.attackers, vec![attacker]);
+        assert_eq!(p1.own_losses, 0.0);
+        assert_eq!(p1.opposing_losses, 0.0);
+        assert!(p1.finishes);
+        assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+        let mut engine_state = state.clone();
+        engine_state.phase = engine::types::phase::Phase::DeclareAttackers;
+        engine_state.waiting_for =
+            engine::game::combat::build_declare_attackers_waiting_for(&engine_state);
+        engine::game::engine::apply_as_current(
+            &mut engine_state,
+            engine::types::actions::GameAction::DeclareAttackers {
+                attacks: attacks.clone(),
+                bands: vec![],
+            },
+        )
+        .expect("the real three-player declaration is engine legal");
+
+        let second = add_creature(&mut state, PlayerId(1), "Second 5/5", 5, 5, vec![]);
+        reset_expanded_comparison_counters();
+        assert_eq!(
+            choose_attackers_with_targets(&state, PlayerId(0)),
+            vec![(attacker, AttackTarget::Player(PlayerId(2)))],
+            "a sufficient two-block floor keeps the open P2 proposal as the positive choice"
+        );
+        assert!(state.battlefield.contains(&second));
+    }
+
+    #[test]
+    fn completed_decline_is_distinct_from_fallback_and_records_empty_proposals() {
+        let mut state = setup_multiplayer(3);
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 1, 1, vec![]);
+        add_creature(&mut state, PlayerId(1), "Wall", 8, 8, vec![]);
+        add_creature(&mut state, PlayerId(2), "Wall", 8, 8, vec![]);
+        let opponents = players::opponents(&state, PlayerId(0));
+        let slices = BlockLegalitySlices::collect(&state);
+        let groups = group_untapped_creature_blockers(&state, PlayerId(0), &opponents);
+        reset_expanded_comparison_counters();
+        let choice = expanded_multiplayer_choice(
+            &state,
+            PlayerId(0),
+            ExpandedComparisonInput {
+                opponents: &opponents,
+                candidates: &[attacker],
+                mandatory: &[],
+                slices: &slices,
+                blockers_by_controller: &groups,
+                valid_attack_targets: None,
+                valid_attack_targets_by_attacker: None,
+                shared_deadline: Deadline::none(),
+                local_deadline: None,
+            },
+        )
+        .expect("the comparator reaches a completed decline");
+        assert!(matches!(choice.attackers, Some(ref ids) if ids.is_empty()));
+        let accounting = expanded_proposal_accounting();
+        assert_eq!(
+            accounting.len(),
+            2,
+            "both defender proposals completed before declining"
+        );
+        assert!(accounting
+            .iter()
+            .all(|proposal| proposal.attackers.is_empty()));
+        assert_eq!(expanded_comparison_receipt().completed_proposals, 2);
+    }
+
+    #[test]
+    fn mandatory_union_and_crackback_pruning_preserve_their_distinct_authorities() {
+        let mut mandatory_state = setup_multiplayer(3);
+        let voluntary = add_creature(&mut mandatory_state, PlayerId(0), "Voluntary", 1, 1, vec![]);
+        let mandatory = add_creature(&mut mandatory_state, PlayerId(0), "Mandatory", 3, 3, vec![]);
+        add_creature(&mut mandatory_state, PlayerId(1), "P1 wall", 8, 8, vec![]);
+        add_creature(&mut mandatory_state, PlayerId(2), "P2 wall", 8, 8, vec![]);
+        let battle_card_id = CardId(mandatory_state.next_object_id);
+        let battle = create_object(
+            &mut mandatory_state,
+            battle_card_id,
+            PlayerId(1),
+            "Battle".to_string(),
+            Zone::Battlefield,
+        );
+        let battle_object = mandatory_state
+            .objects
+            .get_mut(&battle)
+            .expect("battle exists");
+        battle_object.card_types.core_types.push(CoreType::Battle);
+        battle_object
+            .chosen_attributes
+            .push(engine::types::ability::ChosenAttribute::Player(PlayerId(1)));
+        let permanent = engine::types::identifiers::ObjectIncarnationRef::from_object(
+            mandatory_state.objects.get(&battle).expect("battle exists"),
+        );
+        mandatory_state
+            .objects
+            .get_mut(&mandatory)
+            .expect("mandatory creature exists")
+            .static_definitions
+            .push(
+                StaticDefinition::new(engine::types::statics::StaticMode::MustAttackDefender {
+                    defender: engine::types::statics::RequiredDefender::Permanent { permanent },
+                })
+                .affected(engine::types::ability::TargetFilter::SelfRef),
+            );
+        mandatory_state.phase = engine::types::phase::Phase::DeclareAttackers;
+        mandatory_state.waiting_for =
+            engine::game::combat::build_declare_attackers_waiting_for(&mandatory_state);
+        reset_expanded_comparison_counters();
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let action = crate::search::choose_action(&mandatory_state, PlayerId(0), &config, &mut rng)
+            .expect("engine-issued declaration has an action");
+        let accounting = expanded_proposal_accounting();
+        assert!(
+            accounting
+                .iter()
+                .all(|proposal| !proposal.attackers.contains(&mandatory)),
+            "the nonplayer-required ID is absent from every pre-mandatory voluntary proposal"
+        );
+        assert!(
+            accounting
+                .iter()
+                .all(|proposal| !proposal.attackers.contains(&voluntary)),
+            "the walls make the scored voluntary set empty"
+        );
+        assert!(matches!(
+            action,
+            engine::types::actions::GameAction::DeclareAttackers { ref attacks, .. }
+                if attacks.contains(&(mandatory, AttackTarget::Battle(battle)))
+        ));
+        engine::game::engine::apply_as_current(&mut mandatory_state, action)
+            .expect("engine completion retains the mandatory nonplayer target");
+
+        let mut crackback_state = setup_multiplayer(3);
+        crackback_state.players[0].life = 3;
+        let scored = add_creature(&mut crackback_state, PlayerId(0), "Scored", 4, 4, vec![]);
+        add_creature(&mut crackback_state, PlayerId(2), "Crackback", 5, 5, vec![]);
+        reset_expanded_comparison_counters();
+        let attacks = choose_attackers_with_targets(&crackback_state, PlayerId(0));
+        assert!(
+            expanded_proposal_accounting()
+                .iter()
+                .any(|proposal| proposal.defender == PlayerId(1)
+                    && proposal.attackers.contains(&scored)),
+            "P1 receives a positive completed scorer-owned proposal before crackback"
+        );
+        assert!(
+            attacks.iter().all(|(id, _)| *id != scored),
+            "positive crackback prunes the scored nonmandatory attacker without rescoring"
+        );
+    }
+
+    #[test]
     fn proposal_deduplicates_reused_blocker_credit_and_caps_at_open_pressure() {
         let mut state = setup_multiplayer(3);
         let attackers: Vec<_> = (0..5)
@@ -4030,6 +4291,7 @@ mod tests {
                 valid_attack_targets: None,
                 valid_attack_targets_by_attacker: None,
                 shared_deadline: Deadline::none(),
+                local_deadline: None,
             },
         );
 
@@ -4074,6 +4336,7 @@ mod tests {
                 valid_attack_targets: None,
                 valid_attack_targets_by_attacker: None,
                 shared_deadline: Deadline::none(),
+                local_deadline: None,
             },
         );
 
@@ -4112,6 +4375,7 @@ mod tests {
                 valid_attack_targets: None,
                 valid_attack_targets_by_attacker: None,
                 shared_deadline: Deadline::none(),
+                local_deadline: None,
             },
         );
         let proposal = expanded_proposal_accounting()
@@ -4294,6 +4558,7 @@ mod tests {
                 valid_attack_targets: None,
                 valid_attack_targets_by_attacker: None,
                 shared_deadline: Deadline::none(),
+                local_deadline: None,
             },
         );
         let protected = expanded_proposal_accounting()
@@ -4334,6 +4599,7 @@ mod tests {
                 valid_attack_targets: None,
                 valid_attack_targets_by_attacker: None,
                 shared_deadline: Deadline::none(),
+                local_deadline: None,
             },
         );
         let open = expanded_proposal_accounting()
@@ -4498,6 +4764,126 @@ mod tests {
     }
 
     #[test]
+    fn mixed_and_restricted_comparisons_charge_attacker_and_pair_work_separately() {
+        let mut mixed = setup_multiplayer(3);
+        let first = add_creature(&mut mixed, PlayerId(0), "First", 4, 4, vec![]);
+        let second = add_creature(&mut mixed, PlayerId(0), "Second", 4, 4, vec![]);
+        add_creature(&mut mixed, PlayerId(1), "P1 blocker", 2, 2, vec![]);
+        add_creature(&mut mixed, PlayerId(2), "P2 blocker one", 2, 2, vec![]);
+        add_creature(&mut mixed, PlayerId(2), "P2 blocker two", 2, 2, vec![]);
+        reset_expanded_comparison_counters();
+        let mixed_attacks = choose_attackers_with_targets(&mixed, PlayerId(0));
+        let mixed_receipt = expanded_comparison_receipt();
+        assert!(
+            !mixed_attacks.is_empty(),
+            "the mixed board reaches a positive proposal"
+        );
+        assert_eq!(mixed_receipt.attacker_evaluations, 4);
+        assert_eq!(mixed_receipt.pairs, 6);
+        assert_eq!(
+            mixed_receipt.attacker_evaluations + mixed_receipt.pairs,
+            10,
+            "A=2, B={{1,2}} charges aggregate work rather than a pair-only bound"
+        );
+
+        let mut restricted = setup_multiplayer(3);
+        let restricted_first = add_creature(&mut restricted, PlayerId(0), "First", 4, 4, vec![]);
+        let restricted_second = add_creature(&mut restricted, PlayerId(0), "Second", 4, 4, vec![]);
+        add_creature(&mut restricted, PlayerId(1), "P1 blocker", 2, 2, vec![]);
+        add_creature(&mut restricted, PlayerId(2), "P2 blocker", 2, 2, vec![]);
+        let mut targets = HashMap::new();
+        targets.insert(restricted_first, vec![AttackTarget::Player(PlayerId(1))]);
+        targets.insert(restricted_second, vec![AttackTarget::Player(PlayerId(2))]);
+        reset_expanded_comparison_counters();
+        let restricted_attacks = choose_attackers_with_targets_with_profile_and_deadline(
+            &restricted,
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            None,
+            AttackTargetingContext {
+                valid_attacker_ids: Some(&[restricted_first, restricted_second]),
+                valid_attack_targets: Some(&[
+                    AttackTarget::Player(PlayerId(1)),
+                    AttackTarget::Player(PlayerId(2)),
+                ]),
+                valid_attack_targets_by_attacker: Some(&targets),
+                comparison_deadline: Some(Deadline::none()),
+            },
+        );
+        let restricted_receipt = expanded_comparison_receipt();
+        assert!(!restricted_attacks.is_empty());
+        assert_eq!(restricted_receipt.attacker_evaluations, 4);
+        assert_eq!(restricted_receipt.pairs, 2);
+        assert_eq!(
+            restricted_receipt.attacker_evaluations + restricted_receipt.pairs,
+            6
+        );
+        assert!(
+            [first, second]
+                .iter()
+                .all(|id| mixed.battlefield.contains(id)),
+            "the mixed fixture's concrete candidate IDs remain live"
+        );
+    }
+
+    #[test]
+    fn grouping_uses_live_controller_and_excludes_tapped_and_eliminated_blockers() {
+        let mut state = setup_multiplayer(4);
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 4, 4, vec![]);
+        let moved = add_creature(&mut state, PlayerId(1), "Moved", 2, 2, vec![]);
+        let tapped = add_creature(&mut state, PlayerId(2), "Tapped", 2, 2, vec![]);
+        let live = add_creature(&mut state, PlayerId(2), "Live", 2, 2, vec![]);
+        let eliminated = add_creature(&mut state, PlayerId(3), "Eliminated", 2, 2, vec![]);
+        state.objects.get_mut(&moved).unwrap().controller = PlayerId(2);
+        state.objects.get_mut(&tapped).unwrap().tapped = true;
+        state.players[3].is_eliminated = true;
+        reset_expanded_comparison_counters();
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        let groups = expanded_grouped_blockers();
+        let receipt = expanded_comparison_receipt();
+        assert_eq!(groups.get(&PlayerId(1)), None);
+        assert_eq!(groups.get(&PlayerId(2)), Some(&vec![moved, live]));
+        assert!(
+            groups
+                .values()
+                .flatten()
+                .all(|id| *id != tapped && *id != eliminated),
+            "only actual live, untapped controller-owned blockers are grouped"
+        );
+        assert_eq!(
+            receipt.cached_value_evaluations, 3,
+            "one attacker plus the two grouped blockers"
+        );
+        assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+    }
+
+    #[test]
+    fn open_board_expiry_charges_evaluation_work_without_pairs() {
+        let mut state = setup_multiplayer(3);
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 4, 4, vec![]);
+        reset_expanded_comparison_counters();
+        force_expanded_comparison_expiry_after_work(1);
+        let expired = choose_attackers_with_targets(&state, PlayerId(0));
+        let expired_receipt = expanded_comparison_receipt();
+        assert_eq!(expired_receipt.attacker_evaluations, 1);
+        assert_eq!(expired_receipt.pairs, 0);
+        assert_eq!(expired_receipt.completed_proposals, 1);
+        assert_eq!(expired, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+
+        reset_expanded_comparison_counters();
+        let unexpired = choose_attackers_with_targets(&state, PlayerId(0));
+        let unexpired_receipt = expanded_comparison_receipt();
+        assert_eq!(unexpired_receipt.attacker_evaluations, 2);
+        assert_eq!(unexpired_receipt.pairs, 0);
+        assert_eq!(unexpired_receipt.completed_proposals, 2);
+        assert!(
+            !unexpired.is_empty(),
+            "the open-board comparison reaches both defenders without expiry"
+        );
+    }
+
+    #[test]
     fn partial_multiplayer_proposal_cannot_win_after_deterministic_expiry() {
         let mut state = setup_multiplayer(3);
         state.players[1].life = 20;
@@ -4648,6 +5034,144 @@ mod tests {
                 .all(|(_, target)| { *target == AttackTarget::Player(PlayerId(2)) }),
             "the above-cap fallback uses the aggregate issued target domain when no per-attacker map exists"
         );
+    }
+
+    #[test]
+    fn open_board_exact_limit_completes_and_next_attacker_falls_back_without_work() {
+        let mut exact_state = setup_multiplayer(3);
+        let exact_attackers: Vec<_> = (0..2048)
+            .map(|_| add_creature(&mut exact_state, PlayerId(0), "Attacker", 2, 2, vec![]))
+            .collect();
+        let exact_opponents = players::opponents(&exact_state, PlayerId(0));
+        let exact_slices = BlockLegalitySlices::collect(&exact_state);
+        let exact_groups =
+            group_untapped_creature_blockers(&exact_state, PlayerId(0), &exact_opponents);
+        reset_expanded_comparison_counters();
+        let exact = expanded_multiplayer_choice(
+            &exact_state,
+            PlayerId(0),
+            ExpandedComparisonInput {
+                opponents: &exact_opponents,
+                candidates: &exact_attackers,
+                mandatory: &[],
+                slices: &exact_slices,
+                blockers_by_controller: &exact_groups,
+                valid_attack_targets: None,
+                valid_attack_targets_by_attacker: None,
+                shared_deadline: Deadline::none(),
+                local_deadline: None,
+            },
+        )
+        .expect("4096 open-board units are admitted");
+        let exact_receipt = expanded_comparison_receipt();
+        assert!(matches!(exact.attackers, Some(ref ids) if !ids.is_empty()));
+        assert_eq!(exact_receipt.attacker_evaluations, 4096);
+        assert_eq!(exact_receipt.pairs, 0);
+        assert_eq!(exact_receipt.completed_proposals, 2);
+
+        let mut above_state = setup_multiplayer(3);
+        let above_attackers: Vec<_> = (0..2049)
+            .map(|_| add_creature(&mut above_state, PlayerId(0), "Attacker", 2, 2, vec![]))
+            .collect();
+        let above_opponents = players::opponents(&above_state, PlayerId(0));
+        let above_slices = BlockLegalitySlices::collect(&above_state);
+        let above_groups =
+            group_untapped_creature_blockers(&above_state, PlayerId(0), &above_opponents);
+        reset_expanded_comparison_counters();
+        let above = expanded_multiplayer_choice(
+            &above_state,
+            PlayerId(0),
+            ExpandedComparisonInput {
+                opponents: &above_opponents,
+                candidates: &above_attackers,
+                mandatory: &[],
+                slices: &above_slices,
+                blockers_by_controller: &above_groups,
+                valid_attack_targets: None,
+                valid_attack_targets_by_attacker: None,
+                shared_deadline: Deadline::none(),
+                local_deadline: None,
+            },
+        )
+        .expect("above-limit comparison supplies an ordinary fallback defender");
+        assert!(above.attackers.is_none());
+        assert_eq!(
+            expanded_comparison_receipt(),
+            ExpandedComparisonReceipt {
+                entries: 1,
+                attacker_evaluations: 0,
+                pairs: 0,
+                completed_proposals: 0,
+                grouping_passes: 0,
+                cached_value_evaluations: 0,
+            }
+        );
+        reset_expanded_comparison_counters();
+        let public_fallback = choose_attackers_with_targets(&above_state, PlayerId(0));
+        assert_eq!(
+            public_fallback.len(),
+            2049,
+            "the public fallback retains every legal open attacker"
+        );
+        assert_eq!(
+            expanded_comparison_receipt().attacker_evaluations
+                + expanded_comparison_receipt().pairs,
+            0,
+            "the public 4098-unit admission rejection still performs no comparison work"
+        );
+        above_state.phase = engine::types::phase::Phase::DeclareAttackers;
+        above_state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: above_attackers,
+            valid_attack_targets: vec![
+                AttackTarget::Player(PlayerId(1)),
+                AttackTarget::Player(PlayerId(2)),
+            ],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        engine::game::engine::apply_as_current(
+            &mut above_state,
+            engine::types::actions::GameAction::DeclareAttackers {
+                attacks: public_fallback,
+                bands: vec![],
+            },
+        )
+        .expect("the above-limit public fallback is engine legal");
+    }
+
+    #[test]
+    fn empty_attacker_declaration_skips_wide_comparison_setup_and_is_engine_legal() {
+        let mut state = setup_multiplayer(3);
+        for _ in 0..2049 {
+            add_creature(&mut state, PlayerId(1), "Wide blocker", 1, 1, vec![]);
+            add_creature(&mut state, PlayerId(2), "Wide blocker", 1, 1, vec![]);
+        }
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        reset_expanded_comparison_counters();
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        assert!(attacks.is_empty());
+        assert_eq!(
+            expanded_comparison_receipt(),
+            ExpandedComparisonReceipt {
+                entries: 0,
+                attacker_evaluations: 0,
+                pairs: 0,
+                completed_proposals: 0,
+                grouping_passes: 0,
+                cached_value_evaluations: 0,
+            },
+            "an empty candidate domain performs no comparison grouping or value work"
+        );
+        engine::game::engine::apply_as_current(
+            &mut state,
+            engine::types::actions::GameAction::DeclareAttackers {
+                attacks,
+                bands: vec![],
+            },
+        )
+        .expect("the engine accepts the empty declaration on a wide public board");
     }
 
     fn multiplayer_comparison_fixture(attacker_count: usize, blocker_count: usize) -> GameState {
