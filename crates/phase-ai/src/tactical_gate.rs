@@ -15,7 +15,9 @@ use engine::game::functioning_abilities::{
 use engine::game::quantity::{
     quantity_is_cast_stable_for_pre_cast, try_resolve_quantity_in_source_context,
 };
-use engine::game::triggers::trigger_definition_functions_in_zone;
+use engine::game::triggers::{
+    synthetic_keyword_spell_cast_trigger_applies, trigger_definition_functions_in_zone,
+};
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     ContinuousModification, CostCategory, Effect, PtValue, TargetFilter, TargetRef, TypeFilter,
@@ -497,6 +499,14 @@ fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: O
     {
         return false;
     }
+    if state.players[caster.0 as usize]
+        .mana_pool
+        .mana
+        .iter()
+        .any(|unit| !unit.grants.is_empty())
+    {
+        return false;
+    }
     if spell_cost_is_payable_from_pool(state, caster, spell_id) {
         return true;
     }
@@ -504,6 +514,7 @@ fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: O
         .iter()
         .all(|selection| {
             selection.penalty == ManaSourcePenalty::None
+                && !mana_source_selection_has_spell_grant(state, selection)
                 && selection.ability_index.is_none_or(|index| {
                     state
                         .objects
@@ -513,6 +524,42 @@ fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: O
                         .is_none_or(tap_untap_only_cost)
                 })
         })
+}
+
+fn mana_source_selection_has_spell_grant(
+    state: &GameState,
+    selection: &engine::types::mana::ManaSourceSelection,
+) -> bool {
+    selection.ability_index.is_some_and(|index| {
+        state
+            .objects
+            .get(&selection.source.object_id)
+            .and_then(|object| object.abilities.get(index))
+            .is_some_and(ability_has_mana_spell_grant)
+    }) || selection.taps_for_mana.iter().any(|tap| {
+        state
+            .objects
+            .get(&tap.source.object_id)
+            .is_some_and(|source| {
+                active_trigger_definitions(state, source).any(|active| {
+                    active.definition_ref.source == tap.source
+                        && active.definition_ref.occurrence == tap.occurrence
+                        && active
+                            .definition
+                            .execute
+                            .as_deref()
+                            .is_some_and(ability_has_mana_spell_grant)
+                })
+            })
+    })
+}
+
+fn ability_has_mana_spell_grant(ability: &AbilityDefinition) -> bool {
+    matches!(ability.effect.as_ref(), Effect::Mana { grants, .. } if !grants.is_empty())
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_has_mana_spell_grant)
 }
 
 fn mana_cost_has_x(cost: &engine::types::mana::ManaCost) -> bool {
@@ -652,6 +699,12 @@ fn has_relevant_functioning_trigger(state: &GameState, spell_id: ObjectId) -> bo
     let Some(spell) = state.objects.get(&spell_id) else {
         return true;
     };
+    if state.battlefield.iter().copied().any(|source_id| {
+        synthetic_keyword_spell_cast_trigger_applies(state, source_id, spell.controller, spell_id)
+    }) {
+        return true;
+    }
+
     let battlefield_relevant = battlefield_active_triggers(state)
         .any(|(_, active)| !trigger_is_proven_irrelevant(spell, active.definition));
     if battlefield_relevant {
@@ -1305,8 +1358,10 @@ mod tests {
         WaitingFor,
     };
     use engine::types::identifiers::CardId;
-    use engine::types::keywords::WardCost;
-    use engine::types::mana::{ManaCost, ManaCostShard, ManaSourceOutput, ManaUnit};
+    use engine::types::keywords::{Keyword, WardCost};
+    use engine::types::mana::{
+        ManaCost, ManaCostShard, ManaSourceOutput, ManaSpellGrant, ManaUnit,
+    };
     use engine::types::replacements::ReplacementEvent;
     use engine::types::statics::CastFrequency;
     use rand::SeedableRng;
@@ -1652,6 +1707,27 @@ mod tests {
             .cost(AbilityCost::Tap),
         );
         state.battlefield.push_back(source);
+        source
+    }
+
+    fn add_grant_mana_source(state: &mut GameState, card_id: u64) -> ObjectId {
+        let source = add_plain_colorless_mana_source(state, card_id);
+        let ability = Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("grant source exists")
+                .abilities,
+        )
+        .first_mut()
+        .expect("grant source has one mana ability");
+        let Effect::Mana { grants, .. } = &mut *ability.effect else {
+            unreachable!("fixture mana source has a mana effect");
+        };
+        grants.push(ManaSpellGrant::TriggerOnSpend {
+            filter: TargetFilter::Any,
+            ability: Box::new(zero_gain_definition()),
+        });
         source
     }
 
@@ -2382,6 +2458,92 @@ mod tests {
         assert!(
             !zero_cast_is_retained(&state, congregate),
             "removing only the child sibling link restores the known-zero rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_synthetic_prowess_trigger_is_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        *Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)
+            .first_mut()
+            .expect("Congregate has one primary spell definition") = zero_gain_definition();
+        let prowess = create_object(
+            &mut state,
+            CardId(91_205),
+            P0,
+            "Prowess fixture".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&prowess)
+            .expect("Prowess source exists");
+        object.card_types.core_types.push(CoreType::Creature);
+        object.keywords.push(Keyword::Prowess);
+        state.battlefield.push_back(prowess);
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "an engine-issued Auto cast with a synthetic Prowess payoff must remain selectable"
+        );
+        state.objects.get_mut(&prowess).unwrap().keywords.clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only Prowess restores rejection for the same known-zero root"
+        );
+    }
+
+    #[test]
+    fn zero_cast_mana_spell_grants_are_paired_for_pool_and_source_paths() {
+        let (mut pool_state, congregate) = funded_zero_congregate_state();
+        pool_state.players[P0.0 as usize].mana_pool.mana[0]
+            .grants
+            .push(ManaSpellGrant::TriggerOnSpend {
+                filter: TargetFilter::Any,
+                ability: Box::new(zero_gain_definition()),
+            });
+        assert!(
+            zero_cast_is_retained(&pool_state, congregate),
+            "a potentially spent pool grant preserves the engine-issued Auto cast"
+        );
+        pool_state.players[P0.0 as usize].mana_pool.mana[0]
+            .grants
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&pool_state, congregate),
+            "removing only the pool grant restores the known-zero rejection"
+        );
+
+        let (mut source_state, source_congregate) = funded_zero_congregate_state();
+        source_state.players[P0.0 as usize].mana_pool.mana.clear();
+        add_plain_colorless_mana_source(&mut source_state, 91_206);
+        add_plain_colorless_mana_source(&mut source_state, 91_207);
+        let grant_source = add_grant_mana_source(&mut source_state, 91_208);
+        add_plain_mana_source(
+            &mut source_state,
+            91_209,
+            engine::types::mana::ManaColor::White,
+        );
+        assert!(
+            zero_cast_is_retained(&source_state, source_congregate),
+            "an activatable grant-bearing source preserves the same legal Auto cast"
+        );
+        let ability = Arc::make_mut(
+            &mut source_state
+                .objects
+                .get_mut(&grant_source)
+                .expect("grant source exists")
+                .abilities,
+        )
+        .first_mut()
+        .expect("grant source has one mana ability");
+        let Effect::Mana { grants, .. } = &mut *ability.effect else {
+            unreachable!("fixture mana source has a mana effect");
+        };
+        grants.clear();
+        assert!(
+            !zero_cast_is_retained(&source_state, source_congregate),
+            "removing only the source grant restores rejection"
         );
     }
 

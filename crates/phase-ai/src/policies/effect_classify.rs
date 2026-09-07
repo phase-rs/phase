@@ -763,7 +763,7 @@ pub(crate) fn targeted_player_impact_in(
     let mut impact = 0.0;
 
     for effect in effects {
-        let Some(filter) = extract_target_filter(effect) else {
+        let Some(filter) = selected_player_target_filter(effect) else {
             continue;
         };
         if filter_names_the_chosen_players_permanents(filter)
@@ -781,6 +781,28 @@ pub(crate) fn targeted_player_impact_in(
     }
 
     found_targeted_effect.then_some(impact)
+}
+
+/// Returns the player filter that is bound by target selection, if this effect
+/// has one. Contextual recipients such as `Controller` occur independently of
+/// the selected player and therefore must not affect target preference.
+fn selected_player_target_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Draw { target, .. } | Effect::Discard { target, .. } => {
+            chosen_player_binding(target).then_some(target)
+        }
+        Effect::GainLife { player, .. } => chosen_player_binding(player).then_some(player),
+        Effect::LoseLife {
+            target: Some(target),
+            ..
+        } => chosen_player_binding(target).then_some(target),
+        _ => extract_target_filter(effect),
+    }
+}
+
+fn chosen_player_binding(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Player | TargetFilter::ParentTarget)
+        || filter_names_the_chosen_players_permanents(filter)
 }
 
 /// "each creature target player controls" (Requisition
@@ -1450,7 +1472,20 @@ mod live_quantity_targeting_tests {
         effect: Effect,
         action: GameAction,
     ) -> f64 {
-        let ability = ResolvedAbility::new(effect, Vec::new(), source, PlayerId(0));
+        player_target_score_for_ability(
+            state,
+            source,
+            ResolvedAbility::new(effect, Vec::new(), source, PlayerId(0)),
+            action,
+        )
+    }
+
+    fn player_target_score_for_ability(
+        state: &GameState,
+        source: ObjectId,
+        ability: ResolvedAbility,
+        action: GameAction,
+    ) -> f64 {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::TargetSelection {
                 player: PlayerId(0),
@@ -1637,6 +1672,131 @@ mod live_quantity_targeting_tests {
         assert!(
             lose_opponent > lose_self,
             "the same recipient-relative magnitude must make life loss prefer an opponent"
+        );
+    }
+
+    #[test]
+    fn contextual_life_gain_does_not_bind_the_chosen_player() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Targeted harm source".to_string(),
+            Zone::Hand,
+        );
+        let harm = Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: Some(TargetFilter::Player),
+        };
+        let gain = Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        };
+        let effects = vec![&harm, &gain];
+        assert_eq!(
+            targeted_player_impact_in(
+                &state,
+                Some(PlayerId(0)),
+                Some(source),
+                &effects,
+                PlayerId(0)
+            ),
+            Some(-0.15),
+            "the controller gain is not attributed to the self target"
+        );
+        assert_eq!(
+            targeted_player_impact_in(
+                &state,
+                Some(PlayerId(0)),
+                Some(source),
+                &effects,
+                PlayerId(1)
+            ),
+            Some(-0.15),
+            "the same contextual gain is not attributed to the opponent target"
+        );
+
+        let draw = Effect::Draw {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Player,
+        };
+        let discard = Effect::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+            filter: None,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            unless_filter: None,
+        };
+        assert_eq!(
+            targeted_player_impact_in(
+                &state,
+                Some(PlayerId(0)),
+                Some(source),
+                &[&draw],
+                PlayerId(1)
+            ),
+            Some(2.5),
+            "a chosen-player Draw retains its live quantity in targeted scoring"
+        );
+        assert_eq!(
+            targeted_player_impact_in(
+                &state,
+                Some(PlayerId(0)),
+                Some(source),
+                &[&discard],
+                PlayerId(1)
+            ),
+            Some(-1.5),
+            "a ParentTarget Discard continuation remains bound to the chosen player"
+        );
+
+        let mut ability = ResolvedAbility::new(harm, Vec::new(), source, PlayerId(0));
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            gain,
+            Vec::new(),
+            source,
+            PlayerId(0),
+        )));
+        let choose_self = player_target_score_for_ability(
+            &state,
+            source,
+            ability.clone(),
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(0))),
+            },
+        );
+        let choose_opponent = player_target_score_for_ability(
+            &state,
+            source,
+            ability.clone(),
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        );
+        let select_self = player_target_score_for_ability(
+            &state,
+            source,
+            ability.clone(),
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(0))],
+            },
+        );
+        let select_opponent = player_target_score_for_ability(
+            &state,
+            source,
+            ability,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(1))],
+            },
+        );
+        assert!(
+            choose_opponent > choose_self,
+            "ChooseTarget keeps the harmful target preference"
+        );
+        assert!(
+            select_opponent > select_self,
+            "SelectTargets keeps the harmful target preference"
         );
     }
 
