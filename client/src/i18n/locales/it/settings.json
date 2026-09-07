@@ -5,11 +5,18 @@
   },
   "tabs": {
     "gameplay": "Giocabilità",
+    "experimental": "Sperimentale",
     "visual": "Grafica",
     "combat": "Ritmo",
     "audio": "Audio",
     "multiplayer": "Multigiocatore",
     "data": "Dati"
+  },
+  "experimental": {
+    "title": "Sperimentale",
+    "tournaments": "Tornei",
+    "showTournaments": "Mostra i tornei nella navigazione",
+    "showTournamentsDescription": "I tornei sono ancora in lavorazione e potrebbero cambiare senza preavviso."
   },
   "gameplay": {
     "collapseLands": "Comprimi Lands",

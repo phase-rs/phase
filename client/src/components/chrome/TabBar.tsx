@@ -2,8 +2,9 @@ import { useTranslation } from "react-i18next";
 import { Link, useLocation } from "react-router";
 
 import { BuildBadge } from "./BuildBadge";
-import { activeNavKey, NAV_ITEMS } from "./navItems";
+import { activeNavKey, navItemsFor } from "./navItems";
 import { SparkleIcon } from "./SparkleIcon";
+import { usePreferencesStore } from "../../stores/preferencesStore";
 
 interface TabBarProps {
   onWhatsNew: () => void;
@@ -18,7 +19,9 @@ interface TabBarProps {
  */
 export function TabBar({ onWhatsNew, hasUnread }: TabBarProps) {
   const { t } = useTranslation("menu");
-  const active = activeNavKey(useLocation().pathname);
+  const experimentalTournamentsEnabled = usePreferencesStore((s) => s.experimentalTournamentsEnabled);
+  const navItems = navItemsFor(experimentalTournamentsEnabled);
+  const active = activeNavKey(useLocation().pathname, navItems);
 
   return (
     <nav
@@ -30,7 +33,7 @@ export function TabBar({ onWhatsNew, hasUnread }: TabBarProps) {
           bar's height. Absolutely positioned so it stays out of the nav's flex
           flow. */}
       <BuildBadge inline className="absolute bottom-full left-2 mb-2" />
-      {NAV_ITEMS.map(({ key, path, labelKey, Icon }) => {
+      {navItems.map(({ key, path, labelKey, Icon }) => {
         const on = active === key;
         return (
           <Link
