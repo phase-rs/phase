@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { LOG_CATEGORIES, type GameLogEntry, type LogCategory } from "../../adapter/types.ts";
@@ -122,7 +122,10 @@ export function GameLogPanel() {
   // device-correct — and that matters MORE now the value is written
   // automatically on every user toggle.
   const seededSessionRef = useRef<number | null>(null);
-  useEffect(() => {
+  // Seed before the first paint. A passive effect let a menu click briefly open
+  // the panel and then overwrite that user action with the prior session's
+  // remembered choice.
+  useLayoutEffect(() => {
     if (seededSessionRef.current === gameSessionGeneration) return;
     seededSessionRef.current = gameSessionGeneration;
     setLogPanelOpen(!isMobile && logPanelLastChoice === "open");

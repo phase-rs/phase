@@ -1376,9 +1376,6 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
     "--game-split-safe-top": "0px",
-    // Fixed board tools are descendants of the game column, while the log is
-    // its sibling. Keep those tools out of the dedicated log column.
-    "--game-right-rail-offset": logPanelOpen && !isMobile ? "20rem" : "0px",
     "--game-left-rail-offset": "0px",
     // Where the targeting prompt starts, which is the only part of its
     // placement this page can state: the split layout puts seat panes at the
@@ -1478,7 +1475,7 @@ function GamePageContent({
     >
       <div
         ref={containerRef}
-        className="relative z-0 isolate min-h-0 min-w-0 flex-1 overflow-hidden"
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden contain-paint"
         style={gamePageStyle}
       onContextMenu={(e) => {
         e.preventDefault();
