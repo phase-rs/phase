@@ -745,6 +745,7 @@ thread_local! {
 struct ProposalAccounting {
     defender: PlayerId,
     attackers: Vec<ObjectId>,
+    blocked_damage: i32,
     opposing_losses: f64,
     own_losses: f64,
     pre_finish_utility: f64,
@@ -1155,6 +1156,7 @@ fn expanded_multiplayer_choice(
             accounting.borrow_mut().push(ProposalAccounting {
                 defender,
                 attackers: attackers.clone(),
+                blocked_damage,
                 opposing_losses,
                 own_losses,
                 pre_finish_utility,
@@ -4072,12 +4074,39 @@ mod tests {
             vec![Keyword::Menace],
         );
         let blocker = add_creature(&mut state, PlayerId(1), "Lone 5/5", 5, 5, vec![]);
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
         let slices = BlockLegalitySlices::collect(&state);
+        let WaitingFor::DeclareAttackers {
+            valid_attacker_ids,
+            valid_attack_targets,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("fixture must reach DeclareAttackers")
+        };
+        assert_eq!(valid_attacker_ids, &vec![attacker]);
+        assert!(valid_attack_targets.contains(&AttackTarget::Player(PlayerId(1))));
+        assert!(valid_attack_targets.contains(&AttackTarget::Player(PlayerId(2))));
+        let attackable = engine::game::combat::attackable_defender_targets(&state);
+        assert!(
+            !engine::game::combat::creature_must_attack_with_attackable_targets(
+                &state,
+                attacker,
+                &attackable,
+            ),
+            "the hostile attacker must remain voluntary"
+        );
+        let eligible: Vec<_> = [blocker]
+            .into_iter()
+            .filter(|&id| slices.can_block_pair(&state, id, attacker))
+            .collect();
+        assert_eq!(eligible, vec![blocker]);
         let lone_block = defender_best_block_from_eligible(
             &state,
             attacker,
             evaluate_creature(&state, attacker),
-            &[blocker],
+            &eligible,
             |id| evaluate_creature(&state, id),
         )
         .expect("the hostile hypothetical block exists");
@@ -4106,37 +4135,103 @@ mod tests {
         );
 
         reset_expanded_comparison_counters();
-        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let action = crate::search::choose_action(&state, PlayerId(0), &config, &mut rng)
+            .expect("engine-issued DeclareAttackers decision");
         let p1 = expanded_proposal_accounting()
             .into_iter()
             .find(|proposal| proposal.defender == PlayerId(1))
             .expect("P1 proposal completed");
         assert_eq!(p1.attackers, vec![attacker]);
+        assert_eq!(p1.blocked_damage, 3);
         assert_eq!(p1.own_losses, 0.0);
         assert_eq!(p1.opposing_losses, 0.0);
         assert!(p1.finishes);
-        assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+        let p2 = expanded_proposal_accounting()
+            .into_iter()
+            .find(|proposal| proposal.defender == PlayerId(2))
+            .expect("P2 proposal completed");
+        assert_eq!(p2.attackers, vec![attacker]);
+        assert_eq!(p2.blocked_damage, 3);
+        assert!(!p2.finishes);
+        assert!(p2.utility > 0.0);
         let mut engine_state = state.clone();
-        engine_state.phase = engine::types::phase::Phase::DeclareAttackers;
-        engine_state.waiting_for =
-            engine::game::combat::build_declare_attackers_waiting_for(&engine_state);
-        engine::game::engine::apply_as_current(
-            &mut engine_state,
-            engine::types::actions::GameAction::DeclareAttackers {
-                attacks: attacks.clone(),
-                bands: vec![],
-            },
-        )
-        .expect("the real three-player declaration is engine legal");
+        assert!(matches!(
+            &action,
+            engine::types::actions::GameAction::DeclareAttackers { attacks, .. }
+                if attacks == &vec![(attacker, AttackTarget::Player(PlayerId(1)))]
+        ));
+        engine::game::engine::apply_as_current(&mut engine_state, action)
+            .expect("the real three-player declaration is engine legal");
 
         let second = add_creature(&mut state, PlayerId(1), "Second 5/5", 5, 5, vec![]);
-        reset_expanded_comparison_counters();
-        assert_eq!(
-            choose_attackers_with_targets(&state, PlayerId(0)),
-            vec![(attacker, AttackTarget::Player(PlayerId(2)))],
-            "a sufficient two-block floor keeps the open P2 proposal as the positive choice"
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        let refreshed_slices = BlockLegalitySlices::collect(&state);
+        let WaitingFor::DeclareAttackers {
+            valid_attacker_ids,
+            valid_attack_targets,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("refreshed fixture must reach DeclareAttackers")
+        };
+        assert_eq!(valid_attacker_ids, &vec![attacker]);
+        assert!(valid_attack_targets.contains(&AttackTarget::Player(PlayerId(1))));
+        assert!(valid_attack_targets.contains(&AttackTarget::Player(PlayerId(2))));
+        let refreshed_attackable = engine::game::combat::attackable_defender_targets(&state);
+        assert!(
+            !engine::game::combat::creature_must_attack_with_attackable_targets(
+                &state,
+                attacker,
+                &refreshed_attackable,
+            ),
+            "the sufficient-floor sibling remains voluntary"
         );
-        assert!(state.battlefield.contains(&second));
+        let refreshed_eligible: Vec<_> = [blocker, second]
+            .into_iter()
+            .filter(|&id| refreshed_slices.can_block_pair(&state, id, attacker))
+            .collect();
+        assert_eq!(refreshed_eligible, vec![blocker, second]);
+        assert_eq!(
+            engine::game::combat::min_blockers_required_from_precomputed(
+                &state,
+                attacker,
+                &refreshed_slices.block_restriction,
+            ),
+            2,
+        );
+        reset_expanded_comparison_counters();
+        let mut refreshed_rng = SmallRng::seed_from_u64(42);
+        let refreshed_action =
+            crate::search::choose_action(&state, PlayerId(0), &config, &mut refreshed_rng)
+                .expect("refreshed engine-issued DeclareAttackers decision");
+        let refreshed_accounting = expanded_proposal_accounting();
+        let p1 = refreshed_accounting
+            .iter()
+            .find(|proposal| proposal.defender == PlayerId(1))
+            .expect("blocked P1 proposal completed");
+        assert_eq!(p1.attackers, Vec::<ObjectId>::new());
+        assert_eq!(p1.blocked_damage, 0);
+        assert!(!p1.finishes);
+        let p2 = refreshed_accounting
+            .iter()
+            .find(|proposal| proposal.defender == PlayerId(2))
+            .expect("open P2 proposal completed");
+        assert_eq!(p2.attackers, vec![attacker]);
+        assert_eq!(p2.blocked_damage, 3);
+        assert!(!p2.finishes);
+        assert!(p2.utility > 0.0);
+        assert!(matches!(
+            &refreshed_action,
+            engine::types::actions::GameAction::DeclareAttackers { attacks, .. }
+                if attacks == &vec![(attacker, AttackTarget::Player(PlayerId(2)))]
+        ));
+        let mut refreshed_engine_state = state.clone();
+        engine::game::engine::apply_as_current(&mut refreshed_engine_state, refreshed_action)
+            .expect(
+                "a sufficient two-block floor keeps the open P2 proposal as the positive choice",
+            );
     }
 
     #[test]
@@ -4175,7 +4270,17 @@ mod tests {
         assert!(accounting
             .iter()
             .all(|proposal| proposal.attackers.is_empty()));
-        assert_eq!(expanded_comparison_receipt().completed_proposals, 2);
+        assert_eq!(
+            expanded_comparison_receipt(),
+            ExpandedComparisonReceipt {
+                entries: 1,
+                attacker_evaluations: 2,
+                pairs: 2,
+                completed_proposals: 2,
+                grouping_passes: 0,
+                cached_value_evaluations: 3,
+            }
+        );
     }
 
     #[test]
@@ -5206,10 +5311,21 @@ mod tests {
     /// Manual runtime receipt for the bounded free-for-all comparator. Run with
     /// `--ignored --nocapture` on a release binary and compare its p50/p95 output
     /// with the matching baseline checkout. It deliberately uses the production
-    /// Medium and Hard profiles and repeats the same public board 100 times.
+    /// Medium and Hard profiles and repeats the same public board 100 times by
+    /// default. `PHASE_AI_THREAT_TIMING_ITERATIONS` is a test-only diagnostic
+    /// override for collecting a single iteration's work receipt.
     #[test]
     #[ignore = "manual multiplayer timing receipt"]
     fn multiplayer_comparison_timing_harness() {
+        let iterations = std::env::var("PHASE_AI_THREAT_TIMING_ITERATIONS").map_or(100, |value| {
+            value
+                .parse::<usize>()
+                .expect("PHASE_AI_THREAT_TIMING_ITERATIONS must be a positive integer")
+        });
+        assert!(
+            iterations > 0,
+            "PHASE_AI_THREAT_TIMING_ITERATIONS must be a positive integer"
+        );
         let fixtures = [
             ("small", 2, 2),
             ("typical_four_player", 12, 8),
@@ -5236,12 +5352,12 @@ mod tests {
                 )
                 .expect("timing state writes to the temporary directory");
 
-                let mut elapsed_us = Vec::with_capacity(100);
+                let mut elapsed_us = Vec::with_capacity(iterations);
                 let mut attacker_evaluations = 0;
                 let mut pair_count = 0;
                 let mut grouping_passes = 0;
                 let mut cached_value_evaluations = 0;
-                for _ in 0..100 {
+                for _ in 0..iterations {
                     reset_expanded_comparison_counters();
                     let started = Instant::now();
                     let _ = choose_attackers_with_targets_with_profile_and_deadline(
@@ -5260,13 +5376,14 @@ mod tests {
                     cached_value_evaluations += receipt.cached_value_evaluations;
                 }
                 elapsed_us.sort_unstable();
-                let p50 = elapsed_us[49];
-                let p95 = elapsed_us[94];
+                let p50 = elapsed_us[(iterations - 1) / 2];
+                let p95 = elapsed_us[(iterations * 95).div_ceil(100) - 1];
                 assert!(
-                    attacker_evaluations + pair_count <= 100 * MULTIPLAYER_COMPARISON_WORK_LIMIT
+                    attacker_evaluations + pair_count
+                        <= iterations * MULTIPLAYER_COMPARISON_WORK_LIMIT
                 );
                 println!(
-                    "multiplayer-comparison {difficulty:?} {name}: p50={p50}us p95={p95}us E={attacker_evaluations} P={pair_count} W={} groups={grouping_passes} values={cached_value_evaluations} reducers=0 projections=0",
+                    "multiplayer-comparison {difficulty:?} {name}: iterations={iterations} p50={p50}us p95={p95}us E={attacker_evaluations} P={pair_count} W={} groups={grouping_passes} values={cached_value_evaluations} reducers=0 projections=0",
                     attacker_evaluations + pair_count,
                 );
             }
