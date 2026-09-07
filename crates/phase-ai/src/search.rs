@@ -7730,11 +7730,11 @@ mod tests {
     }
 
     fn spell_target_selection_state(
+        mut state: GameState,
         current_legal_targets: Vec<TargetRef>,
         stale_slot_targets: Vec<TargetRef>,
         optional: bool,
     ) -> GameState {
-        let mut state = make_state();
         let spell_id = add_spell_to_hand(&mut state, PlayerId(0), "Targeting Spell", 0);
         let mut ability = ResolvedAbility::new(
             Effect::DealDamage {
@@ -9843,6 +9843,7 @@ mod tests {
     #[test]
     fn public_damage_target_selection_prefers_threat_over_low_life() {
         let mut state = spell_target_selection_state(
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42),
             vec![
                 TargetRef::Player(PlayerId(1)),
                 TargetRef::Player(PlayerId(2)),
@@ -9853,8 +9854,6 @@ mod tests {
             ],
             false,
         );
-        state.format_config = engine::types::format::FormatConfig::free_for_all();
-        state.players.push(state.players[1].clone());
         state.players[1].life = 5;
         state.players[2].life = 20;
         let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
@@ -9924,6 +9923,7 @@ mod tests {
     #[test]
     fn public_fixed_lethal_damage_keeps_its_finish_preference() {
         let mut state = spell_target_selection_state(
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42),
             vec![
                 TargetRef::Player(PlayerId(1)),
                 TargetRef::Player(PlayerId(2)),
@@ -9934,8 +9934,6 @@ mod tests {
             ],
             false,
         );
-        state.format_config = engine::types::format::FormatConfig::free_for_all();
-        state.players.push(state.players[1].clone());
         state.players[1].life = 1;
         for _ in 0..6 {
             add_creature(&mut state, PlayerId(2), 4, 4);
@@ -9977,9 +9975,12 @@ mod tests {
 
     #[test]
     fn public_harmful_object_target_prefers_the_threatening_controller() {
-        let mut target_state = spell_target_selection_state(Vec::new(), Vec::new(), false);
-        target_state.format_config = engine::types::format::FormatConfig::free_for_all();
-        target_state.players.push(target_state.players[1].clone());
+        let mut target_state = spell_target_selection_state(
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42),
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
         let quiet = add_creature(&mut target_state, PlayerId(1), 2, 2);
         let threatening = add_creature(&mut target_state, PlayerId(2), 2, 2);
         for _ in 0..5 {
@@ -10040,6 +10041,7 @@ mod tests {
     #[test]
     fn unmodeled_target_selection_uses_a_reducer_validated_forward_action() {
         let mut state = spell_target_selection_state(
+            make_state(),
             vec![
                 TargetRef::Player(PlayerId(0)),
                 TargetRef::Player(PlayerId(1)),
@@ -10085,6 +10087,7 @@ mod tests {
     #[test]
     fn modeled_else_branch_keeps_target_selection_on_the_normal_scoring_path() {
         let mut state = spell_target_selection_state(
+            make_state(),
             vec![TargetRef::Player(PlayerId(1))],
             vec![TargetRef::Player(PlayerId(1))],
             false,
@@ -10115,6 +10118,7 @@ mod tests {
     #[test]
     fn modeled_mode_keeps_target_selection_on_the_normal_scoring_path() {
         let mut state = spell_target_selection_state(
+            make_state(),
             vec![TargetRef::Player(PlayerId(1))],
             vec![TargetRef::Player(PlayerId(1))],
             false,
@@ -10176,6 +10180,7 @@ mod tests {
     fn fallback_spell_target_selection_uses_current_legal_target_when_slot_is_stale() {
         let target = TargetRef::Player(PlayerId(1));
         let mut state = spell_target_selection_state(
+            make_state(),
             vec![target.clone()],
             vec![TargetRef::Player(PlayerId(0))],
             false,
@@ -10193,8 +10198,12 @@ mod tests {
 
     #[test]
     fn fallback_spell_target_selection_skips_optional_empty_current_slot() {
-        let mut state =
-            spell_target_selection_state(Vec::new(), vec![TargetRef::Player(PlayerId(1))], true);
+        let mut state = spell_target_selection_state(
+            make_state(),
+            Vec::new(),
+            vec![TargetRef::Player(PlayerId(1))],
+            true,
+        );
 
         let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(action, GameAction::ChooseTarget { target: None });
@@ -10203,8 +10212,12 @@ mod tests {
 
     #[test]
     fn fallback_spell_target_selection_cancels_required_empty_current_slot() {
-        let mut state =
-            spell_target_selection_state(Vec::new(), vec![TargetRef::Player(PlayerId(1))], false);
+        let mut state = spell_target_selection_state(
+            make_state(),
+            Vec::new(),
+            vec![TargetRef::Player(PlayerId(1))],
+            false,
+        );
 
         let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(action, GameAction::CancelCast);
