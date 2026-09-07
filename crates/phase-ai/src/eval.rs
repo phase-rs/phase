@@ -340,18 +340,18 @@ pub fn threat_level_projected(
     let power = projection
         .map(|p| projected_power(&p.state, target))
         .unwrap_or(base_power);
-    let raw_board_strength = (creatures as f64 * 0.3 + power.max(0) as f64 * 0.7).max(0.0);
-    // In free-for-all, retain differences between developed boards instead of
-    // flattening every board above the old 10-point cap into the same threat.
-    // This is a bounded tactical calibration, not a rules valuation.
+    // In multiplayer free-for-all, retain differences between developed boards
+    // instead of flattening every board above the old 10-point cap into the
+    // same threat. The legacy branch intentionally keeps its raw-power formula.
     let board_score = if matches!(
         state.format_config.topology(),
         FormatTopology::IndividualSeats
     ) && state.players.len() > 2
     {
+        let raw_board_strength = (creatures as f64 * 0.3 + power.max(0) as f64 * 0.7).max(0.0);
         raw_board_strength / (raw_board_strength + 10.0)
     } else {
-        raw_board_strength.min(10.0) / 10.0
+        (creatures as f64 * 0.3 + power as f64 * 0.7).min(10.0) / 10.0
     };
 
     // Life ratio: higher life = more threatening
@@ -2400,6 +2400,55 @@ mod tests {
             assert!(
                 (threat - expected_threat).abs() < 1e-12,
                 "{name} must retain the legacy raw-strength cap, got {threat}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_negative_power_threat_is_unchanged_for_duel_and_teams() {
+        let cases = [
+            (
+                "two-seat individual seats",
+                engine::types::format::FormatConfig::free_for_all(),
+                2,
+                PlayerId(1),
+                20,
+                20,
+                -0.028,
+            ),
+            (
+                "fixed teams",
+                engine::types::format::FormatConfig::two_headed_giant(),
+                4,
+                PlayerId(2),
+                15,
+                30,
+                -0.078,
+            ),
+        ];
+
+        for (name, config, player_count, target, expected_life, expected_starting_life, expected) in
+            cases
+        {
+            let mut state = GameState::new(config, player_count, 42);
+            add_creature(&mut state, target, -5, 1, vec![]);
+            assert_eq!(
+                board_stats(&state, target).power,
+                -5,
+                "reach guard for {name}"
+            );
+            assert_eq!(
+                state.players[target.0 as usize].life, expected_life,
+                "{name}"
+            );
+            assert_eq!(
+                state.format_config.starting_life, expected_starting_life,
+                "{name}"
+            );
+            let actual = threat_level(&state, PlayerId(0), target);
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "{name} must retain the base raw-power formula for negative power; got {actual}"
             );
         }
     }
