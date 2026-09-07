@@ -33379,6 +33379,56 @@ fn parse_for_each_attacker_copy_blocker_ir(
     })
 }
 
+/// CR 400.1: the destination half of the same-name graveyard-return tail.
+///
+/// The DESTINATION IS PARSED, not assumed. It was previously baked into the
+/// marker string as "to the battlefield", which silently dropped the whole
+/// same-name tail for any other destination — Echoing Return ("...from your
+/// graveyard to your hand") returned its single target and left every other copy
+/// in the graveyard.
+///
+/// The zone TOKEN comes from [`super::oracle_target::parse_zone_word`], the
+/// canonical entry whose doc requires new zone tokens be added there rather than
+/// duplicated at call sites. Only the possessive/article lead-in is local, since
+/// that is grammar rather than a zone token.
+///
+/// CR 110.5b + CR 110.5d: a permanent's tapped status exists only on the
+/// battlefield, so "tapped" is admitted ONLY on that arm — "to your hand tapped"
+/// is refused *here*, by this pairing match, rather than left to the caller's
+/// `all_consuming` to reject as residue.
+///
+/// The (qualifier, zone) pairing is deliberately BOUNDED to the two destinations
+/// whose `ChangeZone`/`ChangeZoneAll` semantics are exercised by this class.
+/// Library and exile destinations need position and face-down handling this
+/// recognizer does not model, so they decline and fall through to the wider
+/// dispatch rather than being given a confidently wrong parse.
+fn parse_same_name_return_destination(
+    input: &str,
+) -> OracleResult<'_, (Zone, crate::types::zones::EtbTapState)> {
+    map_opt(
+        (
+            alt((
+                value(true, tag::<_, _, OracleError<'_>>("your ")),
+                value(false, tag("the ")),
+            )),
+            super::oracle_target::parse_zone_word,
+            opt((multispace1, tag("tapped"))),
+        ),
+        |(possessive, zone, tapped)| match (possessive, zone, tapped.is_some()) {
+            (false, Zone::Battlefield, tapped) => Some((
+                Zone::Battlefield,
+                crate::types::zones::EtbTapState::from_legacy_bool(tapped),
+            )),
+            (true, Zone::Hand, false) => Some((
+                Zone::Hand,
+                crate::types::zones::EtbTapState::from_legacy_bool(false),
+            )),
+            _ => None,
+        },
+    )
+    .parse(input)
+}
+
 fn parse_return_target_and_same_name_from_your_graveyard_ir(
     text: &str,
     kind: AbilityKind,
@@ -33388,12 +33438,11 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
     let (_, rest) = nom_on_lower(text, &lower, |input| value((), tag("return ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest.len()..];
     let rest_tp = TextPair::new(rest, rest_lower);
-    let marker =
-        " and all other cards with the same name as that card from your graveyard to the battlefield";
+    let marker = " and all other cards with the same name as that card from your graveyard to ";
     let (target_tp, after_marker) = rest_tp.split_around(marker)?;
-    let (_, (enter_tapped, _)) = all_consuming((
-        opt(value(true, tag::<_, _, OracleError<'_>>("tapped"))),
-        opt(tag(".")),
+    let (_, ((destination, enter_tapped), _)) = all_consuming((
+        parse_same_name_return_destination,
+        opt(tag::<_, _, OracleError<'_>>(".")),
     ))
     .parse(after_marker.lower.trim())
     .ok()?;
@@ -33405,8 +33454,6 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
     }
     let target =
         add_inferred_origin_constraints_to_target(target, Some(Zone::Graveyard), rest_lower);
-    let enter_tapped =
-        crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped.unwrap_or(false));
     let first_source_len = text.len() - rest.len() + target_tp.original.len();
     let first_source = text.get(..first_source_len)?;
     let second_source = text.get(first_source_len..)?;
@@ -33417,7 +33464,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
             first_source,
             parsed_clause(Effect::ChangeZone {
                 origin: Some(Zone::Graveyard),
-                destination: Zone::Battlefield,
+                destination,
                 target,
                 owner_library: false,
                 enter_transformed: false,
@@ -33442,7 +33489,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
             second_source,
             parsed_clause(Effect::ChangeZoneAll {
                 origin: Some(Zone::Graveyard),
-                destination: Zone::Battlefield,
+                destination,
                 target: TargetFilter::Typed(TypedFilter::default().properties(vec![
                     FilterProp::InZone {
                         zone: Zone::Graveyard,

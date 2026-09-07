@@ -3,8 +3,14 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4699
-- **Total card appearances across root causes:** 4732 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4660
+- **Total card appearances across root causes:** 4693 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+
+> Counting method: both figures count the per-root-cause card bullets only — the
+> three metadata bullets above are excluded. The ranked table's `# cards` column
+> currently sums to 4699 instead, because seven sections' declared counts disagree
+> with their own lists (see the note under the table); the bullet counts above are
+> the source of truth.
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -38,7 +44,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 28 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
-| 27 | Cross-target group / shared-quality constraint dropped | 19 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
+| 27 | Cross-target group / shared-quality constraint dropped | 12 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 13 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 10 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 5 | manual triage |
@@ -46,6 +52,15 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 > The top **5** root causes cover ~50% of all misparse appearances; the top 10 cover the overwhelming majority. Fix these first.
 
 ## Full card lists per root cause
+
+
+> **Known drift in the `# cards` column, measured 2026-09-07.** Seven sections'
+> declared counts disagree with the length of their own card lists: #1 (745 vs
+> 742), #2 (584 vs 589), #3 (404 vs 403), #4 (387 vs 386), #5 (329 vs 332),
+> #13 (132 vs 131), #22 (43 vs 51). The lists are authoritative; the declared
+> counts and this column have not been recomputed after past removals. Left
+> uncorrected here deliberately — that is a whole-file hygiene pass, not part of
+> the card fix that touched root cause 27.
 
 ### 1. Relative-clause / filter restriction on target dropped  (745 cards)
 
@@ -4990,7 +5005,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 27. Cross-target group / shared-quality constraint dropped  (15 cards)
+### 27. Cross-target group / shared-quality constraint dropped  (12 cards)
 
 **Signature.** A multi-target group constraint ('from a single graveyard', 'with different names', same controller, parity) is not carried; the FilterProp/SharedQuality linkage is missing.
 
@@ -5000,10 +5015,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 - Cannibalize
 - Desecrate Reality
-- Echoing Courage
-- Echoing Decay
 - Echoing Echo
-- Echoing Return
 - Eerie Ultimatum
 - Rain of Riches
 - Rashmi, Eternities Crafter
