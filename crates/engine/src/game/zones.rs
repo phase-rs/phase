@@ -437,6 +437,58 @@ pub(crate) fn apply_zone_exit_cleanup(
             });
         }
 
+        // CR 400.7 + CR 611.2a: the REMAINING exits of the same in-place grant the
+        // block above closes. This IS a hand-kept list, like the Stack block
+        // above it — there is no shared predicate, so a FOURTH in-place zone
+        // added to `grant_lingering_permissions` (`effects/cast_from_zone.rs`:
+        // `Zone::Exile | Zone::Graveyard | Zone::Hand`) would not reach here on
+        // its own. That sibling is named so the next reader can check the two
+        // against each other. Exile already has its own clear far above, so the
+        // two left over are HAND and GRAVEYARD, and both were open:
+        // a discarded card and a milled card each carried their grant onward,
+        // where the readers pick it up again by CURRENT zone and never by origin
+        // (`casting::has_graveyard_timed_alt_cost_permission`,
+        // `casting::has_exile_cast_permission`). Emry, Lurker of the Loch is the
+        // named specimen of the graveyard half in the block above; exiling that
+        // graveyard afterwards left the card castable. A hand-origin permission authorizes casting the
+        // card FROM THE HAND ("Until end of turn, you may cast spells from your
+        // hand …", Chandra, Flame's Catalyst); a card that leaves the hand
+        // without being cast "becomes a new object with no memory of … its
+        // previous existence", so the grant must not travel with it. Without
+        // this, a discarded card lands in the graveyard still carrying the
+        // permission, where `casting::has_graveyard_timed_alt_cost_permission`
+        // and `graveyard_spell_objects_available_to_cast` re-offer it as a free
+        // graveyard cast — the same re-offer the Stack exit above exists to
+        // prevent, reached by the other door.
+        //
+        // `to != Zone::Stack` is load-bearing, not defensive, and that is MEASURED:
+        // dropping it turns `rishkars_expertise_free_cast_completes_during_resolution`
+        // red on "the consumed free-cast permission must remain only as a neutral
+        // stable slot" and
+        // `hand_cast_selection_casts_during_resolution_without_lingering_permission`
+        // red on its hand-cast wording of the same assertion. Casting the card IS a
+        // move to the stack, and it is the one exit these grants authorize
+        // (Sunforger searching a card to hand and casting it from there,
+        // Electrodominance's resolution-time pick, Emry's graveyard cast). The
+        // spent grant is then dropped by the Stack exit above when the spell
+        // leaves the stack.
+        //
+        // Scoped to the three in-place cast/play variants, mirroring that block.
+        // The exile-scoped designations a card can gain as it leaves the hand
+        // (`Plotted` from CR 702.170a, `Foretold` from CR 702.143a) are
+        // deliberately absent: those are granted at the exile side of the same
+        // move and must survive it.
+        if matches!(from, Zone::Hand | Zone::Graveyard) && to != Zone::Stack {
+            obj_mut.casting_permissions.retain(|p| {
+                !matches!(
+                    p,
+                    crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+                        | crate::types::ability::CastingPermission::PlayFromExile { .. }
+                )
+            });
+        }
+
         if from == Zone::Battlefield {
             obj_mut.reset_for_battlefield_exit();
         }

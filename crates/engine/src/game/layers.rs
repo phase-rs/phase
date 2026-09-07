@@ -7019,10 +7019,20 @@ pub(crate) fn gather_transient_continuous_effects(
             // characteristic. Grafting it onto each affected object would let
             // `battlefield_active_statics` see it too and double-apply the
             // discount, so skip it here for the same reason.
+            // CR 601.2b + CR 118.9a: `CastFromHandFree` joins them for the same
+            // reason. It is read directly off the TCE by
+            // `casting::transient_cast_free_permission` — the transient arm of
+            // the single free-cast authority
+            // `casting::unlimited_hand_cast_free_source` — and grafting it onto
+            // every affected object would additionally expose it to
+            // `iter_cast_free_permission_source_ids`, giving one grant two
+            // sources.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MayLookAtFaceDown | StaticMode::ReduceAbilityCost { .. },
+                    mode: StaticMode::MayLookAtFaceDown
+                        | StaticMode::ReduceAbilityCost { .. }
+                        | StaticMode::CastFromHandFree { .. },
                 }
             ) {
                 continue;
@@ -7116,6 +7126,7 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// [`any_active_static_condition_perturbed_by_entry`] in this module, six
 /// static-mode/protection queries in `static_abilities`, plus
 /// `casting::transient_granted_spell_keywords_for`,
+/// `casting::transient_cast_free_permission`,
 /// `turns::scan_step_end_mana_handlers` and
 /// `visibility::viewer_may_look_at_face_down`. All but the first evaluate with
 /// `evaluate_condition` rather than `source_condition_gate_passes` — the

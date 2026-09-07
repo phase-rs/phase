@@ -61612,41 +61612,33 @@ fn a_free_cast_grant_with_a_stated_lifetime_is_a_lingering_permission() {
     }
 }
 
-/// CR 611.2a: the HAND-ORIGIN row of the same reconciliation, which no
-/// integration fixture can reach — its runtime is the named gap below. "Until
-/// end of turn, you may cast spells from your hand without paying their mana
-/// costs" (Chandra, Flame's Catalyst's ultimate) is a hand-origin free cast, so
-/// `during_resolution_for_filter_cast_clause` selects `DuringResolution`, and
-/// the stated lifetime then degrades it.
+/// CR 601.2b + CR 118.9a + CR 611.2a: the HAND-ORIGIN row of this class does not
+/// take the lingering `CastFromZone` mechanism at all — it is promoted out of
+/// `CastFromZone` entirely.
 ///
-/// DISCRIMINATING: this row is why the degrade belongs in
-/// `with_lingering_duration` rather than in an `if let` at one seam. A wider
-/// guard at the trailing-duration block in `lower_imperative_clause` would have
-/// reached the trailing-duration members of the class — MEASURED, a reach
-/// marker there fires over the corpus — but never this one: a sentence-leading
-/// duration is stamped around the body lowering, after `lower_imperative_clause`
-/// has returned, so it never sees that gate. Only the shared authority covers
-/// both.
+/// "Until end of turn, you may cast spells from your hand without paying their
+/// mana costs" (Chandra, Flame's Catalyst's ultimate) is Omniscience for a turn.
+/// A per-object `CastingPermission` cannot express it: those are stamped once per
+/// card at resolution (`CastFromZoneDriver::for_batch_bounds`' capability table
+/// says that mechanism "writes an INDEPENDENT `CastingPermission` per object"),
+/// so a card DRAWN
+/// LATER in the same turn would never be covered, and the printed effect covers
+/// it. `apply_duration_to_effect` therefore rewrites the grant into the
+/// mechanism that can hold it — `StaticMode::CastFromHandFree`, the one this
+/// exact sentence already lowers to when a permanent prints it as a static
+/// (Omniscience, the Tamiyo emblem) — carried as a duration-bound player grant.
 ///
-/// A PARSE CLAIM, NOT A BEHAVIOUR CLAIM. Chandra is the hand-origin card this
-/// change gives the lingering mechanism to — Twinning Glass is hand-origin too,
-/// but it loses an invented duration and keeps its during-resolution cast — and
-/// at runtime it moves nothing: MEASURED end-to-end
-/// through `GameRunner` with and without the degrade, the ultimate stops at the
-/// same `WaitingFor::EffectZoneChoice { effect_kind: CastFromZone, zone: Hand,
-/// up_to: true, duration: None }` either way — a pick-one-now offer raised
-/// while the ability resolves, with no permission recorded on any hand card and
-/// none castable afterwards. `resolve` consults the driver before that branch —
-/// for the library one-shot and for `window_bounds()` — but neither route's
-/// remaining conditions hold for a hand pool with no resolved targets, and the
-/// branch it does take reads neither the driver nor the duration
-/// (`open_private_zone_cast_selection` writes `duration: None` as a literal).
-/// So the hand-origin half of this class stays as wrong as it is on main;
-/// repairing it is runtime work this change does not do. What the
-/// assertion below buys today is an honest AST and export for that card, and
-/// the one seam through which a later runtime fix can see the lifetime at all.
+/// GATED ON THE STATED LIFETIME. Electrodominance prints nearly the same sentence
+/// WITHOUT one and is a genuine CR 608.2g resolution-time pick; it never reaches
+/// `apply_duration_to_effect` and keeps its `DuringResolution` driver. That row
+/// is pinned by `paid_chosen_target_cast_is_during_resolution_for_each_supported_zone`
+/// and by the runtime fixtures in `cast_from_zone`'s own module tests.
+///
+/// The runtime half is measured end-to-end in
+/// `lasting_cast_from_hand_permission`, including the row this AST exists for: a
+/// card drawn AFTER the ultimate resolved is castable for free.
 #[test]
-fn a_leading_duration_also_degrades_the_cast_mechanism() {
+fn a_leading_duration_promotes_a_free_hand_cast_to_a_player_permission() {
     // Verbatim Oracle text (`client/public/card-data.json`, key
     // `chandra, flame's catalyst`), the ultimate alone.
     let def = parse_effect_chain(
@@ -61656,35 +61648,73 @@ fn a_leading_duration_also_degrades_the_cast_mechanism() {
     );
     let mut casts = Vec::new();
     collect_cast_from_zone_defs(&def, &mut casts);
-    assert_eq!(
-        casts.len(),
-        1,
-        "reach guard — the ultimate must produce exactly one cast grant, got {casts:?}"
-    );
-    let Effect::CastFromZone {
-        without_paying_mana_cost,
-        duration,
-        driver,
-        ..
-    } = &*casts[0].effect
-    else {
-        unreachable!("filtered above");
-    };
     assert!(
-        *without_paying_mana_cost,
-        "reach guard — the free, hand-origin shape the filter-form authority sends to \
-         `DuringResolution`"
+        casts.is_empty(),
+        "the promotion must leave no `CastFromZone` behind — a per-object grant is \
+         exactly the mechanism this class cannot use; got {casts:?}"
     );
+
+    let mut grants = Vec::new();
+    collect_hand_free_permission_defs(&def, &mut grants);
+    assert_eq!(
+        grants.len(),
+        1,
+        "reach guard — the ultimate must produce exactly one player-scoped free-cast \
+         permission, got {grants:?}"
+    );
+    let (duration, static_def) = &grants[0];
     assert_eq!(
         *duration,
         Some(Duration::UntilEndOfTurn),
-        "the sentence-leading lifetime must reach the effect's own duration slot"
+        "CR 611.2a: the sentence-leading lifetime must reach the grant's duration slot"
     );
-    assert_eq!(
-        *driver, LingeringPermission,
-        "CR 611.2a + CR 117.1a: \"Until end of turn\" means the spells are cast at later \
-         priority windows, not as the ultimate resolves"
+    assert!(
+        matches!(
+            static_def.mode,
+            StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::Hand,
+            }
+        ),
+        "CR 601.2b: \"you may cast spells\" prints no per-turn cap and names the hand \
+         as the origin; got {:?}",
+        static_def.mode
     );
+    assert!(
+        static_def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CastFromHandFree { .. }
+            }
+        )),
+        "the mode must also ride in `modifications` — that is the shape \
+         `effects::effect::register_transient_effect` dispatches on; got {:?}",
+        static_def.modifications
+    );
+}
+
+/// Collect `(duration, static_definition)` for every `GenericEffect` in `def`
+/// whose statics carry a `CastFromHandFree` mode. Sibling of
+/// `collect_cast_from_zone_defs`, walking the same `sub_ability` chain.
+fn collect_hand_free_permission_defs(
+    def: &AbilityDefinition,
+    out: &mut Vec<(Option<Duration>, StaticDefinition)>,
+) {
+    if let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = &*def.effect
+    {
+        for static_def in static_abilities {
+            if matches!(static_def.mode, StaticMode::CastFromHandFree { .. }) {
+                out.push((duration.clone(), static_def.clone()));
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_ref() {
+        collect_hand_free_permission_defs(sub, out);
+    }
 }
 
 /// CR 608.2i: "a spell that WAS CAST this turn" looks back at a previous game

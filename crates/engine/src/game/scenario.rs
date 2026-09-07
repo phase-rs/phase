@@ -745,9 +745,9 @@ impl GameScenario {
     /// already on it.
     ///
     /// Mirrors [`Self::add_enchantment_from_oracle`], plus the two things a
-    /// planeswalker needs that no other permanent does: the loyalty counters
-    /// (CR 306.5b — a planeswalker with none is put into its owner's graveyard
-    /// as a state-based action, so a fixture without them evaporates), and the
+    /// planeswalker needs that no other permanent does: its starting loyalty —
+    /// seeded on BOTH the `loyalty` field and the counter map, see the comment
+    /// at the seeding itself for why both and why after the face — and the
     /// `Gideon`-style planeswalker subtype the caller supplies.
     pub fn add_planeswalker_from_oracle(
         &mut self,
@@ -776,21 +776,38 @@ impl GameScenario {
         // planeswalker animated by its own ability would otherwise inherit the
         // flag.
         obj.summoning_sick = false;
-        // CR 306.5b: a planeswalker's loyalty IS the count of loyalty counters on
-        // it, but the engine keeps a `loyalty` field alongside the counter map —
-        // the activation gate reads the counters (CR 606.3) while the
-        // zero-loyalty state-based action reads the field (CR 704.5i). Seed BOTH
-        // so they start in sync; seeding only one produces a planeswalker that
-        // can be activated but can never die.
-        obj.loyalty = Some(loyalty);
-        obj.counters
-            .insert(crate::types::counter::CounterType::Loyalty, loyalty);
-
         let mut builder = CardBuilder {
             state: &mut self.state,
             id,
         };
         builder.from_oracle_text(oracle_text);
+
+        // CR 306.5c: a planeswalker's loyalty IS the count of loyalty counters on
+        // it, but the engine keeps a `loyalty` FIELD alongside the counter map,
+        // and that field is what the readers of "how much loyalty is there" ask —
+        // the affordability gate for a `[−N]` cost (`planeswalker.rs`:
+        // `obj.loyalty.unwrap_or(0)`) and the CR 704.5i zero-loyalty state-based
+        // action (`sba.rs`: `obj.loyalty.is_some_and(|l| l == 0)`) among them.
+        // Seed both so they start in sync.
+        //
+        // Seeded AFTER the Oracle face is applied, and that ordering is
+        // load-bearing: `apply_card_face_to_object` assigns `obj.loyalty` from
+        // the face's own printed loyalty, and a face built from Oracle text alone
+        // carries none — so seeding first was silently overwritten with `None`.
+        //
+        // The counters survived, and `evaluate_layers` re-derives the field from
+        // them (`layers.rs`), so the damage was NOT permanent: a fixture that ran
+        // a layer pass before activating recovered. One that did not — this
+        // builder returns straight to the caller — held a planeswalker whose
+        // counters said eight and whose field said nothing, so a `[−N]` cost was
+        // unaffordable and the zero-loyalty action could not fire either
+        // (`is_some_and` is false for `None`). Seeding here removes the
+        // dependency on an incidental layer pass rather than repairing a
+        // permanent loss.
+        let obj = builder.state.objects.get_mut(&id).unwrap();
+        obj.loyalty = Some(loyalty);
+        obj.counters
+            .insert(crate::types::counter::CounterType::Loyalty, loyalty);
         builder
     }
 
