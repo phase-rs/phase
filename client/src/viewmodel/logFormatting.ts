@@ -95,7 +95,9 @@ export function timelineRows(
       if (retainStandaloneBoundary && pending !== null && pending.turn !== 0) {
         rows.push({ type: "divider", divider: pending });
       }
-      const previousPending: LogDivider | null = pending;
+      // TypeScript loses the carried loop value's union type at this assignment
+      // site, although a prior boundary can leave a divider pending.
+      const previousPending = pending as LogDivider | null;
       pending = {
         seq: entry.seq,
         turn: entry.turn,
