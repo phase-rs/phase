@@ -21840,11 +21840,17 @@ impl GameState {
 
     /// CR 706.6: Parks one "ignore the lowest roll" resolution.
     ///
-    /// Read back only through `take_active_die_roll_frame`: the CR 706.6 ignore
-    /// choice is raised ONCE per instruction — every applied replacement's rule
-    /// is folded into a single `WaitingFor::DieKeepChoice` with an
-    /// `ignore_count` — so the frame is pushed once and consumed once, with no
-    /// borrow-and-re-park step in between.
+    /// The CR 706.6 ignore choice itself is raised ONCE per instruction — every
+    /// applied replacement's rule is folded into a single
+    /// `WaitingFor::DieKeepChoice` with an `ignore_count` — so this frame is
+    /// pushed once for that choice and consumed by
+    /// `take_active_die_roll_frame`.
+    ///
+    /// It is NOT the frame's whole lifecycle: past the ignore choice, a
+    /// results-table branch can suspend mid-loop on its own prompt
+    /// (CR 706.3a + CR 608.2c), and the owner is then re-parked by
+    /// `park_die_roll_frame_for_resume` to carry the remaining dice. See that
+    /// method for which stack slot each case parks into.
     pub fn push_die_roll_frame(&mut self, pending: PendingDieRoll) {
         self.resolution_stack.push_die_roll(pending);
     }
@@ -21864,6 +21870,41 @@ impl GameState {
         pending: PendingDieRoll,
     ) -> Result<(), ResolutionStackError> {
         self.resolution_stack.replace_active_die_roll(pending)
+    }
+
+    /// CR 706.3a + CR 608.2c: Parks the die-roll owner for a mid-loop resume,
+    /// choosing the structurally valid slot instead of assuming one.
+    ///
+    /// Three cases, and collapsing them is a stack-invariant bug:
+    ///
+    /// * the owner is already on top (this pass came from a keep choice) — swap
+    ///   it in place, keeping the stack top stable;
+    /// * the stack is empty (a first pass that never parked one) — push;
+    /// * something else owns the top. Past cursor 0 this frame is an
+    ///   `AfterChild` owner (see `ResolutionFrame::gate`), so a results-table
+    ///   branch that suspended on its OWN prompt is above us. Pushing there
+    ///   would bury that child's `DirectChoice`, which `validate` rejects
+    ///   (`buried_direct_choice`) because a direct-choice owner must be the top
+    ///   frame. Insert BELOW the active child instead — the frame waits on it,
+    ///   exactly like every other `AfterChild` owner.
+    pub fn park_die_roll_frame_for_resume(
+        &mut self,
+        pending: PendingDieRoll,
+    ) -> Result<(), ResolutionStackError> {
+        match self
+            .resolution_stack
+            .replace_active_die_roll(pending.clone())
+        {
+            Ok(()) => Ok(()),
+            Err(ResolutionStackError::Empty) => {
+                self.resolution_stack.push_die_roll(pending);
+                Ok(())
+            }
+            Err(ResolutionStackError::UnexpectedTop { .. }) => self
+                .resolution_stack
+                .insert_parent_of_active(ResolutionFrame::DieRoll(Box::new(pending))),
+            Err(error) => Err(error),
+        }
     }
 
     /// Re-parks the active coin-flip owner after it suspends for another keep

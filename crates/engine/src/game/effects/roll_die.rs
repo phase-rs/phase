@@ -614,15 +614,18 @@ pub fn resume_after_ignore(
                     // roller committed to.
                     forced_ignored: ignore_indices.clone(),
                 };
-                // The frame is re-parked in place when this pass came from a
-                // keep choice (the take/replace pair keeps the stack top
-                // stable); a first pass that never parked one pushes instead.
-                if state
-                    .replace_active_die_roll_frame(resumed.clone())
-                    .is_err()
-                {
-                    state.push_die_roll_frame(resumed);
-                }
+                // CR 706.3a: park the owner in the structurally valid slot.
+                // A results-table branch that suspended on its own prompt is
+                // above us, and this frame is an `AfterChild` owner past cursor
+                // 0 — so it must go BELOW that child, never on top of it. The
+                // helper discriminates re-park / push / insert-below; the old
+                // `.is_err()` fallback collapsed the last two and could bury an
+                // active `DirectChoice`.
+                state
+                    .park_die_roll_frame_for_resume(resumed)
+                    .map_err(|error| {
+                        EffectError::InvalidParam(format!("die-roll frame re-park: {error}"))
+                    })?;
                 return Ok(Some(state.waiting_for.clone()));
             }
         }
