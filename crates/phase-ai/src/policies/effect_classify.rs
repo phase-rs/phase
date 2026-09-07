@@ -1,5 +1,6 @@
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
+use engine::game::quantity::try_resolve_quantity_in_source_context;
 use engine::types::ability::{
     ContinuousModification, ControllerRef, Effect, EffectScope, PtValue, QuantityExpr,
     TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
@@ -544,10 +545,10 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
             target,
             ..
         } => Some(target),
-        // GenericEffect and LoseLife have Option<TargetFilter>
-        Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
-            target.as_ref()
-        }
+        // GainLife's player axis is always its target filter; GenericEffect
+        // and LoseLife carry optional target filters.
+        Effect::GainLife { player, .. } => Some(player),
+        Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => target.as_ref(),
         // NOTE: ExchangeControl carries two distinct target filters (target_a/target_b).
         // Its slot collection is special-cased; no single filter is meaningful here.
         // NOTE: GiftDelivery { kind } has no target field.
@@ -734,7 +735,10 @@ pub(crate) fn aggregate_player_impact(ctx: &PolicyContext<'_>) -> f64 {
 }
 
 pub(crate) fn aggregate_player_impact_in(effects: &[&Effect]) -> f64 {
-    effects.iter().map(|effect| player_impact(effect)).sum()
+    effects
+        .iter()
+        .map(|effect| player_impact(None, None, None, effect))
+        .sum()
 }
 
 pub(crate) fn targeted_player_impact(ctx: &PolicyContext<'_>, player: PlayerId) -> Option<f64> {
@@ -772,7 +776,7 @@ pub(crate) fn targeted_player_impact_in(
             )
         {
             found_targeted_effect = true;
-            impact += player_impact(effect);
+            impact += player_impact(Some(state), source_controller, source_id, effect);
         }
     }
 
@@ -808,7 +812,12 @@ pub(crate) fn targeted_object_impact(ctx: &PolicyContext<'_>, object_id: ObjectI
     for effect in ctx.effects() {
         if effect_targets_object(ctx, effect, object_id) {
             found_targeted_effect = true;
-            impact += player_impact(effect);
+            impact += player_impact(
+                Some(ctx.state),
+                ctx.source_object().map(|object| object.controller),
+                Some(effect_source_id(ctx)),
+                effect,
+            );
         }
     }
 
@@ -866,13 +875,26 @@ fn object_matches_effect_filter(
     }
 }
 
-fn player_impact(effect: &Effect) -> f64 {
+fn player_impact(
+    state: Option<&GameState>,
+    source_controller: Option<PlayerId>,
+    source_id: Option<ObjectId>,
+    effect: &Effect,
+) -> f64 {
     match effect {
-        Effect::Draw { count, .. } => quantity_weight(count, 1.25),
-        Effect::Discard { count, .. } => -quantity_weight(count, 1.5),
+        Effect::Draw { count, .. } => {
+            quantity_weight(state, source_controller, source_id, count, 1.25)
+        }
+        Effect::Discard { count, .. } => {
+            -quantity_weight(state, source_controller, source_id, count, 1.5)
+        }
         Effect::DiscardCard { count, .. } => -(*count as f64 * 1.5),
-        Effect::GainLife { amount, .. } => quantity_weight(amount, 0.15),
-        Effect::LoseLife { amount, .. } => -quantity_weight(amount, 0.15),
+        Effect::GainLife { amount, .. } => {
+            quantity_weight(state, source_controller, source_id, amount, 0.15)
+        }
+        Effect::LoseLife { amount, .. } => {
+            -quantity_weight(state, source_controller, source_id, amount, 0.15)
+        }
         _ => match effect_polarity(effect) {
             EffectPolarity::Beneficial => 1.0,
             EffectPolarity::Harmful => -1.0,
@@ -881,12 +903,24 @@ fn player_impact(effect: &Effect) -> f64 {
     }
 }
 
-fn quantity_weight(quantity: &QuantityExpr, factor: f64) -> f64 {
-    factor
-        * match quantity {
-            QuantityExpr::Fixed { value } => (*value).max(0) as f64,
-            _ => 1.0,
+fn quantity_weight(
+    state: Option<&GameState>,
+    source_controller: Option<PlayerId>,
+    source_id: Option<ObjectId>,
+    quantity: &QuantityExpr,
+    factor: f64,
+) -> f64 {
+    let magnitude = match (state, source_controller, source_id) {
+        (Some(state), Some(controller), Some(source_id)) => {
+            try_resolve_quantity_in_source_context(state, quantity, controller, source_id)
+                .map_or(1, |value| value.max(0))
         }
+        _ => match quantity {
+            QuantityExpr::Fixed { value } => (*value).max(0),
+            _ => 1,
+        },
+    };
+    factor * f64::from(magnitude)
 }
 
 /// Determines whether an Aura is beneficial or harmful to its target by inspecting
@@ -1387,6 +1421,287 @@ mod grant_trigger_polarity_tests {
             }),
             EffectPolarity::Beneficial
         );
+    }
+}
+
+#[cfg(test)]
+mod live_quantity_targeting_tests {
+    use super::*;
+    use crate::config::AiConfig;
+    use crate::policies::anti_self_harm::AntiSelfHarmPolicy;
+    use crate::policies::context::SearchDepth;
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::quantity::quantity_is_cast_stable_for_pre_cast;
+    use engine::game::zones::create_object;
+    use engine::types::ability::{
+        EffectKind, FilterProp, QuantityRef, ResolvedAbility, TargetRef, TypedFilter,
+    };
+    use engine::types::actions::GameAction;
+    use engine::types::card_type::CoreType;
+    use engine::types::game_state::{
+        PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+    };
+    use engine::types::identifiers::CardId;
+    use engine::types::mana::ManaCost;
+
+    fn player_target_score(
+        state: &GameState,
+        source: ObjectId,
+        effect: Effect,
+        action: GameAction,
+    ) -> f64 {
+        let ability = ResolvedAbility::new(effect, Vec::new(), source, PlayerId(0));
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(PendingCast::new(
+                    source,
+                    CardId(source.0),
+                    ability,
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![
+                        TargetRef::Player(PlayerId(0)),
+                        TargetRef::Player(PlayerId(1)),
+                    ],
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action,
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let policy_context = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        };
+
+        AntiSelfHarmPolicy.score(&policy_context)
+    }
+
+    fn creature_count_amount() -> QuantityExpr {
+        QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn targeted_player_impact_uses_live_object_count_without_double_affiliation() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Congregate source".to_string(),
+            Zone::Hand,
+        );
+        let gain = Effect::GainLife {
+            amount: creature_count_amount(),
+            player: TargetFilter::Player,
+        };
+        let effects = vec![&gain];
+
+        assert_eq!(
+            targeted_player_impact_in(
+                &state,
+                Some(PlayerId(0)),
+                Some(source),
+                &effects,
+                PlayerId(0),
+            ),
+            Some(0.0),
+            "zero is a known recipient impact, not the legacy fabricated +1 magnitude"
+        );
+        assert_eq!(
+            targeted_player_impact_in(
+                &state,
+                Some(PlayerId(0)),
+                Some(source),
+                &effects,
+                PlayerId(1),
+            ),
+            Some(0.0)
+        );
+
+        let creature = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .expect("the counted creature exists")
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        for recipient in [PlayerId(0), PlayerId(1)] {
+            assert_eq!(
+                targeted_player_impact_in(
+                    &state,
+                    Some(PlayerId(0)),
+                    Some(source),
+                    &effects,
+                    recipient,
+                ),
+                Some(0.3),
+                "this helper is recipient-relative; affiliation belongs to its caller"
+            );
+        }
+
+        let choose_self = player_target_score(
+            &state,
+            source,
+            gain.clone(),
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(0))),
+            },
+        );
+        let choose_opponent = player_target_score(
+            &state,
+            source,
+            gain.clone(),
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        );
+        assert!(
+            choose_self > choose_opponent,
+            "the production ChooseTarget policy must apply the one affiliation flip and keep life gain"
+        );
+
+        let select_self = player_target_score(
+            &state,
+            source,
+            gain.clone(),
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(0))],
+            },
+        );
+        let select_opponent = player_target_score(
+            &state,
+            source,
+            gain,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(1))],
+            },
+        );
+        assert!(
+            select_self > select_opponent,
+            "the production SelectTargets policy must preserve the same recipient polarity"
+        );
+
+        let lose = Effect::LoseLife {
+            amount: creature_count_amount(),
+            target: Some(TargetFilter::Player),
+        };
+        let lose_self = player_target_score(
+            &state,
+            source,
+            lose.clone(),
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(0))),
+            },
+        );
+        let lose_opponent = player_target_score(
+            &state,
+            source,
+            lose,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        );
+        assert!(
+            lose_opponent > lose_self,
+            "the same recipient-relative magnitude must make life loss prefer an opponent"
+        );
+    }
+
+    #[test]
+    fn targeted_player_impact_previews_explicit_zone_counts_but_cast_stability_rejects_them() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Zone-count source".to_string(),
+            Zone::Hand,
+        );
+        let graveyard_creature = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Graveyard Bear".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&graveyard_creature)
+            .expect("the explicit-zone object exists")
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let amount = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+            },
+        };
+        let gain = Effect::GainLife {
+            amount: amount.clone(),
+            player: TargetFilter::Player,
+        };
+
+        assert_eq!(
+            targeted_player_impact_in(
+                &state,
+                Some(PlayerId(0)),
+                Some(source),
+                &[&gain],
+                PlayerId(0),
+            ),
+            Some(0.15),
+            "live preview accepts an explicit-zone quantity for recipient valuation"
+        );
+        assert!(
+            !quantity_is_cast_stable_for_pre_cast(&amount),
+            "the pre-cast veto deliberately has a narrower stability contract"
+        );
+    }
+
+    #[test]
+    fn unknown_quantity_retains_legacy_directional_weight() {
+        let unknown = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(quantity_weight(None, None, None, &unknown, 0.15), 0.15);
     }
 }
 

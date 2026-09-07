@@ -4,19 +4,36 @@ use engine::ai_support::{
     is_targeted_exchange_root, targeted_exchange_verdict, AiDecisionContext, CandidateAction,
     TargetedExchangeVerdict,
 };
+use engine::game::casting::{
+    effective_spell_cost, spell_cost_is_payable_from_pool, spell_has_effective_keywords,
+};
 use engine::game::combat::AttackTarget;
+use engine::game::functioning_abilities::{
+    active_trigger_definitions, battlefield_active_triggers, game_active_statics,
+    game_functioning_statics,
+};
+use engine::game::quantity::{
+    quantity_is_cast_stable_for_pre_cast, try_resolve_quantity_in_source_context,
+};
+use engine::game::triggers::trigger_definition_functions_in_zone;
 use engine::types::ability::{
-    AbilityCondition, ActivationRestriction, CostCategory, Effect, PtValue, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
+    ContinuousModification, CostCategory, Effect, PtValue, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaSourcePenalty, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::{AdditionalCostTaxAction, StaticMode};
+use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
+use crate::cast_facts::CastCostMode;
 use crate::combat_ai::is_lethal_attack_available;
 use crate::config::AiConfig;
 use crate::context::AiContext;
@@ -28,8 +45,6 @@ use crate::policies::effect_classify::{
 use crate::policies::stack_awareness::{has_pending_removal, will_target_die_from_stack};
 use crate::policies::strategy_helpers::can_pay_ward_cost;
 use crate::search::ability_is_temporary_combat_modifier;
-#[cfg(test)]
-use engine::types::game_state::CastPaymentMode;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GateDecision {
@@ -241,6 +256,10 @@ fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
 }
 
 fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
+    if zero_direct_spell_is_safe_to_reject(ctx) {
+        return GateDecision::Reject;
+    }
+
     // CR 601.2c + CR 608.2c: Target-sourced self-damage and fight exchanges are
     // evaluated from reducer-issued, fully-bound target paths before scoring.
     // `Indeterminate` stays fail-open: this is a proof-backed veto only.
@@ -371,6 +390,378 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
     }
 
     GateDecision::Allow
+}
+
+/// Conservative root-only proof for ordinary casts whose complete direct effect
+/// has a known zero magnitude. Any unmodelled cast consequence leaves the action
+/// available for policy scoring.
+fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
+    let GameAction::CastSpell {
+        object_id,
+        payment_mode: CastPaymentMode::Auto,
+        ..
+    } = &ctx.candidate.action
+    else {
+        return false;
+    };
+    let Some(object) = ctx.state.objects.get(object_id) else {
+        return false;
+    };
+    if object.zone != Zone::Hand
+        || object.controller != ctx.ai_player
+        || object.owner != ctx.ai_player
+        || !(object.card_types.core_types.contains(&CoreType::Instant)
+            || object.card_types.core_types.contains(&CoreType::Sorcery))
+        || object.additional_cost.is_some()
+        || object.strive_cost.is_some()
+        || !object.casting_options.is_empty()
+        || !object.casting_permissions.is_empty()
+        || !object.trigger_definitions.is_empty()
+        || !object.replacement_definitions.is_empty()
+        || !object.static_definitions.is_empty()
+        || spell_has_effective_keywords(ctx.state, *object_id)
+        || !payment_population_is_stable(ctx.state, ctx.ai_player, *object_id)
+        || !ctx.state.delayed_triggers.is_empty()
+    {
+        return false;
+    }
+
+    // These presence checks deliberately avoid duplicating the casting cost
+    // and payment authorities. A possible external cost/grant is enough to
+    // make this a non-proof.
+    if game_active_statics(ctx.state).any(|(_, definition)| {
+        matches!(
+            definition.mode,
+            StaticMode::CastWithAlternativeCost { .. } | StaticMode::CastWithKeyword { .. }
+        )
+    }) || game_functioning_statics(ctx.state).any(|(_, definition)| {
+        matches!(
+            definition.mode,
+            StaticMode::ImposeAdditionalCost {
+                action: AdditionalCostTaxAction::Cast,
+                ..
+            }
+        )
+    }) || !engine::game::static_abilities::player_life_payment_colors(ctx.state, ctx.ai_player)
+        .is_empty()
+        || ctx
+            .state
+            .pending_next_spell_modifiers
+            .iter()
+            .any(|modifier| modifier.player == ctx.ai_player)
+        || ctx.state.transient_continuous_effects.iter().any(|effect| {
+            effect.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::GrantStaticAbility { definition }
+                        if matches!(definition.mode, StaticMode::CastWithKeyword { .. })
+                )
+            })
+        })
+    {
+        return false;
+    }
+
+    if has_relevant_functioning_trigger(ctx.state, *object_id) {
+        return false;
+    }
+
+    let Some(facts) = ctx.cast_facts() else {
+        return false;
+    };
+    facts.cost_mode == CastCostMode::Printed
+        && facts.immediate_etb_triggers.is_empty()
+        && facts.immediate_replacements.is_empty()
+        && !facts.primary_effects.is_empty()
+        && facts.primary_effects.iter().all(|definition| {
+            definition_is_componentwise_known_zero(
+                ctx.state,
+                definition,
+                object.controller,
+                *object_id,
+                true,
+                false,
+            )
+        })
+}
+
+fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: ObjectId) -> bool {
+    if spell_cost_is_payable_from_pool(state, caster, spell_id) {
+        return true;
+    }
+    let Some(cost) = effective_spell_cost(state, caster, spell_id) else {
+        return false;
+    };
+    if mana_cost_has_x(&cost)
+        || engine::game::mana_payment::classify_payment(&cost)
+            != engine::game::mana_payment::PaymentClassification::Unambiguous
+    {
+        return false;
+    }
+    engine::game::mana_sources::activatable_mana_source_selections(state, caster)
+        .iter()
+        .all(|selection| {
+            selection.penalty == ManaSourcePenalty::None
+                && selection.ability_index.is_none_or(|index| {
+                    state
+                        .objects
+                        .get(&selection.source.object_id)
+                        .and_then(|object| object.abilities.get(index))
+                        .and_then(|ability| ability.cost.as_ref())
+                        .is_none_or(tap_untap_only_cost)
+                })
+        })
+}
+
+fn mana_cost_has_x(cost: &engine::types::mana::ManaCost) -> bool {
+    matches!(
+        cost,
+        engine::types::mana::ManaCost::Cost { shards, .. }
+            if shards.contains(&engine::types::mana::ManaCostShard::X)
+    )
+}
+
+fn tap_untap_only_cost(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Tap | AbilityCost::Untap => true,
+        AbilityCost::Composite { costs } => costs.iter().all(tap_untap_only_cost),
+        _ => false,
+    }
+}
+
+fn definition_is_componentwise_known_zero(
+    state: &GameState,
+    definition: &AbilityDefinition,
+    controller: PlayerId,
+    source_id: ObjectId,
+    root: bool,
+    parent_target_bound: bool,
+) -> bool {
+    if definition.kind != AbilityKind::Spell
+        || definition.cost.is_some()
+        || definition.else_ability.is_some()
+        || definition.duration.is_some()
+        || !definition.activation_restrictions.is_empty()
+        || definition.activation_mana_payment_restriction.is_some()
+        || definition.activator_filter.is_some()
+        || definition.activation_zone.is_some()
+        || definition.ability_tag.is_some()
+        || definition.condition.is_some()
+        || definition.optional_targeting
+        || definition.optional
+        || definition.optional_player.is_some()
+        || definition.optional_for.is_some()
+        || definition.multi_target.is_some()
+        || !definition.target_constraints.is_empty()
+        || !engine::types::ability::TargetChoiceTiming::is_stack(&definition.target_choice_timing)
+        || definition.distribute.is_some()
+        || definition.unless_pay.is_some()
+        || definition.modal.is_some()
+        || !definition.mode_abilities.is_empty()
+        || definition.repeat_for.is_some()
+        || definition.announced_x.is_some()
+        || definition.min_x_value != 0
+        || definition.cant_be_copied
+        || definition.cost_reduction.is_some()
+        || definition.forward_result
+        || definition.player_scope.is_some()
+        || definition.starting_with.is_some()
+        || !definition.target_selection_mode.is_chosen()
+        || definition.target_chooser.is_some()
+        || definition.repeat_until.is_some()
+        || !engine::types::ability::SubAbilityLink::is_continuation(&definition.sub_link)
+        || definition.iteration_kind_binding.is_some()
+        || !engine::types::ability::SiblingCondition::is_default(&definition.sibling_condition)
+    {
+        return false;
+    }
+
+    let effect_is_zero = match definition.effect.as_ref() {
+        Effect::Draw { count, target }
+            if accepted_zero_recipient(target, root, parent_target_bound)
+                && quantity_is_cast_stable_for_pre_cast(count) =>
+        {
+            try_resolve_quantity_in_source_context(state, count, controller, source_id) == Some(0)
+        }
+        Effect::GainLife { amount, player }
+            if accepted_zero_recipient(player, root, parent_target_bound)
+                && quantity_is_cast_stable_for_pre_cast(amount) =>
+        {
+            try_resolve_quantity_in_source_context(state, amount, controller, source_id) == Some(0)
+        }
+        Effect::LoseLife { amount, target }
+            if target.as_ref().is_none_or(|recipient| {
+                accepted_zero_recipient(recipient, root, parent_target_bound)
+            }) && quantity_is_cast_stable_for_pre_cast(amount) =>
+        {
+            try_resolve_quantity_in_source_context(state, amount, controller, source_id) == Some(0)
+        }
+        Effect::Discard {
+            count,
+            target,
+            filter: None,
+            selection,
+            unless_filter: None,
+        } if accepted_zero_recipient(target, root, parent_target_bound)
+            && selection.is_chosen()
+            && quantity_is_cast_stable_for_pre_cast(count) =>
+        {
+            try_resolve_quantity_in_source_context(state, count, controller, source_id) == Some(0)
+        }
+        _ => false,
+    };
+
+    let parent_target_bound =
+        parent_target_bound || (root && effect_binds_parent_target(definition.effect.as_ref()));
+    effect_is_zero
+        && definition.sub_ability.as_ref().is_none_or(|sub| {
+            definition_is_componentwise_known_zero(
+                state,
+                sub,
+                controller,
+                source_id,
+                false,
+                parent_target_bound,
+            )
+        })
+}
+
+fn effect_binds_parent_target(effect: &Effect) -> bool {
+    match effect {
+        Effect::Draw { target, .. } => matches!(target, TargetFilter::Player),
+        Effect::GainLife { player, .. } => matches!(player, TargetFilter::Player),
+        Effect::LoseLife { target, .. } => matches!(target, Some(TargetFilter::Player)),
+        Effect::Discard { target, .. } => matches!(target, TargetFilter::Player),
+        _ => false,
+    }
+}
+
+fn accepted_zero_recipient(
+    recipient: &TargetFilter,
+    root: bool,
+    parent_target_bound: bool,
+) -> bool {
+    matches!(recipient, TargetFilter::Controller)
+        || (root && matches!(recipient, TargetFilter::Player))
+        || (!root && parent_target_bound && matches!(recipient, TargetFilter::ParentTarget))
+}
+
+fn has_relevant_functioning_trigger(state: &GameState, spell_id: ObjectId) -> bool {
+    let Some(spell) = state.objects.get(&spell_id) else {
+        return true;
+    };
+    let battlefield_relevant = battlefield_active_triggers(state)
+        .any(|(_, active)| !trigger_is_proven_irrelevant(spell, active.definition));
+    if battlefield_relevant {
+        return true;
+    }
+
+    state.objects.values().any(|object| {
+        matches!(
+            object.zone,
+            Zone::Hand | Zone::Graveyard | Zone::Exile | Zone::Stack | Zone::Command
+        ) && active_trigger_definitions(state, object).any(|active| {
+            trigger_definition_functions_in_zone(active.definition, object.zone)
+                && !trigger_is_proven_irrelevant(spell, active.definition)
+        })
+    })
+}
+
+/// This intentionally does not evaluate a trigger filter. `matches_target_filter`
+/// can return false for a context-dependent predicate, which is not a proof that a
+/// future cast event cannot satisfy it. Only a contradictory type requirement on the
+/// exact candidate spell is sufficient to make a cast/target hook irrelevant.
+fn trigger_is_proven_irrelevant(
+    spell: &engine::game::game_object::GameObject,
+    definition: &engine::types::ability::TriggerDefinition,
+) -> bool {
+    let disjoint_cast_hook = matches!(
+        definition.mode,
+        TriggerMode::SpellCast
+            | TriggerMode::SpellCastOrCopy
+            | TriggerMode::SpellAbilityCast
+            | TriggerMode::PlayCard
+    ) && definition
+        .valid_card
+        .as_ref()
+        .is_some_and(|filter| target_filter_is_proven_disjoint_from_spell(filter, spell));
+    let disjoint_target_hook = matches!(
+        definition.mode,
+        TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce
+    ) && definition
+        .valid_source
+        .as_ref()
+        .is_some_and(|filter| target_filter_is_proven_disjoint_from_spell(filter, spell));
+    disjoint_cast_hook
+        || disjoint_target_hook
+        || matches!(definition.mode, TriggerMode::Attacks)
+        || (matches!(definition.mode, TriggerMode::ChangesZone)
+            && definition.zone_change_clauses.is_empty()
+            && definition.destination == Some(Zone::Battlefield)
+            && definition.valid_card == Some(TargetFilter::SelfRef))
+}
+
+fn target_filter_is_proven_disjoint_from_spell(
+    filter: &TargetFilter,
+    spell: &engine::game::game_object::GameObject,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed_filter_is_proven_disjoint_from_spell(typed, spell),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| target_filter_is_proven_disjoint_from_spell(filter, spell)),
+        TargetFilter::Or { filters } if !filters.is_empty() => filters
+            .iter()
+            .all(|filter| target_filter_is_proven_disjoint_from_spell(filter, spell)),
+        _ => false,
+    }
+}
+
+fn typed_filter_is_proven_disjoint_from_spell(
+    filter: &TypedFilter,
+    spell: &engine::game::game_object::GameObject,
+) -> bool {
+    filter
+        .type_filters
+        .iter()
+        .any(|type_filter| type_filter_is_proven_disjoint_from_spell(type_filter, spell))
+}
+
+fn type_filter_is_proven_disjoint_from_spell(
+    filter: &TypeFilter,
+    spell: &engine::game::game_object::GameObject,
+) -> bool {
+    let lacks = |card_type| !spell.card_types.core_types.contains(&card_type);
+    match filter {
+        TypeFilter::Creature => lacks(CoreType::Creature),
+        TypeFilter::Land => lacks(CoreType::Land),
+        TypeFilter::Artifact => lacks(CoreType::Artifact),
+        TypeFilter::Enchantment => lacks(CoreType::Enchantment),
+        TypeFilter::Instant => lacks(CoreType::Instant),
+        TypeFilter::Sorcery => lacks(CoreType::Sorcery),
+        TypeFilter::Planeswalker => lacks(CoreType::Planeswalker),
+        TypeFilter::Battle => lacks(CoreType::Battle),
+        TypeFilter::Kindred => lacks(CoreType::Kindred),
+        TypeFilter::Permanent => !spell.card_types.core_types.iter().any(|card_type| {
+            matches!(
+                card_type,
+                CoreType::Artifact
+                    | CoreType::Battle
+                    | CoreType::Creature
+                    | CoreType::Enchantment
+                    | CoreType::Land
+                    | CoreType::Planeswalker
+            )
+        }),
+        TypeFilter::AnyOf(filters) if !filters.is_empty() => filters
+            .iter()
+            .all(|filter| type_filter_is_proven_disjoint_from_spell(filter, spell)),
+        TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Non(_)
+        | TypeFilter::Subtype(_)
+        | TypeFilter::AnyOf(_) => false,
+    }
 }
 
 /// Hard-reject targets that are provably futile (e.g., destroy vs indestructible).
@@ -894,19 +1285,1097 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::scenario::{GameScenario, P0, P1};
-    use engine::types::ability::{BounceSelection, EffectKind, ResolvedAbility, TargetFilter};
+    use engine::game::zones::create_object;
+    use engine::types::ability::{
+        BounceSelection, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
+        ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter,
+        REMOVE_COUNTER_COST_X,
+    };
     use engine::types::ability::{
         QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
     };
+    use engine::types::counter::{CounterMatch, CounterType};
     use engine::types::game_state::{
-        PendingCast, StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress,
-        TargetSelectionSlot, WaitingFor,
+        DelayedTrigger, NextSpellModifier, PendingCast, PendingNextSpellModifier, StackEntry,
+        StackEntryKind, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
+        WaitingFor,
     };
     use engine::types::identifiers::CardId;
     use engine::types::keywords::WardCost;
-    use engine::types::mana::ManaCost;
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaSourceOutput, ManaUnit};
     use engine::types::replacements::ReplacementEvent;
+    use engine::types::statics::CastFrequency;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
     use std::sync::Arc;
+
+    const CONGREGATE_ORACLE: &str =
+        "Target player gains 2 life for each creature on the battlefield.";
+
+    fn pooled_mana(color: ManaType, count: usize) -> Vec<ManaUnit> {
+        vec![ManaUnit::new(color, ObjectId(0), false, vec![]); count]
+    }
+
+    fn funded_zero_congregate_state() -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let congregate = scenario
+            .add_spell_to_hand_from_oracle(P0, "Congregate", true, CONGREGATE_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::White],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 3));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::White, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        (state.clone(), congregate)
+    }
+
+    fn zero_cast_is_retained(state: &GameState, spell: ObjectId) -> bool {
+        let issued = engine::ai_support::candidate_actions(state);
+        assert!(issued.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::CastSpell {
+                    object_id,
+                    payment_mode: CastPaymentMode::Auto,
+                    ..
+                } if object_id == spell
+            )
+        }));
+        cast_is_retained_from_issued(state, spell, issued)
+    }
+
+    fn cast_is_retained_from_issued(
+        state: &GameState,
+        spell: ObjectId,
+        issued: Vec<CandidateAction>,
+    ) -> bool {
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        gate_candidates(
+            state,
+            &decision,
+            issued,
+            P0,
+            &config,
+            &AiContext::empty(&config.weights),
+        )
+        .iter()
+        .any(|candidate| {
+            matches!(
+                candidate.candidate.action,
+                GameAction::CastSpell { object_id, .. } if object_id == spell
+            )
+        })
+    }
+
+    fn cast_is_retained_with_any_payment_mode(state: &GameState, spell: ObjectId) -> bool {
+        let issued = engine::ai_support::candidate_actions(state);
+        assert!(issued.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::CastSpell { object_id, .. } if object_id == spell
+            )
+        }));
+        cast_is_retained_from_issued(state, spell, issued)
+    }
+
+    fn zero_cast_with_payment_mode_is_retained(
+        state: &GameState,
+        spell: ObjectId,
+        payment_mode: CastPaymentMode,
+    ) -> bool {
+        let mut issued = engine::ai_support::candidate_actions(state);
+        let cast = issued
+            .iter_mut()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::CastSpell { object_id, .. } if object_id == spell
+                )
+            })
+            .expect("production cast candidate exists");
+        let GameAction::CastSpell {
+            payment_mode: candidate_mode,
+            ..
+        } = &mut cast.action
+        else {
+            unreachable!("selected a cast candidate");
+        };
+        *candidate_mode = payment_mode;
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        gate_candidates(
+            state,
+            &decision,
+            issued,
+            P0,
+            &config,
+            &AiContext::empty(&config.weights),
+        )
+        .iter()
+        .any(|candidate| {
+            matches!(
+                candidate.candidate.action,
+                GameAction::CastSpell { object_id, .. } if object_id == spell
+            )
+        })
+    }
+
+    fn add_battlefield_trigger(state: &mut GameState, card_id: u64, mode: TriggerMode) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(card_id),
+            P0,
+            format!("{mode:?} hook"),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .expect("hook source exists")
+            .trigger_definitions
+            .push(engine::types::ability::TriggerDefinition::new(mode));
+        state.battlefield.push_back(source);
+        source
+    }
+
+    fn add_zone_trigger(
+        state: &mut GameState,
+        card_id: u64,
+        name: &str,
+        zone: Zone,
+        definition: engine::types::ability::TriggerDefinition,
+    ) -> ObjectId {
+        let source = create_object(state, CardId(card_id), P0, name.to_string(), zone);
+        state
+            .objects
+            .get_mut(&source)
+            .expect("trigger source exists")
+            .trigger_definitions
+            .push(definition);
+        match zone {
+            Zone::Battlefield => state.battlefield.push_back(source),
+            Zone::Hand => state.players[P0.0 as usize].hand.push_back(source),
+            Zone::Graveyard => state.players[P0.0 as usize].graveyard.push_back(source),
+            Zone::Command => state.command_zone.push_back(source),
+            Zone::Stack => {}
+            _ => unreachable!("fixture supports the trigger scan zones only"),
+        }
+        source
+    }
+
+    fn add_battlefield_static(state: &mut GameState, card_id: u64, mode: StaticMode) -> ObjectId {
+        add_battlefield_static_for_controller(state, card_id, P0, StaticDefinition::new(mode))
+    }
+
+    fn add_battlefield_static_for_controller(
+        state: &mut GameState,
+        card_id: u64,
+        controller: PlayerId,
+        definition: StaticDefinition,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(card_id),
+            controller,
+            format!("{:?} producer", definition.mode),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .expect("static producer exists")
+            .static_definitions
+            .push(definition);
+        state.battlefield.push_back(source);
+        source
+    }
+
+    fn add_tapped_slagheap_mana_source(state: &mut GameState) -> ObjectId {
+        let storage = CounterType::Generic("storage".to_string());
+        let slagheap = create_object(
+            state,
+            CardId(91_401),
+            P0,
+            "Molten Slagheap".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&slagheap)
+            .expect("Slagheap source exists");
+        object.card_types.core_types.push(CoreType::Land);
+        object.tapped = true;
+        object.counters.insert(storage.clone(), 7);
+        let abilities = Arc::make_mut(&mut object.abilities);
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::PutCounter {
+                    counter_type: storage.clone(),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::Tap,
+                ],
+            }),
+        );
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyCombination {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        },
+                        color_options: vec![
+                            engine::types::mana::ManaColor::Black,
+                            engine::types::mana::ManaColor::Red,
+                        ],
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::RemoveCounter {
+                        target: None,
+                        count: REMOVE_COUNTER_COST_X,
+                        counter_type: CounterMatch::OfType(storage),
+                        selection: CounterCostSelection::SingleObject,
+                    },
+                ],
+            }),
+        );
+        state.battlefield.push_back(slagheap);
+        slagheap
+    }
+
+    fn add_plain_mana_source(
+        state: &mut GameState,
+        card_id: u64,
+        color: engine::types::mana::ManaColor,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(card_id),
+            P0,
+            format!("{color:?} source"),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&source)
+            .expect("plain mana source exists");
+        object.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut object.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![color],
+                        contribution: engine::types::ability::ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        state.battlefield.push_back(source);
+        source
+    }
+
+    fn add_plain_colorless_mana_source(state: &mut GameState, card_id: u64) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(card_id),
+            P0,
+            "Colorless source".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&source)
+            .expect("plain colorless mana source exists");
+        object.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut object.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        state.battlefield.push_back(source);
+        source
+    }
+
+    #[test]
+    fn zero_congregate_is_gated_but_positive_control_reaches_scoring() {
+        let mut zero_scenario = GameScenario::new();
+        zero_scenario.at_phase(Phase::PreCombatMain);
+        let congregate = zero_scenario
+            .add_spell_to_hand_from_oracle(P0, "Congregate", true, CONGREGATE_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::White],
+            })
+            .id();
+        zero_scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 3));
+        zero_scenario.with_mana_pool(P0, pooled_mana(ManaType::White, 1));
+        let mut zero_runner = zero_scenario.build();
+        let zero_state = zero_runner.state_mut();
+        zero_state.active_player = P0;
+        zero_state.priority_player = P0;
+        zero_state.waiting_for = WaitingFor::Priority { player: P0 };
+        let issued = engine::ai_support::candidate_actions(zero_state);
+        assert!(issued.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::CastSpell {
+                    object_id,
+                    payment_mode: CastPaymentMode::Auto,
+                    ..
+                } if object_id == congregate
+            )
+        }));
+        let decision = AiDecisionContext {
+            waiting_for: zero_state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let gated = gate_candidates(
+            zero_state,
+            &decision,
+            issued,
+            P0,
+            &config,
+            &AiContext::empty(&config.weights),
+        );
+        assert!(
+            gated.iter().all(|candidate| !matches!(
+                candidate.candidate.action,
+                GameAction::CastSpell { object_id, .. } if object_id == congregate
+            )),
+            "known-zero, pool-funded Congregate must be rejected before scoring"
+        );
+        assert!(
+            gated
+                .iter()
+                .any(|candidate| matches!(candidate.candidate.action, GameAction::PassPriority)),
+            "the gate removes only the no-op cast from the engine-issued root domain"
+        );
+        assert!(
+            crate::search::score_candidates(zero_state, P0, &config)
+                .iter()
+                .all(|(action, _)| !matches!(
+                    action,
+                    GameAction::CastSpell { object_id, .. } if *object_id == congregate
+                )),
+            "the scored path must not reintroduce a root rejected by the tactical gate"
+        );
+        for search_enabled in [false, true] {
+            let mut chooser_config = config.clone();
+            chooser_config.search.enabled = search_enabled;
+            let mut rng = ChaCha20Rng::seed_from_u64(7);
+            assert!(
+                !matches!(
+                    crate::search::choose_action(zero_state, P0, &chooser_config, &mut rng),
+                    Some(GameAction::CastSpell { object_id, .. }) if object_id == congregate
+                ),
+                "the {search_enabled:?} chooser route must not sample a gated zero cast"
+            );
+        }
+
+        let mut positive_scenario = GameScenario::new();
+        positive_scenario.at_phase(Phase::PreCombatMain);
+        positive_scenario.add_creature(P0, "Witness", 1, 1);
+        let positive_congregate = positive_scenario
+            .add_spell_to_hand_from_oracle(P0, "Congregate", true, CONGREGATE_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::White],
+            })
+            .id();
+        positive_scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 3));
+        positive_scenario.with_mana_pool(P0, pooled_mana(ManaType::White, 1));
+        let mut positive_runner = positive_scenario.build();
+        let positive_state = positive_runner.state_mut();
+        positive_state.active_player = P0;
+        positive_state.priority_player = P0;
+        positive_state.waiting_for = WaitingFor::Priority { player: P0 };
+        let positive_issued = engine::ai_support::candidate_actions(positive_state);
+        assert!(positive_issued.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::CastSpell {
+                    object_id,
+                    payment_mode: CastPaymentMode::Auto,
+                    ..
+                } if object_id == positive_congregate
+            )
+        }));
+        let positive_decision = AiDecisionContext {
+            waiting_for: positive_state.waiting_for.clone(),
+            candidates: positive_issued.clone(),
+        };
+        assert_eq!(
+            gate_candidates(
+                positive_state,
+                &positive_decision,
+                positive_issued,
+                P0,
+                &config,
+                &AiContext::empty(&config.weights),
+            )
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    candidate.candidate.action,
+                    GameAction::CastSpell {
+                        object_id,
+                        payment_mode: CastPaymentMode::Auto,
+                        ..
+                    } if object_id == positive_congregate
+                )
+            })
+            .count(),
+            1,
+            "a nonzero Congregate control must remain available"
+        );
+        assert!(
+            crate::search::score_candidates(positive_state, P0, &config)
+                .iter()
+                .any(|(action, _)| matches!(
+                    action,
+                    GameAction::CastSpell { object_id, .. } if *object_id == positive_congregate
+                )),
+            "the nonzero control must reach the production scoring path"
+        );
+
+        let outcome = positive_runner
+            .cast(positive_congregate)
+            .target_player(P0)
+            .resolve();
+        outcome.assert_life_delta(P0, 2);
+    }
+
+    fn zero_gain_definition() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Player,
+            },
+        )
+    }
+
+    #[test]
+    fn zero_effect_fold_requires_recognized_nonempty_componentwise_zero() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Source", 1, 1).id();
+        let runner = scenario.build();
+        let state = runner.state();
+        let zero = zero_gain_definition();
+        assert!(definition_is_componentwise_known_zero(
+            state, &zero, P0, source, true, false,
+        ));
+
+        let mut zero_then_draw = zero.clone();
+        zero_then_draw.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+        )));
+        assert!(
+            !definition_is_componentwise_known_zero(
+                state,
+                &zero_then_draw,
+                P0,
+                source,
+                true,
+                false,
+            ),
+            "a nonzero continuation prevents cancellation-style zero inference"
+        );
+
+        let mut gain_then_loss = zero_gain_definition();
+        *gain_then_loss.effect = Effect::GainLife {
+            amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Player,
+        };
+        gain_then_loss.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::ParentTarget),
+            },
+        )));
+        assert!(
+            !definition_is_componentwise_known_zero(
+                state,
+                &gain_then_loss,
+                P0,
+                source,
+                true,
+                false,
+            ),
+            "equal and opposite nonzero effects are not a direct no-op proof"
+        );
+
+        let mut zero_then_parent_target = zero_gain_definition();
+        zero_then_parent_target.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::ParentTarget,
+            },
+        )));
+        assert!(
+            definition_is_componentwise_known_zero(
+                state,
+                &zero_then_parent_target,
+                P0,
+                source,
+                true,
+                false,
+            ),
+            "a root player target binds the continuation's ParentTarget"
+        );
+
+        let mut controller_then_parent_target = zero_gain_definition();
+        *controller_then_parent_target.effect = Effect::GainLife {
+            amount: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+            player: TargetFilter::Controller,
+        };
+        controller_then_parent_target.sub_ability = zero_then_parent_target.sub_ability;
+        assert!(
+            !definition_is_componentwise_known_zero(
+                state,
+                &controller_then_parent_target,
+                P0,
+                source,
+                true,
+                false,
+            ),
+            "ParentTarget is not accepted when the root did not bind a target"
+        );
+    }
+
+    #[test]
+    fn zero_effect_fold_stands_down_on_metadata_and_scope() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Source", 1, 1).id();
+        let runner = scenario.build();
+        let state = runner.state();
+        let mut scoped = zero_gain_definition();
+        scoped.player_scope = Some(engine::types::ability::PlayerFilter::Opponent);
+        assert!(!definition_is_componentwise_known_zero(
+            state, &scoped, P0, source, true, false,
+        ));
+
+        let mut random_target = zero_gain_definition();
+        random_target.target_selection_mode = engine::types::ability::TargetSelectionMode::Random;
+        assert!(!definition_is_componentwise_known_zero(
+            state,
+            &random_target,
+            P0,
+            source,
+            true,
+            false,
+        ));
+
+        let mut resolution_target = zero_gain_definition();
+        resolution_target.target_choice_timing =
+            engine::types::ability::TargetChoiceTiming::Resolution;
+        assert!(!definition_is_componentwise_known_zero(
+            state,
+            &resolution_target,
+            P0,
+            source,
+            true,
+            false,
+        ));
+
+        let mut target_chooser = zero_gain_definition();
+        target_chooser.target_chooser = Some(TargetFilter::Opponent);
+        assert!(!definition_is_componentwise_known_zero(
+            state,
+            &target_chooser,
+            P0,
+            source,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn trigger_disjointness_requires_a_structural_spell_type_contradiction() {
+        let mut scenario = GameScenario::new();
+        let spell_id = scenario
+            .add_spell_to_hand_from_oracle(P0, "Congregate", true, CONGREGATE_ORACLE)
+            .id();
+        let runner = scenario.build();
+        let spell = runner.state().objects.get(&spell_id).unwrap();
+
+        let creature_cast = engine::types::ability::TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()));
+        assert!(trigger_is_proven_irrelevant(spell, &creature_cast));
+
+        let context_dependent_cast = engine::types::ability::TriggerDefinition::new(
+            TriggerMode::SpellCast,
+        )
+        .valid_card(TargetFilter::Typed(
+            TypedFilter::default().controller(engine::types::ability::ControllerRef::Opponent),
+        ));
+        assert!(
+            !trigger_is_proven_irrelevant(spell, &context_dependent_cast),
+            "a controller-relative filter is not a disjointness proof"
+        );
+
+        let creature_target_source =
+            engine::types::ability::TriggerDefinition::new(TriggerMode::BecomesTarget);
+        let mut creature_target_source = creature_target_source;
+        creature_target_source.valid_source = Some(TargetFilter::Typed(TypedFilter::creature()));
+        assert!(trigger_is_proven_irrelevant(spell, &creature_target_source,));
+    }
+
+    #[test]
+    fn zero_cast_commit_crime_trigger_survives_but_attacks_is_irrelevant() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        assert!(!zero_cast_is_retained(&state, congregate));
+
+        let crime = add_battlefield_trigger(&mut state, 91_001, TriggerMode::CommitCrime);
+        assert!(zero_cast_is_retained(&state, congregate));
+        state
+            .objects
+            .get_mut(&crime)
+            .expect("crime hook source exists")
+            .trigger_definitions
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the crime hook restores the known-zero rejection"
+        );
+
+        add_battlefield_trigger(&mut state, 91_002, TriggerMode::Attacks);
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "an attacks-only trigger is proven irrelevant to an ordinary cast"
+        );
+
+        add_battlefield_trigger(&mut state, 91_003, TriggerMode::ChangesZone);
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a generic zone-change hook must stay fail-open; only scalar self-ETB is irrelevant"
+        );
+    }
+
+    #[test]
+    fn zero_cast_payment_and_trigger_hooks_survive() {
+        for (card_id, mode) in [
+            (91_101, TriggerMode::ManaExpend),
+            (91_102, TriggerMode::ManaAdded),
+            (91_103, TriggerMode::SpellCast),
+        ] {
+            let (mut state, congregate) = funded_zero_congregate_state();
+            let hook = add_battlefield_trigger(&mut state, card_id, mode.clone());
+            assert!(
+                zero_cast_is_retained(&state, congregate),
+                "{mode:?} can observe a four-mana cast and must preserve it"
+            );
+            state
+                .objects
+                .get_mut(&hook)
+                .expect("hook source exists")
+                .trigger_definitions
+                .clear();
+            assert!(
+                !zero_cast_is_retained(&state, congregate),
+                "removing only {mode:?} restores the known-zero control"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_cast_hand_and_stack_hooks_are_paired() {
+        for (card_id, name, zone) in [
+            (91_151, "Hand hook", Zone::Hand),
+            (91_152, "Stack hook", Zone::Stack),
+        ] {
+            let (mut state, congregate) = funded_zero_congregate_state();
+            let hook = add_zone_trigger(
+                &mut state,
+                card_id,
+                name,
+                zone,
+                engine::types::ability::TriggerDefinition::new(TriggerMode::SpellCast)
+                    .trigger_zones(vec![zone]),
+            );
+            assert!(
+                zero_cast_is_retained(&state, congregate),
+                "a functioning {zone:?} spell-cast hook is a future observable"
+            );
+            state
+                .objects
+                .get_mut(&hook)
+                .expect("hook source exists")
+                .trigger_definitions
+                .clear();
+            assert!(
+                !zero_cast_is_retained(&state, congregate),
+                "removing only the {zone:?} hook restores rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_cast_pool_coverage_bypasses_but_unfunded_slagheap_stands_down() {
+        let (mut funded, congregate) = funded_zero_congregate_state();
+        let slagheap = add_tapped_slagheap_mana_source(&mut funded);
+        add_plain_mana_source(&mut funded, 91_402, engine::types::mana::ManaColor::White);
+        for card_id in 91_403..=91_405 {
+            add_plain_colorless_mana_source(&mut funded, card_id);
+        }
+        assert!(spell_cost_is_payable_from_pool(&funded, P0, congregate));
+        assert!(
+            !zero_cast_is_retained(&funded, congregate),
+            "a pool-funded cast does not need the impure Slagheap source"
+        );
+
+        let mut unfunded = funded.clone();
+        unfunded.players[P0.0 as usize].mana_pool.mana = pooled_mana(ManaType::Colorless, 1);
+        assert!(
+            !spell_cost_is_payable_from_pool(&unfunded, P0, congregate),
+            "removing only pool coverage forces the gate to inspect available sources"
+        );
+        assert!(
+            engine::game::mana_sources::activatable_mana_source_selections(&unfunded, P0)
+                .iter()
+                .any(|selection| {
+                    selection.source.object_id == slagheap
+                        && selection.ability_index == Some(2)
+                        && selection.output == ManaSourceOutput::DeferredColorChoice
+                }),
+            "the production source census includes the tapped, indexed deferred Slagheap ability"
+        );
+        assert!(
+            cast_is_retained_with_any_payment_mode(&unfunded, congregate),
+            "a counter-removing mana source makes pre-cast payment nontrivial"
+        );
+    }
+
+    #[test]
+    fn zero_cast_off_zone_archive_and_command_hooks_are_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        assert!(!zero_cast_is_retained(&state, congregate));
+
+        let solitude = add_zone_trigger(
+            &mut state,
+            91_201,
+            "Solitude",
+            Zone::Graveyard,
+            engine::types::ability::TriggerDefinition::new(TriggerMode::ChangesZone),
+        );
+        assert!(
+            !trigger_definition_functions_in_zone(
+                state.objects[&solitude]
+                    .trigger_definitions
+                    .first()
+                    .unwrap()
+                    .definition(),
+                Zone::Graveyard,
+            ),
+            "a default trigger definition is battlefield-only"
+        );
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "a graveyard card whose trigger cannot function there is irrelevant"
+        );
+
+        let carnarium = add_zone_trigger(
+            &mut state,
+            91_202,
+            "Rakdos Carnarium",
+            Zone::Battlefield,
+            engine::types::ability::TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(TargetFilter::SelfRef),
+        );
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "a scalar self-ETB cannot observe an unrelated instant cast"
+        );
+        state
+            .objects
+            .get_mut(&carnarium)
+            .expect("Carnarium exists")
+            .trigger_definitions
+            .clear();
+
+        let command = add_zone_trigger(
+            &mut state,
+            91_203,
+            "Command hook",
+            Zone::Command,
+            engine::types::ability::TriggerDefinition::new(TriggerMode::SpellCast)
+                .trigger_zones(vec![Zone::Command]),
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a functioning command-zone spell-cast trigger makes the cast observable"
+        );
+        state
+            .objects
+            .get_mut(&command)
+            .expect("command hook exists")
+            .trigger_definitions
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the command-zone hook restores rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_delayed_trigger_is_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        assert!(!zero_cast_is_retained(&state, congregate));
+        state.delayed_triggers.push(DelayedTrigger::new(
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                congregate,
+                P0,
+            )),
+            P0,
+            congregate,
+            true,
+        ));
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "an installed delayed trigger is a cast-adjacent future observable"
+        );
+        state.delayed_triggers.clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the delayed trigger restores rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_external_cost_and_keyword_producers_are_paired() {
+        let cases = [
+            StaticMode::CastWithAlternativeCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                },
+                timing_permission: None,
+                frequency: CastFrequency::Unlimited,
+            },
+            StaticMode::ImposeAdditionalCost {
+                cost: AbilityCost::Tap,
+                spell_filter: None,
+                action: AdditionalCostTaxAction::Cast,
+            },
+            StaticMode::PayLifeAsColoredMana {
+                color: engine::types::mana::ManaColor::Black,
+            },
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash,
+            },
+        ];
+        for (index, mode) in cases.into_iter().enumerate() {
+            let (mut state, congregate) = funded_zero_congregate_state();
+            let producer = add_battlefield_static(&mut state, 91_300 + index as u64, mode);
+            assert!(
+                zero_cast_is_retained(&state, congregate),
+                "a live external static changes cost or keyword semantics"
+            );
+            state
+                .objects
+                .get_mut(&producer)
+                .expect("producer exists")
+                .static_definitions
+                .clear();
+            assert!(
+                !zero_cast_is_retained(&state, congregate),
+                "removing only the external static restores rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_cast_opponent_imposed_cost_is_caster_conditional_and_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let producer = add_battlefield_static_for_controller(
+            &mut state,
+            91_350,
+            P1,
+            StaticDefinition::new(StaticMode::ImposeAdditionalCost {
+                cost: AbilityCost::Tap,
+                spell_filter: None,
+                action: AdditionalCostTaxAction::Cast,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(engine::types::ability::ControllerRef::Opponent),
+            )),
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "the P0 caster is an opponent of the P1 tax source and the cost applies"
+        );
+        state
+            .objects
+            .get_mut(&producer)
+            .expect("opponent tax source exists")
+            .static_definitions
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the opponent-conditioned tax restores rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_effective_and_pending_keyword_producers_are_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        state.add_transient_continuous_effect(
+            congregate,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: congregate },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flash,
+            }],
+            None,
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "an effective off-zone keyword must stand down the zero-cast proof"
+        );
+        state.transient_continuous_effects.clear();
+        assert!(!zero_cast_is_retained(&state, congregate));
+
+        state
+            .pending_next_spell_modifiers
+            .push(PendingNextSpellModifier {
+                player: P0,
+                modifier: NextSpellModifier::HasKeyword {
+                    keyword: Keyword::Flash,
+                },
+                spell_filter: None,
+                source_id: None,
+            });
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a pending next-spell keyword changes this cast's semantics"
+        );
+        state.pending_next_spell_modifiers.clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the pending modifier restores rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_transient_granted_cast_keyword_is_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        state.add_transient_continuous_effect(
+            congregate,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: congregate },
+            vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(StaticDefinition::new(StaticMode::CastWithKeyword {
+                    keyword: Keyword::Flash,
+                })),
+            }],
+            None,
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a transient grant of a cast keyword invalidates the zero-cast proof"
+        );
+        state.transient_continuous_effects.clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the transient grant restores rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_non_auto_payment_modes_are_not_root_rejected() {
+        let (state, congregate) = funded_zero_congregate_state();
+        assert!(zero_cast_with_payment_mode_is_retained(
+            &state,
+            congregate,
+            CastPaymentMode::Manual,
+        ));
+        assert!(zero_cast_with_payment_mode_is_retained(
+            &state,
+            congregate,
+            CastPaymentMode::AutoExceptSacrificialMana,
+        ));
+    }
 
     #[test]
     fn rejects_pump_after_combat_without_live_threat() {

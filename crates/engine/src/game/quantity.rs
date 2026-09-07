@@ -600,6 +600,163 @@ pub fn resolve_quantity(
     )
 }
 
+/// Resolves a quantity only when its value is available from the present source
+/// context without targets, events, or mutable resolution state.
+///
+/// `Some(0)` is deliberately distinct from `None`: zero is a known live value,
+/// while `None` means this preview must remain unknown to its consumer.
+pub fn try_resolve_quantity_in_source_context(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> Option<i32> {
+    state
+        .objects
+        .contains_key(&source_id)
+        .then(|| quantity_expr_is_source_context_previewable(state, expr, controller, source_id))
+        .filter(|previewable| *previewable)
+        .map(|_| resolve_quantity(state, expr, controller, source_id))
+}
+
+/// Returns whether a quantity can remain unchanged by an ordinary cast whose
+/// only permitted board interaction is pure mana production.
+///
+/// This is intentionally narrower than
+/// [`try_resolve_quantity_in_source_context`]: explicit zone properties are
+/// previewable, but are not a proof that a cast leaves the counted population
+/// unchanged.
+pub fn quantity_is_cast_stable_for_pre_cast(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => true,
+        QuantityExpr::Ref {
+            qty: QuantityRef::StartingLifeTotal,
+        } => true,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } => target_filter_is_property_free_population(filter),
+        QuantityExpr::Ref { .. } => false,
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_is_cast_stable_for_pre_cast(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().all(quantity_is_cast_stable_for_pre_cast)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_is_cast_stable_for_pre_cast(left)
+                && quantity_is_cast_stable_for_pre_cast(right)
+        }
+    }
+}
+
+fn quantity_expr_is_source_context_previewable(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => true,
+        QuantityExpr::Ref {
+            qty: QuantityRef::StartingLifeTotal,
+        } => true,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } => target_filter_is_source_context_free(filter),
+        QuantityExpr::Ref { .. } => false,
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_is_source_context_previewable(state, inner, controller, source_id),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs.iter().all(|inner| {
+            quantity_expr_is_source_context_previewable(state, inner, controller, source_id)
+        }),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_is_source_context_previewable(state, left, controller, source_id)
+                && quantity_expr_is_source_context_previewable(state, right, controller, source_id)
+        }
+        QuantityExpr::UpTo { max } => {
+            quantity_expr_is_source_context_previewable(state, max, controller, source_id)
+                && resolve_quantity(state, max, controller, source_id) == 0
+        }
+    }
+}
+
+fn target_filter_is_source_context_free(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            typed.type_filters.iter().all(type_filter_is_context_free)
+                && typed.controller.as_ref().is_none_or(|controller| {
+                    matches!(
+                        controller,
+                        ControllerRef::You
+                            | ControllerRef::Opponent
+                            | ControllerRef::SpecificPlayer { .. }
+                    )
+                })
+                && typed
+                    .properties
+                    .iter()
+                    .all(|property| matches!(property, FilterProp::InZone { .. }))
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().all(target_filter_is_source_context_free)
+        }
+        TargetFilter::Not { filter } => target_filter_is_source_context_free(filter),
+        _ => false,
+    }
+}
+
+fn target_filter_is_property_free_population(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            typed.properties.is_empty()
+                && typed.type_filters.iter().all(type_filter_is_context_free)
+                && typed.controller.as_ref().is_none_or(|controller| {
+                    matches!(
+                        controller,
+                        ControllerRef::You
+                            | ControllerRef::Opponent
+                            | ControllerRef::SpecificPlayer { .. }
+                    )
+                })
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .all(target_filter_is_property_free_population),
+        TargetFilter::Not { filter } => target_filter_is_property_free_population(filter),
+        _ => false,
+    }
+}
+
+fn type_filter_is_context_free(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Non(inner) => type_filter_is_context_free(inner),
+        TypeFilter::AnyOf(filters) => filters.iter().all(type_filter_is_context_free),
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Subtype(_) => true,
+    }
+}
+
 /// CR 613.4c: Resolve a `QuantityExpr` for a layer-evaluated dynamic
 /// modification whose quantity references the affected object ("attached to
 /// it", "its name", "its colors", etc.). The recipient is the affected object
@@ -7914,9 +8071,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AggregateFunction, ChoiceValue, ControllerRef, DamageKindFilter, DevotionColors, Effect,
-        FilterProp, KickerVariant, ObjectProperty, PlayerRelation, SharedQuality, TargetFilter,
-        TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+        AggregateFunction, ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel,
+        DamageKindFilter, DevotionColors, Effect, FilterProp, KickerVariant, ObjectProperty,
+        ObjectScope, PlayerRelation, SharedQuality, TargetFilter, TargetRef, ThisWayCause,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -7942,6 +8100,230 @@ mod tests {
             .unwrap()
             .mana_spent_source_snapshots
             .push(ManaSpentSourceSnapshot { source_id, lki });
+    }
+
+    #[test]
+    fn try_resolve_source_quantity_distinguishes_zero_from_missing_context_and_nested_filter_x() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let fixed_zero = QuantityExpr::Fixed { value: 0 };
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &fixed_zero, PlayerId(0), source),
+            Some(0)
+        );
+        assert!(quantity_is_cast_stable_for_pre_cast(&fixed_zero));
+
+        let creature_count = QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            }),
+        };
+
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &creature_count, PlayerId(0), source),
+            Some(0)
+        );
+        assert!(quantity_is_cast_stable_for_pre_cast(&creature_count));
+
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &creature_count, PlayerId(0), source),
+            Some(2)
+        );
+
+        let unknown_x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &unknown_x, PlayerId(0), source),
+            None
+        );
+
+        let arithmetic = QuantityExpr::Max {
+            exprs: vec![
+                QuantityExpr::Sum {
+                    exprs: vec![
+                        QuantityExpr::Fixed { value: 1 },
+                        QuantityExpr::Offset {
+                            inner: Box::new(QuantityExpr::Fixed { value: 2 }),
+                            offset: 3,
+                        },
+                    ],
+                },
+                QuantityExpr::Difference {
+                    left: Box::new(QuantityExpr::Fixed { value: 9 }),
+                    right: Box::new(QuantityExpr::Fixed { value: 2 }),
+                },
+            ],
+        };
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &arithmetic, PlayerId(0), source),
+            Some(7)
+        );
+        assert!(quantity_is_cast_stable_for_pre_cast(&arithmetic));
+
+        let graveyard_count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+            },
+        };
+        let graveyard_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&graveyard_creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &graveyard_count, PlayerId(0), source),
+            Some(1),
+            "an explicit zone remains a live-previewable population"
+        );
+        assert!(!quantity_is_cast_stable_for_pre_cast(&graveyard_count));
+
+        let nested_filter_x = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: unknown_x.clone(),
+                    },
+                ])),
+            },
+        };
+        let spell_ledger = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        };
+        for unknown in [nested_filter_x, spell_ledger] {
+            assert_eq!(
+                try_resolve_quantity_in_source_context(&state, &unknown, PlayerId(0), source),
+                None,
+                "history and nested runtime bindings are not source-context previews"
+            );
+            assert!(!quantity_is_cast_stable_for_pre_cast(&unknown));
+        }
+
+        for unknown in [
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: DamageChannel::Total,
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+        ] {
+            assert_eq!(
+                try_resolve_quantity_in_source_context(&state, &unknown, PlayerId(0), source),
+                None,
+                "target and prior-effect bindings are unavailable before resolution"
+            );
+        }
+
+        assert_eq!(
+            try_resolve_quantity_in_source_context(
+                &state,
+                &fixed_zero,
+                PlayerId(0),
+                ObjectId(9_999)
+            ),
+            None,
+            "a preview never substitutes a different object for its missing source"
+        );
+
+        let up_to_zero = QuantityExpr::UpTo {
+            max: Box::new(QuantityExpr::Fixed { value: 0 }),
+        };
+        let up_to_one = QuantityExpr::UpTo {
+            max: Box::new(QuantityExpr::Fixed { value: 1 }),
+        };
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &up_to_zero, PlayerId(0), source),
+            Some(0)
+        );
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &up_to_one, PlayerId(0), source),
+            None,
+            "a nonzero upper bound still requires a resolution-time choice"
+        );
+    }
+
+    #[test]
+    fn cast_stable_quantity_rejects_nonbattlefield_and_spell_ledger_reads() {
+        let battlefield_creatures = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        };
+        let explicit_battlefield = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                ])),
+            },
+        };
+        let hand_count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                ),
+            },
+        };
+        let spell_ledger = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        };
+
+        assert!(quantity_is_cast_stable_for_pre_cast(&battlefield_creatures));
+        assert!(
+            !quantity_is_cast_stable_for_pre_cast(&explicit_battlefield),
+            "explicit-zone populations are previewable, not a pre-cast stability proof"
+        );
+        assert!(!quantity_is_cast_stable_for_pre_cast(&hand_count));
+        assert!(!quantity_is_cast_stable_for_pre_cast(&spell_ledger));
     }
 
     /// Row 18, resolver half. CR 400.1 + CR 109.2: `visit_characteristic_source`'s
@@ -14204,15 +14586,12 @@ mod tests {
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
         assert_eq!(
-            state
-                .lki_cache
-                .get(&source)
-                .map(|lki| {
-                    counter_count_from_map(
-                        &lki.counters,
-                        Some(&CounterType::Generic("charge".to_string())),
-                    )
-                }),
+            state.lki_cache.get(&source).map(|lki| {
+                counter_count_from_map(
+                    &lki.counters,
+                    Some(&CounterType::Generic("charge".to_string())),
+                )
+            }),
             Some(3),
             "the legacy cache reach-guard proves malformed provenance, rather than an empty cache, causes the zero"
         );

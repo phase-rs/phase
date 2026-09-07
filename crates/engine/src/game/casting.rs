@@ -6081,6 +6081,221 @@ pub fn effective_spell_cost(
         .map(|p| p.mana_cost)
 }
 
+/// Returns whether the player's current mana pool can pay this spell's exact
+/// engine-effective normal casting cost. This is read-only: it neither predicts
+/// automatic mana activation nor authorizes a cast.
+pub fn spell_cost_is_payable_from_pool(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    effective_spell_cost(state, player, object_id).is_some_and(|cost| {
+        super::casting_costs::spell_cost_is_payable_from_pool(state, player, object_id, &cost)
+    })
+}
+
+#[cfg(test)]
+mod pool_payability_tests {
+    use std::sync::Arc;
+
+    use super::spell_cost_is_payable_from_pool;
+    use crate::ai_support::legal_actions;
+    use crate::game::mana_sources::activatable_mana_source_selections;
+    use crate::game::scenario::GameScenario;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, CounterCostSelection, Effect, ManaProduction,
+        QuantityExpr, QuantityRef, TargetFilter, REMOVE_COUNTER_COST_X,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::CastPaymentMode;
+    use crate::types::identifiers::CardId;
+    use crate::types::mana::{
+        ManaColor, ManaCost, ManaCostShard, ManaSourceOutput, ManaType, ManaUnit,
+    };
+    use crate::types::phase::Phase;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn pool_funded_cast_does_not_activate_available_impure_mana_source() {
+        let caster = PlayerId(0);
+        let target = PlayerId(1);
+        let storage = CounterType::Generic("storage".to_string());
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario.add_creature(caster, "Bear", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                caster,
+                "Congregate",
+                true,
+                "Target player gains 2 life for each creature on the battlefield.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            })
+            .id();
+        scenario.with_mana_pool(
+            caster,
+            vec![
+                ManaUnit::new(ManaType::White, spell, false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, spell, false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, spell, false, Vec::new()),
+                ManaUnit::new(ManaType::Colorless, spell, false, Vec::new()),
+            ],
+        );
+
+        let slagheap = create_object(
+            &mut scenario.state,
+            CardId(9_001),
+            caster,
+            "Molten Slagheap stand-in".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = scenario
+                .state
+                .objects
+                .get_mut(&slagheap)
+                .expect("the hostile mana source exists");
+            object.card_types.core_types.push(CoreType::Land);
+            object.tapped = true;
+            object.counters.insert(storage.clone(), 7);
+            Arc::make_mut(&mut object.abilities).extend([
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::PutCounter {
+                        counter_type: storage.clone(),
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyCombination {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                            color_options: vec![ManaColor::Black, ManaColor::Red],
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::RemoveCounter {
+                            target: None,
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            selection: CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            ]);
+        }
+
+        let slagheap_selection = activatable_mana_source_selections(&scenario.state, caster)
+            .into_iter()
+            .find(|selection| {
+                selection.source.object_id == slagheap && selection.ability_index == Some(2)
+            })
+            .expect("the tapped archive-shaped no-tap storage ability remains available");
+        assert_eq!(
+            slagheap_selection.output,
+            ManaSourceOutput::DeferredColorChoice
+        );
+        assert_eq!(slagheap_selection.mana_type, ManaType::Colorless);
+
+        assert!(
+            spell_cost_is_payable_from_pool(&scenario.state, caster, spell),
+            "the public predicate must reuse the exact production pool-payment authority"
+        );
+        let mut unfunded = scenario.state.clone();
+        unfunded.players[caster.0 as usize].mana_pool.mana.clear();
+        assert!(
+            !spell_cost_is_payable_from_pool(&unfunded, caster, spell),
+            "removing only pool coverage makes the exact predicate false"
+        );
+        assert!(
+            legal_actions(&scenario.state).iter().any(|action| {
+                matches!(
+                    action,
+                    GameAction::CastSpell {
+                        object_id,
+                        payment_mode: CastPaymentMode::Auto,
+                        ..
+                    } if *object_id == spell
+                )
+            }),
+            "the engine-issued ordinary cast must retain its Auto payment mode"
+        );
+
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).target_player(target).resolve();
+
+        outcome.assert_life_delta(target, 2);
+        assert_eq!(outcome.zone_of(creature), Zone::Battlefield);
+        assert_eq!(
+            outcome.mana_pool_total(caster),
+            0,
+            "the cast spends the exact pool"
+        );
+        assert!(outcome.state().objects[&slagheap].tapped);
+        assert_eq!(outcome.counters(slagheap, storage.clone()), 7);
+        assert!(
+            !outcome.events().iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ManaAbilityProduced { source_id, .. } if *source_id == slagheap
+                )
+            }),
+            "an exact pool payment must not activate the available indexed mana source"
+        );
+    }
+}
+
+/// Returns whether the spell currently has any effective keyword abilities in
+/// its present zone. This is read-only and preserves the off-zone continuous
+/// characteristic authority used by casting.
+pub fn spell_has_effective_keywords(state: &GameState, object_id: ObjectId) -> bool {
+    !crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id).is_empty()
+}
+
 pub(crate) fn effective_spell_cost_for_variant(
     state: &GameState,
     player: PlayerId,

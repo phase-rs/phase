@@ -2972,7 +2972,13 @@ fn source_has_trigger_in_zone(state: &GameState, source_id: ObjectId, zone: Zone
     })
 }
 
-pub(crate) fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
+/// Returns whether a trigger definition functions from `zone`.
+///
+/// CR 113.6 gives abilities their normal battlefield functionality; CR 113.6b
+/// permits an ability to state another zone where it functions. An empty
+/// `trigger_zones` list therefore means battlefield only, while an explicit
+/// list is authoritative.
+pub fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
     if def.trigger_zones.is_empty() {
         zone == Zone::Battlefield
     } else {
