@@ -190,7 +190,7 @@ fn d1_will_cycle_gains_the_land_half_of_its_coordinated_grant() {
         assert_eq!(
             plays.len(),
             1,
-            "{name}: CR 305.1 - the coordinated grant's land half must lower to exactly one Play grant"
+            "{name}: CR 116.2a - the coordinated grant's land half must lower to exactly one Play grant"
         );
 
         // (ii) It grants LANDS, not the cast half's bare `Card`. A land half
@@ -200,7 +200,7 @@ fn d1_will_cycle_gains_the_land_half_of_its_coordinated_grant() {
         assert_eq!(
             land.type_filters,
             vec![TypeFilter::Land],
-            "{name}: CR 305.1 - the land half must be restricted to lands"
+            "{name}: CR 116.2a - the land half must be restricted to lands"
         );
 
         // (iii) It stays anchored to the zone the sentence named. A land half
@@ -316,6 +316,20 @@ fn g5_a_sibling_with_no_stated_window_gains_no_land_half() {
             .any(|d| d == "play lands"),
         "reach-guard: the fixture must still carry the refused fragment"
     );
+
+    // WHY THERE IS NO "same sentence minus the window" MINIMAL PAIR HERE.
+    // MEASURED: dropping the leading window from this grammar does not produce
+    // an un-windowed `CastFromZone` sibling — it changes WHICH PARSER handles
+    // the sentence. "You may play lands and cast spells from your graveyard."
+    // lowers to a STATIC permission (`statics == 1`, zero abilities), so it
+    // never reaches this pass at all. That is B1's `v1` result from the other
+    // direction: the headless form was always the static parser's, and the
+    // leading duration head is what routes the sentence through the effect path.
+    //
+    // So the duration guard's discriminating evidence is the pair of REAL cards
+    // below and in `d1` — Shaman's Trance (eligible filter, no effect duration →
+    // refused) against the Will cycle (same filter shape, window present →
+    // recovered) — not a synthetic sentence pair that cannot exist.
 
     // REACH-GUARD (beta): the same grammar WITH a stated window does produce a
     // land half, so the decline keys on the missing duration and not on some
@@ -444,6 +458,16 @@ fn g4_a_grant_scoped_to_a_chosen_pile_gains_no_land_half() {
     // than the card, and the one way this pass could invent a permission rather
     // than reassemble one. `land_half_filter` requires an explicit zone, so the
     // fragment stays honestly refused instead.
+    //
+    // TWO FIXTURES, because the printed card cannot isolate the zone axis. Its
+    // sibling also carries no duration, so the pass short-circuits on the CR
+    // 611.2a window check (see `g5`) before `land_half_filter` is ever reached —
+    // measured: removing the `InZone` requirement entirely leaves the printed-card
+    // row passing. The windowed variant below is eligible on every OTHER axis, so
+    // it is the row that actually exercises the zone requirement.
+    //
+    // The printed card stays as a corpus-truth row: verbatim Oracle text, real
+    // parse, and the outcome the coverage gate sees.
     let parsed = parse(
         "Exile the top five cards of your library. An opponent separates those cards into two piles. You may play lands and cast spells from one of those piles. If you cast a spell this way, you cast it without paying its mana cost.",
         "Brilliant Ultimatum",
@@ -454,7 +478,7 @@ fn g4_a_grant_scoped_to_a_chosen_pile_gains_no_land_half() {
     // expected result is an empty list and a `for` over it never runs its body.
     assert!(
         play_grants(&parsed).is_empty(),
-        "CR 305.1: a chosen-pile grant must not gain a synthesized land half, got {:?}",
+        "CR 116.2a: a chosen-pile grant must not gain a synthesized land half, got {:?}",
         play_grants(&parsed)
     );
 
@@ -466,6 +490,28 @@ fn g4_a_grant_scoped_to_a_chosen_pile_gains_no_land_half() {
             .iter()
             .any(|d| d == "play lands"),
         "reach-guard: the fixture must still carry the refused fragment"
+    );
+
+    // THE ROW THAT ACTUALLY EXERCISES THE ZONE REQUIREMENT. Same chosen-pile
+    // scope, but WITH a stated window, so it clears the CR 611.2a check and
+    // reaches `land_half_filter` — where the missing `InZone` is the only reason
+    // it can decline. Without this row, removing the zone requirement outright
+    // leaves the whole test passing.
+    let windowed_pile = parse(
+        "Exile the top five cards of your library. An opponent separates those cards into two piles. Until end of turn, you may play lands and cast spells from one of those piles.",
+        "Windowed Pile Probe",
+        &["Sorcery"],
+    );
+    assert!(
+        play_grants(&windowed_pile).is_empty(),
+        "CR 116.2a: a chosen-pile grant must not gain a land half even WITH a window, got {:?}",
+        play_grants(&windowed_pile)
+    );
+    assert!(
+        unimplemented_descriptions(&windowed_pile)
+            .iter()
+            .any(|d| d == "play lands"),
+        "reach-guard: the windowed pile fixture must still carry the refused fragment"
     );
 
     // REACH-GUARD (beta): the same sentence with a real ZONE in place of the

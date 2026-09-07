@@ -2199,9 +2199,9 @@ fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinit
     }
 }
 
-// --- CR 305.1 + CR 601.2a: recover the land half of a coordinated grant ---
+// --- CR 116.2a + CR 601.2a: recover the land half of a coordinated grant ---
 
-/// CR 305.1 + CR 601.2a: "you may play lands **and** cast spells from `<zone>`"
+/// CR 116.2a + CR 601.2a: "you may play lands **and** cast spells from `<zone>`"
 /// (Yawgmoth's Will, Gaea's Will, Magus of the Will) is ONE permission naming two
 /// actions. `"cast "` is a bare-`and` clause starter, so the sequence splitter
 /// separates the halves; the cast half keeps the zone clause and lowers correctly
@@ -2252,11 +2252,10 @@ fn recover_coordinated_land_play_in_ability(def: &mut AbilityDefinition) {
                 } => duration
                     .as_ref()
                     // CR 611.2a: "If no duration is stated, it lasts until the end
-                    // of the game." Every card in this class prints a window
-                    // ("until end of turn", "this turn"), so a sibling that lowered
-                    // WITHOUT one did not capture the printed window — copying that
-                    // absence would synthesize a PERMANENT land permission, which is
-                    // strictly worse than leaving the fragment refused.
+                    // of the game." A sibling that lowered WITHOUT a window did not
+                    // capture whatever the card printed, so copying that absence
+                    // would synthesize a PERMANENT land permission — strictly worse
+                    // than leaving the fragment refused.
                     //
                     // MEASURED: Shaman's Trance prints "this turn" but its cast
                     // sibling carries `duration: None`, so it declines here. Its
@@ -2265,17 +2264,51 @@ fn recover_coordinated_land_play_in_ability(def: &mut AbilityDefinition) {
                     // `casting.rs::graveyard_lands_playable_by_permission` iterates
                     // `player_data.graveyard` and uses `controller` to pick which
                     // objects match, not who acts), which contradicts the card's
-                    // "other players' graveyards". Corpus census over graveyard
-                    // `CastFromZone` grants: 47 `You`, 15 `None`, zero `Opponent` —
-                    // every genuine cross-player card (Chancellor of the Spires,
-                    // Memory Plunder, Havengul Lich) sits in the `None` bucket.
-                    // Making that card correct needs a runtime widening to other
-                    // players' graveyards, not a filter copy.
+                    // "other players' graveyards". Making that card correct needs a
+                    // runtime widening to other players' graveyards, not a filter
+                    // copy.
+                    //
+                    // WHY `controller: You` IS NOT A LATENT HAZARD HERE. Nine corpus
+                    // cards carry the refused `"play lands"` fragment and so can
+                    // reach this branch; measured, exactly four produce a land half:
+                    //
+                    //   Yawgmoth's Will / Gaea's Will / Magus of the Will
+                    //       You + Graveyard — and each PRINTS "your graveyard", so
+                    //       `You` is FAITHFUL, not an inherited mistake.
+                    //   Sen Triplets
+                    //       None + Hand (see the player-axis note on the CR 115.1
+                    //       guard in `land_half_filter`).
+                    //
+                    // The other five decline: Shaman's Trance, Brilliant Ultimatum
+                    // and Gix on the absent window, Magus of the Mind on the zone
+                    // anchor, Elder Brain on having no `CastFromZone` sibling. So no
+                    // printed card reaches this branch with a `You`-scoped graveyard
+                    // filter that contradicts its own text — the unfaithful shape is
+                    // not currently producible, which is why this documents the axis
+                    // rather than gating on it.
+                    //
+                    // Corpus census over graveyard-anchored `CastFromZone` grants,
+                    // counted as DISTINCT CARDS: 43 `You`, 15 `None`, zero
+                    // `Opponent`. Every genuine cross-player card (Chancellor of the
+                    // Spires, Memory Plunder, Havengul Lich) sits in the `None`
+                    // bucket. Count cards, not grants: a per-grant count includes the
+                    // land halves this pass itself adds and so drifts with its own
+                    // behaviour.
                     .and_then(|_| land_half_filter(target))
                     .map(|land_target| Effect::CastFromZone {
-                        // CR 305.1: the land half plays LANDS from the same zone. The
-                        // sibling's filter carries the zone anchor; only the card-type
-                        // axis differs between the two halves.
+                        // CR 116.2a / CR 701.18a: "To play a land, a player puts that
+                        // land onto the battlefield FROM THE ZONE IT WAS IN (usually
+                        // that player's hand)" — the zone-general definition, which is
+                        // what licenses a land half anchored to the graveyard. NOT
+                        // CR 305.1, which states the default permission as being
+                        // "from their hand" and so does not cover this grant; no
+                        // 305.x subrule licenses playing a land from another zone.
+                        // The permission to use a different zone comes from the
+                        // card's own granted effect, which is exactly what this pass
+                        // reconstructs.
+                        //
+                        // The sibling's filter carries the zone anchor; only the
+                        // card-type axis differs between the two halves.
                         target: land_target,
                         without_paying_mana_cost: *without_paying_mana_cost,
                         mode: CardPlayMode::Play,
@@ -2300,7 +2333,7 @@ fn recover_coordinated_land_play_in_ability(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 305.1: Build the land half's filter from the cast half's, changing ONLY the
+/// CR 116.2a: Build the land half's filter from the cast half's, changing ONLY the
 /// card-type axis and preserving the zone anchor (`InZone`), the controller scope
 /// and every other property.
 ///
@@ -2326,7 +2359,7 @@ fn land_half_filter(cast_target: &TargetFilter) -> Option<TargetFilter> {
     if typed.type_filters != vec![TypeFilter::Card] {
         return None;
     }
-    // CR 305.1: the recovered half is a permission to PLAY A LAND, which without
+    // CR 116.2a: the recovered half is a permission to PLAY A LAND, which without
     // a zone anchor reads as "play lands from anywhere". Require the sibling to
     // name the zone rather than copying an empty property list.
     //
@@ -2347,7 +2380,7 @@ fn land_half_filter(cast_target: &TargetFilter) -> Option<TargetFilter> {
     Some(TargetFilter::Typed(land))
 }
 
-/// CR 305.1 + CR 601.2a: entry point for [`recover_coordinated_land_play_in_ability`].
+/// CR 116.2a + CR 601.2a: entry point for [`recover_coordinated_land_play_in_ability`].
 fn recover_coordinated_land_play(result: &mut ParsedAbilities) {
     for ability in &mut result.abilities {
         recover_coordinated_land_play_in_ability(ability);
@@ -3846,7 +3879,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         &static_ids,
     );
     reconcile_host_bound_phase_outs(&mut result);
-    // CR 305.1 + CR 601.2a: recover the land half of a coordinated "play lands and
+    // CR 116.2a + CR 601.2a: recover the land half of a coordinated "play lands and
     // cast spells from <zone>" grant, which the bare-`and` split leaves as a
     // zone-less fragment the CR 305.2a guard correctly refuses per-clause.
     recover_coordinated_land_play(&mut result);
