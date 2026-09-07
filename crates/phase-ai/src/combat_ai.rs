@@ -2132,6 +2132,12 @@ struct DefenderBlock {
     kills_blocker: bool,
     /// Whether the attacker survives the exchange.
     attacker_survives: bool,
+    /// The defender's own utility from making this block: attacker value removed
+    /// (if the block is lethal) minus blocker value lost (if it dies). `<= 0`
+    /// means a rational defender would not make this block at all — the
+    /// `defender_best_block` `max_by` still returns it as the least-bad option,
+    /// so callers that need "would the defender actually block" must check this.
+    defender_gain: f64,
 }
 
 /// CR 509.1a: Choose the block the defending player would actually make against
@@ -2179,6 +2185,7 @@ fn defender_best_block(
                     blocker_value,
                     kills_blocker: !blocker_survives,
                     attacker_survives: !blocker_kills_attacker,
+                    defender_gain,
                 },
             ))
         })
@@ -2383,6 +2390,7 @@ fn latent_defender_best_block(
                     blocker_value,
                     kills_blocker: !blocker_survives,
                     attacker_survives: !blocker_kills_attacker,
+                    defender_gain,
                 },
             )
         })
@@ -2440,6 +2448,18 @@ struct AttackEvInputs<'a> {
 /// `CombatEvModel::DownsideWeighted` gate:
 /// `expected_damage - P(bad_block) * value_at_risk + upside` vs. an
 /// objective-scaled floor. `PushLethal` always attacks.
+///
+/// - `expected_damage` is discounted by `P(won't connect)` — a real block the
+///   defender would actually make (`defender_gain > 0`), a latent man-land block
+///   (weighted by `latent_credence`), or the defender's open mana fizzling it
+///   (`trick_risk`).
+/// - `P(bad_block)` is the chance we lose the attacker with no compensation: a
+///   real/latent block that kills it, or a trick that turns a block lethal. A
+///   favorable or even trade is not "bad" — it has `defender_gain <= 0`, so the
+///   defender is modelled as declining and we connect.
+/// - The off-clock floor makes a marginal attack (small expected damage into
+///   held-up mana, while ahead and under no clock) fail the bar it would clear
+///   at floor 0.
 fn should_attack_ev(input: &AttackEvInputs<'_>) -> bool {
     if input.objective == CombatObjective::PushLethal {
         return true;
@@ -2466,45 +2486,37 @@ fn should_attack_ev(input: &AttackEvInputs<'_>) -> bool {
             1.0
         };
 
-    // Reduce one candidate block to (defender takes it, it costs us the creature
-    // without adequate compensation). A block that is pure free damage for us the
-    // defender simply declines.
-    let assess = |b: &DefenderBlock| -> (bool, bool) {
-        if b.kills_blocker && b.attacker_survives {
-            return (false, false);
-        }
-        let attacker_dies = !b.attacker_survives;
-        let favorable_trade =
-            attacker_dies && b.kills_blocker && input.attacker_value <= b.blocker_value;
-        (true, attacker_dies && !favorable_trade)
-    };
+    // CR 509.1a: would the defender actually make this block? `defender_best_block`
+    // returns the least-bad block even when none is worth making, so gate on
+    // `defender_gain`: a non-positive gain means the defender declines and we
+    // connect. Any block they *would* make (`defender_gain > 0`) kills our
+    // attacker without adequate compensation — a favorable or even trade already
+    // has `defender_gain <= 0` (attacker value removed ≤ blocker value lost), so
+    // it lands in the "declines / we connect" branch, matching Basic's
+    // `favorable_trade` arm.
+    let real_blocks = input.real_block.is_some_and(|b| b.defender_gain > 0.0);
+    let latent_blocks = input.latent_block.is_some_and(|b| b.defender_gain > 0.0);
+    let trick = input.trick_risk.clamp(0.0, 1.0);
 
-    let (real_blocks, real_bad) = match input.real_block {
-        Some(block) => assess(block),
-        None => (false, false),
-    };
-    let (latent_blocks, latent_bad) = match input.latent_block {
-        Some(block) => assess(block),
-        None => (false, false),
-    };
-
-    let p_block_any = if real_blocks {
+    let base_block = if real_blocks {
         1.0
     } else if latent_blocks {
         input.latent_credence
     } else {
         0.0
     };
+    // CR 116: the defender acts at instant speed after attackers are declared.
+    // Open mana can fizzle the attack outright — a flash blocker, Fog, or a
+    // bounce spell — even with no creature currently on board. Model that as
+    // extra "won't connect" probability. This is the information-asymmetry
+    // reasoning: weigh what the mana *could* be, not just the bodies that exist.
+    let p_block_any = base_block.max(trick);
 
-    let mut p_bad_block: f64 = 0.0;
-    if real_blocks && real_bad {
-        p_bad_block = 1.0;
-    } else if latent_blocks && latent_bad {
-        p_bad_block = p_bad_block.max(input.latent_credence);
-    }
-    // A trick needs a body to target/pump — only fold it in when one can block.
+    let mut p_bad_block = base_block;
+    // A trick that pumps or removes only costs us the creature outright when a
+    // body is there to block it; a bare flash blocker is handled by `p_block_any`.
     if real_blocks || latent_blocks {
-        p_bad_block = p_bad_block.max(input.trick_risk.clamp(0.0, 1.0));
+        p_bad_block = p_bad_block.max(trick);
     }
 
     let lifelink_bonus = if has_lifelink { 0.5 } else { 0.0 };
@@ -5673,7 +5685,7 @@ mod tests {
     #[test]
     fn latent_blockers_detects_open_manland() {
         let mut state = setup();
-        add_manland(&mut state, PlayerId(1), 1, 2, 2);
+        add_manland(&mut state, PlayerId(1), 1, 3, 3);
         add_mana_land(&mut state, PlayerId(1)); // pays the {1} without tapping the manland
 
         let bodies = latent_blockers(&state, PlayerId(1));
@@ -5682,13 +5694,13 @@ mod tests {
             1,
             "an open, payable man-land is a latent blocker"
         );
-        assert_eq!((bodies[0].power, bodies[0].toughness), (2, 2));
+        assert_eq!((bodies[0].power, bodies[0].toughness), (3, 3));
     }
 
     #[test]
     fn latent_blockers_empty_when_defender_tapped_out() {
         let mut state = setup();
-        add_manland(&mut state, PlayerId(1), 1, 2, 2);
+        add_manland(&mut state, PlayerId(1), 1, 3, 3);
         let land = add_mana_land(&mut state, PlayerId(1));
         state.objects.get_mut(&land).unwrap().tapped = true;
 
@@ -5702,7 +5714,7 @@ mod tests {
     fn downside_model_holds_marginal_attacker_into_open_manland() {
         let mut state = setup();
         let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
-        add_manland(&mut state, PlayerId(1), 1, 2, 2);
+        add_manland(&mut state, PlayerId(1), 1, 3, 3); // Treetop-sized: eats a 2/2
         add_mana_land(&mut state, PlayerId(1));
 
         let dw = choose_attackers_with_targets_with_profile(
@@ -5716,8 +5728,8 @@ mod tests {
         );
         assert!(
             !dw.iter().any(|(id, _)| *id == attacker),
-            "a 2/2 that only trades into an animatable 2/2 land, while ahead and \
-             off-clock, has negative EV — hold it back"
+            "a 2/2 into an animatable 3/3 land the defender has open mana for — \
+             it dies for a downgrade; the EV is negative, hold it back"
         );
 
         // Basic model has no latent-blocker sight, so it swings.
@@ -5740,7 +5752,7 @@ mod tests {
     fn downside_model_attacks_when_defender_cannot_animate() {
         let mut state = setup();
         let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
-        add_manland(&mut state, PlayerId(1), 1, 2, 2);
+        add_manland(&mut state, PlayerId(1), 1, 3, 3);
         let land = add_mana_land(&mut state, PlayerId(1));
         state.objects.get_mut(&land).unwrap().tapped = true;
 
@@ -5761,51 +5773,46 @@ mod tests {
     }
 
     #[test]
-    fn downside_model_holds_offclock_even_trade() {
-        // 2/2 into a real 2/2 blocker — an even trade the Basic model always
-        // takes. Ahead on board, neither side on a clock: PreserveAdvantage +
-        // off-clock, so it must clear the off-clock EV floor. An even trade
-        // (expected damage 0, no compensating value swing) does not.
+    fn downside_model_takes_favorable_real_trade_while_ahead() {
+        // Regression: a favorable/even real trade must not be modelled as a
+        // taken block (expected damage 0, EV <= 0 → held). Our 1/1 deathtouch
+        // into a lone 4/4, ahead on board and off-clock. `defender_gain` for
+        // that block is negative — no defender makes it — so we are modelled as
+        // connecting, and the attack clears the floor.
         let mut state = setup();
-        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
-        add_creature(&mut state, PlayerId(0), "Wall", 0, 6, vec![]);
-        add_creature(&mut state, PlayerId(1), "Blocker", 2, 2, vec![]);
-
-        let held = choose_attackers_with_targets_with_profile(
-            &state,
+        let dt = add_creature(
+            &mut state,
             PlayerId(0),
-            &dw_profile(),
-            CombatLookahead::Disabled,
-            None,
-            None,
-            None,
+            "Snake",
+            1,
+            1,
+            vec![Keyword::Deathtouch],
         );
-        assert!(
-            !held.iter().any(|(id, _)| *id == attacker),
-            "ahead and off-clock, an even trade does not clear the EV floor — hold back"
-        );
+        add_creature(&mut state, PlayerId(0), "Bull", 5, 5, vec![]); // board lead → PreserveAdvantage
+        add_creature(&mut state, PlayerId(1), "Ogre", 4, 4, vec![]);
 
-        // Basic model: an even trade is always a favorable_trade → it swings.
-        let basic = choose_attackers_with_targets_with_profile(
-            &state,
-            PlayerId(0),
-            &AiProfile::default(),
-            CombatLookahead::Disabled,
-            None,
-            None,
-            None,
-        );
-        assert!(
-            basic.iter().any(|(id, _)| *id == attacker),
-            "Basic model takes the even trade"
-        );
+        for (label, profile) in [("basic", AiProfile::default()), ("downside", dw_profile())] {
+            let attacks = choose_attackers_with_targets_with_profile(
+                &state,
+                PlayerId(0),
+                &profile,
+                CombatLookahead::Disabled,
+                None,
+                None,
+                None,
+            );
+            assert!(
+                attacks.iter().any(|(id, _)| *id == dt),
+                "{label}: a 1/1 deathtouch that trades up into a 4/4 should attack while ahead"
+            );
+        }
     }
 
     #[test]
-    fn downside_model_races_the_even_trade_when_under_a_clock() {
-        // Same 2/2-into-2/2 even trade, but the board says we are racing: behind
-        // on board, opponent has a real clock on us. Race upside makes forcing
-        // the trade worthwhile.
+    fn downside_model_attacks_marginal_creature_when_racing() {
+        // 2/2 into two 2/2 blockers: `defender_gain` for either block is 0, so
+        // the defender is modelled as declining and we connect — and the Race
+        // upside carries a marginal attack that PreserveAdvantage would hold.
         let mut state = setup();
         let racer = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
         add_creature(&mut state, PlayerId(1), "Blocker", 2, 2, vec![]);
@@ -5823,7 +5830,7 @@ mod tests {
         );
         assert!(
             raced.iter().any(|(id, _)| *id == racer),
-            "racing: forcing the even trade is worth the race upside — attack"
+            "racing: forcing damage through is worth the race upside — attack"
         );
     }
 }
