@@ -886,6 +886,30 @@ fn handle_replacement_choice_inner(
                         "CoinFlip replacement reached the optional-choice resume path"
                     );
                 }
+                // CR 706.1 + CR 616.1: die-roll replacements (Barbarian Class,
+                // Pixie Guide, Wyll) are Mandatory, but being mandatory does NOT
+                // keep them off this path: two of them applying to the same
+                // instruction is a CR 616.1 ordering choice, which is exactly the
+                // marquee dice-matters interaction (Barbarian Class + Pixie
+                // Guide, or Wyll + Pixie Guide). Delegate to the die-roll
+                // resolver's own authority with the bound modified event — its
+                // raised count and its ACCUMULATED CR 706.6 ignore rules ride
+                // that event and must not be re-derived — mirroring the
+                // `SearchFound` arm below.
+                //
+                // A re-suspension (a CR 706.6 ignore tie-break, or a results
+                // branch's own choice) is returned as-is; a completed roll falls
+                // through to the shared drain below, exactly as every other
+                // completed resume arm does.
+                event @ ProposedEvent::RollDice { .. } => {
+                    match effects::roll_die::resume_roll_dice_after_replacement(
+                        state, event, events,
+                    ) {
+                        Ok(Some(waiting)) => return Ok(waiting),
+                        Ok(None) => {}
+                        Err(error) => return Err(EngineError::InvalidAction(format!("{error}"))),
+                    }
+                }
                 // CR 701.23a + CR 614.6: modified SearchFound events are delivered by
                 // the search-resolution continuation. This arm is reached only
                 // when CR 616 ordering required a replacement choice; the bound

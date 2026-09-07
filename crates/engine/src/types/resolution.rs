@@ -15,7 +15,8 @@ pub use frame_vec::ChildStackDepth;
 use frame_vec::{FrameSlot, FrameVec};
 
 use crate::types::ability::{
-    AbilityDefinition, DiscardedCardResult, EffectKind, ResolvedAbility, TargetRef,
+    AbilityDefinition, DieResultBranch, DieRollIgnoreRule, DieRollModifier, DiscardedCardResult,
+    EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -130,6 +131,157 @@ pub struct PendingCoinFlip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lose_effect: Option<Box<AbilityDefinition>>,
     pub kind: PendingCoinFlipKind,
+}
+
+/// CR 706.6 + CR 614.1a: Full resolution context for a die-roll resolver paused
+/// at an "ignore the lowest roll" choice (Barbarian Class, Pixie Guide, Wyll).
+///
+/// The dice have all been rolled (`results` holds their NATURAL values) but no
+/// `GameEvent::DieRolled` has been emitted yet: CR 706.6 says an ignored roll
+/// "is considered to have never happened", so emission is deferred to
+/// `roll_die::resume_after_ignore`, which emits only for the survivors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDieRoll {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    /// CR 706.6: the player who rolled, and therefore the player who chooses
+    /// which of several tied-lowest rolls to ignore.
+    pub roller: PlayerId,
+    pub targets: Vec<TargetRef>,
+    pub sides: u8,
+    /// CR 706.2 + CR 706.6: the NATURAL results — "the number indicated on the
+    /// top face of the die before any modifiers" — in roll order. The ignore set
+    /// is computed over THESE values, because CR 706.6 forbids any effect
+    /// applying to an ignored roll and ranking it by its modified value would be
+    /// such an effect. `modifier` is applied only to surviving dice, in
+    /// `resume_after_ignore`.
+    pub results: Vec<u8>,
+    /// CR 706.6: one ignore rule per applied die-roll replacement, in
+    /// application order. Each applied replacement independently instructs the
+    /// roller to ignore a roll, so N stacked replacements ignore N rolls. Empty
+    /// when no replacement applied (nothing is ignored).
+    #[serde(default)]
+    pub ignore_rules: Vec<DieRollIgnoreRule>,
+    pub results_table: Vec<DieResultBranch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifier: Option<DieRollModifier>,
+    /// CR 706.4 + CR 608.2: the value of `state.die_result_this_resolution` at
+    /// the moment the keep-choice was raised. Captured because `apply()` clears
+    /// the field on every action boundary, and `stack.rs` clears it at further
+    /// reset points. Restored around the continuation drain, mirroring
+    /// `choose_zone_trigger_context`. NOT the aggregate this roll produces —
+    /// that is re-stamped by `resume_after_ignore`.
+    ///
+    /// SCOPE: this protects the `QuantityRef::EventContextAmount` cascade
+    /// (`game/quantity.rs`), which is how most "equal to the result" cards read
+    /// their die result. It does NOT protect
+    /// `snapshot_resolution_context_quantity` (`game/effects/effect.rs`), which
+    /// reverse-scans the `events` slice and never consults this field — that
+    /// consumer's correctness comes from emission ordering instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_result: Option<i32>,
+    /// CR 706.3a + CR 608.2c: the index into `results` at which the per-die
+    /// results-table loop resumes.
+    ///
+    /// Each surviving die consults the results table independently, and a
+    /// branch body may itself be interactive ("roll two d20; for each, target
+    /// player discards a card"). When a branch suspends on its own
+    /// `WaitingFor`, the instruction is only PARTLY done: the dice after the
+    /// suspending one still owe their branches. This cursor is what lets the
+    /// resume path re-enter the loop at the next unrolled die instead of
+    /// restarting at zero (which would re-run every earlier branch) or
+    /// abandoning the remainder (which would silently drop them).
+    ///
+    /// `running_total` and `rolled_any` travel with it for the same reason —
+    /// CR 706.4's "equal to the result(s)" aggregate spans the whole
+    /// instruction, so a mid-loop suspension must not lose the survivors
+    /// already counted.
+    #[serde(default)]
+    pub next_index: usize,
+    /// CR 706.4: sum of the surviving dice's post-modifier results counted so
+    /// far, carried across a mid-loop branch suspension.
+    #[serde(default)]
+    pub running_total: i32,
+    /// CR 706.4: whether any die has survived so far. Distinguishes "every roll
+    /// was ignored" (stamp `None`) from "the surviving total happens to be 0".
+    #[serde(default)]
+    pub rolled_any: bool,
+    /// CR 706.6: the rolls the ignore rules DETERMINED must go, held across the
+    /// tie-break prompt.
+    ///
+    /// With a stacked run of "ignore the lowest" the ignored set can be part
+    /// forced and part chosen: over naturals `[4, 7, 7]` with two rules, the 4
+    /// is not the roller's to keep and only the two 7s are a real choice. The
+    /// prompt therefore offers ONLY the tied rolls, and this field carries the
+    /// forced remainder so the resume path drops both halves together.
+    #[serde(default)]
+    pub forced_ignored: Vec<usize>,
+}
+
+/// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
+/// ordering choice, before any die has been rolled.
+///
+/// `roll_die::resolve` proposes the instruction to the CR 614 pipeline before
+/// touching the RNG. When two or more die-roll replacements apply (Barbarian
+/// Class + Pixie Guide), CR 616.1 makes the affected player order them, which
+/// suspends the resolver on `WaitingFor::ReplacementChoice` — and unlike the
+/// CR 706.6 ignore choice, the dice do NOT exist yet, so `PendingDieRoll`
+/// cannot carry it. This frame carries the instruction's non-event context
+/// (results table, modifier, targets, source) so the resume path can finish the
+/// roll with the fully-modified `ProposedEvent::RollDice` the pipeline hands
+/// back.
+///
+/// The `sides` and the die count both ride the proposed event, not this frame:
+/// a replacement may change how many dice are rolled (CR 706.1), so re-reading
+/// them from here would discard the very modification the choice was about.
+///
+/// `continuation` names WHICH caller finishes the roll. Not every die roll is an
+/// `Effect::RollDie` resolution: the CR 703.4g roll-to-visit turn-based action
+/// rolls a d6 with no resolution context at all, and its completion emits
+/// `AttractionsRolledToVisit` / `AttractionVisited` instead of consulting a
+/// results table. Both callers park the SAME frame and the resume path
+/// dispatches on this tag, so a CR 616.1 ordering choice cannot silently drop
+/// either roll.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDieRollInstruction {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    /// CR 706.6: the player who rolls, and therefore the player who breaks an
+    /// ignore tie once the dice exist.
+    pub roller: PlayerId,
+    pub targets: Vec<TargetRef>,
+    pub results_table: Vec<DieResultBranch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifier: Option<DieRollModifier>,
+    /// CR 706.4 + CR 608.2: the value of `state.die_result_this_resolution` when
+    /// the instruction was proposed. Same save/restore contract as
+    /// `PendingDieRoll::die_result` — `apply()` clears the field on every action
+    /// boundary, and the CR 616.1 ordering choice is such a boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_result: Option<i32>,
+    /// Which caller owns the completion of this roll (see the type docs).
+    #[serde(default)]
+    pub continuation: DieRollContinuation,
+}
+
+/// CR 706.1: Which caller finishes a parked die-roll instruction once a CR 616.1
+/// replacement-ordering choice settles.
+///
+/// A die roll is not always a spell/ability resolution. The two production
+/// origins differ in everything that happens AFTER the dice land — event
+/// emission, whether a results table is consulted, and whether
+/// `die_result_this_resolution` is stamped — so the parked frame names its owner
+/// rather than letting the resume path infer one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DieRollContinuation {
+    /// CR 706.3a: an `Effect::RollDie` resolution — apply the modifier, consult
+    /// the results table, stamp the aggregate.
+    #[default]
+    Resolution,
+    /// CR 701.52a + CR 703.4g: the roll-to-visit turn-based action — no results
+    /// table, no modifier, no resolution stamp; each surviving result decides
+    /// which Attractions are visited.
+    RollToVisitAttractions,
 }
 
 /// CR 701.34a + CR 614.1a: Remaining proliferate actions after a count-modifying
@@ -261,6 +413,7 @@ pub enum ResolutionFrame {
     PerCategoryZoneChoice(PerCategoryZoneChoiceFrame),
     OptionalEffect(OptionalEffectFrame),
     CoinFlip(PendingCoinFlip),
+    DieRoll(Box<PendingDieRoll>),
     Proliferate(PendingProliferateActions),
     MultiDraw(MultiDrawFrame),
     Discard(Box<DiscardFrame>),
@@ -294,6 +447,7 @@ pub enum FrameKind {
     PerCategoryZoneChoice,
     OptionalEffect,
     CoinFlip,
+    DieRoll,
     Proliferate,
     MultiDraw,
     Discard,
@@ -326,6 +480,7 @@ impl ResolutionFrame {
             Self::PerCategoryZoneChoice(_) => FrameKind::PerCategoryZoneChoice,
             Self::OptionalEffect(_) => FrameKind::OptionalEffect,
             Self::CoinFlip(_) => FrameKind::CoinFlip,
+            Self::DieRoll(_) => FrameKind::DieRoll,
             Self::Proliferate(_) => FrameKind::Proliferate,
             Self::MultiDraw(_) => FrameKind::MultiDraw,
             Self::Discard(_) => FrameKind::Discard,
@@ -363,6 +518,7 @@ impl ResolutionFrame {
             | Self::PerCategoryZoneChoice(_)
             | Self::OptionalEffect(_)
             | Self::CoinFlip(_)
+            | Self::DieRoll(_)
             | Self::Proliferate(_)
             | Self::MutateMerge(_)
             | Self::MultiDraw(_)
@@ -386,6 +542,28 @@ impl ResolutionFrame {
             }) => FrameGate::DirectChoice(DirectChoiceGate::RepeatedOptionalPayment),
             Self::OptionalEffect(_) => FrameGate::DirectChoice(DirectChoiceGate::OptionalEffect),
             Self::CoinFlip(_) => FrameGate::DirectChoice(DirectChoiceGate::CoinFlipKeep),
+            // CR 706.6 + CR 706.3a: the die-roll frame serves two distinct
+            // roles, and its cursor is what tells them apart.
+            //
+            // At cursor 0 it is parked for the CR 706.6 ignore prompt, which it
+            // RAISES itself (there is no child frame to wait on) — a
+            // prompt-owning direct-choice frame. `AfterChild` would type-check
+            // and is the wrong answer for that role.
+            //
+            // Past cursor 0 it is a mid-loop continuation: a results-table
+            // branch suspended on ITS OWN prompt (CR 608.2c) and the frame was
+            // re-parked underneath to carry the remaining dice. It owns no
+            // prompt in that role — the branch's child does — so it waits on
+            // that child exactly like every other `AfterChild` owner. Reporting
+            // `DirectChoice` here would demand the top frame match a
+            // `DieKeepChoice` that is not, and must not be, the active prompt.
+            Self::DieRoll(pending) => {
+                if pending.next_index == 0 {
+                    FrameGate::DirectChoice(DirectChoiceGate::DieRollKeep)
+                } else {
+                    FrameGate::AfterChild
+                }
+            }
             Self::Proliferate(_) => FrameGate::DirectChoice(DirectChoiceGate::Proliferate),
             Self::MutateMerge(_) => FrameGate::DirectChoice(DirectChoiceGate::MutateMerge),
             Self::CipherEncode(PendingCipherEncode {
@@ -438,6 +616,7 @@ pub enum DirectChoiceGate {
     RepeatedOptionalPayment,
     OptionalEffect,
     CoinFlipKeep,
+    DieRollKeep,
     Proliferate,
     MutateMerge,
     CipherEncode,
@@ -470,6 +649,7 @@ impl DirectChoiceGate {
                     }
                 )
                 | (Self::CoinFlipKeep, WaitingFor::CoinFlipKeepChoice { .. })
+                | (Self::DieRollKeep, WaitingFor::DieKeepChoice { .. })
                 | (Self::Proliferate, WaitingFor::ProliferateChoice { .. })
                 | (Self::MutateMerge, WaitingFor::MutateMergeChoice { .. })
                 | (Self::CipherEncode, WaitingFor::CipherEncodeChoice { .. })
@@ -1978,6 +2158,57 @@ impl ResolutionStack {
             None => Err(ResolutionStackError::Empty),
             Some(frame) => Err(ResolutionStackError::UnexpectedTop {
                 expected: FrameKind::CoinFlip,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// CR 706.3a: Returns the die-roll owner only when it owns the stack top.
+    pub fn active_die_roll(&self) -> Option<&PendingDieRoll> {
+        match self.last() {
+            Some(ResolutionFrame::DieRoll(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// CR 706.6: Consumes exactly the active die-roll owner once the roller has
+    /// chosen which roll(s) to ignore.
+    pub fn take_active_die_roll(&mut self) -> Result<Option<PendingDieRoll>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::DieRoll(_)) => {
+                let ResolutionFrame::DieRoll(frame) = self.pop_expected(FrameKind::DieRoll)? else {
+                    unreachable!("checked die-roll frame kind must match")
+                };
+                Ok(Some(*frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::DieRoll,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// CR 706.6: Parks one "ignore the lowest roll" choice.
+    pub fn push_die_roll(&mut self, frame: PendingDieRoll) {
+        self.push_inner(ResolutionFrame::DieRoll(Box::new(frame)));
+    }
+
+    /// CR 706.3a + CR 608.2c: Re-parks the active die-roll owner when a results
+    /// branch suspended mid-loop, without exposing an empty-stack interval
+    /// between the branch's choice and the rest of the dice. Mirrors
+    /// [`Self::replace_active_coin_flip`].
+    pub fn replace_active_die_roll(
+        &mut self,
+        frame: PendingDieRoll,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::DieRoll(_)) => {
+                self.replace_active(ResolutionFrame::DieRoll(Box::new(frame)))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::DieRoll,
                 actual: frame.kind(),
             }),
         }
@@ -4062,6 +4293,7 @@ fn migrate_legacy_counter_removal_replacement_pause(state: &mut GameState) {
                 | ProposedEvent::Scry { .. }
                 | ProposedEvent::Mill { .. }
                 | ProposedEvent::CoinFlip { .. }
+                | ProposedEvent::RollDice { .. }
                 | ProposedEvent::Explore { .. }
                 | ProposedEvent::Connive { .. }
                 | ProposedEvent::Proliferate { .. }
@@ -4859,6 +5091,7 @@ fn project_frames_into_legacy_state(
                 projected.push_optional_effect_frame(frame.clone());
             }
             ResolutionFrame::CoinFlip(pending) => projected.push_coin_flip_frame(pending.clone()),
+            ResolutionFrame::DieRoll(pending) => projected.push_die_roll_frame((**pending).clone()),
             ResolutionFrame::Proliferate(pending) => {
                 projected.push_proliferate_frame(pending.clone())
             }

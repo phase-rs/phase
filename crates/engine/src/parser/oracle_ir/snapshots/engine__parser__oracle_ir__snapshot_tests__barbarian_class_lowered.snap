@@ -1,27 +1,9 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1310
 expression: "&lowered"
 ---
 {
   "abilities": [
-    {
-      "kind": "Spell",
-      "effect": {
-        "type": "Unimplemented",
-        "name": "unknown",
-        "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll."
-      },
-      "cost": null,
-      "sub_ability": null,
-      "duration": null,
-      "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
-      "target_prompt": null,
-      "condition": null,
-      "optional_targeting": false,
-      "optional": false,
-      "forward_result": false
-    },
     {
       "kind": "Activated",
       "effect": {
@@ -201,6 +183,47 @@ expression: "&lowered"
       "description": "Creatures you control have haste."
     }
   ],
-  "replacements": [],
+  "replacements": [
+    {
+      "event": "RollDice",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "RollDie",
+          "count": {
+            "type": "Offset",
+            "inner": {
+              "type": "Ref",
+              "qty": {
+                "type": "EventContextAmount"
+              }
+            },
+            "offset": 1
+          },
+          "sides": 0,
+          "results": []
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "mode": {
+        "type": "Mandatory"
+      },
+      "valid_card": null,
+      "description": "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
+      "condition": null,
+      "die_ignore_rule": {
+        "type": "Lowest"
+      },
+      "valid_player": "You"
+    }
+  ],
   "extractedKeywords": []
 }

@@ -750,9 +750,16 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `RippleBottomOrder` (the "in any order" bottom placement). Both name one
     // acting `player` and are classified by `WaitingFor::acting_authority` as
     // `ActingAuthority::One(player)` — neither is actorless.
-    if declared.len() != 135 {
+    // 135 -> 136 is adjudicated: the CR 706.6 die-roll ignore model (Barbarian
+    // Class, Pixie Guide, Wyll) added `DieKeepChoice`. It names one acting
+    // `player` — CR 706.6's second sentence gives the tie choice to the player
+    // instructed to ignore, i.e. the roller — and is classified by
+    // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
+    // actorless: the prompt cannot advance without that player's
+    // `GameAction::SelectDieRolls`.
+    if declared.len() != 136 {
         failures.push(format!(
-            "PIN declared.len()={} != 135.\n\
+            "PIN declared.len()={} != 136.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

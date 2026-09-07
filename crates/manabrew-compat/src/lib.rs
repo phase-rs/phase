@@ -2695,6 +2695,12 @@ pub fn convert_available_action(
         GameAction::SelectCoinFlips { .. } => {
             AvailableActionConversion::Unsupported("local.coin-flip-unsupported")
         }
+        // CR 706.6: the die-roll ignore choice has the same shape as the coin
+        // flip keep choice above, and the same gap — options carry only a label,
+        // so the rolls cannot be distinguished except by prose.
+        GameAction::SelectDieRolls { .. } => {
+            AvailableActionConversion::Unsupported("local.die-roll-unsupported")
+        }
         GameAction::ChooseOutsideGameCards { .. } => {
             AvailableActionConversion::Unsupported("local.outside-game-selection-unsupported")
         }

@@ -2668,12 +2668,18 @@ fn aerial_formation() {
 //     `static_def` *before* the push in both branches, so the conversion site is
 //     identical either way; the unwrapped half is covered by row 204's Wizard L1.
 //
-// Non-witness worth knowing about: Barbarian Class L1 ("If you would roll one or
-// more dice, instead roll that many dice plus one and ignore the lowest roll")
-// does NOT reach the replacement arm — it falls through to the generic path and
-// lands as `PreLoweredSpell` with an `Unimplemented` effect. That is a pre-existing
-// parser gap, not something T1 introduces; it is baselined here so that if T1
-// changes it, the churn is visible and must be explained.
+// Formerly-baselined gap, now CLOSED: Barbarian Class L1 ("If you would roll one
+// or more dice, instead roll that many dice plus one and ignore the lowest roll")
+// used to fall through the replacement arm to the generic path, landing as
+// `PreLoweredSpell` with an `Unimplemented` effect. It now reaches the
+// replacement arm and lowers to a real `ReplacementEvent::RollDice` definition
+// (CR 706.1 + CR 706.6 + CR 614.1a): the `execute` raises the instruction's die
+// count by one (`Offset { EventContextAmount, +1 }`) and `die_ignore_rule`
+// carries `Lowest`, with `valid_player: You` for the "if YOU would roll" scope.
+// Both `barbarian_class_ir` and `barbarian_class_lowered` were regenerated
+// together for that change — the IR node moved from `Unsupported`/`Unknown` to
+// `Replacement`, and the lowered ability moved out of `abilities` into
+// `replacements`.
 // ---------------------------------------------------------------------------
 
 #[test]

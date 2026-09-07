@@ -2305,6 +2305,12 @@ pub(super) const ABILITY_WORD_NAMES: &[&str] = &[
     "flurry",
     "formidable",
     "grandeur",
+    // CR 207.2c: Adventures in the Forgotten Realms (AFR) flavor ability word —
+    // not in the rulebook enumeration, but italicized and rules-meaningless in
+    // exactly the same way (Pixie Guide: "Grant an Advantage — If you would roll
+    // one or more dice, instead roll that many dice plus one and ignore the
+    // lowest roll."). Peeling it lets the body reach the ordinary parser.
+    "grant an advantage",
     "hellbent",
     "heroic",
     "imprint",

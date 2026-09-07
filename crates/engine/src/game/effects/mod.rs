@@ -1075,6 +1075,17 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::PerCategoryZoneChoice(_) => {
             let _ = choose_from_zone::drain_active_per_category_zone_choice(state, &[], events);
         }
+        // CR 706.3a + CR 608.2c: a die-roll frame is re-parked (with its loop
+        // cursor advanced) when a results-table branch suspends for its own
+        // interactive choice. Once that choice settles, the remaining dice still
+        // owe their branches, so the frame drains here and the loop continues.
+        //
+        // The CR 706.6 "ignore the lowest roll" prompt is a DIFFERENT resume: it
+        // is consumed by `GameAction::SelectDieRolls`, which takes the frame
+        // before any drain can see it. Only a mid-loop re-park reaches this arm.
+        ResolutionFrame::DieRoll(_) => {
+            roll_die::drain_active_die_roll(state, events);
+        }
         ResolutionFrame::OptionalEffect(_)
         | ResolutionFrame::CoinFlip(_)
         | ResolutionFrame::Proliferate(_)
@@ -3288,6 +3299,26 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
+            // CR 706.6 + CR 608.2c: the "ignore the lowest roll" choice pauses
+            // resolution before the surviving results exist. A chained
+            // sub_ability ("Roll a d20. <effect> equal to the result") must run
+            // only AFTER the ignore is submitted — resolving it inline would
+            // read a die result that has not been decided.
+            //
+            // This arm ALSO carries both events-slice die-result consumers,
+            // neither of which the compiler can see:
+            //   1. `recent_roll_difference` (`game/contraptions.rs`)
+            //      reverse-scans the shared events vec with no resolution
+            //      boundary, so Hard Hat Area's reflexive
+            //      `AssembleContraptionsFromRollDifference` must not run until
+            //      `resume_after_ignore` has pushed the survivors' `DieRolled`.
+            //   2. `snapshot_resolution_context_quantity`
+            //      (`game/effects/effect.rs`) reverse-scans the SAME vec via
+            //      `extract_amount_from_event` to freeze CR 611.2d "where X is
+            //      the result" into a continuous effect, so Hammer Helper's
+            //      `GenericEffect` static registration must not run before those
+            //      events exist — it would snapshot a permanent +0/+0.
+            | WaitingFor::DieKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }

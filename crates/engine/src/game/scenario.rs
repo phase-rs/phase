@@ -1967,6 +1967,7 @@ impl GameRunner {
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
+            WaitingFor::DieKeepChoice { .. } => "DieKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
@@ -3047,6 +3048,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::SurveilChoice { .. } => "SurveilChoice",
         WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
         WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
+        WaitingFor::DieKeepChoice { .. } => "DieKeepChoice",
         WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
         WaitingFor::NamedChoice { .. } => "NamedChoice",
         WaitingFor::TributeChoice { .. } => "TributeChoice",
@@ -3541,6 +3543,26 @@ fn drive_resolution(
                 act_collect(
                     runner,
                     GameAction::SelectCoinFlips { keep_indices },
+                    &mut events,
+                )?;
+            }
+            // CR 706.6: with a die-roll ignore replacement in play, ignore the
+            // first offered tied-lowest roll deterministically. Every offered
+            // index holds the same natural result, so the choice cannot change
+            // any observable outcome.
+            WaitingFor::DieKeepChoice {
+                ignorable_indices,
+                ignore_count,
+                ..
+            } => {
+                let ignore_indices = ignorable_indices
+                    .iter()
+                    .take(*ignore_count)
+                    .copied()
+                    .collect();
+                act_collect(
+                    runner,
+                    GameAction::SelectDieRolls { ignore_indices },
                     &mut events,
                 )?;
             }

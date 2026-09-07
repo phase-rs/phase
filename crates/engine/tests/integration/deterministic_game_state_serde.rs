@@ -774,6 +774,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "Scry",
         "Mill",
         "CoinFlip",
+        "RollDice",
         "Explore",
         "Connive",
         "Proliferate",

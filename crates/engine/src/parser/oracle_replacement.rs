@@ -38,12 +38,13 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
     CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
-    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope, FilterProp,
-    LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
-    PermissionGrantee, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
-    QuantityRef, RedirectionLifetime, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ReplacementPlayerScope, SourceExclusion, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration, Effect,
+    EffectScope, FilterProp, LibraryPosition, ManaModification, ManaReplacementScope,
+    ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount, QuantityExpr,
+    QuantityModification, QuantityRef, RedirectionLifetime, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, SourceExclusion,
+    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 use crate::types::ability::{CardPlayMode, CastingPermission};
 use crate::types::card_type::Supertype;
@@ -105,6 +106,16 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // Checked early so the generic "instead" / event-substitution handlers below
     // don't mis-claim the line.
     if let Some(def) = parse_krark_coin_flip_replacement(&text, &lower) {
+        return Some(def);
+    }
+
+    // --- Die-roll count/ignore replacements: "If you would roll one or more
+    //     dice, instead roll that many dice plus one and ignore the lowest
+    //     roll." (CR 706.1 + CR 706.6 + CR 614.1a) — Barbarian Class, Pixie
+    //     Guide, Wyll. Checked here, beside its coin-flip sibling and ahead of
+    //     the generic "instead" / event-substitution handlers below, so those
+    //     do not mis-claim the line.
+    if let Some(def) = parse_die_roll_ignore_replacement(&text, &lower) {
         return Some(def);
     }
 
@@ -1545,6 +1556,132 @@ fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<Replacem
         .description(text.to_string());
     // CR 614.1a: "If you would flip a coin" — controller-scoped.
     def.valid_player = Some(ReplacementPlayerScope::You);
+    Some(def)
+}
+
+/// CR 706.1 + CR 706.6 + CR 614.1a: die-roll count/ignore replacements —
+/// "If you would roll one or more dice, instead roll that many dice plus one and
+/// ignore the lowest roll." (Barbarian Class, Pixie Guide, Wyll, Blade of
+/// Frontiers).
+///
+/// Emits a controller-scoped `RollDice` replacement whose `execute` raises the
+/// instruction's die count (`Offset { EventContextAmount, +N }`) and whose
+/// `die_ignore_rule` names what CR 706.6 does with the extras. The runtime
+/// applier reads both off the definition and writes them onto the proposed
+/// event; `roll_die::resolve` then rolls the raised count and drops the ignored
+/// roll(s) before any `DieRolled` is emitted.
+///
+/// No `valid_card` filter — the replacement is objectless (it watches the
+/// controller's die rolls, not a permanent moving), so it must not be skipped by
+/// an object-filter mismatch.
+///
+/// Deliberately does NOT match the planar-dice variant ("instead roll that many
+/// planar dice plus one", Ichor Elixir): CR 706.7 excludes the planar die from
+/// every effect that refers to a numerical die result, and the planar path in
+/// `game/planechase.rs` emits `DieRolled { result: None }` without going through
+/// `Effect::RollDie`. Leaving it unmatched keeps it an honest gap rather than a
+/// silently wrong parse.
+fn parse_die_roll_ignore_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
+    let ((plus_n, rule), rest) = nom_on_lower(text, lower, |i| {
+        // CR 207.2c: an optional ability word carries no rules meaning
+        // ("Grant an Advantage — If you would roll …", Pixie Guide). Peeled with
+        // the curated list for the reasons documented on
+        // `extract_enters_with_leading_if_gate`.
+        let (i, _) = opt(terminated(
+            super::oracle_modal::parse_known_ability_word_name,
+            alt((tag(" — "), tag(" – "), tag(" - "))),
+        ))
+        .parse(i)?;
+        // CR 614.1a: "If you would roll …, instead …" — the antecedent.
+        let (i, _) = tag("if you would roll ").parse(i)?;
+        // Only the plural antecedent is accepted. A corpus scan for the full
+        // accepted grammar matches exactly three cards, all reading "one or more
+        // dice"; the sole printed card whose antecedent is "if you would roll a
+        // die" (Krark's Other Thumb) continues "instead roll two of those dice
+        // and ignore one of those results", which never reaches the
+        // "that many dice plus " tail below. Accepting a singular antecedent
+        // here would be unvalidated surface — the same policy the `plus N` and
+        // `PlayerChoice` decisions below carry.
+        let (i, _) = tag("one or more dice").parse(i)?;
+        let (i, _) = tag(", instead roll ").parse(i)?;
+        // CR 706.1: "that many dice plus N" — the raised instruction count.
+        //
+        // Only `plus one` is accepted. CR 706.6 removes exactly ONE roll per
+        // instructing effect ("if a player is instructed to ignore a roll ...
+        // the player chooses one of those rolls to be ignored"), and
+        // `DieRollIgnoreRule` is a single-roll rule by construction, so a
+        // `plus N` with N > 1 would roll N extra dice from ONE effect while
+        // that effect ignores only one — silently inflating every aggregate and
+        // results-table branch. Every printing of this class reads "plus one";
+        // rejecting the rest keeps a hypothetical N > 1 card an honest
+        // `Unimplemented` gap instead of a wrong parse.
+        //
+        // Note this is a per-DEFINITION invariant, not a per-instruction one:
+        // several replacements stacking on one instruction is a different axis,
+        // already handled — each contributes its own rule to
+        // `ProposedEvent::RollDice::ignore_rules` and ignores its own roll
+        // (`DieRollIgnoreRule::ignorable_indices_for_rules`). Widening THIS
+        // parser gate means parameterizing `DieRollIgnoreRule` by a per-rule
+        // ignore count, which `ignorable_indices` would then honor.
+        let (i, _) = tag("that many dice plus ").parse(i)?;
+        let (i, plus_n) = nom_primitives::parse_number(i)?;
+        if plus_n != 1 {
+            return Err(oracle_err(i));
+        }
+        // CR 706.6: which of the extra rolls is ignored.
+        // No " and ignore the highest roll" arm: a Scryfall corpus check for
+        // that text returns ZERO cards, and this parser's own policy (see the
+        // `plus N` gate above) is to leave an unprinted form an honest
+        // `Unimplemented` gap rather than ship speculative surface.
+        let (i, rule) = alt((
+            value(
+                DieRollIgnoreRule::Lowest,
+                tag(" and ignore the lowest roll"),
+            ),
+            // No printed card reaches this arm today: the only card with this
+            // exact tail (Probability Flux) is a duration-bounded, any-player
+            // form whose antecedent this parser does not match, and the three
+            // "ignore one" cards nearest to it (Krark's Other Thumb, Ichor
+            // Elixir, Bamboozling Beeble) each miss the grammar for a separate
+            // reason. See `DieRollIgnoreRule::PlayerChoice` for the derivation.
+            value(DieRollIgnoreRule::PlayerChoice, tag(" and ignore one")),
+        ))
+        .parse(i)?;
+        let (i, _) = opt(char('.')).parse(i)?;
+        Ok((i, (plus_n, rule)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::RollDice)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            // CR 614.1a: "instead roll that many dice plus one" — raise the count
+            // the replacement applier sees. `EventContextAmount` is the proposed
+            // instruction's own die count, so this composes with any other
+            // count-modifying replacement applied first (CR 616.1).
+            Effect::RollDie {
+                count: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                    offset: i32::try_from(plus_n).ok()?,
+                },
+                // CR 706.1: the die kind rides the proposed event — the
+                // replacement changes how MANY dice are rolled, never which kind.
+                sides: 0,
+                results: vec![],
+                modifier: None,
+            },
+        ))
+        .description(text.to_string());
+    // CR 614.1a: "If YOU would roll" — controller-scoped.
+    def.valid_player = Some(ReplacementPlayerScope::You);
+    // CR 706.6: the ignore rule travels on the definition; `roll_dice_applier`
+    // snapshots it onto the proposed event, which is the only channel into
+    // `roll_die.rs`.
+    def.die_ignore_rule = Some(rule);
     Some(def)
 }
 

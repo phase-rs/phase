@@ -1483,6 +1483,25 @@ pub fn fallback_action(
         WaitingFor::CoinFlipKeepChoice { keep_count, .. } => Some(GameAction::SelectCoinFlips {
             keep_indices: (0..*keep_count).collect(),
         }),
+        // CR 706.6: die-roll ignore choice — ignore the first `ignore_count`
+        // offered rolls. Only `ignorable_indices` are legal, so this is always a
+        // legal submission, and it is one of the combinations the candidate
+        // enumerator offers (`ai_support::candidates`), so the contract's
+        // membership check accepts it. This is a last-resort rescue, not the
+        // evaluated pick: when several candidates differ in value, the search
+        // scores the enumerated combinations and only falls back here if it
+        // produced none.
+        WaitingFor::DieKeepChoice {
+            ignorable_indices,
+            ignore_count,
+            ..
+        } => Some(GameAction::SelectDieRolls {
+            ignore_indices: ignorable_indices
+                .iter()
+                .take(*ignore_count)
+                .copied()
+                .collect(),
+        }),
         // CR 608.2d: SearchPartitionChoice requires EXACTLY primary_count cards —
         // an empty selection is illegal. Deterministically take the first
         // primary_count of the found set for the battlefield (rest auto-route).

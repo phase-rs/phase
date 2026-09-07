@@ -1087,6 +1087,28 @@ fn snapshot_transient_modifications(
 /// UNTOUCHED so CDA-style "+1/+1 for each X" continuous mods keep their dynamic
 /// behavior — only resolution-context refs, which read transient context that
 /// is gone by the next layer recompute, are snapshotted.
+///
+/// ORDERING INVARIANT — read before re-timing die-roll emission. The "resolved
+/// one step earlier" assumption above is NOT free once a CR 706.6 ignore
+/// replacement (Barbarian Class, Pixie Guide, Wyll) is in play: emission is then
+/// deferred past a `SelectDieRolls` action boundary, and this scan runs against
+/// whatever the vec holds at registration time.
+///
+/// What preserves it is `WaitingFor::DieKeepChoice`'s membership in
+/// `waits_for_resolution_choice` (`game/effects/mod.rs`): the effect chain
+/// suspends at the keep-choice, so this `GenericEffect` registration is stashed
+/// and drained only AFTER `resume_after_ignore` has pushed the survivors'
+/// `DieRolled` events. Remove that arm and the `debug_assert!` below trips in
+/// debug — while RELEASE builds silently register a permanent +0/+0, because
+/// CR 611.2d freezes X once on resolution and the layer system never re-resolves
+/// it.
+///
+/// NOTE FOR CENSUS-TAKERS: this consumer reads `DieRolled` INDIRECTLY, through
+/// `extract_amount_from_event` (`game/targeting.rs`). A `grep -rn 'DieRolled'`
+/// CANNOT see it. Enumerate die-result readers by the predicate "reads a die
+/// result out of an events slice", and grep `extract_amount_from_event` call
+/// sites as a second axis. Sibling consumer at `game/contraptions.rs`
+/// (`recent_roll_difference`).
 fn snapshot_resolution_context_quantity(expr: &QuantityExpr, events: &[GameEvent]) -> QuantityExpr {
     match expr {
         QuantityExpr::Ref {

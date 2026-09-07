@@ -1691,10 +1691,19 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" sticker on "),
             card_seg(state, *object_id),
         ],
-        GameEvent::AttractionsRolledToVisit { roll, .. } => {
+        GameEvent::AttractionsRolledToVisit { rolls, .. } => {
+            // CR 701.52a: ONE turn-based action, so ONE log line — a count-
+            // raising replacement (CR 706.6) that leaves several surviving dice
+            // lists them together rather than reporting the action twice.
             vec![
                 text("Rolled "),
-                text(&roll.to_string()),
+                text(
+                    &rolls
+                        .iter()
+                        .map(u8::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
                 text(" to visit Attractions"),
             ]
         }

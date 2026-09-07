@@ -1596,9 +1596,16 @@ pub enum GameEvent {
         kind: StickerKind,
     },
     /// CR 701.52: The active player rolled to visit their Attractions.
+    ///
+    /// CR 701.52a specifies ONE roll-to-visit turn-based action, so this event
+    /// is emitted ONCE per action even when a CR 706.6 count-raising replacement
+    /// (Barbarian Class, Pixie Guide, Wyll) leaves more than one surviving die.
+    /// `rolls` therefore carries every SURVIVING result, in roll order — an
+    /// ignored roll never happened (CR 706.6) and never appears here. Visiting
+    /// is still decided per result (`AttractionVisited`, one per visit).
     AttractionsRolledToVisit {
         player_id: PlayerId,
-        roll: u8,
+        rolls: Vec<u8>,
     },
     /// CR 701.52a + CR 702.159a: A specific Attraction was visited this roll.
     AttractionVisited {

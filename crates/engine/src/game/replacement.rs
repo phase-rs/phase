@@ -3730,6 +3730,74 @@ fn coin_flip_applier(
     })
 }
 
+// --- 4c1. RollDice (Barbarian Class, Pixie Guide, Wyll) ---
+
+// CR 706.1 + CR 614.1a: A die-roll instruction is about to happen. "If you
+// would roll one or more dice, instead roll that many dice plus one and ignore
+// the lowest roll" replaces the whole instruction (CR 706.1 — an effect
+// specifies how many dice to roll), so the matcher fires once per instruction
+// while `count > 0`.
+fn roll_dice_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::RollDice { count, .. } if *count > 0)
+}
+
+fn roll_dice_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::RollDice {
+        player_id,
+        count,
+        sides,
+        mut ignore_rules,
+        applied,
+    } = event
+    else {
+        return ApplyResult::Modified(event);
+    };
+
+    // A single definition lookup serves BOTH the raised count and the ignore
+    // rule — the two halves of "instead roll that many dice plus one AND ignore
+    // the lowest roll" come from the same replacement.
+    let def = state
+        .objects
+        .get(&rid.source)
+        .and_then(|source| source.replacement_definitions.get(rid.index));
+
+    // CR 614.1a: "instead roll that many dice plus one" — the definition's
+    // `execute` carries `RollDie { count: Offset { EventContextAmount, +1 } }`.
+    let new_count = match def.and_then(|d| d.execute.as_deref()) {
+        Some(ability) if ability.sub_ability.is_none() => match &*ability.effect {
+            Effect::RollDie { count: qty, .. } => resolve_event_replacement_quantity(qty, count)
+                .map(|resolved| resolved.max(0) as u32)
+                .unwrap_or(count),
+            _ => count,
+        },
+        _ => count,
+    };
+
+    // CR 706.6: carry the ignore rule onto the event — `ApplyResult` has no
+    // other channel to `roll_die.rs`. APPENDING (rather than collapsing with
+    // `.or`) is what keeps stacked replacements correct under CR 616.1: each
+    // applied replacement independently instructs the roller to ignore a roll,
+    // so two of them (Barbarian Class + Pixie Guide) raise the count 1 → 2 → 3
+    // AND contribute two ignore rules, leaving the CR-correct single survivor.
+    // Collapsing to one rule would roll three dice and ignore only one.
+    if let Some(rule) = def.and_then(|d| d.die_ignore_rule) {
+        ignore_rules.push(rule);
+    }
+
+    ApplyResult::Modified(ProposedEvent::RollDice {
+        player_id,
+        count: new_count,
+        sides,
+        ignore_rules,
+        applied,
+    })
+}
+
 // --- 4c2. Proliferate (Tekuthal, Inquiry Dominus) ---
 
 // CR 701.34a + CR 614.1a: A proliferate action is about to happen. Count-
@@ -5487,6 +5555,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         },
     );
     registry.insert(
+        ReplacementEvent::RollDice,
+        ReplacementHandlerEntry {
+            matcher: roll_dice_matcher,
+            applier: roll_dice_applier,
+        },
+    );
+    registry.insert(
         ReplacementEvent::Proliferate,
         ReplacementHandlerEntry {
             matcher: proliferate_matcher,
@@ -6655,6 +6730,9 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
         ProposedEvent::CoinFlip { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::CoinFlip);
         }
+        ProposedEvent::RollDice { .. } => {
+            push_replacement_event_key(&mut keys, ReplacementEvent::RollDice);
+        }
         ProposedEvent::Explore { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::Explore);
         }
@@ -7046,6 +7124,10 @@ fn object_replacement_candidate_applies(
     | ProposedEvent::Mill { player_id, .. }
     | ProposedEvent::Proliferate { player_id, .. }
     | ProposedEvent::CoinFlip { player_id, .. }
+    // CR 706.6 + CR 614.1a: "If YOU would roll one or more dice" — without this
+    // arm `valid_player` would be silently inert and Barbarian Class would add a
+    // die to an opponent's rolls too.
+    | ProposedEvent::RollDice { player_id, .. }
     | ProposedEvent::Planeswalk { player_id, .. } = event
     {
         // CR 614.1a: player-scoped replacements apply only to matching player events.
@@ -8036,6 +8118,7 @@ pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
         | ProposedEvent::Scry { .. }
         | ProposedEvent::Mill { .. }
         | ProposedEvent::CoinFlip { .. }
+        | ProposedEvent::RollDice { .. }
         | ProposedEvent::Explore { .. }
         | ProposedEvent::Connive { .. }
         | ProposedEvent::Proliferate { .. }
@@ -8931,6 +9014,13 @@ fn apply_single_replacement(
                         // would create an un-dispatchable sibling drain for every
                         // affected event (issue #5676).
                         | (ProposedEvent::CoinFlip { .. }, Effect::FlipCoins { .. })
+                        // CR 706.1 + CR 614.1a: `roll_dice_applier` reads the
+                        // raised count and the CR 706.6 ignore rule inline and
+                        // writes both onto the modified event; the die-roll
+                        // resolver consumes them. Parking the same
+                        // `Effect::RollDie` as a post-replacement continuation
+                        // would re-propose the roll and re-enter the pipeline.
+                        | (ProposedEvent::RollDice { .. }, Effect::RollDie { .. })
                         | (ProposedEvent::Damage { .. }, Effect::RemoveAllDamage { .. })
                         // CR 614.1a + CR 111.1: Full token substitution
                         // (Divine Visitation) is performed inline by
@@ -11982,6 +12072,18 @@ mod tests {
             (
                 ProposedEvent::planeswalk(PlayerId(0)),
                 vec![ReplacementEvent::Planeswalk],
+            ),
+            // CR 706.1 + CR 614.1a: a die-roll instruction proposes one event for
+            // the whole instruction, keyed to the count/ignore replacement family.
+            (
+                ProposedEvent::RollDice {
+                    player_id: PlayerId(0),
+                    count: 1,
+                    sides: 20,
+                    ignore_rules: Vec::new(),
+                    applied: HashSet::new(),
+                },
+                vec![ReplacementEvent::RollDice],
             ),
             (
                 ProposedEvent::Sacrifice {
