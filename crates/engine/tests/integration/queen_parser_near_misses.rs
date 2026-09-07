@@ -3,13 +3,18 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityCost, Effect, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, CastManaObjectScope, CastManaSpentMetric, Effect, QuantityExpr, QuantityRef,
+    TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use super::rules::run_combat;
@@ -18,14 +23,36 @@ const QUEEN_OF_DALE: &str = "Whenever an opponent casts their first noncreature 
 const ASSIMILATE_ESSENCE: &str = "Counter target creature or battle spell unless its controller pays {4}. If they do, you incubate 2. (Create an Incubator token with two +1/+1 counters on it and \"{2}: Transform this token.\" It transforms into a 0/0 Phyrexian artifact creature.)";
 const NECROGEN_ROTPRIEST: &str = "Toxic 2 (Players dealt combat damage by this creature also get two poison counters.)\nWhenever a creature you control with toxic deals combat damage to a player, that player gets an additional poison counter.\n{1}{B}{G}: Target creature you control with toxic gains deathtouch until end of turn.";
 const AWAKENED_INFERNO: &str = "This spell can't be countered.\n[+2]: Each opponent gets an emblem with \"At the beginning of your upkeep, this emblem deals 1 damage to you.\"\n[−3]: Chandra deals 3 damage to each non-Elemental creature.\n[−X]: Chandra deals X damage to target creature or planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.";
+const DRESSED_TO_KILL: &str = "[+1]: Add {R}. Chandra deals 1 damage to up to one target player or planeswalker.\n[+1]: Exile the top card of your library. If it's red, you may cast it this turn.\n[−7]: Exile the top five cards of your library. You may cast red spells from among them this turn. You get an emblem with \"Whenever you cast a red spell, this emblem deals X damage to any target, where X is the amount of mana spent to cast that spell.\"";
+const SPARK_HUNTER: &str = "At the beginning of combat on your turn, choose up to one target Vehicle you control. Until end of turn, it becomes an artifact creature and gains haste.\n[+2]: You may sacrifice an artifact or discard a card. If you do, draw a card.\n[0]: Create a 3/2 colorless Vehicle artifact token with crew 1.\n[−7]: You get an emblem with \"Whenever an artifact you control enters, this emblem deals 3 damage to any target.\"";
+const TORCH_OF_DEFIANCE: &str = "[+1]: Exile the top card of your library. You may cast that card. If you don't, Chandra deals 2 damage to each opponent.\n[+1]: Add {R}{R}.\n[−3]: Chandra deals 4 damage to target creature.\n[−7]: You get an emblem with \"Whenever you cast a spell, this emblem deals 5 damage to any target.\"";
+const KOTH_FIRE_OF_RESISTANCE: &str = "[+2]: Search your library for a basic Mountain card, reveal it, put it into your hand, then shuffle.\n[−3]: Koth deals damage to target creature equal to the number of Mountains you control.\n[−7]: You get an emblem with \"Whenever a Mountain you control enters, this emblem deals 4 damage to any target.\"";
 const NARSET: &str = "[+1]: You gain 2 life. Add {U}, {R}, or {W}. Spend this mana only to cast a noncreature spell.\n[−2]: Draw a card, then you may discard a card. When you discard a nonland card this way, Narset deals damage equal to that card's mana value to target creature or planeswalker.\n[−6]: You get an emblem with \"Whenever you cast a noncreature spell, this emblem deals 2 damage to any target.\"";
 
 fn ability_has_unimplemented(ability: &engine::types::ability::AbilityDefinition) -> bool {
     matches!(*ability.effect, Effect::Unimplemented { .. })
+        || matches!(ability.effect.as_ref(), Effect::CreateEmblem { triggers, .. } if triggers.iter().any(|trigger| trigger.execute.as_deref().is_some_and(ability_has_unimplemented)))
         || ability
             .sub_ability
             .as_deref()
             .is_some_and(ability_has_unimplemented)
+}
+
+fn emblem_trigger_damage(
+    ability: &engine::types::ability::AbilityDefinition,
+) -> Option<(&engine::types::ability::TriggerDefinition, &Effect)> {
+    match ability.effect.as_ref() {
+        Effect::CreateEmblem { triggers, .. } => triggers.iter().find_map(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .map(|execute| (trigger, execute.effect.as_ref()))
+        }),
+        _ => ability
+            .sub_ability
+            .as_deref()
+            .and_then(emblem_trigger_damage),
+    }
 }
 
 fn put_creature_spell_on_stack(
@@ -69,15 +96,60 @@ fn activate_emblem(runner: &mut GameRunner, source: ObjectId, amount: i32) -> Ob
 #[test]
 fn shape_all_nine_cards_reach_their_targeted_semantic_family() {
     let cards = [
-        ("The Queen of Dale", QUEEN_OF_DALE, vec!["Creature"], vec!["Human", "Noble"]),
-        ("Assimilate Essence", ASSIMILATE_ESSENCE, vec!["Instant"], vec![]),
-        ("Necrogen Rotpriest", NECROGEN_ROTPRIEST, vec!["Creature"], vec!["Phyrexian", "Zombie", "Cleric"]),
-        ("Chandra, Awakened Inferno", AWAKENED_INFERNO, vec!["Planeswalker"], vec!["Chandra"]),
-        ("Chandra, Dressed to Kill", "[+1]: Add {R}. Chandra deals 1 damage to up to one target player or planeswalker.\n[+1]: Exile the top card of your library. If it's red, you may cast it this turn.\n[−7]: Exile the top five cards of your library. You may cast red spells from among them this turn. You get an emblem with \"Whenever you cast a red spell, this emblem deals X damage to any target, where X is the amount of mana spent to cast that spell.\"", vec!["Planeswalker"], vec!["Chandra"]),
-        ("Chandra, Spark Hunter", "At the beginning of combat on your turn, choose up to one target Vehicle you control. Until end of turn, it becomes an artifact creature and gains haste.\n[+2]: You may sacrifice an artifact or discard a card. If you do, draw a card.\n[0]: Create a 3/2 colorless Vehicle artifact token with crew 1.\n[−7]: You get an emblem with \"Whenever an artifact you control enters, this emblem deals 3 damage to any target.\"", vec!["Planeswalker"], vec!["Chandra"]),
-        ("Chandra, Torch of Defiance", "[+1]: Exile the top card of your library. You may cast that card. If you don't, Chandra deals 2 damage to each opponent.\n[+1]: Add {R}{R}.\n[−3]: Chandra deals 4 damage to target creature.\n[−7]: You get an emblem with \"Whenever you cast a spell, this emblem deals 5 damage to any target.\"", vec!["Planeswalker"], vec!["Chandra"]),
-        ("Koth, Fire of Resistance", "[+2]: Search your library for a basic Mountain card, reveal it, put it into your hand, then shuffle.\n[−3]: Koth deals damage to target creature equal to the number of Mountains you control.\n[−7]: You get an emblem with \"Whenever a Mountain you control enters, this emblem deals 4 damage to any target.\"", vec!["Planeswalker"], vec!["Koth"]),
-        ("Narset of the Ancient Way", NARSET, vec!["Planeswalker"], vec!["Narset"]),
+        (
+            "The Queen of Dale",
+            QUEEN_OF_DALE,
+            vec!["Creature"],
+            vec!["Human", "Noble"],
+        ),
+        (
+            "Assimilate Essence",
+            ASSIMILATE_ESSENCE,
+            vec!["Instant"],
+            vec![],
+        ),
+        (
+            "Necrogen Rotpriest",
+            NECROGEN_ROTPRIEST,
+            vec!["Creature"],
+            vec!["Phyrexian", "Zombie", "Cleric"],
+        ),
+        (
+            "Chandra, Awakened Inferno",
+            AWAKENED_INFERNO,
+            vec!["Planeswalker"],
+            vec!["Chandra"],
+        ),
+        (
+            "Chandra, Dressed to Kill",
+            DRESSED_TO_KILL,
+            vec!["Planeswalker"],
+            vec!["Chandra"],
+        ),
+        (
+            "Chandra, Spark Hunter",
+            SPARK_HUNTER,
+            vec!["Planeswalker"],
+            vec!["Chandra"],
+        ),
+        (
+            "Chandra, Torch of Defiance",
+            TORCH_OF_DEFIANCE,
+            vec!["Planeswalker"],
+            vec!["Chandra"],
+        ),
+        (
+            "Koth, Fire of Resistance",
+            KOTH_FIRE_OF_RESISTANCE,
+            vec!["Planeswalker"],
+            vec!["Koth"],
+        ),
+        (
+            "Narset of the Ancient Way",
+            NARSET,
+            vec!["Planeswalker"],
+            vec!["Narset"],
+        ),
     ];
     for (name, oracle, types, subtypes) in cards {
         let types = types.into_iter().map(str::to_owned).collect::<Vec<_>>();
@@ -96,32 +168,109 @@ fn shape_all_nine_cards_reach_their_targeted_semantic_family() {
             parsed.abilities
         );
     }
-    let parsed = parse_oracle_text(
-        AWAKENED_INFERNO,
-        "Chandra, Awakened Inferno",
-        &[],
-        &["Planeswalker".to_string()],
-        &["Chandra".to_string()],
-    );
-    let trigger = parsed
-        .abilities
-        .iter()
-        .find_map(|ability| match ability.effect.as_ref() {
-            Effect::CreateEmblem { triggers, .. } => triggers.first(),
-            _ => None,
-        })
-        .expect("Awakened Inferno must create an emblem trigger");
-    assert!(matches!(
-        trigger
-            .execute
-            .as_deref()
-            .map(|ability| ability.effect.as_ref()),
-        Some(Effect::DealDamage {
-            target: TargetFilter::Controller,
-            damage_source: None,
+    for (name, oracle, subtype, expected_mode, expected_phase, expected_target, expected_amount) in [
+        (
+            "Chandra, Awakened Inferno",
+            AWAKENED_INFERNO,
+            "Chandra",
+            TriggerMode::Phase,
+            Some(Phase::Upkeep),
+            TargetFilter::Controller,
+            QuantityExpr::Fixed { value: 1 },
+        ),
+        (
+            "Chandra, Dressed to Kill",
+            DRESSED_TO_KILL,
+            "Chandra",
+            TriggerMode::SpellCast,
+            None,
+            TargetFilter::Any,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::TriggeringSpell,
+                    metric: CastManaSpentMetric::Total,
+                },
+            },
+        ),
+        (
+            "Chandra, Spark Hunter",
+            SPARK_HUNTER,
+            "Chandra",
+            TriggerMode::ChangesZone,
+            None,
+            TargetFilter::Any,
+            QuantityExpr::Fixed { value: 3 },
+        ),
+        (
+            "Chandra, Torch of Defiance",
+            TORCH_OF_DEFIANCE,
+            "Chandra",
+            TriggerMode::SpellCast,
+            None,
+            TargetFilter::Any,
+            QuantityExpr::Fixed { value: 5 },
+        ),
+        (
+            "Koth, Fire of Resistance",
+            KOTH_FIRE_OF_RESISTANCE,
+            "Koth",
+            TriggerMode::ChangesZone,
+            None,
+            TargetFilter::Any,
+            QuantityExpr::Fixed { value: 4 },
+        ),
+        (
+            "Narset of the Ancient Way",
+            NARSET,
+            "Narset",
+            TriggerMode::SpellCast,
+            None,
+            TargetFilter::Any,
+            QuantityExpr::Fixed { value: 2 },
+        ),
+    ] {
+        let parsed = parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &["Planeswalker".to_string()],
+            &[subtype.to_string()],
+        );
+        let (trigger, damage) = parsed
+            .abilities
+            .iter()
+            .find_map(emblem_trigger_damage)
+            .unwrap_or_else(|| panic!("{name} must create an emblem damage trigger"));
+        assert_eq!(
+            &trigger.mode, &expected_mode,
+            "{name} emblem must retain its printed trigger mode"
+        );
+        assert_eq!(
+            &trigger.phase, &expected_phase,
+            "{name} emblem must retain its printed phase constraint"
+        );
+        let Effect::DealDamage {
+            amount,
+            target,
+            damage_source,
             ..
-        })
-    ));
+        } = damage
+        else {
+            panic!("{name} emblem trigger must deal damage, got {damage:?}");
+        };
+        assert_eq!(
+            target, &expected_target,
+            "{name} emblem damage must retain its printed target"
+        );
+        assert!(
+            damage_source.is_none(),
+            "{name} emblem damage must use the resolving emblem as its source"
+        );
+        assert_eq!(
+            amount, &expected_amount,
+            "{name} emblem damage must retain its printed amount"
+        );
+    }
 }
 
 #[test]
@@ -173,6 +322,12 @@ fn queen_of_dale_recruit_draws_discards_and_mints_token_for_its_controller() {
 fn assimilate_essence_paid_unless_creates_controller_incubator_with_two_counters() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P1,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
     let assimilate = scenario
         .add_spell_to_hand_from_oracle(P0, "Assimilate Essence", true, ASSIMILATE_ESSENCE)
         .id();
@@ -190,11 +345,11 @@ fn assimilate_essence_paid_unless_creates_controller_incubator_with_two_counters
     runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("P1 pays the unless cost");
-    assert!(
-        runner.state().stack.iter().any(|entry| entry.id == target),
+    assert_eq!(
+        runner.state().objects[&target].zone,
+        Zone::Stack,
         "paid unless must leave target spell on stack"
     );
-    runner.advance_until_stack_empty();
     let incubators = runner
         .state()
         .objects
@@ -226,14 +381,13 @@ fn narset_emblem_is_command_zone_source_of_trigger_damage() {
         .add_planeswalker_from_oracle(P0, "Narset of the Ancient Way", "Narset", 6, NARSET)
         .as_planeswalker_with_loyalty("Narset", 6)
         .id();
-    let victim = scenario.add_creature(P1, "Damage target", 3, 3).id();
     let spell = scenario
         .add_spell_to_hand(P0, "Noncreature trigger", true)
         .id();
     let mut runner = scenario.build();
     let emblem = activate_emblem(&mut runner, narset, -6);
     let p1_before = runner.life(P1);
-    let commit = runner.cast(spell).target_object(victim).commit();
+    let commit = runner.cast(spell).target_player(P1).commit();
     assert!(
         commit.state().stack.iter().any(|entry| matches!(
             &entry.kind,
@@ -245,7 +399,7 @@ fn narset_emblem_is_command_zone_source_of_trigger_damage() {
     assert_eq!(
         outcome.state().players[P1.0 as usize].life,
         p1_before - 2,
-        "the emblem trigger must deal two damage to the selected target's controller"
+        "the emblem trigger must deal two damage to the selected player"
     );
 }
 
