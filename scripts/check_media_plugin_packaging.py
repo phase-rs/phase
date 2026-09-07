@@ -330,8 +330,20 @@ def appimage_apt_packages() -> set[str]:
     for line in body.splitlines():
         try:
             tokens = shlex.split(line, comments=True)
-        except ValueError:
-            continue  # An untokenizable line is refused below, with its message.
+        except ValueError as exc:
+            # Nothing refuses it below: the refusal further down only fires for
+            # lines that already matched APT_INSTALL, and `echo "` never does.
+            # So a skip here reads the interior lines of a multi-line quoted
+            # string as commands, and their install text lands in the covered
+            # set -- the gate's own failure mode, reported green. The opening
+            # line of such a string is always untokenizable on its own, which
+            # is what makes this the place to catch it.
+            raise Refusal(
+                f"{SHELL_RELEASE}: step '{APT_STEP}' has an untokenizable "
+                f"line: {line.strip()!r} ({exc}). This gate reads the step a "
+                "line at a time, so a line that does not stand on its own -- "
+                "an unbalanced quote opening a multi-line string, a dangling "
+                "escape -- would have its continuation read as commands") from exc
         # Only in command position. `shlex` strips quotes, so a whole-token
         # match would refuse `echo "done"` and any sentence containing a bare
         # `for` -- a false refusal on a tree that is entirely correct. A
@@ -365,6 +377,11 @@ def appimage_apt_packages() -> set[str]:
         try:
             tokens = shlex.split(line, comments=True)
         except ValueError as exc:
+            # Unreachable while the scan above tokenizes every line of the same
+            # body with the same call: anything that raises here has already
+            # raised there. Kept as the backstop for that coupling, since a
+            # future `continue` in the scan would restore the fail-open this
+            # arm names, and a refusal is the safe direction to be wrong in.
             raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' has an "
                           f"untokenizable install line: {exc}") from exc
         # A line that was entirely a comment tokenizes to nothing. It installs

@@ -662,6 +662,30 @@ class MediaPluginPackagingTests(unittest.TestCase):
         self.assertIn("cannot read as an install", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_install_text_inside_a_quoted_string_covers_nothing(self) -> None:
+        # Reported by Superagent (P2) on #8630 and confirmed by the maintainer.
+        # `echo "` opens a multi-line string whose interior lines this gate read
+        # as commands: the packages were credited to a step that installs
+        # nothing, reported as exit 0. The refusal lives on the tokenizer's
+        # ValueError because the opening line of such a string is always
+        # untokenizable on its own -- nothing downstream catches it, since the
+        # refusal there only fires for lines that already matched APT_INSTALL,
+        # and `echo "` never does.
+        t = self.tree()
+        t.write_workflow(run=(
+            "sudo apt-get update\n"
+            "sudo apt-get install -y libgtk-3-dev\n"
+            'echo "\n'
+            f"sudo apt-get install -y {' '.join(DEFAULT_PACKAGES)}\n"
+            '"'))
+        r = t.run()
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("untokenizable line", r.stderr)
+        self.assertIn("multi-line string", r.stderr)
+        # Not merely non-zero for some other reason: the packages must not have
+        # been credited, and this must not read as a coverage gap.
+        self.assertNotIn("is missing", r.stderr)
+
     def test_an_apt_step_that_installs_nothing_refuses(self) -> None:
         # The step still exists, on the right job and the right arm, and runs
         # no `apt-get install`. Zero packages read out of it is not zero
@@ -843,6 +867,10 @@ class MediaPluginPackagingTests(unittest.TestCase):
         cases["unreadable install verb"] = t.run()
 
         t = self.tree(); t.write_workflow(
+            run='sudo apt-get update\necho "\nsudo apt-get install -y libgtk-3-dev\n"')
+        cases["install text inside a quoted string"] = t.run()
+
+        t = self.tree(); t.write_workflow(
             run="sudo apt-get update\nif true; then sudo apt-get install -y x\nfi")
         cases["shell control flow"] = t.run()
 
@@ -874,7 +902,7 @@ class MediaPluginPackagingTests(unittest.TestCase):
         t = self.tree(); t.write_workflow(
             run='sudo apt-get update\n'
                 'sudo apt-get install -y "libgtk-3-dev')
-        cases["untokenizable install"] = t.run()
+        cases["untokenizable install line"] = t.run()
 
         for name, result in cases.items():
             with self.subTest(case=name):
