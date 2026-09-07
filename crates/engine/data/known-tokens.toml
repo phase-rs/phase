@@ -25860,6 +25860,40 @@ scryfall_id = "7b19a41d-95c1-4cd8-89fc-4ec89ab10884"
 scryfall_oracle_id = "f81c047d-de36-4aed-806b-f14a290771a4"
 preset_id = "1cb75630-1114-5430-b13c-b23dea69bb89"
 
+# Heartwood (Soul Tether, FRA "Reality Fracture", releases 2026-10-02): hand-
+# authored ahead of tokens-gen because MTGJSON has not yet published a set
+# file (with per-set token data) for FRA — only AtomicCards.json carries the
+# preview oracle text. `id` is therefore a deterministic uuid5 placeholder
+# (namespaced off the card's real Scryfall oracle_id, not a genuine MTGJSON
+# token uuid) so this entry sorts and dedupes safely; `source_card_refs`
+# below uses the real Scryfall identifiers. Once MTGJSON ships data/mtgjson
+# /sets/FRA.json with a real Heartwood token entry, a normal `tokens-gen`
+# regen will naturally replace this placeholder with the canonical one.
+[[token]]
+id = "1cb84b18-676d-5b79-9c4c-4f94af329ae5"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Soul Tether"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+released_at = "2026-10-02"
+type_line = "Token Artifact — Heartwood"
+rules_text = "{T}: Add {R} or {G}."
+
+[token.body]
+display_name = "Heartwood"
+core_types = ["Artifact"]
+subtypes = ["Heartwood"]
+supertypes = []
+colors = ["Red", "Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Woodwork Prodigy // Soul Tether"
+face_name = "Soul Tether"
+scryfall_oracle_id = "f3ed157f-a09b-405f-aec4-0e7a81d80fc8"
+scryfall_id = "7d17f7e3-7b63-4674-9024-4fd1827f40ec"
+
 [[token]]
 id = "1cfb9daa-8bf2-52e4-a048-b442f30a3a56"
 category = "Creature"
