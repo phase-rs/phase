@@ -1982,6 +1982,14 @@ impl FormatConfig {
     /// the format invariant a payload may declare, this one bounds the seat
     /// count a session is actually built with.
     ///
+    /// That pairing only holds when a payload actually declared a config. An
+    /// UNDECLARED config is not a rules choice to bind a seat count against —
+    /// `server_core::session::SessionManager::create_game_n_players` instead
+    /// picks a default whose own registry range already admits the requested
+    /// seat count (Standard for `player_count <= 2`, Free-for-All above that)
+    /// before this function ever runs, so this check never binds an
+    /// undeclared config against an unrelated format's range.
+    ///
     /// No protocol-version bump accompanies this: no wire *shape* changed (no
     /// new field on any `Serialize`/`Deserialize` type), but this IS a
     /// behavioral tightening — a `player_count` outside the format's range

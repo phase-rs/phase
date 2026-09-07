@@ -14606,14 +14606,7 @@ mod refused_auto_start_join_tests {
                     // nothing and the create is refused.
                     deck: Some(DeckChoice::DeckList(Box::default())),
                 }],
-                // Phase 1d: `validate_for_player_count` now bounds `player_count`
-                // against the format's registry range, and Standard is 2..=2.
-                // This test is about the cEDH bracket gate (which keys on AI
-                // difficulty, not format) and needs three seats, so it opens
-                // with Free-for-All (registry 2..=6, same IndividualSeats
-                // topology) rather than relying on Standard's old unenforced
-                // default.
-                format_config: Some(engine::types::format::FormatConfig::free_for_all()),
+                format_config: None,
                 room_name: None,
                 host_peer_id: None,
                 draft_metadata: None,
