@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { LOG_CATEGORIES, type GameLogEntry, type LogCategory } from "../../adapter/types.ts";
@@ -61,7 +60,6 @@ export function GameLogPanel() {
   const setLogPanelOpenByUser = useUiStore((s) => s.setLogPanelOpenByUser);
   const inspectObjectSticky = useUiStore((s) => s.inspectObjectSticky);
   const gameSessionGeneration = useGameStore((s) => s.gameSessionGeneration);
-  const reduceMotion = useReducedMotion();
   const isMobile = useIsMobile();
 
   const [view, setView] = useState<LogView>("timeline");
@@ -228,17 +226,13 @@ export function GameLogPanel() {
 
   const filterSummary = t("log.filterSummary", { count: filteredEntries.length });
 
+  if (!isOpen) return null;
+
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <motion.aside
+        <aside
           role="region"
           aria-label={t("log.panelLabel")}
           className="flex h-[min(50dvh,28rem)] w-full shrink-0 flex-col border-t border-gray-700 bg-gray-900/95 pb-[env(safe-area-inset-bottom)] shadow-2xl lg:h-full lg:w-80 lg:border-l lg:border-t-0"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 300, damping: 30 }}
         >
           <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-300">{t("log.title")}</h3>
@@ -280,8 +274,6 @@ export function GameLogPanel() {
           </div>
           {unreadCount > 0 && <button type="button" onClick={jumpToLatest} className="m-2 min-h-11 rounded bg-cyan-700 px-3 text-xs font-medium text-white shadow focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("log.jumpToLatest", { count: unreadCount })}</button>}
           <p className="sr-only" aria-live="polite">{copyStatus === "success" ? t("log.copySuccess") : copyStatus === "failure" ? t("log.copyFailure") : filterSummary}</p>
-        </motion.aside>
-      )}
-    </AnimatePresence>
+        </aside>
   );
 }

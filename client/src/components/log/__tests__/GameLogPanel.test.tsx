@@ -268,6 +268,14 @@ describe("GameLogPanel", () => {
     expect(useUiStore.getState().logPanelOpen).toBe(false);
   });
 
+  it("releases its flex-layout column immediately when closed", () => {
+    render(<GameLogPanel />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close game log" }));
+
+    expect(screen.queryByRole("region", { name: "Game log panel" })).not.toBeInTheDocument();
+  });
+
   it("seeds the panel open on desktop from the shipped default", () => {
     // Driven from the store's REAL default rather than a literal "open": with a
     // literal this test would pass against the pre-change seed effect too and so
