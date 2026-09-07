@@ -7950,17 +7950,21 @@ mod tests {
         );
     }
 
-    /// CR 508.1c + CR 508.1h: positive control for the gate above. With a real
-    /// Ghostly Prison on the flushed board, `static_mode_presence` reports
-    /// `CantAttack` present, the gate falls through to the exact walk (the
-    /// counter fires), and the tax is still computed — proving the O(1) gate
-    /// suppresses only boards where no tax could apply.
+    /// CR 508.1c + CR 508.1h + CR 118.12a: positive control for the gate above.
+    /// With a real Ghostly Prison on the flushed board, `static_mode_presence`
+    /// reports `CantAttack` present, the gate falls through to the exact walk
+    /// (the counter fires), and the tax is still computed — proving the O(1)
+    /// gate suppresses only boards where no tax could apply.
     ///
     /// A Ghostly Prison tax is a RESTRICTION (CR 508.1c — "effects that say a
     /// creature can't attack, or that it can't attack unless some condition is
-    /// met") whose cost is aggregated at CR 508.1h. It is not a requirement, so
-    /// CR 508.1d does not describe it; the authority array above carries the
-    /// correct citation.
+    /// met") whose cost is aggregated at CR 508.1h. CR 508.1d still applies: its
+    /// requirement count passes over a restriction, while its third sentence
+    /// covers this case directly — "If a creature can't attack unless a player
+    /// pays a cost, that player is not required to pay that cost." CR 118.12a is
+    /// the general rule behind that optional payment ("unless [a player] pays"
+    /// means "[a player] MAY pay"), and is what this test's `{2}` assertion
+    /// exercises; see the authority comment on `combat_tax_relevant_modes`.
     #[test]
     fn combat_tax_presence_gate_does_not_suppress_a_real_tax() {
         let mut state = setup();
