@@ -1,4 +1,4 @@
-import type { AiActionProposal, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, RewindOption, WaitingFor } from "../adapter/types";
+import type { AiActionProposal, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, PersistedGameState, RewindOption, WaitingFor } from "../adapter/types";
 import type {
   InteractionPreview,
   InteractionPreviewRequest,
@@ -986,11 +986,11 @@ export async function processRemoteUpdate(
 }
 
 /**
- * Restore a previously captured GameState snapshot.
+ * Restore a previously captured game-state snapshot or trusted persistence envelope.
  * Returns null on success, or an error message string on failure.
  */
 export async function restoreGameState(
-  state: GameState,
+  state: PersistedGameState,
   options: { preserveCheckpoints?: boolean } = {},
 ): Promise<string | null> {
   const { adapter, gameId } = useGameStore.getState();
