@@ -35,7 +35,8 @@ use engine::types::zones::Zone;
 use crate::card_value::{cmp_keep, intrinsic_value, keep_key};
 use crate::cast_facts::cast_facts_for_action;
 use crate::combat_ai::{
-    choose_attackers_with_targets_with_profile, choose_blockers_with_profile, CombatLookahead,
+    choose_attackers_with_targets_with_profile_and_threat, choose_blockers_with_profile,
+    CombatLookahead,
 };
 use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
@@ -3177,6 +3178,7 @@ fn score_candidates_core(
             ai_player,
             &effective_profile,
             Some(session.as_ref()),
+            context.opponent_threat.as_ref(),
         ) {
             return vec![(action, 1.0)];
         }
@@ -4091,7 +4093,7 @@ pub(crate) fn deterministic_choice(
         ..
     } = &state.waiting_for
     {
-        let attacks = choose_attackers_with_targets_with_profile(
+        let attacks = choose_attackers_with_targets_with_profile_and_threat(
             state,
             ai_player,
             &config.profile,
@@ -4099,6 +4101,7 @@ pub(crate) fn deterministic_choice(
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
             context.map(|c| c.session.as_ref()),
+            context.and_then(|c| c.opponent_threat.as_ref()),
         );
         return Some(validated_declare_attackers(state, attacks));
     }
@@ -4149,6 +4152,7 @@ fn deterministic_combat_choice(
     ai_player: PlayerId,
     profile: &crate::config::AiProfile,
     session: Option<&AiSession>,
+    opponent_threat: Option<&ThreatProfile>,
 ) -> Option<GameAction> {
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
@@ -4156,7 +4160,7 @@ fn deterministic_combat_choice(
         ..
     } = &state.waiting_for
     {
-        let attacks = choose_attackers_with_targets_with_profile(
+        let attacks = choose_attackers_with_targets_with_profile_and_threat(
             state,
             ai_player,
             profile,
@@ -4164,6 +4168,7 @@ fn deterministic_combat_choice(
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
             session,
+            opponent_threat,
         );
         return Some(validated_declare_attackers(state, attacks));
     }

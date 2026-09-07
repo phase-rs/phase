@@ -190,6 +190,11 @@ pub fn choose_attackers_with_targets(
     )
 }
 
+/// `None`-threat shim over [`choose_attackers_with_targets_with_profile_and_threat`]
+/// for callers with no difficulty-gated threat profile (tests, the public
+/// wrapper). Production combat goes through the `_and_threat` form so the
+/// defender's trick risk is bounded by the difficulty's information boundary
+/// (`search::build_ai_context_with_session`), never a parallel full-info source.
 pub fn choose_attackers_with_targets_with_profile(
     state: &GameState,
     player: PlayerId,
@@ -198,6 +203,29 @@ pub fn choose_attackers_with_targets_with_profile(
     valid_attacker_ids: Option<&[ObjectId]>,
     valid_attack_targets: Option<&[AttackTarget]>,
     session: Option<&AiSession>,
+) -> Vec<(ObjectId, AttackTarget)> {
+    choose_attackers_with_targets_with_profile_and_threat(
+        state,
+        player,
+        profile,
+        lookahead,
+        valid_attacker_ids,
+        valid_attack_targets,
+        session,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // heuristic entry point; inputs are genuinely independent
+pub(crate) fn choose_attackers_with_targets_with_profile_and_threat(
+    state: &GameState,
+    player: PlayerId,
+    profile: &AiProfile,
+    lookahead: CombatLookahead,
+    valid_attacker_ids: Option<&[ObjectId]>,
+    valid_attack_targets: Option<&[AttackTarget]>,
+    session: Option<&AiSession>,
+    opponent_threat: Option<&crate::threat_profile::ThreatProfile>,
 ) -> Vec<(ObjectId, AttackTarget)> {
     let opponents = players::opponents(state, player);
     if opponents.is_empty() {
@@ -326,7 +354,7 @@ pub fn choose_attackers_with_targets_with_profile(
     // `DownsideWeighted` context, computed once for the sweep: man-lands the
     // defender can still animate (latent blockers, CR 509.1a), our own open mana
     // (can we protect an attacker post-block?), the defender's open-mana trick
-    // risk (CR 116), and whether the opponent is on a clock at all.
+    // risk (CR 508.2 + CR 117.1a), and whether the opponent is on a clock at all.
     let downside_weighted = matches!(profile.combat_ev_model, CombatEvModel::DownsideWeighted);
     let latent_blocker_bodies: Vec<AnimatedBody> = if downside_weighted {
         preferred_opponent
@@ -342,7 +370,7 @@ pub fn choose_attackers_with_targets_with_profile(
     };
     let defender_trick_risk_value = if downside_weighted {
         preferred_opponent
-            .map(|opp| defender_trick_risk(state, opp, profile, session))
+            .map(|opp| defender_trick_risk(state, opp, profile, opponent_threat))
             .unwrap_or(0.0)
     } else {
         0.0
@@ -392,7 +420,13 @@ pub fn choose_attackers_with_targets_with_profile(
             latent_defender_best_block(state, id, my_value, &latent_blocker_bodies)
         };
 
-        if is_unblockable || (real_block.is_none() && latent_block.is_none()) {
+        // Unblockable is unblockable at any model. Basic has no trick / off-clock
+        // model, so a board with no blocker is simply a clean attack.
+        // DownsideWeighted still runs the EV gate on a no-blocker board: the
+        // defender's held-up mana (a flash blocker, removal, or Fog) is weighed
+        // there even when no body is on the battlefield.
+        if is_unblockable || (!downside_weighted && real_block.is_none() && latent_block.is_none())
+        {
             attacking_ids.push(id);
             continue;
         }
@@ -2227,55 +2261,56 @@ impl BlockStats {
 }
 
 /// `(blocker_kills_attacker, blocker_survives)` for one blocker vs. one
-/// attacker, accounting for first strike (CR 702.7), double strike
-/// (CR 702.4), and deathtouch (CR 702.2c: any nonzero deathtouch damage is
-/// lethal). Return shape is unchanged from the pre-refactor
-/// `evaluate_block_outcome`.
+/// attacker. Resolves the two combat damage steps in sequence per CR 510.1a–d:
+/// first-strike / double-strike creatures assign in the first step; then any
+/// creature still alive that has double strike (CR 702.4b) or lacks first
+/// strike (CR 702.7b) assigns in the second. A creature that died in the first
+/// step deals nothing in the second — so a double striker killed by a
+/// first-strike blocker only lands its first hit. Deathtouch (CR 702.2c): any
+/// nonzero damage from it is lethal.
 fn block_exchange(blocker: &BlockStats, attacker: &BlockStats) -> (bool, bool) {
-    let attacker_fs = attacker.first_strike || attacker.double_strike;
-    let blocker_fs = blocker.first_strike || blocker.double_strike;
-
-    let attacker_lethal = if attacker.deathtouch {
+    // Damage each side needs to take to die. Deathtouch: 1 (any nonzero is
+    // lethal, CR 702.2c) — whether the dealer actually lands ≥1 is decided by
+    // the accumulated totals below.
+    let lethal_to_blocker = if attacker.deathtouch {
         1
     } else {
         blocker.toughness
     };
-    let blocker_lethal = if blocker.deathtouch {
+    let lethal_to_attacker = if blocker.deathtouch {
         1
     } else {
         attacker.toughness
     };
 
-    // CR 702.4b / CR 702.7b: an unanswered first striker can kill before the
-    // other side deals damage.
-    let blocker_dies_before_dealing =
-        attacker_fs && !blocker_fs && attacker.power >= attacker_lethal;
-    let attacker_dies_before_dealing =
-        blocker_fs && !attacker_fs && blocker.power >= blocker_lethal;
+    let a_first = attacker.first_strike || attacker.double_strike;
+    let b_first = blocker.first_strike || blocker.double_strike;
 
-    // CR 702.4a: double strike deals in both combat damage steps.
-    let effective_attacker_damage = if attacker.double_strike {
-        attacker.power * 2
+    // Step 1 — only first/double strikers assign (CR 510.1a).
+    let a_step1 = if a_first { attacker.power.max(0) } else { 0 };
+    let b_step1 = if b_first { blocker.power.max(0) } else { 0 };
+    let attacker_dead_after_1 = lethal_to_attacker > 0 && b_step1 >= lethal_to_attacker;
+    let blocker_dead_after_1 = lethal_to_blocker > 0 && a_step1 >= lethal_to_blocker;
+
+    // Step 2 — survivors that either double strike or did not strike first.
+    let a_step2 = if !attacker_dead_after_1 && (attacker.double_strike || !a_first) {
+        attacker.power.max(0)
     } else {
-        attacker.power
+        0
     };
-    let effective_blocker_damage = if blocker.double_strike {
-        blocker.power * 2
+    let b_step2 = if !blocker_dead_after_1 && (blocker.double_strike || !b_first) {
+        blocker.power.max(0)
     } else {
-        blocker.power
+        0
     };
 
-    let kills = if blocker_dies_before_dealing {
-        false
-    } else {
-        effective_blocker_damage >= blocker_lethal
-    };
-    let survives = if attacker_dies_before_dealing {
-        true
-    } else {
-        effective_attacker_damage < attacker_lethal
-    };
-    (kills, survives)
+    let total_to_blocker = a_step1 + a_step2;
+    let total_to_attacker = b_step1 + b_step2;
+
+    let blocker_dies = lethal_to_blocker > 0 && total_to_blocker >= lethal_to_blocker;
+    let attacker_dies = lethal_to_attacker > 0 && total_to_attacker >= lethal_to_attacker;
+
+    (attacker_dies, !blocker_dies)
 }
 
 /// Evaluate whether a single blocker kills the attacker and/or survives combat.
@@ -2399,27 +2434,38 @@ fn latent_defender_best_block(
 }
 
 /// Probability mass that the defender's open mana is a combat trick / burn spell
-/// that turns a would-be-safe or trading attack into a loss. Deck-pool aware
-/// when a threat profile is available (CR 116: instant-speed response after
-/// attackers are declared), else a bounded open-mana heuristic. Zero on the
-/// defender's own turn — they don't hold priority to respond to our attack.
+/// that turns a would-be-safe or trading attack into a loss.
+///
+/// `opponent_threat` is the difficulty-gated profile from
+/// `search::build_ai_context_with_session` — this function never builds its own,
+/// so the estimate respects the difficulty's information boundary. A `Full`
+/// profile (`pool_size > 0`) is mana-gated via `castable_probabilities`; an
+/// archetype-only profile carries fixed base rates read directly; with no
+/// profile (no threat-awareness) a bounded open-mana proxy is used.
+///
+/// CR 508.2 + CR 117.1a: after attackers are declared the active player gains
+/// priority and may cast instants / activate abilities — so this is zero on the
+/// defender's own turn, and zero when the defender has no untapped mana.
 fn defender_trick_risk(
     state: &GameState,
     defender: PlayerId,
     profile: &AiProfile,
-    session: Option<&AiSession>,
+    opponent_threat: Option<&crate::threat_profile::ThreatProfile>,
 ) -> f64 {
-    if state.active_player == defender {
+    if state.active_player == defender || available_mana(state, defender) == 0 {
         return 0.0;
     }
     let scaled = |probability: f64| (probability * profile.trick_risk_scale).clamp(0.0, 1.0);
-    if let Some(threat) = session.and_then(|s| s.opponent_threat_profile(state, defender)) {
-        let probs = crate::threat_profile::castable_probabilities(&threat, state, defender);
-        scaled(probs.combat_trick.max(probs.direct_damage))
-    } else {
+    let Some(threat) = opponent_threat else {
         let open_mana = available_mana(state, defender);
-        scaled(f64::from(open_mana.saturating_sub(1)) * 0.10)
-    }
+        return scaled((f64::from(open_mana.saturating_sub(1)) * 0.10).min(0.30));
+    };
+    let probs = if threat.pool_size > 0 {
+        crate::threat_profile::castable_probabilities(threat, state, defender)
+    } else {
+        threat.probabilities.clone()
+    };
+    scaled(probs.combat_trick.max(probs.direct_damage))
 }
 
 /// Extra EV credited to a marginal attack that has a reason to force damage
@@ -5831,6 +5877,96 @@ mod tests {
         assert!(
             raced.iter().any(|(id, _)| *id == racer),
             "racing: forcing damage through is worth the race upside — attack"
+        );
+    }
+
+    #[test]
+    fn downside_model_holds_marginal_attack_into_open_mana_with_no_blockers() {
+        use crate::deck_profile::DeckArchetype;
+        use crate::threat_profile::{ThreatProbabilities, ThreatProfile};
+
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        add_mana_land(&mut state, PlayerId(1)); // untapped mana, but no creature
+
+        // Archetype-only shape (pool_size 0): base rates are read directly, not
+        // recomputed from a card pool — the difficulty-gated authority's form.
+        let threat = ThreatProfile {
+            probabilities: ThreatProbabilities {
+                combat_trick: 0.9,
+                ..Default::default()
+            },
+            opponent_archetype: DeckArchetype::Midrange,
+            category_pools: Default::default(),
+            pool_size: 0,
+            hand_size: 7,
+        };
+
+        let dw = choose_attackers_with_targets_with_profile_and_threat(
+            &state,
+            PlayerId(0),
+            &dw_profile(),
+            CombatLookahead::Disabled,
+            None,
+            None,
+            None,
+            Some(&threat),
+        );
+        assert!(
+            !dw.iter().any(|(id, _)| *id == attacker),
+            "ahead and off-clock, a 2/2 into a defender holding open mana with a \
+             high combat-trick rate and no blockers — expected damage is below the floor"
+        );
+
+        let basic = choose_attackers_with_targets_with_profile_and_threat(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            None,
+            None,
+            None,
+            Some(&threat),
+        );
+        assert!(
+            basic.iter().any(|(id, _)| *id == attacker),
+            "Basic has no trick model — a clean board is a clean attack"
+        );
+    }
+
+    #[test]
+    fn block_exchange_double_striker_that_dies_in_first_step_only_hits_once() {
+        // CR 702.4b: a 3/3 first striker kills a 2/2 double striker in the first
+        // combat damage step. The double striker deals its first 2 (it strikes
+        // in step 1) but not a second 2 — it is dead. Blocker survives.
+        let mut state = setup();
+        let atk = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Doubler",
+            2,
+            2,
+            vec![Keyword::DoubleStrike],
+        );
+        let blk = add_creature(
+            &mut state,
+            PlayerId(1),
+            "Striker",
+            3,
+            3,
+            vec![Keyword::FirstStrike],
+        );
+        let attacker = state.objects.get(&atk).unwrap();
+        let blocker = state.objects.get(&blk).unwrap();
+
+        let (blocker_kills_attacker, blocker_survives) = evaluate_block_outcome(blocker, attacker);
+        assert!(
+            blocker_kills_attacker,
+            "the 3/3 first striker kills the 2/2 double striker in the first step"
+        );
+        assert!(
+            blocker_survives,
+            "the double striker's doubled damage must not land after it dies in the first step"
         );
     }
 }
