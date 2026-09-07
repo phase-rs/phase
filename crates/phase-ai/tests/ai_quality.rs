@@ -1365,6 +1365,55 @@ fn attacks_when_opponent_is_at_lethal() {
     }
 }
 
+/// Difficulty-gated downside weighting: a 2/2 that only trades evenly into a
+/// 2/2 blocker, while we are ahead on board and under no clock, is a marginal
+/// "because I can" attack. VeryEasy/Easy still take the even trade (the historic
+/// boolean gate); Medium+ (the `DownsideWeighted` EV model) hold it back —
+/// expected damage 0, no compensating value, below the off-clock EV floor.
+#[test]
+fn strong_ai_holds_marginal_offclock_attack_weak_ai_takes_it() {
+    let mut scenario = GameScenario::new();
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    scenario.add_creature(P0, "Wall", 0, 6); // board lead, neither side on a clock
+    scenario.add_creature(P1, "Blocker", 2, 2);
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.turn_number = 3;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = P0;
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+    }
+
+    for (diff, action) in ai_choose_at_all_difficulties(runner.state()) {
+        let attacks_bear = match &action {
+            GameAction::DeclareAttackers { attacks, .. } => {
+                attacks.iter().any(|(id, _)| *id == attacker)
+            }
+            other => panic!("{diff:?}: expected DeclareAttackers, got {other:?}"),
+        };
+        match diff {
+            AiDifficulty::VeryEasy | AiDifficulty::Easy => assert!(
+                attacks_bear,
+                "{diff:?}: the Basic combat model takes the even trade"
+            ),
+            _ => assert!(
+                !attacks_bear,
+                "{diff:?}: DownsideWeighted holds the marginal off-clock attack"
+            ),
+        }
+    }
+}
+
 // ── Board Development ────────────────────────────────────────────────────
 
 #[test]

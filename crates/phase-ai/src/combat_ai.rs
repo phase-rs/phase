@@ -17,11 +17,13 @@ use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
-use crate::config::{AiConfig, AiProfile, ExecutionMode};
+use crate::config::{AiConfig, AiProfile, CombatEvModel, ExecutionMode};
 use crate::damage_reflection::has_damage_reflection_to_controller;
-use crate::eval::{evaluate_creature, threat_level};
+use crate::eval::{creature_combat_value, evaluate_creature, threat_level, KeywordBonuses};
+use crate::manland::{self, AnimatedBody};
 use crate::projection::{project_to, projection_deadline, Projection, ProjectionHorizon};
 use crate::session::AiSession;
+use crate::zone_eval::available_mana;
 
 /// Block-legality static slices collected once per combat decision and threaded
 /// through the per-pair `can_block_pair` checks. Hoisting these out of the
@@ -321,7 +323,48 @@ pub fn choose_attackers_with_targets_with_profile(
     // statics O(candidates × blockers) times.
     let slices = BlockLegalitySlices::collect(state);
 
-    // Determine which creatures should attack (same logic as before)
+    // `DownsideWeighted` context, computed once for the sweep: man-lands the
+    // defender can still animate (latent blockers, CR 509.1a), our own open mana
+    // (can we protect an attacker post-block?), the defender's open-mana trick
+    // risk (CR 116), and whether the opponent is on a clock at all.
+    let downside_weighted = matches!(profile.combat_ev_model, CombatEvModel::DownsideWeighted);
+    let latent_blocker_bodies: Vec<AnimatedBody> = if downside_weighted {
+        preferred_opponent
+            .map(|opp| latent_blockers(state, opp))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let my_open_mana = if downside_weighted {
+        available_mana(state, player)
+    } else {
+        0
+    };
+    let defender_trick_risk_value = if downside_weighted {
+        preferred_opponent
+            .map(|opp| defender_trick_risk(state, opp, profile, session))
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    // "Ahead and off-clock": PreserveAdvantage, and no opponent can kill us
+    // inside `OFF_CLOCK_TURNS` at their current board rate. Marginal attacks
+    // must then clear `offclock_attack_ev_floor` rather than merely not be a
+    // bad trade.
+    let off_clock = downside_weighted
+        && matches!(objective, CombatObjective::PreserveAdvantage)
+        && opponents
+            .iter()
+            .all(|&opp| race_clock(state, opp, player) >= OFF_CLOCK_TURNS);
+    let pw_target_available = valid_attack_targets
+        .map(|targets| {
+            targets
+                .iter()
+                .any(|target| !matches!(target, AttackTarget::Player(_)))
+        })
+        .unwrap_or(false);
+
+    // Determine which creatures should attack.
     let mut attacking_ids = Vec::new();
     for &id in &candidates {
         let obj = match state.objects.get(&id) {
@@ -336,38 +379,58 @@ pub fn choose_attackers_with_targets_with_profile(
         let has_lifelink = obj.has_keyword(&Keyword::Lifelink);
         let is_commander = obj.is_commander;
 
-        if is_unblockable || opponent_blockers.is_empty() {
+        // CR 509.1a: evaluate against the defender's *best* real block (not its
+        // cheapest body) and its best latent man-land block.
+        let real_block = if opponent_blockers.is_empty() {
+            None
+        } else {
+            defender_best_block(state, id, my_value, &opponent_blockers, &slices)
+        };
+        let latent_block = if latent_blocker_bodies.is_empty() {
+            None
+        } else {
+            latent_defender_best_block(state, id, my_value, &latent_blocker_bodies)
+        };
+
+        if is_unblockable || (real_block.is_none() && latent_block.is_none()) {
             attacking_ids.push(id);
             continue;
         }
 
-        // CR 509.1a: Evaluate the attack against the defender's *best* block, not
-        // its cheapest creature. Assuming the defender chump-trades with its
-        // weakest body let the AI swing doomed creatures into a "favorable trade"
-        // the defender would never offer — it instead kills the attacker for free
-        // with a first-striker or a larger body (gamestate1: a 1/1 animated land
-        // sent into a 2/1 first strike).
-        match defender_best_block(state, id, my_value, &opponent_blockers, &slices) {
-            None => attacking_ids.push(id),
-            Some(DefenderBlock {
-                blocker_value,
-                kills_blocker,
-                attacker_survives,
-            }) => {
-                let free_damage = kills_blocker && attacker_survives;
-                let favorable_trade = kills_blocker && my_value <= blocker_value;
-                if should_attack_given_objective(
-                    objective,
-                    free_damage,
-                    favorable_trade,
-                    has_lifelink,
-                    my_power,
-                    attacker_survives,
-                    is_commander,
-                ) {
-                    attacking_ids.push(id);
+        let should_attack = match profile.combat_ev_model {
+            CombatEvModel::Basic => match real_block {
+                None => true,
+                Some(ref block) => {
+                    let free_damage = block.kills_blocker && block.attacker_survives;
+                    let favorable_trade = block.kills_blocker && my_value <= block.blocker_value;
+                    should_attack_given_objective(
+                        objective,
+                        free_damage,
+                        favorable_trade,
+                        has_lifelink,
+                        my_power,
+                        block.attacker_survives,
+                        is_commander,
+                    )
                 }
-            }
+            },
+            CombatEvModel::DownsideWeighted => should_attack_ev(&AttackEvInputs {
+                objective,
+                attacker: obj,
+                attacker_value: my_value,
+                real_block: real_block.as_ref(),
+                latent_block: latent_block.as_ref(),
+                latent_credence: profile.latent_blocker_credence,
+                trick_risk: defender_trick_risk_value,
+                my_open_mana,
+                no_follow_up_mult: profile.no_follow_up_downside_mult,
+                offclock: off_clock,
+                offclock_ev_floor: profile.offclock_attack_ev_floor,
+                pw_target_available,
+            }),
+        };
+        if should_attack {
+            attacking_ids.push(id);
         }
     }
 
@@ -2123,73 +2186,343 @@ fn defender_best_block(
         .map(|(_, outcome)| outcome)
 }
 
-/// Evaluate whether a single blocker kills the attacker and/or survives combat,
-/// accounting for first strike (CR 702.7), double strike (CR 702.4), and
-/// deathtouch (CR 702.2).
-fn evaluate_block_outcome(
-    blocker: &engine::game::game_object::GameObject,
-    attacker: &engine::game::game_object::GameObject,
-) -> (bool, bool) {
-    let blocker_power = blocker.power.unwrap_or(0);
-    let blocker_toughness = blocker.toughness.unwrap_or(0);
-    let attacker_power = attacker.power.unwrap_or(0);
-    let attacker_toughness = attacker.toughness.unwrap_or(0);
+/// Minimal combat-relevant stats for one creature or one synthetic animated
+/// body, so the exchange math (CR 702.7 / CR 702.4 / CR 702.2) runs against
+/// both a real `GameObject` and a latent man-land body identically.
+struct BlockStats {
+    power: i32,
+    toughness: i32,
+    first_strike: bool,
+    double_strike: bool,
+    deathtouch: bool,
+}
 
-    let attacker_has_first_strike =
-        attacker.has_keyword(&Keyword::FirstStrike) || attacker.has_keyword(&Keyword::DoubleStrike);
-    let blocker_has_first_strike =
-        blocker.has_keyword(&Keyword::FirstStrike) || blocker.has_keyword(&Keyword::DoubleStrike);
-    let attacker_has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
-    let blocker_has_deathtouch = blocker.has_keyword(&Keyword::Deathtouch);
+impl BlockStats {
+    fn from_object(obj: &engine::game::game_object::GameObject) -> Self {
+        Self {
+            power: obj.power.unwrap_or(0),
+            toughness: obj.toughness.unwrap_or(0),
+            first_strike: obj.has_keyword(&Keyword::FirstStrike),
+            double_strike: obj.has_keyword(&Keyword::DoubleStrike),
+            deathtouch: obj.has_keyword(&Keyword::Deathtouch),
+        }
+    }
 
-    // CR 702.2c: Any nonzero damage from deathtouch is lethal.
-    let attacker_lethal = if attacker_has_deathtouch {
+    fn from_body(body: &AnimatedBody) -> Self {
+        Self {
+            power: body.power,
+            toughness: body.toughness,
+            first_strike: body.has_keyword(&Keyword::FirstStrike),
+            double_strike: body.has_keyword(&Keyword::DoubleStrike),
+            deathtouch: body.has_keyword(&Keyword::Deathtouch),
+        }
+    }
+}
+
+/// `(blocker_kills_attacker, blocker_survives)` for one blocker vs. one
+/// attacker, accounting for first strike (CR 702.7), double strike
+/// (CR 702.4), and deathtouch (CR 702.2c: any nonzero deathtouch damage is
+/// lethal). Return shape is unchanged from the pre-refactor
+/// `evaluate_block_outcome`.
+fn block_exchange(blocker: &BlockStats, attacker: &BlockStats) -> (bool, bool) {
+    let attacker_fs = attacker.first_strike || attacker.double_strike;
+    let blocker_fs = blocker.first_strike || blocker.double_strike;
+
+    let attacker_lethal = if attacker.deathtouch {
         1
     } else {
-        blocker_toughness
+        blocker.toughness
     };
-    let blocker_lethal = if blocker_has_deathtouch {
+    let blocker_lethal = if blocker.deathtouch {
         1
     } else {
-        attacker_toughness
+        attacker.toughness
     };
 
-    // CR 702.4b / CR 702.7b: First-strike/double-strike creatures deal damage
-    // in the first combat damage step. If one side has it and the other doesn't,
-    // the first-striker may kill before the other deals damage.
+    // CR 702.4b / CR 702.7b: an unanswered first striker can kill before the
+    // other side deals damage.
     let blocker_dies_before_dealing =
-        attacker_has_first_strike && !blocker_has_first_strike && attacker_power >= attacker_lethal;
-
+        attacker_fs && !blocker_fs && attacker.power >= attacker_lethal;
     let attacker_dies_before_dealing =
-        blocker_has_first_strike && !attacker_has_first_strike && blocker_power >= blocker_lethal;
+        blocker_fs && !attacker_fs && blocker.power >= blocker_lethal;
 
-    // CR 702.4a: Double strike deals damage in both combat damage steps.
-    let effective_attacker_damage = if attacker.has_keyword(&Keyword::DoubleStrike) {
-        attacker_power * 2
+    // CR 702.4a: double strike deals in both combat damage steps.
+    let effective_attacker_damage = if attacker.double_strike {
+        attacker.power * 2
     } else {
-        attacker_power
+        attacker.power
     };
-    let effective_blocker_damage = if blocker.has_keyword(&Keyword::DoubleStrike) {
-        blocker_power * 2
+    let effective_blocker_damage = if blocker.double_strike {
+        blocker.power * 2
     } else {
-        blocker_power
+        blocker.power
     };
 
     let kills = if blocker_dies_before_dealing {
-        // Blocker is killed by first strike before it can deal damage
         false
     } else {
         effective_blocker_damage >= blocker_lethal
     };
-
     let survives = if attacker_dies_before_dealing {
-        // Attacker is killed by blocker's first strike before it can deal damage
         true
     } else {
         effective_attacker_damage < attacker_lethal
     };
-
     (kills, survives)
+}
+
+/// Evaluate whether a single blocker kills the attacker and/or survives combat.
+fn evaluate_block_outcome(
+    blocker: &engine::game::game_object::GameObject,
+    attacker: &engine::game::game_object::GameObject,
+) -> (bool, bool) {
+    block_exchange(
+        &BlockStats::from_object(blocker),
+        &BlockStats::from_object(attacker),
+    )
+}
+
+/// CR 509.1a: man-lands the defender could still animate this combat, as latent
+/// blockers. Structural detection (any activated ability that adds the Creature
+/// type — no card-name list). Included only when the defender has the open mana
+/// for the activation (CR 602.1) and activating it would not leave the source
+/// tapped (CR 508.1a / CR 509.1a). Summoning sickness is irrelevant: CR 302.6
+/// restricts attacking and tap-abilities, never blocking, so a land animated
+/// this turn still blocks.
+fn latent_blockers(state: &GameState, defender: PlayerId) -> Vec<AnimatedBody> {
+    let open_mana = available_mana(state, defender);
+    if open_mana == 0 {
+        return Vec::new();
+    }
+    let mut bodies = Vec::new();
+    for &id in &state.battlefield {
+        let Some(obj) = state.objects.get(&id) else {
+            continue;
+        };
+        if obj.controller != defender
+            || obj.tapped
+            || obj.card_types.core_types.contains(&CoreType::Creature)
+        {
+            continue;
+        }
+        for (index, ability) in engine::game::casting::activated_ability_definitions(state, id) {
+            if !manland::animates_source(&ability) {
+                continue;
+            }
+            match manland::animation_mana_value(&ability) {
+                Some(cost) if cost <= open_mana => {}
+                _ => continue,
+            }
+            if manland::activation_leaves_source_tapped(state, defender, id, index, &ability) {
+                continue;
+            }
+            bodies.push(manland::extract_body(&ability));
+            break;
+        }
+    }
+    bodies
+}
+
+/// CR 509.1b: a synthetic animated body has no `ObjectId`, so it can't consult
+/// the block-legality static slices. Approximate the common evasion gates:
+/// CR 702.9b flying (needs flying or CR 702.17 reach), CR 702.28b shadow,
+/// CR 702.111b menace. Evasion this doesn't model falls through as "can block",
+/// which can only ever over-credit a latent blocker in a rare corner — the EV
+/// math already discounts latent blocks by `latent_blocker_credence`.
+fn latent_body_can_block(
+    body: &AnimatedBody,
+    attacker: &engine::game::game_object::GameObject,
+) -> bool {
+    if attacker.has_keyword(&Keyword::Flying)
+        && !body.has_keyword(&Keyword::Flying)
+        && !body.has_keyword(&Keyword::Reach)
+    {
+        return false;
+    }
+    // CR 702.28b: shadow can block / be blocked only by shadow.
+    if attacker.has_keyword(&Keyword::Shadow) != body.has_keyword(&Keyword::Shadow) {
+        return false;
+    }
+    // CR 702.111b: menace needs two or more blockers; a lone latent body can't.
+    if attacker.has_keyword(&Keyword::Menace) {
+        return false;
+    }
+    true
+}
+
+/// CR 509.1a: the block a rational defender would make with one of its latent
+/// man-land bodies — the analog of [`defender_best_block`] over synthetic bodies.
+fn latent_defender_best_block(
+    state: &GameState,
+    attacker_id: ObjectId,
+    attacker_value: f64,
+    latent: &[AnimatedBody],
+) -> Option<DefenderBlock> {
+    let attacker = state.objects.get(&attacker_id)?;
+    let attacker_stats = BlockStats::from_object(attacker);
+    latent
+        .iter()
+        .filter(|body| latent_body_can_block(body, attacker))
+        .map(|body| {
+            let blocker_value = creature_combat_value(
+                body.power,
+                body.toughness,
+                |keyword| body.has_keyword(keyword),
+                &KeywordBonuses::default(),
+            );
+            let (blocker_kills_attacker, blocker_survives) =
+                block_exchange(&BlockStats::from_body(body), &attacker_stats);
+            let defender_gain = (if blocker_kills_attacker {
+                attacker_value
+            } else {
+                0.0
+            }) - (if blocker_survives { 0.0 } else { blocker_value });
+            (
+                defender_gain,
+                DefenderBlock {
+                    blocker_value,
+                    kills_blocker: !blocker_survives,
+                    attacker_survives: !blocker_kills_attacker,
+                },
+            )
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(_, outcome)| outcome)
+}
+
+/// Probability mass that the defender's open mana is a combat trick / burn spell
+/// that turns a would-be-safe or trading attack into a loss. Deck-pool aware
+/// when a threat profile is available (CR 116: instant-speed response after
+/// attackers are declared), else a bounded open-mana heuristic. Zero on the
+/// defender's own turn — they don't hold priority to respond to our attack.
+fn defender_trick_risk(
+    state: &GameState,
+    defender: PlayerId,
+    profile: &AiProfile,
+    session: Option<&AiSession>,
+) -> f64 {
+    if state.active_player == defender {
+        return 0.0;
+    }
+    let scaled = |probability: f64| (probability * profile.trick_risk_scale).clamp(0.0, 1.0);
+    if let Some(threat) = session.and_then(|s| s.opponent_threat_profile(state, defender)) {
+        let probs = crate::threat_profile::castable_probabilities(&threat, state, defender);
+        scaled(probs.combat_trick.max(probs.direct_damage))
+    } else {
+        let open_mana = available_mana(state, defender);
+        scaled(f64::from(open_mana.saturating_sub(1)) * 0.10)
+    }
+}
+
+/// Extra EV credited to a marginal attack that has a reason to force damage
+/// through beyond raw face damage.
+const RACE_ATTACK_UPSIDE: f64 = 2.5;
+const PLANESWALKER_PRESSURE_UPSIDE: f64 = 1.5;
+/// `race_clock` turns-to-die at or above which the opponent is "not a clock",
+/// so `PreserveAdvantage` marginal attacks must clear `offclock_attack_ev_floor`.
+const OFF_CLOCK_TURNS: u32 = 4;
+
+struct AttackEvInputs<'a> {
+    objective: CombatObjective,
+    attacker: &'a engine::game::game_object::GameObject,
+    attacker_value: f64,
+    real_block: Option<&'a DefenderBlock>,
+    latent_block: Option<&'a DefenderBlock>,
+    latent_credence: f64,
+    trick_risk: f64,
+    my_open_mana: u32,
+    no_follow_up_mult: f64,
+    offclock: bool,
+    offclock_ev_floor: f64,
+    pw_target_available: bool,
+}
+
+/// `CombatEvModel::DownsideWeighted` gate:
+/// `expected_damage - P(bad_block) * value_at_risk + upside` vs. an
+/// objective-scaled floor. `PushLethal` always attacks.
+fn should_attack_ev(input: &AttackEvInputs<'_>) -> bool {
+    if input.objective == CombatObjective::PushLethal {
+        return true;
+    }
+
+    let power = f64::from(input.attacker.power.unwrap_or(0).max(0));
+    let has_lifelink = input.attacker.has_keyword(&Keyword::Lifelink);
+
+    // CR 903.8: never trade the commander outside lethal — mirror
+    // should_attack_given_objective. "Safe" here = the block is pure free damage.
+    let block_is_free = |b: &DefenderBlock| b.kills_blocker && b.attacker_survives;
+    if input.attacker.is_commander {
+        let real_ok = input.real_block.is_none_or(block_is_free);
+        let latent_ok = input.latent_block.is_none_or(block_is_free);
+        if !(real_ok && latent_ok) {
+            return false;
+        }
+    }
+
+    let value_at_risk = input.attacker_value
+        * if input.my_open_mana == 0 {
+            input.no_follow_up_mult
+        } else {
+            1.0
+        };
+
+    // Reduce one candidate block to (defender takes it, it costs us the creature
+    // without adequate compensation). A block that is pure free damage for us the
+    // defender simply declines.
+    let assess = |b: &DefenderBlock| -> (bool, bool) {
+        if b.kills_blocker && b.attacker_survives {
+            return (false, false);
+        }
+        let attacker_dies = !b.attacker_survives;
+        let favorable_trade =
+            attacker_dies && b.kills_blocker && input.attacker_value <= b.blocker_value;
+        (true, attacker_dies && !favorable_trade)
+    };
+
+    let (real_blocks, real_bad) = match input.real_block {
+        Some(block) => assess(block),
+        None => (false, false),
+    };
+    let (latent_blocks, latent_bad) = match input.latent_block {
+        Some(block) => assess(block),
+        None => (false, false),
+    };
+
+    let p_block_any = if real_blocks {
+        1.0
+    } else if latent_blocks {
+        input.latent_credence
+    } else {
+        0.0
+    };
+
+    let mut p_bad_block: f64 = 0.0;
+    if real_blocks && real_bad {
+        p_bad_block = 1.0;
+    } else if latent_blocks && latent_bad {
+        p_bad_block = p_bad_block.max(input.latent_credence);
+    }
+    // A trick needs a body to target/pump — only fold it in when one can block.
+    if real_blocks || latent_blocks {
+        p_bad_block = p_bad_block.max(input.trick_risk.clamp(0.0, 1.0));
+    }
+
+    let lifelink_bonus = if has_lifelink { 0.5 } else { 0.0 };
+    let expected_dmg = power * (1.0 - p_block_any) * (1.0 + lifelink_bonus);
+
+    let upside = match input.objective {
+        CombatObjective::Race => RACE_ATTACK_UPSIDE,
+        _ if input.pw_target_available => PLANESWALKER_PRESSURE_UPSIDE,
+        _ => 0.0,
+    };
+
+    let ev = expected_dmg - p_bad_block * value_at_risk + upside;
+
+    let floor = match input.objective {
+        CombatObjective::PreserveAdvantage if input.offclock => input.offclock_ev_floor,
+        _ => 0.0,
+    };
+    ev > floor
 }
 
 #[cfg(test)]
@@ -3061,6 +3394,7 @@ mod tests {
             risk_tolerance: 0.8,
             interaction_patience: 0.4,
             stabilize_bias: 0.9,
+            ..AiProfile::default()
         };
         let assignments = choose_blockers_with_profile(
             &state,
@@ -5244,6 +5578,252 @@ mod tests {
             "CR 702.19b: a floor-sized gang absorbing 2 of 11 leaves a lethal residual \
              at 6 life, so the trampler must not be chump-ganged — the creatures are \
              spent and the player dies anyway. Got {assignments:?}"
+        );
+    }
+
+    // ─────────── DownsideWeighted EV gate + latent man-land blockers ──────────
+
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification as CMod, Effect,
+        ManaProduction, StaticDefinition,
+    };
+    use engine::types::mana::{ManaColor, ManaCost};
+    use engine::types::statics::StaticMode;
+
+    fn dw_profile() -> AiProfile {
+        AiProfile {
+            combat_ev_model: CombatEvModel::DownsideWeighted,
+            ..AiProfile::default()
+        }
+    }
+
+    /// A land that taps for one generic mana — a real payable source for the
+    /// engine's cost solver (unlike a bare `create_object` land).
+    fn add_mana_land(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Wastes".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: Default::default(),
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        );
+        ability.cost = Some(AbilityCost::Tap);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.entered_battlefield_turn = Some(1);
+        *std::sync::Arc::make_mut(&mut obj.abilities) = vec![ability];
+        id
+    }
+
+    /// A man-land: a land whose `{generic}` activated ability grants it the
+    /// Creature type plus a `power`/`toughness` body until end of turn.
+    fn add_manland(
+        state: &mut GameState,
+        owner: PlayerId,
+        generic_cost: u32,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Manland".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                    .modifications(vec![
+                        CMod::SetPower { value: power },
+                        CMod::SetToughness { value: toughness },
+                        CMod::AddType {
+                            core_type: CoreType::Creature,
+                        },
+                    ])],
+                duration: Some(engine::types::ability::Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        ability.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::generic(generic_cost),
+        });
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.entered_battlefield_turn = Some(1);
+        *std::sync::Arc::make_mut(&mut obj.abilities) = vec![ability];
+        id
+    }
+
+    #[test]
+    fn latent_blockers_detects_open_manland() {
+        let mut state = setup();
+        add_manland(&mut state, PlayerId(1), 1, 2, 2);
+        add_mana_land(&mut state, PlayerId(1)); // pays the {1} without tapping the manland
+
+        let bodies = latent_blockers(&state, PlayerId(1));
+        assert_eq!(
+            bodies.len(),
+            1,
+            "an open, payable man-land is a latent blocker"
+        );
+        assert_eq!((bodies[0].power, bodies[0].toughness), (2, 2));
+    }
+
+    #[test]
+    fn latent_blockers_empty_when_defender_tapped_out() {
+        let mut state = setup();
+        add_manland(&mut state, PlayerId(1), 1, 2, 2);
+        let land = add_mana_land(&mut state, PlayerId(1));
+        state.objects.get_mut(&land).unwrap().tapped = true;
+
+        assert!(
+            latent_blockers(&state, PlayerId(1)).is_empty(),
+            "no open mana to pay the animation cost without tapping the manland itself"
+        );
+    }
+
+    #[test]
+    fn downside_model_holds_marginal_attacker_into_open_manland() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        add_manland(&mut state, PlayerId(1), 1, 2, 2);
+        add_mana_land(&mut state, PlayerId(1));
+
+        let dw = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &dw_profile(),
+            CombatLookahead::Disabled,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !dw.iter().any(|(id, _)| *id == attacker),
+            "a 2/2 that only trades into an animatable 2/2 land, while ahead and \
+             off-clock, has negative EV — hold it back"
+        );
+
+        // Basic model has no latent-blocker sight, so it swings.
+        let basic = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            basic.iter().any(|(id, _)| *id == attacker),
+            "Basic model ignores the un-animated man-land and attacks"
+        );
+    }
+
+    #[test]
+    fn downside_model_attacks_when_defender_cannot_animate() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        add_manland(&mut state, PlayerId(1), 1, 2, 2);
+        let land = add_mana_land(&mut state, PlayerId(1));
+        state.objects.get_mut(&land).unwrap().tapped = true;
+
+        let dw = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &dw_profile(),
+            CombatLookahead::Disabled,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            dw.iter().any(|(id, _)| *id == attacker),
+            "defender is tapped out — the man-land is not a live blocker, so the \
+             unblocked 2/2 attacks"
+        );
+    }
+
+    #[test]
+    fn downside_model_holds_offclock_even_trade() {
+        // 2/2 into a real 2/2 blocker — an even trade the Basic model always
+        // takes. Ahead on board, neither side on a clock: PreserveAdvantage +
+        // off-clock, so it must clear the off-clock EV floor. An even trade
+        // (expected damage 0, no compensating value swing) does not.
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        add_creature(&mut state, PlayerId(0), "Wall", 0, 6, vec![]);
+        add_creature(&mut state, PlayerId(1), "Blocker", 2, 2, vec![]);
+
+        let held = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &dw_profile(),
+            CombatLookahead::Disabled,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !held.iter().any(|(id, _)| *id == attacker),
+            "ahead and off-clock, an even trade does not clear the EV floor — hold back"
+        );
+
+        // Basic model: an even trade is always a favorable_trade → it swings.
+        let basic = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            basic.iter().any(|(id, _)| *id == attacker),
+            "Basic model takes the even trade"
+        );
+    }
+
+    #[test]
+    fn downside_model_races_the_even_trade_when_under_a_clock() {
+        // Same 2/2-into-2/2 even trade, but the board says we are racing: behind
+        // on board, opponent has a real clock on us. Race upside makes forcing
+        // the trade worthwhile.
+        let mut state = setup();
+        let racer = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        add_creature(&mut state, PlayerId(1), "Blocker", 2, 2, vec![]);
+        add_creature(&mut state, PlayerId(1), "Clock", 2, 2, vec![]);
+        state.players[0].life = 10;
+
+        let raced = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &dw_profile(),
+            CombatLookahead::Disabled,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            raced.iter().any(|(id, _)| *id == racer),
+            "racing: forcing the even trade is worth the race upside — attack"
         );
     }
 }

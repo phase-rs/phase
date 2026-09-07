@@ -37,6 +37,8 @@ use crate::synergy::SynergyGraph;
 const COMMANDER_ANALYSIS_WEIGHT: u32 = 4;
 
 type ProspectiveFetchProposals = HashMap<PlayerId, Vec<(GameAction, CertifiedFetchPrompt)>>;
+/// Opponent threat profiles keyed by `(opponent, state hash)`.
+type ThreatProfileCache = HashMap<(PlayerId, u64), Arc<crate::threat_profile::ThreatProfile>>;
 pub(crate) type PactRouteStore = HashMap<PlayerId, CertifiedPactPlan>;
 pub(crate) type PactPlanProposals = HashMap<PlayerId, Vec<(GameAction, CertifiedPactPlan)>>;
 
@@ -53,6 +55,10 @@ pub struct AiSession {
     /// `turn_number` + `active_player`, so stale entries from prior turns
     /// never match — no explicit invalidation needed.
     pub projection_cache: Arc<RwLock<HashMap<ProjectionKey, Arc<Projection>>>>,
+    /// Cache for opponent threat profiles, keyed by `(opponent, state hash)`.
+    /// A changed state hash rebuilds — the profile reads hand size and the
+    /// remaining-deck view, both of which drift as the game advances.
+    pub(crate) threat_profile_cache: Arc<RwLock<ThreatProfileCache>>,
     /// Reducer-certified fetch selection armed only after this session chose
     /// its corresponding root activation. The engine token contains no clone
     /// or hidden terminal state and rejects any stale prompt.
@@ -86,6 +92,7 @@ impl std::fmt::Debug for AiSession {
             .field("synergy", &self.synergy)
             .field("memory", &self.memory)
             .field("projection_cache", &self.projection_cache)
+            .field("threat_profile_cache", &self.threat_profile_cache)
             .field("prospective_fetch_prompt", &self.prospective_fetch_prompt)
             .field(
                 "prospective_fetch_follow_up",
@@ -139,6 +146,7 @@ impl AiSession {
             synergy,
             memory: Arc::default(),
             projection_cache: Arc::default(),
+            threat_profile_cache: Arc::default(),
             prospective_fetch_prompt: Arc::default(),
             prospective_fetch_follow_up: Arc::default(),
             prospective_fetch_proposals: Arc::default(),
@@ -298,6 +306,38 @@ impl AiSession {
             .read()
             .ok()
             .and_then(|cache| cache.get(&key).map(Arc::clone))
+    }
+
+    /// Opponent threat profile — mana-gated combat-trick / removal / burn
+    /// probabilities derived from the opponent's remaining card pool
+    /// ([`crate::threat_profile`]). Built once per `(opponent, state)` and
+    /// cached. Returns `None` when the opponent's deck pool is unknown, so
+    /// callers fall back to a coarser open-mana heuristic.
+    pub fn opponent_threat_profile(
+        &self,
+        state: &GameState,
+        opponent: PlayerId,
+    ) -> Option<Arc<crate::threat_profile::ThreatProfile>> {
+        let key = (opponent, quick_state_hash(state));
+
+        if let Ok(cache) = self.threat_profile_cache.read() {
+            if let Some(hit) = cache.get(&key) {
+                return Some(Arc::clone(hit));
+            }
+        }
+
+        let deck_view = crate::deck_knowledge::remaining_deck_view(state, opponent);
+        if deck_view.entries.is_empty() {
+            return None;
+        }
+        let profile = Arc::new(crate::threat_profile::build_threat_profile(
+            state, opponent, &deck_view,
+        ));
+
+        if let Ok(mut cache) = self.threat_profile_cache.write() {
+            cache.insert(key, Arc::clone(&profile));
+        }
+        Some(profile)
     }
 }
 

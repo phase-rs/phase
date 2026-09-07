@@ -182,6 +182,7 @@ fn eval_params_to_config(params: &[f64]) -> AiConfig {
         risk_tolerance: params[9].clamp(0.01, 2.0),
         interaction_patience: params[10].clamp(0.01, 2.0),
         stabilize_bias: params[11].clamp(0.01, 3.0),
+        ..AiProfile::default()
     };
 
     let mut config = create_config(AiDifficulty::Medium, Platform::Native);
@@ -351,6 +352,7 @@ fn load_cma_tuned_config(path: &std::path::Path) -> Result<AiConfig, String> {
         risk_tolerance: field(profile, "risk_tolerance")?,
         interaction_patience: field(profile, "interaction_patience")?,
         stabilize_bias: field(profile, "stabilize_bias")?,
+        ..AiProfile::default()
     };
 
     Ok(config_from_late_weights_and_profile(late, profile))

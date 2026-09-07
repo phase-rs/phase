@@ -173,11 +173,43 @@ pub enum OpponentModel {
     SampledReply,
 }
 
+/// How the heuristic combat AI gates a marginal attacker (see
+/// [`crate::combat_ai`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombatEvModel {
+    /// The historical 3-way boolean gate (`free_damage` / `favorable_trade` /
+    /// `lifelink_bonus` per objective). Un-animated man-lands are invisible and
+    /// there is no numeric downside weighting. Used by VeryEasy / Easy.
+    Basic,
+    /// Numeric `expected_damage - P(bad_block) * value_lost` gate that also
+    /// treats an animatable man-land as a latent blocker (CR 509.1a), folds in
+    /// the defender's open-mana combat-trick risk, and raises the bar for
+    /// marginal attacks while ahead and off-clock. Used by Medium and up.
+    DownsideWeighted,
+}
+
 #[derive(Debug, Clone)]
 pub struct AiProfile {
     pub risk_tolerance: f64,
     pub interaction_patience: f64,
     pub stabilize_bias: f64,
+    /// Combat marginal-attacker gate. See [`CombatEvModel`].
+    pub combat_ev_model: CombatEvModel,
+    /// `DownsideWeighted` only: credence that a detected animatable man-land the
+    /// defender has open mana for actually blocks (it costs them mana + the
+    /// land). Scales that block's contribution to `P(bad_block)`. ~0.6.
+    pub latent_blocker_credence: f64,
+    /// `DownsideWeighted` only: multiplier applied to an attacker's value-at-risk
+    /// when the AI has zero untapped mana and therefore cannot protect it after
+    /// blocks. ~1.3.
+    pub no_follow_up_downside_mult: f64,
+    /// `DownsideWeighted` only: EV a `PreserveAdvantage` attack must clear when
+    /// the AI is ahead and under no clock — marginal "because I can" attacks are
+    /// held back below this bar. In creature-value units (~0.75).
+    pub offclock_attack_ev_floor: f64,
+    /// `DownsideWeighted` only: scale on the defender's open-mana combat-trick /
+    /// burn probability before it feeds `P(bad_block)`. 1.0 = as-modeled.
+    pub trick_risk_scale: f64,
 }
 
 impl AiProfile {
@@ -192,6 +224,9 @@ impl AiProfile {
             interaction_patience: (self.interaction_patience * strategy.interaction_patience_mult)
                 .clamp(0.1, 1.0),
             stabilize_bias: (self.stabilize_bias * strategy.stabilize_bias_mult).clamp(0.5, 2.0),
+            // Combat-EV knobs are difficulty-scoped, not archetype-modulated —
+            // carry them through unchanged.
+            ..self.clone()
         }
     }
 }
@@ -202,6 +237,13 @@ impl Default for AiProfile {
             risk_tolerance: 0.6,
             interaction_patience: 0.75,
             stabilize_bias: 1.0,
+            // Preserve the historical gate for the raw wrapper and tests;
+            // difficulty presets opt Medium+ into `DownsideWeighted`.
+            combat_ev_model: CombatEvModel::Basic,
+            latent_blocker_credence: 0.6,
+            no_follow_up_downside_mult: 1.3,
+            offclock_attack_ev_floor: 0.75,
+            trick_risk_scale: 1.0,
         }
     }
 }
@@ -1258,6 +1300,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.9,
                 interaction_patience: 0.2,
                 stabilize_bias: 0.8,
+                ..AiProfile::default()
             },
             false,
             false,
@@ -1282,6 +1325,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.8,
                 interaction_patience: 0.4,
                 stabilize_bias: 0.9,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1306,6 +1350,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.65,
                 interaction_patience: 0.7,
                 stabilize_bias: 1.0,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1335,6 +1381,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.55,
                 interaction_patience: 0.9,
                 stabilize_bias: 1.1,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1364,6 +1412,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.45,
                 interaction_patience: 1.0,
                 stabilize_bias: 1.2,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true,
             false,
@@ -1393,6 +1443,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 risk_tolerance: 0.4,
                 interaction_patience: 1.0,
                 stabilize_bias: 1.2,
+                combat_ev_model: CombatEvModel::DownsideWeighted,
+                ..AiProfile::default()
             },
             true, // play_lookahead
             true, // combat_lookahead — cEDH is the first tier to enable this
