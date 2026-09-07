@@ -422,14 +422,27 @@ fn g4_a_grant_scoped_to_a_chosen_pile_gains_no_land_half() {
         "Brilliant Ultimatum",
         &["Sorcery"],
     );
-    for filter in play_grants(&parsed) {
-        let t = typed(filter);
-        assert!(
-            t.properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::InZone { .. })),
-            "CR 305.1: a synthesized land half must never be zone-less, got {:?}",
-            t.properties
-        );
-    }
+    // The load-bearing assertion: NO land half at all. Iterating the grants and
+    // checking a property of each would pass vacuously here, because the
+    // expected result is an empty list and a `for` over it never runs its body.
+    assert!(
+        play_grants(&parsed).is_empty(),
+        "CR 305.1: a chosen-pile grant must not gain a synthesized land half, got {:?}",
+        play_grants(&parsed)
+    );
+
+    // REACH-GUARD: the same sentence with a real ZONE in place of the pile does
+    // produce a land half, so the emptiness above is `land_half_filter`'s zone
+    // requirement declining this input — not the fixture failing to reach the
+    // pass, and not `play_grants` being blind to grants on this card shape.
+    let anchored = parse(
+        "Exile the top five cards of your library. You may play lands and cast spells from your graveyard. If you cast a spell this way, you cast it without paying its mana cost.",
+        "Pile Probe Reach Guard",
+        &["Sorcery"],
+    );
+    assert_eq!(
+        play_grants(&anchored).len(),
+        1,
+        "reach-guard: the same grammar over a real zone must still produce the land half"
+    );
 }
