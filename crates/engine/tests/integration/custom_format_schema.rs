@@ -1,9 +1,14 @@
-//! Schema-level tests for the custom-format engine core (Phase 1a). No
-//! evaluator exists yet — these tests cover construction, serde round-trip,
-//! the `GameFormat::Custom` wire format, the two registration gates against
-//! synthetic values, and the disclosed non-panicking fallbacks for methods
-//! that cannot resolve a Custom format's real values from a bare
-//! `GameFormat` alone. Never real deck-legality enforcement (that's Phase 1d).
+//! Schema-level tests for the custom-format engine core (Phase 1a), plus a
+//! handful of Phase 1d integration checks that exercise the real evaluator
+//! through the public `validate_name_deck_for_format_full` entry point. Most
+//! of this file covers construction, serde round-trip, the `GameFormat::Custom`
+//! wire format, the two registration gates against synthetic values, and the
+//! disclosed non-panicking fallbacks for methods that cannot resolve a Custom
+//! format's real values from a bare `GameFormat` alone. The bulk of
+//! deck-legality evaluation (`evaluate_custom_format` / `DeclaredPool` /
+//! `CardPoolAuthority`, all private to `deck_validation.rs`) is tested there,
+//! in that module's own `#[cfg(test)]` unit tests, which can reach those
+//! private items directly.
 
 use engine::types::custom_format::{
     assert_no_lobby_save_sentinel_collision, passes_legacy_axis_gate, passes_reprint_fidelity_gate,
@@ -439,12 +444,20 @@ fn custom_format_label_falls_back_when_id_is_not_registered() {
 
 // `evaluate_deck_compatibility` is the UI-HINT entry point (it feeds the
 // lobby's live deck-legality chip via `classifyCompatResult`, where `None`
-// already means "idle"/no opinion). The engine cannot evaluate Custom-format
-// legality yet — no per-card `CustomFormatRules` resolver exists — so a hard
-// "illegal" verdict would assert a rules claim nothing computed. Both
-// dispatches (summary and full) therefore answer "no opinion". The ENFORCING
-// paths are covered separately and still fail closed:
-// `validate_name_deck_for_format_full` below, plus
+// already means "idle"/no opinion). Phase 1d wired a real evaluator
+// (`evaluate_custom_format`), but the Wire-Inertness Invariant on
+// `SelectedFormat` (its wire form is always the bare `GameFormat` tag, never
+// `Resolved`) means a `DeckCompatibilityRequest` built from a bare
+// `Tag(Custom(_))`, as both tests below do, can never resolve real rules —
+// `SelectedFormat::rules()` is unconditionally `Err` for it — so the engine
+// genuinely has no verdict to report. A hard "illegal" verdict would assert a
+// rules claim nothing computed. Both dispatches (summary and full) therefore
+// answer "no opinion" for exactly this unresolvable case. The real evaluator
+// is covered by `deck_validation.rs`'s own test module (which can construct a
+// trusted `SelectedFormat::Resolved`) and by
+// `validate_name_deck_for_format_full_evaluates_a_resolved_custom_format`
+// below, which exercises the real evaluator through a trusted `FormatConfig`.
+// The ENFORCING paths are covered separately and still fail closed:
 // `validate_deck_for_format` / `evaluate_deck_format_gate` in
 // `deck_validation.rs`'s own test module.
 
@@ -480,24 +493,48 @@ fn custom_format_deck_compatibility_reports_no_opinion() {
     assert!(result.selected_format_reasons.is_empty());
 }
 
+/// A `CardDatabase` populated with exactly one card — a basic Plains — so a
+/// legal 60-card deck can be built without any card-pool restriction getting
+/// in the way (`sample_rules`'s `LegalityRules` are all defaults: unrestricted
+/// `legal_sets`, empty banned/restricted). Basic lands are exempt from every
+/// deck-copy ceiling (CR 100.2a), so 60 copies of one name is legal under any
+/// `DeckCopyLimit`.
+fn plains_only_db_json() -> String {
+    serde_json::json!({
+        "plains": {
+            "name": "Plains",
+            "mana_cost": { "type": "NoCost" },
+            "card_type": { "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Plains"] },
+            "power": null, "toughness": null, "loyalty": null, "defense": null,
+            "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+            "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+            "color_override": null, "scryfall_oracle_id": null, "legalities": {}
+        }
+    })
+    .to_string()
+}
+
+/// Phase 1d: `validate_name_deck_for_format_full` now runs a `Resolved`
+/// Custom format through the REAL evaluator (`evaluate_custom_format`) rather
+/// than an honest "not yet supported" rejection. `custom_config` is built via
+/// `FormatConfig::for_custom_rules` — the same resolver a real caller uses —
+/// so every runtime field (`deck_size`, `sideboard_policy`,
+/// `default_deck_copy_limit`, ...) is self-consistent with `sample_rules`'
+/// declared structural rules, exactly as `validate_custom_rules_consistency`
+/// demands of a trusted, non-deserialized config.
 #[test]
-fn validate_name_deck_for_format_full_rejects_custom_format_honestly() {
+fn validate_name_deck_for_format_full_evaluates_a_resolved_custom_format() {
     use engine::database::CardDatabase;
     use engine::game::deck_validation::validate_name_deck_for_format_full;
 
-    let db = CardDatabase::from_json_str("{}").expect("empty card database");
-    // The real signature takes every deck slot explicitly, plus the
-    // CR 903.13f(3) draft set codes, a resolved `FormatConfig`, a match type,
-    // and a player count. Passing the config (not a bare `GameFormat`) is the
-    // point: a Custom format's declared rules only exist on the config, so
-    // this is the shape a future resolver would read.
-    let custom_config = FormatConfig {
-        format: GameFormat::Custom(CustomFormatId(1)),
-        custom_rules: Some(Box::new(sample_rules(1))),
-        ..FormatConfig::standard()
-    };
+    let custom_config = FormatConfig::for_custom_rules(&sample_rules(1));
+
+    // Deck-size row: `sample_structural`'s `DeckSizeRule::Minimum(60)` rejects
+    // an empty main deck. This row needs no card data at all — an empty DB is
+    // fine here, unlike the pass row below.
+    let empty_db = CardDatabase::from_json_str("{}").expect("empty card database");
     let result = validate_name_deck_for_format_full(
-        &db,
+        &empty_db,
         &[],
         &[],
         &[],
@@ -511,9 +548,42 @@ fn validate_name_deck_for_format_full_rejects_custom_format_honestly() {
         2,
     );
     match result {
-        Err(reasons) => assert!(reasons.iter().any(|r| r.contains("not yet supported"))),
-        Ok(()) => panic!("expected Custom format validation to be rejected as not yet supported"),
+        Err(reasons) => assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("at least 60") && r.contains("found 0")),
+            "expected a real deck-size rejection, got: {reasons:?}"
+        ),
+        Ok(()) => {
+            panic!("expected an empty deck to fail the format's own Minimum(60) deck-size rule")
+        }
     }
+
+    // Pass row: a genuinely legal 60-card deck needs a database that actually
+    // knows the card (an empty DB fails every such deck on "Unknown cards",
+    // which would prove nothing about the evaluator under test).
+    let populated_db =
+        CardDatabase::from_json_str(&plains_only_db_json()).expect("populated card database");
+    let main_deck: Vec<String> = std::iter::repeat_n("Plains".to_string(), 60).collect();
+    let result = validate_name_deck_for_format_full(
+        &populated_db,
+        &main_deck,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &custom_config,
+        None,
+        2,
+    );
+    assert_eq!(
+        result,
+        Ok(()),
+        "expected a legal 60-card deck to pass a constructed-shaped custom format"
+    );
 }
 
 #[test]
