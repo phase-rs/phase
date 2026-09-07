@@ -12637,9 +12637,11 @@ pub enum WaitingFor {
     /// which roll is lowest — it renders `results` and enables only
     /// `ignorable_indices`.
     ///
-    /// CR 706.2: die results are public information (the die is rolled openly),
-    /// so this variant is deliberately absent from `game/visibility.rs` — no
-    /// per-player redaction, exactly like `CoinFlipKeepChoice` (CR 705.1).
+    /// Engine convention, deliberately carrying no CR annotation: no
+    /// Comprehensive Rule states that die results are public information, so
+    /// there is no rule to cite here. This variant is absent from
+    /// `game/visibility.rs` — no per-player redaction, mirroring
+    /// `CoinFlipKeepChoice`.
     DieKeepChoice {
         /// CR 706.6: the player who rolled, who is the player instructed to
         /// ignore and therefore the player who breaks a tie.

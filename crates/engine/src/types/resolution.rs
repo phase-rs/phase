@@ -193,9 +193,10 @@ pub struct PendingDieRoll {
     /// abandoning the remainder (which would silently drop them).
     ///
     /// `running_total` and `rolled_any` travel with it for the same reason —
-    /// CR 706.4's "equal to the result(s)" aggregate spans the whole
-    /// instruction, so a mid-loop suspension must not lose the survivors
-    /// already counted.
+    /// the aggregate that "equal to the result(s)" card text reads (CR 706.4 —
+    /// an ability without a results table specifies how to use its results)
+    /// spans the whole instruction, so a mid-loop suspension must not lose the
+    /// survivors already counted.
     #[serde(default)]
     pub next_index: usize,
     /// CR 706.4: sum of the surviving dice's post-modifier results counted so
