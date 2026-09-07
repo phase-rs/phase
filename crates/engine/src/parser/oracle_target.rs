@@ -2180,9 +2180,9 @@ pub(super) fn parse_definite_parent_reference<'a>(
     // Optional trailing "card"/"cards" zone qualifier (Goblin Welder's "the
     // artifact card"). When present, the anaphor names a non-battlefield
     // (card-zone) slot.
-    let (rest, is_card) = match parse_card_or_cards_word(after_type_word.trim_start()) {
-        Ok((r, _)) => (r, true),
-        Err(_) => (after_type_word, false),
+    let (rest, zone_class) = match parse_card_or_cards_word(after_type_word.trim_start()) {
+        Ok((r, _)) => (r, AnaphorZoneClass::CardInNonBattlefieldZone),
+        Err(_) => (after_type_word, AnaphorZoneClass::BattlefieldPermanent),
     };
     // A possessive continuation ("the creature's controller") is a distinct
     // anaphor class (controller/owner of the slot), not a bare slot reference —
@@ -2200,8 +2200,12 @@ pub(super) fn parse_definite_parent_reference<'a>(
     // CR 601.2c: each anaphor names exactly one earlier slot — bind only a
     // UNIQUE match; zero or ≥2 matches fall through as `None`.
     let mut matched: Option<usize> = None;
+    // CR 205.3: `parse_type_filter_word` yields only card types and subtypes, so
+    // this call site can never produce `AnaphorNoun::Token` — the token arm is
+    // reachable only from the demonstrative-route gate in `conditions.rs`.
+    let anaphor_noun = AnaphorNoun::Type(anaphor_type);
     for (index, slot) in slots.iter().enumerate() {
-        if slot_matches_anaphor(&anaphor_type, is_card, slot) {
+        if slot_matches_anaphor(&anaphor_noun, zone_class, slot) {
             if matched.is_some() {
                 return None;
             }
@@ -2211,29 +2215,71 @@ pub(super) fn parse_definite_parent_reference<'a>(
     matched.map(|index| (TargetFilter::ParentTargetSlot { index }, rest))
 }
 
-/// CR 205.3 + CR 400.1: Whether a declared target slot filter matches a definite
-/// anaphor's parsed `(type token, is-card)`. Type match is by core-type
-/// membership or subtype equality; the card qualifier requires the slot to be
-/// (`is_card`) or not be (`!is_card`) in a non-battlefield card zone.
-fn slot_matches_anaphor(anaphor_type: &TypeFilter, is_card: bool, slot: &TargetFilter) -> bool {
+/// CR 205.3 + CR 111.1: the matching axis a demonstrative or definite anaphor's
+/// noun contributes. "token" is NOT a card type (CR 111.1) — it is the
+/// `FilterProp::Token` object property — so the axis is a typed enum rather than
+/// a bare `TypeFilter`, which could not express it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum AnaphorNoun {
+    /// A card type ("creature", "artifact", "land") or a subtype used as the
+    /// printed noun ("Equipment", "Aura") — CR 205.3.
+    Type(TypeFilter),
+    /// CR 111.1: a token is not a card type; it is an object property.
+    Token,
+}
+
+/// CR 400.1 + CR 601.2c: which zone class an anaphor names. A bare demonstrative
+/// or definite noun names a battlefield permanent; a printed "card"/"cards"
+/// qualifier names an object in another zone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AnaphorZoneClass {
+    /// A bare demonstrative or definite noun ("that token", "the artifact")
+    /// names a battlefield permanent (CR 400.1).
+    BattlefieldPermanent,
+    /// An explicit "card"/"cards" qualifier ("the artifact card") names an
+    /// object in a non-battlefield zone (Goblin Welder's graveyard slot).
+    CardInNonBattlefieldZone,
+}
+
+/// CR 400.1: the zone class a declared target slot filter itself denotes. A slot
+/// with no zone property, or one explicitly scoped to the battlefield, is a
+/// permanent; any other zone property makes it a card in that zone.
+fn slot_zone_class(slot: &TargetFilter) -> AnaphorZoneClass {
+    match slot.extract_in_zone() {
+        Some(zone) if zone != Zone::Battlefield => AnaphorZoneClass::CardInNonBattlefieldZone,
+        _ => AnaphorZoneClass::BattlefieldPermanent,
+    }
+}
+
+/// CR 205.3 + CR 400.1: Whether a declared target slot filter matches an
+/// anaphor's parsed noun and zone class. Type match is by core-type membership,
+/// subtype equality, or — CR 111.1 — the token object property; the zone
+/// conjunct requires the slot's own derived `AnaphorZoneClass` to equal the
+/// anaphor's, so a graveyard-scoped slot never answers a bare demonstrative.
+pub(super) fn slot_matches_anaphor(
+    noun: &AnaphorNoun,
+    zone_class: AnaphorZoneClass,
+    slot: &TargetFilter,
+) -> bool {
     let TargetFilter::Typed(tf) = slot else {
         return false;
     };
-    let type_ok = match anaphor_type {
-        TypeFilter::Subtype(sub) => tf
+    let type_ok = match noun {
+        AnaphorNoun::Type(TypeFilter::Subtype(sub)) => tf
             .get_subtype()
             .is_some_and(|slot_sub| slot_sub.eq_ignore_ascii_case(sub)),
-        other => tf.type_filters.iter().any(|t| t == other),
+        // CR 111.1: a token is not a card type; a "that token" anaphor names a
+        // slot carrying the token object property.
+        AnaphorNoun::Token => tf.properties.iter().any(|p| matches!(p, FilterProp::Token)),
+        AnaphorNoun::Type(other) => tf.type_filters.iter().any(|t| t == other),
     };
     if !type_ok {
         return false;
     }
-    // A "card" lives in a non-battlefield zone (Goblin Welder's graveyard slot);
-    // a battlefield permanent carries no such zone property.
-    let slot_is_card = slot
-        .extract_in_zone()
-        .is_some_and(|zone| zone != Zone::Battlefield);
-    slot_is_card == is_card
+    // CR 400.1: a bare demonstrative names a battlefield permanent; a printed
+    // "card" qualifier names a non-battlefield zone (Goblin Welder's graveyard
+    // slot). The two classes must agree.
+    slot_zone_class(slot) == zone_class
 }
 
 /// CR 201.2: Match a clause boundary that ends a card name in a board-filter

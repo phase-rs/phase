@@ -11,6 +11,7 @@ describe("uiStore", () => {
         selectedObjectId: null,
         hoveredObjectId: null,
         inspectedObjectId: null,
+        inspectedCardName: null,
         inspectedFaceIndex: 0,
         altHeld: false,
         selectedCardIds: [],
@@ -34,6 +35,19 @@ describe("uiStore", () => {
   it("inspectObject sets inspectedObjectId", () => {
     act(() => useUiStore.getState().inspectObject(99));
     expect(useUiStore.getState().inspectedObjectId).toBe(99);
+  });
+
+  it("keeps a public log card name when its live object is unavailable", () => {
+    act(() => useUiStore.getState().inspectObjectSticky(99, 0, "cursor", "Pithing Needle"));
+
+    expect(useUiStore.getState()).toMatchObject({
+      inspectedObjectId: 99,
+      inspectedCardName: "Pithing Needle",
+      previewSticky: true,
+    });
+
+    act(() => useUiStore.getState().dismissPreview());
+    expect(useUiStore.getState().inspectedCardName).toBeNull();
   });
 
   it("inspecting a different object resets a pinned altHeld", () => {

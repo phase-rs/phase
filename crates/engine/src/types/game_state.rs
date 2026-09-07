@@ -7824,6 +7824,31 @@ pub enum ManaChoiceContext {
     ResolvingEffect(Box<ResolvedAbility>),
 }
 
+/// Deserializes [`PendingManaAbility::chosen_tappers`] as a REQUIRED
+/// `Option<Vec<ObjectId>>`: `null` is the legal *unanswered* state, an array is
+/// the answered one, and an ABSENT field is a hard error.
+///
+/// ⚠ MEASURED: this function is the mechanism, not decoration. Dropping
+/// `#[serde(default)]` does NOT make an `Option` field required —
+/// `serde_derive` routes a missing field through
+/// `serde::__private::de::missing_field`, whose deserializer answers
+/// `deserialize_option` with `visit_none`, so the field would still decode to
+/// `None` (the same measured fact recorded on
+/// `WaitingFor::LoopShortcut::declaration`). Once a field carries a
+/// `deserialize_with`, `serde_derive` emits a direct `Error::missing_field`
+/// instead, and THAT is what turns the pre-68 wire shape — `chosen_tappers`
+/// omitted, exactly as old code emitted an empty selection under
+/// `skip_serializing_if = "Vec::is_empty"` — into a loud decode failure rather
+/// than a silent read as *unanswered*.
+fn deserialize_required_chosen_tappers<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<ObjectId>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<Vec<ObjectId>>::deserialize(deserializer)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingManaAbility {
     pub player: PlayerId,
@@ -7853,8 +7878,51 @@ pub struct PendingManaAbility {
     /// already-live outer payment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_move_resume: Option<ManaAbilityResume>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub chosen_tappers: Vec<ObjectId>,
+    /// CR 107.3a + CR 601.2h: the tappers chosen for this activation's
+    /// `TapCreatures` cost. `None` means the selection stage has not been
+    /// answered yet; `Some(vec![])` is a legal, ANSWERED zero-tapper payment of
+    /// the CR 107.3a X-sentinel form (X=0, e.g. Hazel of the Rootbloom's
+    /// `Tap X untapped tokens you control` with no eligible token chosen).
+    /// A bare `Vec` conflates the two states, so `advance_mana_ability_activation`
+    /// re-surfaces the same `WaitingFor::PayCost` forever. Mirrors
+    /// [`Self::chosen_mana_payment`], two fields below, and the already-correct
+    /// `chosen_x.is_none()` presence gate.
+    ///
+    /// **WIRE BREAK — this retype is deliberately not wire-compatible.** A
+    /// pre-68 unanswered payload omits this field, and the custom deserializer
+    /// rejects that shape rather than silently decoding it as `None`; a
+    /// non-empty old array is the only old shape that decodes to `Some`. New→old
+    /// is SILENTLY INVERTED: `Some(vec![])` serializes as `chosen_tappers: []`,
+    /// which an old build decodes to `Vec::new()` and its `is_empty()` gate
+    /// reads as *unanswered* — re-prompting forever, the exact livelock this
+    /// field's `Option` fixes. The path is serialized, not theoretical:
+    /// `game::mana_abilities::handle_tap_creatures_for_mana_ability` writes this
+    /// field before the composite cost walk, and Hazel of the Rootbloom's cost
+    /// order `[Tap, PayLife(2), TapCreatures]` lets the later `PayLife` return
+    /// `PayLifeCostResult::DeferredReplacementChoice` → `pause_mana_ability_cost_payment`,
+    /// which stores into [`GameState::pending_cost_move_resume`] — documented as
+    /// serialized so a host checkpoint can resume the same cost-payment action.
+    /// A retype like this is normally version-backed rather than left silent:
+    /// see the `tap_creatures_pre_mode_wire_shape_is_rejected` doc block in this
+    /// file for the immediately preceding `PayCostKind::TapCreatures::mode`
+    /// retype, a deliberate break backed by `lobby_broker::PROTOCOL_VERSION` /
+    /// `WIRE_PROTOCOL_VERSION` under the convention entry 23
+    /// (`PayableResource::ManaGeneric`) established, whose test proves that break
+    /// is a clean, non-silent deserialize failure. That decision is now TAKEN,
+    /// the same way: `lobby_broker::PROTOCOL_VERSION` moved to 68 and
+    /// `WIRE_PROTOCOL_VERSION` to 51 (#8698), and this field intentionally
+    /// carries NO `#[serde(default)]` — so a payload that omits
+    /// `chosen_tappers`, which is exactly the pre-68 unanswered shape old code
+    /// emitted under `skip_serializing_if = "Vec::is_empty"`, fails
+    /// deserialization instead of inverting silently. `None` is therefore
+    /// always written on the wire (as `null`), never elided. The rejection is
+    /// pinned by `chosen_tappers_pre_option_wire_shape_is_rejected` in this
+    /// file's test module, alongside the `mode` precedent above. The
+    /// `deserialize_with` is what makes that rejection real — see
+    /// `deserialize_required_chosen_tappers` for why removing
+    /// `#[serde(default)]` from an `Option` field is not enough on its own.
+    #[serde(deserialize_with = "deserialize_required_chosen_tappers")]
+    pub chosen_tappers: Option<Vec<ObjectId>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_discards: Vec<ObjectId>,
     /// CR 107.4e + CR 605.3a: Pre-resolved hybrid-color choices for a `Mana` sub-cost
@@ -7868,11 +7936,24 @@ pub struct PendingManaAbility {
     /// in a mana-ability cost. The amount is chosen before mana production.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_counter_count: Option<u32>,
-    /// CR 107.3a + CR 601.2b + CR 702.179e/f: Announced value of X for a
-    /// `Pay X speed` mana-ability cost (Chicago Loop's `Pay X speed: Add X mana
-    /// in any combination of colors`). Chosen before cost payment and mana
-    /// production; bound to BOTH the speed cost and the produced-mana count via
-    /// `set_chosen_x_recursive`. `None` until the player announces X.
+    /// CR 107.3a + CR 601.2b: Announced value of X for this mana ability. Two
+    /// writers, both binding the same CR 107.3a announcement:
+    ///
+    /// * CR 702.179e/f: a `Pay X speed` cost (Chicago Loop's `Pay X speed: Add
+    ///   X mana in any combination of colors`), announced before cost payment
+    ///   and bound to BOTH the speed cost and the produced-mana count via
+    ///   `set_chosen_x_recursive`;
+    /// * the X-sentinel `TapCreatures` form (Hazel of the Rootbloom's
+    ///   `Tap X untapped tokens you control`), where
+    ///   `handle_tap_creatures_for_mana_ability` binds X to the size of the
+    ///   completed tapper selection. Both the cost-application loop in
+    ///   `pay_mana_ability_cost_with_choices` and the cursor advance in
+    ///   `advance_mana_ability_selection_cursor` read that single stored value
+    ///   rather than re-deriving it from `requirement.fixed_count()`.
+    ///
+    /// `None` until X is announced. Because this slot is shared by two costs, it
+    /// is NOT a stage-completion marker — each selection stage owns its own
+    /// typed presence field (see [`Self::chosen_tappers`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_x: Option<u32>,
     /// CR 605.2 + CR 701.59: Cards exiled to pay a `Collect evidence N`
@@ -30786,6 +30867,124 @@ mod tests {
         );
     }
 
+    /// #8698 review follow-up (matthewevans): `PendingManaAbility::chosen_tappers`
+    /// changed from `Vec<ObjectId>` to `Option<Vec<ObjectId>>` so an ANSWERED
+    /// zero-tapper selection of the CR 107.3a X-sentinel form (Hazel of the
+    /// Rootbloom's `Tap X untapped tokens you control` with X=0) is
+    /// distinguishable from a selection stage nobody has answered yet. The
+    /// field intentionally carries NO `#[serde(default)]` and no
+    /// `skip_serializing_if`, and its `deserialize_with` is what makes the
+    /// absent field an error at all (see
+    /// `deserialize_required_chosen_tappers`), so this is a deliberate
+    /// wire-compatibility break,
+    /// backed by `lobby_broker::PROTOCOL_VERSION` 68 / `WIRE_PROTOCOL_VERSION`
+    /// 51 (not a backward-compatible decode shim) — the same convention entry
+    /// 23 (`PayableResource::ManaGeneric`) established and
+    /// `tap_creatures_pre_mode_wire_shape_is_rejected` above pins for the
+    /// sibling `PayCostKind::TapCreatures::mode` retype.
+    ///
+    /// This test proves the break is a clean, non-silent deserialize failure
+    /// through the actual production restore path (`PersistedGameState`, the
+    /// same type `server-core::session::PersistedSession.state` uses) rather
+    /// than an inversion: without it, a pre-68 payload that OMITS the field —
+    /// exactly what the old `Vec<ObjectId>` emitted for an empty selection
+    /// under `skip_serializing_if = "Vec::is_empty"` — would decode to `None`
+    /// and re-surface the same `WaitingFor::PayCost` forever, the livelock this
+    /// PR fixes. The answered-zero round-trip asserted first is the reach-guard:
+    /// without it, "rejects the old shape" would also be satisfied by a fixture
+    /// that fails to deserialize for some unrelated reason.
+    #[test]
+    fn chosen_tappers_pre_option_wire_shape_is_rejected() {
+        let state_with = |chosen_tappers: Option<Vec<ObjectId>>| {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::PayCost {
+                player: PlayerId(0),
+                kind: PayCostKind::TapCreatures {
+                    mode: TapCreaturesSelectionMode::Fixed,
+                },
+                choices: vec![ObjectId(1)],
+                count: 1,
+                min_count: 0,
+                resume: CostResume::ManaAbility {
+                    mana_ability: Box::new(PendingManaAbility {
+                        player: PlayerId(0),
+                        source_id: ObjectId(1),
+                        ability_index: None,
+                        rules_execution_node: None,
+                        ability_snapshot: None,
+                        color_override: None,
+                        resume: ManaAbilityResume::Priority,
+                        cost_move_resume: None,
+                        chosen_tappers,
+                        chosen_discards: Vec::new(),
+                        chosen_mana_payment: None,
+                        chosen_counter_count: None,
+                        chosen_x: None,
+                        collected_evidence: Vec::new(),
+                        chosen_exiled: Vec::new(),
+                        chosen_sacrificed_battlefield: Vec::new(),
+                        cost_paid_object: None,
+                        batch_siblings: Vec::new(),
+                    }),
+                },
+            };
+            state
+        };
+
+        // The value the pre-68 wire silently inverted: an ANSWERED zero-tapper
+        // payment. New->new must round-trip it as `Some(vec![])`, not `None`.
+        let answered_zero = serde_json::to_value(state_with(Some(Vec::new())))
+            .expect("answered zero-tapper fixture state serializes");
+        let restored = match serde_json::from_value::<PersistedGameState>(answered_zero.clone())
+            .expect("a payload that carries `chosen_tappers` restores")
+        {
+            PersistedGameState::Raw(state) => state,
+            PersistedGameState::Trusted(_) => panic!("raw fixture decoded as a trusted envelope"),
+        };
+        match &restored.waiting_for {
+            WaitingFor::PayCost {
+                resume: CostResume::ManaAbility { mana_ability },
+                ..
+            } => assert_eq!(
+                mana_ability.chosen_tappers,
+                Some(Vec::new()),
+                "an answered zero-tapper selection must not restore as unanswered"
+            ),
+            other => panic!("expected a mana-ability PayCost wait, got {other:?}"),
+        }
+
+        // No `skip_serializing_if`, so the unanswered state is now STATED on
+        // the wire rather than inferred from an absent field.
+        let unanswered =
+            serde_json::to_value(state_with(None)).expect("unanswered fixture state serializes");
+        // `.get()`, not `Value` indexing: indexing a MISSING key also yields
+        // `Value::Null`, which would make this probe vacuous against exactly
+        // the `skip_serializing_if = "Option::is_none"` it exists to refuse.
+        assert_eq!(
+            unanswered["waiting_for"]["data"]["resume"]["ManaAbility"]
+                .as_object()
+                .expect("the ManaAbility resume payload is a JSON object")
+                .get("chosen_tappers"),
+            Some(&serde_json::Value::Null),
+            "`chosen_tappers` must be serialized unconditionally, `None` included: \
+             a `skip_serializing_if` here would re-emit the pre-68 omitted shape \
+             this break exists to reject"
+        );
+
+        // The pre-68 unanswered wire shape: the field omitted entirely.
+        let mut legacy_omitted = answered_zero;
+        legacy_omitted["waiting_for"]["data"]["resume"]["ManaAbility"]
+            .as_object_mut()
+            .expect("the ManaAbility resume payload is a JSON object")
+            .remove("chosen_tappers");
+        let omitted_error = serde_json::from_value::<PersistedGameState>(legacy_omitted)
+            .expect_err("pre-68 omitted-`chosen_tappers` payload must fail to deserialize");
+        assert!(
+            omitted_error.to_string().contains("chosen_tappers"),
+            "expected a missing-`chosen_tappers` deserialize error, got: {omitted_error}"
+        );
+    }
+
     #[test]
     fn direct_current_raw_requires_canonical_trigger_firing_carriers() {
         let state = normal_trigger_firing_fixture();
@@ -34483,7 +34682,7 @@ mod tests {
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
-                    chosen_tappers: Vec::new(),
+                    chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
                     chosen_counter_count: None,

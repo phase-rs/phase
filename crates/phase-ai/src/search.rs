@@ -35,8 +35,8 @@ use engine::types::zones::Zone;
 use crate::card_value::{cmp_keep, intrinsic_value, keep_key};
 use crate::cast_facts::cast_facts_for_action;
 use crate::combat_ai::{
-    choose_attackers_with_targets_with_profile_and_threat, choose_blockers_with_profile,
-    CombatLookahead,
+    choose_attackers_with_targets_with_profile_and_deadline_and_threat,
+    choose_blockers_with_profile, AttackTargetingContext, CombatLookahead,
 };
 use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
@@ -2478,6 +2478,12 @@ pub(crate) fn score_candidates_with_session(
     config: &AiConfig,
     session: &Arc<AiSession>,
 ) -> Vec<(GameAction, f64)> {
+    // Attacker declarations are public-state tactical choices. Running K hidden
+    // information samples cannot improve them, but would multiply the bounded
+    // multiplayer comparison and make a singleton support drift.
+    if matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. }) {
+        return score_candidates_core(state, ai_player, config, session, None);
+    }
     let k = config.search.determinization_samples;
     if k == 0 {
         // Unchanged path: no determinization, no shared-deadline override.
@@ -3163,6 +3169,9 @@ fn score_candidates_core(
     let policies = PolicyRegistry::shared();
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
 
+    let mut services =
+        PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
+
     // Combat decisions bypass the candidate pipeline entirely — the combat AI
     // reads directly from game state and never uses generated candidates.
     // This must run before validation/gating, which can filter out all candidates
@@ -3172,20 +3181,19 @@ fn score_candidates_core(
         state.waiting_for,
         WaitingFor::DeclareAttackers { .. } | WaitingFor::DeclareBlockers { .. }
     ) {
-        let effective_profile = config.profile.with_strategy(&context.strategy);
+        let effective_profile = config.profile.with_strategy(&services.context.strategy);
         if let Some(action) = deterministic_combat_choice(
             state,
             ai_player,
             &effective_profile,
             Some(session.as_ref()),
             context.opponent_threat.as_ref(),
+            Some(services.deadline),
         ) {
             return vec![(action, 1.0)];
         }
     }
 
-    let mut services =
-        PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
     let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
     let prepared = services.validate_prepared_candidates(state, prepared);
     let gated = gate_prepared_candidates(
@@ -4090,17 +4098,22 @@ pub(crate) fn deterministic_choice(
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
         valid_attack_targets,
+        valid_attack_targets_by_attacker,
         ..
     } = &state.waiting_for
     {
-        let attacks = choose_attackers_with_targets_with_profile_and_threat(
+        let attacks = choose_attackers_with_targets_with_profile_and_deadline_and_threat(
             state,
             ai_player,
             &config.profile,
             CombatLookahead::from_config(config),
-            Some(valid_attacker_ids),
-            Some(valid_attack_targets),
             context.map(|c| c.session.as_ref()),
+            AttackTargetingContext {
+                valid_attacker_ids: Some(valid_attacker_ids),
+                valid_attack_targets: Some(valid_attack_targets),
+                valid_attack_targets_by_attacker: valid_attack_targets_by_attacker.as_ref(),
+                comparison_deadline: context.map(|c| c.deadline),
+            },
             context.and_then(|c| c.opponent_threat.as_ref()),
         );
         return Some(validated_declare_attackers(state, attacks));
@@ -4153,21 +4166,27 @@ fn deterministic_combat_choice(
     profile: &crate::config::AiProfile,
     session: Option<&AiSession>,
     opponent_threat: Option<&ThreatProfile>,
+    comparison_deadline: Option<engine::util::Deadline>,
 ) -> Option<GameAction> {
     if let WaitingFor::DeclareAttackers {
         valid_attacker_ids,
         valid_attack_targets,
+        valid_attack_targets_by_attacker,
         ..
     } = &state.waiting_for
     {
-        let attacks = choose_attackers_with_targets_with_profile_and_threat(
+        let attacks = choose_attackers_with_targets_with_profile_and_deadline_and_threat(
             state,
             ai_player,
             profile,
             CombatLookahead::Disabled,
-            Some(valid_attacker_ids),
-            Some(valid_attack_targets),
             session,
+            AttackTargetingContext {
+                valid_attacker_ids: Some(valid_attacker_ids),
+                valid_attack_targets: Some(valid_attack_targets),
+                valid_attack_targets_by_attacker: valid_attack_targets_by_attacker.as_ref(),
+                comparison_deadline,
+            },
             opponent_threat,
         );
         return Some(validated_declare_attackers(state, attacks));
@@ -4550,8 +4569,8 @@ mod tests {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
         ControllerRef, Duration, Effect, EffectKind, ManaProduction, PlayerFilter, PtValue,
-        QuantityExpr, ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter,
-        TargetRef, TriggerConstraint, TriggerDefinition, TypedFilter,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticDefinition,
+        TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypedFilter,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
@@ -6082,6 +6101,26 @@ mod tests {
         id
     }
 
+    fn free_for_all_attacker_root(goaded: bool) -> (GameState, ObjectId) {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        add_creature(&mut state, PlayerId(1), 2, 2);
+        if goaded {
+            state
+                .objects
+                .get_mut(&attacker)
+                .expect("attacker exists")
+                .goaded_by
+                .insert(PlayerId(1));
+        }
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        (state, attacker)
+    }
+
     fn add_spell_to_hand(
         state: &mut GameState,
         owner: PlayerId,
@@ -6780,6 +6819,285 @@ mod tests {
     }
 
     #[test]
+    fn attacker_declarations_bypass_hidden_information_sampling() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![
+                engine::game::combat::AttackTarget::Player(PlayerId(1)),
+                engine::game::combat::AttackTarget::Player(PlayerId(2)),
+            ],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        let hidden = add_opp_hidden(&mut state, "HiddenA", Zone::Hand);
+        let session = AiSession::arc_from_game(&state);
+        let mut k0 = create_config(AiDifficulty::Hard, Platform::Native);
+        k0.search.determinization_samples = 0;
+        let mut k3 = k0.clone();
+        k3.search.determinization_samples = 3;
+
+        let direct = score_candidates_with_session(&state, PlayerId(0), &k0, &session);
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let sampled = score_candidates_with_session(&state, PlayerId(0), &k3, &session);
+
+        assert!(
+            matches!(
+                direct.as_slice(),
+                [(GameAction::DeclareAttackers { .. }, 1.0)]
+            ),
+            "reach guard: DeclareAttackers must use the specialized production path"
+        );
+        assert_eq!(sampled, direct, "K must not rescore attacker declarations");
+        let (entries, _pairs, completed) = crate::combat_ai::expanded_comparison_counters();
+        assert_eq!(entries, 1, "K=3 enters the root combat comparison once");
+        assert!(completed >= 2, "the one entry evaluates complete proposals");
+
+        let mut measured_k0 =
+            create_config(AiDifficulty::Hard, Platform::Native).into_measurement(2);
+        measured_k0.search.determinization_samples = 0;
+        let mut measured_k3 = measured_k0.clone();
+        measured_k3.search.determinization_samples = 3;
+        assert_eq!(
+            score_candidates_with_session(&state, PlayerId(0), &measured_k3, &session),
+            score_candidates_with_session(&state, PlayerId(0), &measured_k0, &session),
+            "measurement deadline override preserves the same one-action attacker score for K=0 and K=3"
+        );
+
+        state.objects.get_mut(&hidden).unwrap().name = "HiddenB".to_string();
+        let mutated_session = AiSession::arc_from_game(&state);
+        assert_eq!(
+            score_candidates_with_session(&state, PlayerId(0), &k3, &mutated_session),
+            sampled,
+            "attacker comparison reads public combat state, not a hidden opponent identity with unchanged counts"
+        );
+    }
+
+    #[test]
+    fn root_combat_comparison_requires_context_but_root_scoring_reaches_it() {
+        let (state, attacker) = free_for_all_attacker_root(false);
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(17);
+
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let rollout_action = deterministic_choice(&state, PlayerId(0), &config, &[], None)
+            .expect("DeclareAttackers has a deterministic fallback action");
+        assert!(matches!(
+            rollout_action,
+            GameAction::DeclareAttackers { ref attacks, .. } if attacks.iter().any(|(id, _)| *id == attacker)
+        ));
+        assert_eq!(
+            crate::combat_ai::expanded_comparison_counters().0,
+            0,
+            "context=None is the non-expanding rollout path"
+        );
+
+        let session = AiSession::arc_from_game(&state);
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let root = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        assert!(matches!(
+            root.as_slice(),
+            [(GameAction::DeclareAttackers { attacks, .. }, 1.0)] if attacks.iter().any(|(id, _)| *id == attacker)
+        ));
+        assert_eq!(
+            crate::combat_ai::expanded_comparison_counters().0,
+            1,
+            "PlannerServices supplies the root comparison deadline"
+        );
+    }
+
+    #[test]
+    fn k3_expired_mandatory_attacker_fallback_is_nonempty_and_engine_accepted() {
+        let (mut state, attacker) = free_for_all_attacker_root(true);
+        let WaitingFor::DeclareAttackers {
+            valid_attacker_ids,
+            valid_attack_targets_by_attacker: Some(targets_by_attacker),
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("use the engine-issued DeclareAttackers domain");
+        };
+        assert!(valid_attacker_ids.contains(&attacker));
+        assert!(
+            targets_by_attacker.get(&attacker).is_some_and(|targets| {
+                targets.contains(&engine::game::combat::AttackTarget::Player(PlayerId(2)))
+                    && !targets.contains(&engine::game::combat::AttackTarget::Player(PlayerId(1)))
+            }),
+            "goad leaves P2 as a legal required attack defender"
+        );
+
+        let session = AiSession::arc_from_game(&state);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
+        config.search.determinization_samples = 3;
+        config.search.time_budget_ms = Some(0);
+
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let scored = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let action = match scored.as_slice() {
+            [(action @ GameAction::DeclareAttackers { attacks, .. }, 1.0)] => {
+                assert!(
+                    attacks.iter().any(|(id, _)| *id == attacker),
+                    "the required attacker remains nonempty under zero-work fallback"
+                );
+                action.clone()
+            }
+            other => panic!("expected one scored DeclareAttackers action, got {other:?}"),
+        };
+        assert_eq!(
+            crate::combat_ai::expanded_comparison_receipt(),
+            crate::combat_ai::ExpandedComparisonReceipt {
+                entries: 1,
+                attacker_evaluations: 0,
+                pairs: 0,
+                completed_proposals: 0,
+                grouping_passes: 1,
+                cached_value_evaluations: 0,
+            },
+            "K=3 dispatches one pre-expired root without attacker or blocker work"
+        );
+        engine::game::engine::apply_as_current(&mut state, action)
+            .expect("the engine accepts the mandatory fallback declaration");
+    }
+
+    #[test]
+    fn measurement_combat_ignores_zero_timeout_and_k0_k3_scores_match() {
+        let (state, attacker) = free_for_all_attacker_root(false);
+        let session = AiSession::arc_from_game(&state);
+        let mut k0 = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(23);
+        k0.search.determinization_samples = 0;
+        k0.search.time_budget_ms = Some(0);
+        let mut k3 = k0.clone();
+        k3.search.determinization_samples = 3;
+
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let k0_scores = score_candidates_with_session(&state, PlayerId(0), &k0, &session);
+        let k0_receipt = crate::combat_ai::expanded_comparison_receipt();
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let k3_scores = score_candidates_with_session(&state, PlayerId(0), &k3, &session);
+        let k3_receipt = crate::combat_ai::expanded_comparison_receipt();
+
+        assert!(matches!(
+            k0_scores.as_slice(),
+            [(GameAction::DeclareAttackers { attacks, .. }, 1.0)] if attacks.iter().any(|(id, _)| *id == attacker)
+        ));
+        assert_eq!(
+            k0_receipt.entries, 1,
+            "K=0 reaches one measurement comparison root"
+        );
+        assert!(
+            k0_receipt.attacker_evaluations > 0 && k0_receipt.pairs > 0,
+            "the live root evaluates attackers and a real blocker"
+        );
+        assert!(
+            k0_receipt.attacker_evaluations + k0_receipt.pairs <= 4096,
+            "the root preserves the single comparison work ceiling"
+        );
+        assert_eq!(
+            k3_receipt, k0_receipt,
+            "K=3 is dispatched before the sample loop"
+        );
+        assert_eq!(
+            k3_scores, k0_scores,
+            "measurement K=0/K=3 keeps the identical public combat action and score"
+        );
+    }
+
+    #[test]
+    fn k3_combat_scores_ignore_hidden_identity_with_public_hand_count_fixed() {
+        let (mut state, attacker) = free_for_all_attacker_root(false);
+        let card_id = CardId(state.next_object_id);
+        let hidden = create_object(
+            &mut state,
+            card_id,
+            PlayerId(1),
+            "Hidden Identity A".to_string(),
+            Zone::Hand,
+        );
+        let public_hand_count = state.players[1].hand.len();
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
+        config.search.determinization_samples = 3;
+        config.search.time_budget_ms = None;
+        let baseline_session = AiSession::arc_from_game(&state);
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let baseline =
+            score_candidates_with_session(&state, PlayerId(0), &config, &baseline_session);
+        let baseline_receipt = crate::combat_ai::expanded_comparison_receipt();
+
+        let hidden_object = state.objects.get_mut(&hidden).expect("hidden card exists");
+        hidden_object.name = "Hidden Identity B".to_string();
+        hidden_object.card_id = CardId(card_id.0 + 1);
+        hidden_object.card_types.core_types.push(CoreType::Creature);
+        hidden_object.power = Some(7);
+        hidden_object.toughness = Some(7);
+        assert_eq!(
+            state.players[1].hand.len(),
+            public_hand_count,
+            "the hidden card changes identity and characteristics without changing public count"
+        );
+        let mutated_session = AiSession::arc_from_game(&state);
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let mutated = score_candidates_with_session(&state, PlayerId(0), &config, &mutated_session);
+        let mutated_receipt = crate::combat_ai::expanded_comparison_receipt();
+
+        assert!(matches!(
+            baseline.as_slice(),
+            [(GameAction::DeclareAttackers { attacks, .. }, 1.0)] if attacks.iter().any(|(id, _)| *id == attacker)
+        ));
+        assert!(
+            baseline_receipt.attacker_evaluations > 0 && baseline_receipt.pairs > 0,
+            "the public root includes real attacker/blocker comparison work"
+        );
+        assert_eq!(
+            mutated_receipt, baseline_receipt,
+            "hidden identity leaves every public comparison work count unchanged"
+        );
+        assert_eq!(
+            mutated, baseline,
+            "the K=3 attacker root reads public combat state, not hidden opponent identity"
+        );
+    }
+
+    #[test]
+    fn expired_attacker_root_uses_one_zero_work_threat_fallback() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![
+                engine::game::combat::AttackTarget::Player(PlayerId(1)),
+                engine::game::combat::AttackTarget::Player(PlayerId(2)),
+            ],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        let session = AiSession::arc_from_game(&state);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
+        config.search.determinization_samples = 3;
+        config.search.time_budget_ms = Some(0);
+
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let scored = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+
+        assert!(matches!(
+            scored.as_slice(),
+            [(GameAction::DeclareAttackers { .. }, 1.0)]
+        ));
+        assert_eq!(
+            crate::combat_ai::expanded_comparison_counters(),
+            (1, 0, 0),
+            "an expired root chooses the bounded fallback once without partial comparison work"
+        );
+    }
+
+    #[test]
     fn determinization_candidate_set_stable_over_resampled_opponent_hand() {
         // B2 + N4(b): the AI's ObjectId-keyed candidate set is invariant to
         // opponent hidden-hand resampling — the pin-invariant. To actually
@@ -7426,11 +7744,11 @@ mod tests {
     }
 
     fn spell_target_selection_state(
+        mut state: GameState,
         current_legal_targets: Vec<TargetRef>,
         stale_slot_targets: Vec<TargetRef>,
         optional: bool,
     ) -> GameState {
-        let mut state = make_state();
         let spell_id = add_spell_to_hand(&mut state, PlayerId(0), "Targeting Spell", 0);
         let mut ability = ResolvedAbility::new(
             Effect::DealDamage {
@@ -9537,8 +9855,207 @@ mod tests {
     }
 
     #[test]
+    fn public_damage_target_selection_prefers_threat_over_low_life() {
+        let mut state = spell_target_selection_state(
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42),
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            false,
+        );
+        state.players[1].life = 5;
+        state.players[2].life = 20;
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            panic!("fixture must retain its target selection prompt");
+        };
+        pending_cast.ability.effect = Effect::DealDamage {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            target: TargetFilter::Player,
+            damage_source: None,
+            excess: None,
+        };
+        for _ in 0..6 {
+            add_creature(&mut state, PlayerId(2), 4, 4);
+        }
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let selection =
+            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let receipt = selection
+            .receipt
+            .expect("target selection is a ranked decision");
+        let low_life = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(PlayerId(1))),
+                    }
+            })
+            .expect("the engine issued the low-life opponent target");
+        let threatening = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(PlayerId(2))),
+                    }
+            })
+            .expect("the engine issued the threatening opponent target");
+
+        assert_eq!(
+            receipt.sampling_temperature,
+            Some(config.temperature),
+            "Hard uses softmax, so a seeded sampled action need not equal the top-ranked target"
+        );
+        eprintln!(
+            "reflection target ranking: low-life score={:?} probability={:?}; threatening score={:?} probability={:?}",
+            low_life.score,
+            low_life.probability,
+            threatening.score,
+            threatening.probability,
+        );
+        assert!(
+            threatening.is_top_ranked
+                && threatening.score > low_life.score
+                && threatening.probability > low_life.probability,
+            "the registry-composed public selector must rank the threatening legal opponent above the low-life opponent: low-life={low_life:?}, threatening={threatening:?}"
+        );
+    }
+
+    #[test]
+    fn public_fixed_lethal_damage_keeps_its_finish_preference() {
+        let mut state = spell_target_selection_state(
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42),
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            false,
+        );
+        state.players[1].life = 1;
+        for _ in 0..6 {
+            add_creature(&mut state, PlayerId(2), 4, 4);
+        }
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let selection =
+            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let receipt = selection
+            .receipt
+            .expect("target selection is a ranked decision");
+        let lethal = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(PlayerId(1))),
+                    }
+            })
+            .expect("the engine issued the legal lethal opponent target");
+        let threatening = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(PlayerId(2))),
+                    }
+            })
+            .expect("the engine issued the legal threatening opponent target");
+        assert!(
+            lethal.is_top_ranked && lethal.score > threatening.score,
+            "a known fixed lethal remains above a nonlethal threatening opponent: lethal={lethal:?}, threatening={threatening:?}"
+        );
+    }
+
+    #[test]
+    fn public_harmful_object_target_prefers_the_threatening_controller() {
+        let mut target_state = spell_target_selection_state(
+            GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42),
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+        let quiet = add_creature(&mut target_state, PlayerId(1), 2, 2);
+        let threatening = add_creature(&mut target_state, PlayerId(2), 2, 2);
+        for _ in 0..5 {
+            add_creature(&mut target_state, PlayerId(2), 4, 4);
+        }
+        if let WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &mut target_state.waiting_for
+        {
+            let legal = vec![TargetRef::Object(quiet), TargetRef::Object(threatening)];
+            target_slots[0].legal_targets.clone_from(&legal);
+            selection.current_legal_targets = legal;
+        } else {
+            panic!("fixture must retain its target selection prompt");
+        }
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let session = AiSession::arc_from_game(&target_state);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let selection = choose_action_with_session_diagnostic(
+            &target_state,
+            PlayerId(0),
+            &config,
+            &mut rng,
+            &session,
+        );
+        let receipt = selection
+            .receipt
+            .expect("target selection is a ranked decision");
+        let quiet = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(quiet)),
+                    }
+            })
+            .expect("the engine issued the quiet legal creature target");
+        let threatening = receipt
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.action
+                    == GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(threatening)),
+                    }
+            })
+            .expect("the engine issued the threatening legal creature target");
+        assert!(
+            threatening.is_top_ranked && threatening.score > quiet.score,
+            "equal legal bodies must be ranked by their controller's shared threat: quiet={quiet:?}, threatening={threatening:?}"
+        );
+    }
+
+    #[test]
     fn unmodeled_target_selection_uses_a_reducer_validated_forward_action() {
         let mut state = spell_target_selection_state(
+            make_state(),
             vec![
                 TargetRef::Player(PlayerId(0)),
                 TargetRef::Player(PlayerId(1)),
@@ -9584,6 +10101,7 @@ mod tests {
     #[test]
     fn modeled_else_branch_keeps_target_selection_on_the_normal_scoring_path() {
         let mut state = spell_target_selection_state(
+            make_state(),
             vec![TargetRef::Player(PlayerId(1))],
             vec![TargetRef::Player(PlayerId(1))],
             false,
@@ -9614,6 +10132,7 @@ mod tests {
     #[test]
     fn modeled_mode_keeps_target_selection_on_the_normal_scoring_path() {
         let mut state = spell_target_selection_state(
+            make_state(),
             vec![TargetRef::Player(PlayerId(1))],
             vec![TargetRef::Player(PlayerId(1))],
             false,
@@ -9675,6 +10194,7 @@ mod tests {
     fn fallback_spell_target_selection_uses_current_legal_target_when_slot_is_stale() {
         let target = TargetRef::Player(PlayerId(1));
         let mut state = spell_target_selection_state(
+            make_state(),
             vec![target.clone()],
             vec![TargetRef::Player(PlayerId(0))],
             false,
@@ -9692,8 +10212,12 @@ mod tests {
 
     #[test]
     fn fallback_spell_target_selection_skips_optional_empty_current_slot() {
-        let mut state =
-            spell_target_selection_state(Vec::new(), vec![TargetRef::Player(PlayerId(1))], true);
+        let mut state = spell_target_selection_state(
+            make_state(),
+            Vec::new(),
+            vec![TargetRef::Player(PlayerId(1))],
+            true,
+        );
 
         let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(action, GameAction::ChooseTarget { target: None });
@@ -9702,8 +10226,12 @@ mod tests {
 
     #[test]
     fn fallback_spell_target_selection_cancels_required_empty_current_slot() {
-        let mut state =
-            spell_target_selection_state(Vec::new(), vec![TargetRef::Player(PlayerId(1))], false);
+        let mut state = spell_target_selection_state(
+            make_state(),
+            Vec::new(),
+            vec![TargetRef::Player(PlayerId(1))],
+            false,
+        );
 
         let action = fallback_action_default(&state).expect("fallback returns an action");
         assert_eq!(action, GameAction::CancelCast);
@@ -9801,6 +10329,40 @@ mod tests {
             "Should return DeclareAttackers, got {:?}",
             action
         );
+    }
+
+    #[test]
+    fn multiplayer_attack_choice_survives_engine_completion() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        let player_one = engine::game::combat::AttackTarget::Player(PlayerId(1));
+        let player_two = engine::game::combat::AttackTarget::Player(PlayerId(2));
+        let mut targets_by_attacker = std::collections::HashMap::new();
+        // The aggregate domain contains both opponents, while the engine-issued
+        // support for this attacker admits only player two. The production combat
+        // path must preserve that pair through completion.
+        targets_by_attacker.insert(attacker, vec![player_two]);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![player_one, player_two],
+            valid_attack_targets_by_attacker: Some(targets_by_attacker),
+            attacker_constraints: Default::default(),
+        };
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let action =
+            choose_action(&state, PlayerId(0), &config, &mut rng).expect("DeclareAttackers action");
+
+        let GameAction::DeclareAttackers { attacks, .. } = &action else {
+            panic!("expected DeclareAttackers, got {action:?}");
+        };
+        assert_eq!(attacks, &vec![(attacker, player_two)]);
+        engine::game::engine::apply_as_current(&mut state, action)
+            .expect("the engine must accept the AI's coherent target assignment");
     }
 
     /// Issue #1523 (p0 softlock): `validated_declare_attackers` must never
@@ -13818,7 +14380,7 @@ mod tests {
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
-                    chosen_tappers: Vec::new(),
+                    chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
                     chosen_counter_count: None,

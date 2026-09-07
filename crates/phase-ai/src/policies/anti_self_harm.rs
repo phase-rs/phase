@@ -32,9 +32,7 @@ use engine::types::zones::Zone;
 
 use crate::card_value::intrinsic_value;
 use crate::cast_facts::collect_definition_effects;
-use crate::damage_reflection::{
-    is_event_context_damage_to_player, opponent_creature_reflection_penalty,
-};
+use crate::damage_reflection::opponent_creature_reflection_penalty;
 use crate::eval::{evaluate_creature, threat_level};
 use engine::game::players;
 
@@ -985,29 +983,6 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
                     let opponent_life = ctx.state.players[player_id.0 as usize].life;
                     if damage >= opponent_life {
                         return ctx.penalties().lethal_burn_bonus;
-                    }
-                }
-            }
-
-            // Spiteful Sliver / Boros Reckoner-style reflection: in multiplayer,
-            // concentrate damage on the lowest-life opponent instead of rotating
-            // targets each trigger (issue #1364).
-            if !is_self
-                && !beneficial
-                && ctx
-                    .effects()
-                    .iter()
-                    .any(|e| is_event_context_damage_to_player(e))
-            {
-                let opponents = players::opponents(ctx.state, ctx.ai_player);
-                if opponents.len() > 1 {
-                    if let Some(weakest) = opponents
-                        .iter()
-                        .min_by_key(|&&p| ctx.state.players[p.0 as usize].life)
-                    {
-                        if *player_id == *weakest {
-                            return 12.0 + threat_level(ctx.state, ctx.ai_player, *player_id) * 4.0;
-                        }
                     }
                 }
             }
@@ -5631,14 +5606,28 @@ mod tests {
         );
     }
 
-    /// Issue #1364: reflected damage in multiplayer should concentrate on the
-    /// lowest-life opponent instead of cycling evenly between opponents.
+    /// Reflected damage with an unknown dynamic amount follows the shared threat
+    /// signal; only a known fixed lethal amount receives the lethal preference.
     #[test]
-    fn event_context_damage_prefers_lowest_life_opponent_in_multiplayer() {
+    fn event_context_damage_prefers_threatening_opponent_in_multiplayer() {
         let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
         state.players[0].life = 20;
         state.players[1].life = 5;
         state.players[2].life = 14;
+        for _ in 0..8 {
+            let card_id = CardId(state.next_object_id);
+            let creature = create_object(
+                &mut state,
+                card_id,
+                PlayerId(2),
+                "Threat".to_string(),
+                Zone::Battlefield,
+            );
+            let object = state.objects.get_mut(&creature).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.power = Some(3);
+            object.toughness = Some(3);
+        }
 
         let effect = Effect::DealDamage {
             amount: QuantityExpr::Ref {
@@ -5693,8 +5682,40 @@ mod tests {
         let other_score = AntiSelfHarmPolicy.score(&ctx_other);
 
         assert!(
-            lowest_score > other_score,
-            "Reflected damage should prefer the lowest-life opponent: lowest={lowest_score}, other={other_score}"
+            other_score > lowest_score,
+            "Dynamic reflected damage must prefer the stronger opponent: low-life={lowest_score}, threat={other_score}"
+        );
+
+        state.players[1].life = 3;
+        let fixed = Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Player,
+            damage_source: None,
+            excess: None,
+        };
+        let (decision, candidate) = make_target_selection_ctx(
+            &mut state,
+            fixed,
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            Some(TargetRef::Player(PlayerId(1))),
+        );
+        let fixed_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(
+            AntiSelfHarmPolicy.score(&fixed_ctx),
+            config.policy_penalties.lethal_burn_bonus,
+            "known fixed lethal still overrides ordinary threat ranking"
         );
     }
 

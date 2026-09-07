@@ -3,20 +3,19 @@ import { memo } from "react";
 import type { GameLogEntry, LogSegment, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { assertNever } from "../../utils/assertNever.ts";
 import { logPresentation, toneClass } from "../../viewmodel/logFormatting.ts";
 
 interface LogEntryProps {
   entry: GameLogEntry;
-  onInspectObjectSticky?: (objectId: ObjectId) => void;
+  onInspectObjectSticky?: (objectId: ObjectId, fallbackCardName?: string) => void;
 }
 
 function renderSegment(
   segment: LogSegment,
   index: number,
   seatOrder: PlayerId[] | undefined,
-  onInspectObjectSticky?: (objectId: ObjectId) => void,
+  onInspectObjectSticky?: (objectId: ObjectId, fallbackCardName?: string) => void,
 ) {
   switch (segment.type) {
     case "Text":
@@ -26,8 +25,8 @@ function renderSegment(
         <button
           key={index}
           type="button"
-          onClick={() => onInspectObjectSticky(segment.value.object_id)}
-          className="font-semibold text-yellow-300 underline decoration-yellow-500/40 underline-offset-2 transition hover:text-yellow-200"
+          onClick={() => onInspectObjectSticky(segment.value.object_id, segment.value.name)}
+          className="font-semibold text-yellow-300 underline decoration-yellow-500/40 underline-offset-2 transition hover:text-yellow-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300"
         >
           {segment.value.name}
         </button>
@@ -43,7 +42,7 @@ function renderSegment(
           className="font-semibold"
           style={{ color: getSeatColor(segment.value.player_id, seatOrder) }}
         >
-          {getPlayerDisplayName(segment.value.player_id)}
+          {segment.value.name}
         </span>
       );
     case "Number":
@@ -87,7 +86,7 @@ export const LogEntry = memo(function LogEntry({ entry, onInspectObjectSticky }:
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
 
   return (
-    <div data-tone={presentation.tone} className={`border-b border-l border-gray-800 py-0.5 pl-1 font-mono text-[10px] ${colorClass}`}>
+    <div data-tone={presentation.tone} className={`border-b border-l border-gray-800 py-1 pl-2 text-sm leading-5 break-words ${colorClass}`}>
       {entry.segments.map((segment, index) =>
         renderSegment(segment, index, seatOrder, onInspectObjectSticky),
       )}

@@ -106,6 +106,16 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  51 — PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
+ *       Option<Vec<ObjectId>> (#8698), separating an ANSWERED zero-tapper
+ *       CR 107.3a X-sentinel selection (X=0) from an unanswered one. A PARSE
+ *       bump like 50: the field carries no serde default, so a pre-51 payload
+ *       that omits it is a missing-field error rather than a silent None. The
+ *       reverse direction is why first contact must refuse the skew — Some([])
+ *       goes on the wire as `[]`, which a v50 build's is_empty() gate reads as
+ *       *unanswered* and re-prompts forever. Since game_setup and
+ *       reconnect_ack carry GameState, first contact rejects the skew instead.
+ *       Bumped in lockstep with PROTOCOL_VERSION 68.
  *  50 — DerivedViews.dungeon_rooms entries gained required `card` and `rooms`
  *       fields: the dungeon card's Scryfall identity, and every room with its
  *       outgoing edges (CR 309.5a) and its position on the printed card face.
@@ -359,7 +369,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 50 as const;
+export const WIRE_PROTOCOL_VERSION = 51 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

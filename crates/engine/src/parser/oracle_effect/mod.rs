@@ -22443,6 +22443,84 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     None
 }
 
+/// CR 601.2c + CR 608.2c: Returns the nearest earlier same-chain clause's
+/// declared OBJECT target filter — the antecedent a later clause's demonstrative
+/// anaphor ("that token", "that artifact") can name (Hazel of the Rootbloom's
+/// `CopyTokenOf` copy source; Thieving Skydiver's `GainControl` subject).
+///
+/// FAIL-CLOSED, mirroring [`chain_prior_chosen_target`]: a nearer clause that is
+/// conditional, or whose declared object target is absent or not `Typed`,
+/// BLOCKS the walk (`return None`) rather than being skipped — skipping would
+/// let a FARTHER clause's target become a NEARER demonstrative's antecedent,
+/// which is a provenance error, not a conservative default. Only `ParentTarget`
+/// carriers are skipped, because they continue the same referent.
+///
+/// Returns the filter (not a bool) so the caller can run the noun-agreement
+/// predicate `oracle_target::slot_matches_anaphor` against it.
+///
+/// **Returns no slot INDEX, deliberately — and the gate must keep emitting
+/// `AbilityCondition::TargetMatchesFilter { subject_slot: None }`.** That is not
+/// a single-slot shortcut. `None` resolves the condition node's own most-recent
+/// chain-propagated object target (`game::effects::evaluate_condition`'s
+/// `TargetMatchesFilter` arm: "the current node's local `targets` were
+/// overwritten by most-recent-only chain propagation"), which is why Malamet's
+/// two-target counter chain must re-key its condition to `Some(0)`
+/// (`lower::rekey_counter_slot_in_chain`: bind slot 0, "not the most-recent
+/// opponent target"). This walk is fail-closed in exactly the way that makes the
+/// two agree at EVERY declared index: it stops at the NEAREST declaring clause
+/// and blocks on anything nearer that is not a `ParentTarget` carrier, and a
+/// `ParentTarget` carrier declares no slot at all
+/// (`TargetFilter::is_context_ref`), so it cannot move "most recent". The
+/// antecedent returned here is therefore always the chain's most-recent declared
+/// object target — the object `None` already resolves. A multi-slot declaration
+/// head can never BE the antecedent either: `Effect::target_filter()` is `None`
+/// for a paired-subject effect by design, so the `_ => return None` arm blocks
+/// on it.
+///
+/// Emitting `Some(index)` instead would be a regression, not a tightening: it
+/// indexes the FLATTENED root chain through
+/// `targeting::resolve_parent_slot_from_root` (a runtime concatenation of every
+/// node's own targets, player refs included) which no parse-time clause count
+/// reproduces; it drops the `TriggeringSource` fallback `None` carries, which is
+/// what makes the Phase/End-step trigger route work; and it sets
+/// `reads_member_bound` in `game::ability_rw`, refusing batch-T1. The non-zero
+/// index case is covered by
+/// [`chain_declared_object_target_tests::the_antecedent_at_a_non_zero_declared_slot_is_the_most_recent_declarer`]
+/// and its paired emission assertion in `conditions`.
+///
+/// **KNOWN LIMITATION — the condition-carrying clause's OWN declared target is
+/// invisible to this walk.** The caller seeds the antecedent from
+/// `builder.clauses()` — clauses pushed BEFORE the current chunk — so a chunk
+/// whose condition node declares its own object target is not considered here,
+/// while `subject_slot: None` resolves that node's own first object target at
+/// runtime (`game::effects::evaluate_condition`'s `TargetMatchesFilter` arm).
+/// For a shape like "gain control of target artifact. If that artifact is an
+/// Equipment, destroy target creature" the gate would therefore claim on the
+/// PRIOR clause's artifact while the runtime tests the newly declared creature.
+/// No corpus card prints that shape (measured: zero), and the exposure is not
+/// introduced here — it is inherent to the `subject_slot: None` convention, so
+/// BASE is equally wrong on it (its condition just evaluates false) and the same
+/// gap already exists untouched for the three overlap nouns. If a card ever
+/// prints it, the fix is to DECLINE: have the caller skip seeding when the
+/// current chunk's own clause declares a non-`ParentTarget` object target, which
+/// keeps the fail-closed contract instead of binding the wrong referent.
+/// Malamet is the standing proof the shape is real —
+/// `lower::rekey_counter_slot_in_chain` must re-key to `Some(0)` precisely
+/// because its condition node has its own local target.
+fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
+    for prev in clauses.iter().rev() {
+        if prev.condition.is_some() {
+            return None;
+        }
+        match prev.parsed.effect.target_filter() {
+            Some(TargetFilter::ParentTarget) => continue,
+            Some(t @ TargetFilter::Typed(_)) => return Some(t),
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// CR 608.2c: Is the chain's MOST-RECENT object referent a just-created token
 /// (`Token`/`CopyTokenOf`/`Populate`)? A bare "it" anaphor in a following clause
 /// then binds to that token — Esper Terra: "Create a token that's a copy of
@@ -34138,7 +34216,25 @@ pub(crate) fn parse_effect_chain_ir(
     // from the current iteration's `normalized_text`. Measured: zero occurrences
     // corpus-wide.
     let mut pending_stamp: Option<(usize, String)> = None;
+    // CR 601.2c + CR 608.2c: take the caller's declared-object-target antecedent
+    // for the duration of this chain's chunk loop and restore it immediately
+    // after the loop. A `parse_effect_chain_ir` re-entered from inside the loop
+    // body therefore sees `None` from its own chunk loop onward (conservative:
+    // its demonstratives decline the target route and keep today's binding),
+    // while the pre-loop special-case IR builders above still observe the
+    // caller's value. The pair is always reached — the loop body contains no
+    // statement-level `return` — so no value can escape to the caller.
+    let outer_declared_object_target = ctx.chain_declared_object_target.take();
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
+        // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
+        // (the producer for the "If <cond>, instead <body>" rider that carries
+        // Hazel of the Rootbloom) as well as `strip_leading_general_conditional`
+        // and `strip_suffix_conditional` further down the body. Reassigned
+        // unconditionally every iteration as a pure function of the clauses
+        // pushed so far, so none of the body's early `continue` paths can leave
+        // a stale antecedent for the next chunk.
+        ctx.chain_declared_object_target = chain_declared_object_target(builder.clauses()).cloned();
         // TOP of the iteration: check the PREVIOUS iteration's stamp, then re-arm.
         debug_assert!(
             pending_stamp
@@ -37771,6 +37867,10 @@ pub(crate) fn parse_effect_chain_ir(
             carried_targeted_player_subject = None;
         }
     }
+    // CR 601.2c + CR 608.2c: restore the caller's antecedent. Paired with the
+    // `take()` immediately above the loop; this line is the reason no chain's
+    // declared-object-target fact can escape to its caller.
+    ctx.chain_declared_object_target = outer_declared_object_target;
 
     // Once more after the loop: the final iteration's stamp has no next-iteration
     // top to check it. See the declaration of `pending_stamp` above.
@@ -40575,6 +40675,251 @@ mod change_targets_stack_object_tests {
                 kind: None,
             },
             "a combined spelling must widen to both kinds"
+        );
+    }
+}
+
+/// CR 601.2c + CR 608.2c — unit tests for [`chain_declared_object_target`], the
+/// fail-closed reverse walk that supplies a demonstrative anaphor's antecedent.
+///
+/// **UNIT, explicitly labelled.** These do NOT satisfy the runtime-semantics
+/// requirement — the integration tests `hazel_end_step_copies_squirrel_token_twice`
+/// / `hazel_end_step_copies_non_squirrel_token_once` /
+/// `thieving_skydiver_equipment_rider_condition_becomes_live` /
+/// `jackknight_contraption_rider_still_reads_the_entering_artifact` do.
+///
+/// This module exists because **no corpus card distinguishes fail-closed from
+/// skip**: every card whose rider reaches the walk has exactly ONE prior clause,
+/// so `return None` and `continue` terminate identically there. A synthetic
+/// two-clause chain is the only fixture that separates them.
+#[cfg(test)]
+mod chain_declared_object_target_tests {
+    use super::chain_declared_object_target;
+    use crate::parser::oracle_ir::ast::parsed_clause;
+    use crate::parser::oracle_ir::effect_chain::{ClauseDisposition, ClauseIrBuilder};
+    use crate::types::ability::{Effect, QuantityExpr, TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::counter::CounterType;
+
+    fn emit() -> ClauseDisposition {
+        ClauseDisposition::Emit {
+            followup: None,
+            intrinsic: None,
+        }
+    }
+
+    /// `Typed[Artifact]` — the shape `Effect::target_filter()` surfaces for
+    /// Thieving Skydiver's "gain control of target artifact".
+    fn artifact_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            ..Default::default()
+        })
+    }
+
+    fn gain_control_artifact() -> Effect {
+        Effect::GainControl {
+            target: artifact_filter(),
+        }
+    }
+
+    /// `PutCounter { target: SelfRef }` — Jackknight's / Oran-Rief Hydra's prior
+    /// clause: a declared target that is NOT `Typed`, so the walk must block.
+    fn put_counter_on_self() -> Effect {
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    }
+
+    /// A one-clause chain: the walk reaches `Effect::target_filter()` and
+    /// returns the declared `Typed` filter. **Paired positive (a)** — without
+    /// it, the `None` assertions below could pass on an always-`None` walk.
+    #[test]
+    fn one_clause_chain_returns_its_declared_typed_target() {
+        let mut builder = ClauseIrBuilder::new("gain control of target artifact");
+        builder
+            .clause(
+                "gain control of target artifact",
+                parsed_clause(gain_control_artifact()),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 1);
+        assert_eq!(
+            chain_declared_object_target(builder.clauses()),
+            Some(&artifact_filter()),
+        );
+    }
+
+    /// **T12 — the discriminating case.** The NEARER clause's declared target is
+    /// `SelfRef` (non-`Typed`), so the walk BLOCKS and never hands back the
+    /// FARTHER clause's `Typed[Artifact]`.
+    ///
+    /// Revert probe: change the walk's `_ => return None` arm to `_ => continue`
+    /// and this returns `Some(Typed[Artifact])` — the farther clause's target
+    /// becoming a nearer demonstrative's antecedent, the exact provenance error
+    /// the fail-closed arm exists to forbid.
+    #[test]
+    fn chain_declared_object_target_blocks_at_a_non_typed_nearer_clause() {
+        let mut builder = ClauseIrBuilder::new(
+            "gain control of target artifact. put a +1/+1 counter on this creature",
+        );
+        builder
+            .clause(
+                "gain control of target artifact",
+                parsed_clause(gain_control_artifact()),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause(
+                "put a +1/+1 counter on this creature",
+                parsed_clause(put_counter_on_self()),
+                None,
+                emit(),
+            )
+            .push();
+        // **Paired positive (c)**: a silently dropped `push()` must not make the
+        // `None` below vacuous.
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_declared_object_target(builder.clauses()),
+            None,
+            "a non-Typed NEARER clause must BLOCK the walk, not be skipped past \
+             to the farther clause's target",
+        );
+    }
+
+    /// **Paired positive (b)**: when the NEARER clause is itself `Typed`, the
+    /// walk stops at it and returns the NEARER filter — proving it does not run
+    /// past the nearest declared target.
+    #[test]
+    fn two_clause_chain_returns_the_nearer_typed_target() {
+        let nearer = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        let mut builder =
+            ClauseIrBuilder::new("gain control of target artifact. destroy target creature");
+        builder
+            .clause(
+                "gain control of target artifact",
+                parsed_clause(gain_control_artifact()),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause(
+                "destroy target creature",
+                parsed_clause(Effect::Destroy {
+                    target: nearer.clone(),
+                    cant_regenerate: false,
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        assert_eq!(builder.clauses().len(), 2);
+        assert_eq!(
+            chain_declared_object_target(builder.clauses()),
+            Some(&nearer),
+            "the walk must stop at the NEAREST declared target",
+        );
+    }
+
+    /// **The NON-ZERO declared-slot case**, and the reason the emission stays
+    /// `subject_slot: None` rather than `Some(index)`.
+    ///
+    /// The fixture is the shape a reviewer proposed as a latent mis-binding:
+    /// `[destroy target creature, gain control of target artifact, "if that
+    /// artifact is an Equipment …"]`. The chain declares TWO object slots, so
+    /// the anaphor's antecedent sits at declared index **1**, not 0 — asserted
+    /// below so the fixture cannot silently degenerate into the single-slot
+    /// shape every corpus card has.
+    ///
+    /// **`subject_slot: None` is CORRECT here, not merely equivalent.** `None`
+    /// resolves the condition node's own most-recent chain-propagated object
+    /// target, NOT declared slot 0 — see the `TargetMatchesFilter` arm in
+    /// `game::effects::evaluate_condition` ("the current node's local `targets`
+    /// were overwritten by most-recent-only chain propagation") and
+    /// `lower::rekey_counter_slot_in_chain` ("must bind slot 0 …, **not the
+    /// most-recent** opponent target"), which is why Malamet's two-target
+    /// counter chain has to re-key its condition to `Some(0)` at all. This walk
+    /// is fail-closed in exactly the way that makes the two agree at EVERY
+    /// index: it returns the NEAREST declaring clause and blocks on anything
+    /// nearer that is not a slot-less `ParentTarget` carrier
+    /// (`TargetFilter::is_context_ref` covers `ParentTarget`, so such a carrier
+    /// declares no slot and cannot move "most recent"). The antecedent it hands
+    /// back is therefore always the chain's most-recent declared object target
+    /// — the very object `None` resolves.
+    ///
+    /// Revert probe: make the walk return an index and the gate emit
+    /// `subject_slot: Some(index)` for a non-zero antecedent, and the paired
+    /// assertion in
+    /// `conditions::tests::a_non_zero_slot_antecedent_still_emits_no_subject_slot`
+    /// fails. Change this walk's `_ => return None` arm to `_ => continue` (or
+    /// let a nearer non-`ParentTarget` clause through) and the "most recent"
+    /// guarantee this rests on is gone, so the nearest-declarer assertion below
+    /// fails too.
+    #[test]
+    fn the_antecedent_at_a_non_zero_declared_slot_is_the_most_recent_declarer() {
+        let artifact = artifact_filter();
+        let creature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        let mut builder = ClauseIrBuilder::new(
+            "destroy target creature. gain control of target artifact. if that artifact is an \
+             equipment, draw a card",
+        );
+        builder
+            .clause(
+                "destroy target creature",
+                parsed_clause(Effect::Destroy {
+                    target: creature.clone(),
+                    cant_regenerate: false,
+                }),
+                None,
+                emit(),
+            )
+            .push();
+        builder
+            .clause(
+                "gain control of target artifact",
+                parsed_clause(gain_control_artifact()),
+                None,
+                emit(),
+            )
+            .push();
+        // Reach guard on the fixture's DISCRIMINATING property: two declared
+        // object slots, so the antecedent's declared index is 1. Computed here,
+        // in the test, precisely because production derives no such index.
+        let declared_slots = builder
+            .clauses()
+            .iter()
+            .filter(|clause| {
+                clause
+                    .parsed
+                    .effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref())
+            })
+            .count();
+        assert_eq!(
+            declared_slots, 2,
+            "reach guard: this fixture must declare TWO object slots, so the \
+             antecedent is at a NON-ZERO declared index",
+        );
+        assert_eq!(
+            chain_declared_object_target(builder.clauses()),
+            Some(&artifact),
+            "the antecedent must be the NEAREST declarer (the slot-1 artifact), \
+             never the slot-0 creature — this is what makes the emitted \
+             `subject_slot: None` resolve the same object",
         );
     }
 }

@@ -2,8 +2,9 @@ import { useTranslation } from "react-i18next";
 import { Link, useLocation, useNavigate } from "react-router";
 
 import { BuildBadge } from "./BuildBadge";
-import { activeNavKey, NAV_ITEMS } from "./navItems";
+import { activeNavKey, navItemsFor } from "./navItems";
 import { SparkleIcon } from "./SparkleIcon";
+import { usePreferencesStore } from "../../stores/preferencesStore";
 
 /**
  * Desktop navigation rail (≥820px). Logo → the five primary destinations, and a
@@ -21,7 +22,9 @@ interface RailProps {
 export function Rail({ onSettings, onWhatsNew, hasUnread }: RailProps) {
   const { t } = useTranslation("menu");
   const navigate = useNavigate();
-  const active = activeNavKey(useLocation().pathname);
+  const experimentalTournamentsEnabled = usePreferencesStore((s) => s.experimentalTournamentsEnabled);
+  const navItems = navItemsFor(experimentalTournamentsEnabled);
+  const active = activeNavKey(useLocation().pathname, navItems);
 
   return (
     <nav
@@ -46,7 +49,7 @@ export function Rail({ onSettings, onWhatsNew, hasUnread }: RailProps) {
       </button>
 
       <div className="flex w-full flex-col gap-1">
-        {NAV_ITEMS.map(({ key, path, labelKey, Icon }) => {
+        {navItems.map(({ key, path, labelKey, Icon }) => {
           const on = active === key;
           return (
             <Link

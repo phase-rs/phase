@@ -621,7 +621,7 @@ mod tests {
             color_override: None,
             resume: crate::types::game_state::ManaAbilityResume::Priority,
             cost_move_resume: None,
-            chosen_tappers: Vec::new(),
+            chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,

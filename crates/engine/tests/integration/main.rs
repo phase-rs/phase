@@ -350,6 +350,7 @@ mod harrow_regression;
 mod hatchery_sliver_dynamic_replicate;
 mod havi_the_all_father;
 mod hawkeye_avenging_archer_dealt_damage_draw;
+mod hazel_of_the_rootbloom;
 mod head_of_the_hunt_token_controller_7086;
 mod heart_shaped_herb_monarch;
 mod heist_production_path_handoff;

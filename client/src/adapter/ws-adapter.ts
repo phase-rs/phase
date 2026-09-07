@@ -208,6 +208,15 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 68 — PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
+ *      Option<Vec<ObjectId>> (#8698), so an ANSWERED zero-tapper selection of
+ *      the CR 107.3a X-sentinel form (X=0) is distinguishable from a selection
+ *      stage nobody has answered. A PARSE bump like 67: the field carries no
+ *      serde default, so the pre-68 unanswered shape — which omitted the field
+ *      entirely — is a missing-field error rather than a silent decode. The
+ *      reverse skew is what made the bump mandatory: Some([]) serializes as
+ *      `chosen_tappers: []`, which a v67 build reads through its is_empty()
+ *      gate as *unanswered*, re-surfacing the same PayCost prompt forever.
  * 67 — DerivedViews.dungeon_rooms entries gained required `card` and `rooms`
  *      fields, carrying the dungeon card's Scryfall identity and the whole
  *      room graph (each room's edges plus its position on the printed card).
@@ -450,7 +459,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 67;
+export const PROTOCOL_VERSION = 68;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
