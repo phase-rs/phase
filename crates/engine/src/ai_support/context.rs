@@ -302,7 +302,7 @@ mod tests {
         ability::{Effect, ResolvedAbility},
         actions::GameAction,
         card_type::CoreType,
-        game_state::{StackEntry, StackEntryKind, StackResolutionPolicy},
+        game_state::{StackEntry, StackEntryKind, StackResolutionBudget, StackResolutionPolicy},
         identifiers::{CardId, ObjectId},
         player::PlayerId,
         zones::Zone,
@@ -498,5 +498,37 @@ mod tests {
             AiProposalApplication::Stale
         ));
         assert!(state.stack_resolution_session.is_none());
+    }
+
+    #[test]
+    fn ai_pass_uses_the_ordinary_boundary_during_committed_stack_resolution() {
+        let ai_player = PlayerId(1);
+        let mut state = priority_state(ai_player);
+        state
+            .stack
+            .push_back(no_op_stack_entry(70_103, PlayerId(0)));
+        let baseline = state
+            .auto_pass
+            .iter()
+            .map(|(&player, &mode)| (player, mode))
+            .collect();
+        crate::game::engine::install_stack_resolution_session(
+            &mut state,
+            [PlayerId(0)].into_iter().collect(),
+            StackResolutionBudget::Unlimited,
+            StackResolutionPolicy::Committed,
+            baseline,
+        );
+        let contract = AiDecisionContract::issue(&state, ai_player);
+
+        assert!(crate::game::engine::verified_ai_stack_pass_player(
+            &state,
+            &GameAction::PassPriority,
+        )
+        .is_none());
+        assert!(matches!(
+            apply_ai_action_proposal(&mut state, &contract, ai_player, GameAction::PassPriority),
+            AiProposalApplication::AppliedAction { .. }
+        ));
     }
 }

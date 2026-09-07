@@ -1078,6 +1078,17 @@ pub fn verified_ai_stack_pass_player(state: &GameState, action: &GameAction) -> 
     if !matches!(action, GameAction::PassPriority) || state.stack.is_empty() {
         return None;
     }
+    // A committed Resolve All session owns ordinary priority passes. Only the
+    // AI recheck policy may take the verified-pass continuation boundary.
+    if state
+        .stack_resolution_session
+        .as_ref()
+        .is_some_and(|session| {
+            session.policy != StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
+        })
+    {
+        return None;
+    }
     match state.waiting_for {
         WaitingFor::Priority { player } => Some(player),
         _ => None,
