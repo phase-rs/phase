@@ -515,7 +515,7 @@ describe("tournament request frames", () => {
       const ws = new MockWebSocket();
       await createWithScoring(ws, MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING, null);
       expect(ws.send).toHaveBeenCalledWith(
-        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":null,"bracket":"Swiss","total_rounds":3}}',
+        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":null,"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
       );
     });
 
@@ -526,7 +526,7 @@ describe("tournament request frames", () => {
       const ws = new MockWebSocket();
       await createWithScoring(ws, lobbyProtocolVersion, null);
       expect(ws.send).toHaveBeenCalledWith(
-        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3}}',
+        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":3,"draw_points":1,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
       );
     });
 
@@ -540,7 +540,7 @@ describe("tournament request frames", () => {
         loss_points: 0,
       });
       expect(ws.send).toHaveBeenCalledWith(
-        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":5,"draw_points":0,"loss_points":0},"bracket":"Swiss","total_rounds":3}}',
+        '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":5,"draw_points":0,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
       );
     });
   });
