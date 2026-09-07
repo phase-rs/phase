@@ -1720,7 +1720,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // UNVALIDATED chain, not `execute_effect(state, &validated, ..)` at :1793.
         // That branch is UNREACHABLE by this change, not merely harmless: the only
         // writer of an inherited entry pushes `parent_creature_target`, a `find_map`
-        // over the HEAD's own `TargetRef::Object`s (ability_utils.rs:7876-7879), so
+        // over the HEAD's own `TargetRef::Object`s (ability_utils.rs:7911-7914), so
         // an empty head pushes nothing and its sub is empty too. This flatten can
         // only be empty where the old one already was, so the gate is taken on
         // exactly the same chains as at BASE. Symmetry is safe by construction —

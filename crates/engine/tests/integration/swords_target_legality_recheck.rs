@@ -153,6 +153,79 @@ fn issue_5965_hexproof_granted_mid_stack_fizzles_swords() {
     );
 }
 
+/// POSITIVE INSTRUMENT CONTROL for BOTH `SWORDS` regression pins above and
+/// below. Every assertion those two tests make is an ABSENCE — nothing exiled,
+/// no life gained, spell in the graveyard. If `SWORDS` ever stopped lowering to
+/// `ChangeZone` + the `GainLife` anaphor rider — a parse regression to
+/// `Effect::Unimplemented`, or a lost rider — all of those absences would still
+/// hold and both pins would rot silently to green. Nothing upstream catches it:
+/// `add_spell_to_hand_from_oracle` asserts nothing about the parse, and
+/// `SpellCast::try_commit` never checks that `.target_object(..)` was actually
+/// consumed by a surfaced slot (`CastCommit` has no `Drop`), so a target handed
+/// to a spell that surfaces no slot is discarded in silence.
+///
+/// This test is the only thing in the file that proves the instrument is alive
+/// for the PRIMARY card: `SWORDS` on a legal target really does exile it AND
+/// really does gain its controller life equal to its power.
+///
+/// NOTE FOR THE NEXT MAINTAINER — apply this to the CLASS, not the instance.
+/// The file already stated this doctrine and enforced it for the *control*
+/// (`bare_exile_exiles_legal_target`, below) while leaving the primary card
+/// uncovered. That instance-not-class gap is the single error shape that has
+/// recurred through this entire investigation. Every negative regression pin
+/// here needs a paired positive that proves its instrument still works — if you
+/// add one, add the pair.
+#[test]
+fn swords_exiles_and_gains_life_on_legal_target() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Same fixture as the two pins, minus the hexproof grant and minus the
+    // death — so the ONLY difference is that the target stays legal.
+    let creature = scenario.add_creature(P1, "Legal Target", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Swords to Plowshares", true, SWORDS)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    let p1_life_before = runner.life(P1);
+
+    runner.cast(spell).target_object(creature).commit();
+
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Battlefield,
+        "reach-guard: the target must be on the battlefield when the spell is cast"
+    );
+
+    runner.advance_until_stack_empty();
+
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach-guard: the spell must have left the stack"
+    );
+
+    // CR 608.2b: a spell that resolves normally DOES both of its things. These
+    // two assertions are what prove the instrument is alive; if either goes red,
+    // the two fizzle pins in this file are no longer measuring anything.
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Exile,
+        "instrument check: `SWORDS` must actually EXILE a legal target — if it \
+         does not, the ChangeZone head is gone and both fizzle pins in this file \
+         pass vacuously"
+    );
+    assert_eq!(
+        runner.life(P1),
+        p1_life_before + 2,
+        "instrument check: `SWORDS`'s anaphoric rider must actually fire on a \
+         legal target — the 2/2's controller gains life equal to its power. If \
+         this is red, the GainLife rider is gone and `issue_8058`'s and \
+         `issue_5965`'s life assertions pass vacuously"
+    );
+}
+
 /// CR 608.2b (issue #8058): the target dies before Swords resolves. The spell
 /// is countered on resolution, so the life-gain clause must NOT fire.
 #[test]

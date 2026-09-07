@@ -1985,7 +1985,8 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 /// known information (issues #5965, #8058).
 ///
 /// The discriminator mirrors the GENERIC TAIL of those two functions — the
-/// condition under which the tail performs the push — conjunct for conjunct:
+/// condition under which the tail performs the push — in its three STRUCTURAL
+/// conjuncts, and deliberately NOT in its fourth, value-testing one:
 ///
 ///   `sub_ability_inherits_parent_creature_target_only(parent, sub)`
 ///   `  && !defers_sub_ability_target_selection(&parent.effect)`
@@ -1993,14 +1994,48 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 ///
 /// Those three lines are a STATEMENT OF THE CONDITION, not of anyone's
 /// evaluation order. The producer evaluates the defer-head guard first
-/// (:7863), then the PREDICATE (:7872 — computed before the `as_mut()` borrow,
+/// (:7898), then the PREDICATE (:7907 — computed before the `as_mut()` borrow,
 /// because the helper needs `&parent` and `&sub` at once), then the defer-sub
-/// guard (:7881). The mirror below regroups BOTH gates ahead of the predicate,
+/// guard (:7916). The mirror below regroups BOTH gates ahead of the predicate,
 /// deliberately, so a reader sees both refusals before the classification.
 /// Same verdict either way — and only because all three conjuncts are pure and
 /// total over already-loaded fields, and none of them reads `.targets`. If any
 /// one of them ever gains a side effect or an early `.targets` read, the
 /// regrouping stops being free: re-derive it then rather than assuming it.
+///
+/// THE PRODUCER HAS A FOURTH GATE, AND MIRRORING IT WOULD BE A BUG. The push is
+/// additionally guarded by `if let Some(creature) = parent_creature_target`
+/// (:7920 / :8345) — a `find_map` over the PARENT's own `TargetRef::Object`s.
+/// It is omitted here for a reason stronger than redundancy: it is the one gate
+/// that READS `.targets`, and `.targets` is exactly the field
+/// `validate_targets_in_chain` rewrites. On the ORIGINAL side the head still
+/// holds its chosen object, so a fourth conjunct would say "inherited"; on the
+/// VALIDATED side the head's `targets` has been emptied by the very
+/// re-validation under test, so it would say "NOT inherited" and count the
+/// rider's snapshot — resurrecting the exact defect this function exists to fix.
+/// Omitting it is what keeps the verdict provably identical on both sides of the
+/// `check_fizzle` comparison. It is also inert in the only direction that could
+/// matter: when `parent_creature_target` is `None` the producer pushes nothing,
+/// so the sub's `targets` is empty from this writer and skipping an empty vector
+/// is a no-op.
+///
+/// LOCKSTEP — A SECOND ANNOUNCE-TIME SNAPSHOT WRITER THIS FUNCTION DOES NOT YET
+/// COVER. `stamp_other_batch_source_targets` (see above) also writes targets a
+/// node did not specify: for
+/// `EachSourceDealsDamage { sources: ParentTarget, recipient: OtherBatchSource }`
+/// it stamps the two nearest `TargetOnly` producers' objects onto a node that
+/// carries no instance of the word "target" of its own (Grim Contest, "Choose
+/// target creature you control and target creature an opponent controls. Each
+/// of those creatures deals damage equal to its toughness to the other."). Those
+/// stamped entries are NOT excluded here, so if BOTH announced targets become
+/// illegal the stamped node keeps them, `legal_targets` stays non-empty, and the
+/// spell resolves instead of being countered — the same CR 608.2b masking this
+/// function fixes for anaphoric riders, in a different class. That is a KNOWN,
+/// PRE-EXISTING gap, deliberately out of scope here and tracked separately; it
+/// is recorded so the omission is discoverable rather than latent. If this
+/// function is ever widened to cover it, the discriminator must key off
+/// `stamp_other_batch_source_targets`' own condition, exactly as it keys off the
+/// assigners' condition today.
 ///
 /// IT IS NOT THE WHOLE OF EITHER FUNCTION, and the difference is deliberate.
 /// Both open with six effect-keyed arms — an `AdditionalCostPaidInstead` sub,
@@ -2070,9 +2105,9 @@ pub(crate) fn flatten_specified_targets_in_chain(ability: &ResolvedAbility) -> V
         // ever changes.)
         if let Some(sub) = ability.sub_ability.as_deref() {
             // Mirror BOTH producer gates — `assign_targets_recursive`
-            // :7863 / :7881 and `assign_selected_slots_recursive`
-            // :8288 / :8306 — REGROUPED ahead of the predicate. This is NOT
-            // the producer's order: it evaluates the predicate at :7872,
+            // :7898 / :7916 and `assign_selected_slots_recursive`
+            // :8323 / :8341 — REGROUPED ahead of the predicate. This is NOT
+            // the producer's order: it evaluates the predicate at :7907,
             // BETWEEN its two gates. The regrouping is verdict-preserving
             // because all three conjuncts are pure and none reads `.targets`.
             // On the deferred path the sub receives REAL selected targets
@@ -11855,6 +11890,56 @@ mod tests {
         );
     }
 
+    /// V10b — the sibling that pins the SECOND defer guard,
+    /// `!defers_conditional_target_selection(sub)`. V10's head is `Surveil`, so
+    /// V10 is refused by conjunct 1 and would still pass if conjunct 2 were
+    /// deleted in isolation — a pair-wise mutation check cannot tell the two
+    /// apart. This fixture inverts that: a NON-deferring head (conjunct 1 holds)
+    /// over a `WhenYouDo`-conditioned GainLife anaphor sub, so conjunct 2 is the
+    /// only conjunct that can refuse. Delete it and this returns one entry, not
+    /// two.
+    #[test]
+    fn flatten_specified_targets_in_chain_keeps_conditional_deferred_sub_targets() {
+        let victim = ObjectId(77);
+        let mut ability = change_zone_head(Zone::Exile, vec![TargetRef::Object(victim)]);
+        let mut rider = gain_life_anaphor_rider(vec![TargetRef::Object(victim)]);
+        // CR 603.12 + CR 608.2d: a `WhenYouDo` reflexive rider chooses its
+        // targets while resolving, so the producer returns at the defer-sub
+        // guard BEFORE the snapshot push ever happens.
+        rider.condition = Some(AbilityCondition::WhenYouDo);
+        ability.sub_ability = Some(Box::new(rider));
+
+        // The verdict is decided by the FIRST failing conjunct, not the last one named.
+        // REACH GUARD (paired positive, MANDATORY) — conjunct 1 must NOT refuse:
+        assert!(
+            !defers_sub_ability_target_selection(&ability.effect),
+            "reach-guard: the head must NOT be in the deferring set, or conjunct 1 \
+             refuses first and the conjunct under test is never exercised"
+        );
+        // REACH GUARD — the predicate must hold, or conjunct 3 refuses first:
+        assert!(
+            sub_ability_inherits_parent_creature_target_only(
+                &ability,
+                ability.sub_ability.as_deref().unwrap()
+            ),
+            "reach-guard: the fixture must satisfy the predicate, or this test is vacuous"
+        );
+        // The conjunct actually under test:
+        assert!(
+            defers_conditional_target_selection(ability.sub_ability.as_deref().unwrap()),
+            "reach-guard: the sub must defer its target selection — that is the \
+             conjunct this test exists to pin"
+        );
+
+        assert_eq!(
+            flatten_specified_targets_in_chain(&ability),
+            vec![TargetRef::Object(victim), TargetRef::Object(victim)],
+            "CR 603.12 + CR 608.2d: a WhenYouDo rider receives NO announce-time \
+             snapshot push (the producer returns at the defer-sub guard), so \
+             whatever targets it holds are its own and must still be counted"
+        );
+    }
+
     /// V11 — the not-in-class boundary. `effect_player_filter_is_parent_target_anaphor`
     /// matches `Effect::GainLife` only, so a `Draw` rider never receives the
     /// inherited push and its targets must be counted as specified. This is the
@@ -11890,7 +11975,7 @@ mod tests {
         assert!(
             chain_has_target_sink(&ability),
             "reach-guard: the parent must be a target sink, or the predicate \
-             short-circuits at conjunct 1 (:4966) and this test never reaches \
+             short-circuits at conjunct 1 (:5001) and this test never reaches \
              the anaphor arm"
         );
         // REACH GUARD (paired positive, MANDATORY) — the upstream quantity-slot
@@ -11900,7 +11985,7 @@ mod tests {
             "reach-guard: the quantity-slot conjunct must HOLD, so the anaphor \
              arm is the only conjunct that can refuse"
         );
-        // With both reach-guards holding, the `_ => false` arm at :5075 is the
+        // With both reach-guards holding, the `_ => false` arm at :5110 is the
         // ONLY conjunct that can be refusing here.
         assert!(
             !sub_ability_inherits_parent_creature_target_only(&ability, sub),
