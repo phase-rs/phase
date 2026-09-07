@@ -98,8 +98,8 @@ pub struct DungeonDefinition {
     pub rooms: &'static [RoomDefinition],
 }
 
-/// CR 309.4: Where a room sits on the printed dungeon card, as a fraction of
-/// the card image (0.0-1.0, origin top-left).
+/// CR 309.4: Where a room sits on the printed dungeon card, in permille of
+/// the card image (0-1000, origin top-left).
 ///
 /// The dungeon cards are the rare case where the "art" IS the game state: each
 /// card is a labeled floor plan whose rooms are drawn as rectangles, not a

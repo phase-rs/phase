@@ -1411,12 +1411,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 66);
+        assert_eq!(PROTOCOL_VERSION, 67);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 65);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 66);
     }
 
     #[test]
