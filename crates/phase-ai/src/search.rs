@@ -6097,6 +6097,25 @@ mod tests {
         id
     }
 
+    fn free_for_all_attacker_root(goaded: bool) -> (GameState, ObjectId) {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 4, 4);
+        if goaded {
+            state
+                .objects
+                .get_mut(&attacker)
+                .expect("attacker exists")
+                .goaded_by
+                .insert(PlayerId(1));
+        }
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        (state, attacker)
+    }
+
     fn add_spell_to_hand(
         state: &mut GameState,
         owner: PlayerId,
@@ -6851,6 +6870,180 @@ mod tests {
             score_candidates_with_session(&state, PlayerId(0), &k3, &mutated_session),
             sampled,
             "attacker comparison reads public combat state, not a hidden opponent identity with unchanged counts"
+        );
+    }
+
+    #[test]
+    fn root_combat_comparison_requires_context_but_root_scoring_reaches_it() {
+        let (state, attacker) = free_for_all_attacker_root(false);
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(17);
+
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let rollout_action = deterministic_choice(&state, PlayerId(0), &config, &[], None)
+            .expect("DeclareAttackers has a deterministic fallback action");
+        assert!(matches!(
+            rollout_action,
+            GameAction::DeclareAttackers { ref attacks, .. } if attacks.iter().any(|(id, _)| *id == attacker)
+        ));
+        assert_eq!(
+            crate::combat_ai::expanded_comparison_counters().0,
+            0,
+            "context=None is the non-expanding rollout path"
+        );
+
+        let session = AiSession::arc_from_game(&state);
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let root = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        assert!(matches!(
+            root.as_slice(),
+            [(GameAction::DeclareAttackers { attacks, .. }, 1.0)] if attacks.iter().any(|(id, _)| *id == attacker)
+        ));
+        assert_eq!(
+            crate::combat_ai::expanded_comparison_counters().0,
+            1,
+            "PlannerServices supplies the root comparison deadline"
+        );
+    }
+
+    #[test]
+    fn k3_expired_mandatory_attacker_fallback_is_nonempty_and_engine_accepted() {
+        let (mut state, attacker) = free_for_all_attacker_root(true);
+        let WaitingFor::DeclareAttackers {
+            valid_attacker_ids,
+            valid_attack_targets_by_attacker: Some(targets_by_attacker),
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("use the engine-issued DeclareAttackers domain");
+        };
+        assert!(valid_attacker_ids.contains(&attacker));
+        assert!(
+            targets_by_attacker.get(&attacker).is_some_and(|targets| {
+                targets.contains(&engine::game::combat::AttackTarget::Player(PlayerId(2)))
+                    && !targets.contains(&engine::game::combat::AttackTarget::Player(PlayerId(1)))
+            }),
+            "goad leaves P2 as a legal required attack defender"
+        );
+
+        let session = AiSession::arc_from_game(&state);
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
+        config.search.determinization_samples = 3;
+        config.search.time_budget_ms = Some(0);
+
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let scored = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let action = match scored.as_slice() {
+            [(action @ GameAction::DeclareAttackers { attacks, .. }, 1.0)] => {
+                assert!(
+                    attacks.iter().any(|(id, _)| *id == attacker),
+                    "the required attacker remains nonempty under zero-work fallback"
+                );
+                action.clone()
+            }
+            other => panic!("expected one scored DeclareAttackers action, got {other:?}"),
+        };
+        assert_eq!(
+            crate::combat_ai::expanded_comparison_counters(),
+            (1, 0, 0),
+            "K=3 dispatches one pre-expired root with zero comparison pairs"
+        );
+        engine::game::engine::apply_as_current(&mut state, action)
+            .expect("the engine accepts the mandatory fallback declaration");
+    }
+
+    #[test]
+    fn measurement_combat_ignores_zero_timeout_and_k0_k3_scores_match() {
+        let (state, attacker) = free_for_all_attacker_root(false);
+        let session = AiSession::arc_from_game(&state);
+        let mut k0 = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(23);
+        k0.search.determinization_samples = 0;
+        k0.search.time_budget_ms = Some(0);
+        let mut k3 = k0.clone();
+        k3.search.determinization_samples = 3;
+
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let k0_scores = score_candidates_with_session(&state, PlayerId(0), &k0, &session);
+        let k0_counts = crate::combat_ai::expanded_comparison_counters();
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let k3_scores = score_candidates_with_session(&state, PlayerId(0), &k3, &session);
+        let k3_counts = crate::combat_ai::expanded_comparison_counters();
+
+        assert!(matches!(
+            k0_scores.as_slice(),
+            [(GameAction::DeclareAttackers { attacks, .. }, 1.0)] if attacks.iter().any(|(id, _)| *id == attacker)
+        ));
+        assert_eq!(
+            k0_counts.0, 1,
+            "K=0 reaches one measurement comparison root"
+        );
+        assert!(
+            k0_counts.2 >= 2,
+            "K=0's measurement deadline is not pre-expired"
+        );
+        assert_eq!(k3_counts.0, 1, "K=3 is dispatched before the sample loop");
+        assert!(k3_counts.2 >= 2, "measurement ignores time_budget_ms=0");
+        assert_eq!(
+            k3_scores, k0_scores,
+            "measurement K=0/K=3 keeps the identical public combat action and score"
+        );
+    }
+
+    #[test]
+    fn k3_combat_scores_ignore_hidden_identity_with_public_hand_count_fixed() {
+        let (mut state, attacker) = free_for_all_attacker_root(false);
+        let card_id = CardId(state.next_object_id);
+        let hidden = create_object(
+            &mut state,
+            card_id,
+            PlayerId(1),
+            "Hidden Identity A".to_string(),
+            Zone::Hand,
+        );
+        let public_hand_count = state.players[1].hand.len();
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
+        config.search.determinization_samples = 3;
+        config.search.time_budget_ms = None;
+        let baseline_session = AiSession::arc_from_game(&state);
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let baseline =
+            score_candidates_with_session(&state, PlayerId(0), &config, &baseline_session);
+        let baseline_counts = crate::combat_ai::expanded_comparison_counters();
+
+        let hidden_object = state.objects.get_mut(&hidden).expect("hidden card exists");
+        hidden_object.name = "Hidden Identity B".to_string();
+        hidden_object.card_id = CardId(card_id.0 + 1);
+        hidden_object.card_types.core_types.push(CoreType::Creature);
+        hidden_object.power = Some(7);
+        hidden_object.toughness = Some(7);
+        assert_eq!(
+            state.players[1].hand.len(),
+            public_hand_count,
+            "the hidden card changes identity and characteristics without changing public count"
+        );
+        let mutated_session = AiSession::arc_from_game(&state);
+        crate::combat_ai::reset_expanded_comparison_counters();
+        let mutated = score_candidates_with_session(&state, PlayerId(0), &config, &mutated_session);
+        let mutated_counts = crate::combat_ai::expanded_comparison_counters();
+
+        assert!(matches!(
+            baseline.as_slice(),
+            [(GameAction::DeclareAttackers { attacks, .. }, 1.0)] if attacks.iter().any(|(id, _)| *id == attacker)
+        ));
+        assert_eq!(
+            baseline_counts.0, 1,
+            "K=3 dispatches one public root comparison"
+        );
+        assert_eq!(
+            mutated_counts.0, 1,
+            "the changed hidden payload still dispatches once"
+        );
+        assert!(
+            baseline_counts.2 >= 2 && mutated_counts.2 >= 2,
+            "both roots complete their public defender proposals"
+        );
+        assert_eq!(
+            mutated, baseline,
+            "the K=3 attacker root reads public combat state, not hidden opponent identity"
         );
     }
 

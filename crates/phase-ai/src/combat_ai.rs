@@ -2679,6 +2679,9 @@ mod tests {
     use crate::planner::quick_state_hash;
     use crate::projection::ProjectionKey;
     use engine::game::zones::create_object;
+    use engine::types::ability::{
+        Effect, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,
+    };
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
     use rand::{rngs::SmallRng, SeedableRng};
@@ -2700,6 +2703,33 @@ mod tests {
         state.turn_number = 2;
         state.active_player = PlayerId(0);
         state
+    }
+
+    fn install_combat_prevention_shield(state: &mut GameState, player: PlayerId) {
+        let card_id = CardId(state.next_object_id);
+        let shield_source = create_object(
+            state,
+            card_id,
+            player,
+            "Combat prevention".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Controller,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            Vec::new(),
+            shield_source,
+            player,
+        );
+        let mut events = Vec::new();
+        engine::game::effects::prevent_damage::resolve(state, &ability, &mut events)
+            .expect("the engine installs a combat prevention shield");
     }
 
     fn assert_mandatory_permanent_target(
@@ -3622,6 +3652,28 @@ mod tests {
     }
 
     #[test]
+    fn free_for_all_comparator_returns_no_attack_without_living_opponents() {
+        let mut state = setup_multiplayer(3);
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 4, 4, vec![]);
+        state.players[1].is_eliminated = true;
+        state.players[2].is_eliminated = true;
+        reset_expanded_comparison_counters();
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+
+        assert!(
+            attacks.is_empty(),
+            "no living opponent leaves no legal defender"
+        );
+        assert_eq!(
+            expanded_comparison_counters().0,
+            0,
+            "the free-for-all comparator only starts with at least two living opponents"
+        );
+        assert!(state.battlefield.contains(&attacker));
+    }
+
+    #[test]
     fn free_for_all_comparison_respects_per_attacker_player_targets() {
         let mut state = setup_multiplayer(3);
         let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 4, 4, vec![]);
@@ -3708,6 +3760,67 @@ mod tests {
             p1.opposing_losses, 0.0,
             "a single-block model cannot credit a menace exchange"
         );
+    }
+
+    #[test]
+    fn public_comparator_uses_the_minimum_blocker_floor_before_counting_damage() {
+        let mut state = setup_multiplayer(3);
+        state.players[1].life = 3;
+        state.players[2].life = 20;
+        let attacker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Menace attacker",
+            3,
+            3,
+            vec![Keyword::Menace],
+        );
+        let first = add_creature(&mut state, PlayerId(1), "First blocker", 2, 3, vec![]);
+        let second = add_creature(&mut state, PlayerId(1), "Second blocker", 2, 3, vec![]);
+
+        reset_expanded_comparison_counters();
+        let sufficient = choose_attackers_with_targets(&state, PlayerId(0));
+        assert_eq!(
+            expanded_comparison_counters().0,
+            1,
+            "the public path reaches comparison"
+        );
+        assert_eq!(
+            sufficient,
+            vec![(attacker, AttackTarget::Player(PlayerId(2)))],
+            "two legal blockers satisfy menace and prevent the low-life finish"
+        );
+        assert!(
+            !expanded_proposal_accounting()
+                .iter()
+                .find(|proposal| proposal.defender == PlayerId(1))
+                .expect("the public comparison records P1")
+                .finishes,
+            "the sufficient floor supplies blockers to the engine damage estimate"
+        );
+
+        state.objects.get_mut(&second).unwrap().tapped = true;
+        reset_expanded_comparison_counters();
+        let insufficient = choose_attackers_with_targets(&state, PlayerId(0));
+        assert_eq!(
+            expanded_comparison_counters().0,
+            1,
+            "the changed floor remains public"
+        );
+        assert_eq!(
+            insufficient,
+            vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+            "one blocker cannot satisfy menace, so the finish proposal is selected"
+        );
+        assert!(
+            expanded_proposal_accounting()
+                .iter()
+                .find(|proposal| proposal.defender == PlayerId(1))
+                .expect("the public comparison records P1")
+                .finishes,
+            "one blocker cannot satisfy menace, so the comparison's engine damage estimate is unblocked"
+        );
+        assert!(state.battlefield.contains(&first));
     }
 
     #[test]
@@ -3820,6 +3933,57 @@ mod tests {
     }
 
     #[test]
+    fn public_comparator_vanilla_trade_matches_engine_combat_resolution() {
+        let mut state = setup_multiplayer(3);
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 3, 1, vec![]);
+        let blocker = add_creature(&mut state, PlayerId(1), "Blocker", 2, 3, vec![]);
+        add_creature(&mut state, PlayerId(2), "Wall", 8, 8, vec![]);
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        reset_expanded_comparison_counters();
+
+        let action = crate::search::choose_action(&state, PlayerId(0), &config, &mut rng)
+            .expect("public attacker selection");
+        assert!(matches!(
+            &action,
+            engine::types::actions::GameAction::DeclareAttackers { attacks, .. }
+                if attacks == &vec![(attacker, AttackTarget::Player(PlayerId(1)))]
+        ));
+        assert_eq!(
+            expanded_comparison_counters().0,
+            1,
+            "the public path reaches comparison"
+        );
+        engine::game::engine::apply_as_current(&mut state, action)
+            .expect("the engine accepts the chosen trade");
+        engine::game::combat::declare_blockers_for_player(
+            &mut state,
+            PlayerId(1),
+            &[(blocker, attacker)],
+            &mut Vec::new(),
+        )
+        .expect("the engine accepts the representative block");
+
+        let mut events = Vec::new();
+        assert!(
+            engine::game::combat_damage::resolve_combat_damage(&mut state, &mut events).is_none(),
+            "a single vanilla block needs no interactive damage assignment"
+        );
+        assert_eq!(
+            state.objects[&attacker].zone,
+            Zone::Graveyard,
+            "the engine resolves the attacker as dead in the chosen trade"
+        );
+        assert_eq!(
+            state.objects[&blocker].zone,
+            Zone::Graveyard,
+            "the engine resolves the blocker as dead in the chosen trade"
+        );
+    }
+
+    #[test]
     fn comparator_prefers_a_nonlethal_open_defender_over_a_small_positive_trade() {
         let mut state = setup_multiplayer(3);
         state.players[1].life = 20;
@@ -3907,6 +4071,107 @@ mod tests {
     }
 
     #[test]
+    fn public_comparator_prefers_unblocked_lethal_but_not_blocked_face_damage() {
+        let mut open = setup_multiplayer(3);
+        open.players[1].life = 3;
+        let attacker = add_creature(&mut open, PlayerId(0), "Attacker", 3, 3, vec![]);
+        open.phase = engine::types::phase::Phase::DeclareAttackers;
+        open.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&open);
+        reset_expanded_comparison_counters();
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let open_action = crate::search::choose_action(&open, PlayerId(0), &config, &mut rng)
+            .expect("public attacker selection");
+        assert!(matches!(
+            &open_action,
+            engine::types::actions::GameAction::DeclareAttackers { attacks, .. }
+                if attacks == &vec![(attacker, AttackTarget::Player(PlayerId(1)))]
+        ));
+        assert_eq!(
+            expanded_comparison_counters().0,
+            1,
+            "public selection reaches comparator"
+        );
+        engine::game::engine::apply_as_current(&mut open, open_action)
+            .expect("the engine accepts the unblocked lethal declaration");
+
+        let mut blocked = setup_multiplayer(3);
+        blocked.players[1].life = 3;
+        let blocked_attacker = add_creature(&mut blocked, PlayerId(0), "Attacker", 3, 3, vec![]);
+        add_creature(
+            &mut blocked,
+            PlayerId(1),
+            "Preventing blocker",
+            5,
+            5,
+            vec![],
+        );
+        blocked.phase = engine::types::phase::Phase::DeclareAttackers;
+        blocked.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&blocked);
+        reset_expanded_comparison_counters();
+        let mut rng = SmallRng::seed_from_u64(42);
+        let blocked_action = crate::search::choose_action(&blocked, PlayerId(0), &config, &mut rng)
+            .expect("public attacker selection");
+        assert!(matches!(
+            &blocked_action,
+            engine::types::actions::GameAction::DeclareAttackers { attacks, .. }
+                if attacks == &vec![(blocked_attacker, AttackTarget::Player(PlayerId(2)))]
+        ));
+        assert_eq!(
+            expanded_comparison_counters().0,
+            1,
+            "blocked case reaches comparator"
+        );
+        engine::game::engine::apply_as_current(&mut blocked, blocked_action)
+            .expect("a tactical finish estimate never bypasses engine declaration legality");
+    }
+
+    #[test]
+    fn public_comparator_finish_estimate_does_not_certify_through_prevention() {
+        let mut state = setup_multiplayer(3);
+        state.players[1].life = 3;
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 3, 3, vec![]);
+        install_combat_prevention_shield(&mut state, PlayerId(1));
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        reset_expanded_comparison_counters();
+
+        let action = crate::search::choose_action(&state, PlayerId(0), &config, &mut rng)
+            .expect("public attacker selection");
+        assert!(matches!(
+            &action,
+            engine::types::actions::GameAction::DeclareAttackers { attacks, .. }
+                if attacks == &vec![(attacker, AttackTarget::Player(PlayerId(1)))]
+        ));
+        assert_eq!(
+            expanded_comparison_counters().0,
+            1,
+            "the public path reaches comparison"
+        );
+        engine::game::engine::apply_as_current(&mut state, action)
+            .expect("the engine accepts a policy-selected potential finish");
+        engine::game::combat::declare_blockers_for_player(
+            &mut state,
+            PlayerId(1),
+            &[],
+            &mut Vec::new(),
+        )
+        .expect("the engine accepts no blocks");
+
+        let mut events = Vec::new();
+        assert!(
+            engine::game::combat_damage::resolve_combat_damage(&mut state, &mut events).is_none(),
+            "unblocked combat resolves without a damage-assignment choice"
+        );
+        assert_eq!(
+            state.players[1].life, 3,
+            "the engine prevention replacement, not the tactical estimate, decides final damage"
+        );
+    }
+
+    #[test]
     fn free_for_all_comparison_is_entered_once_and_honors_expired_deadline() {
         let mut state = setup_multiplayer(3);
         let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 4, 4, vec![]);
@@ -3953,14 +4218,21 @@ mod tests {
     #[test]
     fn partial_multiplayer_proposal_cannot_win_after_deterministic_expiry() {
         let mut state = setup_multiplayer(3);
+        state.players[1].life = 20;
+        state.players[2].life = 20;
         let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 5, 5, vec![]);
-        add_creature(&mut state, PlayerId(1), "Blocker", 1, 1, vec![]);
+        add_creature(&mut state, PlayerId(1), "One blocker", 1, 1, vec![]);
         for _ in 0..8 {
             let threat = add_creature(&mut state, PlayerId(2), "Threat", 5, 5, vec![]);
             state.objects.get_mut(&threat).unwrap().tapped = true;
         }
-        add_creature(&mut state, PlayerId(2), "Blocker", 0, 5, vec![]);
-        add_creature(&mut state, PlayerId(2), "Blocker", 0, 5, vec![]);
+        add_creature(&mut state, PlayerId(2), "First blocker", 0, 5, vec![]);
+        add_creature(&mut state, PlayerId(2), "Second blocker", 0, 5, vec![]);
+        assert!(
+            threat_level(&state, PlayerId(0), PlayerId(2))
+                > threat_level(&state, PlayerId(0), PlayerId(1)),
+            "the interrupted defender is the tempting higher-threat choice"
+        );
         reset_expanded_comparison_counters();
         force_expanded_comparison_expiry_after_pairs(2);
         let attacks = choose_attackers_with_targets_with_profile_and_deadline(
@@ -3972,9 +4244,19 @@ mod tests {
             AttackTargetingContext::unrestricted(),
         );
         assert_eq!(expanded_comparison_counters(), (1, 2, 1));
-        assert!(expanded_proposal_accounting()
-            .iter()
-            .all(|p| p.defender != PlayerId(2)));
+        let accounting = expanded_proposal_accounting();
+        assert!(
+            accounting
+                .iter()
+                .any(|proposal| proposal.defender == PlayerId(1)),
+            "the first defender completed before expiry"
+        );
+        assert!(
+            accounting
+                .iter()
+                .all(|proposal| proposal.defender != PlayerId(2)),
+            "an interrupted defender must never be recorded as a complete proposal"
+        );
         assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
         reset_expanded_comparison_counters();
     }
@@ -4035,7 +4317,14 @@ mod tests {
     fn above_pair_ceiling_uses_bounded_fallback() {
         let mut state = setup_multiplayer(3);
         for _ in 0..65 {
-            add_creature(&mut state, PlayerId(0), "Attacker", 2, 2, vec![]);
+            add_creature(
+                &mut state,
+                PlayerId(0),
+                "Attacker",
+                4,
+                4,
+                vec![Keyword::Vigilance],
+            );
             add_creature(&mut state, PlayerId(1), "Blocker", 2, 2, vec![]);
             add_creature(&mut state, PlayerId(2), "Blocker", 2, 2, vec![]);
         }
