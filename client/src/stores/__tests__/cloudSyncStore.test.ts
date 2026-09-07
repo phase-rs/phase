@@ -15,11 +15,16 @@ const mocks = vi.hoisted(() => ({
   effectiveOffline: { value: false },
 }));
 
-vi.mock("../../services/backup", () => ({
-  buildBackup: mocks.buildBackup,
-  applyBackup: mocks.applyBackup,
-  mergeDeckCollections: mocks.mergeDeckCollections,
-}));
+vi.mock("../../services/backup", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/backup")>();
+  return {
+    ...actual,
+    buildBackup: mocks.buildBackup,
+    buildCloudBackup: () => actual.projectCloudBackup(mocks.buildBackup()),
+    applyBackup: mocks.applyBackup,
+    mergeDeckCollections: mocks.mergeDeckCollections,
+  };
+});
 vi.mock("../../services/cloudSync", () => ({
   getCloudSyncProvider: mocks.getProvider,
   isCloudSyncConfigured: mocks.configured,
@@ -115,6 +120,7 @@ beforeEach(() => {
     error: null,
     dirty: false,
     lastSyncedRevision: null,
+    lastSyncedDigest: null,
     lastSyncedAt: null,
     conflict: null,
     conflictDiff: null,
@@ -330,11 +336,13 @@ describe("cloud sync offline lifecycle", () => {
     await settle();
     await vi.waitFor(() => expect(provider.push).toHaveBeenCalledTimes(1));
 
+    const newest = backup({ decks: { Newest: "{}" } });
+    mocks.buildBackup.mockReturnValue(newest);
     watched?.();
     pushed.resolve(meta(2));
     await vi.waitFor(() => expect(provider.push).toHaveBeenCalledTimes(2));
 
-    expect(provider.push).toHaveBeenNthCalledWith(2, backup({ decks: { Local: "{}" } }), 2);
+    expect(provider.push).toHaveBeenNthCalledWith(2, newest, 2);
     expect(useCloudSyncStore.getState()).toMatchObject({ dirty: false, lastSyncedRevision: 3 });
   });
 
@@ -352,6 +360,7 @@ describe("cloud sync offline lifecycle", () => {
     await vi.waitFor(() => expect(provider.push).toHaveBeenCalledTimes(1));
     vi.useFakeTimers();
 
+    mocks.buildBackup.mockReturnValue(backup({ decks: { Newest: "{}" } }));
     watched?.();
     await Promise.resolve();
     firstPush.resolve(meta(2));
@@ -500,6 +509,42 @@ describe("cloud sync serialization", () => {
     expect(profileReplaced).toHaveBeenCalledTimes(1);
     expect(useCloudSyncStore.getState()).toMatchObject({ lastSyncedRevision: 2, dirty: false });
     window.removeEventListener("phase:profile-replaced", profileReplaced);
+  });
+
+  it("acknowledges a remote revision without applying regenerated feed deck changes", async () => {
+    const local = backup({
+      decks: { Personal: "same", "Feed A": "old" },
+      deckMetadata: JSON.stringify({ "Feed A": { addedAt: 1 } }),
+      feedDeckOrigins: JSON.stringify({ "Feed A": "bundled-a" }),
+    });
+    const regenerated = backup({
+      decks: { Personal: "same", "Feed B": "new" },
+      deckMetadata: JSON.stringify({ "Feed B": { addedAt: 2 } }),
+      feedDeckOrigins: JSON.stringify({ "Feed B": "bundled-b" }),
+    });
+    await readySignedIn();
+    mocks.buildBackup.mockReturnValue(local);
+    useCloudSyncStore.setState({ dirty: false, lastSyncedRevision: 1 });
+    provider.pullMeta.mockResolvedValue(meta(2));
+    provider.pull.mockResolvedValue({ backup: regenerated, meta: meta(2) });
+
+    await useCloudSyncStore.getState().syncNow();
+
+    expect(mocks.applyBackup).not.toHaveBeenCalled();
+    expect(provider.push).not.toHaveBeenCalled();
+    expect(useCloudSyncStore.getState()).toMatchObject({
+      status: "synced",
+      dirty: false,
+      lastSyncedRevision: 2,
+    });
+
+    mocks.buildBackup.mockReturnValue(regenerated);
+    useCloudSyncStore.setState({ dirty: true });
+    provider.pullMeta.mockResolvedValue(meta(2));
+    await useCloudSyncStore.getState().syncNow();
+
+    expect(provider.push).not.toHaveBeenCalled();
+    expect(useCloudSyncStore.getState().dirty).toBe(false);
   });
 
   it("reseeds local data when the remote row vanishes between metadata and body pulls", async () => {
@@ -750,7 +795,7 @@ describe("cloud sync serialization", () => {
     await useCloudSyncStore.getState().resolveConflict("cloud");
 
     expect(mocks.applyBackup).not.toHaveBeenCalled();
-    expect(useCloudSyncStore.getState().conflict).toBe(fresh);
+    expect(useCloudSyncStore.getState().conflict).toEqual(fresh);
   });
 
   it("retains a retryable conflict when its publish hits a CAS conflict", async () => {
@@ -767,6 +812,34 @@ describe("cloud sync serialization", () => {
     await useCloudSyncStore.getState().resolveConflict("local");
 
     expect(useCloudSyncStore.getState()).toMatchObject({ status: "conflict", conflict: remote(4) });
+  });
+
+  it("acknowledges an equivalent projected payload after a CAS race", async () => {
+    const local = backup({
+      decks: { Personal: "same", "Feed A": "old" },
+      deckMetadata: JSON.stringify({ "Feed A": { addedAt: 1 } }),
+      feedDeckOrigins: JSON.stringify({ "Feed A": "bundled-a" }),
+    });
+    const competing = backup({
+      decks: { Personal: "same", "Feed B": "new" },
+      deckMetadata: JSON.stringify({ "Feed B": { addedAt: 2 } }),
+      feedDeckOrigins: JSON.stringify({ "Feed B": "bundled-b" }),
+    });
+    await readySignedIn();
+    mocks.buildBackup.mockReturnValue(local);
+    useCloudSyncStore.setState({ dirty: true, lastSyncedRevision: 1 });
+    provider.pullMeta.mockResolvedValue(meta(1));
+    provider.push.mockRejectedValue(new SyncConflictError());
+    provider.pull.mockResolvedValue({ backup: competing, meta: meta(2) });
+
+    await useCloudSyncStore.getState().syncNow();
+
+    expect(useCloudSyncStore.getState()).toMatchObject({
+      status: "synced",
+      conflict: null,
+      dirty: false,
+      lastSyncedRevision: 2,
+    });
   });
 
   it("awaits predecessor realtime cleanup before subscribing its replacement", async () => {
@@ -966,6 +1039,8 @@ describe("cloud sync serialization", () => {
 
     const choice = useCloudSyncStore.getState().resolveConflict("local");
     await vi.waitFor(() => expect(provider.push).toHaveBeenCalledTimes(1));
+    const newest = backup({ preferences: '{"newest":true}' });
+    mocks.buildBackup.mockReturnValue(newest);
     watched?.();
     pushed.resolve(meta(4));
     await choice;
@@ -977,7 +1052,7 @@ describe("cloud sync serialization", () => {
       dirty: false,
       lastSyncedRevision: 5,
     });
-    expect(provider.push).toHaveBeenNthCalledWith(2, backup(), 4);
+    expect(provider.push).toHaveBeenNthCalledWith(2, newest, 4);
   });
 
   it("reseeds through a fresh reconciliation when a cloud-choice row vanishes after metadata", async () => {
@@ -1027,8 +1102,7 @@ describe("cloud sync serialization", () => {
 
     watched?.();
     remotePull.resolve(remote(2));
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(useCloudSyncStore.getState().status).toBe("conflict"));
 
     expect(provider.push).toHaveBeenCalledTimes(1);
     expect(useCloudSyncStore.getState()).toMatchObject({

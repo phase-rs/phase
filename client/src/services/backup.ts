@@ -3,11 +3,10 @@
  * preferences + decks + feed subscriptions between machines.
  *
  * Design note — each field is a raw JSON string (or null) rather than a
- * decoded object. The backup service never computes on this data; it just
- * round-trips the exact on-disk representation. This avoids coupling the
- * backup format to internal store shapes (which evolve independently) and
- * lets each store's own versioning machinery handle forward migration when
- * the restored data lands in localStorage.
+ * decoded object. Manual export/import round-trips the exact on-disk
+ * representation. Cloud sync additionally projects out device-local feed
+ * cache material while leaving each store's own versioning machinery in
+ * charge of the restored serialized data.
  *
  * IndexedDB caches (feed cache, audio cache, game state checkpoints) are
  * intentionally NOT exported — they rehydrate at runtime from source.
@@ -25,6 +24,7 @@ import {
   type DeckFolder,
   type DeckMeta,
 } from "../constants/storage";
+import type { FeedSubscription } from "../types/feed";
 
 /** Versioned envelope. Future shapes go in a `PhaseBackupV2 | …` union. */
 export interface PhaseBackupV1 {
@@ -249,6 +249,82 @@ export function buildBackup(): PhaseBackupV1 {
     feedSubscriptions: localStorage.getItem(FEED_SUBSCRIPTIONS_KEY),
     feedDeckOrigins: localStorage.getItem(FEED_DECK_ORIGINS_KEY),
   };
+}
+
+function isFeedSubscription(value: unknown): value is FeedSubscription {
+  return (
+    isRecord(value) &&
+    typeof value.sourceId === "string" &&
+    typeof value.url === "string" &&
+    (value.type === "bundled" || value.type === "remote") &&
+    typeof value.subscribedAt === "number" &&
+    typeof value.lastRefreshedAt === "number" &&
+    typeof value.lastVersion === "number" &&
+    (value.error === undefined || typeof value.error === "string")
+  );
+}
+
+function projectCloudSubscriptions(raw: string | null): string | null {
+  if (raw === null) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!Array.isArray(value) || !value.every(isFeedSubscription)) return null;
+    return JSON.stringify(value.map(({ sourceId, url, type }) => ({
+      sourceId,
+      url,
+      type,
+      // Required by the local persistence shape, but deliberately reset:
+      // cloud owns only subscription identity, never per-device cache state.
+      subscribedAt: 0,
+      lastRefreshedAt: 0,
+      lastVersion: 0,
+    })));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Strip device-local feed cache material from a backup used for cloud sync.
+ * Manual file exports intentionally retain the complete local profile.
+ */
+export function projectCloudBackup(backup: PhaseBackup): PhaseBackupV1 {
+  const origins = parseRecord(backup.feedDeckOrigins, (value): value is string => typeof value === "string");
+  if (origins === null) {
+    return {
+      ...backup,
+      feedSubscriptions: projectCloudSubscriptions(backup.feedSubscriptions),
+      feedDeckOrigins: null,
+    };
+  }
+
+  const feedDeckNames = new Set(Object.keys(origins));
+  const decks = Object.fromEntries(
+    Object.entries(backup.decks).filter(([name]) => !feedDeckNames.has(name)),
+  );
+  const metadata = parseRecord(backup.deckMetadata);
+  let deckMetadata = backup.deckMetadata;
+  if (backup.deckMetadata !== null && metadata !== null) {
+    deckMetadata = JSON.stringify(Object.fromEntries(
+      Object.entries(metadata).filter(([name]) => !feedDeckNames.has(name)),
+    ));
+  }
+
+  return {
+    ...backup,
+    decks,
+    deckMetadata,
+    activeDeck: backup.activeDeck !== null && feedDeckNames.has(backup.activeDeck)
+      ? null
+      : backup.activeDeck,
+    feedSubscriptions: projectCloudSubscriptions(backup.feedSubscriptions),
+    feedDeckOrigins: null,
+  };
+}
+
+/** Snapshot only the portable profile fields owned by cloud sync. */
+export function buildCloudBackup(): PhaseBackupV1 {
+  return projectCloudBackup(buildBackup());
 }
 
 /** Trigger a browser download of the backup payload. */

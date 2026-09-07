@@ -155,6 +155,10 @@ describe("validateFeed", () => {
     expect(validateFeed({ ...VALID_FEED, decks: "not array" })).toBeNull();
   });
 
+  it("rejects an empty feed so it cannot erase a valid cached catalog", () => {
+    expect(validateFeed({ ...VALID_FEED, decks: [] })).toBeNull();
+  });
+
   it("rejects deck with missing name", () => {
     const bad = {
       ...VALID_FEED,
@@ -347,7 +351,7 @@ describe("initializeFeeds", () => {
     expect(getDeckFeedOrigin("Test Deck")).toBe("cached");
   });
 
-  it("hydrates a fresh restored subscription without changing identical portable metadata", async () => {
+  it("hydrates a restored subscription and records this device's refresh", async () => {
     const restoredFeed = {
       ...VALID_FEED,
       decks: [{ ...VALID_FEED.decks[0], name: "Restored Feed Deck" }],
@@ -367,7 +371,11 @@ describe("initializeFeeds", () => {
     expect(getCachedFeed("restored")).toMatchObject({ id: "restored", decks: restoredFeed.decks });
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Restored Feed Deck")).not.toBeNull();
     expect(getDeckFeedOrigin("Restored Feed Deck")).toBe("restored");
-    expect(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)).toBe(originalSubscriptions);
+    const before = JSON.parse(originalSubscriptions) as FeedSubscription[];
+    const refreshed = listSubscriptions().find((sub) => sub.sourceId === "restored")!;
+    expect(refreshed.lastRefreshedAt).toBeGreaterThanOrEqual(
+      before.find((sub) => sub.sourceId === "restored")!.lastRefreshedAt,
+    );
   });
 
   it("persists refresh metadata after a stale subscription refresh", async () => {
@@ -390,7 +398,26 @@ describe("initializeFeeds", () => {
     expect(localStorage.getItem(FEED_SUBSCRIPTIONS_KEY)).toContain('"lastVersion":2');
   });
 
-  it("persists meaningful metadata from fresh cache hydration without advancing its timestamp", async () => {
+  it("refreshes a changed bundled feed even when its timestamp is fresh and version is unchanged", async () => {
+    const oldFeed = {
+      ...STARTER_FEED,
+      updated: "2026-03-19T00:00:00Z",
+      decks: [{ ...STARTER_FEED.decks[0], name: "Old Default" }],
+    };
+    await setCachedFeed("starter-decks", oldFeed);
+    await seedFreshBundledSubscriptions();
+    await setCachedFeed("starter-decks", oldFeed);
+    mockFetchByUrl(ALL_BUNDLED_FEEDS);
+
+    await initializeFeeds();
+
+    expect(global.fetch).toHaveBeenCalledWith("/feeds/starter-decks.json", { signal: undefined });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Default")).toBeNull();
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Test Deck")).not.toBeNull();
+    expect(getCachedFeed("starter-decks")?.updated).toBe(STARTER_FEED.updated);
+  });
+
+  it("persists refresh metadata when a subscription has no cache on this device", async () => {
     const lastRefreshedAt = Date.now();
     await seedFreshBundledSubscriptions([{
       sourceId: "restored",
@@ -406,7 +433,8 @@ describe("initializeFeeds", () => {
     await initializeFeeds();
 
     const refreshed = listSubscriptions().find((sub) => sub.sourceId === "restored")!;
-    expect(refreshed).toMatchObject({ lastVersion: 2, lastRefreshedAt });
+    expect(refreshed.lastVersion).toBe(2);
+    expect(refreshed.lastRefreshedAt).toBeGreaterThanOrEqual(lastRefreshedAt);
     expect(refreshed).not.toHaveProperty("error");
   });
 
