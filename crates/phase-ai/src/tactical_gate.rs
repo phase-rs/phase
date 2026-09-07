@@ -2334,14 +2334,23 @@ mod tests {
             );
         }
 
-        let object = state.objects.get_mut(&congregate).unwrap();
-        Arc::make_mut(&mut object.abilities)
-            .first_mut()
-            .unwrap()
-            .multi_target = Some(MultiTargetSpec::fixed(1, 2));
+        {
+            let object = state.objects.get_mut(&congregate).unwrap();
+            let definition = Arc::make_mut(&mut object.abilities).first_mut().unwrap();
+            *definition = zero_gain_definition();
+            definition.multi_target = Some(MultiTargetSpec::fixed(1, 2));
+        }
         assert!(
             zero_cast_is_retained(&state, congregate),
-            "multi-target metadata prevents a one-recipient zero proof"
+            "multi-target metadata retains an engine-issued Auto cast with an otherwise known-zero effect"
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)
+            .first_mut()
+            .expect("Congregate has one primary spell definition")
+            .multi_target = None;
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only multi-target metadata restores the known-zero rejection"
         );
     }
 
@@ -2349,14 +2358,30 @@ mod tests {
     fn zero_cast_independent_subability_metadata_survives() {
         let (mut state, congregate) = funded_zero_congregate_state();
         let mut root = zero_gain_definition();
-        root.sub_ability = Some(Box::new(zero_gain_definition()));
-        root.sub_link = SubAbilityLink::SequentialSibling;
+        let mut child = zero_gain_definition();
+        *child.effect = Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 0 },
+            player: TargetFilter::Controller,
+        };
+        child.sub_link = SubAbilityLink::SequentialSibling;
+        root.sub_ability = Some(Box::new(child));
         *Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)
             .first_mut()
             .expect("Congregate has one primary spell definition") = root;
         assert!(
             zero_cast_is_retained(&state, congregate),
-            "an independent sibling cannot inherit the root target proof"
+            "an independent sibling retains an engine-issued Auto cast with otherwise known-zero effects"
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)
+            .first_mut()
+            .expect("Congregate has one primary spell definition")
+            .sub_ability
+            .as_mut()
+            .expect("fixture has one child ability")
+            .sub_link = SubAbilityLink::ContinuationStep;
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the child sibling link restores the known-zero rejection"
         );
     }
 
