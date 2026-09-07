@@ -133,6 +133,41 @@ fn typed(filter: &TargetFilter) -> &TypedFilter {
     }
 }
 
+/// The `CastFromZone` sibling that sits DIRECTLY under a refused `"play lands"`
+/// fragment — the exact pair the pass keys on.
+///
+/// This is stricter than "the parse contains a refusal somewhere and a cast
+/// grant somewhere", which is satisfied by a chain where the two are unrelated,
+/// non-adjacent, or where the sibling is missing entirely. A negative row that
+/// asserts only the weaker property stays green if the fixture stops reaching
+/// `land_half_filter` for a reason having nothing to do with the guard under
+/// test, so every such row here locates this pair and pins its shape first.
+fn refused_land_play_cast_sibling(
+    parsed: &ParsedAbilities,
+) -> Option<(&TargetFilter, Option<Duration>)> {
+    all_defs(parsed).into_iter().find_map(|d| {
+        let head_is_refusal = matches!(
+            &*d.effect,
+            Effect::Unimplemented { description, .. }
+                if description
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("play lands"))
+        );
+        if !head_is_refusal {
+            return None;
+        }
+        match &*d.sub_ability.as_deref()?.effect {
+            Effect::CastFromZone {
+                target,
+                mode: CardPlayMode::Cast,
+                duration,
+                ..
+            } => Some((target, duration.clone())),
+            _ => None,
+        }
+    })
+}
+
 fn is_graveyard_anchored(filter: &TypedFilter) -> bool {
     filter.properties.iter().any(|p| {
         matches!(
@@ -301,20 +336,38 @@ fn g5_a_sibling_with_no_stated_window_gains_no_land_half() {
         "Shaman's Trance",
         &["Instant"],
     );
+    // REACH-GUARD, ASSERTED BEFORE THE NEGATIVE. Locate the exact
+    // refusal→`CastFromZone` pair the pass keys on and pin its shape, so the
+    // emptiness below can only be the DURATION check declining.
+    //
+    // Without this, the negative also passes if the sibling is absent,
+    // non-adjacent, or fails the class-wide type gate — none of which would
+    // exercise the guard under test.
+    let (sibling, sibling_duration) = refused_land_play_cast_sibling(&parsed).expect(
+        "reach-guard: the fixture must reach the pass with a cast sibling under the refusal",
+    );
+    let sib = typed(sibling);
+    assert_eq!(
+        sib.type_filters,
+        vec![TypeFilter::Card],
+        "reach-guard: the sibling must clear the class-wide type gate, so only the window can decline it"
+    );
+    assert!(
+        is_graveyard_anchored(sib),
+        "reach-guard: the sibling must clear the zone requirement too, got {:?}",
+        sib.properties
+    );
+    assert_eq!(
+        sibling_duration, None,
+        "reach-guard: the sibling must carry NO window — that is the axis under test"
+    );
+
+    // THE NEGATIVE. Eligible on every other axis, so the absent window is the
+    // only reason no land half is produced.
     assert!(
         play_grants(&parsed).is_empty(),
         "CR 611.2a: a sibling with no stated window must not yield a permanent land grant, got {:?}",
         play_grants(&parsed)
-    );
-
-    // REACH-GUARD (alpha): the fixture really does reach the pass — it still
-    // carries the refused fragment the pass keys on, so the emptiness above is
-    // the duration requirement declining rather than the input never arriving.
-    assert!(
-        unimplemented_descriptions(&parsed)
-            .iter()
-            .any(|d| d == "play lands"),
-        "reach-guard: the fixture must still carry the refused fragment"
     );
 
     // WHY THERE IS NO "same sentence minus the window" MINIMAL PAIR HERE.
@@ -502,16 +555,36 @@ fn g4_a_grant_scoped_to_a_chosen_pile_gains_no_land_half() {
         "Windowed Pile Probe",
         &["Sorcery"],
     );
+    // REACH-GUARD, ASSERTED BEFORE THE NEGATIVE — same discipline as `g5`.
+    // Pin the exact sibling so the emptiness below can only be the ZONE check.
+    let (pile_sibling, pile_duration) = refused_land_play_cast_sibling(&windowed_pile)
+        .expect("reach-guard: the windowed pile fixture must reach the pass with a cast sibling");
+    let pile_sib = typed(pile_sibling);
+    assert_eq!(
+        pile_duration,
+        Some(Duration::UntilEndOfTurn),
+        "reach-guard: this sibling must CLEAR the window check, or the zone axis is never reached"
+    );
+    assert_eq!(
+        pile_sib.type_filters,
+        vec![TypeFilter::Card],
+        "reach-guard: the sibling must clear the class-wide type gate too"
+    );
+    assert!(
+        !pile_sib
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { .. })),
+        "reach-guard: the sibling must carry NO zone anchor — that is the axis under test, got {:?}",
+        pile_sib.properties
+    );
+
+    // THE NEGATIVE. Eligible on every other axis, so the missing zone anchor is
+    // the only reason no land half is produced.
     assert!(
         play_grants(&windowed_pile).is_empty(),
         "CR 116.2a: a chosen-pile grant must not gain a land half even WITH a window, got {:?}",
         play_grants(&windowed_pile)
-    );
-    assert!(
-        unimplemented_descriptions(&windowed_pile)
-            .iter()
-            .any(|d| d == "play lands"),
-        "reach-guard: the windowed pile fixture must still carry the refused fragment"
     );
 
     // REACH-GUARD (beta): the same sentence with a real ZONE in place of the
@@ -531,5 +604,57 @@ fn g4_a_grant_scoped_to_a_chosen_pile_gains_no_land_half() {
         play_grants(&anchored).len(),
         1,
         "reach-guard: the same grammar over a real zone must still produce the land half"
+    );
+}
+
+#[test]
+fn g6_a_type_narrowed_sibling_gains_no_land_half() {
+    // THE THIRD GUARD, which nothing else in this file exercised. Found by
+    // mutation: deleting `land_half_filter`'s class-wide type check left every
+    // other row GREEN, because the two targeted cards in `g1` lower their
+    // permission as the ability's HEAD effect and so never form the
+    // refusal→sibling pair that reaches `land_half_filter` at all.
+    //
+    // This fixture does reach it. The sibling is eligible on BOTH other axes —
+    // `Until end of turn` window, explicit `InZone{Graveyard}` — and differs
+    // only in its type axis, which is `[Creature]` rather than the class-wide
+    // bare `Card`.
+    //
+    // CR 115.1 / class-wide reading: "cast CREATURE spells from your graveyard"
+    // permits creature cards, and nothing licenses inferring from it that LANDS
+    // may also be played from there. Copying the zone while swapping the type
+    // axis would invent exactly that.
+    let parsed = parse(
+        "Until end of turn, you may play lands and cast creature spells from your graveyard.",
+        "Type Narrowed Probe",
+        &["Sorcery"],
+    );
+
+    // REACH-GUARD, asserted first: the sibling clears the window and zone
+    // checks, so the type axis is the only thing left that can decline it.
+    let (sibling, sibling_duration) = refused_land_play_cast_sibling(&parsed)
+        .expect("reach-guard: the fixture must reach the pass with a cast sibling");
+    let sib = typed(sibling);
+    assert_eq!(
+        sibling_duration,
+        Some(Duration::UntilEndOfTurn),
+        "reach-guard: this sibling must CLEAR the window check"
+    );
+    assert!(
+        is_graveyard_anchored(sib),
+        "reach-guard: this sibling must CLEAR the zone check, got {:?}",
+        sib.properties
+    );
+    assert_eq!(
+        sib.type_filters,
+        vec![TypeFilter::Creature],
+        "reach-guard: the sibling must be type-NARROWED — that is the axis under test"
+    );
+
+    // THE NEGATIVE.
+    assert!(
+        play_grants(&parsed).is_empty(),
+        "a narrowed 'cast creature spells' permission must not yield a land half, got {:?}",
+        play_grants(&parsed)
     );
 }
