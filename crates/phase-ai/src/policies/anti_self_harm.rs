@@ -1852,6 +1852,88 @@ mod tests {
         (decision, candidate)
     }
 
+    fn pending_target_verdict(
+        state: &mut GameState,
+        ability: ResolvedAbility,
+        source: ObjectId,
+        legal_targets: Vec<TargetRef>,
+        action: GameAction,
+    ) -> PolicyVerdict {
+        let (decision, _) = install_target_selection_ctx(
+            state,
+            ability,
+            source,
+            state.objects[&source].card_id,
+            legal_targets,
+            None,
+        );
+        let candidate = CandidateAction {
+            action,
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        AntiSelfHarmPolicy.verdict(&ctx)
+    }
+
+    fn assert_live_target_action_advances(effect: Effect, action: GameAction) {
+        let mut state = make_state();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source = create_object(
+            &mut state,
+            CardId(10_000),
+            PlayerId(0),
+            "live target reducer source".to_string(),
+            Zone::Hand,
+        );
+        state.players[0].hand.push_back(source);
+        state.objects.get_mut(&source).unwrap().abilities =
+            Arc::new(vec![AbilityDefinition::new(AbilityKind::Spell, effect)]);
+        engine::game::apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: source,
+                card_id: CardId(10_000),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+        )
+        .expect("the real zero-cost spell cast reaches target selection");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        if matches!(action, GameAction::ChooseTarget { .. }) {
+            assert!(
+                engine::ai_support::candidate_actions(&state)
+                    .iter()
+                    .any(|issued| issued.action == action),
+                "candidate generation issues ChooseTarget, never a bulk target action"
+            );
+        }
+        engine::game::apply_as_current(&mut state, action)
+            .expect("the real reducer accepts the one-element target action");
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+    }
+
     fn make_target_selection_ctx(
         state: &mut GameState,
         effect: Effect,
@@ -3332,7 +3414,7 @@ mod tests {
                 None,
             );
             let candidate = CandidateAction {
-                action,
+                action: action.clone(),
                 metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let context = crate::context::AiContext::empty(&config.weights);
@@ -3352,6 +3434,179 @@ mod tests {
                 PolicyVerdict::Score { delta, ref reason }
                     if delta == 0.0 && reason.kind == "anti_self_harm_score"
             ));
+            assert_live_target_action_advances(ability.effect.clone(), action);
+        }
+    }
+
+    #[test]
+    fn exact_dynamic_draw_and_chosen_discard_cover_actions_and_reducer() {
+        let legal = vec![
+            TargetRef::Player(PlayerId(0)),
+            TargetRef::Player(PlayerId(1)),
+        ];
+        for (name, effect, expect_self_reject) in [
+            (
+                "draw",
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                        },
+                    },
+                    target: TargetFilter::Player,
+                },
+                false,
+            ),
+            (
+                "discard",
+                Effect::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                        },
+                    },
+                    target: TargetFilter::Player,
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    unless_filter: None,
+                },
+                true,
+            ),
+        ] {
+            for creature_count in [0, 1] {
+                let mut state = make_state();
+                let source = create_object(
+                    &mut state,
+                    CardId(10_100 + creature_count),
+                    PlayerId(0),
+                    format!("dynamic {name}"),
+                    Zone::Hand,
+                );
+                state.players[0].hand.push_back(source);
+                if creature_count == 1 {
+                    let creature =
+                        add_creature(&mut state, PlayerId(0), "counted reach guard", 1, 1);
+                    assert!(state.battlefield.contains(&creature));
+                }
+                let ability = ResolvedAbility::new(effect.clone(), Vec::new(), source, PlayerId(0));
+                for (target, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+                    for bulk in [false, true] {
+                        let action = if bulk {
+                            GameAction::SelectTargets {
+                                targets: vec![TargetRef::Player(target)],
+                            }
+                        } else {
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Player(target)),
+                            }
+                        };
+                        let verdict = pending_target_verdict(
+                            &mut state,
+                            ability.clone(),
+                            source,
+                            legal.clone(),
+                            action.clone(),
+                        );
+                        if creature_count == 0 {
+                            assert!(
+                                matches!(
+                                    verdict,
+                                    PolicyVerdict::Score { delta, ref reason }
+                                        if delta == 0.0 && reason.kind == "anti_self_harm_score"
+                                ),
+                                "{name} zero {action:?} must take the exact neutral path"
+                            );
+                        } else if is_self == expect_self_reject {
+                            assert!(
+                                matches!(
+                                    verdict,
+                                    PolicyVerdict::Reject { ref reason }
+                                        if reason.kind == "anti_self_harm_wrong_player_target"
+                                ),
+                                "{name} positive {action:?} must reject its harmful recipient"
+                            );
+                        } else {
+                            assert!(matches!(
+                                verdict,
+                                PolicyVerdict::Score { delta, ref reason }
+                                    if delta == if name == "draw" { 5.462857142857143 } else { 4.8 }
+                                        && reason.kind == "anti_self_harm_score"
+                            ), "{name} positive {action:?} must retain the exact directional score");
+                        }
+                        assert_live_target_action_advances(effect.clone(), action);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_small_signed_impact_ignores_controller_rider_in_both_action_forms() {
+        let mut state = make_state();
+        let source = create_object(
+            &mut state,
+            CardId(10_200),
+            PlayerId(0),
+            "controller rider source".to_string(),
+            Zone::Hand,
+        );
+        state.players[0].hand.push_back(source);
+        let rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::Player),
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(rider);
+        let legal = vec![
+            TargetRef::Player(PlayerId(0)),
+            TargetRef::Player(PlayerId(1)),
+        ];
+        for (target, is_self) in [(PlayerId(0), true), (PlayerId(1), false)] {
+            for bulk in [false, true] {
+                let action = if bulk {
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(target)],
+                    }
+                } else {
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(target)),
+                    }
+                };
+                let verdict = pending_target_verdict(
+                    &mut state,
+                    ability.clone(),
+                    source,
+                    legal.clone(),
+                    action.clone(),
+                );
+                if is_self {
+                    assert_eq!(
+                        reject_kind(&verdict),
+                        Some("anti_self_harm_wrong_player_target")
+                    );
+                } else {
+                    assert_eq!(score_delta(&verdict), 4.8);
+                    assert!(matches!(
+                        verdict,
+                        PolicyVerdict::Score { ref reason, .. }
+                            if reason.kind == "anti_self_harm_score"
+                    ));
+                }
+                assert_live_target_action_advances(ability.effect.clone(), action);
+            }
         }
     }
 

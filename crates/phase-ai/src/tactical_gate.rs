@@ -1749,24 +1749,38 @@ mod tests {
         )
         .first_mut()
         .expect("otherwise grant source has one mana ability");
-        ability.condition = Some(AbilityCondition::ConditionInstead {
-            inner: Box::new(AbilityCondition::IsMonarch),
-        });
-        ability.else_ability = Some(Box::new(AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Mana {
-                produced: ManaProduction::Colorless {
-                    count: QuantityExpr::Fixed { value: 1 },
+        ability.sub_ability = Some(Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
                 },
-                restrictions: vec![],
-                grants: vec![ManaSpellGrant::TriggerOnSpend {
-                    filter: TargetFilter::Any,
-                    ability: Box::new(zero_gain_definition()),
-                }],
-                expiry: None,
-                target: None,
-            },
-        )));
+            )
+            .condition(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::IsMonarch),
+            })
+            .with_else_ability(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![ManaSpellGrant::TriggerOnSpend {
+                        filter: TargetFilter::Any,
+                        ability: Box::new(zero_gain_definition()),
+                    }],
+                    expiry: None,
+                    target: None,
+                },
+            )),
+        ));
         source
     }
 
@@ -2598,29 +2612,43 @@ mod tests {
         add_plain_mana_source(&mut state, 91_214, engine::types::mana::ManaColor::White);
 
         assert!(
+            engine::game::mana_sources::activatable_mana_source_selections(&state, P0)
+                .iter()
+                .any(|selection| {
+                    selection.source.object_id == source
+                        && selection.ability_index == Some(0)
+                        && selection.penalty == ManaSourcePenalty::None
+                }),
+            "the engine must issue the indexed no-penalty source selection before the gate scans it"
+        );
+
+        assert!(
             zero_cast_is_retained(&state, congregate),
             "an otherwise-only source mana grant preserves the legal Auto cast"
         );
-        state
-            .objects
-            .get_mut(&source)
-            .expect("otherwise grant source exists")
-            .abilities = Arc::new(vec![AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Mana {
-                produced: ManaProduction::Colorless {
-                    count: QuantityExpr::Fixed { value: 1 },
-                },
-                restrictions: vec![],
-                grants: vec![],
-                expiry: None,
-                target: None,
-            },
+        let mut without_grants = state.clone();
+        let otherwise = Arc::make_mut(
+            &mut without_grants
+                .objects
+                .get_mut(&source)
+                .expect("otherwise grant source exists")
+                .abilities,
         )
-        .cost(AbilityCost::Tap)]);
+        .first_mut()
+        .expect("otherwise grant source has one root ability")
+        .sub_ability
+        .as_deref_mut()
+        .expect("root carries the ConditionInstead sub-ability")
+        .else_ability
+        .as_deref_mut()
+        .expect("conditional sub-ability carries the otherwise mana branch");
+        let Effect::Mana { grants, .. } = &mut *otherwise.effect else {
+            unreachable!("otherwise branch remains a mana effect");
+        };
+        grants.clear();
         assert!(
-            !zero_cast_is_retained(&state, congregate),
-            "removing only the otherwise grant restores the known-zero rejection"
+            !zero_cast_is_retained(&without_grants, congregate),
+            "clearing only the otherwise mana grants restores the known-zero rejection"
         );
     }
 
