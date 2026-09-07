@@ -113,7 +113,7 @@ describe("gameStateExport", () => {
 
   it("rejects an incomplete game state import", () => {
     expect(gameStateFromImportText(JSON.stringify({ waiting_for: { type: "Priority" } }))).toBe(
-      "JSON does not look like a GameState (missing waiting_for)",
+      "JSON does not look like a GameState (missing waiting_for or players)",
     );
   });
 
