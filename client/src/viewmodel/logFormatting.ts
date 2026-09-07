@@ -95,6 +95,7 @@ export function timelineRows(
       if (retainStandaloneBoundary && pending !== null && pending.turn !== 0) {
         rows.push({ type: "divider", divider: pending });
       }
+      const previousPending: LogDivider | null = pending;
       pending = {
         seq: entry.seq,
         turn: entry.turn,
@@ -102,8 +103,8 @@ export function timelineRows(
         boundary: presentation.boundary,
         turnSegments: presentation.boundary === "Turn"
           ? entry.segments
-          : pending?.turn === entry.turn
-            ? pending.turnSegments
+          : previousPending?.turn === entry.turn
+            ? previousPending.turnSegments
             : null,
       };
       continue;

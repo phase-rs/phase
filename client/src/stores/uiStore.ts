@@ -560,7 +560,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     }
   },
 
-  inspectObjectSticky: (id, faceIndex = 0, placement = "cursor", fallbackCardName = null) => {
+  inspectObjectSticky: (id, faceIndex = 0, placement = "cursor", fallbackCardName) => {
     if (pendingClearTimer != null) {
       clearTimeout(pendingClearTimer);
       pendingClearTimer = null;
@@ -568,7 +568,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     cancelPendingShow();
     set({
       inspectedObjectId: id,
-      inspectedCardName: fallbackCardName,
+      inspectedCardName: fallbackCardName ?? null,
       inspectedFaceIndex: faceIndex,
       previewPlacement: placement,
       previewSticky: true,
