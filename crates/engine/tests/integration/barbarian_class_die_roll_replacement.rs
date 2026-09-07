@@ -195,47 +195,52 @@ fn planar_dice_variant_is_not_claimed_by_the_die_roll_combinator() {
 
 // --- V2 sibling rules: the ignore axis is parameterized, not a Lowest special case ---
 
-/// The combinator covers two points on the CR 706.6 ignore axis, which are NOT
-/// equally corpus-backed:
+/// The combinator covers exactly one point on the CR 706.6 ignore axis, because
+/// exactly one is corpus-backed: `Lowest` ("and ignore the lowest roll"),
+/// printed on Barbarian Class, Pixie Guide, and Wyll, Blade of Frontiers, each
+/// of which reaches this parser through its real Oracle text.
 ///
-/// - `Lowest` ("and ignore the lowest roll") is printed on Barbarian Class,
-///   Pixie Guide, and Wyll, Blade of Frontiers, each of which reaches this
-///   parser through its real Oracle text.
-/// - `PlayerChoice` ("and ignore one") is exercised below ONLY by the synthetic
-///   string in this loop. No printed card reaches it: the nearest printings
-///   (Krark's Other Thumb, Ichor Elixir, Bamboozling Beeble, Probability Flux)
-///   each miss the accepted grammar for a different reason, catalogued on
-///   `DieRollIgnoreRule::PlayerChoice`. Read this assertion as covering the
-///   combinator's shape, not as evidence that a card exercises the leaf.
+/// Neither "the highest roll" nor "one" is parsed — a corpus check for the exact
+/// grammar this parser accepts returns ZERO cards for both, so each stays an
+/// honest gap like the rejected `plus N` form below rather than shipping an
+/// unvalidated leaf.
 ///
-/// "the highest roll" is deliberately NOT parsed — a corpus check for it returns
-/// zero cards, so it stays an honest gap, like the rejected `plus N` form below.
+/// "and ignore one" is the more tempting of the two, because the words ARE
+/// printed — on Ichor Elixir, Krark's Other Thumb, Probability Flux, Bamboozling
+/// Beeble and Squid Fire Knight. None of them is served by adding the arm:
+/// Ichor Elixir is planar (CR 706.7), Krark's Other Thumb uses neither the
+/// "that many dice plus one" count form nor the tail, Probability Flux is a
+/// duration-bounded ANY-player form this controller-scoped antecedent does not
+/// match, and the two activated abilities let the ability's CONTROLLER choose
+/// rather than the roller — an axis `WaitingFor::DieKeepChoice` cannot express.
 #[test]
 fn ignore_rule_variants_parse_across_the_axis() {
-    for (text, expected) in [
-        (BARBARIAN_CLASS_L1, DieRollIgnoreRule::Lowest),
-        (
-            "If you would roll one or more dice, instead roll that many dice plus one and ignore \
-             one.",
-            DieRollIgnoreRule::PlayerChoice,
-        ),
-    ] {
-        let parsed = parse(text, "Test Card");
-        assert_eq!(parsed.replacements.len(), 1, "failed to parse: {text}");
-        assert_eq!(parsed.replacements[0].die_ignore_rule, Some(expected));
-    }
-
-    // No printed card says "ignore the highest roll", so the combinator must
-    // reject it rather than ship an unvalidated leaf.
-    let unprinted = "If you would roll one or more dice, instead roll that many dice plus one \
-and ignore the highest roll.";
-    assert!(
-        parse(unprinted, "Test Card")
-            .replacements
-            .iter()
-            .all(|def| def.event != ReplacementEvent::RollDice),
-        "an unprinted ignore form must stay an honest gap, not a speculative parse"
+    let parsed = parse(BARBARIAN_CLASS_L1, "Test Card");
+    assert_eq!(
+        parsed.replacements.len(),
+        1,
+        "failed to parse the printed form"
     );
+    assert_eq!(
+        parsed.replacements[0].die_ignore_rule,
+        Some(DieRollIgnoreRule::Lowest)
+    );
+
+    // Both unprinted tails must stay gaps. Each differs from the accepted text
+    // ONLY in the tail, so a rejection is attributable to the ignore-rule
+    // combinator and nothing else.
+    for unprinted in [
+        "If you would roll one or more dice, instead roll that many dice plus one and ignore the          highest roll.",
+        "If you would roll one or more dice, instead roll that many dice plus one and ignore one.",
+    ] {
+        assert!(
+            parse(unprinted, "Test Card")
+                .replacements
+                .iter()
+                .all(|def| def.event != ReplacementEvent::RollDice),
+            "an unprinted ignore form must stay an honest gap, not a speculative parse:              {unprinted}"
+        );
+    }
 }
 
 /// CR 706.6 removes exactly ONE roll, and `DieRollIgnoreRule` carries no ignore
@@ -321,11 +326,6 @@ fn ignorable_indices_ranks_naturals_and_reports_every_tie() {
         DieRollIgnoreRule::Lowest.ignorable_indices(&[3, 7, 3]),
         vec![0, 2]
     );
-    // "ignore one" places no constraint.
-    assert_eq!(
-        DieRollIgnoreRule::PlayerChoice.ignorable_indices(&[4, 4, 9]),
-        vec![0, 1, 2]
-    );
     // No rolls → nothing to ignore (the `rolled_any == false` path).
     assert!(DieRollIgnoreRule::Lowest.ignorable_indices(&[]).is_empty());
 }
@@ -371,17 +371,6 @@ fn ignorable_indices_for_rules_ignores_one_roll_per_applied_replacement() {
         DieRollIgnoreRule::ignorable_indices_for_rules(
             &[DieRollIgnoreRule::Lowest, DieRollIgnoreRule::Lowest],
             &[4, 4, 4]
-        ),
-        (vec![0, 1, 2], 2)
-    );
-
-    // Mixed axis leaves: `Lowest` then `PlayerChoice` — the second rule places
-    // no constraint, so every REMAINING roll joins the candidate set while the
-    // count still rises to 2.
-    assert_eq!(
-        DieRollIgnoreRule::ignorable_indices_for_rules(
-            &[DieRollIgnoreRule::Lowest, DieRollIgnoreRule::PlayerChoice],
-            &[1, 3, 6]
         ),
         (vec![0, 1, 2], 2)
     );
@@ -890,12 +879,6 @@ fn chained_result_effect_waits_for_the_ignore_choice_and_reads_the_survivor() {
         })
         .expect("submit the ignore choice");
 
-    eprintln!(
-        "PROBE2 life={} wf={:?} die={:?}",
-        runner.state().players[P0.0 as usize].life,
-        runner.state().waiting_for,
-        runner.state().die_result_this_resolution
-    );
     let life_after = runner.state().players[P0.0 as usize].life;
     // Reach-guard FIRST: a dropped die result yields a +0 gain, which would
     // vacuously satisfy any "not the ignored value" assertion.
@@ -1545,36 +1528,120 @@ fn select_die_rolls_keeps_the_die_context_when_a_branch_re_suspends() {
     );
 }
 
-/// CR 706.6 - a `PlayerChoice` run that must ignore EVERY remaining roll is
-/// fully determined, so it reports no choice rather than raising a vacuous
-/// prompt offering all of them.
+/// CR 706.3a + CR 608.2c (regression): a results-table branch that suspends on
+/// a STACK-RESIDENT direct-choice owner must not be buried by the die-roll
+/// frame's re-park.
 ///
-/// `ignore_outcome_for_rules` folds a fully-determined tie into `forced` on the
-/// `Lowest` path, which is what keeps `needs_choice()` in agreement with the
-/// caller's CR 706.6 prompt precondition in `roll_die::resolve`
-/// (`picks > 0 && tied.len() > picks`). The `PlayerChoice` early return skipped
-/// that fold: it set `tied = (0..naturals.len())` unconditionally, so whenever
-/// `ignore_count == naturals.len()` the result was `tied.len() == picks` -
-/// `needs_choice()` returned true, the debug assert tripped, and a release build
-/// raised a prompt asking the roller to "choose" every roll they had.
+/// Path-divergence guard, and the whole reason this fixture exists alongside
+/// `select_die_rolls_keeps_the_die_context_when_a_branch_re_suspends`: that test
+/// suspends on a `DiscardChoice`, which owns no resolution frame, so the re-park
+/// reaches the EMPTY-stack fallback and a blind push is harmless there. An
+/// OPTIONAL branch effect installs a real `ResolutionFrame` whose gate is
+/// `FrameGate::DirectChoice`, and `ResolutionStack::validate` requires a
+/// direct-choice owner to be the TOP frame (`buried_direct_choice`). Past cursor
+/// 0 the die-roll frame is an `AfterChild` owner, so it belongs BELOW that
+/// child. The former `if replace(..).is_err() { push(..) }` collapsed
+/// `Empty` and `UnexpectedTop` into one branch and pushed the die-roll frame on
+/// top of the live direct-choice owner, violating that invariant.
 ///
-/// Not reachable from today's parser (every parsed rule arrives bundled with a
-/// `+1` count raise, keeping `naturals.len() > ignore_count`), but the leaf is
-/// parser-reachable via " and ignore one" and the antecedent is documented
-/// follow-up work, so the invariant is pinned at the type level here.
+/// A d1 makes every natural 1, so all three rolls tie for lowest and the roller
+/// breaks the tie by hand — routing through the `SelectDieRolls` handler, which
+/// is the path that re-parks.
 #[test]
-fn player_choice_ignoring_every_roll_is_determined_not_a_vacuous_prompt() {
-    // Fully determined: one rule, one die - the only roll must go.
-    let outcome =
-        DieRollIgnoreRule::ignore_outcome_for_rules(&[DieRollIgnoreRule::PlayerChoice], &[4]);
+fn a_branch_suspending_on_a_resident_direct_choice_is_not_buried_by_the_re_park() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Roller", 1, 1).id();
+    // Raises the instruction 2 -> 3 and attaches `DieRollIgnoreRule::Lowest`.
+    scenario.add_enchantment_from_oracle(P0, "Barbarian Class", BARBARIAN_CLASS_L1);
+    let mut runner = scenario.build();
+
+    // An OPTIONAL branch effect: resolving it installs a direct-choice frame and
+    // parks a `WaitingFor` for the "you may" decision, unlike the discard
+    // fixture's frameless prompt.
+    let mut optional_gain = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: engine::types::ability::TargetFilter::Controller,
+        },
+    );
+    optional_gain.optional = true;
+    let branch = DieResultBranch {
+        min: 1,
+        max: 1,
+        effect: Box::new(optional_gain),
+    };
+    let (_events, _) = resolve_roll(&mut runner, source, 2, 1, None, vec![branch]);
+
+    // Reach-guard: without the three-way tie this never enters `SelectDieRolls`,
+    // which is the handler that performs the re-park under test.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::DieKeepChoice { .. }),
+        "reach-guard: a three-way tie must open the CR 706.6 keep-choice, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Submitting the ignore choice runs the branch for the first survivor, which
+    // suspends on its own optional prompt and forces the mid-loop re-park.
+    runner
+        .act(GameAction::SelectDieRolls {
+            ignore_indices: vec![0],
+        })
+        .expect("submit the ignore choice");
+
+    // Reach-guard: the branch must actually have suspended on its own prompt.
+    // If it resolved inline there is no resident direct-choice owner and this
+    // test proves nothing.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "reach-guard: the optional branch must have suspended on its own prompt, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // THE REGRESSION: the stack must still be structurally valid. Under the old
+    // blind push the die-roll frame sat ON TOP of the live direct-choice owner,
+    // burying it. Answering the prompt is what exercises that: the engine
+    // matches the active prompt against the top frame's gate, so a buried owner
+    // either rejects the action or resumes the wrong frame.
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("CR 608.2c: the branch's own prompt must still be answerable");
+}
+
+/// CR 706.6 — a run that must ignore EVERY remaining roll is fully determined,
+/// so it reports no choice rather than raising a vacuous prompt offering all of
+/// them.
+///
+/// `ignore_outcome_for_rules` folds a fully-determined tie into `forced`, which
+/// is what keeps `needs_choice()` in agreement with the caller's CR 706.6 prompt
+/// precondition in `roll_die::resolve` (`picks > 0 && tied.len() > picks`).
+/// Without the fold, `ignore_count == naturals.len()` would leave
+/// `tied.len() == picks`: `needs_choice()` returns true, the debug assert trips,
+/// and a release build asks the roller to "choose" every roll they had.
+///
+/// Not reachable from today's parser — every parsed rule arrives bundled with a
+/// `+1` count raise, keeping `naturals.len() > ignore_count` — so the invariant
+/// is pinned at the type level here instead.
+#[test]
+fn a_run_ignoring_every_roll_is_determined_not_a_vacuous_prompt() {
+    // Two rules over two tied rolls: every roll is owed, so nothing is left to
+    // choose between.
+    let outcome = DieRollIgnoreRule::ignore_outcome_for_rules(
+        &[DieRollIgnoreRule::Lowest, DieRollIgnoreRule::Lowest],
+        &[4, 4],
+    );
     assert!(
         !outcome.needs_choice(),
         "CR 706.6: with every roll owed there is no decision to offer, got {outcome:?}"
     );
     assert_eq!(
         outcome.forced,
-        vec![0],
-        "CR 706.6: the determined roll belongs in `forced`, not `tied`"
+        vec![0, 1],
+        "CR 706.6: determined rolls belong in `forced`, not `tied`"
     );
     assert!(
         outcome.tied.is_empty(),
@@ -1586,10 +1653,9 @@ fn player_choice_ignoring_every_roll_is_determined_not_a_vacuous_prompt() {
         "`needs_choice()` and the CR 706.6 prompt precondition must never disagree"
     );
 
-    // Contrast: with a roll to spare the choice is real, and every roll is a
-    // legal pick because `PlayerChoice` constrains nothing (CR 706.6).
+    // Contrast: with a roll to spare the tie is real and the roller breaks it.
     let outcome =
-        DieRollIgnoreRule::ignore_outcome_for_rules(&[DieRollIgnoreRule::PlayerChoice], &[4, 7]);
+        DieRollIgnoreRule::ignore_outcome_for_rules(&[DieRollIgnoreRule::Lowest], &[4, 4, 7]);
     assert!(
         outcome.needs_choice(),
         "CR 706.6: with a roll to spare the roller genuinely chooses, got {outcome:?}"
@@ -1597,6 +1663,6 @@ fn player_choice_ignoring_every_roll_is_determined_not_a_vacuous_prompt() {
     assert_eq!(
         outcome.tied,
         vec![0, 1],
-        "CR 706.6: `ignore one` places no constraint on WHICH roll goes"
+        "CR 706.6: only the rolls tied for the lowest are legal picks"
     );
 }

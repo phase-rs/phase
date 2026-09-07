@@ -1628,24 +1628,24 @@ fn parse_die_roll_ignore_replacement(text: &str, lower: &str) -> Option<Replacem
         if plus_n != 1 {
             return Err(oracle_err(i));
         }
-        // CR 706.6: which of the extra rolls is ignored.
-        // No " and ignore the highest roll" arm: a Scryfall corpus check for
-        // that text returns ZERO cards, and this parser's own policy (see the
-        // `plus N` gate above) is to leave an unprinted form an honest
-        // `Unimplemented` gap rather than ship speculative surface.
-        let (i, rule) = alt((
-            value(
-                DieRollIgnoreRule::Lowest,
-                tag(" and ignore the lowest roll"),
-            ),
-            // No printed card reaches this arm today: the only card with this
-            // exact tail (Probability Flux) is a duration-bounded, any-player
-            // form whose antecedent this parser does not match, and the three
-            // "ignore one" cards nearest to it (Krark's Other Thumb, Ichor
-            // Elixir, Bamboozling Beeble) each miss the grammar for a separate
-            // reason. See `DieRollIgnoreRule::PlayerChoice` for the derivation.
-            value(DieRollIgnoreRule::PlayerChoice, tag(" and ignore one")),
-        ))
+        // CR 706.6: which of the extra rolls is ignored. One arm, because one
+        // form is printed — every card matching this antecedent ends
+        // " and ignore the lowest roll" (Barbarian Class, Pixie Guide, Wyll).
+        //
+        // Neither " and ignore the highest roll" nor " and ignore one" gets an
+        // arm, for the same reason as the `plus N` gate above: a Scryfall
+        // corpus check returns ZERO cards for the exact grammar this parser
+        // accepts, and an unprinted form is better left an honest
+        // `Unimplemented` gap than shipped as speculative surface. The nearest
+        // "ignore one" printings each need work this arm would not do — see
+        // `DieRollIgnoreRule::Lowest` for the per-card derivation, including
+        // the controller-vs-roller chooser axis that Bamboozling Beeble and
+        // Squid Fire Knight require and `WaitingFor::DieKeepChoice` cannot yet
+        // express.
+        let (i, rule) = value(
+            DieRollIgnoreRule::Lowest,
+            tag(" and ignore the lowest roll"),
+        )
         .parse(i)?;
         let (i, _) = opt(char('.')).parse(i)?;
         Ok((i, (plus_n, rule)))

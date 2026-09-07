@@ -1542,37 +1542,24 @@ pub enum DieRollIgnoreRule {
     /// auto-pick with no card to validate it — the same policy that makes the
     /// parser reject "that many dice plus N" for N > 1. If a card ever prints
     /// it, add the leaf and the matching `alt()` arm together.
-    Lowest,
-    /// "and ignore one" — the roller picks freely, with no extreme to rank by.
     ///
-    /// NO PRINTED CARD currently reaches this leaf through the parser. The
-    /// nearby printings each miss the accepted grammar for a different reason,
-    /// and none of them should be read as validating it:
-    ///
-    /// - Krark's Other Thumb: "instead roll **two of those dice** and ignore one
-    ///   **of those results**" — neither the "that many dice plus one" count
-    ///   form nor the " and ignore one" tail.
-    /// - Ichor Elixir: "roll that many **planar** dice plus one and ignore one"
-    ///   — deliberately excluded by the planar-dice carve-out documented on
-    ///   `parse_die_roll_ignore_replacement` (CR 706.7).
-    /// - Bamboozling Beeble: a one-shot targeted ACTIVATED ability ("The next
-    ///   time target player would roll…"), not an "If you would roll" static
-    ///   replacement, and it ends "you choose one of those rolls to ignore".
-    /// - Probability Flux: "**Until your next turn**, if **a player** would roll
-    ///   one or more dice, instead **they** roll that many dice plus one and
-    ///   ignore one" — the right tail, but a duration-bounded, any-player form
-    ///   the controller-scoped parser antecedent does not match.
-    ///
-    /// A corpus query for the exact grammar the parser accepts —
+    /// The same policy retired the former `PlayerChoice` ("and ignore one")
+    /// leaf. A corpus query for the exact grammar the parser accepted —
     /// `instead roll that many dice plus one and ignore one` — returns ZERO
-    /// cards. The leaf is retained rather than deleted because Probability Flux
-    /// shows the rules text is genuinely printed and only the surrounding
-    /// scoping is unsupported: widening the antecedent to the any-player,
-    /// duration-bounded form is the work that lights this up, and the leaf is
-    /// the half of it that is already correct. It is NOT corpus-backed today,
-    /// and `ignore_rule_variants_parse_across_the_axis` exercises it only
-    /// against a synthetic string.
-    PlayerChoice,
+    /// cards, and each nearby printing needs work this leaf did not do:
+    /// Ichor Elixir is planar (CR 706.7), Krark's Other Thumb uses neither the
+    /// "that many dice plus one" count form nor the " and ignore one" tail,
+    /// Probability Flux is a duration-bounded ANY-player form the
+    /// controller-scoped antecedent does not match, and Bamboozling Beeble /
+    /// Squid Fire Knight are one-shot targeted activated abilities whose
+    /// chooser is the ability's CONTROLLER, not the roller — a distinction
+    /// `WaitingFor::DieKeepChoice` cannot express, since it carries one
+    /// `player` who both rolls and ignores. Keeping the leaf also forced
+    /// `ignore_outcome_for_rules` to model a mixed `[Lowest, PlayerChoice]`
+    /// run, and that path dropped the `Lowest` forcing — offering the roller a
+    /// set that let them KEEP a roll CR 706.6 requires them to ignore. Whoever
+    /// prints the first real card here needs the chooser axis designed first.
+    Lowest,
 }
 
 /// CR 706.6: The result of applying a run of die-roll ignore rules to a set of
@@ -1647,11 +1634,13 @@ impl DieRollIgnoreRule {
     /// one roll. Use [`Self::ignorable_indices_for_rules`] for that case; it
     /// composes this single-roll method rather than reinterpreting its slice.
     pub fn ignorable_indices(self, naturals: &[u8]) -> Vec<usize> {
+        // One arm, and deliberately an exhaustive `match` rather than a direct
+        // `naturals.iter().min()`: a new leaf must not compile until someone
+        // decides which extreme (if any) it ranks by. A free-choice leaf in
+        // particular ranks by NONE, and `attractions::unprompted_ignored_indices`
+        // documents why that case needs a prompt rather than a silent pick.
         let extreme = match self {
             DieRollIgnoreRule::Lowest => naturals.iter().min(),
-            // CR 706.6: "ignore one" places no constraint — every roll is a
-            // legal choice.
-            DieRollIgnoreRule::PlayerChoice => return (0..naturals.len()).collect(),
         };
         let Some(&extreme) = extreme else {
             return Vec::new();
@@ -1708,27 +1697,6 @@ impl DieRollIgnoreRule {
         let ignore_count = rules.len().min(naturals.len());
         if ignore_count == 0 {
             return DieRollIgnoreOutcome::default();
-        }
-
-        // CR 706.6: `PlayerChoice` places no constraint on WHICH roll goes, so a
-        // run containing one cannot be reduced to an ordered extreme — every
-        // remaining roll stays a legal pick.
-        if rules.contains(&DieRollIgnoreRule::PlayerChoice) {
-            let mut forced = Vec::new();
-            let mut tied: Vec<usize> = (0..naturals.len()).collect();
-            // Same fold as the `Lowest` path below: when every remaining roll is
-            // owed there is no decision left, so hand the caller a fully
-            // determined set rather than a vacuous prompt offering every roll.
-            // This keeps `needs_choice()` and the caller's CR 706.6 prompt
-            // precondition in agreement by construction.
-            if tied.len() == ignore_count {
-                forced.append(&mut tied);
-            }
-            return DieRollIgnoreOutcome {
-                forced,
-                tied,
-                ignore_count,
-            };
         }
 
         // Homogeneous `Lowest` run: the N lowest naturals are the ignored set.

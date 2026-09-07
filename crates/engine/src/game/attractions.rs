@@ -145,35 +145,22 @@ pub(crate) fn finish_attraction_open(
 ///   CR 706.6 removes the ROLL and CR 701.52a decides visits per RESULT, so
 ///   dropping either of two equal rolls yields an identical set of visits — the
 ///   auto-pick cannot change any observable outcome.
-/// - `PlayerChoice` ("ignore one"): CR 706.6 places no constraint, so EVERY
-///   roll is a legal choice and those rolls have DIFFERENT values. Auto-picking
-///   would silently discard a roll the roller was entitled to keep, and a
-///   different pick visits different Attractions (CR 701.52a). With no way to
-///   prompt, ignoring NOTHING is the only option that never takes the decision
-///   away from the roller: it keeps every result the player could have kept.
 ///
-/// The `PlayerChoice` arm is unreachable today — no printed non-planar
-/// `PlayerChoice` die-roll replacement reaches this path (Ichor Elixir is
-/// planar, and CR 706.7 excludes the planar die from effects that refer to a
-/// numerical die result). If one is ever printed, this path needs a real
-/// continuation frame rather than a silent pick.
+/// `DieRollIgnoreRule` has exactly one leaf today, and it is a tied-extreme
+/// rule, so the auto-pick above is always safe here. A future FREE-choice rule
+/// ("ignore one", where every remaining roll is a legal pick with a DIFFERENT
+/// value) would NOT be: any pick the engine made would silently take a decision
+/// away from the roller, and a different pick visits different Attractions
+/// (CR 701.52a). This path has no way to prompt, so such a rule needs a real
+/// continuation frame here rather than a silent pick — it must not be added to
+/// the enum without one.
 fn unprompted_ignored_indices(ignore_rules: &[DieRollIgnoreRule], naturals: &[u8]) -> Vec<usize> {
     // CR 706.6 applies once per instructing effect, so each applied replacement
-    // removes one roll from the pool the earlier ones left behind. A single
-    // `PlayerChoice` rule anywhere in the list forfeits the WHOLE auto-pick:
-    // that rule makes every remaining roll a legal choice with a DIFFERENT
-    // value, so any pick the engine makes silently takes a decision away from
-    // the roller, and its removal also changes what a later rule ranks over.
-    if ignore_rules
-        .iter()
-        .any(|rule| matches!(rule, DieRollIgnoreRule::PlayerChoice))
-    {
-        return Vec::new();
-    }
-    // CR 706.6: every remaining rule is a tied-extreme rule (`Lowest` is the
-    // only one today), whose candidates are all tied at one extreme, so the
-    // deterministic pick cannot change any observable outcome (CR 701.52a
-    // decides visits per RESULT, and tied rolls hold equal results).
+    // removes one roll from the pool the earlier ones left behind. Every rule is
+    // a tied-extreme rule (`Lowest` is the only leaf), whose candidates are all
+    // tied at one extreme, so the deterministic pick cannot change any
+    // observable outcome (CR 701.52a decides visits per RESULT, and tied rolls
+    // hold equal results).
     let mut remaining: Vec<usize> = (0..naturals.len()).collect();
     let mut ignored = Vec::new();
     for rule in ignore_rules {
@@ -406,12 +393,13 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
 
     /// CR 706.6 + CR 701.52a: the unprompted roll-to-visit ignore decision is
-    /// safe ONLY for the tied-extreme rules. `Lowest` (the only such rule today)
+    /// safe ONLY for the tied-extreme rules. `Lowest` — the only rule today —
     /// offers candidates that all hold the same value, so picking any of them is
-    /// observationally identical; `PlayerChoice` offers candidates with
-    /// DIFFERENT values, so
-    /// picking one silently discards a roll the roller was entitled to keep and
-    /// (CR 701.52a decides visits per result) visits different Attractions.
+    /// observationally identical. A free-choice rule would offer candidates with
+    /// DIFFERENT values, so picking one would silently discard a roll the roller
+    /// was entitled to keep and (CR 701.52a decides visits per result) visit
+    /// different Attractions; the enum carries no such rule, and this test pins
+    /// the tied-extreme behavior the auto-pick depends on.
     #[test]
     fn unprompted_ignore_is_restricted_to_the_tied_extreme_rules() {
         // A unique lowest is not a choice at all — drop it.
@@ -438,18 +426,6 @@ mod tests {
                 &[3, 7, 3]
             ),
             vec![0, 2]
-        );
-
-        // CR 706.6 "ignore one": the candidates are [0, 1, 2] with DIFFERENT
-        // values, so there is no observationally-neutral pick. The engine must
-        // not choose for the roller — it ignores nothing instead. Asserting
-        // empty (not merely "not [0]") is what pins the fix: the old
-        // `ignored.first()` would have returned index 0 here, silently
-        // dropping the 4 and losing every visit its result would have caused.
-        assert_eq!(
-            unprompted_ignored_indices(&[DieRollIgnoreRule::PlayerChoice], &[4, 5, 9]),
-            Vec::<usize>::new(),
-            "CR 706.6: 'ignore one' must not be auto-picked on the unpromptable turn-based path"
         );
 
         // No ignore replacement in play: CR 706.6 is inert.
