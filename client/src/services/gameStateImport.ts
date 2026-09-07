@@ -34,7 +34,12 @@ export function gameStateFromImportText(importText: string): PersistedGameState 
   }
   const state = persistedGameStateView(persistedState);
 
-  if (!state || typeof state !== "object" || !("waiting_for" in state)) {
+  if (
+    !state
+    || typeof state !== "object"
+    || !("waiting_for" in state)
+    || !Array.isArray(state.players)
+  ) {
     return "JSON does not look like a GameState (missing waiting_for)";
   }
 

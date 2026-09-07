@@ -111,6 +111,12 @@ describe("gameStateExport", () => {
     expect(imported).toEqual(trustedEnvelope);
   });
 
+  it("rejects an incomplete game state import", () => {
+    expect(gameStateFromImportText(JSON.stringify({ waiting_for: { type: "Priority" } }))).toBe(
+      "JSON does not look like a GameState (missing waiting_for)",
+    );
+  });
+
   it("exports the trusted envelope from the P2P host", async () => {
     const trustedState = JSON.stringify({ state: { players: [{ hand: ["host-only-card"] }] } });
     const adapter = buildEngineAdapterMock(undefined, {
