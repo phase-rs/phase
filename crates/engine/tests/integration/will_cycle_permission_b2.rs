@@ -658,3 +658,82 @@ fn g6_a_type_narrowed_sibling_gains_no_land_half() {
         play_grants(&parsed)
     );
 }
+
+#[test]
+fn g7_a_zone_no_permission_consumer_serves_gains_no_land_half() {
+    // Sen Triplets: "You may play lands and cast spells from THAT PLAYER'S hand
+    // this turn." Its sibling is class-wide `Card`, carries a window, and IS
+    // zone-anchored — so it clears every other guard in this pass and is the
+    // only fixture that exercises the served-zone check.
+    //
+    // TWO independent reasons this must not become a grant:
+    //
+    // 1. NO CONSUMER. `game::casting` has exactly three land-permission
+    //    consumers — graveyard, exile, and top-of-library — each keyed to the
+    //    acting player's own zone. The hand branch of the land-availability
+    //    path walks `player.hand` directly and consults no `CastFromZone`
+    //    permission at all. A Hand-anchored `Play` half can never be delivered.
+    //
+    // 2. NO PLAYER BINDING. The filter lowers with `controller: None`, so it
+    //    cannot express "that player's" hand even in principle; the card's
+    //    selected-player scope lives on a different node entirely.
+    //
+    // Emitting it anyway would trade an honest unsupported gap for a typed
+    // grant the runtime ignores — worse than refusing, because coverage reads
+    // it as progress. It stays refused until a selected-player permission
+    // authority and its runtime coverage exist.
+    let parsed = parse(
+        "At the beginning of your upkeep, choose target opponent. This turn, that player can't cast spells or activate abilities and plays with their hand revealed. You may play lands and cast spells from that player's hand this turn.",
+        "Sen Triplets",
+        &["Artifact", "Creature", "Legendary"],
+    );
+
+    // REACH-GUARD, asserted first: this sibling CLEARS the type, window and
+    // zone-anchor checks, so the served-zone check is the only one left that
+    // can decline it.
+    let (sibling, sibling_duration) = refused_land_play_cast_sibling(&parsed)
+        .expect("reach-guard: the fixture must reach the pass with a cast sibling");
+    let sib = typed(sibling);
+    assert_eq!(
+        sib.type_filters,
+        vec![TypeFilter::Card],
+        "reach-guard: this sibling must CLEAR the class-wide type gate"
+    );
+    assert_eq!(
+        sibling_duration,
+        Some(Duration::UntilEndOfTurn),
+        "reach-guard: this sibling must CLEAR the window check"
+    );
+    assert!(
+        sib.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Hand,
+                ..
+            }
+        )),
+        "reach-guard: the sibling must be HAND-anchored — that is the axis under test, got {:?}",
+        sib.properties
+    );
+
+    // THE NEGATIVE.
+    assert!(
+        play_grants(&parsed).is_empty(),
+        "no land-permission consumer serves the hand, so no Play half may be synthesized, got {:?}",
+        play_grants(&parsed)
+    );
+
+    // REACH-GUARD (beta): the same grammar over a SERVED zone does produce a
+    // land half, so the decline keys on the zone being unserved rather than on
+    // some unrelated property of this card.
+    let served = parse(
+        "Until end of turn, you may play lands and cast spells from your graveyard.",
+        "Served Zone Probe",
+        &["Sorcery"],
+    );
+    assert_eq!(
+        play_grants(&served).len(),
+        1,
+        "reach-guard: the same grammar over a SERVED zone must produce the land half"
+    );
+}

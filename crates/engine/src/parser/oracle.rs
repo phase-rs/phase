@@ -2350,6 +2350,11 @@ fn recover_coordinated_land_play_in_ability(def: &mut AbilityDefinition) {
 ///   structural guard so the pass cannot widen a narrowed grant even if the head
 ///   shape changes.)
 /// * a non-`Typed` filter, which carries no type axis to swap.
+/// * a filter with no `InZone` anchor at all (Brilliant Ultimatum's chosen pile).
+/// * a filter anchored to a zone NO land-permission consumer serves — today only
+///   Graveyard, Exile and Library are represented, so a Hand-anchored grant
+///   (Sen Triplets) fails closed rather than becoming a typed permission the
+///   runtime silently ignores.
 fn land_half_filter(cast_target: &TargetFilter) -> Option<TargetFilter> {
     let TargetFilter::Typed(typed) = cast_target else {
         return None;
@@ -2368,11 +2373,37 @@ fn land_half_filter(cast_target: &TargetFilter) -> Option<TargetFilter> {
     // no `InZone` and this returns `None`. Its `"play lands"` fragment therefore
     // stays refused — the honest outcome, since the engine cannot express that
     // pile restriction and a zone-less land grant would be strictly too broad.
-    if !typed
-        .properties
-        .iter()
-        .any(|p| matches!(p, FilterProp::InZone { .. }))
-    {
+    //
+    // The check FAILS CLOSED on zones no land-permission consumer can serve.
+    // Exactly three exist in `game::casting`, each keyed to the ACTING player's
+    // own zone:
+    //
+    //     graveyard_lands_playable_by_permission      (Graveyard)
+    //     exile_lands_playable_by_permission          (Exile)
+    //     top_of_library_land_playable_by_permission  (Library)
+    //
+    // There is NO hand consumer. The hand branch of the land-availability path
+    // (`casting.rs`, the `player.hand` loop) walks the acting player's own hand
+    // and consults no `CastFromZone` permission at all. A recovered `Play` half
+    // anchored to the Hand therefore can never be delivered, and emitting one
+    // would trade an honest unsupported gap for a typed grant the runtime
+    // silently ignores.
+    //
+    // MEASURED: Sen Triplets ("play lands and cast spells from THAT PLAYER'S
+    // hand") lowers its sibling to `InZone{Hand}` with `controller: None` — no
+    // selected-player binding, so the filter cannot express whose hand is meant
+    // even in principle. Its fragment stays refused until a selected-player
+    // permission authority and its runtime coverage exist. Pinned by `g7`.
+    let zone_is_served = typed.properties.iter().any(|p| {
+        matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Graveyard | Zone::Exile | Zone::Library,
+                ..
+            }
+        )
+    });
+    if !zone_is_served {
         return None;
     }
     let mut land = typed.clone();
