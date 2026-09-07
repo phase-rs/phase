@@ -24547,6 +24547,27 @@ fn parse_emry_cast_that_card_this_turn_is_cast_from_zone() {
     }
 }
 
+#[test]
+fn parse_linked_exile_owner_free_cast_permission() {
+    let def = parse_effect_chain(
+        "The exiled card's owner may cast that card without paying its mana cost.",
+        AbilityKind::Triggered,
+    );
+
+    assert!(matches!(
+        &*def.effect,
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::ExileWithAltCost {
+                cost,
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+                ..
+            },
+            target: TargetFilter::ExiledBySource,
+            grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
+        } if *cost == ManaCost::zero()
+    ));
+}
+
 /// Regression for PR #2185: an impulse-draw chain ("Exile the top card... you
 /// may play that card this turn") has NO chosen target — the "that card"
 /// anaphor refers to the prior exile's tracked set. It must keep its

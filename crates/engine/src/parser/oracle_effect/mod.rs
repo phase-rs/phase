@@ -14048,6 +14048,10 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
 fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
+    if let Some(clause) = try_parse_linked_exile_owner_free_cast(tp) {
+        return Some(clause);
+    }
+
     // CR 118.9 + CR 609.4b: The any-mana conjunct must win over the bare
     // per-grantee branch so "they may play that card ... mana of any type can
     // be spent to cast a spell this way" (Gonti, Night Minister) keeps
@@ -14306,6 +14310,49 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         None => clause,
         Some(_) => clause,
     })
+}
+
+/// CR 118.9 + CR 611.2a + CR 607.2a: Parse a source-linked exile permission
+/// granted to each exiled card's owner, as in Spell Queller. The permission is
+/// an alternative-cost cast from the source's linked exile set, and
+/// `ObjectOwner` binds each card to its owner rather than the ability's
+/// controller.
+fn try_parse_linked_exile_owner_free_cast(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    if nom_on_lower(tp.original, tp.lower, |input| {
+        value(
+            (),
+            all_consuming((
+                tag("the exiled card's owner may cast that card"),
+                tag(" without paying its mana cost"),
+                opt(tag(".")),
+                multispace0,
+            )),
+        )
+        .parse(input)
+    })
+    .is_none()
+    {
+        return None;
+    }
+
+    Some(parsed_clause(Effect::GrantCastingPermission {
+        permission: CastingPermission::ExileWithAltCost {
+            cost: ManaCost::zero(),
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: None,
+            resolution_cleanup: None,
+            duration: None,
+            source_id: None,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        },
+        target: TargetFilter::ExiledBySource,
+        grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
+    }))
 }
 
 fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClause> {
