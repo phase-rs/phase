@@ -28,7 +28,7 @@ fn ability_has_unimplemented(ability: &engine::types::ability::AbilityDefinition
             .is_some_and(ability_has_unimplemented)
 }
 
-fn put_instant_on_stack(
+fn put_creature_spell_on_stack(
     runner: &mut GameRunner,
     controller: engine::types::player::PlayerId,
 ) -> ObjectId {
@@ -39,13 +39,9 @@ fn put_instant_on_stack(
         "Target spell".to_string(),
         Zone::Stack,
     );
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&spell)
-        .unwrap()
-        .card_types
-        .core_types = vec![CoreType::Instant];
+    let target = runner.state_mut().objects.get_mut(&spell).unwrap();
+    target.card_types.core_types = vec![CoreType::Creature];
+    target.base_card_types = target.card_types.clone();
     runner.state_mut().stack.push_back(StackEntry {
         id: spell,
         source_id: spell,
@@ -139,6 +135,9 @@ fn queen_of_dale_recruit_draws_discards_and_mints_token_for_its_controller() {
         .add_spell_to_hand(P1, "Opponent noncreature", true)
         .id();
     let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
     runner.cast(trigger).commit();
     runner.resolve_top();
     assert!(
@@ -178,7 +177,7 @@ fn assimilate_essence_paid_unless_creates_controller_incubator_with_two_counters
         .add_spell_to_hand_from_oracle(P0, "Assimilate Essence", true, ASSIMILATE_ESSENCE)
         .id();
     let mut runner = scenario.build();
-    let target = put_instant_on_stack(&mut runner, P1);
+    let target = put_creature_spell_on_stack(&mut runner, P1);
     runner.cast(assimilate).target_object(target).commit();
     runner.resolve_top();
     assert!(
@@ -225,6 +224,7 @@ fn narset_emblem_is_command_zone_source_of_trigger_damage() {
     scenario.at_phase(Phase::PreCombatMain);
     let narset = scenario
         .add_planeswalker_from_oracle(P0, "Narset of the Ancient Way", "Narset", 6, NARSET)
+        .as_planeswalker_with_loyalty("Narset", 6)
         .id();
     let victim = scenario.add_creature(P1, "Damage target", 3, 3).id();
     let spell = scenario
@@ -252,7 +252,7 @@ fn narset_emblem_is_command_zone_source_of_trigger_damage() {
 #[test]
 fn awakened_inferno_opponent_emblem_damages_its_controller() {
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::Untap);
+    scenario.at_phase(Phase::PreCombatMain);
     let chandra = scenario
         .add_planeswalker_from_oracle(
             P0,
@@ -261,6 +261,7 @@ fn awakened_inferno_opponent_emblem_damages_its_controller() {
             8,
             AWAKENED_INFERNO,
         )
+        .as_planeswalker_with_loyalty("Chandra", 8)
         .id();
     for player in [P0, P1] {
         scenario.with_library_top(player, &["A", "B", "C"]);
@@ -274,6 +275,7 @@ fn awakened_inferno_opponent_emblem_damages_its_controller() {
     );
     runner.state_mut().active_player = P1;
     runner.state_mut().priority_player = P1;
+    runner.state_mut().phase = Phase::Untap;
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
     let p0_before = runner.life(P0);
     let p1_before = runner.life(P1);
