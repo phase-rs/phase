@@ -27,6 +27,7 @@ import {
   failureLabel,
   isActionOpen,
   isActiveEntrant,
+  isPairingReportable,
   myPairing,
   viewerRelation,
   viewerRoles,
@@ -349,10 +350,23 @@ export function TournamentPage() {
   // while the dialog is open cannot carry a stale seat list into the payload.
   // No `key={pairing.id}` is passed: the dialog's entry-state reset is
   // structural, and its own prop doc says a caller need not pass one.
-  const freshPairing =
+  //
+  // Gated on `isPairingReportable`, the same broker `report_gate` the Report
+  // button consumes: a broadcast can close the gate while the dialog is open
+  // (the tournament ends → `TournamentNotRunning`, or a drop auto-settles the
+  // pairing → `Forfeit`), and an open dialog would then offer a submit the
+  // broker refuses every time. Closing it keeps the dialog consistent with the
+  // button that opened it. An already-`Reported` pairing on a running event
+  // stays `Open`, so a correction-in-progress is not yanked away.
+  const freshPairingCandidate =
     reporting === null
       ? null
       : (view?.pairings.find((p) => p.id === reporting.id) ?? reporting);
+  const freshPairing =
+    freshPairingCandidate !== null &&
+    isPairingReportable(freshPairingCandidate)
+      ? freshPairingCandidate
+      : null;
 
   const arity = view === null ? null : arityLabel(view.summary.arity);
 

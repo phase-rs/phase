@@ -559,6 +559,47 @@ describe("TournamentPage Bo1 result entry", () => {
   });
 });
 
+// An open report dialog consumes the same broker `report_gate` the Report
+// button does: a broadcast that closes the gate (the tournament ends) must
+// close the dialog, not leave it offering a submit the broker will refuse.
+describe("TournamentPage report dialog gate", () => {
+  it("closes an open report dialog when a broadcast closes the pairing's gate", async () => {
+    const user = userEvent.setup();
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    useMultiplayerStore.setState({
+      tournamentCredentials: { TOUR01: playerCredential("alice") },
+    });
+    await mountWith(fake, h2hView());
+
+    await user.click(screen.getByRole("button", { name: "Report Result" }));
+    await settle();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    // The tournament ends: the pairing's report_gate closes to
+    // `TournamentNotRunning`.
+    const closed: TournamentView = {
+      ...h2hView(),
+      summary: { ...summaryFor("TOUR01"), status: "Completed" },
+      pairings: [
+        {
+          id: 1,
+          round: 1,
+          players: [ALICE, BOB],
+          outcome: { Reported: "Draw" },
+          report_gate: "TournamentNotRunning",
+        },
+      ],
+    };
+    await act(async () => {
+      fake.deliver("TournamentUpdate", { code: "TOUR01", view: closed });
+    });
+    await settle();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
 // ── V11 — no page ever writes a view from an RPC result ──────────────────
 
 describe("TournamentPage RPC-result provenance", () => {
