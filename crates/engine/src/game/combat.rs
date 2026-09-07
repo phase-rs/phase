@@ -2903,8 +2903,14 @@ fn combat_tax_relevant_modes(
 pub(crate) fn combat_tax_relevant_kinds(
     context: &crate::types::game_state::CombatTaxContext,
 ) -> [StaticModeKind; 2] {
-    let modes = combat_tax_relevant_modes(context);
-    [modes[0].kind(), modes[1].kind()]
+    // `each_ref` keeps the arity DERIVED rather than restated. Writing
+    // `[modes[0].kind(), modes[1].kind()]` would let a future third mode compile
+    // and be SILENTLY DROPPED from the gate — narrowing it, which is the unsound
+    // direction. Mapping the whole array makes that a compile error at this
+    // function's return type instead of a red test after the fact.
+    combat_tax_relevant_modes(context)
+        .each_ref()
+        .map(|mode| mode.kind())
 }
 
 /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Walk every battlefield / command-zone
@@ -4663,15 +4669,41 @@ impl AttackDeclarationConstraints {
     /// out from the closed form itself so a test can run the closed form on a
     /// board that FAILS the precondition and show the two answers genuinely
     /// diverge there — i.e. that declining is load-bearing, not decorative.
-    fn separable_precondition(&self, state: &GameState) -> bool {
-        // Precondition 1: uncoupled. The SAME predicate `max_no_payment` tests
-        // before taking its own separable fast path.
-        let coupled = self.global_cap.is_some()
+    /// CR 508.1c + CR 506.5: whether one candidate's legality or score can depend
+    /// on ANOTHER candidate's declaration. This is the single authority both
+    /// separable fast paths gate on.
+    ///
+    /// It is a method rather than two matching expressions because the
+    /// correspondence IS the correctness premise: the precondition
+    /// [`Self::separable_precondition`] checks has to be the same predicate
+    /// `max_no_payment` gates on, and two blocks that merely happen to read alike
+    /// are free to drift on a future edit.
+    ///
+    /// Each disjunct names a genuinely set-coupled rule:
+    /// * `global_cap` / `per_defender_caps` — a shared budget across attackers.
+    /// * `per_permanent_defender_caps` (`MaxAttackersEachCombat { defender:
+    ///   Some(ThisPermanent) }`, The Eternal Wanderer) — two creatures whose only
+    ///   legal target is a capped permanent are not independently maximizable,
+    ///   since attacking it with both would exceed the cap.
+    /// * `needs_companion` / `must_be_sole` — CR 506.5 "can't attack alone" and
+    ///   "attacks alone", which read the rest of the declared set by definition.
+    ///
+    /// The three fields deliberately absent (`candidates`, `legal_targets`,
+    /// `requirements`) are the inputs to the per-pair legality loop and the score
+    /// bar, both of which are per-candidate by signature.
+    fn is_coupled(&self) -> bool {
+        self.global_cap.is_some()
             || !self.per_defender_caps.is_empty()
             || !self.per_permanent_defender_caps.is_empty()
             || !self.needs_companion.is_empty()
-            || !self.must_be_sole.is_empty();
-        if coupled {
+            || !self.must_be_sole.is_empty()
+    }
+
+    fn separable_precondition(&self, state: &GameState) -> bool {
+        // Precondition 1: uncoupled. The SAME predicate `max_no_payment` tests
+        // before taking its own separable fast path — literally the same method,
+        // so the two cannot drift apart.
+        if self.is_coupled() {
             return false;
         }
         // Precondition 2: CR 508.1a + CR 702.26b + CR 701.35a — every candidate
@@ -4873,18 +4905,10 @@ fn max_no_payment(constraints: &AttackDeclarationConstraints, state: &GameState)
     // requirements depend only on its own chosen (free) target, so the optimum is
     // the per-creature sum of best single-target scores.
     //
-    // `per_permanent_defender_caps` (`MaxAttackersEachCombat { defender:
-    // Some(ThisPermanent) }`, The Eternal Wanderer) IS a coupling input here,
-    // same as `per_defender_caps`: two creatures whose only legal target is a
-    // capped permanent are not independently maximizable (attacking it with
-    // both would exceed the cap), so the fast path must be skipped whenever
-    // any such cap is active.
-    let coupled = constraints.global_cap.is_some()
-        || !constraints.per_defender_caps.is_empty()
-        || !constraints.per_permanent_defender_caps.is_empty()
-        || !constraints.needs_companion.is_empty()
-        || !constraints.must_be_sole.is_empty();
-    if !coupled {
+    // Coupling is decided by the single authority on the constraints model; see
+    // `AttackDeclarationConstraints::is_coupled` for why each disjunct is one,
+    // including why `per_permanent_defender_caps` (The Eternal Wanderer) counts.
+    if !constraints.is_coupled() {
         return constraints
             .candidates
             .iter()
@@ -7926,11 +7950,17 @@ mod tests {
         );
     }
 
-    /// CR 508.1d + CR 118.12a: positive control for the gate above. With a real
+    /// CR 508.1c + CR 508.1h: positive control for the gate above. With a real
     /// Ghostly Prison on the flushed board, `static_mode_presence` reports
     /// `CantAttack` present, the gate falls through to the exact walk (the
     /// counter fires), and the tax is still computed — proving the O(1) gate
     /// suppresses only boards where no tax could apply.
+    ///
+    /// A Ghostly Prison tax is a RESTRICTION (CR 508.1c — "effects that say a
+    /// creature can't attack, or that it can't attack unless some condition is
+    /// met") whose cost is aggregated at CR 508.1h. It is not a requirement, so
+    /// CR 508.1d does not describe it; the authority array above carries the
+    /// correct citation.
     #[test]
     fn combat_tax_presence_gate_does_not_suppress_a_real_tax() {
         let mut state = setup();
