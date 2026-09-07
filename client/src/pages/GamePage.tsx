@@ -1992,10 +1992,6 @@ function GamePageContent({
       <AttackRequirementBadges />
       <BlockerConstraintBadges />
 
-      {/* Card preview overlay. Owns its own inspect-state subscriptions so a
-          hover doesn't re-render GamePageContent (and the whole battlefield). */}
-      <GameCardPreview />
-
       {/* WaitingFor-driven prompt overlays (only for human player).
           Wrapped in DialogHost so any active dialog can be peeked away to
           reveal the battlefield underneath; peek state resets on every
@@ -2343,6 +2339,9 @@ function GamePageContent({
       />
       </div>
       <GameLogPanel />
+      {/* This is a peer of the board and log columns: a preview opened from a
+          log card must not be clipped by the paint-contained board column. */}
+      <GameCardPreview />
     </div>
   );
 }

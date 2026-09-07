@@ -448,6 +448,10 @@ fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
         // can observe it; the player already saw the chapter ability itself
         // resolve. Same low-signal bookkeeping class as StackResolved.
         GameEvent::SagaChapterAbilityResolved { .. } => true,
+        // `handle_empty_attackers` emits this bookkeeping event so the combat
+        // pipeline can advance uniformly, but no creature attacked. It must
+        // not be narrated as an attack against the default defender.
+        GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.is_empty() => true,
         _ => false,
     }
 }
@@ -1832,6 +1836,24 @@ mod tests {
             cast_mana_value: None,
         };
         assert!(!should_exclude_event(&cast, &state));
+    }
+
+    #[test]
+    fn empty_attack_declaration_is_excluded_from_the_log() {
+        let state = GameState::new_two_player(42);
+        let no_attackers = GameEvent::AttackersDeclared {
+            attacker_ids: vec![],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+        let attacker = GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(7)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+
+        assert!(should_exclude_event(&no_attackers, &state));
+        assert!(!should_exclude_event(&attacker, &state));
     }
 
     #[test]
