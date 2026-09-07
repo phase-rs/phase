@@ -8713,8 +8713,7 @@ mod tests {
     #[test]
     fn reflexive_connector_defers_an_unrecognized_following_guard() {
         let text = "When you do, if the moon is blue, draw a card";
-        let stripped =
-            strip_if_you_do_conditional_with_context(text, &mut ParseContext::default());
+        let stripped = strip_if_you_do_conditional_with_context(text, &mut ParseContext::default());
 
         let ReflexiveConditionalStrip::DeferredWhenYouDoGuard {
             condition,
