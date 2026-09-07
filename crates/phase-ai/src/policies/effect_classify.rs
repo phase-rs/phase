@@ -2,8 +2,9 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::quantity::try_resolve_quantity_in_source_context;
 use engine::types::ability::{
-    ContinuousModification, ControllerRef, Effect, EffectScope, PtValue, QuantityExpr,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
+    AbilityKind, ContinuousModification, ControllerRef, Effect, EffectScope, PtValue, QuantityExpr,
+    ResolvedAbility, SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
+    TriggerDefinition, TypeFilter,
 };
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
@@ -759,6 +760,45 @@ pub(crate) fn targeted_player_impact_in(
     effects: &[&Effect],
     player: PlayerId,
 ) -> Option<f64> {
+    targeted_player_impact_in_with_parent_target_binding(
+        state,
+        source_controller,
+        source_id,
+        effects,
+        player,
+        None,
+    )
+}
+
+/// Compatibility seam for callers that have already proved that `player` is
+/// the direct root target. A flat effect slice cannot establish that ownership
+/// itself, so ordinary target scoring must continue to pass `None` here.
+pub(crate) fn targeted_player_impact_in_with_bound_parent_target(
+    state: &GameState,
+    source_controller: Option<PlayerId>,
+    source_id: Option<ObjectId>,
+    effects: &[&Effect],
+    player: PlayerId,
+    bound_parent_target: PlayerId,
+) -> Option<f64> {
+    targeted_player_impact_in_with_parent_target_binding(
+        state,
+        source_controller,
+        source_id,
+        effects,
+        player,
+        Some(bound_parent_target),
+    )
+}
+
+fn targeted_player_impact_in_with_parent_target_binding(
+    state: &GameState,
+    source_controller: Option<PlayerId>,
+    source_id: Option<ObjectId>,
+    effects: &[&Effect],
+    player: PlayerId,
+    bound_parent_target: Option<PlayerId>,
+) -> Option<f64> {
     let mut found_targeted_effect = false;
     let mut impact = 0.0;
 
@@ -766,7 +806,8 @@ pub(crate) fn targeted_player_impact_in(
         let Some(filter) = selected_player_target_filter(effect) else {
             continue;
         };
-        if filter_names_the_chosen_players_permanents(filter)
+        if matches!(filter, TargetFilter::ParentTarget) && bound_parent_target == Some(player)
+            || filter_names_the_chosen_players_permanents(filter)
             || engine::game::filter::player_matches_target_filter_in_state(
                 state,
                 filter,
@@ -781,6 +822,206 @@ pub(crate) fn targeted_player_impact_in(
     }
 
     found_targeted_effect.then_some(impact)
+}
+
+/// Preview a player-targeting pending cast only while the exact root target
+/// selection is still live. This is intentionally not a general ability-graph
+/// interpreter: unsupported modifiers, branches, or recipient authorities
+/// leave the established heuristic in control.
+pub(crate) fn exact_pending_player_impact(
+    ctx: &PolicyContext<'_>,
+    target: &TargetRef,
+) -> Option<f64> {
+    let TargetRef::Player(player) = target else {
+        return None;
+    };
+    let WaitingFor::TargetSelection {
+        pending_cast,
+        target_slots,
+        selection,
+        ..
+    } = &ctx.decision.waiting_for
+    else {
+        return None;
+    };
+    if target_slots.len() != 1
+        || selection.current_slot != 0
+        || !selection.selected_slots.is_empty()
+        || !selection.current_legal_targets.contains(target)
+        || target_slots[0].chooser.is_some()
+    {
+        return None;
+    }
+
+    let root = &pending_cast.ability;
+    if pending_cast.object_id != root.source_id
+        || root.kind != AbilityKind::Spell
+        || !ctx.state.objects.contains_key(&pending_cast.object_id)
+        || !exact_pending_node_is_eligible(root)
+    {
+        return None;
+    }
+    let source_controller = root.original_controller.unwrap_or(root.controller);
+    let root_filter = exact_player_effect_filter(&root.effect)?;
+    if !is_exact_root_player_selector(root_filter)
+        || !engine::game::filter::player_matches_target_filter_in_state(
+            ctx.state,
+            root_filter,
+            *player,
+            Some(source_controller),
+            Some(root.source_id),
+        )
+    {
+        return None;
+    }
+
+    let Some(mut impact) = exact_pending_node_impact(root, true, ctx.state, source_controller)?
+    else {
+        return None;
+    };
+    let mut node: &ResolvedAbility = root;
+    while let Some(next) = node.sub_ability.as_deref() {
+        if next.sub_link != SubAbilityLink::ContinuationStep
+            || next.source_id != root.source_id
+            || !exact_pending_node_is_eligible(next)
+        {
+            return None;
+        }
+        if let Some(contribution) =
+            exact_pending_node_impact(next, false, ctx.state, source_controller)?
+        {
+            impact += contribution;
+        }
+        node = next;
+    }
+    Some(impact)
+}
+
+fn exact_pending_node_is_eligible(node: &ResolvedAbility) -> bool {
+    node.kind == AbilityKind::Spell
+        && node.targets.is_empty()
+        && node.else_ability.is_none()
+        && node.duration.is_none()
+        && node.condition.is_none()
+        && !node.optional_targeting
+        && !node.optional
+        && node.optional_player.is_none()
+        && node.optional_for.is_none()
+        && node.multi_target.is_none()
+        && node.target_constraints.is_empty()
+        && node.target_choice_timing == TargetChoiceTiming::Stack
+        && node.selected_mode_labels.is_empty()
+        && node.modal_instruction_ordinal.is_none()
+        && node.detached_remainder == Default::default()
+        && node.repeat_for.is_none()
+        && node.min_x_value == 0
+        && node.announced_x.is_none()
+        && !node.cant_be_copied
+        && node.copy_count_status == Default::default()
+        && !node.forward_result
+        && node.unless_pay.is_none()
+        && node.distribution.is_none()
+        && node.distribute.is_none()
+        && node.player_scope.is_none()
+        && node.starting_with.is_none()
+        && node.chosen_x.is_none()
+        && node.target_chooser.is_none()
+        && node.chosen_players.is_empty()
+        && node.repeat_until.is_none()
+        && node.replacement_applied.is_empty()
+        && node.target_selection_mode == Default::default()
+        && node.sibling_condition == Default::default()
+        && node.modal.is_none()
+        && node.mode_abilities.is_empty()
+        && node.parent_target_missing_reason.is_none()
+}
+
+fn exact_player_effect_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Draw { target, .. } | Effect::Discard { target, .. } => Some(target),
+        Effect::GainLife { player, .. } => Some(player),
+        Effect::LoseLife {
+            target: Some(target),
+            ..
+        } => Some(target),
+        _ => None,
+    }
+}
+
+fn is_exact_root_player_selector(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Player | TargetFilter::PlayerMatching { .. }
+    ) || matches!(
+        filter,
+        TargetFilter::Typed(typed)
+            if typed.type_filters.is_empty()
+                && typed.properties.is_empty()
+                && matches!(
+                    typed.controller,
+                    Some(
+                        ControllerRef::You
+                            | ControllerRef::Opponent
+                            | ControllerRef::SpecificPlayer { .. }
+                    )
+                )
+    )
+}
+
+fn exact_pending_node_impact(
+    node: &ResolvedAbility,
+    root: bool,
+    state: &GameState,
+    source_controller: PlayerId,
+) -> Option<Option<f64>> {
+    let (quantity, coefficient, filter, discard_is_simple) = match &node.effect {
+        Effect::Draw { count, target } => (count, 1.25, target, true),
+        Effect::Discard {
+            count,
+            target,
+            filter,
+            selection,
+            unless_filter,
+        } => (
+            count,
+            -1.5,
+            target,
+            filter.is_none()
+                && unless_filter.is_none()
+                && matches!(selection, engine::types::ability::CardSelectionMode::Chosen),
+        ),
+        Effect::GainLife { amount, player } => (amount, 0.15, player, true),
+        Effect::LoseLife {
+            amount,
+            target: Some(target),
+        } => (amount, -0.15, target, true),
+        _ => return None,
+    };
+    if !discard_is_simple {
+        return None;
+    }
+
+    if root {
+        if !is_exact_root_player_selector(filter) {
+            return None;
+        }
+    } else {
+        match filter {
+            TargetFilter::Controller => return Some(None),
+            TargetFilter::ParentTarget => {}
+            _ => return None,
+        }
+    }
+
+    let value = if root {
+        try_resolve_quantity_in_source_context(state, quantity, source_controller, node.source_id)?
+    } else {
+        let QuantityExpr::Fixed { value } = quantity else {
+            return None;
+        };
+        *value
+    };
+    Some(Some(f64::from(value.max(0)) * coefficient))
 }
 
 /// Returns the player filter that is bound by target selection, if this effect
@@ -1506,7 +1747,14 @@ mod live_quantity_targeting_tests {
                     effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
-                selection: Default::default(),
+                selection: engine::types::game_state::TargetSelectionProgress {
+                    current_slot: 0,
+                    selected_slots: Vec::new(),
+                    current_legal_targets: vec![
+                        TargetRef::Player(PlayerId(0)),
+                        TargetRef::Player(PlayerId(1)),
+                    ],
+                },
             },
             candidates: Vec::new(),
         };
@@ -1747,8 +1995,20 @@ mod live_quantity_targeting_tests {
                 &[&discard],
                 PlayerId(1)
             ),
+            None,
+            "a flat ParentTarget has no target-graph ownership"
+        );
+        assert_eq!(
+            targeted_player_impact_in_with_bound_parent_target(
+                &state,
+                Some(PlayerId(0)),
+                Some(source),
+                &[&discard],
+                PlayerId(1),
+                PlayerId(1),
+            ),
             Some(-1.5),
-            "a ParentTarget Discard continuation remains bound to the chosen player"
+            "the explicit direct-root binding restores the ParentTarget recipient"
         );
 
         let mut ability = ResolvedAbility::new(harm, Vec::new(), source, PlayerId(0));

@@ -43,9 +43,9 @@ use super::copy_value::{
 };
 use super::effect_classify::{
     aggregate_player_impact, aura_polarity, effect_polarity, effect_targets_object,
-    extract_target_filter, is_spell_beneficial, lethal_to_creature, targeted_object_impact,
-    targeted_player_impact, targets_creatures, targets_creatures_only, EffectPolarity,
-    PLAYER_IMPACT_PREFERENCE_BAND,
+    exact_pending_player_impact, extract_target_filter, is_spell_beneficial, lethal_to_creature,
+    targeted_object_impact, targeted_player_impact, targets_creatures, targets_creatures_only,
+    EffectPolarity, PLAYER_IMPACT_PREFERENCE_BAND,
 };
 use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX,
@@ -926,6 +926,12 @@ fn filter_reaches_only_own_permanents(
 fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<PolicyReason> {
     match target {
         TargetRef::Player(player_id) => {
+            if let Some(impact) = exact_pending_player_impact(ctx, target) {
+                let prefers_self = impact > 0.0;
+                return (impact != 0.0 && prefers_self != (*player_id == ctx.ai_player))
+                    .then(|| PolicyReason::new("anti_self_harm_wrong_player_target"));
+            }
+
             let beneficial = is_spell_beneficial(ctx);
             let is_self = *player_id == ctx.ai_player;
 
@@ -968,6 +974,11 @@ fn target_reject_reason(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<P
 }
 
 fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
+    if matches!(target, TargetRef::Player(_))
+        && exact_pending_player_impact(ctx, target) == Some(0.0)
+    {
+        return 0.0;
+    }
     if target_reject_reason(ctx, target).is_some() {
         return 0.0;
     }
@@ -3165,8 +3176,16 @@ mod tests {
 
     #[test]
     fn draw_then_parent_target_discard_prefers_opponent() {
-        let state = make_state();
+        let mut state = make_state();
         let config = AiConfig::default();
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Draw then discard".to_string(),
+            Zone::Hand,
+        );
+        state.players[0].hand.push_back(source);
         let discard = ResolvedAbility::new(
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 3 },
@@ -3176,7 +3195,7 @@ mod tests {
                 filter: None,
             },
             Vec::new(),
-            ObjectId(100),
+            source,
             PlayerId(0),
         );
         let ability = ResolvedAbility::new(
@@ -3185,7 +3204,7 @@ mod tests {
                 target: TargetFilter::Player,
             },
             Vec::new(),
-            ObjectId(100),
+            source,
             PlayerId(0),
         )
         .sub_ability(discard);
@@ -3193,7 +3212,7 @@ mod tests {
             waiting_for: WaitingFor::TargetSelection {
                 player: PlayerId(0),
                 pending_cast: Box::new(PendingCast::new(
-                    ObjectId(100),
+                    source,
                     CardId(100),
                     ability,
                     ManaCost::zero(),
@@ -3209,7 +3228,14 @@ mod tests {
                     effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
-                selection: Default::default(),
+                selection: TargetSelectionProgress {
+                    current_slot: 0,
+                    selected_slots: Vec::new(),
+                    current_legal_targets: vec![
+                        TargetRef::Player(PlayerId(0)),
+                        TargetRef::Player(PlayerId(1)),
+                    ],
+                },
             },
             candidates: Vec::new(),
         };
@@ -3255,6 +3281,78 @@ mod tests {
             AntiSelfHarmPolicy.verdict(&opponent_ctx),
             PolicyVerdict::Score { .. }
         ));
+    }
+
+    #[test]
+    fn exact_zero_player_targets_score_zero_for_choose_and_bulk() {
+        let mut state = make_state();
+        let config = AiConfig::default();
+        let source = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Zero draw".to_string(),
+            Zone::Hand,
+        );
+        state.players[0].hand.push_back(source);
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Player,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let legal_targets = vec![
+            TargetRef::Player(PlayerId(0)),
+            TargetRef::Player(PlayerId(1)),
+        ];
+
+        for action in [
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(0))),
+            },
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(0))],
+            },
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(PlayerId(1))],
+            },
+        ] {
+            let (decision, _) = install_target_selection_ctx(
+                &mut state,
+                ability.clone(),
+                source,
+                CardId(101),
+                legal_targets.clone(),
+                None,
+            );
+            let candidate = CandidateAction {
+                action,
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+            };
+            let context = crate::context::AiContext::empty(&config.weights);
+            let ctx = PolicyContext {
+                state: &state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: PlayerId(0),
+                config: &config,
+                context: &context,
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            };
+            assert_eq!(AntiSelfHarmPolicy.score(&ctx), 0.0);
+            assert!(matches!(
+                AntiSelfHarmPolicy.verdict(&ctx),
+                PolicyVerdict::Score { delta, ref reason }
+                    if delta == 0.0 && reason.kind == "anti_self_harm_score"
+            ));
+        }
     }
 
     #[test]

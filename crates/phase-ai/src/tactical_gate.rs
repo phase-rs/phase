@@ -23,6 +23,7 @@ use engine::types::ability::{
     ContinuousModification, CostCategory, Effect, PtValue, TargetFilter, TargetRef, TypeFilter,
     TypedFilter,
 };
+use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
@@ -34,6 +35,7 @@ use engine::types::player::PlayerId;
 use engine::types::statics::{AdditionalCostTaxAction, StaticMode};
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
+use std::ops::ControlFlow;
 
 use crate::cast_facts::CastCostMode;
 use crate::combat_ai::is_lethal_attack_available;
@@ -555,11 +557,16 @@ fn mana_source_selection_has_spell_grant(
 }
 
 fn ability_has_mana_spell_grant(ability: &AbilityDefinition) -> bool {
-    matches!(ability.effect.as_ref(), Effect::Mana { grants, .. } if !grants.is_empty())
-        || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_has_mana_spell_grant)
+    let mut has_grant = false;
+    let _ = visit_ability_def(ability, &mut |effect| {
+        if matches!(effect, Effect::Mana { grants, .. } if !grants.is_empty()) {
+            has_grant = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    has_grant
 }
 
 fn mana_cost_has_x(cost: &engine::types::mana::ManaCost) -> bool {
@@ -1343,10 +1350,10 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use engine::types::ability::{
-        BounceSelection, Comparator, CountScope, CounterCostSelection, DelayedTriggerCondition,
-        Duration, EffectKind, FilterProp, ManaProduction, ModalChoice, MultiTargetSpec,
-        PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition,
-        SubAbilityLink, TargetFilter, REMOVE_COUNTER_COST_X,
+        AbilityCondition, BounceSelection, Comparator, CountScope, CounterCostSelection,
+        DelayedTriggerCondition, Duration, EffectKind, FilterProp, ManaProduction, ModalChoice,
+        MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
+        StaticDefinition, SubAbilityLink, TargetFilter, REMOVE_COUNTER_COST_X,
     };
     use engine::types::ability::{
         QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
@@ -1728,6 +1735,38 @@ mod tests {
             filter: TargetFilter::Any,
             ability: Box::new(zero_gain_definition()),
         });
+        source
+    }
+
+    fn add_otherwise_only_grant_mana_source(state: &mut GameState, card_id: u64) -> ObjectId {
+        let source = add_plain_colorless_mana_source(state, card_id);
+        let ability = Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("otherwise grant source exists")
+                .abilities,
+        )
+        .first_mut()
+        .expect("otherwise grant source has one mana ability");
+        ability.condition = Some(AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::IsMonarch),
+        });
+        ability.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![ManaSpellGrant::TriggerOnSpend {
+                    filter: TargetFilter::Any,
+                    ability: Box::new(zero_gain_definition()),
+                }],
+                expiry: None,
+                target: None,
+            },
+        )));
         source
     }
 
@@ -2496,6 +2535,8 @@ mod tests {
     #[test]
     fn zero_cast_mana_spell_grants_are_paired_for_pool_and_source_paths() {
         let (mut pool_state, congregate) = funded_zero_congregate_state();
+        let pool_grant_source = add_plain_colorless_mana_source(&mut pool_state, 91_210);
+        pool_state.players[P0.0 as usize].mana_pool.mana[0].source_id = pool_grant_source;
         pool_state.players[P0.0 as usize].mana_pool.mana[0]
             .grants
             .push(ManaSpellGrant::TriggerOnSpend {
@@ -2544,6 +2585,42 @@ mod tests {
         assert!(
             !zero_cast_is_retained(&source_state, source_congregate),
             "removing only the source grant restores rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_otherwise_only_source_mana_grant_is_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        state.players[P0.0 as usize].mana_pool.mana.clear();
+        add_plain_colorless_mana_source(&mut state, 91_211);
+        add_plain_colorless_mana_source(&mut state, 91_212);
+        let source = add_otherwise_only_grant_mana_source(&mut state, 91_213);
+        add_plain_mana_source(&mut state, 91_214, engine::types::mana::ManaColor::White);
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "an otherwise-only source mana grant preserves the legal Auto cast"
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .expect("otherwise grant source exists")
+            .abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap)]);
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the otherwise grant restores the known-zero rejection"
         );
     }
 

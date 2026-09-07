@@ -66,7 +66,7 @@ use crate::features::DeckFeatures;
 
 use super::effect_classify::{
     aggregate_player_impact_in, extract_target_filter, lethal_to_creature,
-    targeted_player_impact_in, PLAYER_IMPACT_PREFERENCE_BAND,
+    targeted_player_impact_in_with_bound_parent_target, PLAYER_IMPACT_PREFERENCE_BAND,
 };
 use super::self_protection_classify::{
     any_immediate_threat, is_self_protection_effect, self_protection_effect_payoff,
@@ -715,11 +715,12 @@ fn predicted_root_player_recipient(
     let mut opponent_accepted = false;
 
     for player in state.players.iter().filter(|player| !player.is_eliminated) {
-        let impact = targeted_player_impact_in(
+        let impact = targeted_player_impact_in_with_bound_parent_target(
             state,
             source_controller,
             Some(source_id),
             effects,
+            player.id,
             player.id,
         )
         .unwrap_or(aggregate);
