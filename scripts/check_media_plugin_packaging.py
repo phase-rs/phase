@@ -101,6 +101,9 @@ DEBIAN_NAME = re.compile(r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?")
 SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", "&"})
 #: The characters those operators are built from, for spotting one glued to a word.
 OPERATOR_CHARS = frozenset("&|;")
+#: Operators whose right-hand command may not run, or whose input this gate
+#: cannot see. `;` and `&` sequence unconditionally and are not among them.
+CONDITIONAL_OPERATORS = frozenset({"&&", "||", "|"})
 
 
 class Refusal(Exception):
@@ -409,7 +412,7 @@ def appimage_apt_packages() -> set[str]:
         # check on `apt-get update`, then found the `echo`'s `install` and
         # credited everything after it -- a step that installs nothing reading
         # as full coverage, which is the fail-open this gate exists to prevent.
-        for segment in split_on_operators(tokens):
+        for joined_by, segment in split_on_operators(tokens):
             # Only a command that claims to be an apt install is held to that
             # standard. `pip install pyyaml` and `echo install complete` name a
             # verb this gate does not own, and refusing them would block a line
@@ -445,6 +448,21 @@ def appimage_apt_packages() -> set[str]:
                 raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' has a "
                               f"command this gate cannot read as an install: "
                               f"{' '.join(segment)!r}")
+            # Whether this install runs depends on the command before it, and
+            # this gate cannot evaluate that command. `false && apt-get install
+            # <pkgs>` installs nothing; crediting it is the same fail-open the
+            # control-flow scan already refuses when the identical tree is
+            # spelled `if true; then <install>; fi`. Refusing one spelling and
+            # crediting the other was the inconsistency, so both refuse now.
+            # Placed after the head and verb checks so a segment that only
+            # *names* an install keeps its own, more specific message.
+            if joined_by in CONDITIONAL_OPERATORS:
+                raise Refusal(f"{SHELL_RELEASE}: step '{APT_STEP}' has an "
+                              f"install joined by {joined_by!r}, so whether it "
+                              f"runs depends on the command before it: "
+                              f"{' '.join(segment)!r}. This gate cannot "
+                              "evaluate that command. Put the install on its "
+                              "own line")
             arguments = segment[segment.index("install") + 1:]
 
             for token in arguments:
@@ -473,15 +491,20 @@ def appimage_apt_packages() -> set[str]:
     return packages
 
 
-def split_on_operators(tokens: list[str]) -> list[list[str]]:
-    """One token list per command, split on the shell operators joining them.
+def split_on_operators(tokens: list[str]) -> list[tuple[str | None, list[str]]]:
+    """Each command on the line, with the operator that joined it to the last.
 
     `apt-get update && echo apt-get install x` is two commands, and only the
     second mentions an install. Judging the line as a whole lets the first
     command satisfy the "is this really an apt install" check while the second
     supplies the packages.
+
+    The joining operator is part of the answer, not scaffolding to discard:
+    whether a command runs at all depends on it. `false && apt-get install x`
+    installs nothing, and a caller handed a bare token list has no way to tell
+    that from an unconditional install.
     """
-    segments: list[list[str]] = [[]]
+    segments: list[tuple[str | None, list[str]]] = [(None, [])]
     for token in tokens:
         # `shlex` splits on whitespace, not on shell metacharacters, so
         # `update&&echo` survives as one token and hides a command boundary
@@ -498,13 +521,13 @@ def split_on_operators(tokens: list[str]) -> list[list[str]]:
                           "operators and cannot see the boundary inside that "
                           "token; put spaces around the operator")
         if token in SHELL_OPERATORS:
-            segments.append([])
+            segments.append((token, []))
         elif token.endswith(";"):
-            segments[-1].append(token[:-1])
-            segments.append([])
+            segments[-1][1].append(token[:-1])
+            segments.append((";", []))
         else:
-            segments[-1].append(token)
-    return [segment for segment in segments if segment]
+            segments[-1][1].append(token)
+    return [(joined_by, seg) for joined_by, seg in segments if seg]
 
 
 class Consumer(NamedTuple):

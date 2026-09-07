@@ -686,6 +686,74 @@ class MediaPluginPackagingTests(unittest.TestCase):
         # been credited, and this must not read as a coverage gap.
         self.assertNotIn("is missing", r.stderr)
 
+    def test_a_conditional_install_is_not_credited(self) -> None:
+        # `split_on_operators` used to discard the operator joining each
+        # command, so a guarded install looked identical to an unconditional
+        # one and its packages were credited -- exit 0 over a step that may
+        # install nothing. The same tree spelled `if guard; then install; fi`
+        # was already refused, so the module refused one spelling and credited
+        # the other; `guard && install` is that statement with different
+        # syntax.
+        joined = " ".join(DEFAULT_PACKAGES)
+        for shape, command in (
+            ("false &&", f"false && sudo apt-get install -y {joined}"),
+            ("test &&", f"test -f /nonexistent && sudo apt-get install -y {joined}"),
+            ("|| fallback", f"false || sudo apt-get install -y {joined}"),
+            # Deliberately accepted, not an oversight: an `update &&` prefix is
+            # common and in practice does run, but narrowing the rule to admit
+            # it would special-case "the previous command was also apt". The
+            # step this gate guards puts them on separate lines, and the
+            # refusal names the fix.
+            ("update &&", f"sudo apt-get update && sudo apt-get install -y {joined}"),
+        ):
+            with self.subTest(shape=shape):
+                t = self.tree()
+                t.write_workflow(run=command)
+                r = t.run()
+                self.assertEqual(r.returncode, 2, r.stdout)
+                self.assertIn("depends on the command before it", r.stderr)
+                self.assertNotIn("is missing", r.stderr)
+
+    def test_a_piped_install_refuses_via_the_more_specific_head_check(self) -> None:
+        # `echo x | xargs sudo apt-get install ...` is refused, but by the head
+        # check rather than the operator rule: `xargs` is not an apt command,
+        # and that is the more specific answer. Pinned so a future reordering
+        # of the two refusals does not silently downgrade the message.
+        t = self.tree()
+        t.write_workflow(run=("echo x | xargs sudo apt-get install -y "
+                              + " ".join(DEFAULT_PACKAGES)))
+        r = t.run()
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("without running it", r.stderr)
+        self.assertNotIn("is missing", r.stderr)
+
+    def test_an_unconditional_install_is_still_credited(self) -> None:
+        # The reach-guard for the test above: refusing every operator would
+        # satisfy it just as well, so these pin the shapes that must stay
+        # creditable.
+        #
+        # The last two are what make this a guard rather than decoration. In
+        # every other shape here the install is the *leftmost* command, so
+        # `joined_by` is None and the CONDITIONAL_OPERATORS branch is never
+        # reached -- widening that set to include `;` and `&` would leave them
+        # all passing. These two put a command *before* the install, joined by
+        # an operator that sequences unconditionally, so they are the shapes
+        # that actually enter the branch and must come out credited.
+        joined = " ".join(DEFAULT_PACKAGES)
+        for shape, command in (
+            ("tolerant", f"sudo apt-get install -y {joined} || true"),
+            ("then echo", f"sudo apt-get install -y {joined} && echo ok"),
+            ("sequenced", f"sudo apt-get install -y {joined} ; echo ok"),
+            ("own line", f"sudo apt-get update\nsudo apt-get install -y {joined}"),
+            ("after a `;`", f"echo ok ; sudo apt-get install -y {joined}"),
+            ("after a `&`", f"echo ok & sudo apt-get install -y {joined}"),
+        ):
+            with self.subTest(shape=shape):
+                t = self.tree()
+                t.write_workflow(run=command)
+                r = t.run()
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_an_apt_step_that_installs_nothing_refuses(self) -> None:
         # The step still exists, on the right job and the right arm, and runs
         # no `apt-get install`. Zero packages read out of it is not zero
@@ -869,6 +937,10 @@ class MediaPluginPackagingTests(unittest.TestCase):
         t = self.tree(); t.write_workflow(
             run='sudo apt-get update\necho "\nsudo apt-get install -y libgtk-3-dev\n"')
         cases["install text inside a quoted string"] = t.run()
+
+        t = self.tree(); t.write_workflow(
+            run="false && sudo apt-get install -y libgtk-3-dev")
+        cases["conditional install"] = t.run()
 
         t = self.tree(); t.write_workflow(
             run="sudo apt-get update\nif true; then sudo apt-get install -y x\nfi")
