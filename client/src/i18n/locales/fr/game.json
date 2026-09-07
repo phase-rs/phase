@@ -511,6 +511,8 @@
     "enduringStoryTooltip": "Histoire durable — obtenue en contrôlant un permanent avec Storied et au moins trois artefacts, permanents légendaires et/ou sagas ; dure pour le reste de la partie",
     "dungeonAriaLabel": "Aventure dans {{name}}, {{roomName}}, salle {{room}} sur {{total}}",
     "dungeonRoomTooltip": "{{roomName}} — salle {{room}} sur {{total}}",
+    "dungeonMapLoading": "Chargement de la carte de donjon…",
+    "dungeonMapUnavailable": "Image de la carte de donjon indisponible",
     "dungeonTooltip": "Aventure dans {{name}}",
     "poisonAriaLabel_one": "{{count}} marqueur poison",
     "poisonAriaLabel_other": "{{count}} marqueurs poison",

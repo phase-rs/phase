@@ -511,6 +511,8 @@
     "enduringStoryTooltip": "Trwała historia — zdobyta za kontrolowanie permanenta ze Storied i co najmniej trzech artefaktów, legendarnych permanentów i/lub Sag; trwa do końca gry",
     "dungeonAriaLabel": "Wyprawa w {{name}}, {{roomName}}, pokój {{room}} z {{total}}",
     "dungeonRoomTooltip": "{{roomName}} — pokój {{room}} z {{total}}",
+    "dungeonMapLoading": "Wczytywanie karty lochu…",
+    "dungeonMapUnavailable": "Obraz karty lochu niedostępny",
     "dungeonTooltip": "Wyprawa w {{name}}",
     "poisonAriaLabel_one": "{{count}} znacznik trucizny",
     "poisonAriaLabel_other": "{{count}} znaczników trucizny",

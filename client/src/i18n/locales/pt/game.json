@@ -511,6 +511,8 @@
     "enduringStoryTooltip": "História duradoura — obtida ao controlar um permanente com Storied e três ou mais artefatos, permanentes lendários e/ou sagas; dura pelo resto do jogo",
     "dungeonAriaLabel": "Aventurando-se em {{name}}, {{roomName}}, sala {{room}} de {{total}}",
     "dungeonRoomTooltip": "{{roomName}} — sala {{room}} de {{total}}",
+    "dungeonMapLoading": "Carregando carta de masmorra…",
+    "dungeonMapUnavailable": "Imagem da carta de masmorra indisponível",
     "dungeonTooltip": "Aventurando-se em {{name}}",
     "poisonAriaLabel_one": "{{count}} marcador de veneno",
     "poisonAriaLabel_other": "{{count}} marcadores de veneno",

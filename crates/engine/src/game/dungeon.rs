@@ -98,6 +98,228 @@ pub struct DungeonDefinition {
     pub rooms: &'static [RoomDefinition],
 }
 
+/// CR 309.4: Where a room sits on the printed dungeon card, as a fraction of
+/// the card image (0.0-1.0, origin top-left).
+///
+/// The dungeon cards are the rare case where the "art" IS the game state: each
+/// card is a labeled floor plan whose rooms are drawn as rectangles, not a
+/// framed illustration. That is what makes overlaying a venture marker on the
+/// image meaningful rather than decorative — the marker lands in the drawn room
+/// it represents.
+///
+/// Fractions, not pixels, because the client renders the card at whatever width
+/// the panel gives it and picks an image rung by viewport. Fractions also
+/// transfer across printings: the token-set and oversized printings of a
+/// dungeon are the same layout at the same proportions (verified by comparing
+/// the `tafr` and `oafr` Lost Mine scans, identical at every rung).
+///
+/// `x`/`y` are the room rectangle's CENTER, which is where the marker is drawn.
+///
+/// Stored as PERMILLE (0-1000) rather than a float. `DerivedViews` derives `Eq`
+/// so that state snapshots can be compared for equality, and `f32` is not `Eq`
+/// — a float here would force the whole projection down to `PartialEq`. Permille
+/// is far finer than the overlay needs: one part in a thousand of a 672px card
+/// is under a pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomMarkerPoint {
+    /// Distance from the card's left edge, in thousandths of its width.
+    pub x_permille: u16,
+    /// Distance from the card's top edge, in thousandths of its height.
+    pub y_permille: u16,
+}
+
+/// Authoring helper: the coordinates are read off the card as fractions, so
+/// they are written as fractions and converted once, here.
+const fn pt(x_permille: u16, y_permille: u16) -> RoomMarkerPoint {
+    RoomMarkerPoint {
+        x_permille,
+        y_permille,
+    }
+}
+
+/// CR 309.4: Centers of each room's drawn rectangle on the dungeon card,
+/// indexed in the same order as the dungeon's `rooms` table.
+///
+/// Authored from the printed card faces; there is no coordinate data on
+/// Scryfall (its `oracle_text` gives only ordered "Name — Effect. (Leads to:)"
+/// lines), so these are the single place the geometry exists. The
+/// `dungeon_marker_points_cover_every_room` test pins each list's length to its
+/// room table so a dungeon can never carry a partial or stale list.
+pub fn marker_points(id: DungeonId) -> &'static [RoomMarkerPoint] {
+    match id {
+        DungeonId::LostMineOfPhandelver => &LOST_MINE_MARKERS,
+        DungeonId::DungeonOfTheMadMage => &MAD_MAGE_MARKERS,
+        DungeonId::TombOfAnnihilation => &TOMB_MARKERS,
+        DungeonId::Undercity => &UNDERCITY_MARKERS,
+        DungeonId::BaldursGateWilderness => &BALDURS_GATE_MARKERS,
+    }
+}
+
+/// Lost Mine of Phandelver — 4 rows: full / halves / thirds / full.
+/// Read off the printed card face (AFR token #021).
+static LOST_MINE_MARKERS: [RoomMarkerPoint; 7] = [
+    pt(500, 215), // 0 Cave Entrance   (full width)
+    pt(310, 390), // 1 Goblin Lair     (left half)
+    pt(690, 390), // 2 Mine Tunnels    (right half)
+    pt(180, 610), // 3 Storeroom       (left third)
+    pt(500, 610), // 4 Dark Pool       (centre third)
+    pt(810, 610), // 5 Fungi Cavern    (right third)
+    pt(500, 800), // 6 Temple of Dumathoin (full width)
+];
+
+/// Dungeon of the Mad Mage — alternating full-width corridors and half-width
+/// branch pairs. The branch rows are drawn roughly twice as tall as the
+/// single-room corridors, so the y values are not evenly spaced.
+/// Read off the printed card face (AFR token #020).
+static MAD_MAGE_MARKERS: [RoomMarkerPoint; 9] = [
+    pt(500, 184), // 0 Yawning Portal      (full width)
+    pt(500, 259), // 1 Dungeon Level       (full width)
+    pt(290, 376), // 2 Goblin Bazaar       (left half, tall)
+    pt(715, 376), // 3 Twisted Caverns     (right half, tall)
+    pt(500, 494), // 4 Lost Level          (full width)
+    pt(290, 606), // 5 Runestone Caverns   (left half, tall)
+    pt(715, 606), // 6 Muiral's Graveyard  (right half, tall)
+    pt(500, 723), // 7 Deep Mines          (full width)
+    pt(500, 814), // 8 Mad Wizard's Lair   (full width, bottommost)
+];
+
+/// Tomb of Annihilation — irregular: Oubliette is a single TALL room on the
+/// right spanning the vertical extent of both Veils of Fear and Sandfall Cell,
+/// which are stacked on the left. Not a 2x2 grid.
+/// Read off the printed card face (AFR token #022).
+static TOMB_MARKERS: [RoomMarkerPoint; 5] = [
+    pt(500, 220), // 0 Trapped Entry           (full width)
+    pt(290, 400), // 1 Veils of Fear           (left, upper)
+    pt(720, 480), // 2 Oubliette               (right, spans both left rows)
+    pt(290, 580), // 3 Sandfall Cell           (left, lower)
+    pt(500, 775), // 4 Cradle of the Death God (full width, bottommost)
+];
+
+/// Undercity — the "You can't enter this dungeon unless you 'venture into
+/// Undercity.'" line above the grid pushes every row down relative to the AFR
+/// dungeons, and the Trap!/Arena/Stash row is asymmetric (Arena is a narrow
+/// centre room). Archives/Catacombs below it are unequal halves.
+/// Read off the printed card face (CLB token #020).
+static UNDERCITY_MARKERS: [RoomMarkerPoint; 9] = [
+    pt(500, 248), // 0 Secret Entrance
+    pt(310, 370), // 1 Forge            (left half)
+    pt(710, 370), // 2 Lost Well        (right half)
+    pt(200, 508), // 3 Trap!            (left)
+    pt(490, 508), // 4 Arena            (narrow centre)
+    pt(780, 508), // 5 Stash            (right)
+    pt(280, 654), // 6 Archives         (left)
+    pt(700, 660), // 7 Catacombs        (right, taller)
+    pt(500, 818), // 8 Throne of the Dead Three (bottommost)
+];
+
+/// Baldur's Gate Wilderness — 19 rooms in an alternating lattice, NOT a
+/// diamond: one full-width entry, then rows of 3 and 2 alternating down the
+/// card (3/2/3/2/3/2/3). Rooms in the 3-rows sit at the thirds; rooms in the
+/// 2-rows sit offset between them, which is what makes the diagonal corridors
+/// line up on the printed card.
+/// Read off the printed card face (CLB token, 2024 printing).
+static BALDURS_GATE_MARKERS: [RoomMarkerPoint; 19] = [
+    // Row 1 — full width
+    pt(500, 170), // 0  Crash Landing
+    // Row 2 — three
+    pt(210, 253), // 1  Goblin Camp
+    pt(500, 253), // 2  Emerald Grove
+    pt(800, 253), // 3  Auntie's Teahouse
+    // Row 3 — two
+    pt(295, 336), // 4  Defiled Temple
+    pt(730, 336), // 5  Mountain Pass
+    // Row 4 — three
+    pt(210, 440), // 6  Ebonlake Grotto
+    pt(500, 440), // 7  Grymforge
+    pt(800, 440), // 8  Githyanki Crèche
+    // Row 5 — two
+    pt(285, 545), // 9  Last Light Inn
+    pt(700, 545), // 10 Reithwin Tollhouse
+    // Row 6 — three
+    pt(210, 622), // 11 Moonrise Towers
+    pt(500, 622), // 12 Gauntlet of Shar
+    pt(800, 622), // 13 Balthazar's Lab
+    // Row 7 — two
+    pt(300, 710), // 14 Circus of the Last Days
+    pt(715, 710), // 15 Undercity Ruins
+    // Row 8 — three (bottommost row)
+    pt(190, 822), // 16 Steel Watch Foundry
+    pt(500, 822), // 17 Ansur's Sanctum
+    pt(810, 822), // 18 Temple of Bhaal
+];
+
+/// CR 309.1: The dungeon card's identity on Scryfall, so the client can show
+/// the printed card the venture marker moves across.
+///
+/// A dungeon is a real printed card, not a synthesized object, so it has no
+/// `printed_ref` on any battlefield object to borrow — a dungeon never enters
+/// the battlefield (CR 309.3: it goes to the command zone). This is the only
+/// place its printing identity exists, which is why it lives beside the room
+/// tables rather than in the client.
+///
+/// Two lookup paths, because the five dungeons are not indexed uniformly by the
+/// client's Scryfall sidecars (verified against the Scryfall API):
+///
+///   * Four dungeons are `layout: "normal"`, so `scryfall-data.json` keys them
+///     by `oracle_id` like any other card.
+///   * Undercity is `layout: "double_faced_token"` — it is printed as
+///     `Undercity // The Initiative`, whose front face is the dungeon. That
+///     layout is in `gen-scryfall-images.sh`'s NON_PLAYABLE exclusion list, so
+///     it is absent from `scryfall-data.json` entirely and resolves ONLY
+///     through `scryfall-token-images.json`, which is keyed by printing id.
+///
+/// Emitting both ids lets the client try the card table and fall back to the
+/// token table without knowing which dungeon is which — the asymmetry stays
+/// here, in the engine, instead of becoming a special case in the display layer.
+pub struct DungeonCardRef {
+    /// Scryfall `oracle_id` — the `scryfall-data.json` key.
+    pub oracle_id: &'static str,
+    /// Scryfall printing id of the token-set printing — the
+    /// `scryfall-token-images.json` key. This is the `tafr`/`tclb` printing,
+    /// whose art is identical at every image rung to its oversized `oafr`/`oclb`
+    /// twin (both scan to 488x680 `normal` / 672x936 `large`), so nothing is
+    /// lost by pinning one.
+    pub scryfall_id: &'static str,
+    /// The dungeon's own face name. Meaningful only for the double-faced
+    /// Undercity, where it selects the dungeon face over `The Initiative`;
+    /// for the single-faced dungeons it equals the card name.
+    pub face_name: &'static str,
+}
+
+/// CR 309.1: The printed card behind each dungeon. Ids verified against the
+/// Scryfall API rather than transcribed from memory.
+pub fn card_ref(id: DungeonId) -> DungeonCardRef {
+    match id {
+        DungeonId::LostMineOfPhandelver => DungeonCardRef {
+            oracle_id: "5c446a7f-0301-4343-b0df-146cf2db605b",
+            scryfall_id: "59b11ff8-f118-4978-87dd-509dc0c8c932",
+            face_name: "Lost Mine of Phandelver",
+        },
+        DungeonId::DungeonOfTheMadMage => DungeonCardRef {
+            oracle_id: "30d0398c-bf5a-4b30-936f-afdb5a109b4b",
+            scryfall_id: "6f509dbe-6ec7-4438-ab36-e20be46c9922",
+            face_name: "Dungeon of the Mad Mage",
+        },
+        DungeonId::TombOfAnnihilation => DungeonCardRef {
+            oracle_id: "d2ea2605-0ca0-4782-851d-e706bd0114e4",
+            scryfall_id: "70b284bd-7a8f-4b60-8238-f746bdc5b236",
+            face_name: "Tomb of Annihilation",
+        },
+        // CR 309.1: the only double-faced dungeon. `face_name` is what picks the
+        // dungeon face out of `Undercity // The Initiative`.
+        DungeonId::Undercity => DungeonCardRef {
+            oracle_id: "36b61021-72f0-4c22-a41d-9b2f093d7ca8",
+            scryfall_id: "2c65185b-6cf0-451d-985e-56aa45d9a57d",
+            face_name: "Undercity",
+        },
+        DungeonId::BaldursGateWilderness => DungeonCardRef {
+            oracle_id: "06b9590d-01bf-4fae-9837-352c9e04267a",
+            scryfall_id: "a9d56324-8293-4500-a9ad-fed351ccf966",
+            face_name: "Baldur's Gate Wilderness",
+        },
+    }
+}
+
 /// CR 309: Look up a dungeon's static definition.
 pub fn get_definition(id: DungeonId) -> &'static DungeonDefinition {
     match id {
@@ -2149,5 +2371,85 @@ mod tests {
             get_definition(DungeonId::BaldursGateWilderness).rooms.len(),
             19
         );
+    }
+
+    /// Every dungeon must carry exactly one marker point per room.
+    ///
+    /// This is the guard that keeps the hand-authored geometry honest. The
+    /// coordinates are read off the printed card faces and cannot be derived
+    /// from anything the engine or Scryfall stores, so the failure mode they
+    /// invite is a silent one: add a room, forget the point, and the client
+    /// draws the venture marker on the wrong room — asserting something false
+    /// about game state rather than merely looking wrong.
+    #[test]
+    fn dungeon_marker_points_cover_every_room() {
+        for id in ALL_DUNGEONS {
+            let rooms = get_definition(id).rooms.len();
+            let points = marker_points(id).len();
+            assert_eq!(
+                points, rooms,
+                "{id} has {rooms} rooms but {points} marker points",
+            );
+        }
+    }
+
+    /// Marker points are permille of the card image, so every coordinate has to
+    /// land inside it. A point past 1000 would place the marker off the card
+    /// entirely.
+    #[test]
+    fn dungeon_marker_points_are_normalized() {
+        for id in ALL_DUNGEONS {
+            for (index, point) in marker_points(id).iter().enumerate() {
+                assert!(
+                    point.x_permille <= 1000 && point.y_permille <= 1000,
+                    "{id} room {index} marker {point:?} is outside the card",
+                );
+            }
+        }
+    }
+
+    /// Rooms are drawn top-to-bottom on the card in the same order the room
+    /// table lists them, so a room can never sit ABOVE one that precedes it.
+    /// This catches a transposed or misordered coordinate list — the shape of
+    /// error that `dungeon_marker_points_cover_every_room` cannot see because
+    /// the count still matches.
+    #[test]
+    fn dungeon_marker_points_descend_the_card() {
+        for id in ALL_DUNGEONS {
+            let points = marker_points(id);
+            for (index, window) in points.windows(2).enumerate() {
+                assert!(
+                    window[1].y_permille >= window[0].y_permille,
+                    "{id}: room {} sits above room {index} ({:?} then {:?})",
+                    index + 1,
+                    window[0],
+                    window[1],
+                );
+            }
+        }
+    }
+
+    /// The Scryfall ids behind each dungeon must be distinct and well-formed.
+    /// Undercity is the one that matters most: it is the only double-faced
+    /// dungeon, and its `face_name` is what selects the dungeon half of
+    /// `Undercity // The Initiative`.
+    #[test]
+    fn dungeon_card_refs_are_distinct_and_well_formed() {
+        let mut oracle_ids = std::collections::BTreeSet::new();
+        let mut scryfall_ids = std::collections::BTreeSet::new();
+        for id in ALL_DUNGEONS {
+            let card = card_ref(id);
+            assert_eq!(card.oracle_id.len(), 36, "{id} oracle_id is not a uuid");
+            assert_eq!(card.scryfall_id.len(), 36, "{id} scryfall_id is not a uuid");
+            assert!(!card.face_name.is_empty(), "{id} has no face name");
+            assert!(
+                oracle_ids.insert(card.oracle_id),
+                "{id} duplicate oracle_id"
+            );
+            assert!(
+                scryfall_ids.insert(card.scryfall_id),
+                "{id} duplicate scryfall_id",
+            );
+        }
     }
 }
