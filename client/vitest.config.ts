@@ -84,6 +84,27 @@ export default defineConfig({
   },
   test: {
     environment: "happy-dom",
+    server: {
+      deps: {
+        /**
+         * `react-i18next` must be processed by Vite rather than externalized to
+         * the Node ESM loader.
+         *
+         * Its `TransWithoutContext` entry does a bare `import
+         * "html-parse-stringify"`. Under pnpm that dependency is reached
+         * through a symlink, and Vitest 4's externalized path resolves the
+         * IMPORTER to its realpath under `.pnpm/react-i18next@.../`, then looks
+         * for `html-parse-stringify` beneath that directory instead of
+         * following the link — so every test file fails to load at import time
+         * with "Cannot find package ...". Node's own resolver handles it fine
+         * (`require.resolve` finds it); only the externalized loader does not.
+         *
+         * `test-setup.ts` imports `react-i18next` globally, so this took down
+         * the WHOLE suite, not just the tests that render translated UI.
+         */
+        inline: ["react-i18next"],
+      },
+    },
     include: ["src/**/*.test.{ts,tsx}"],
     exclude: ["src/**/*.integration.test.{ts,tsx}"],
     setupFiles: ["src/test-setup.ts"],
