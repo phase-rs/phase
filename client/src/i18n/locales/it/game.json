@@ -511,6 +511,8 @@
     "enduringStoryTooltip": "Storia duratura — ottenuta controllando un permanente con Storied e tre o più artefatti, permanenti leggendari e/o saghe; dura per il resto della partita",
     "dungeonAriaLabel": "Avventura in {{name}}, {{roomName}}, stanza {{room}} di {{total}}",
     "dungeonRoomTooltip": "{{roomName}} — stanza {{room}} di {{total}}",
+    "dungeonMapLoading": "Caricamento della carta sotterraneo…",
+    "dungeonMapUnavailable": "Immagine della carta sotterraneo non disponibile",
     "dungeonTooltip": "Avventura in {{name}}",
     "poisonAriaLabel_one": "{{count}} segnalino veleno",
     "poisonAriaLabel_other": "{{count}} segnalini veleno",

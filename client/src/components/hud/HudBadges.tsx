@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+import { DungeonMapPopover } from "./DungeonMapPopover.tsx";
 import { RingBenefitsPopover } from "./RingBenefitsPopover.tsx";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
@@ -136,6 +137,55 @@ interface DungeonBadgeProps {
 
 export function DungeonBadge({ room }: DungeonBadgeProps) {
   const { t } = useTranslation("game");
+  const chipRef = useRef<HTMLButtonElement>(null);
+  const [hoverOpen, setHoverOpen] = useState(false);
+  // Click latches the panel open so it survives the pointer leaving, and so
+  // touch devices — which never fire hover — can open it at all.
+  const [pinned, setPinned] = useState(false);
+  const closeTimerRef = useRef<number | null>(null);
+
+  const cancelClose = useCallback(() => {
+    if (closeTimerRef.current != null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+  const onEnter = useCallback(() => {
+    cancelClose();
+    setHoverOpen(true);
+  }, [cancelClose]);
+  const onLeave = useCallback(() => {
+    cancelClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      setHoverOpen(false);
+      closeTimerRef.current = null;
+    }, DUNGEON_HOVER_CLOSE_DELAY_MS);
+  }, [cancelClose]);
+  useEffect(() => () => cancelClose(), [cancelClose]);
+
+  // Dismiss a pinned panel on the next outside click or on Escape — the two
+  // gestures a latched overlay has to answer to.
+  useEffect(() => {
+    if (!pinned) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node
+        && chipRef.current?.contains(event.target) !== true
+      ) {
+        setPinned(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPinned(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [pinned]);
+
   // CR 309.4a: the marker starts on room index 0; players count from 1.
   const position = room.room.index + 1;
   const labelArgs = {
@@ -144,28 +194,32 @@ export function DungeonBadge({ room }: DungeonBadgeProps) {
     room: position,
     total: room.room_count,
   };
-  // CR 309.4b-c: name the room and say what its room ability did. The chip has
-  // no space for either, and most rooms are entered without a prompt, so the
-  // tooltip is where a player reads them back.
-  const tooltip = [
-    t("badges.dungeonTooltip", labelArgs),
-    t("badges.dungeonRoomTooltip", labelArgs),
-    room.room.text,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const open = hoverOpen || pinned;
   return (
-    <BadgeTip text={tooltip}>
-      <span
-        role="img"
+    <>
+      <button
+        type="button"
+        ref={chipRef}
         aria-label={t("badges.dungeonAriaLabel", labelArgs)}
-        className="relative inline-flex h-6 shrink-0 items-center gap-1 overflow-hidden rounded-full bg-violet-500/85 px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-50 ring-1 ring-violet-300/70 shadow-[0_0_12px_rgba(139,92,246,0.45)]"
+        aria-expanded={open}
+        title={t("badges.dungeonTooltip", labelArgs)}
+        onMouseEnter={onEnter}
+        onMouseLeave={onLeave}
+        onFocus={onEnter}
+        onBlur={onLeave}
+        onClick={() => setPinned((wasPinned) => !wasPinned)}
+        className="relative inline-flex h-6 shrink-0 cursor-pointer items-center gap-1 overflow-hidden rounded-full bg-violet-500/85 px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-50 ring-1 ring-violet-300/70 shadow-[0_0_12px_rgba(139,92,246,0.45)] transition hover:bg-violet-400/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-violet-200"
       >
         <span aria-hidden className="text-[12px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🏰</span>
         <span className="relative truncate">{room.dungeon_name}</span>
         <span className="relative tabular-nums text-white">{position}/{room.room_count}</span>
-      </span>
-    </BadgeTip>
+      </button>
+      {open && chipRef.current ? (
+        <span onMouseEnter={onEnter} onMouseLeave={onLeave}>
+          <DungeonMapPopover anchorEl={chipRef.current} view={room} />
+        </span>
+      ) : null}
+    </>
   );
 }
 
@@ -674,6 +728,10 @@ function RingChip({
 // Brief dismiss delay smoothing cursor jitter on the chip edge (mirrors
 // EnchantmentsBadge's HOVER_CLOSE_DELAY_MS).
 const RING_HOVER_CLOSE_DELAY_MS = 80;
+
+/** Matches the Ring popover's grace period, so the pointer can cross the gap
+ *  between the dungeon chip and its panel without the panel closing. */
+const DUNGEON_HOVER_CLOSE_DELAY_MS = 80;
 
 /**
  * The player's OWN Ring badge: the gold level chip plus a hover popover
