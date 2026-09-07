@@ -156,9 +156,7 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
         {
             Some(PolicyReason::new("anti_self_harm_extra_turn_self_loss"))
         }
-        GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. } => {
-            harmful_action_reaches_only_own_board(ctx)
-        }
+        GameAction::ActivateAbility { .. } => harmful_activation_reaches_only_own_board(ctx),
         GameAction::DecideOptionalEffect { accept: true }
             if optional_effect_life_cost_is_lethal(ctx) =>
         {
@@ -816,8 +814,28 @@ fn own_permanent_with_opponent_alternative(
         .then(|| PolicyReason::new("anti_self_harm_own_permanent_with_opponent_target"))
 }
 
-/// Refuse an action whose every legal target is a permanent the AI itself
+/// Refuse an ACTIVATION whose every legal target is a permanent the AI itself
 /// controls, and whose effect on that permanent is harmful.
+///
+/// # Activation only, deliberately
+///
+/// There is no `CastSpell` arm, and adding one is a mistake this function
+/// already made once. [`PolicyContext::effects`]'s `CastSpell` arm walks every
+/// printed `AbilityDefinition` on the source with no `kind` filter — activated
+/// abilities included — unlike [`action_ability_definitions`], whose own
+/// `CastSpell` arm carries `.filter(|ability| ability.kind == AbilityKind::Spell)`.
+/// So a cast read its source's ACTIVATED abilities: casting Royal Assassin
+/// ("{T}: Destroy target tapped creature") while the AI controlled a tapped
+/// creature and the opponent controlled none produced an own-board-only pool
+/// from an ability that was not even activatable yet, and hard-rejected the
+/// spell — deleting the candidate, since a `Reject` is `-inf`. The AI refused
+/// to deploy Royal Assassin exactly when it was ahead on board.
+///
+/// The CR argument below reaches only the activation case, and the cast case is
+/// already priced: `score_pre_cast` charges `wasted_cast_penalty` for a harmful
+/// creature-only spell with no reachable opponent target, softly and by
+/// deliberate design. See `cast_arm` in
+/// `policies/tests/own_board_only_activation_repro.rs`.
 ///
 /// CR 601.2c + CR 601.2h + CR 602.2b: targets are announced at 601.2c and costs
 /// are paid at 601.2h, and CR 602.2b applies that whole 601.2b–i sequence to
@@ -840,7 +858,7 @@ fn own_permanent_with_opponent_alternative(
 /// "does this action have anywhere worth going at all", and CR 115.3 makes
 /// target legality the engine's to answer — so it asks `find_legal_targets`,
 /// which already honours hexproof, shroud, protection and ward.
-fn harmful_action_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
+fn harmful_activation_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
     let source = ctx.source_object()?;
     let effects = ctx.effects();
 
@@ -920,7 +938,7 @@ fn harmful_action_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<Poli
     }
 
     Some(
-        PolicyReason::new("anti_self_harm_harmful_action_own_board_only")
+        PolicyReason::new("anti_self_harm_harmful_activation_own_board_only")
             .with_fact("harmful_own_board_effects", harmful_own_board_effects),
     )
 }

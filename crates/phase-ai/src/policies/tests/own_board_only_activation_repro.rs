@@ -387,7 +387,7 @@ fn the_own_board_veto_is_the_mechanism() {
     let board = build_board(false);
     assert_eq!(
         reject_kind(&anti_self_harm_verdict(&board)),
-        Some("anti_self_harm_harmful_action_own_board_only"),
+        Some("anti_self_harm_harmful_activation_own_board_only"),
         "the activation-time own-board veto must be what declines this"
     );
 }
@@ -441,5 +441,161 @@ fn a_low_opponent_life_total_cannot_justify_a_creature_only_ability() {
                  shooting the AI's OWN attacker look worthwhile — got {score}"
             );
         }
+    }
+}
+
+/// Review finding (PR #8696): the veto's `CastSpell` arm read activated
+/// abilities the cast never commits to, and hard-`Reject`ed the spell.
+///
+/// `PolicyContext::effects()`'s `CastSpell` arm walks EVERY printed
+/// `AbilityDefinition` on the source with no `kind` filter, activated abilities
+/// included — unlike this file's own `action_ability_definitions`, whose
+/// `CastSpell` arm carries `.filter(|ability| ability.kind == AbilityKind::Spell)`.
+///
+/// Royal Assassin ("{T}: Destroy target tapped creature.", verified against
+/// `data/card-data.json`) is the sharpest case. Cast it while the AI controls a
+/// tapped creature and the opponent controls none, and the veto read the `{T}`
+/// ability's `Effect::Destroy` — an ability that is not even activatable yet,
+/// the creature having summoning sickness — found a non-empty own-board-only
+/// legal-target pool, and rejected the CAST. A `Reject` is `-inf`, so the
+/// candidate is deleted rather than mispriced: the AI refused to deploy Royal
+/// Assassin precisely when it was ahead on board.
+///
+/// CR 601.2c / CR 601.2h / CR 602.2b motivate the ACTIVATION case only — the
+/// activation is the last window in which the AI can decline. Nothing in that
+/// argument reaches the cast, and `score_pre_cast` already prices a genuine
+/// no-opponent-target cast with `wasted_cast_penalty` (a soft penalty, by
+/// deliberate design). So the `CastSpell` arm is gone.
+mod cast_arm {
+    use super::*;
+
+    use engine::types::game_state::CastPaymentMode;
+    use engine::types::identifiers::CardId as EngineCardId;
+
+    /// Royal Assassin in hand, one tapped creature the AI controls, and no
+    /// opposing creature at all.
+    fn board_with_assassin_in_hand() -> (GameState, ObjectId, ObjectId) {
+        let mut ids = Ids::new();
+        let mut state = GameState::new_two_player(4242);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = AI;
+        state.priority_player = AI;
+
+        // The AI's own tapped creature: the only thing "target tapped creature"
+        // can legally see on this board.
+        let own_tapped = vanilla_creature(&mut state, &mut ids, AI, "Own Body", 2, 2);
+        state.objects.get_mut(&own_tapped).unwrap().tapped = true;
+
+        let card_id = ids.next();
+        let assassin = create_object(
+            &mut state,
+            card_id,
+            AI,
+            "Royal Assassin".to_string(),
+            Zone::Hand,
+        );
+        let parsed = parse_oracle_text(
+            "{T}: Destroy target tapped creature.",
+            "Royal Assassin",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        {
+            let obj = state.objects.get_mut(&assassin).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            *Arc::make_mut(&mut obj.abilities) = parsed.abilities;
+        }
+
+        state.waiting_for = WaitingFor::Priority { player: AI };
+        (state, assassin, own_tapped)
+    }
+
+    fn verdict_for_action(state: &GameState, action: GameAction) -> PolicyVerdict {
+        let config = AiConfig::default();
+        let mut session = AiSession::empty();
+        session.features.insert(AI, Default::default());
+        let mut context = AiContext::empty(&config.weights);
+        context.session = Arc::new(session);
+        context.player = AI;
+
+        let candidate = CandidateAction {
+            action,
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: AI },
+            candidates: Vec::new(),
+        };
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        };
+        AntiSelfHarmPolicy.verdict(&ctx)
+    }
+
+    /// The regression. Casting a creature must never be vetoed because of an
+    /// activated ability the cast does not commit to.
+    #[test]
+    fn casting_a_creature_is_not_vetoed_by_its_own_activated_ability() {
+        let (state, assassin, _own_tapped) = board_with_assassin_in_hand();
+        let card_id: EngineCardId = state.objects.get(&assassin).unwrap().card_id;
+        let verdict = verdict_for_action(
+            &state,
+            GameAction::CastSpell {
+                object_id: assassin,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::default(),
+            },
+        );
+        assert_eq!(
+            reject_kind(&verdict),
+            None,
+            "casting Royal Assassin must not be rejected: its {{T}} ability is not something \
+             the CAST commits to (CR 601.2c binds targets for the SPELL), and the creature has \
+             summoning sickness so the ability is not even activatable yet"
+        );
+    }
+
+    /// The other half of the same card, and the reason dropping the `CastSpell`
+    /// arm costs nothing: ACTIVATING Royal Assassin to destroy the AI's own
+    /// tapped creature is exactly the misplay this veto exists for, and it is
+    /// still caught.
+    #[test]
+    fn activating_the_same_ability_at_the_same_board_is_still_vetoed() {
+        let (mut state, assassin, _own_tapped) = board_with_assassin_in_hand();
+        // Move it to the battlefield and let it be activatable.
+        {
+            let obj = state.objects.get_mut(&assassin).unwrap();
+            obj.zone = Zone::Battlefield;
+            obj.summoning_sick = false;
+        }
+        state.players[AI.0 as usize]
+            .hand
+            .retain(|&id| id != assassin);
+        state.battlefield.push_back(assassin);
+
+        let verdict = verdict_for_action(
+            &state,
+            GameAction::ActivateAbility {
+                source_id: assassin,
+                ability_index: 0,
+            },
+        );
+        assert_eq!(
+            reject_kind(&verdict),
+            Some("anti_self_harm_harmful_activation_own_board_only"),
+            "activating Royal Assassin when the only legal 'tapped creature' is the AI's own \
+             must still be vetoed"
+        );
     }
 }
