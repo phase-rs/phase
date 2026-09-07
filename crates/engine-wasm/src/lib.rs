@@ -8,17 +8,17 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
-    auto_pass_recommended, auto_pass_recommended_for_viewer, end_continuous_effect_offers,
-    legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
+    apply_ai_action_proposal, auto_pass_recommended, auto_pass_recommended_for_viewer,
+    end_continuous_effect_offers, legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
+    AiProposalApplication,
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 #[cfg(test)]
 use engine::game::engine::apply;
 use engine::game::engine::{
-    apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
-    resume_restored_stack_automation, RestoredStackAutomationOutcome,
-    RestoredStackAutomationPresentation,
+    apply_with_rejection, preflight_debug_action_with_rejection, resume_restored_stack_automation,
+    RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{
     bind_interaction_authority, preview_interaction, submit_interaction_with_rejection,
@@ -3305,53 +3305,28 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     };
 
     match with_state_mut(|state| {
-        // Classification lives in the engine (`verified_ai_stack_pass_player`),
-        // not in this adapter: it is the same call the callee gates on, so the
-        // two cannot disagree. CLAUDE.md — transport layers hold zero game
-        // logic.
-        let is_stack_recheck_pass =
-            engine::game::engine::verified_ai_stack_pass_player(state, &action).is_some();
-        // A payment finalize is no longer misclassified, so it now passes
-        // through `permits` — whose `state_revision` equality check can report
-        // `Stale` for a proposal minted against a superseded state. The client
-        // treats `Stale` as a benign race and re-queries without counting a
-        // failure, which is the intended handling for every other action.
-        if !is_stack_recheck_pass && !proposal.contract.permits(state, actor, &action) {
-            return AiProposalSubmission::Stale {
-                reason: "decision_changed_or_action_outside_issued_bounds",
-            };
-        }
-        let applied = if is_stack_recheck_pass {
-            engine::game::engine::apply_verified_ai_priority_pass_with_rejection(
-                state,
-                actor,
-                &proposal.contract,
-                action.clone(),
-            )
-        } else {
-            apply_interaction_with_rejection(
-                state,
-                actor,
-                proposal.contract.semantic_owner,
-                action.clone(),
-            )
-        };
-        match applied {
-            Ok(result) => {
-                if is_stack_recheck_pass {
-                    record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
-                } else {
-                    record_replay_action(false, actor, action);
-                }
-                invalidate_ai_proposals();
-                AiProposalSubmission::Applied {
-                    result: Box::new(result),
-                }
-            }
-            Err(rejection) => AiProposalSubmission::Rejected { rejection },
-        }
+        apply_ai_action_proposal(state, &proposal.contract, actor, action.clone())
     }) {
-        Ok(outcome) => to_js(&outcome),
+        Ok(AiProposalApplication::AppliedStackPass { result }) => {
+            record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
+            invalidate_ai_proposals();
+            to_js(&AiProposalSubmission::Applied {
+                result: Box::new(result),
+            })
+        }
+        Ok(AiProposalApplication::AppliedAction { result }) => {
+            record_replay_action(false, actor, action);
+            invalidate_ai_proposals();
+            to_js(&AiProposalSubmission::Applied {
+                result: Box::new(result),
+            })
+        }
+        Ok(AiProposalApplication::Stale) => to_js(&AiProposalSubmission::Stale {
+            reason: "decision_changed_or_action_outside_issued_bounds",
+        }),
+        Ok(AiProposalApplication::Rejected { rejection }) => {
+            to_js(&AiProposalSubmission::Rejected { rejection })
+        }
         Err(_) => to_js(&AiProposalSubmission::Stale {
             reason: "state_unavailable",
         }),
@@ -4258,35 +4233,6 @@ mod tests {
     }
 
     #[test]
-    fn stack_pass_proposal_uses_the_verified_recheck_seam() {
-        let player = PlayerId(0);
-        let mut state = priority_state(player);
-        state
-            .stack
-            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
-        add_non_mana_recheck_action(&mut state, PlayerId(1));
-        let action = GameAction::PassPriority;
-        let token = install_issued_candidate(state, player, &action);
-
-        assert_eq!(
-            proposal_outcome(&token, player, &action)["status"],
-            "applied"
-        );
-        with_state(|state| {
-            assert_eq!(
-                state
-                    .stack_resolution_session
-                    .as_ref()
-                    .map(|session| session.policy),
-                Some(engine::types::game_state::StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
-                "the WASM proposal boundary must not downgrade a verified stack pass"
-            );
-        })
-        .expect("test state must remain installed");
-        clear_game_state();
-    }
-
-    #[test]
     fn public_proposal_issuer_mints_a_submitable_priority_capability() {
         let player = PlayerId(0);
         clear_game_state();
@@ -4840,28 +4786,6 @@ mod tests {
             })));
         });
         assert!(has_replay_recording());
-    }
-
-    fn add_non_mana_recheck_action(state: &mut GameState, controller: PlayerId) {
-        let object_id = create_object(
-            state,
-            CardId(70_100),
-            controller,
-            "Wasm Recheck Action".to_string(),
-            Zone::Battlefield,
-        );
-        let object = state
-            .objects
-            .get_mut(&object_id)
-            .expect("created battlefield object");
-        object.card_types.core_types.push(CoreType::Artifact);
-        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-        ));
     }
 
     #[test]

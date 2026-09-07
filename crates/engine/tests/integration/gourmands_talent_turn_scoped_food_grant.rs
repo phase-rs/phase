@@ -67,7 +67,7 @@ Whenever you gain life for the first time each turn, put a +1/+1 counter on each
 /// controls, and a vanilla artifact P1 controls (the owner-vs-controller
 /// hostile row) — all on the battlefield, with mana to cover the granted
 /// ability's `{2}` cost.
-fn setup() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+fn setup() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
@@ -93,7 +93,7 @@ fn setup() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
         .id();
 
     let runner = scenario.build();
-    (runner, gourmand, p0_artifact, p1_artifact, ObjectId(0))
+    (runner, gourmand, p0_artifact, p1_artifact)
 }
 
 /// V10 + V12 + the owner/controller hostile row: the additive Food subtype
@@ -103,7 +103,7 @@ fn setup() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
 /// receives the grant (CR 109.5) regardless of whose turn it is.
 #[test]
 fn food_subtype_only_during_controllers_turn() {
-    let (mut runner, gourmand, p0_artifact, p1_artifact, _) = setup();
+    let (mut runner, gourmand, p0_artifact, p1_artifact) = setup();
 
     // ----- Reach-guard: the level-1 line parsed to a real static, not a
     // dropped `Effect::Unimplemented`. Fails on revert (today: zero statics,
@@ -199,7 +199,7 @@ fn food_subtype_only_during_controllers_turn() {
 /// [something]` self-reference binds to the object it's on).
 #[test]
 fn granted_food_ability_activates_and_sacrifices_the_host() {
-    let (mut runner, gourmand, p0_artifact, _p1_artifact, _) = setup();
+    let (mut runner, gourmand, p0_artifact, _p1_artifact) = setup();
 
     runner.state_mut().active_player = P0;
     runner.state_mut().layers_dirty.mark_full();
@@ -412,6 +412,109 @@ fn granted_food_follows_controller_not_owner() {
     assert!(
         obj.abilities.is_empty(),
         "the granted ability must be gone on the opponent's turn: {:?}",
+        obj.abilities
+    );
+}
+
+/// CR 109.5 + CR 613.1b — the SOURCE side of the same binding: the window
+/// follows the controller of the Class, not its owner.
+///
+/// `granted_food_follows_controller_not_owner` above diverges owner from
+/// controller on the AFFECTED artifact, but leaves Gourmand's Talent itself
+/// owned and controlled by P0 — so an implementation that read the SOURCE's
+/// `owner` when evaluating `DuringYourTurn` would still pass it. This test
+/// closes that axis: P1 OWNS the Class, P0 CONTROLS it (moved through the real
+/// `Effect::GainControl` path), and the window must follow P0.
+///
+/// An owner-keyed window inverts every assertion below — it would switch the
+/// grant on during P1's turn and off during P0's.
+#[test]
+fn window_follows_source_controller_not_source_owner() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // P0's own artifact — the grant recipient. Its control never moves, so the
+    // only owner/controller divergence in this test is on the SOURCE.
+    let p0_artifact = scenario
+        .add_artifact_from_oracle(P0, "Vanilla Artifact", "")
+        .id();
+    let thief = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Enchantment Thief",
+            1,
+            1,
+            "{T}: Gain control of target enchantment.",
+        )
+        .id();
+    // OWNED BY P1. B1: subtype BEFORE oracle text (see this file's module doc).
+    let gourmand = scenario
+        .add_creature(P1, "Gourmand's Talent", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Class"])
+        .from_oracle_text(GOURMANDS_TALENT)
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Pre-state guard: P1 really does control its own Class right now.
+    assert_eq!(
+        runner.state().objects[&gourmand].controller,
+        P1,
+        "pre-state: the Class must start under its owner's control"
+    );
+
+    runner
+        .activate(thief, 0)
+        .target_objects(&[gourmand])
+        .resolve();
+
+    assert_eq!(
+        runner.state().objects[&gourmand].controller,
+        P0,
+        "CR 613.1b: the activated GainControl must move the Class to P0"
+    );
+    assert_eq!(
+        runner.state().objects[&gourmand].owner,
+        P1,
+        "the Class must still be OWNED by P1 — that divergence is the whole point"
+    );
+
+    // P0's turn: P0 controls the Class, so the window is open and P0's artifact
+    // is a Food. An owner-keyed window would be CLOSED here (owner is P1).
+    runner.state_mut().active_player = P0;
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+    let obj = &runner.state().objects[&p0_artifact];
+    assert!(
+        obj.card_types.subtypes.iter().any(|s| s == "Food"),
+        "CR 109.5: 'your turn' is the CONTROLLER's turn (P0), even though P1 owns \
+         the Class: {:?}",
+        obj.card_types
+    );
+    assert_eq!(
+        obj.abilities.len(),
+        1,
+        "the granted ability must be present on the controller's turn: {:?}",
+        obj.abilities
+    );
+
+    // P1's turn: P1 OWNS the Class but no longer controls it, so the window is
+    // shut. An owner-keyed window would be OPEN here — this is the assertion
+    // that discriminates the two implementations.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+    let obj = &runner.state().objects[&p0_artifact];
+    assert!(
+        !obj.card_types.subtypes.iter().any(|s| s == "Food"),
+        "CR 102.1 + CR 109.5: the window must be shut on the OWNER's turn once \
+         control has moved away: {:?}",
+        obj.card_types
+    );
+    assert!(
+        obj.abilities.is_empty(),
+        "the granted ability must be gone on the owner's turn: {:?}",
         obj.abilities
     );
 }

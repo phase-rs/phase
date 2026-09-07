@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { FormatGroup, GameFormat } from "../../adapter/types";
+import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { flagForServer, parseJoinCode } from "../../services/serverDetection";
 import { healthHint, refreshServerDirectory } from "../../services/serverDirectory";
@@ -412,25 +413,14 @@ export function LobbyView({
     });
   }, [entries, formatFilter, roomTypeFilter]);
 
-  // Every enabled source reports its own online count; the chip shows the
-  // total reach of the lobby the user is browsing. Two rules, both
-  // structural:
-  //   membership — summed over the CURRENT sources (as in `entries`), so a
-  //     source the user has removed leaves the total immediately;
-  //   liveness   — the count is read from that source's status row, which
-  //     the store rewrites on every connection state change and refills
-  //     only from a frame on the socket that is live now. A source that is
-  //     reconnecting, offline, or freshly re-opened without having reported
-  //     since therefore contributes nothing; there is no cached number here
-  //     that could outlive the socket that sent it.
-  const playerCount = useMemo(
-    () =>
-      sources.reduce(
-        (sum, source) => sum + (sourceStatus.get(source.url)?.playerCount ?? 0),
-        0,
-      ),
-    [sources, sourceStatus],
-  );
+  // The badge describes the shared online lobby, so its broker is the single
+  // population authority. Dedicated servers report their own WebSocket counts,
+  // which overlap with the broker population and with one another; neither a
+  // sum nor a maximum can recover a distinct-player count from those aggregate
+  // values. The status row is socket-generation scoped, so a disconnected or
+  // reconnecting broker contributes no stale count.
+  const playerCount =
+    sourceStatus.get(OFFICIAL_MULTIPLAYER_SERVER_URL)?.playerCount ?? 0;
 
   // Count-free by design: the picker lists each source with its own status,
   // which is where a number would be actionable.
@@ -454,7 +444,7 @@ export function LobbyView({
   const serverHost = (hostingServer ?? "").replace(/^wss?:\/\//, "").split("/")[0];
 
   return (
-    <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col gap-6 px-5 py-6">
+    <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col gap-6 px-3 py-6 sm:px-5">
       <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
           {t("lobbyView.onlineLobby")}
@@ -516,7 +506,7 @@ export function LobbyView({
       </div>
 
       {showRoomTypeFilter && (
-        <div className="flex rounded-[10px] border border-white/10 bg-black/25 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm">
+        <div className="grid grid-cols-2 rounded-[10px] border border-white/10 bg-black/25 p-1 shadow-[0_8px_22px_rgba(0,0,0,0.18)] backdrop-blur-sm sm:flex">
           {ROOM_TYPE_FILTERS.map((opt) => (
             <button
               key={opt.value}
@@ -553,7 +543,7 @@ export function LobbyView({
             )}
           </div>
         ) : (
-          <div className="flex max-h-64 flex-col gap-2 overflow-y-auto">
+          <div className="flex flex-col gap-2 min-[820px]:max-h-64 min-[820px]:overflow-y-auto">
             {filteredEntries.map((entry) => (
               <GameListItem
                 // Keyed by source too: `game_code` is unique per authority,

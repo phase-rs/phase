@@ -1,4 +1,5 @@
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::action_rejection::ActionRejection;
+use crate::types::game_state::{ActionResult, GameState, WaitingFor};
 
 use crate::game::turn_control;
 use crate::types::actions::GameAction;
@@ -29,6 +30,52 @@ pub struct AiDecisionContract {
     pub authorized_actor: PlayerId,
     pub state_revision: u64,
     pub candidates: Vec<CandidateAction>,
+}
+
+/// The engine's outcome when it applies an action bound to an issued AI
+/// decision contract. Transport adapters use `Stale` to request a fresh
+/// decision and surface only `Rejected` as an action failure.
+#[derive(Debug)]
+pub enum AiProposalApplication {
+    AppliedStackPass { result: ActionResult },
+    AppliedAction { result: ActionResult },
+    Stale,
+    Rejected { rejection: ActionRejection },
+}
+
+/// Applies an AI proposal after re-validating its engine-issued contract.
+///
+/// A verified stack-priority pass takes the retained stack-resolution path;
+/// all other actions use the normal interaction boundary. An invalidated
+/// contract is an expected race with state progression, not a rejected action.
+pub fn apply_ai_action_proposal(
+    state: &mut GameState,
+    contract: &AiDecisionContract,
+    actor: PlayerId,
+    action: GameAction,
+) -> AiProposalApplication {
+    let verified_stack_pass =
+        crate::game::engine::verified_ai_stack_pass_player(state, &action).is_some();
+    if !contract.permits(state, actor, &action) {
+        return AiProposalApplication::Stale;
+    }
+    let applied = if verified_stack_pass {
+        crate::game::engine::apply_verified_ai_priority_pass_with_rejection(
+            state, actor, contract, action,
+        )
+    } else {
+        crate::game::engine::apply_interaction_with_rejection(
+            state,
+            actor,
+            contract.semantic_owner,
+            action,
+        )
+    };
+    match applied {
+        Ok(result) if verified_stack_pass => AiProposalApplication::AppliedStackPass { result },
+        Ok(result) => AiProposalApplication::AppliedAction { result },
+        Err(rejection) => AiProposalApplication::Rejected { rejection },
+    }
 }
 
 impl AiDecisionContract {
@@ -252,8 +299,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::{
+        ability::{Effect, ResolvedAbility},
         actions::GameAction,
         card_type::CoreType,
+        game_state::{StackEntry, StackEntryKind, StackResolutionPolicy},
         identifiers::{CardId, ObjectId},
         player::PlayerId,
         zones::Zone,
@@ -383,5 +432,71 @@ mod tests {
                 cards: vec![second, first],
             },
         ));
+    }
+
+    fn priority_state(player: PlayerId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        state
+    }
+
+    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    object_id,
+                    controller,
+                )),
+            },
+        }
+    }
+
+    #[test]
+    fn stack_pass_proposal_uses_the_verified_recheck_seam() {
+        let player = PlayerId(0);
+        let mut state = priority_state(player);
+        state
+            .stack
+            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
+        let contract = AiDecisionContract::issue(&state, player);
+
+        assert!(matches!(
+            apply_ai_action_proposal(&mut state, &contract, player, GameAction::PassPriority),
+            AiProposalApplication::AppliedStackPass { .. }
+        ));
+        assert_eq!(
+            state
+                .stack_resolution_session
+                .as_ref()
+                .map(|session| session.policy),
+            Some(StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
+        );
+    }
+
+    #[test]
+    fn stale_stack_pass_proposal_is_not_a_rejected_ai_decision() {
+        let player = PlayerId(0);
+        let mut state = priority_state(player);
+        state
+            .stack
+            .push_back(no_op_stack_entry(70_102, PlayerId(1)));
+        let contract = AiDecisionContract::issue(&state, player);
+        state.state_revision = state.state_revision.wrapping_add(1);
+
+        assert!(matches!(
+            apply_ai_action_proposal(&mut state, &contract, player, GameAction::PassPriority),
+            AiProposalApplication::Stale
+        ));
+        assert!(state.stack_resolution_session.is_none());
     }
 }

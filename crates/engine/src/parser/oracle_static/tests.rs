@@ -35590,14 +35590,44 @@ fn during_your_turn_composes_onto_subtype_land_and_color_statics() {
     let color_line =
         "During your turn, creatures you control are green in addition to their other colors.";
 
+    // Pin the CONCRETE subtype and the affected filter, not just non-emptiness:
+    // a non-empty check passes even when the parser recovers the wrong subtype
+    // or scopes the grant to the wrong controller, which is most of what could
+    // actually go wrong on these two lines.
     let subtype_def =
         parse_static_line(subtype_line).expect("subtype-granting windowed line must parse");
     assert_eq!(subtype_def.condition, Some(StaticCondition::DuringYourTurn));
-    assert!(!subtype_def.modifications.is_empty(), "{subtype_def:?}");
+    assert_eq!(
+        subtype_def.modifications,
+        vec![ContinuousModification::AddSubtype {
+            subtype: "Zombie".to_string()
+        }],
+        "{subtype_def:?}"
+    );
+    assert_eq!(
+        subtype_def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        )),
+        "the grant must be scoped to creatures YOU control: {subtype_def:?}"
+    );
 
     let land_def = parse_static_line(land_line).expect("land-type windowed line must parse");
     assert_eq!(land_def.condition, Some(StaticCondition::DuringYourTurn));
-    assert!(!land_def.modifications.is_empty(), "{land_def:?}");
+    assert_eq!(
+        land_def.modifications,
+        vec![ContinuousModification::AddSubtype {
+            subtype: "Mountain".to_string()
+        }],
+        "{land_def:?}"
+    );
+    assert_eq!(
+        land_def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::land().controller(ControllerRef::You)
+        )),
+        "the grant must be scoped to lands YOU control: {land_def:?}"
+    );
 
     let color_def = parse_static_line(color_line).expect("color-granting windowed line must parse");
     assert_eq!(color_def.condition, Some(StaticCondition::DuringYourTurn));

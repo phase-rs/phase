@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 206,
+      "date": "2026-09-06",
+      "title": "Esix makes creature copies",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Esix, Fractal Bloom now works: on your first token-making event each turn, you can choose another creature and make that many copies of it instead\n• Elspeth Resplendent now gives its chosen creature both the +1/+1 counter and the flying, first strike, lifelink, or vigilance counter you choose\n• Card-type choices can now name only the types the card actually prints, improving cards such as Cloud Key and the wider class\n\n🛠️ Cards That Now Work Right\n• Oath of Druids and Oath of Lieges now trigger only when an opponent really has more creatures, and the upkeep player chooses the target as printed\n• Ripple no longer crashes at its reveal prompt; the full mechanic now plays through its reveal, free-cast, and bottom-ordering choices\n• Esix, Elspeth Resplendent, Cartographer’s Hawk, Iron Man, Bleeding Edge, and Mold Folk now follow their printed abilities\n• Split cards, transform cards, accents, and alternate spellings now resolve as one physical card in deck building; commanders are counted once whether listed in the command zone or deck\n• Effects whose turn window is tied to their source keep following that source’s controller, including Gourmand’s Talent\n\n⚔️ Combat & Gameplay\n• The AI no longer acts on a stale stack-pass suggestion, avoiding an invalid pass after the game state has changed\n• Cloud saves stop creating needless revision churn during restore\n\n🖥️ Interface\n• Hosting a game makes the P2P versus Official Server choice clear and usable, while game rows reflow better on mobile\n• The game log sits in its own column, and offline status is visible outside the game layout\n\n🌐 Multiplayer\n• The lobby now keeps P2P discovery separate from the game host, reports its online count accurately, and preserves typed join codes\n• Tournament Organizer networking now has broker-validated actions, sensible default scoring, and renewable event credentials",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1546357751935008778"
+    },
+    {
       "id": 205,
       "date": "2026-09-06",
       "title": "Tournament organizer is live",

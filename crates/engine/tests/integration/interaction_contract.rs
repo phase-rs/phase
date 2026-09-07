@@ -3548,6 +3548,14 @@ fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
          waiting-for state and the response that states them — not from a board. The pin is what \
          keeps that a fact about the signature rather than a search result"
     );
+    assert_eq!(
+        params_of("completed_shortcut_declaration"),
+        "interaction_id: &InteractionId, projection: &LoopShortcutProjection, response: \
+         &InteractionResponse",
+        "type-level pin: the nothing-naming pin's completion sits on the preview path beside \
+         every producer above it, and it runs on the SUBMIT path too. Widening it to anything \
+         reaching a `GameState` reopens the clone-apply route through a span no textual ban reads"
+    );
 
     for (span_name, body) in [
         ("preview_interaction's attach arm", &response_attach),
@@ -8747,6 +8755,505 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
         "paired positive: the accepted element states magnitudes over more than one segment, so \
          the count equality above is not read off an empty element"
     );
+}
+
+/// Re-bind the interaction authority over an EDITED offer board and hand back its proposer. The
+/// edit moves the published schema, so the offer's ids are re-minted under a fresh session rather
+/// than carried over.
+fn f4_rebound(mut state: GameState, session: &str) -> (GameState, PlayerId) {
+    let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for else {
+        panic!(
+            "the edited board must still sit at the CR 732.2a offer, got {:?}",
+            state.waiting_for
+        );
+    };
+    bind_interaction_authority(&mut state, InteractionSessionId(session.to_string()))
+        .expect("the interaction authority binds over the edited offer");
+    assert_eq!(
+        viewer_interaction(&state, proposer).opportunities.len(),
+        1,
+        "liveness control: the edited board still publishes the proposer's own opportunity, so a \
+         refusal below is the ingress's answer and not a dead projection"
+    );
+    (state, proposer)
+}
+
+/// The F4 offer board with its announced `Targets` point made OPTIONAL (`min_targets == 0`),
+/// carried through `PersistedGameState::into_game_state` so the bound under test is one the
+/// production restore contract admits.
+fn f4_optional_announcement_board() -> (GameState, PlayerId) {
+    let (mut state, _) = f4_offer_board();
+    {
+        let WaitingFor::LoopShortcut { schema, .. } = &mut state.waiting_for else {
+            panic!("the F4 board sits at the CR 732.2a offer");
+        };
+        let point = schema
+            .points
+            .iter_mut()
+            .find(|point| matches!(point.kind, DecisionPointKind::Targets { .. }))
+            .expect("the F4 offer announces a Targets point");
+        let DecisionPointKind::Targets { min_targets, .. } = &mut point.kind else {
+            unreachable!("found under that same predicate")
+        };
+        *min_targets = 0;
+    }
+    let restored = engine::types::game_state::PersistedGameState::capture(state)
+        .into_game_state()
+        .expect("the edited snapshot satisfies the checked restore contract");
+    f4_rebound(restored, "interaction-contract-f4-optional")
+}
+
+/// The F4 offer board publishing a SECOND announced-target point — the schema's own `Targets`
+/// point duplicated under a distinct `DecisionSlot` index, which is what makes both publish.
+fn f4_second_announcement_board() -> (GameState, PlayerId) {
+    let (mut state, _) = f4_offer_board();
+    {
+        let WaitingFor::LoopShortcut { schema, .. } = &mut state.waiting_for else {
+            panic!("the F4 board sits at the CR 732.2a offer");
+        };
+        let mut duplicate = schema
+            .points
+            .iter()
+            .find(|point| matches!(point.kind, DecisionPointKind::Targets { .. }))
+            .expect("the F4 offer announces a Targets point")
+            .clone();
+        duplicate.slot.index = duplicate
+            .slot
+            .index
+            .checked_add(1)
+            .expect("the announced slot's sub-index leaves room for a sibling");
+        schema.points.push(duplicate);
+    }
+    f4_rebound(state, "interaction-contract-f4-two-announcements")
+}
+
+/// The announced `Targets` schema point's slot and the seats its candidates name, in published
+/// order — the two halves the submitted announcement is compared against.
+fn f4_announced_slot(state: &GameState) -> (DecisionSlot, Vec<PlayerId>) {
+    let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+        panic!("the board sits at the CR 732.2a offer");
+    };
+    let point = schema
+        .points
+        .iter()
+        .find(|point| matches!(point.kind, DecisionPointKind::Targets { .. }))
+        .expect("the F4 offer announces a Targets point");
+    let DecisionPointKind::Targets { legal_targets, .. } = &point.kind else {
+        unreachable!("found under that same predicate")
+    };
+    (
+        point.slot.clone(),
+        legal_targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Player(seat) => *seat,
+                TargetRef::Object(id) => panic!("the F4 offer announces seats, got object {id:?}"),
+            })
+            .collect(),
+    )
+}
+
+/// **Row 3b** — a pin naming NOTHING is answered, and accepted, with the offer's own canonical
+/// split at a count the published sample omits. The complement of the unpartitioned-pin row
+/// above: that one pins the shape naming WHO without a magnitude, this one the shape naming
+/// neither.
+///
+/// # Discrimination
+///
+/// Each leg names its own failing change:
+/// * leg 1 — without the completion the request is `Rejected { ConstraintUnsatisfied }` with no
+///   element on the answering entry point and `Err` on the other;
+/// * leg 2 — consult the completion at the preview entry points instead of at the ingress and
+///   this leg is `Err` while leg 1 passes, which is the divergence itself;
+/// * leg 3 — mint anything but `canonical_allocation` over the domain's ids and the equality
+///   against the offer's own published element fails;
+/// * leg 4 — drop the `min == 1` conjunct and an element appears where an empty announcement is
+///   already the declaration;
+/// * leg 5 — drop the sole-point conjunct and the answered-second member turns `Confirmable` and
+///   submits, while the both-empty member stays refused either way.
+#[test]
+fn a_nothing_naming_pin_is_completed_with_the_offers_canonical_split() {
+    use engine::analysis::decision_template::PinnedDecision;
+
+    let (state, proposer) = f4_offer_board();
+    let view = viewer_interaction(&state, proposer);
+    let interaction_id = view.opportunities[0].interaction_id.clone();
+    let points = shortcut_points(&view);
+    let point = f4_allocation_point(&points);
+    let (count_spec, published) = f4_published(&view);
+    let InteractionShortcutCountSpec::Fixed { min, max, .. } = count_spec else {
+        panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
+    };
+    assert!(
+        (point.min, point.max) == (1, 1) && point.candidate_ids.len() > 1,
+        "reach-guard: the completion fires only on a MANDATORY single-subject announced point, \
+         and a second candidate is what makes its split observable; min={} max={} candidates={}",
+        point.min,
+        point.max,
+        point.candidate_ids.len()
+    );
+    // `f4_pins(.., &[])` builds the nothing-naming pin over the announced point — no ids and no
+    // amounts — while every other answerable point is answered from its own candidate list.
+    let nothing_named = f4_pins(&points, &[]);
+    assert!(
+        nothing_named.iter().any(|pin| pin.group == point.group
+            && pin.choice_ids.is_empty()
+            && pin.amounts.is_empty()),
+        "reach-guard: the request under test must NAME NOTHING over the announced point, else \
+         every leg below is about some other pin shape"
+    );
+
+    // ── LEG 1: the first in-window count the offer's bounded sample published no element for.
+    let unsampled = (min..=max)
+        .find(|count| !published.iter().any(|element| element.count == *count))
+        .expect(
+            "reach-guard: the payload cap must omit a count inside the offer's own window, else \
+             this row is about a fully sampled window and asserts nothing",
+        );
+    let answered = f4_preview(
+        &state,
+        proposer,
+        &interaction_id,
+        unsampled,
+        nothing_named.clone(),
+    );
+    assert_eq!(
+        answered.status,
+        InteractionPreviewStatus::Confirmable,
+        "CR 732.2a: the count is the proposer's to specify, and a pin naming nothing defers to \
+         the offer's own split — a payload cap on which counts PUBLISH an element cannot narrow \
+         which may be declared"
+    );
+    let element = answered
+        .shortcut_preview
+        .clone()
+        .expect("a confirmable completed declaration carries its previewed element");
+    assert_eq!(
+        element.count, unsampled,
+        "the element states the count the request declared"
+    );
+    assert!(
+        !element.entries.is_empty(),
+        "paired positive: the completed element states magnitudes, so the equalities below are \
+         not read off an empty element"
+    );
+    assert!(
+        !element.allocation.is_empty() && element.allocation.iter().all(|part| part.amount > 0),
+        "CR 601.2c: every announced segment takes at least one repetition; {:?}",
+        element.allocation
+    );
+    assert_eq!(
+        element
+            .allocation
+            .iter()
+            .map(|part| part.amount)
+            .sum::<u32>(),
+        unsampled,
+        "the split is a partition OF the declared count"
+    );
+    let rejecting = preview_interaction_with_rejection(
+        &state,
+        proposer,
+        &f4_request(&interaction_id, unsampled, nothing_named.clone()),
+    )
+    .expect("the completed declaration answers on the rejection-typed entry point too");
+    assert_eq!(
+        rejecting.shortcut_preview.as_ref(),
+        Some(&element),
+        "both preview entry points answer one request with one element"
+    );
+
+    // ── LEG 2: the same request SUBMITS, carrying that allocation as a sequenced announcement.
+    let mut submitted = state.clone();
+    let applied = submit_interaction(
+        &mut submitted,
+        proposer,
+        InteractionSubmission {
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::Shortcut {
+                decision: InteractionShortcutDecision::Fixed {
+                    iterations: unsampled,
+                },
+                pins: nothing_named.clone(),
+            },
+        },
+    )
+    .expect("what previews confirmable submits: the completion sits at the chokepoint both share");
+    let GameAction::DeclareShortcut {
+        count,
+        template: Some(template),
+    } = &applied.action
+    else {
+        panic!(
+            "a declared shortcut submits a template, got {:?}",
+            applied.action
+        );
+    };
+    assert_eq!(
+        *count,
+        IterationCount::Fixed(unsampled),
+        "the accepted action drives the count the request declared"
+    );
+    let (announced_slot, announced_seats) = f4_announced_slot(&state);
+    let segments = indexed(&point, &element.allocation);
+    let starts: Vec<u32> = segments
+        .iter()
+        .scan(0u32, |start, (_, amount)| {
+            let at = *start;
+            *start += amount;
+            Some(at)
+        })
+        .collect();
+    let seats: Vec<PlayerId> = segments
+        .iter()
+        .map(|(candidate, _)| announced_seats[*candidate])
+        .collect();
+    assert!(
+        template.decisions.contains(&piecewise_pin(
+            announced_slot,
+            &starts,
+            &seat_subjects(&seats)
+        )),
+        "CR 601.2c: the accepted declaration announces the completed split per repetition; \
+         got {:?}",
+        template.decisions
+    );
+
+    // ── LEG 3: the SAMPLED control — the completion's answer is the offer's own published one.
+    let sampled = published
+        .iter()
+        .find(|candidate| {
+            candidate.allocation.len() > 1
+                && candidate
+                    .allocation
+                    .iter()
+                    .any(|part| part.amount != candidate.allocation[0].amount)
+        })
+        .expect(
+            "reach-guard: a published NON-UNIFORM multi-segment element is what keeps an even \
+             split from satisfying the equality below",
+        );
+    let control = f4_preview(
+        &state,
+        proposer,
+        &interaction_id,
+        sampled.count,
+        nothing_named.clone(),
+    );
+    assert_eq!(control.status, InteractionPreviewStatus::Confirmable);
+    assert_eq!(
+        control.shortcut_preview.as_ref(),
+        Some(sampled),
+        "CR 732.2a: at a count the offer DID publish, the completion states that published \
+         element — allocation and entries alike"
+    );
+
+    // ── LEG 4: the OPTIONAL end of the class, where the empty pin is ALREADY a declaration.
+    let (optional_state, optional_proposer) = f4_optional_announcement_board();
+    let optional_view = viewer_interaction(&optional_state, optional_proposer);
+    let optional_id = optional_view.opportunities[0].interaction_id.clone();
+    let optional_points = shortcut_points(&optional_view);
+    let optional_point = f4_allocation_point(&optional_points);
+    assert_eq!(
+        (optional_point.min, optional_point.max),
+        (0, 1),
+        "reach-guard: the restored board must publish the OPTIONAL bound, else this leg is the \
+         mandatory one over again"
+    );
+    let optional_pins = f4_pins(&optional_points, &[]);
+    let optional_preview = f4_preview(
+        &optional_state,
+        optional_proposer,
+        &optional_id,
+        unsampled,
+        optional_pins.clone(),
+    );
+    assert_eq!(
+        optional_preview.status,
+        InteractionPreviewStatus::Confirmable,
+        "an OPTIONAL announced point's empty pin is a legal answer, exactly as it is today"
+    );
+    assert!(
+        optional_preview.shortcut_preview.is_none(),
+        "CR 601.2c: at `min == 0` the empty pin already MEANS 'announce no target here', so \
+         completing it would replace one stated declaration with a different one"
+    );
+    let mut optional_submitted = optional_state.clone();
+    let optional_applied = submit_interaction(
+        &mut optional_submitted,
+        optional_proposer,
+        InteractionSubmission {
+            interaction_id: optional_id,
+            response: InteractionResponse::Shortcut {
+                decision: InteractionShortcutDecision::Fixed {
+                    iterations: unsampled,
+                },
+                pins: optional_pins,
+            },
+        },
+    )
+    .expect("the optional announcement submits, as it does today");
+    let GameAction::DeclareShortcut {
+        template: Some(optional_template),
+        ..
+    } = &optional_applied.action
+    else {
+        panic!(
+            "a declared shortcut submits a template, got {:?}",
+            optional_applied.action
+        );
+    };
+    assert!(
+        optional_template
+            .decisions
+            .contains(&PinnedDecision::Targets {
+                slot: f4_announced_slot(&optional_state).0,
+                targets: Vec::new(),
+            }),
+        "the EMPTY announcement is what submits; got {:?}",
+        optional_template.decisions
+    );
+
+    // ── LEG 5: a SECOND announced-target point leaves the offer's one published split an
+    //    incomplete answer, so nothing is completed on either member.
+    let (spliced_state, spliced_proposer) = f4_second_announcement_board();
+    let spliced_view = viewer_interaction(&spliced_state, spliced_proposer);
+    let spliced_id = spliced_view.opportunities[0].interaction_id.clone();
+    let spliced_points = shortcut_points(&spliced_view);
+    let announced: Vec<&InteractionShortcutPoint> = spliced_points
+        .iter()
+        .filter(|candidate| candidate.kind == InteractionShortcutPointKind::Targets)
+        .collect();
+    assert_eq!(
+        announced.len(),
+        2,
+        "reach-guard: the spliced board must publish TWO announced-target points, else this leg \
+         is the single-point board over again"
+    );
+    let second_group = announced[1].group;
+    let answered_second: Vec<InteractionShortcutPin> = spliced_points
+        .iter()
+        .filter(|candidate| !candidate.read_only)
+        .map(|candidate| match candidate.kind {
+            InteractionShortcutPointKind::Targets if candidate.group == second_group => {
+                sequenced_pin(candidate, &[(0, unsampled)])
+            }
+            InteractionShortcutPointKind::Targets => sequenced_pin(candidate, &[]),
+            _ => InteractionShortcutPin {
+                group: candidate.group,
+                choice_ids: vec![candidate.candidate_ids[0].clone()],
+                amounts: Vec::new(),
+            },
+        })
+        .collect();
+    for (name, pins) in [
+        ("answered-second", answered_second),
+        ("both-empty", f4_pins(&spliced_points, &[])),
+    ] {
+        let refused = f4_preview(
+            &spliced_state,
+            spliced_proposer,
+            &spliced_id,
+            unsampled,
+            pins.clone(),
+        );
+        assert_eq!(
+            refused.status,
+            InteractionPreviewStatus::Rejected {
+                reason: InteractionReasonCode::ConstraintUnsatisfied
+            },
+            "CR 601.2c: with a second announced-target point published the offer's one split is \
+             not a complete answer, so the {name} member keeps today's refusal"
+        );
+        assert!(
+            refused.shortcut_preview.is_none(),
+            "a refused declaration states no magnitude; {name} rendered one"
+        );
+        assert!(
+            preview_interaction_with_rejection(
+                &spliced_state,
+                spliced_proposer,
+                &f4_request(&spliced_id, unsampled, pins.clone()),
+            )
+            .is_err(),
+            "the rejection-typed entry point refuses the {name} member too"
+        );
+        let mut spliced_submitted = spliced_state.clone();
+        assert!(
+            submit_interaction(
+                &mut spliced_submitted,
+                spliced_proposer,
+                InteractionSubmission {
+                    interaction_id: spliced_id.clone(),
+                    response: InteractionResponse::Shortcut {
+                        decision: InteractionShortcutDecision::Fixed {
+                            iterations: unsampled,
+                        },
+                        pins,
+                    },
+                },
+            )
+            .is_err(),
+            "the submit path refuses the {name} member too"
+        );
+    }
+
+    // ── HOSTILE SIBLINGS, all three at the SAME unsampled count leg 1 completes.
+    // A pin naming ONE choice id with empty amounts states WHO without partitioning anything —
+    // still confirmable, and still carrying no element, because the completion fires only on a
+    // pin naming nothing.
+    let one_named: Vec<InteractionShortcutPin> = nothing_named
+        .iter()
+        .cloned()
+        .map(|mut pin| {
+            if pin.group == point.group {
+                pin.choice_ids = vec![point.candidate_ids[0].clone()];
+            }
+            pin
+        })
+        .collect();
+    let unpartitioned = f4_preview(&state, proposer, &interaction_id, unsampled, one_named);
+    assert_eq!(
+        unpartitioned.status,
+        InteractionPreviewStatus::Confirmable,
+        "an unpartitioned declaration stays a legal answer at an unsampled count"
+    );
+    assert!(
+        unpartitioned.shortcut_preview.is_none(),
+        "CR 732.2a: a pin NAMING a subject states no split, so the completion leaves it alone"
+    );
+    // Dropping another point's pin entirely: the completion substitutes the announced group and
+    // nothing else, so a declaration another point leaves unanswered stays refused.
+    let missing_other = nothing_named
+        .iter()
+        .filter(|pin| pin.group == point.group)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        missing_other.len() < nothing_named.len(),
+        "reach-guard: the offer must publish a second answerable point for this sibling to drop"
+    );
+    let incomplete = f4_preview(&state, proposer, &interaction_id, unsampled, missing_other);
+    assert_eq!(
+        incomplete.status,
+        InteractionPreviewStatus::Rejected {
+            reason: InteractionReasonCode::ConstraintUnsatisfied
+        },
+        "the completion is group-local: it cannot carry a declaration another point leaves \
+         unanswered"
+    );
+    assert!(incomplete.shortcut_preview.is_none());
+    // The window is `materialize_loop_shortcut_response`'s single authority, and the completion
+    // does not restate it: an out-of-window count is refused after the substitution as before it.
+    let out_of_window = f4_preview(&state, proposer, &interaction_id, max + 1, nothing_named);
+    assert_eq!(
+        out_of_window.status,
+        InteractionPreviewStatus::Rejected {
+            reason: InteractionReasonCode::ConstraintUnsatisfied
+        },
+        "CR 732.2a: a count outside the offer's own window is refused, completion or not"
+    );
+    assert!(out_of_window.shortcut_preview.is_none());
 }
 
 /// **Row 4** — a declaration the ingress REFUSES carries no magnitude, each refusal asserted by

@@ -1155,12 +1155,11 @@ interface MultiplayerState {
   playerId: string;
   displayName: string;
   /**
-   * Where this client hosts and registers games — the P2P broker target and
-   * the server-run hosting endpoint. `null` is the direct-codes sentinel:
-   * no lobby is browsed and `MultiplayerPage` runs in P2P mode, so any
-   * `userLobbySources` are inert until a hosting server is chosen again.
-   * A non-null value is always a valid `ws(s)://` URL (enforced at
-   * `setHostingServer`, migration and hydration).
+   * Preferred lobby authority for direct-code lookup and custom P2P brokering.
+   * A Full authority does not replace the official P2P broker. Dedicated games
+   * choose their own endpoint per session; browsing subscribes to all sources.
+   * `null` is a legacy direct-code preference migrated by MultiplayerPage.
+   * Non-null URLs are validated by the setter and persistence boundary.
    */
   hostingServer: string | null;
   /**
@@ -1311,7 +1310,8 @@ interface MultiplayerActions {
   startP2PHostingSession: (
     settings: HostingSettings,
     deck: HostingDeck,
-    opts: { useBroker: boolean; roomName?: string | null },
+    // The probed broker for this attempt; null explicitly opts out of the lobby.
+    opts: { brokerUrl: string | null; roomName?: string | null },
   ) => Promise<boolean>;
   /**
    * Transfers the pre-game host adapter to the matching game route. Once
@@ -2717,7 +2717,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         };
 
         set({
-          hostIsPublic: opts.useBroker && settings.public,
+          hostIsPublic: opts.brokerUrl !== null && settings.public,
           hostingStatus: "connecting",
           hostGameCode: null,
           hostSession: {
@@ -2792,15 +2792,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             releaseAttempt();
             return false;
           }
-          if (opts.useBroker) {
-            // Unreachable through `MultiplayerPage`: `useBroker` is only set
-            // after the hosting server's own socket reported `LobbyOnly`. The
-            // throw lands in this function's catch and resets hosting.
-            const brokerUrl = get().hostingServer;
-            if (brokerUrl === null) {
-              throw new Error("No hosting server to register on.");
-            }
-            broker = await openBrokerClient(brokerUrl);
+          if (opts.brokerUrl !== null) {
+            broker = await openBrokerClient(opts.brokerUrl);
             if (!isCurrentAttempt()) {
               releaseAttempt();
               return false;
@@ -2892,7 +2885,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           destroyHostedRoom = null;
 
           set({
-            hostIsPublic: opts.useBroker && settings.public,
+            hostIsPublic: opts.brokerUrl !== null && settings.public,
             hostingStatus: "waiting",
             hostGameCode: host.roomCode,
             hostSession: {

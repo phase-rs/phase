@@ -105,6 +105,21 @@ describe("registerTauriUpdater connectivity lifecycle", () => {
     await vi.waitFor(() => expect(mocks.check).toHaveBeenCalledTimes(1));
   });
 
+  // The shell refuses updates inside a Flatpak sandbox by supplying the updater
+  // plugin's *default* version comparator (client/src-tauri/src/update_authority.rs).
+  // `check({ allowDowngrades: true })` replaces that default outright rather than
+  // composing with it, so passing any options here would reach past the guard and
+  // let a sandboxed install try to rewrite its read-only /app. This shell binary
+  // and this web app ship on separate schedules, so the constraint is pinned here
+  // rather than left as a comment.
+  it("checks for updates with no options so the sandbox update guard is not bypassed", async () => {
+    const updater = await import("../tauriUpdater");
+    updater.registerTauriUpdater();
+
+    await vi.waitFor(() => expect(mocks.check).toHaveBeenCalledTimes(1));
+    expect(mocks.check).toHaveBeenCalledWith();
+  });
+
   it("does not self-update a dev build or non-desktop host", async () => {
     vi.stubEnv("DEV", true);
     const updater = await import("../tauriUpdater");

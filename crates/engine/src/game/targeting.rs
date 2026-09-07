@@ -130,6 +130,37 @@ pub fn player_is_legal_target(
         )
 }
 
+/// CR 102.1 + CR 115.1: True when `filter`'s legal set is a set of PLAYERS
+/// narrowed by a [`PlayerFilter`] predicate, rather than an object population.
+///
+/// A bare `TargetFilter::Player` is deliberately NOT included: it is already
+/// enumerated by the `add_players` branch, and routing it here would change
+/// nothing while widening this predicate's contract. Only the predicate-bearing
+/// shapes need the new door.
+///
+/// The `And` arm is what makes a multi-conjunct printed restriction expressible
+/// without a new enum variant — "target player who controls more creatures than
+/// they do AND is their opponent" is one `PlayerMatching` leg per conjunct. It
+/// requires EVERY leg to be player-scoped (`TargetFilter::is_player_scope`, the
+/// existing single authority for that question) so a mixed object/player `And`
+/// keeps its object enumeration, and at least one leg to carry a predicate so a
+/// conjunction of bare player nouns is not diverted here. Legs are flat by
+/// construction; a nested `And`/`Or` leg fails `is_player_scope` and therefore
+/// fails CLOSED (no legal targets, CR 603.3d) rather than being enumerated with
+/// half its restriction dropped.
+fn denotes_player_predicate_target(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::PlayerMatching { .. } => true,
+        TargetFilter::And { filters } => {
+            filters.iter().all(TargetFilter::is_player_scope)
+                && filters
+                    .iter()
+                    .any(|leg| matches!(leg, TargetFilter::PlayerMatching { .. }))
+        }
+        _ => false,
+    }
+}
+
 fn find_legal_targets_with_context(
     state: &GameState,
     filter: &TargetFilter,
@@ -177,6 +208,39 @@ fn find_legal_targets_with_context(
     if matches!(filter, TargetFilter::AttachedTo) {
         if let Some(target) = resolve_event_context_target(state, filter, source_id) {
             targets.push(target);
+        }
+        return targets;
+    }
+
+    // CR 102.1 + CR 115.1 + CR 601.2c: a player-PREDICATE target filter denotes a
+    // PLAYER population, so its legal set is enumerated over seats — never over
+    // objects. Without this door a `TargetFilter::PlayerMatching` used as an
+    // ability's target (rather than as a trigger-event matcher) falls through to
+    // the object loops below, enumerates ZERO candidates, and CR 603.3d silently
+    // removes the ability from the stack for every board state — the mirror of
+    // the "no arm ⇒ every seat is legal" failure `player_matches_target_filter_in_state`
+    // documents on the legality side.
+    //
+    // Membership is delegated to that same single authority
+    // (`filter::player_matches_target_filter_in_state`), which already answers
+    // `PlayerMatching` and recurses through `And`/`Or`, so the enumerating side
+    // and the CR 608.2b re-check side cannot drift. Seat eligibility stays with
+    // `player_is_legal_target` (CR 800.4 existence + CR 702.11c/702.18a/702.16b
+    // targeting exclusions), exactly as the `Typed` player branch below.
+    if denotes_player_predicate_target(filter) {
+        for player in &state.players {
+            if !player_is_legal_target(state, player.id, source_id, source_controller) {
+                continue;
+            }
+            if super::filter::player_matches_target_filter_in_state(
+                state,
+                filter,
+                player.id,
+                Some(source_controller),
+                Some(source_id),
+            ) {
+                targets.push(TargetRef::Player(player.id));
+            }
         }
         return targets;
     }

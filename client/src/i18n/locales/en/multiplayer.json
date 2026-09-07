@@ -128,9 +128,9 @@
     "kindLobbyOnly": "(lobby broker)"
   },
   "connectionMode": {
-    "label": "Connection",
-    "server": "Official Server",
-    "p2p": "P2P"
+    "label": "Who hosts?",
+    "server": "Dedicated server",
+    "p2p": "You host (P2P)"
   },
   "serverPicker": {
     "title": "Server",
@@ -208,7 +208,7 @@
   "hostSetup": {
     "hostDirectMatch": "Host Direct Match",
     "hostMatch": "Host Match",
-    "p2pNotice": "Peer-to-peer mode. This room connects players directly instead of running on a server.",
+    "p2pNotice": "Your device runs the game. Keep the app open and stay connected. You can list your game in the lobby.",
     "p2pSeatCap": "P2P tables seat at most {{max}} players, so the seat count is capped.",
     "roomName": "Room Name",
     "optional": "(optional)",
@@ -235,7 +235,7 @@
     "ranked": "Ranked",
     "listInLobby": "List in lobby",
     "hostServer": "Host on",
-    "hostServerHelp": "Which server runs this match. Your browsing and direct-code settings don't change.",
+    "hostServerHelp": "A dedicated server runs the game. It may slow down or go offline. You can list your game in the lobby.",
     "hostServerScore": "{{name}} — health {{score}}",
     "hostServerUnscored": "{{name}} — not yet rated",
     "sandboxMode": "Sandbox Mode — allow debug actions",

@@ -1317,7 +1317,7 @@ describe("multiplayerStore", () => {
         sideboard: [],
         commander: ["Goreclaw, Terror of Qal Sisma"],
       },
-      { useBroker: false },
+      { brokerUrl: null },
     );
 
     expect(ok).toBe(true);
@@ -1360,7 +1360,7 @@ describe("multiplayerStore", () => {
           sideboard: [],
           commander: ["Goreclaw, Terror of Qal Sisma"],
         },
-        { useBroker: false },
+        { brokerUrl: null },
       ),
     ).resolves.toBe(false);
 
@@ -1380,7 +1380,7 @@ describe("multiplayerStore", () => {
         sideboard: [],
         commander: [],
       },
-      { useBroker: false },
+      { brokerUrl: null },
     );
 
     expect(ok).toBe(true);
@@ -1390,18 +1390,22 @@ describe("multiplayerStore", () => {
   it.each([false, true])(
     "uses the P2P host visibility setting when listing in the broker: %s",
     async (isPublic) => {
-      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+      const hosting = useMultiplayerStore.getState().startP2PHostingSession(
         hostingSettings({ public: isPublic }),
         {
           main_deck: ["Forest"],
           sideboard: [],
           commander: ["Goreclaw, Terror of Qal Sisma"],
         },
-        { useBroker: true },
+        { brokerUrl: "wss://broker.example/ws" },
       );
 
-      expect(ok).toBe(true);
+      // Host initialization awaits transport setup; changing the browsing
+      // anchor during that work must not redirect the captured broker URL.
+      useMultiplayerStore.setState({ hostingServer: "wss://dedicated.example/ws" });
+      expect(await hosting).toBe(true);
       expect(useMultiplayerStore.getState().hostIsPublic).toBe(isPublic);
+      expect(brokerMocks.openBrokerClient).toHaveBeenCalledWith("wss://broker.example/ws");
       expect(brokerMocks.registerHost).toHaveBeenCalledOnce();
       expect(brokerMocks.registerHost).toHaveBeenCalledWith(
         expect.objectContaining({ public: isPublic }),
@@ -1417,7 +1421,7 @@ describe("multiplayerStore", () => {
         sideboard: [],
         commander: ["Goreclaw, Terror of Qal Sisma"],
       },
-      { useBroker: false },
+      { brokerUrl: null },
     );
     expect(ok).toBe(true);
 
@@ -1452,7 +1456,7 @@ describe("multiplayerStore", () => {
         sideboard: [],
         commander: ["Goreclaw, Terror of Qal Sisma"],
       },
-      { useBroker: false },
+      { brokerUrl: null },
     );
     expect(ok).toBe(true);
 
@@ -1479,7 +1483,7 @@ describe("multiplayerStore", () => {
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(
       hostingSettings(),
       { main_deck: ["Forest"], sideboard: [], commander: [] },
-      { useBroker: false },
+      { brokerUrl: null },
     );
     expect(ok).toBe(true);
     useMultiplayerStore.setState({ activePlayerId: 2 });

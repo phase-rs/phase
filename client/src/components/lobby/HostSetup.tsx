@@ -49,16 +49,13 @@ interface HostSetupProps {
    * `serverUrl` is the server this submit chose to host on, and `null` means
    * exactly one thing: this submit chose no server, which is the P2P case.
    *
-   * The nullability stops at this boundary. It is deliberately NOT
-   * `hostingServer`: the parent runs the action later (deck-select can come
-   * between), so a value captured here would be a latch, whereas `null` lets
-   * the parent make the same live read it makes today.
+   * P2P broker selection happens when the parent executes the action, after
+   * any deck-selection step. It is independent of this dedicated server pick.
    */
   onHost: (settings: HostSettings, serverUrl: string | null) => void | Promise<boolean>;
   onBack: () => void;
   connectionMode: ConnectionMode;
-  /** The page-level mode handler, shared with the lobby's switch. Mirrored
-   * here because the mode changes what the controls below it mean. */
+  /** Host Game owns this choice; browsing and joining use either transport. */
   onConnectionModeChange: (mode: ConnectionMode) => void;
   /** When true, the host-submit button is disabled (e.g. live deck check
    * says the active deck is illegal for the chosen format, or a check is
@@ -425,22 +422,6 @@ export function HostSetup({
     ? Math.min(formatConfig.max_players, P2P_MAX_PEERS)
     : formatConfig.max_players;
   const accentTone = isP2P ? "cyan" : "emerald";
-  // A P2P room reaches the public list only through a `LobbyOnly` broker: that
-  // is the sole path `MultiplayerPage` takes into `startP2PHostingSession` with
-  // `useBroker`, and `openBrokerClient` refuses every other mode. Against a
-  // `Full` anchor there is nothing to register with — `hostIsPublic` is false
-  // whatever this form submits — so offering the toggle there would be a
-  // control with no effect.
-  //
-  // Withheld on POSITIVE knowledge only. `sourceStatus` is not persisted, so a
-  // cold mount knows no mode until the handshake lands; treating that as "no
-  // broker" would make the row appear a beat after the form, and the default
-  // anchor is a broker anyway. Unknown therefore reads as available.
-  const p2pListingUnavailable =
-    isP2P
-    && hostingServer !== null
-    && sourceStatus.get(hostingServer)?.serverInfo?.mode === "Full";
-
   /** Apply a freshly-resolved format config. Shared by the built-in picker and
    *  the saved-custom-format picker so both reset the same dependent state. */
   const applyResolvedFormat = (
@@ -628,7 +609,7 @@ export function HostSetup({
   };
 
   const handleHost = async () => {
-    if (isSubmitting || hostingStatus !== "idle") return;
+    if (submitDisabled) return;
     // A format resolve in flight means `formatConfig` is still the previous
     // (valid) selection. `submitDisabled` already blocks the button; this is
     // the belt-and-braces guard for a programmatic form submit.
@@ -751,26 +732,9 @@ export function HostSetup({
       ?? DEFAULT_MULTIPLAYER_SERVER_URL,
   );
 
-  /**
-   * The server this submit will actually use — DERIVED every render, never a
-   * latch.
-   *
-   * The candidate list is asynchronous: `directorySources` and `sourceStatus`
-   * are not persisted, so on a cold session this form can mount before either
-   * has been populated. `fullHostCandidates` is then empty and the initial
-   * state above falls through to `DEFAULT_MULTIPLAYER_SERVER_URL` — the
-   * official broker, which carries no `kind` before its handshake and is not
-   * yet announced, so the picker's mode filter excludes it. A latched value
-   * would freeze there and submit a server the dropdown does not even offer,
-   * which the parent's mode probe would then route down the P2P branch while
-   * the user is looking at a list of Full servers.
-   *
-   * So: honour the explicit pick only while it is still a selectable
-   * candidate, and otherwise fall back to the best-evidenced selectable one
-   * that currently exists. This re-resolves as the directory lands, and it
-   * still terminates in a non-null constant, which is what makes the server
-   * leg's value a `string` by construction rather than by assumption.
-   */
+  /** Re-resolve as the directory arrives, retaining an explicit pick only
+   * while it remains eligible. The default URL is only a placeholder while
+   * candidates are absent: dedicated submission is disabled in that state. */
   const selected =
     selectableCandidates.some((candidate) => candidate.source.url === hostServerUrl)
       ? hostServerUrl
@@ -834,8 +798,10 @@ export function HostSetup({
   // submission locally instead of letting the user walk the full
   // save/select/deck-pick flow into a guaranteed dead end.
   const customFormatHostUnavailable = activeSavedFormat !== null;
+  const dedicatedHostUnavailable = !isP2P && selectableCandidates.length === 0;
   const submitDisabled =
-    hostDisabled
+    dedicatedHostUnavailable
+    || hostDisabled
     || customFormatHostUnavailable
     || isSubmitting
     || isResolvingFormat
@@ -850,7 +816,7 @@ export function HostSetup({
       {/* Mode first: it changes what every control below it means, so it sits
           above format and seats rather than among the option rows. */}
       <Field label={t("connectionMode.label")}>
-        <div className="max-w-xs">
+        <div className="max-w-sm">
           <ConnectionModeSwitch
             value={connectionMode}
             onChange={onConnectionModeChange}
@@ -858,11 +824,9 @@ export function HostSetup({
         </div>
       </Field>
 
-      {isP2P && (
-        <p className="max-w-2xl text-sm leading-6 text-slate-400">
-          {t("hostSetup.p2pNotice")}
-        </p>
-      )}
+      <p className="max-w-2xl text-sm leading-6 text-slate-400">
+        {t(isP2P ? "hostSetup.p2pNotice" : "hostSetup.hostServerHelp")}
+      </p>
 
       {/* Two-column table-setup grammar (design mockup HostScreen): form panel
           beside a sticky seat panel + primary CTA. Stacks to one column below lg. */}
@@ -1118,7 +1082,10 @@ export function HostSetup({
               P2P has no server to place the game on, so there is no selection
               to make and none is reported. */}
           {!isP2P && (
-            <Field label={t("hostSetup.hostServer")} hint={t("hostSetup.hostServerHelp")}>
+            <Field
+              label={t("hostSetup.hostServer")}
+              hint={dedicatedHostUnavailable ? t("serverOfflineDialog.couldNotConnect") : undefined}
+            >
               <MenuSelect
                 ariaLabel={t("hostSetup.hostServer")}
                 label={
@@ -1165,25 +1132,13 @@ export function HostSetup({
             </Field>
           )}
 
-          {/* Privacy / timing options — iOS-toggle rows (design mockup).
-              "List in lobby" is offered in BOTH modes. Listing and transport
-              are independent: a P2P room hosted against a `LobbyOnly` broker —
-              which the official default anchor is — is registered through
-              `broker.registerHost({ public })` and appears in the public list
-              exactly as a server-run game does. Hiding this in P2P never
-              stopped that; it only removed the OPT-OUT, because `isPublic`
-              defaults to true. `startP2PHostingSession` still ANDs it with
-              `useBroker`, so against a `Full` anchor — which has no broker to
-              register with — the room is unlisted whatever this says, which is
-              also why the row is withheld outright in that case. */}
-          {!p2pListingUnavailable && (
-            <OptionRow
-              label={t("hostSetup.listInLobby")}
-              on={isPublic}
-              onChange={setIsPublic}
-              accent={accentTone}
-            />
-          )}
+          {/* Visibility is independent of who runs the game. */}
+          <OptionRow
+            label={t("hostSetup.listInLobby")}
+            on={isPublic}
+            onChange={setIsPublic}
+            accent={accentTone}
+          />
           <OptionRow label={t("hostSetup.startWhenFull")} on={startWhenFull} onChange={setStartWhenFull} accent={accentTone} />
           {/* Sandbox mode — capability flag, orthogonal to format; lets the host
               submit debug actions. Off by default; immutable for the session. */}

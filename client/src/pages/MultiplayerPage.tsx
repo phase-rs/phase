@@ -35,7 +35,7 @@ import {
   type ConnectionMode,
   type LobbySource,
 } from "../stores/multiplayerStore";
-import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../config/multiplayerServer";
+import { DEFAULT_MULTIPLAYER_SERVER_URL, OFFICIAL_MULTIPLAYER_SERVER_URL } from "../config/multiplayerServer";
 import {
   useMultiplayerDraftStore,
   type MultiplayerDraftPhase,
@@ -151,11 +151,10 @@ function MultiplayerPageContent({
   // not in the store, because it's scoped to the Multiplayer flow.
   const [serverOfflinePrompt, setServerOfflinePrompt] = useState(false);
   const [lobbyRetryKey, setLobbyRetryKey] = useState(0);
-  // Set when the user clicks "Host online game" on a `LobbyOnly` server but
-  // the broker isn't reachable. Stashes the pending action so the modal's
-  // "Continue without lobby" button can dispatch it with `useBroker: false`.
+  // Capture the attempted endpoint so an unavailable broker is never reported
+  // as the dedicated server the player also happens to be connected to.
   const [brokerOfflinePrompt, setBrokerOfflinePrompt] = useState<
-    { action: PendingAction } | null
+    { action: PendingAction; serverAddress: string | null } | null
   >(null);
   // Fatal guest-side errors (build mismatch especially) need more weight
   // than a transient toast — the user may need to act (refresh the page
@@ -512,35 +511,31 @@ function MultiplayerPageContent({
           return true;
         }
 
-        // Reachability + mode check for the hosting flow. We lean on the
-        // store's long-lived subscription socket (opened when the user
-        // entered this page) rather than paying a fresh broker handshake:
-        // `ensureSubscriptionSocket` is idempotent and returns `null` when
-        // the server is unreachable, which is exactly the signal the
-        // `BrokerOfflinePrompt` needs. This also populates `serverInfo` on
-        // the store so the mode check has authoritative data even on a
-        // fresh page load. A `LobbyOnly` server doesn't run games — it
-        // only brokers P2P peer IDs — so a user who clicked "Host Game"
-        // (server mode) against such a server is implicitly asking for a
-        // broker-advertised P2P game.
         const store = useMultiplayerStore.getState();
-        // The server this action targets: the host-setup choice in server
-        // mode, and — because that choice is `null` in P2P — the same live
-        // `hostingServer` read this line has always made, in the same
-        // statement, whenever the action is a P2P one.
-        const target = action.serverUrl ?? store.hostingServer;
-        const socket = target === null
+        // A dedicated game server and the lobby broker can both be connected.
+        // Preserve a custom broker anchor, but never use a Full server for
+        // P2P registration. Unknown custom endpoints are probed before deciding.
+        const anchor = store.hostingServer;
+        let target = action.connectionMode === "p2p"
+          ? anchor !== null && store.sourceStatus.get(anchor)?.serverInfo?.mode !== "Full"
+            ? anchor
+            : OFFICIAL_MULTIPLAYER_SERVER_URL
+          : action.serverUrl;
+        let socket = target === null
           ? null
           : await store.ensureSubscriptionSocket(target);
-        const mode = socket?.serverInfo.mode ?? store.serverInfo?.mode;
+        if (action.connectionMode === "p2p" && socket?.serverInfo.mode === "Full") {
+          target = OFFICIAL_MULTIPLAYER_SERVER_URL;
+          socket = await store.ensureSubscriptionSocket(target);
+        }
 
-        if (action.connectionMode === "p2p" || mode === "LobbyOnly") {
-          if (mode === "LobbyOnly" && !socket) {
-            setBrokerOfflinePrompt({ action });
+        if (action.connectionMode === "p2p") {
+          if (socket?.serverInfo.mode !== "LobbyOnly") {
+            setBrokerOfflinePrompt({ action, serverAddress: target });
             return false;
           }
           const ok = await startP2PHostingSession(action.settings, deck, {
-            useBroker: mode === "LobbyOnly",
+            brokerUrl: target,
             roomName: action.settings.roomName,
           });
           if (!ok) {
@@ -548,15 +543,9 @@ function MultiplayerPageContent({
           }
           navigate("/");
         } else {
-          // Server-mode host: if the server is unreachable, surface the
-          // offline prompt and offer a P2P fallback rather than handing
-          // the action off to `startHosting`, which would hang on the WS
-          // handshake and leave the user staring at the host-setup screen.
-          // The `target === null` disjunct adds no behaviour — `socket` is
-          // already null whenever `target` is — it narrows `target` to the
-          // `string` `startHosting` requires.
-          if (target === null || !socket) {
-            setBrokerOfflinePrompt({ action });
+          // A dedicated choice must never silently start a player-hosted game.
+          if (target === null || socket?.serverInfo.mode !== "Full") {
+            showToast(t("serverOfflineDialog.couldNotConnect"));
             return false;
           }
           startHosting(action.settings, deck, target);
@@ -1017,7 +1006,7 @@ function MultiplayerPageContent({
       )}
       {brokerOfflinePrompt && (
         <BrokerOfflinePrompt
-          serverAddress={hostingServer ?? undefined}
+          serverAddress={brokerOfflinePrompt.serverAddress ?? undefined}
           onCancel={() => setBrokerOfflinePrompt(null)}
           onContinueWithoutLobby={() => {
             const { action } = brokerOfflinePrompt;
@@ -1029,7 +1018,7 @@ function MultiplayerPageContent({
                 return;
               }
               void startP2PHostingSession(action.settings, deck, {
-                useBroker: false,
+                brokerUrl: null,
                 roomName: action.settings.roomName,
               }).then((ok) => {
                 if (ok) navigate("/");

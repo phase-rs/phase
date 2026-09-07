@@ -115,6 +115,13 @@ EOF
 #     also matches `parse_target_with_ctx`), so a row keeps passing after the
 #     symbol it names has been renamed away -- the exact drift this invariant
 #     exists to catch.
+#
+#     A row body must contain no unescaped ERE metacharacter. Under the old
+#     substring match a row like `fn peel_clause(` was a valid literal; under
+#     -E it is a regex syntax error, and grep's exit 2 is reported by the `||`
+#     below as documented-symbol-missing -- a regex bug wearing a doc-drift
+#     message. Escape the character, or pin the row with the declaration
+#     keyword instead (`const FOO`, `struct Bar`).
 # ---------------------------------------------------------------------------
 while IFS=$'\t' read -r pat file; do
   grep -qE "$pat" "$file" || err "documented symbol missing: '$pat' in $file"
@@ -226,19 +233,51 @@ done < <(grep -oE '// Priority [^:]+:' "$ORACLE" | sed -E 's#// Priority ##; s#:
 # Each entry is a symbol REMOVED or RENAMED by a landed refactor. If a future
 # rename retires a name the doc cites, add it here in the same commit.
 # ---------------------------------------------------------------------------
+# Both greps anchor the retired name with a trailing \b. Unanchored, a dead
+# name matches its own longer siblings, and both guards then fire on a tree that
+# is not stale: a NEW `parse_keyword_from_oracle_v2()` anywhere under the parser
+# trips the non-vacuity guard, and a SKILL.md citation of
+# `extract_keyword_line_v2()` trips the dead-cite guard. Both fail closed (a
+# spurious red, never a silent green), which is why this trailed invariant (2).
+#
+# The anchor is trailing-only, so a live `try_extract_keyword_line` would still
+# trip both guards. That also fails closed, and no such name exists today.
+#
+# As with invariant (2), these are EREs now: an entry below must be a bare
+# identifier with no unescaped ERE metacharacter, or grep exits 2 and the `||`
+# reports a regex bug as doc drift.
 while IFS= read -r dead; do
   [ -n "$dead" ] || continue
-  if grep -q "$dead" "$SKILL"; then
+  if grep -qE "$dead\b" "$SKILL"; then
     err "SKILL.md cites '$dead', which no longer exists in the parser tree (renamed/removed)"
   fi
   # Non-vacuity: if the symbol came BACK, this list is the stale thing.
-  if grep -rq "fn $dead" crates/engine/src/parser/; then
+  if grep -rqE "fn $dead\b" crates/engine/src/parser/; then
     err "'$dead' is listed as dead but exists in the parser tree — update this list, not the doc"
   fi
 done <<'EOF'
 parse_keyword_from_oracle
 extract_keyword_line
 EOF
+
+# ---------------------------------------------------------------------------
+# (5) This gate's own regression suite, run ahead of the verdict.
+#
+# Every invariant above stands on its patterns discriminating: a row that keeps
+# matching after the symbol it names is renamed away reports green while the doc
+# it guards has rotted. That has shipped twice (an unanchored row absorbing its
+# longer siblings, and a row with no declaration keyword satisfied by a comment),
+# and neither was visible from this script's own output. The suite pins those as
+# properties, so it runs where the gate runs.
+#
+# The guard is also the recursion stop: the throwaway repos the suite builds
+# copy only this script, so the file is absent there and the fixture's own
+# invocation skips this block.
+# ---------------------------------------------------------------------------
+if [ -f "$(dirname "$0")/check_skill_doc_tests.py" ]; then
+  python3 "$(dirname "$0")/check_skill_doc_tests.py" >/dev/null 2>&1 ||
+    err "gate self-tests failed — run: python3 scripts/check_skill_doc_tests.py"
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo "✗ STALE — update .claude/skills/oracle-parser/SKILL.md (see §12)" >&2
