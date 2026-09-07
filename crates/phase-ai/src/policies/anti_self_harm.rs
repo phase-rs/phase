@@ -53,6 +53,7 @@ use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX,
 };
 use super::removal_lethality;
+use super::self_cost::count_death_triggers_on_board;
 use super::strategy_helpers::can_pay_ward_cost;
 use crate::features::DeckFeatures;
 #[cfg(test)]
@@ -154,6 +155,9 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
             if grants_extra_turn_then_self_loss(ctx) =>
         {
             Some(PolicyReason::new("anti_self_harm_extra_turn_self_loss"))
+        }
+        GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. } => {
+            harmful_action_reaches_only_own_board(ctx)
         }
         GameAction::DecideOptionalEffect { accept: true }
             if optional_effect_life_cost_is_lethal(ctx) =>
@@ -810,6 +814,115 @@ fn own_permanent_with_opponent_alternative(
             TargetRef::Player(_) => false,
         })
         .then(|| PolicyReason::new("anti_self_harm_own_permanent_with_opponent_target"))
+}
+
+/// Refuse an action whose every legal target is a permanent the AI itself
+/// controls, and whose effect on that permanent is harmful.
+///
+/// CR 601.2c + CR 601.2h + CR 602.2b: targets are announced at 601.2c and costs
+/// are paid at 601.2h, and CR 602.2b applies that whole 601.2b–i sequence to
+/// activating an ability. Both steps therefore happen inside ONE atomic
+/// process. By the time any target-step policy is consulted the activation cost
+/// is already spent and the ability is on the stack, so a veto there cannot give
+/// back a sacrificed creature. **The activation decision is the last window in
+/// which the AI can decline**, which is why this lives on the pre-cast arm
+/// rather than beside its target-step sibling.
+///
+/// [`own_permanent_with_opponent_alternative`] is that sibling, and it cannot
+/// cover this case by construction: it fires only while the SAME slot still
+/// offers an opponent-controlled object to prefer instead. When the AI's own
+/// board is the ENTIRE legal target pool there is no alternative, so it stands
+/// down — which is how a "{T}, Sacrifice this creature: it deals 2 damage to
+/// target attacking or blocking creature" outlet came to be spent shooting the
+/// AI's own lone attacker.
+///
+/// Board-wide by design, unlike that slot-local sibling: the question here is
+/// "does this action have anywhere worth going at all", and CR 115.3 makes
+/// target legality the engine's to answer — so it asks `find_legal_targets`,
+/// which already honours hexproof, shroud, protection and ward.
+fn harmful_action_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
+    let source = ctx.source_object()?;
+    let effects = ctx.effects();
+
+    // Own bounce / flicker: aiming these at one's own permanent IS the play.
+    if effects.iter().any(is_deliberate_self_target_rider) {
+        return None;
+    }
+
+    // CR 115.10a: a MASS leg (`DestroyAll`, `DamageAll`) is NON-targeted, so it
+    // clears an opposing population that targeting cannot reach at all —
+    // hexproof (CR 702.11b gates targeting only), shroud, protection. A chain
+    // carrying one is a real removal line no matter what its targeted leg can
+    // see, so consult the same resolver-mirroring mass seam `score_pre_cast`
+    // uses for its own no-target branch rather than re-deriving it.
+    if ctx.has_opposing_mass_population() {
+        return None;
+    }
+
+    let mut harmful_own_board_effects = 0i64;
+    for effect in &effects {
+        let Some(filter) = extract_target_filter(effect) else {
+            continue;
+        };
+        let targets = find_legal_targets(ctx.state, filter, ctx.ai_player, source.id);
+        // An EMPTY pool is the WHIFF case, already priced by `score_pre_cast`'s
+        // `wasted_cast_penalty` branches. Charging it again here would
+        // double-book one mistake as two.
+        if targets.is_empty() {
+            continue;
+        }
+
+        let reaches_beyond_own_board = targets.iter().any(|target| match target {
+            TargetRef::Object(id) => ctx
+                .state
+                .objects
+                .get(id)
+                .is_none_or(|object| object.controller != ctx.ai_player),
+            // CR 115.4: a player slot the AI can point somewhere other than
+            // itself is a real alternative, so the pool is not own-board-only.
+            TargetRef::Player(player) => *player != ctx.ai_player,
+        });
+        if reaches_beyond_own_board {
+            return None;
+        }
+
+        match effect_polarity(effect) {
+            EffectPolarity::Harmful => harmful_own_board_effects += 1,
+            // A beneficial or contextual leg confined to the AI's own board is
+            // the ability working exactly as printed — a self-pump, a regrowth,
+            // a counter placed on its own source. Never veto those.
+            EffectPolarity::Beneficial | EffectPolarity::Contextual => return None,
+        }
+    }
+
+    if harmful_own_board_effects == 0 {
+        return None;
+    }
+
+    // An aristocrats board turns the AI's own creature dying into a PAYOFF
+    // (CR 603.2 death triggers), so pointing a harmful effect at its own
+    // creature can be the correct line there. Reuses the same death-trigger
+    // census `FreeOutletActivationPolicy` gates on rather than re-deriving it.
+    let features = ctx
+        .context
+        .session
+        .features
+        .get(&ctx.ai_player)
+        .cloned()
+        .unwrap_or_default();
+    if count_death_triggers_on_board(
+        ctx.state,
+        ctx.ai_player,
+        &features.aristocrats.death_trigger_names,
+    ) > 0
+    {
+        return None;
+    }
+
+    Some(
+        PolicyReason::new("anti_self_harm_harmful_action_own_board_only")
+            .with_fact("harmful_own_board_effects", harmful_own_board_effects),
+    )
 }
 
 /// CR 601.2b + CR 700.2a: a mode is chosen while the spell is being cast (or
@@ -1553,7 +1666,7 @@ fn cost_includes_sacrifice_self(cost: &AbilityCost) -> bool {
 
 /// Extract the fixed damage amount from the pending spell's DealDamage effect.
 /// Returns None for variable damage or non-damage spells.
-fn extract_damage_amount(effects: &[&Effect]) -> Option<i32> {
+pub(crate) fn extract_damage_amount(effects: &[&Effect]) -> Option<i32> {
     effects.iter().find_map(|effect| match effect {
         Effect::DealDamage {
             amount: QuantityExpr::Fixed { value },
