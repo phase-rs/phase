@@ -525,7 +525,9 @@ fn plains_only_db_json() -> String {
 #[test]
 fn validate_name_deck_for_format_full_evaluates_a_resolved_custom_format() {
     use engine::database::CardDatabase;
-    use engine::game::deck_validation::validate_name_deck_for_format_full;
+    use engine::game::deck_validation::{
+        evaluate_deck_compatibility, validate_name_deck_for_format_full, DeckCompatibilityRequest,
+    };
 
     let custom_config = FormatConfig::for_custom_rules(&sample_rules(1));
 
@@ -583,6 +585,82 @@ fn validate_name_deck_for_format_full_evaluates_a_resolved_custom_format() {
         result,
         Ok(()),
         "expected a legal 60-card deck to pass a constructed-shaped custom format"
+    );
+
+    // A real card-pool rejection through the same public entry point proves
+    // the custom evaluator does more than reuse the structural deck-size
+    // check above. CR 100.6 permits tournament-format rules to limit a
+    // card's use; this custom format declares Plains banned.
+    let mut banned_rules = sample_rules(1);
+    banned_rules.legality.banned = vec!["Plains".to_string()];
+    let banned_config = FormatConfig::for_custom_rules(&banned_rules);
+    let result = validate_name_deck_for_format_full(
+        &populated_db,
+        &main_deck,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &banned_config,
+        None,
+        2,
+    );
+    assert!(
+        matches!(result, Err(ref reasons) if reasons.iter().any(|reason| reason.contains("Plains (banned)"))),
+        "a custom banned list must reject a deck that is otherwise legal: {result:?}"
+    );
+
+    // `Forbidden` is a resolved custom-format structural rule, not merely a
+    // fallback for an unresolved `GameFormat::Custom` tag. The public game
+    // creation validator must reject a submitted sideboard under that policy.
+    let mut forbidden_sideboard_rules = sample_rules(1);
+    forbidden_sideboard_rules.structural.sideboard_policy = SideboardPolicy::Forbidden;
+    let forbidden_sideboard_config = FormatConfig::for_custom_rules(&forbidden_sideboard_rules);
+    let result = validate_name_deck_for_format_full(
+        &populated_db,
+        &main_deck,
+        &["Plains".to_string()],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &forbidden_sideboard_config,
+        None,
+        2,
+    );
+    assert!(
+        matches!(result, Err(ref reasons) if reasons.iter().any(|reason| reason.contains("does not allow a sideboard"))),
+        "a forbidden custom sideboard must fail the public validator: {result:?}"
+    );
+
+    // The summary twin must preserve the same policy. A future resolved
+    // custom-format summary caller would otherwise report the deck compatible
+    // while the authoritative full path rejects it.
+    let summary = evaluate_deck_compatibility(
+        &populated_db,
+        &DeckCompatibilityRequest {
+            main_deck,
+            sideboard: vec!["Plains".to_string()],
+            selected_format: Some(SelectedFormat::Resolved(Box::new(
+                forbidden_sideboard_config,
+            ))),
+            player_count: 2,
+            summary_only: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(summary.selected_format_compatible, Some(false));
+    assert!(
+        summary
+            .selected_format_reasons
+            .iter()
+            .any(|reason| reason.contains("does not allow a sideboard")),
+        "the custom summary validator must reject a forbidden sideboard: {summary:?}"
     );
 }
 

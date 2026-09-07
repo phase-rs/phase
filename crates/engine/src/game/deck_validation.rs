@@ -723,15 +723,19 @@ fn evaluate_constructed(
         ));
     }
 
-    // CR 100.4a: In constructed play, the sideboard may contain at most 15 cards.
-    if let SideboardPolicy::Limited(max) = format_rules.sideboard_policy {
-        if request.sideboard.len() as u32 > max {
+    // CR 100.4: Sideboard availability and its size are format rules.
+    match format_rules.sideboard_policy {
+        SideboardPolicy::Forbidden if !request.sideboard.is_empty() => {
+            reasons.push(format!("{format_label} does not allow a sideboard"));
+        }
+        SideboardPolicy::Limited(max) if request.sideboard.len() as u32 > max => {
             reasons.push(format!(
                 "Sideboard has {} cards (maximum {})",
                 request.sideboard.len(),
                 max
             ));
         }
+        SideboardPolicy::Forbidden | SideboardPolicy::Limited(_) | SideboardPolicy::Unlimited => {}
     }
 
     // CR 100.2a + CR 100.4a: The copy limit applies to main + sideboard
@@ -751,11 +755,9 @@ fn evaluate_constructed(
         }
         match pool.status(db, name) {
             Some(LegalityStatus::Legal) => {}
-            // CR 100.2b: A card on a format's restricted list is legal but
-            // a deck may contain at most one copy of it. Vintage is the
-            // canonical user, but the rule is format-general — any format
-            // whose legality table marks a card `Restricted` follows the
-            // same 1-copy ceiling, enforced below. The card itself is not
+            // CR 100.6: Tournament rules may limit a card's use. Phase's
+            // `Restricted` status represents the established one-copy
+            // format-policy, enforced below; the card itself is not
             // "illegal" — that was the bug that flagged Power 9 as banned
             // in Vintage.
             Some(LegalityStatus::Restricted) => {
@@ -785,7 +787,8 @@ fn evaluate_constructed(
         ));
     }
 
-    // CR 100.2b: Restricted cards may appear at most once in a deck.
+    // CR 100.6: Tournament rules may limit a card's use; Phase's `Restricted`
+    // status uses the established one-copy format-policy.
     let restricted_violations = restricted_copy_violations(db, &counts, &restricted_canonical);
     if !restricted_violations.is_empty() {
         reasons.push(summarize_cards(
@@ -2586,14 +2589,20 @@ fn quick_constructed_check(
             request.main_deck.len()
         ));
     }
-    if let SideboardPolicy::Limited(max) = format_rules.sideboard_policy {
-        if request.sideboard.len() as u32 > max {
+    match format_rules.sideboard_policy {
+        SideboardPolicy::Forbidden if !request.sideboard.is_empty() => {
+            return QuickCheckResult::incompatible(format!(
+                "{format_label} does not allow a sideboard"
+            ));
+        }
+        SideboardPolicy::Limited(max) if request.sideboard.len() as u32 > max => {
             return QuickCheckResult::incompatible(format!(
                 "Sideboard has {} cards (maximum {})",
                 request.sideboard.len(),
                 max
             ));
         }
+        SideboardPolicy::Forbidden | SideboardPolicy::Limited(_) | SideboardPolicy::Unlimited => {}
     }
 
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -3537,10 +3546,11 @@ fn copy_limit_violations(
     violations
 }
 
-/// CR 100.2b: Flag any card the active format marks as `Restricted` whose
-/// combined main+sideboard count exceeds 1. The 1-copy ceiling is
-/// format-general — Vintage is the canonical consumer, but the rule applies
-/// to any format whose legality table uses `Restricted`.
+/// CR 100.6: Tournament rules may limit a card's use. Flag any card the
+/// active format marks as `Restricted` whose combined main+sideboard count
+/// exceeds Phase's established one-copy format-policy. Vintage is the
+/// canonical consumer, but the policy applies to any format whose legality
+/// table uses `Restricted`.
 /// `restricted_canonical` is the set of canonical (DFC-resolved, lowercased)
 /// names that the legality table marks as `Restricted` for the active format;
 /// `counts` is the combined main+sideboard map produced by `combined_copy_counts`.
@@ -5262,7 +5272,8 @@ mod tests {
         );
     }
 
-    /// CR 100.2b: the restricted list is a copy ceiling, so the query the deck
+    /// CR 100.6: Tournament rules may limit a card's use; Phase's restricted
+    /// list uses its established one-copy format-policy, so the query the deck
     /// builder gates its increment control on has to honour it — otherwise the
     /// `+` stays live through four Black Lotuses and the deck only fails later,
     /// at validation. The restriction is format-scoped: the same card is a
@@ -7918,9 +7929,10 @@ mod tests {
 
     #[test]
     fn vintage_one_copy_of_restricted_card_is_legal() {
-        // CR 100.2b: A restricted card is legal in Vintage at no more than
-        // one copy. Regression for a bug where `is_legal()` rejected the
-        // `Restricted` status, marking Power 9 as illegal in Vintage decks.
+        // CR 100.6: Tournament rules may limit a card's use. Phase's
+        // `Restricted` status uses a one-copy format-policy. Regression for a
+        // bug where `is_legal()` rejected the status, marking Power 9 as
+        // illegal in Vintage decks.
         let db = CardDatabase::from_json_str(&vintage_test_db()).unwrap();
         let mut main = vec!["Black Lotus".to_string()];
         main.extend(expand("Island", 59));
@@ -7949,9 +7961,10 @@ mod tests {
 
     #[test]
     fn vintage_two_copies_of_restricted_card_violate_one_copy_limit() {
-        // CR 100.2b: Two copies of a restricted card violate the 1-copy
-        // ceiling — the deck must be flagged, but the message is
-        // "More than 1 copy of a restricted card", not "banned".
+        // CR 100.6: Tournament rules may limit a card's use. Two copies
+        // violate Phase's restricted-card policy — the deck must be flagged,
+        // but the message is "More than 1 copy of a restricted card", not
+        // "banned".
         let db = CardDatabase::from_json_str(&vintage_test_db()).unwrap();
         let mut main = expand("Black Lotus", 2);
         main.extend(expand("Island", 58));
