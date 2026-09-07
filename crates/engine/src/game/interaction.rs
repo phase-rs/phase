@@ -3053,25 +3053,136 @@ fn loop_shortcut_preview(
         .collect()
 }
 
+/// CR 732.2a: the declaration a pin naming NOTHING states — the offer's own canonical split of
+/// the declared count, minted on demand at any count in the published window.
+///
+/// The offer's `preview` list is a bounded SAMPLE of that window (`shortcut_preview_counts`),
+/// while the ingress admits every count in it. At an unsampled count there is no published
+/// element to restate, so the pin the client can honestly send names nothing — and CR 732.2a
+/// leaves the count the proposer's to specify regardless of how many the payload published.
+/// This completes that declaration with the same `canonical_allocation` the sampled counts
+/// already publish, so the answer at an unsampled count is the offer's own answer.
+///
+/// It is a COMPLETION of the player's declaration, not the engine making a CR 601.2c
+/// announcement for them, and every conjunct below is what keeps that true:
+///
+/// * An AUTHORED pin wins — the substitution fires only on a pin naming no ids and no amounts.
+///   An ABSENT pin is not a nothing-naming one: the `?` on the lookup returns `None`, leaving
+///   the ingress's own missing-pin refusal exactly where it is.
+/// * `(min, max) == (1, 1)` on the announced point, each half buying its own outcome. `max == 1`
+///   is the ingress's own gate on a sequenced partition (`sequenced_partition`), so the minted
+///   pin is the shape it accepts a split on. `min == 1` is what makes the empty pin a
+///   non-declaration: at `min == 0` the point is OPTIONAL and an empty pin already MEANS
+///   "announce no target here", which is confirmable today, so completing it would replace one
+///   stated declaration with a different one.
+/// * The domain's point is the offer's ONLY announced-target point, asked by re-calling
+///   `allocation_point` over the points after it rather than by a second `Targets` predicate.
+///   With a second such point published, the offer's one published split is not a complete
+///   answer to the declaration, and an empty pin there is a decision the player has not made.
+///
+/// The count resolution is the exhaustive `(decision, count_spec)` match
+/// `declared_shortcut_preview` performs, `AcceptSuggested` included — that decision reaches this
+/// completion exactly as a `Fixed` one does. `UntilLethal` names no number to partition and
+/// returns on every arm, so this is structurally unreachable there; a new
+/// `InteractionShortcutCountSpec` variant build-breaks the match rather than falling through.
+///
+/// Consulted BEFORE legality, at the one chokepoint both the preview and the submit paths share,
+/// so a request that previews `Confirmable` submits the same sequenced announcement.
+fn completed_shortcut_declaration(
+    interaction_id: &InteractionId,
+    projection: &LoopShortcutProjection,
+    response: &InteractionResponse,
+) -> Option<InteractionResponse> {
+    let InteractionResponse::Shortcut { decision, pins } = response else {
+        return None;
+    };
+    let count = match (*decision, projection.count) {
+        (
+            InteractionShortcutDecision::AcceptSuggested,
+            InteractionShortcutCountSpec::Fixed { suggested, .. },
+        ) => suggested,
+        (
+            InteractionShortcutDecision::Fixed { iterations },
+            InteractionShortcutCountSpec::Fixed { .. },
+        ) => iterations,
+        (InteractionShortcutDecision::Decline, _)
+        | (
+            InteractionShortcutDecision::AcceptSuggested,
+            InteractionShortcutCountSpec::UntilLethal,
+        )
+        | (InteractionShortcutDecision::Fixed { .. }, InteractionShortcutCountSpec::UntilLethal) => {
+            return None;
+        }
+    };
+    // The offer publishes a sampled element list at all: without a basis it publishes none, and
+    // there is no published split for a nothing-naming pin to defer to.
+    shortcut_preview_basis(interaction_id, projection)?;
+    let domain = shortcut_allocation_domain(interaction_id, projection)?;
+    let sole_point = allocation_point(
+        projection
+            .points
+            .iter()
+            .skip(usize::try_from(domain.group).ok()? + 1),
+    )
+    .is_none();
+    if domain.ids.is_empty() || (domain.point.min, domain.point.max) != (1, 1) || !sole_point {
+        return None;
+    }
+    let pin = pins.iter().find(|pin| pin.group == domain.group)?;
+    if !pin.choice_ids.is_empty() || !pin.amounts.is_empty() {
+        return None;
+    }
+    let allocation = canonical_allocation(&domain.ids, count);
+    if allocation.is_empty() {
+        return None;
+    }
+    Some(InteractionResponse::Shortcut {
+        decision: *decision,
+        pins: pins
+            .iter()
+            .map(|pin| {
+                if pin.group != domain.group {
+                    return pin.clone();
+                }
+                InteractionShortcutPin {
+                    group: pin.group,
+                    choice_ids: allocation
+                        .iter()
+                        .map(|assignment| assignment.choice_id.clone())
+                        .collect(),
+                    amounts: allocation.clone(),
+                }
+            })
+            .collect(),
+    })
+}
+
 /// CR 732.2a: the previewed element for the declaration this response states — the same
 /// arithmetic the published list carries, over the allocation the player authored.
 ///
 /// CR 732.1b: the sequence is deliberately never performed, so this is `n x delta` and reaches
 /// no `GameState`.
 ///
-/// Fail-closed: a pin carrying no `amounts` states no split, so no element is minted for it
-/// rather than one being invented from the canonical order. The count is not re-validated
-/// here — an out-of-window count is refused by the ingress in the same call, and the payload
-/// is attached only on the confirmable arm.
+/// Fail-closed: a pin NAMING a subject but carrying no `amounts` states no split, so no element
+/// is minted for it rather than one being invented from the canonical order. A pin naming
+/// NOTHING is `completed_shortcut_declaration`'s own case and reaches the destructure below
+/// already carrying the offer's canonical split. The count is not re-validated here — an
+/// out-of-window count is refused by the ingress in the same call, and the payload is attached
+/// only on the confirmable arm.
 fn declared_shortcut_preview(
     waiting_for: &WaitingFor,
     interaction_id: &InteractionId,
     response: &InteractionResponse,
 ) -> Option<InteractionShortcutPreview> {
-    let InteractionResponse::Shortcut { decision, pins } = response else {
+    let projection = loop_shortcut_projection(waiting_for).ok()?;
+    // The same completion the ingress consults, over an EQUAL projection minted from the state
+    // both preview entry points hand to this function and to `materialize_response`. Sharing the
+    // authority rather than the value is what keeps the element and the action one declaration.
+    let completed = completed_shortcut_declaration(interaction_id, &projection, response);
+    let InteractionResponse::Shortcut { decision, pins } = completed.as_ref().unwrap_or(response)
+    else {
         return None;
     };
-    let projection = loop_shortcut_projection(waiting_for).ok()?;
     let count = match (*decision, projection.count) {
         (
             InteractionShortcutDecision::AcceptSuggested,
@@ -10836,13 +10947,17 @@ fn materialize_response(
             if *proposer != semantic_owner {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
+            // CR 732.2a: a pin naming nothing over the offer's one announced-target point is
+            // completed with the offer's own canonical split BEFORE legality, so the preview and
+            // the submit paths — which share this chokepoint — answer one question.
+            let completed = completed_shortcut_declaration(interaction_id, &projection, response);
             return materialize_loop_shortcut_response(
                 interaction_id,
                 &projection,
                 *proposer,
                 schema,
                 authoritative_state,
-                response,
+                completed.as_ref().unwrap_or(response),
             );
         }
         HumanResponseModel::AmountAssignments => {

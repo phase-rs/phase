@@ -1252,6 +1252,67 @@ pub fn parse_target_with_syntax<'a>(
                     }
                 }
             }
+            // CR 115.1 + CR 601.2c + CR 603.3d: a `who`-headed relative clause
+            // narrows the PLAYER TARGET's legal domain, and every conjunct of it
+            // is load-bearing at announcement. Discarding it here — leaving the
+            // broad player noun behind and letting the caller drop the remainder
+            // — is what let the Exodus Oath cycle announce ANY player and resolve
+            // on every upkeep regardless of the printed comparison (Oath of
+            // Druids, Oath of Lieges). This is the target-position mirror of the
+            // trigger-event hook in `oracle_trigger`, and it shares that hook's
+            // two rules: the clause must be modelled in FULL, and it must end at
+            // a real clause boundary.
+            //
+            // Each conjunct becomes its own `PlayerMatching` leg; a single
+            // conjunct stays unwrapped so the common one-restriction shape does
+            // not grow a redundant `And`. The bare `TargetFilter::Player` head
+            // noun is the identity for a player population (CR 102.1) and is
+            // dropped from the conjunction; any narrower head noun ("target
+            // opponent") is kept as its own leg so the base and predicate axes
+            // compose instead of one shadowing the other.
+            //
+            // The attempt is SPECULATIVE, so it runs against a cloned
+            // `ParseContext` and commits with `*ctx = tentative_ctx` only once the
+            // clause is accepted — the same discipline the damage-chain
+            // recognizers use. The inner type-phrase parse mutates `ctx`
+            // (`relative_player_scope`, the printed-colour choice, …), and a
+            // declined clause must not leak those writes into the fallback parse.
+            // Every head-noun tag above stops before the separating space, so the
+            // remainder begins with the character AFTER the noun: a space before
+            // a relative clause, or ","/"."/eof otherwise. Peel that one space
+            // with the same `tag(" ")` the trigger-side hook uses, so both seams
+            // hand the predicate grammar an identically normalized slice.
+            let after_noun_orig = &text[lower.len() - after_player.len()..];
+            let after_noun = tag::<_, _, OracleError<'_>>(" ")
+                .parse(after_noun_orig)
+                .map_or(after_noun_orig, |(after, _)| after);
+            let mut tentative_ctx = ctx.clone();
+            if let Ok((clause_rest, predicates)) =
+                super::oracle_effect::parse_target_player_relative_clause(
+                    after_noun,
+                    &mut tentative_ctx,
+                )
+            {
+                let clause_rest_lower = clause_rest.to_lowercase();
+                if nom_primitives::peek_clause_terminator(&clause_rest_lower).is_ok() {
+                    *ctx = tentative_ctx;
+                    let mut legs: Vec<TargetFilter> = Vec::new();
+                    if !matches!(player_filter, TargetFilter::Player) {
+                        legs.push(player_filter.clone());
+                    }
+                    legs.extend(predicates.into_iter().map(|player| {
+                        TargetFilter::PlayerMatching {
+                            player: Box::new(player),
+                        }
+                    }));
+                    let bound = if legs.len() == 1 {
+                        legs.remove(0)
+                    } else {
+                        TargetFilter::And { filters: legs }
+                    };
+                    return (bound, clause_rest, syntax);
+                }
+            }
             return (
                 player_filter,
                 &text[lower.len() - after_player.len()..],

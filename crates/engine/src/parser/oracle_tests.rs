@@ -28969,3 +28969,276 @@ fn where_x_that_creature_stat_binds_target_only_when_the_clause_announces_one() 
         );
     }
 }
+
+/// CR 115.1 + CR 601.2c + CR 603.2 + CR 102.2: the Exodus Oath cycle prints a
+/// two-conjunct relative clause on its player TARGET — "who controls more
+/// ⟨type⟩ than they do and is their opponent". Both conjuncts are announcement
+/// restrictions (CR 601.2c), so both must survive into the announced filter.
+///
+/// Revert-failing: drop the relative-clause hook in `oracle_target`'s player
+/// head-noun arm and every row below collapses to the bare
+/// `TargetFilter::Player` that let Oath of Druids resolve on every upkeep
+/// regardless of the board.
+///
+/// The threshold's `ObjectCount` filter carries
+/// `ControllerRef::TriggeringPlayer`, NOT `You`: "they" anaphors the clause's
+/// subject ("that player", the upkeep player), which on these cards is a
+/// different seat from the enchantment's controller.
+#[test]
+fn oath_cycle_binds_the_target_player_relative_clause() {
+    use crate::types::ability::{
+        Comparator, ControllerRef, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef,
+        TypeFilter,
+    };
+
+    let expected = |ty: TypeFilter| {
+        let bare = TypedFilter::new(ty);
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::ControlsCount {
+                        relation: PlayerRelation::All,
+                        filter: TargetFilter::Typed(bare.clone()),
+                        comparator: Comparator::GT,
+                        count: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(
+                                    bare.controller(ControllerRef::TriggeringPlayer),
+                                ),
+                            },
+                        }),
+                    }),
+                },
+                TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::OpponentOfTriggeringPlayer),
+                },
+            ],
+        }
+    };
+
+    for (name, oracle, ty) in [
+        (
+            "Oath of Druids",
+            "At the beginning of each player's upkeep, that player chooses target player who controls more creatures than they do and is their opponent. The first player may reveal cards from the top of their library until they reveal a creature card.",
+            TypeFilter::Creature,
+        ),
+        (
+            "Oath of Lieges",
+            "At the beginning of each player's upkeep, that player chooses target player who controls more lands than they do and is their opponent. The first player may search their library for a basic land card, put that card onto the battlefield, then shuffle.",
+            TypeFilter::Land,
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], &["Enchantment"], &[]);
+        let trigger = parsed
+            .triggers
+            .first()
+            .unwrap_or_else(|| panic!("{name} must produce an upkeep trigger: {parsed:#?}"));
+        let execute = trigger
+            .execute
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} trigger must carry an ability: {parsed:#?}"));
+        let Effect::TargetOnly { target } = &*execute.effect else {
+            panic!("{name} sentence 1 must announce a target slot: {parsed:#?}");
+        };
+        assert_eq!(
+            target.clone(),
+            expected(ty),
+            "{name}: the printed relative clause must bind both conjuncts"
+        );
+    }
+}
+
+/// CR 608.2c consume-on-success, target-position mirror. A player-target
+/// relative clause the grammar can model only in PART must decline entirely:
+/// binding the prefix leaves an UNDER-restricted target, which is the same
+/// silent-drop failure the hook exists to eliminate. The remaining Oath cycle
+/// members are the live corpus rows for this — their predicates are not
+/// modelled, so they must NOT come back with the comparative half bound.
+#[test]
+fn unmodelled_target_player_clause_does_not_bind_a_partial_restriction() {
+    for (name, oracle) in [
+        (
+            "Oath of Mages",
+            "At the beginning of each player's upkeep, that player chooses target player who has more life than they do and is their opponent. The first player may have this enchantment deal 1 damage to the second player.",
+        ),
+        (
+            "Oath of Ghouls",
+            "At the beginning of each player's upkeep, that player chooses target player whose graveyard has fewer creature cards in it than their graveyard does and is their opponent. The first player may return a creature card from their graveyard to their hand.",
+        ),
+        (
+            // The comparative half alone ("more creatures than they do") is
+            // modelled, but the printed clause continues past it. Binding the
+            // modelled prefix would drop the rest of the restriction.
+            "Partial Oath Clause",
+            "At the beginning of each player's upkeep, that player chooses target player who controls more creatures than they do and controls a Forest. The first player may draw a card.",
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], &["Enchantment"], &[]);
+        for trigger in &parsed.triggers {
+            let Some(execute) = trigger.execute.as_ref() else {
+                continue;
+            };
+            if let Effect::TargetOnly { target } = &*execute.effect {
+                assert!(
+                    !matches!(target, TargetFilter::PlayerMatching { .. })
+                        && !matches!(target, TargetFilter::And { .. }),
+                    "{name}: a clause the grammar cannot model in full must not bind a \
+                     partial player predicate, got {target:?}"
+                );
+            }
+        }
+    }
+}
+
+/// CR 601.2c + CR 603.3d: the controller announces every target UNLESS the card
+/// prints a different subject on the choosing sentence. That subject becomes the
+/// ability's `target_chooser`, so the engine routes target selection to the
+/// named player instead of the source's controller.
+///
+/// Revert-failing: delete the `target_announcer_from_subject` call in
+/// `lower_subject_predicate_ast` and every row's `target_chooser` goes back to
+/// `None`, silently handing the Oath cycle's choice to the enchantment's
+/// controller on every player's upkeep.
+///
+/// The negative rows are the gate: a subject-led sentence that *acts* rather
+/// than announcing, and a choosing sentence whose subject already IS the
+/// controller, must both leave the CR 601.2c default in place.
+#[test]
+fn printed_subject_of_a_choosing_sentence_becomes_the_target_chooser() {
+    use crate::types::ability::ControllerRef;
+
+    // Announcer rows: `(name, oracle, expected chooser)`.
+    for (name, oracle, expected) in [
+        (
+            "Oath of Druids",
+            "At the beginning of each player's upkeep, that player chooses target player who controls more creatures than they do and is their opponent. The first player may reveal cards from the top of their library until they reveal a creature card.",
+            TargetFilter::ScopedPlayer,
+        ),
+        (
+            "Oath of Mages",
+            "At the beginning of each player's upkeep, that player chooses target player who has more life than they do and is their opponent. The first player may have this enchantment deal 1 damage to the second player.",
+            TargetFilter::ScopedPlayer,
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], &["Enchantment"], &[]);
+        let trigger = parsed
+            .triggers
+            .first()
+            .unwrap_or_else(|| panic!("{name} must produce an upkeep trigger: {parsed:#?}"));
+        let execute = trigger
+            .execute
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} trigger must carry an ability: {parsed:#?}"));
+        assert!(
+            matches!(&*execute.effect, Effect::TargetOnly { .. }),
+            "{name} sentence 1 must announce a target slot: {parsed:#?}"
+        );
+        assert_eq!(
+            execute.target_chooser,
+            Some(expected),
+            "{name}: the printed subject of the choosing sentence must announce the target"
+        );
+    }
+
+    // CR 102.2 + CR 601.2c: "An opponent chooses target creature they control"
+    // (Echo Chamber) — the player-shaped subject is normalized to the dedicated
+    // `Opponent` chooser, the shape the runtime resolves with the multiplayer
+    // announcing-opponent rule.
+    let echo = parse(
+        "{4}, {T}: An opponent chooses target creature they control. Create a token that's a copy of that creature.",
+        "Echo Chamber",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    let ability = echo
+        .abilities
+        .first()
+        .expect("Echo Chamber must produce an activated ability");
+    assert_eq!(
+        ability.target_chooser,
+        Some(TargetFilter::Opponent),
+        "an opponent-subject choosing sentence announces via the Opponent chooser: {echo:#?}"
+    );
+
+    // Negative: the subject ACTS, it does not announce. Retribution's targets are
+    // announced by its own first sentence (subject = the controller); the second
+    // sentence's "That player" is the sacrificing actor.
+    let retribution = parse(
+        "Choose two target creatures controlled by the same opponent. That player chooses and sacrifices one of those creatures. Put a -1/-1 counter on the other.",
+        "Retribution",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        retribution
+            .abilities
+            .iter()
+            .all(|a| a.target_chooser.is_none()),
+        "an acting subject must not become the target announcer: {retribution:#?}"
+    );
+
+    // Negative — CR 115.10a + CR 608.2d: the designated thing is NOT a target,
+    // so there is no announcement to route. These read almost identically to the
+    // rows above once the subject is stripped; the printed word "target" is the
+    // only difference, and on "Target opponent chooses a creature they control"
+    // it belongs to the SUBJECT, not to the chosen creature.
+    for (name, oracle, types) in [
+        (
+            "Imperial Edict",
+            "Target opponent chooses a creature they control. Destroy that creature.",
+            "Sorcery",
+        ),
+        (
+            "Archfiend of Depravity",
+            "At the beginning of each opponent's end step, that player chooses up to two creatures they control, then sacrifices the rest.",
+            "Creature",
+        ),
+        (
+            "Wormfang Crab",
+            "When this creature enters, an opponent chooses a permanent you control other than this creature and exiles it.",
+            "Creature",
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], &[types], &[]);
+        let choosers: Vec<_> = parsed
+            .abilities
+            .iter()
+            .map(|a| a.target_chooser.clone())
+            .chain(
+                parsed
+                    .triggers
+                    .iter()
+                    .filter_map(|t| t.execute.as_ref())
+                    .map(|e| e.target_chooser.clone()),
+            )
+            .collect();
+        assert!(
+            choosers.iter().all(Option::is_none),
+            "{name}: an untargeted CR 608.2d selection has no target to announce, \
+             got {choosers:?}"
+        );
+    }
+
+    // Negative: a choosing sentence whose subject is the controller keeps the
+    // CR 601.2c default rather than storing a redundant `You` chooser.
+    let controller_subject = parse(
+        "When this creature enters, you choose target creature an opponent controls.",
+        "Controller Subject Probe",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert!(
+        controller_subject
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_ref())
+            .all(|e| e.target_chooser.is_none()),
+        "a controller subject leaves the CR 601.2c default: {controller_subject:#?}"
+    );
+    // Keep the unused-import guard honest: `ControllerRef` names the axis the
+    // normalization above reads off the subject's `Typed` shape.
+    let _ = ControllerRef::Opponent;
+}
