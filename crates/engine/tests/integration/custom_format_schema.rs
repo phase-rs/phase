@@ -613,6 +613,33 @@ fn validate_name_deck_for_format_full_evaluates_a_resolved_custom_format() {
         "a custom banned list must reject a deck that is otherwise legal: {result:?}"
     );
 
+    // A restricted card remains legal at one copy, but the same public
+    // admission path must reject the second and later copies independently of
+    // the format's ordinary copy ceiling. Plains is Basic, so this row also
+    // proves the custom restricted-list policy is not accidentally masked by
+    // the Basic-land exemption in `copy_limit_violations`.
+    let mut restricted_rules = sample_rules(1);
+    restricted_rules.legality.restricted = vec!["Plains".to_string()];
+    let restricted_config = FormatConfig::for_custom_rules(&restricted_rules);
+    let result = validate_name_deck_for_format_full(
+        &populated_db,
+        &main_deck,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &restricted_config,
+        None,
+        2,
+    );
+    assert!(
+        matches!(result, Err(ref reasons) if reasons.iter().any(|reason| reason.contains("More than 1 copy of a restricted card") && reason.contains("Plains"))),
+        "a custom restricted list must reject repeated cards through the public validator: {result:?}"
+    );
+
     // `Forbidden` is a resolved custom-format structural rule, not merely a
     // fallback for an unresolved `GameFormat::Custom` tag. The public game
     // creation validator must reject a submitted sideboard under that policy.
