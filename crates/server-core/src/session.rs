@@ -1693,33 +1693,13 @@ impl SessionManager {
         format_config: Option<FormatConfig>,
     ) -> Result<(String, String), String> {
         // A defaulted config is not a declaration: when the caller does not
-        // specify a format, choose a registry-compatible default for the
-        // REQUESTED seat count rather than always falling back to Standard.
-        // Standard is a two-player constructed format (registry range
-        // 2..=2); a 4-player "Standard" game was already incoherent — it
-        // simply went unnoticed while `validate_for_player_count`'s seat row
-        // (just below) was unenforced. Free-for-All shares Standard's
-        // `IndividualSeats` topology and admits 2..=6, so the chosen default
-        // stays internally coherent (and survives a later
-        // `to_persisted`/`from_persisted` round-trip) instead of persisting a
-        // Standard config next to a `player_count` its own registry range
-        // excludes — that combination is exactly what `from_persisted`
-        // refuses irreversibly. Do NOT widen Standard via a struct-literal
-        // override (`FormatConfig { max_players: n, ..standard() }`)
-        // instead: that produces a config `FormatConfig::deserialize` itself
-        // rejects (the `min_players`/`max_players` rows in
-        // `built_in_axes_no_looser_than_rules` are Locked for built-in
-        // formats), bricking the very session this default is meant to keep
-        // restorable. Above Free-for-All's 6-seat ceiling the bound just
-        // below now (correctly) rejects the request — that is intentional,
-        // not a gap to widen here.
-        let format_config = format_config.unwrap_or_else(|| {
-            if player_count <= 2 {
-                FormatConfig::standard()
-            } else {
-                FormatConfig::free_for_all()
-            }
-        });
+        // specify a format, use the engine's single shared authority for
+        // picking a registry-compatible default for the REQUESTED seat
+        // count (also used by the WASM `initialize_game_impl` ingress, so
+        // the two never drift) — see `FormatConfig::default_for_player_count`
+        // for the full rationale.
+        let format_config =
+            format_config.unwrap_or_else(|| FormatConfig::default_for_player_count(player_count));
         format_config.validate_for_player_count(player_count)?;
         format_config.reject_unimplemented_range_of_influence()?;
         // Defense in depth alongside the two checks above: every production

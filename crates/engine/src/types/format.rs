@@ -1984,11 +1984,14 @@ impl FormatConfig {
     ///
     /// That pairing only holds when a payload actually declared a config. An
     /// UNDECLARED config is not a rules choice to bind a seat count against —
-    /// `server_core::session::SessionManager::create_game_n_players` instead
-    /// picks a default whose own registry range already admits the requested
-    /// seat count (Standard for `player_count <= 2`, Free-for-All above that)
-    /// before this function ever runs, so this check never binds an
-    /// undeclared config against an unrelated format's range.
+    /// both call sites that can build a session from an undeclared config,
+    /// `server_core::session::SessionManager::create_game_n_players` and the
+    /// WASM `initialize_game_impl`, instead pick a default whose own
+    /// registry range already admits the requested seat count via the
+    /// shared `FormatConfig::default_for_player_count` (Standard for
+    /// `player_count <= 2`, Free-for-All above that) before this function
+    /// ever runs, so this check never binds an undeclared config against an
+    /// unrelated format's range.
     ///
     /// No protocol-version bump accompanies this: no wire *shape* changed (no
     /// new field on any `Serialize`/`Deserialize` type), but this IS a
@@ -1996,19 +1999,32 @@ impl FormatConfig {
     /// that an older server would have accepted is now rejected.
     ///
     /// Five production call sites reach this check, and they split into
-    /// three groups by what they are validating:
+    /// four groups by what they are validating:
     ///
     /// - Retryable wire rejections, validating a player_count just supplied
-    ///   on an inbound request against a *declared* `FormatConfig`: both
+    ///   on an inbound request against a *declared* `FormatConfig` — the
+    ///   check is skipped entirely when the request declares none: both
     ///   ingress guards (`lobby_broker::inbound_guard::guard_create_game_
     ///   settings_inbound` for `ServerMode::LobbyOnly`, and `phase-server`'s
     ///   own `guard_full_create_game_settings_inbound` for `ServerMode::Full`,
-    ///   which clamps to `MAX_FULL_GAME_PLAYER_COUNT`), and the WASM
-    ///   `initialize_game_impl`'s `validate_external_format_config`. The
-    ///   client resubmits a corrected request and no state is lost.
+    ///   which clamps to `MAX_FULL_GAME_PLAYER_COUNT`). The client resubmits
+    ///   a corrected request and no state is lost.
     /// - Session creation itself: `server_core::session::SessionManager::
     ///   create_game_n_players` re-checks the same bound the ingress guard
-    ///   in front of it already checked, as defense in depth.
+    ///   in front of it already checked, as defense in depth — and, unlike
+    ///   the ingress guards, it always runs this check, because it is one of
+    ///   the two sites (with the WASM site below) that must supply
+    ///   `FormatConfig::default_for_player_count`'s output when the caller
+    ///   declared no config at all.
+    /// - The WASM `initialize_game_impl`'s `validate_external_format_config`
+    ///   is also a retryable wire rejection, but unlike the two ingress
+    ///   guards above it does NOT skip this check when the config is
+    ///   undeclared: `initialize_game_impl` is the one call site that
+    ///   substitutes `FormatConfig::default_for_player_count`'s output for
+    ///   an undeclared config and then validates *that* default — passing no
+    ///   format config at all is the common case for a local (non-networked)
+    ///   game, so this check must run unconditionally here instead of being
+    ///   skipped the way the ingress guards skip it.
     /// - Checked against a PERSISTED `player_count` instead — a game that
     ///   already exists, not a fresh request. `server_core::session::
     ///   GameSession::from_persisted` is a hard rejection here: a session
@@ -2120,6 +2136,44 @@ impl FormatConfig {
         // CR 904.6: The archenemy takes the first turn instead of a randomly
         // determined player. Non-Archenemy formats keep the legacy default.
         self.archenemy_player().unwrap_or(PlayerId(0))
+    }
+
+    /// Chooses a registry-compatible default `FormatConfig` for an
+    /// UNDECLARED configuration and a given seat count.
+    ///
+    /// A defaulted config is not a declaration: when the caller does not
+    /// specify a format, choose a registry-compatible default for the
+    /// REQUESTED seat count rather than always falling back to Standard.
+    /// Standard is a two-player constructed format (registry range 2..=2);
+    /// a 4-player "Standard" game would be incoherent regardless of which
+    /// call site produces it. Free-for-All shares Standard's
+    /// `IndividualSeats` topology and admits 2..=6, so the chosen default
+    /// stays internally coherent (and survives a later
+    /// `to_persisted`/`from_persisted` round-trip) instead of persisting a
+    /// Standard config next to a `player_count` its own registry range
+    /// excludes — that combination is exactly what `from_persisted` refuses
+    /// irreversibly. Do NOT widen Standard via a struct-literal override
+    /// (`FormatConfig { max_players: n, ..standard() }`) instead: that
+    /// produces a config `FormatConfig::deserialize` itself rejects (the
+    /// `min_players`/`max_players` rows in
+    /// `built_in_axes_no_looser_than_rules` are Locked for built-in
+    /// formats), bricking the very session this default is meant to keep
+    /// restorable. Above Free-for-All's 6-seat ceiling, the caller's own
+    /// `validate_for_player_count` bound correctly rejects the request —
+    /// that is intentional, not a gap for this function to widen.
+    ///
+    /// This is the single shared authority for "what should an undeclared
+    /// config default to for N seats?" — both
+    /// `server_core::session::SessionManager::create_game_n_players` and
+    /// the WASM `initialize_game_impl` call this function so the answer
+    /// never drifts between the two ingresses. It is an engine-policy
+    /// default, not a rules claim, so it is deliberately CR-free.
+    pub fn default_for_player_count(player_count: u8) -> Self {
+        if player_count <= 2 {
+            Self::standard()
+        } else {
+            Self::free_for_all()
+        }
     }
 
     pub fn standard() -> Self {
@@ -3000,6 +3054,52 @@ mod tests {
         assert_eq!(config.deck_size, DeckSizeRule::Minimum(60));
         assert!(!config.singleton);
         assert!(!config.command_zone);
+    }
+
+    /// `default_for_player_count` is the single shared authority both
+    /// ingresses (`server_core::session::SessionManager::
+    /// create_game_n_players` and the WASM `initialize_game_impl`) call to
+    /// pick an undeclared config's default. Pin its two-format split and,
+    /// separately, that every seat count it can be asked about lands on a
+    /// format whose own registry range actually admits that seat count —
+    /// the exact property whose absence caused the regression this
+    /// function fixes (a 4-player "Standard" default).
+    #[test]
+    fn default_for_player_count_picks_standard_at_or_below_two_seats() {
+        assert_eq!(
+            FormatConfig::default_for_player_count(1).format,
+            GameFormat::Standard
+        );
+        assert_eq!(
+            FormatConfig::default_for_player_count(2).format,
+            GameFormat::Standard
+        );
+    }
+
+    #[test]
+    fn default_for_player_count_picks_free_for_all_above_two_seats() {
+        assert_eq!(
+            FormatConfig::default_for_player_count(3).format,
+            GameFormat::FreeForAll
+        );
+        assert_eq!(
+            FormatConfig::default_for_player_count(6).format,
+            GameFormat::FreeForAll
+        );
+    }
+
+    #[test]
+    fn default_for_player_count_is_always_valid_for_the_count_it_was_chosen_for() {
+        for n in 2..=6u8 {
+            let config = FormatConfig::default_for_player_count(n);
+            assert!(
+                config.validate_for_player_count(n).is_ok(),
+                "default_for_player_count({n}) chose {:?} ({}..={}), which must admit {n} seats",
+                config.format,
+                config.min_players,
+                config.max_players,
+            );
+        }
     }
 
     #[test]

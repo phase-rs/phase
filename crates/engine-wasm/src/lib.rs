@@ -198,6 +198,26 @@ fn validate_external_format_config(config: &FormatConfig, player_count: u8) -> R
     config.reject_unimplemented_range_of_influence()
 }
 
+/// Resolves and validates `initialize_game_impl`'s effective `FormatConfig`
+/// from an already-decoded declared config (if any) and the resolved
+/// `player_count`. `decoded_format_config` is `None` exactly when the JS
+/// caller supplied no format config (`null`/`undefined`) — in that case this
+/// is the WASM boundary's own site that supplies an UNDECLARED default (see
+/// `FormatConfig::validate_for_player_count`'s doc comment for the taxonomy
+/// of call sites), via the same shared `FormatConfig::default_for_player_count`
+/// authority `server_core::session::SessionManager::create_game_n_players`
+/// uses, so the two ingresses never disagree about what an undeclared config
+/// defaults to for a given seat count.
+fn resolve_and_validate_initialize_format_config(
+    decoded_format_config: Option<FormatConfig>,
+    resolved_player_count: u8,
+) -> Result<FormatConfig, String> {
+    let format_config = decoded_format_config
+        .unwrap_or_else(|| FormatConfig::default_for_player_count(resolved_player_count));
+    validate_external_format_config(&format_config, resolved_player_count)?;
+    Ok(format_config)
+}
+
 fn parse_initialize_format_config(
     decoded: Result<FormatConfig, String>,
 ) -> Result<FormatConfig, serde_json::Value> {
@@ -311,6 +331,41 @@ mod external_format_config_tests {
             ))
             .expect_err("a starting_life above MAX_STARTING_LIFE risks i32 overflow")
             .contains("starting_life"),
+        );
+    }
+
+    /// Regression: `initialize_game_impl` previously defaulted an undeclared
+    /// config to `FormatConfig::standard()` unconditionally, so a local
+    /// 4-player game with no declared format config was rejected with
+    /// "player_count 4 is outside Standard's seat range 2-2" — naming a
+    /// format the caller never chose. `resolve_and_validate_initialize_
+    /// format_config` is the exact function `initialize_game_impl` calls for
+    /// this decision, so this test would fail if the fix were reverted.
+    #[test]
+    fn initialize_without_a_declared_format_config_accepts_a_four_player_local_game() {
+        let config = resolve_and_validate_initialize_format_config(None, 4).expect(
+            "an undeclared config for 4 players must default to a format that admits 4 seats",
+        );
+        assert_eq!(
+            config.format,
+            GameFormat::FreeForAll,
+            "4 seats must default via FormatConfig::default_for_player_count, not Standard"
+        );
+    }
+
+    #[test]
+    fn initialize_with_a_declared_format_config_validates_that_config_unchanged() {
+        let commander_draft = FormatConfig::commander_draft();
+
+        let resolved =
+            resolve_and_validate_initialize_format_config(Some(commander_draft.clone()), 4)
+                .expect("CommanderDraft's registry range (3-8) admits 4 players");
+        assert_eq!(resolved.format, GameFormat::CommanderDraft);
+
+        assert!(
+            resolve_and_validate_initialize_format_config(Some(commander_draft), 2)
+                .expect_err("2 players is outside CommanderDraft's 3-8 registry range")
+                .contains("player_count")
         );
     }
 
@@ -1577,24 +1632,33 @@ fn initialize_game_impl(
 ) -> JsValue {
     let seed = seed.map(|s| s as u64).unwrap_or(42);
 
-    let format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
+    // Resolved before the format config: an undeclared config's default must
+    // be chosen FOR this seat count (see
+    // `resolve_and_validate_initialize_format_config`), so `count` has to be
+    // known first.
+    let count = player_count.unwrap_or(2);
+
+    let decoded_format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
         match parse_initialize_format_config(
             serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
                 .map_err(|error| error.to_string()),
         ) {
-            Ok(config) => config,
+            Ok(config) => Some(config),
             Err(error) => return to_js(&error),
         }
     } else {
-        FormatConfig::standard()
+        None
     };
-    let count = player_count.unwrap_or(2);
-    if let Err(reason) = validate_external_format_config(&format_config, count) {
-        return to_js(&serde_json::json!({
-            "error": true,
-            "reasons": [reason],
-        }));
-    }
+    let format_config =
+        match resolve_and_validate_initialize_format_config(decoded_format_config, count) {
+            Ok(config) => config,
+            Err(reason) => {
+                return to_js(&serde_json::json!({
+                    "error": true,
+                    "reasons": [reason],
+                }));
+            }
+        };
 
     let mut state = GameState::new(format_config.clone(), count, seed);
     // Read the posture from `kind`, not from `is_multiplayer_mode()`: the flag
