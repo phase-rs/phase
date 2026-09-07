@@ -512,12 +512,11 @@ describe("LimitedDeckBuilder", () => {
       expect(within(dock).getByText("3.00")).toBeInTheDocument();
       expect(container.querySelectorAll("table")).toHaveLength(0);
 
-      const suggest = within(dock).getByRole("button", { name: "Suggest Deck" });
-      expect(suggest).toBeDisabled();
-      fireEvent.click(suggest);
+      expect(within(dock).getByRole("button", { name: "Suggest Deck" })).toBeEnabled();
       expect(suggestDeck).not.toHaveBeenCalled();
 
       const actions = container.querySelector<HTMLElement>("[data-tablet-builder-actions]")!;
+      expect(actions).toHaveClass("grid-cols-2");
       fireEvent.click(within(actions).getByRole("button", { name: "Submit Deck" }));
       expect(await screen.findByRole("alert")).toHaveTextContent("submission rejected");
       expect(container.querySelector("[data-tablet-builder-actions]")).toBe(actions);
@@ -741,12 +740,30 @@ describe("LimitedDeckBuilder", () => {
       />,
     );
 
-    expect(screen.getByText("Average Mana Cost")).toBeInTheDocument();
-    expect(screen.getByText("3.00")).toBeInTheDocument();
+    expect(screen.queryByText("Average Mana Cost")).not.toBeInTheDocument();
+    const controls = screen.getByRole("button", { name: "Deck Stats" }).closest("[data-desktop-deck-controls]")!;
+    expect(Array.from(controls.querySelectorAll("button")).map((button) => button.textContent))
+      .toEqual(["Add Lands", "Deck Stats"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Deck Stats" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Deck Stats" });
+    expect(within(dialog).getByText("Mana Curve")).toBeInTheDocument();
+    expect(within(dialog).getByText("Average Mana Cost")).toBeInTheDocument();
+    expect(within(dialog).getByText("3.00")).toBeInTheDocument();
+    expect(within(dialog).getAllByRole("table")).toHaveLength(2);
   });
 
-  it("disables the tablet suggestion button when the workspace cannot suggest", () => {
-    render(
+  it.each([
+    ["tablet-portrait", "[data-tablet-builder-actions]", ["Submit Deck"], "grid-cols-1"],
+    ["tablet-landscape", "[data-tablet-landscape-builder-row]", ["Mana Curve", "Average Mana Cost", "Submit Deck"], "grid-cols-[minmax(0,55fr)_minmax(0,20fr)_minmax(0,25fr)]"],
+  ] as const)("omits unsupported tablet Suggest Deck actions in %s", (
+    responsiveLayout,
+    containerSelector,
+    controlNames,
+    gridClass,
+  ) => {
+    const { container } = render(
       <LimitedDeckBuilder
         local={{
           view: { ...TEST_VIEW, min_deck_size: 1 },
@@ -762,15 +779,118 @@ describe("LimitedDeckBuilder", () => {
           onSubmitDeck: () => {},
           onAddBasicLand: () => {},
           onRemoveBasicLand: () => {},
-          capabilities: { kind: "editable-pool", suggestions: false },
-          onAutoSuggestDeck: vi.fn(),
+          capabilities: { kind: "editable-pool", suggestions: true },
         }}
-        responsiveLayout="tablet-portrait"
+        responsiveLayout={responsiveLayout}
         showSuggestions
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Suggest Deck" })).toBeDisabled();
+    const controls = container.querySelector<HTMLElement>(containerSelector)!;
+    expect(controls).toHaveClass(gridClass);
+    expect(within(controls).queryByRole("button", { name: "Suggest Deck" })).not.toBeInTheDocument();
+    for (const controlName of controlNames) {
+      expect(within(controls).getByText(controlName)).toBeInTheDocument();
+    }
+  });
+
+  it("places normal desktop Suggest Deck and Submit Deck beside their deck controls", () => {
+    const suggestDeck = vi.fn();
+    const submitDeck = vi.fn();
+    const { container } = render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...TEST_VIEW, min_deck_size: 1 },
+          workspace: {
+            schemaVersion: 1,
+            placements: { "card-1": { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: submitDeck,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+          onAutoSuggestDeck: suggestDeck,
+        }}
+        responsiveLayout="desktop"
+        showSuggestions
+      />,
+    );
+
+    const deckControls = container.querySelector<HTMLElement>("[data-desktop-deck-controls]")!;
+    expect(Array.from(deckControls.querySelectorAll("button")).map((button) => button.textContent))
+      .toEqual(["Add Lands", "Deck Stats", "Suggest Deck"]);
+    const deckStatusActions = container.querySelector<HTMLElement>("[data-desktop-deck-status-actions]")!;
+    const deckStatus = deckStatusActions.querySelector("[data-deck-status]")!;
+    const submit = within(deckStatusActions).getByRole("button", { name: "Submit Deck" });
+    const responsiveBuilderLayout = container.querySelector<HTMLElement>(
+      "[data-responsive-builder-layout='desktop']",
+    )!;
+    expect(responsiveBuilderLayout.style.getPropertyValue("--collapsed-sideboard-card-width"))
+      .toBe("240.89999999999998px");
+    expect(deckStatusActions).toHaveClass(
+      "grid-cols-[minmax(0,1fr)_minmax(0,calc(var(--collapsed-sideboard-card-width)_+_2px))]",
+      "gap-[clamp(4px,1vw,16px)]",
+    );
+    expect(deckStatus).toHaveClass("w-full");
+    expect(submit).toHaveClass("w-full", "bg-emerald-950/56");
+    expect(within(deckControls).getByRole("button", { name: "Suggest Deck" }))
+      .toHaveClass("w-full", "bg-emerald-950/56");
+    expect(deckStatus.compareDocumentPosition(submit) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(container.querySelector("[data-desktop-builder-analysis]")).not.toBeInTheDocument();
+
+    fireEvent.click(within(deckControls).getByRole("button", { name: "Suggest Deck" }));
+    fireEvent.click(submit);
+    expect(suggestDeck).toHaveBeenCalledOnce();
+    expect(submitDeck).toHaveBeenCalledWith([]);
+  });
+
+  it.each([
+    ["desktop", "[data-desktop-deck-controls]", undefined],
+    ["tablet-portrait", "[data-tablet-builder-actions]", "grid-cols-2"],
+    [
+      "tablet-landscape",
+      "[data-tablet-landscape-builder-row]",
+      "grid-cols-[minmax(0,45fr)_minmax(0,15fr)_minmax(0,20fr)_minmax(0,20fr)]",
+    ],
+  ] as const)("keeps Suggest Deck visible but disabled while %s is interaction-locked", (
+    responsiveLayout,
+    controlsSelector,
+    expectedGridClass,
+  ) => {
+    const suggestDeck = vi.fn();
+    const { container } = render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...TEST_VIEW, min_deck_size: 1 },
+          workspace: {
+            schemaVersion: 1,
+            placements: { "card-1": { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: true,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+          onAutoSuggestDeck: suggestDeck,
+        }}
+        responsiveLayout={responsiveLayout}
+        showSuggestions={false}
+      />,
+    );
+
+    const controls = container.querySelector<HTMLElement>(controlsSelector)!;
+    if (expectedGridClass) expect(controls).toHaveClass(expectedGridClass);
+    const suggest = within(controls).getByRole("button", { name: "Suggest Deck" });
+    expect(suggest).toBeDisabled();
+    fireEvent.click(suggest);
+    expect(suggestDeck).not.toHaveBeenCalled();
   });
 
   it("opens a preview on touch long press without moving the card", () => {
@@ -1539,8 +1659,9 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     ));
     expect(await screen.findByText(reason)).toBeInTheDocument();
     const submits = within(container).getAllByRole("button", { name: "Submit Deck" });
-    expect(submits.every((button) => button.hasAttribute("disabled"))).toBe(true);
-    submits.forEach((button) => fireEvent.click(button));
+    expect(submits).toHaveLength(1);
+    expect(submits[0]).toBeDisabled();
+    fireEvent.click(submits[0]);
     expect(submitSpy).not.toHaveBeenCalled();
   });
 
@@ -1746,6 +1867,10 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       />,
     );
 
+    if (responsiveLayout === "desktop") {
+      fireEvent.click(screen.getByRole("button", { name: "Deck Stats" }));
+    }
+
     await waitFor(() => {
       expect(compatibilityHarness.colorCaptures).toContainEqual(distribution);
     });
@@ -1755,7 +1880,9 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     const responsive = tablet
       ? layout
       : layout.querySelector<HTMLElement>("[data-responsive-workspace-layout]")!;
-    const analysis = tablet
+    const analysis = responsiveLayout === "desktop"
+      ? screen.getByRole("dialog", { name: "Deck Stats" }).querySelector<HTMLElement>("[data-deck-stats-overlay]")!
+      : tablet
       ? responsive.querySelector<HTMLElement>("[data-mana-curve]")!
       : responsive.querySelector<HTMLElement>(
         phone ? "[data-mobile-builder-analysis]" : "[data-desktop-builder-analysis]",
@@ -1764,8 +1891,9 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       ? analysis
       : analysis.querySelector<HTMLElement>("[data-mana-curve]")!;
     const colors = analysis.querySelector<HTMLElement>("[data-color-distribution]")!;
-    expect(container.querySelectorAll("[data-mana-curve]")).toHaveLength(1);
-    expect(container.querySelectorAll("[data-color-distribution]")).toHaveLength(1);
+    const statisticsRoot = responsiveLayout === "desktop" ? analysis : container;
+    expect(statisticsRoot.querySelectorAll("[data-mana-curve]")).toHaveLength(1);
+    expect(statisticsRoot.querySelectorAll("[data-color-distribution]")).toHaveLength(1);
     if (phone) {
       expect(container.querySelector("[data-desktop-builder-analysis]")).toBeNull();
     } else {
@@ -1774,7 +1902,11 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         expect(container.querySelector("[data-desktop-builder-analysis]")).toBeNull();
       }
     }
-    expect(responsive.compareDocumentPosition(analysis) & Node.DOCUMENT_POSITION_CONTAINED_BY).not.toBe(0);
+    if (responsiveLayout === "desktop") {
+      expect(responsive.compareDocumentPosition(analysis) & Node.DOCUMENT_POSITION_CONTAINED_BY).toBe(0);
+    } else {
+      expect(responsive.compareDocumentPosition(analysis) & Node.DOCUMENT_POSITION_CONTAINED_BY).not.toBe(0);
+    }
     expect(curve.compareDocumentPosition(colors) & Node.DOCUMENT_POSITION_CONTAINED_BY).not.toBe(0);
     const dock = container.querySelector<HTMLElement>("[data-mobile-builder-submit-dock]");
     if (phone) {

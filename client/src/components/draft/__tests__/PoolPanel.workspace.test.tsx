@@ -205,25 +205,27 @@ describe("controlled workspace pool panel", () => {
     );
 
     const primary = container.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
+    const filters = screen.getByRole("group", { name: "Pool zone filter" });
     expect(within(primary).getAllByRole("button").map((button) => button.textContent))
-      .toEqual(["Group", "Add Lands", "Counts", "Visual builder"]);
+      .toEqual(["Group by", "Add Lands", "Counts", "Visual builder"]);
+    expect(primary.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(primary).toHaveClass("flex-nowrap", "w-full");
     expect(container.querySelector("[data-compact-pool-trailing-controls]")).toHaveClass("ml-auto");
-    expect(within(primary).getByRole("button", { name: "Group" })).toHaveClass("min-h-11", "bg-slate-950/80");
+    expect(within(primary).getByRole("button", { name: "Group by" })).toHaveClass("min-h-11", "bg-slate-950/80");
     expect(screen.getByRole("region", { name: "Card pool" })).toHaveClass("min-h-0", "overflow-hidden");
     expect(container.querySelector<HTMLElement>("[data-instance-id]")?.parentElement?.parentElement)
       .toHaveClass("min-h-0", "overflow-y-auto");
     expect(screen.queryByRole("button", { name: "Mana value" })).not.toBeInTheDocument();
 
-    fireEvent.click(within(primary).getByRole("button", { name: "Group" }));
-    const menu = screen.getByRole("menu", { name: "Group" });
+    fireEvent.click(within(primary).getByRole("button", { name: "Group by" }));
+    const menu = screen.getByRole("menu", { name: "Group by" });
     for (const sort of ["Mana value", "Color", "Type"]) {
       expect(within(menu).getByRole("menuitemradio", { name: sort })).toHaveClass("min-h-11");
     }
     expect(within(menu).getByRole("menuitemradio", { name: "Mana value" })).toHaveAttribute("aria-pressed", "true");
     expect(within(menu).queryByRole("menuitemradio", { name: "Rarity" })).not.toBeInTheDocument();
     fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Color" }));
-    expect(screen.queryByRole("menu", { name: "Group" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "Group by" })).not.toBeInTheDocument();
   });
 
   it("preserves_legacy_pool_panel_when_controlled_workspace_props_are_absent", () => {

@@ -38,7 +38,7 @@ import { DraftProgress } from "../components/draft/DraftProgress";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { SealedPackOpening } from "../components/draft/SealedPackOpening";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
-import { useDraftShellChrome } from "../components/chrome/ShellContext";
+import { useDraftShellChrome, useInShell } from "../components/chrome/ShellContext";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuShell } from "../components/menu/MenuShell";
 import { runLimits } from "../services/quickDraftPersistence";
@@ -381,6 +381,8 @@ export function DraftPage() {
   const responsiveDrafting = phase === "drafting" && responsiveLayout !== "desktop";
   const phoneDeckbuilding = phase === "deckbuilding" && phoneLayout;
   const tabletDeckbuilding = phase === "deckbuilding" && tabletLayout;
+  const fillEmbeddedHeight = useInShell()
+    && (responsiveDrafting || phoneDeckbuilding || tabletDeckbuilding);
   const compactSteps = responsiveDrafting || phoneDeckbuilding || tabletDeckbuilding;
   useDraftShellChrome(
     phoneLayout && phase === "drafting"
@@ -392,6 +394,9 @@ export function DraftPage() {
         : responsiveDrafting
           ? "tablet-drafting"
         : "default",
+      undefined,
+      "quick",
+      !phoneLayout,
   );
 
   useEffect(() => {
@@ -515,6 +520,8 @@ export function DraftPage() {
 
   const dragController = useDraftWorkspaceDrag({
     enabled: phase === "drafting" && introDismissed && !pickInteractionLocked,
+    workspaceProjectionEnabled: responsiveLayout === "desktop",
+    retainLastValidWorkspaceTarget: true,
     readPickInteraction,
     subscribePickInteraction,
     onDrop: handleDrop,
@@ -593,7 +600,7 @@ export function DraftPage() {
   }), [handleWorkspacePreferencesChange, workspacePreferences]);
 
   return (
-    <div className={`menu-scene relative flex flex-col overflow-hidden ${phoneLayout && phase === "drafting" && introDismissed ? "h-dvh min-h-0 overscroll-none" : tabletLayout && phase === "drafting" && introDismissed ? "h-full min-h-0" : "min-h-screen"}`}>
+    <div className={`menu-scene relative flex flex-col overflow-hidden ${fillEmbeddedHeight ? "h-full min-h-0 flex-1" : phoneLayout && phase === "drafting" && introDismissed ? "h-dvh min-h-0 overscroll-none" : tabletLayout && phase === "drafting" && introDismissed ? "h-full min-h-0" : "min-h-screen"}`}>
       <ScreenChrome onBack={() => navigate("/draft")} />
       {phase === "drafting" && introDismissed && (
         <HoverCardPreview
@@ -613,8 +620,9 @@ export function DraftPage() {
             (phoneLayout && (phase === "drafting" || phase === "deckbuilding"))
             || tabletDeckbuilding
           }
+          fillEmbeddedHeight={fillEmbeddedHeight}
         >
-        <div className="flex w-full flex-col">
+        <div className={`flex w-full flex-col ${fillEmbeddedHeight ? "h-full min-h-0 flex-1" : ""}`}>
         {resumeLoading ? (
           <div className="flex items-center justify-center py-24">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-500 border-t-white" />

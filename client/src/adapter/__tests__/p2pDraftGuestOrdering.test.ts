@@ -278,6 +278,41 @@ describe("P2P draft guest receive ordering", () => {
     expect(events).toEqual([{ type: "reconnecting", attempt: 1 }]);
   });
 
+  it("settles only a matching land-suggestion response from its owning session", async () => {
+    const { guest, conn } = createGuest({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    const initialized = guest.initialize();
+    await conn.receiveRaw(rawMessage(welcome(view(1))));
+    await initialized;
+
+    const suggested = guest.suggestLands();
+    await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+    const request = await decodeDraftWireMessage(conn.sentRaw[1]!);
+    expect(request.type).toBe("draft_suggest_lands");
+    if (request.type !== "draft_suggest_lands") throw new Error("Expected land suggestion request");
+
+    await conn.receiveRaw(rawMessage({
+      type: "draft_suggest_lands_result", requestId: "unknown", lands: { Island: 17 },
+    }));
+    await conn.receiveRaw(rawMessage({
+      type: "draft_suggest_lands_result", requestId: request.requestId, lands: { Mountain: 17 },
+    }));
+
+    await expect(suggested).resolves.toEqual({ Mountain: 17 });
+  });
+
+  it("rejects a pending land suggestion when disposed", async () => {
+    const { guest, conn } = createGuest({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    const initialized = guest.initialize();
+    await conn.receiveRaw(rawMessage(welcome(view(1))));
+    await initialized;
+
+    const suggested = guest.suggestLands();
+    await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+    guest.dispose();
+
+    await expect(suggested).rejects.toThrow("Draft connection disposed");
+  });
+
   it.each([
     {
       name: "submitPick",

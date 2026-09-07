@@ -249,6 +249,14 @@ export function suggest_deck(): any;
  */
 export function suggest_lands(spells_json: string): any;
 
+/**
+ * Suggest land counts for spells in a specific multiplayer seat's pool.
+ *
+ * The spells payload is parsed before the active session is accessed, so a
+ * malformed request cannot observe or depend on the current draft state.
+ */
+export function suggest_lands_for_seat(seat: number, spells_json: string): any;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -280,6 +288,7 @@ export interface InitOutput {
     readonly submit_pick_with_draft_effect_for_seat: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
+    readonly suggest_lands_for_seat: (a: number, b: number, c: number) => [number, number, number];
     readonly init_panic_hook: () => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
