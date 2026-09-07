@@ -511,6 +511,8 @@
     "enduringStoryTooltip": "Historia perdurable — se obtiene al controlar un permanente con Storied y tres o más artefactos, permanentes legendarios y/o sagas; dura el resto del juego",
     "dungeonAriaLabel": "Aventurándose en {{name}}, {{roomName}}, sala {{room}} de {{total}}",
     "dungeonRoomTooltip": "{{roomName}} — sala {{room}} de {{total}}",
+    "dungeonMapLoading": "Cargando carta de mazmorra…",
+    "dungeonMapUnavailable": "Imagen de la carta de mazmorra no disponible",
     "dungeonTooltip": "Aventurándose en {{name}}",
     "poisonAriaLabel_one": "{{count}} contador de veneno",
     "poisonAriaLabel_other": "{{count}} contadores de veneno",

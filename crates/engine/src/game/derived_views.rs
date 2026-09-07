@@ -588,6 +588,42 @@ pub struct DungeonRoomView {
     /// CR 309.4: total rooms on the dungeon card, so the badge can place the
     /// marker ("room 3 of 7") rather than showing a naked index.
     pub room_count: u8,
+    /// CR 309.1: the printed dungeon card's Scryfall identity, so the client
+    /// can show the card the venture marker moves across. A dungeon is never
+    /// on the battlefield (CR 309.3 puts it in the command zone), so there is
+    /// no `printed_ref`-carrying object for the client to resolve art from.
+    pub card: DungeonCardView,
+    /// CR 309.4a-c: every room on the card, in printed order, each with the
+    /// rooms it leads to and where it sits on the card face. This is what lets
+    /// the client draw the venture marker in the right place and show the path
+    /// taken; without it the frontend would need its own copy of the dungeon
+    /// tables, which the display-layer rule forbids.
+    pub rooms: Vec<DungeonRoomNodeView>,
+}
+
+/// CR 309.1: The printed dungeon card, as the client looks it up on Scryfall.
+///
+/// Both ids ride along because the five dungeons are not indexed uniformly by
+/// the client's Scryfall sidecars — Undercity is a `double_faced_token` that
+/// only `scryfall-token-images.json` carries. See `dungeon::DungeonCardRef`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DungeonCardView {
+    pub oracle_id: String,
+    pub scryfall_id: String,
+    pub face_name: String,
+}
+
+/// CR 309.4: One room as the client draws it — its preview, its outgoing
+/// edges, and its position on the printed card face.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DungeonRoomNodeView {
+    #[serde(flatten)]
+    pub room: crate::game::dungeon::RoomPreview,
+    /// CR 309.5a: the rooms the venture marker may move to from here. Empty
+    /// for the bottommost room (CR 309.5).
+    pub next_rooms: Vec<u8>,
+    /// Where this room is drawn on the card, as a fraction of the image.
+    pub marker: crate::game::dungeon::RoomMarkerPoint,
 }
 
 /// Engine-authored projections used by the display layer. Keep this struct
@@ -1185,6 +1221,40 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     ))
 }
 
+/// CR 309.1: Project the printed dungeon card's Scryfall identity.
+fn dungeon_card_view(dungeon: crate::game::dungeon::DungeonId) -> DungeonCardView {
+    let card = crate::game::dungeon::card_ref(dungeon);
+    DungeonCardView {
+        oracle_id: card.oracle_id.to_string(),
+        scryfall_id: card.scryfall_id.to_string(),
+        face_name: card.face_name.to_string(),
+    }
+}
+
+/// CR 309.4 + CR 309.5a: Project the whole dungeon graph — every room, its
+/// outgoing edges, and where it is drawn on the card.
+///
+/// The client needs all of it at once: it draws the marker on the current room
+/// and dims the rooms that can no longer be reached, and neither is derivable
+/// from the current room alone.
+fn dungeon_room_nodes(dungeon: crate::game::dungeon::DungeonId) -> Vec<DungeonRoomNodeView> {
+    let markers = crate::game::dungeon::marker_points(dungeon);
+    (0..crate::game::dungeon::room_count(dungeon))
+        .filter_map(|index| {
+            // `dungeon_marker_points_cover_every_room` pins these lists to the
+            // same length, so a miss is unreachable. Skipping rather than
+            // indexing keeps a future table edit from panicking the whole state
+            // projection on a purely cosmetic field.
+            let marker = *markers.get(index as usize)?;
+            Some(DungeonRoomNodeView {
+                room: crate::game::dungeon::room_preview(dungeon, index),
+                next_rooms: crate::game::dungeon::next_rooms(dungeon, index).to_vec(),
+                marker,
+            })
+        })
+        .collect()
+}
+
 /// CR 309.4a-c: name the room each venturing player's marker currently sits on.
 ///
 /// `dungeon_progress` may keep an entry with `current_dungeon: None` after a
@@ -1206,6 +1276,8 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
                         .to_string(),
                     room: crate::game::dungeon::room_preview(dungeon, progress.current_room),
                     room_count: crate::game::dungeon::room_count(dungeon),
+                    card: dungeon_card_view(dungeon),
+                    rooms: dungeon_room_nodes(dungeon),
                 },
             ))
         })
