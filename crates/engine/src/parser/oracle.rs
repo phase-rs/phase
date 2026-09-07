@@ -2249,21 +2249,44 @@ fn recover_coordinated_land_play_in_ability(def: &mut AbilityDefinition) {
                     driver,
                     mana_spend_permission,
                     ..
-                } => land_half_filter(target).map(|land_target| Effect::CastFromZone {
-                    // CR 305.1: the land half plays LANDS from the same zone. The
-                    // sibling's filter carries the zone anchor; only the card-type
-                    // axis differs between the two halves.
-                    target: land_target,
-                    without_paying_mana_cost: *without_paying_mana_cost,
-                    mode: CardPlayMode::Play,
-                    cast_transformed: false,
-                    alt_ability_cost: alt_ability_cost.clone(),
-                    constraint: constraint.clone(),
-                    // CR 611.2a: one stated window scopes both halves.
-                    duration: duration.clone(),
-                    driver: *driver,
-                    mana_spend_permission: *mana_spend_permission,
-                }),
+                } => duration
+                    .as_ref()
+                    // CR 611.2a: "If no duration is stated, it lasts until the end
+                    // of the game." Every card in this class prints a window
+                    // ("until end of turn", "this turn"), so a sibling that lowered
+                    // WITHOUT one did not capture the printed window — copying that
+                    // absence would synthesize a PERMANENT land permission, which is
+                    // strictly worse than leaving the fragment refused.
+                    //
+                    // MEASURED: Shaman's Trance prints "this turn" but its cast
+                    // sibling carries `duration: None`, so it declines here. Its
+                    // filter is independently unfaithful too — `controller: You`
+                    // selects YOUR graveyard (the consumer at
+                    // `casting.rs::graveyard_lands_playable_by_permission` iterates
+                    // `player_data.graveyard` and uses `controller` to pick which
+                    // objects match, not who acts), which contradicts the card's
+                    // "other players' graveyards". Corpus census over graveyard
+                    // `CastFromZone` grants: 47 `You`, 15 `None`, zero `Opponent` —
+                    // every genuine cross-player card (Chancellor of the Spires,
+                    // Memory Plunder, Havengul Lich) sits in the `None` bucket.
+                    // Making that card correct needs a runtime widening to other
+                    // players' graveyards, not a filter copy.
+                    .and_then(|_| land_half_filter(target))
+                    .map(|land_target| Effect::CastFromZone {
+                        // CR 305.1: the land half plays LANDS from the same zone. The
+                        // sibling's filter carries the zone anchor; only the card-type
+                        // axis differs between the two halves.
+                        target: land_target,
+                        without_paying_mana_cost: *without_paying_mana_cost,
+                        mode: CardPlayMode::Play,
+                        cast_transformed: false,
+                        alt_ability_cost: alt_ability_cost.clone(),
+                        constraint: constraint.clone(),
+                        // CR 611.2a: one stated window scopes both halves.
+                        duration: duration.clone(),
+                        driver: *driver,
+                        mana_spend_permission: *mana_spend_permission,
+                    }),
                 _ => None,
             });
 

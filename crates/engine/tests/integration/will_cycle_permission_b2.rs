@@ -272,37 +272,64 @@ fn d2_the_cast_half_is_unchanged_and_was_never_the_gap() {
 }
 
 #[test]
-fn d3_the_same_grammar_over_another_players_graveyard_is_recovered_too() {
-    // MEASURED COLLATERAL, pinned deliberately. The coverage gate showed this
-    // change flips Shaman's Trance to supported — a card the plan never named.
-    // An unclaimed flip is exactly the shape of a false green, so it is pinned
-    // here as a real outcome rather than left as an unexplained side effect.
+fn g5_a_sibling_with_no_stated_window_gains_no_land_half() {
+    // MEASURED COLLATERAL. An earlier revision of this pass flipped Shaman's
+    // Trance to "supported", and an earlier version of this test claimed the
+    // flip was earned. It was not, and the claim was wrong on two axes.
     //
-    // It earns the flip: its ONLY parse gap was the same refused `"play lands"`
-    // fragment, and the recovered half is correctly shaped.
+    // WINDOW. The card prints "this turn", but its cast sibling lowered with
+    // `duration: None`. CR 611.2a: "If no duration is stated, it lasts until the
+    // end of the game." Copying that absence synthesizes a PERMANENT land
+    // permission — the failure this suite's own d1 row (v) calls out as worse
+    // than not parsing at all.
+    //
+    // GRAVEYARD. The sibling carries `controller: Some(You)`, which selects
+    // objects in YOUR graveyard: `casting.rs::graveyard_lands_playable_by_permission`
+    // iterates `player_data.graveyard` for the acting player and applies the
+    // filter to those objects, so `controller` picks WHICH OBJECTS MATCH, not
+    // who acts. That contradicts the card's "other players' graveyards".
+    // Corpus census over graveyard `CastFromZone` grants: 47 `You`, 15 `None`,
+    // zero `Opponent` — every genuine cross-player card (Chancellor of the
+    // Spires, Memory Plunder, Havengul Lich) sits in the `None` bucket.
+    //
+    // So the pass declines on the missing window, and the card stays honestly
+    // unsupported. Making it genuinely correct needs a runtime widening to other
+    // players' graveyards plus the "this turn" window — a separate change, not a
+    // filter copy.
     let parsed = parse(
         "Other players can't play lands or cast spells from their graveyards this turn. You may play lands and cast spells from other players' graveyards this turn as though those cards were in your graveyard.",
         "Shaman's Trance",
         &["Instant"],
     );
-
-    let plays = play_grants(&parsed);
-    assert_eq!(
-        plays.len(),
-        1,
-        "CR 305.1: the coordinated grant's land half must be recovered here too"
-    );
-    let land = typed(plays[0]);
-    assert_eq!(land.type_filters, vec![TypeFilter::Land]);
     assert!(
-        is_graveyard_anchored(land),
-        "the recovered half must stay anchored to the graveyard, got {:?}",
-        land.properties
+        play_grants(&parsed).is_empty(),
+        "CR 611.2a: a sibling with no stated window must not yield a permanent land grant, got {:?}",
+        play_grants(&parsed)
     );
-    // CR 109.5: `controller` scopes the PERMISSION HOLDER ("**you** may play"),
-    // not the zone's owner — the "other players' graveyards" reading is carried
-    // by the card's own opponent-scoped clause, which this pass leaves alone.
-    assert_eq!(land.controller, Some(ControllerRef::You));
+
+    // REACH-GUARD (alpha): the fixture really does reach the pass — it still
+    // carries the refused fragment the pass keys on, so the emptiness above is
+    // the duration requirement declining rather than the input never arriving.
+    assert!(
+        unimplemented_descriptions(&parsed)
+            .iter()
+            .any(|d| d == "play lands"),
+        "reach-guard: the fixture must still carry the refused fragment"
+    );
+
+    // REACH-GUARD (beta): the same grammar WITH a stated window does produce a
+    // land half, so the decline keys on the missing duration and not on some
+    // unrelated property of this sentence.
+    let windowed = parse(
+        "Until end of turn, you may play lands and cast spells from your graveyard.",
+        "Windowed Probe",
+        &["Sorcery"],
+    );
+    assert_eq!(
+        play_grants(&windowed).len(),
+        1,
+        "reach-guard: the same grammar WITH a stated window must produce the land half"
+    );
 }
 
 // ── G — regression guards ─────────────────────────────────────────────────
@@ -431,12 +458,26 @@ fn g4_a_grant_scoped_to_a_chosen_pile_gains_no_land_half() {
         play_grants(&parsed)
     );
 
-    // REACH-GUARD: the same sentence with a real ZONE in place of the pile does
-    // produce a land half, so the emptiness above is `land_half_filter`'s zone
-    // requirement declining this input — not the fixture failing to reach the
-    // pass, and not `play_grants` being blind to grants on this card shape.
+    // REACH-GUARD (alpha): the fixture really does reach the pass — it still
+    // carries the refused fragment the pass keys on, so the emptiness above is
+    // a guard declining rather than the input never arriving.
+    assert!(
+        unimplemented_descriptions(&parsed)
+            .iter()
+            .any(|d| d == "play lands"),
+        "reach-guard: the fixture must still carry the refused fragment"
+    );
+
+    // REACH-GUARD (beta): the same sentence with a real ZONE in place of the
+    // pile does produce a land half, so the emptiness above is
+    // `land_half_filter`'s zone requirement declining this input and not
+    // `play_grants` being blind to grants on this card shape.
+    //
+    // The window is load-bearing in this fixture: the pass also requires a
+    // stated duration (CR 611.2a, see `g5`), so a probe without one would
+    // decline for that reason instead and prove nothing about the zone axis.
     let anchored = parse(
-        "Exile the top five cards of your library. You may play lands and cast spells from your graveyard. If you cast a spell this way, you cast it without paying its mana cost.",
+        "Exile the top five cards of your library. Until end of turn, you may play lands and cast spells from your graveyard. If you cast a spell this way, you cast it without paying its mana cost.",
         "Pile Probe Reach Guard",
         &["Sorcery"],
     );
