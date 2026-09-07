@@ -16442,10 +16442,11 @@ fn unmodeled_guarded_reflexive_optional_fails_closed() {
 }
 
 /// CR 614.1c + CR 603.12 + CR 608.2c: clone-replacement riders use the same
-/// effect-chain path. An unsupported guard must reject that rider rather than
-/// attaching an unconditional optional reflexive sub-ability to the replacement.
+/// effect-chain path. An unsupported guard must reject the entire replacement
+/// so the source remains an explicit parser gap rather than a supported clone
+/// with its rider silently discarded.
 #[test]
-fn unmodeled_guarded_clone_replacement_rider_stays_detached() {
+fn unmodeled_guarded_clone_replacement_rider_fails_closed() {
     let parsed = parse(
         "You may have Guarded Clone enter as a copy of any creature on the battlefield. When you do, if the moon is full, you may draw a card.",
         "Guarded Clone",
@@ -16453,21 +16454,18 @@ fn unmodeled_guarded_clone_replacement_rider_stays_detached() {
         &["Creature"],
         &[],
     );
-    let replacement = parsed
-        .replacements
-        .first()
-        .expect("the clone replacement must still parse");
-    let execute = replacement
-        .execute
-        .as_deref()
-        .expect("the clone replacement must retain its execute definition");
     assert!(
-        matches!(*execute.effect, Effect::BecomeCopy { .. }),
-        "the replacement's supported copy instruction must survive"
+        parsed.replacements.is_empty(),
+        "the unsupported rider must prevent a partial clone replacement, got {:?}",
+        parsed.replacements
     );
     assert!(
-        execute.sub_ability.is_none(),
-        "the unsupported guard must not become an unconditional optional replacement rider"
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. })),
+        "the rejected clone source must remain an explicit Effect::Unimplemented gap, got {:?}",
+        parsed.abilities
     );
 }
 
