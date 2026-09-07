@@ -15002,7 +15002,10 @@ mod mode_gate_tests {
                 bracket: BracketShape::Swiss,
                 total_rounds: Some(4),
                 plus_rounds: None,
-                format: None,
+                // A concrete label, so the round-trip cannot pass against a
+                // projection that hardcoded `format: None` instead of forwarding
+                // it — matching the server-direction fixture's treatment.
+                format: Some(engine::types::format::GameFormat::Commander),
             },
             ClientMessage::JoinTournament {
                 code: "TOUR01".into(),

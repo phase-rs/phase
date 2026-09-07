@@ -4799,12 +4799,15 @@ export interface TournamentSummary {
   created_at: number;
   /**
    * The event's game-format label (Standard, Commander, …), a display label
-   * only — the tournament enforces no deck legality. `undefined` when the
-   * organizer named none, or when talking to a pre-v7 broker that omits the
-   * field (lobby protocol 7 added it). Mirrors the `format` a {@link LobbyGame}
-   * listing already carries; resolve its human label through `FORMAT_REGISTRY`.
+   * only — the tournament enforces no deck legality. Typed `| null` because the
+   * Rust field is `#[serde(default)] Option<GameFormat>` with NO
+   * `skip_serializing_if`, so `None` arrives as an explicit `"format": null`,
+   * not a missing key — the common "organizer named none" path. `undefined`
+   * only against a pre-v7 broker that omits the field entirely (lobby protocol
+   * 7 added it). Guard with `!= null` to cover both. Mirrors the `format` a
+   * {@link LobbyGame} listing carries; resolve its label through `FORMAT_REGISTRY`.
    */
-  format?: GameFormat;
+  format?: GameFormat | null;
 }
 
 /**

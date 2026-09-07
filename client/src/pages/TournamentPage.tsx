@@ -414,7 +414,7 @@ export function TournamentPage() {
                     shared registry (the engine is the source of truth for the
                     list). Absent when the organizer named none, or against a
                     pre-v7 broker. Never recomputed — a display label only. */}
-                {view.summary.format !== undefined && (
+                {view.summary.format != null && (
                   <span className="rounded-[5px] border border-sky-300/20 bg-sky-500/15 px-1.5 py-0.5 font-semibold text-sky-200">
                     {formatMetadata(view.summary.format)?.label ??
                       view.summary.format}

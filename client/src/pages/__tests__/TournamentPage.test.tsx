@@ -630,6 +630,42 @@ describe("TournamentPage broadcast scoping", () => {
   });
 });
 
+// The v7 format badge. The pill (a `bg-sky-500/15` chip) resolves the label
+// through the registry, and must NOT render on the no-format path — the wire
+// sends an explicit `null` there, not `undefined`.
+describe("TournamentPage format badge", () => {
+  it("renders the format label when the summary carries one", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    const view = h2hView("TOUR01", {
+      summary: { ...summaryFor("TOUR01"), format: "Commander" },
+    });
+    const { container } = await mountWith(fake, view);
+
+    expect(screen.getByText("Commander")).toBeTruthy();
+    expect(container.querySelector(".bg-sky-500\\/15")).not.toBeNull();
+  });
+
+  it("renders no format pill when the summary format is null", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    const view = h2hView("TOUR01", {
+      summary: { ...summaryFor("TOUR01"), format: null },
+    });
+    const { container } = await mountWith(fake, view);
+
+    expect(container.querySelector(".bg-sky-500\\/15")).toBeNull();
+  });
+
+  it("renders no format pill when the summary omits format (pre-v7 broker)", async () => {
+    const fake = makeFakeSocket();
+    primeSocket(fake);
+    const { container } = await mountWith(fake, h2hView());
+
+    expect(container.querySelector(".bg-sky-500\\/15")).toBeNull();
+  });
+});
+
 // ── V4 / V4b — organizer gating, and the §0.2 player-authority correction ──
 
 describe("TournamentPage organizer gating", () => {

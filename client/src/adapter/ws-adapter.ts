@@ -471,12 +471,13 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
- * 7 — Tournament game-format label and an "automatic + N" round option. Three
- *     fields added to CreateTournament, all optional (`#[serde(default)]`):
+ * 7 — Tournament game-format label and an "automatic + N" round option. Two
+ *     fields added to CreateTournament, both optional (`#[serde(default)]`):
  *     `format` (a GameFormat display label, mirroring the one a LobbyGame
- *     listing already carries), `plus_rounds` (add N to the auto-derived round
- *     count — the "Swiss plus N" shape, mutually exclusive with `total_rounds`),
- *     and `format` is echoed back resolved on TournamentSummary. Purely ADDITIVE
+ *     listing already carries) and `plus_rounds` (add N to the auto-derived
+ *     round count — the "Swiss plus N" shape, mutually exclusive with
+ *     `total_rounds`). Separately, the DIFFERENT TournamentSummary message
+ *     gains a `format` echoed back resolved (server → client). Purely ADDITIVE
  *     in BOTH directions, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL below stays at
  *     2 and — unlike 6's scoring relaxation — NO client-side floor is needed:
  *     a client sending `format`/`plus_rounds` to a pre-7 broker has them
