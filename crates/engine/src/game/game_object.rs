@@ -1824,7 +1824,7 @@ impl GameObject {
         modification: &crate::types::ability::PerpetualModification,
         all_creature_types: &[String],
     ) {
-        use crate::types::ability::PerpetualModification;
+        use crate::types::ability::{PerpetualGrantModification, PerpetualModification};
         use crate::types::card_type::CoreType;
         match modification {
             PerpetualModification::SetBasePowerToughness { power, toughness } => {
@@ -1935,6 +1935,120 @@ impl GameObject {
                     .active_zones(crate::types::zones::self_spell_cost_mod_active_zones());
                 self.static_definitions.push(synthetic.clone());
                 Arc::make_mut(&mut self.base_static_definitions).push(synthetic);
+            }
+            PerpetualModification::GrantAbility { modifications } => {
+                // Digital-only Alchemy (no CR entry for "perpetually"): install
+                // each classified quoted-ability grant onto the persistent
+                // baseline so it survives every layer/zone reset, mirroring the
+                // `GrantKeywords` (base_keywords) and `ModifyCost`
+                // (base_static_definitions) arms above.
+                //
+                // Architectural note (no CR citation -- this describes the
+                // Rust match's exhaustiveness, not a rule): the match below is
+                // EXHAUSTIVE over `PerpetualGrantModification` -- the closed,
+                // typed set of kinds this installer handles (`types/ability.rs`).
+                // It carries no wildcard arm on purpose: the parser cannot
+                // construct a `GrantAbility` holding an uninstallable kind
+                // (`PerpetualGrantModification::try_from` is the single gate, and
+                // rejects `classify_quoted_inner`'s other outputs --
+                // `GrantTrigger`, `GrantReplacement` -- closing the whole parse),
+                // and widening that gate is a compile error here until the new
+                // kind is installed. A wildcard would let a widened gate record
+                // the modification in `perpetual_mods` while installing nothing.
+                use crate::types::ability::TargetFilter;
+                use crate::types::statics::StaticMode;
+                self.sync_missing_base_characteristics();
+                for granted in modifications {
+                    match granted {
+                        PerpetualGrantModification::AddKeyword { keyword } => {
+                            if !self.keywords.contains(keyword) {
+                                self.keywords.push(keyword.clone());
+                            }
+                            if !self.base_keywords.contains(keyword) {
+                                self.base_keywords.push(keyword.clone());
+                            }
+                        }
+                        PerpetualGrantModification::AddStaticMode { mode } => {
+                            let mut synthetic =
+                                crate::types::ability::StaticDefinition::new(mode.clone())
+                                    .affected(TargetFilter::SelfRef);
+                            // CR 113.6 + CR 601.2f: a granted self-spell cost
+                            // modifier (a quoted "This spell costs {N}
+                            // less/more to cast." body, classified here via
+                            // `classify_quoted_inner`'s static-line path --
+                            // Chronicler of Worship's own granted text is this
+                            // exact shape, though Chronicler's OWN card fails
+                            // closed upstream in `parse_perpetual_self_subject`
+                            // for lack of a legitimate "it" antecedent and so
+                            // never actually reaches this arm; see the runtime
+                            // test `perpetual_grant_modify_cost_after_conjure_installs_on_conjured_object_and_reduces_cast_cost`
+                            // in `effects/perpetual.rs` for a card shape that
+                            // DOES reach it) must function from every zone the
+                            // recipient card could be CAST from -- hand, and
+                            // the other alternative-cast zones -- not just the
+                            // battlefield-only default (CR 113.6b): the
+                            // recipient is a card sitting in a non-battlefield
+                            // zone, and `self_spell_cost_modifier_applies_before_targets`
+                            // (casting.rs) gates on `active_zones` containing
+                            // the spell's current zone before it ever reads
+                            // the static's `StaticMode::ModifyCost` payload.
+                            // Without this opt-in the installed static is a
+                            // silent no-op -- Blocker 1 (review round on PR
+                            // #8494). Mirrors the sibling
+                            // `PerpetualModification::ModifyCost` arm above
+                            // verbatim. Scoped to the `ModifyCost` shape only:
+                            // other `StaticMode` kinds this arm installs (a
+                            // granted "can't block" restriction, CR 509.1b)
+                            // are legitimately battlefield-only and must keep
+                            // the empty (battlefield-default) `active_zones`.
+                            if matches!(mode, StaticMode::ModifyCost { .. }) {
+                                synthetic = synthetic.active_zones(
+                                    crate::types::zones::self_spell_cost_mod_active_zones(),
+                                );
+                            }
+                            self.static_definitions.push(synthetic.clone());
+                            Arc::make_mut(&mut self.base_static_definitions).push(synthetic);
+                        }
+                        // CR 113.3a + CR 113.3b: the quoted body classified to a
+                        // full spell/activated ability -- Topsoil Turner's "{T}:
+                        // Add {G}{G}." and Ethereal Grasp's "{8}: Untap this
+                        // creature." (both CR 113.3b activated abilities: a cost
+                        // and an effect) reach here. A quoted body that instead
+                        // reads as a STATIC (CR 113.3d) but was misclassified by
+                        // `classify_quoted_inner`'s spell/activated fallback --
+                        // Agent of Raffine's "You may spend mana as though it
+                        // were mana of any color to cast this spell.", a
+                        // `GenericEffect`-wrapped static smuggled in as a
+                        // costless spell-kind body -- never reaches this arm:
+                        // `PerpetualGrantModification::try_from`
+                        // (`types/ability.rs`) rejects that shape upstream,
+                        // since this installer has no step that would extract
+                        // the nested static into `static_definitions` /
+                        // `base_static_definitions`. Mirrors the NON-perpetual
+                        // layer-6 `GrantAbility` apply (`game/layers.rs`): push
+                        // onto BOTH the live `abilities` (so a from-hand cast
+                        // sees it immediately — this grant typically lands on a
+                        // card sitting in hand, not on the battlefield, so
+                        // there is no layer pass to populate it from base) and
+                        // `base_abilities` (so it survives the battlefield
+                        // layer reset's `abilities = base_abilities.clone()`).
+                        // No `concretize_granting_object` step: unlike an
+                        // aura/equipment donor, a perpetual self-grant has no
+                        // separate granting object to rebind `GrantingObject`
+                        // self-references to. Dedup by structural equality,
+                        // matching every other perpetual-grant arm's
+                        // idempotency (this function runs once per
+                        // `ApplyPerpetual` resolution).
+                        PerpetualGrantModification::GrantAbility { definition } => {
+                            if !self.abilities.iter().any(|a| a == definition.as_ref()) {
+                                Arc::make_mut(&mut self.abilities).push(*definition.clone());
+                            }
+                            if !self.base_abilities.iter().any(|a| a == definition.as_ref()) {
+                                Arc::make_mut(&mut self.base_abilities).push(*definition.clone());
+                            }
+                        }
+                    }
+                }
             }
         }
         self.perpetual_mods.push(modification.clone());

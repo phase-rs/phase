@@ -3232,11 +3232,22 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
 /// with no referent, so their anaphor fell through to `ParentTarget` (empty —
 /// the producer has no targets) or to the trigger source: Conductive Machete
 /// attached to nothing, Weight Room put its counters on the Room (#7531).
+///
+/// `Effect::Conjure` (digital-only, no CR entry) is the same shape again: it
+/// puts exactly one new object into a zone and declares no target, so a
+/// following same-chain "it" has exactly one possible referent — the card it
+/// just conjured. Agent of Raffine's "Conjure a duplicate ... into your hand.
+/// It perpetually gains ..." would otherwise mis-bind "it" to `ParentTarget`
+/// (the ability's actual chosen target — "target opponent" — not the
+/// conjured card).
 pub(super) fn publishes_chain_created_referent(effect: &Effect) -> bool {
     is_token_creating_effect(effect)
         || matches!(
             effect,
-            Effect::Manifest { .. } | Effect::ManifestDread | Effect::Cloak { .. }
+            Effect::Manifest { .. }
+                | Effect::ManifestDread
+                | Effect::Cloak { .. }
+                | Effect::Conjure { .. }
         )
 }
 

@@ -1024,6 +1024,7 @@ mod peer_into_the_abyss;
 mod peerless_recycling_gift_recipient;
 mod pendrell_flux_unless_pay_own_cost;
 mod per_opponent_binder_autofill;
+mod perpetual_last_created_empty_no_source_fallback;
 mod perrie_the_pulverizer_attack_trigger_6219;
 mod peter_parker_modal_back_face_cast;
 mod phantom_general_token_anthem;
