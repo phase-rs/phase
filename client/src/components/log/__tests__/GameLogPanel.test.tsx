@@ -209,7 +209,7 @@ describe("GameLogPanel", () => {
     await user.click(screen.getByRole("button", { name: "Filters (0)" }));
     await user.selectOptions(screen.getByRole("combobox", { name: "Filter by turn" }), "2");
 
-    expect(screen.getByText("T2 · Upkeep")).toBeInTheDocument();
+    expect(screen.getByText("Turn 2 · Upkeep")).toBeInTheDocument();
     expect(screen.queryByText("No matching events")).not.toBeInTheDocument();
   });
 
