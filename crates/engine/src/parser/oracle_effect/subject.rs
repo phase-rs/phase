@@ -7104,6 +7104,10 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "look",
     "lose",
     "investigate",
+    // CR 701.53a: "if they do, you incubate N" (Assimilate Essence). The
+    // subject prefix is stripped so the existing imperative lowerer owns the
+    // keyword action and retains the resolving ability's controller.
+    "incubate",
     "learn",
     // CR 701.40a: Manifest — "its controller manifests the top card of their
     // library" (Reality Shift). Subject-shifted manifest clauses route through
@@ -7116,6 +7120,9 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "put",
     "proliferate",
     "regenerate",
+    // CR 701.70a: "you recruit" (Queen of Dale) re-dispatches to the
+    // existing Recruit lowering after the controller subject is stripped.
+    "recruit",
     "reveal",
     "return",
     "sacrifice",
@@ -8484,6 +8491,22 @@ mod tests {
             "expected TakeTheInitiative, got {:?}",
             ability.effect
         );
+    }
+
+    #[test]
+    fn subject_prefixed_recruit_and_incubate_reach_existing_imperatives() {
+        for (text, predicate) in [("you recruit", "recruit"), ("you incubate 2", "incubate 2")] {
+            let stripped = strip_subject_clause(text)
+                .unwrap_or_else(|| panic!("{text:?} must reach subject stripping"));
+            assert_eq!(stripped, predicate, "wrong predicate for {text:?}");
+            let ability =
+                crate::parser::oracle_effect::parse_effect_chain(text, AbilityKind::Spell);
+            assert!(
+                !matches!(*ability.effect, Effect::Unimplemented { .. }),
+                "{text:?} must reach its existing imperative lowering, got {:?}",
+                ability.effect
+            );
+        }
     }
 
     #[test]

@@ -12322,6 +12322,14 @@ pub(super) fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAs
             return None;
         };
 
+    // "additional" is a printed adjective after the quantity, not part of the
+    // player-counter kind. Keep the parsed quantity unchanged and consume it
+    // with nom before the counter-kind authority validates the remainder.
+    let (counter_kind, _) = opt(tag::<_, _, OracleError<'_>>("additional "))
+        .parse(counter_kind)
+        .ok()?;
+    let counter_kind = counter_kind.trim();
+
     // Validate: counter kind should be a single word (no spaces) to avoid false positives
     // like "gets +1/+1 counter" which is an object counter, not a player counter.
     if counter_kind.is_empty() || counter_kind.contains('+') || counter_kind.contains('-') {
@@ -18525,6 +18533,48 @@ mod tests {
             }
             other => panic!("Expected GivePlayerCounter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_player_counter_additional_preserves_each_quantity_form() {
+        for (text, expected_kind, expected_count) in [
+            (
+                "get an additional poison counter",
+                PlayerCounterKind::Poison,
+                QuantityExpr::Fixed { value: 1 },
+            ),
+            (
+                "gets two additional experience counters",
+                PlayerCounterKind::Experience,
+                QuantityExpr::Fixed { value: 2 },
+            ),
+            (
+                "get that many additional rad counters",
+                PlayerCounterKind::Rad,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            ),
+        ] {
+            match try_parse_player_counter(text) {
+                Some(ImperativeFamilyAst::GivePlayerCounter {
+                    counter_kind,
+                    count,
+                }) => {
+                    assert_eq!(counter_kind, expected_kind, "wrong kind for {text:?}");
+                    assert_eq!(count, expected_count, "wrong quantity for {text:?}");
+                }
+                other => panic!("Expected GivePlayerCounter for {text:?}, got {other:?}"),
+            }
+        }
+        assert!(
+            try_parse_player_counter("get an additional charge counter").is_none(),
+            "an unknown counter kind must still fail closed"
+        );
+        assert!(
+            try_parse_player_counter("get an additional +1/+1 counter").is_none(),
+            "an object counter must not become a player counter"
+        );
     }
 
     #[test]

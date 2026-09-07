@@ -924,6 +924,7 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
     "this aura",
     "this vehicle",
     "this planeswalker",
+    "this emblem",
     "this battle",
     "this token",
     "this spacecraft",
@@ -3434,6 +3435,19 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("This creature enters tapped", "Some Card"),
             "~ enters tapped"
+        );
+    }
+
+    #[test]
+    fn normalize_this_emblem_without_matching_longer_words() {
+        assert_eq!(
+            normalize_card_name_refs("this emblem deals 1 damage to you", "Chandra"),
+            "~ deals 1 damage to you"
+        );
+        assert_eq!(
+            normalize_card_name_refs("this emblematic creature attacks", "Chandra"),
+            "this emblematic creature attacks",
+            "self-reference normalization must respect word boundaries"
         );
     }
 
