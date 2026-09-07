@@ -79,7 +79,8 @@ pub struct ActivationPatiencePolicy;
 /// * A mana ability (CR 605.1a). It does not use the stack, produces mana that
 ///   empties at the end of the step (CR 106.4), and is answered by the payment
 ///   pipeline rather than by timing.
-/// * A temporary combat modifier (CR 611.2 — it wears off at cleanup). Waiting
+/// * A temporary combat modifier (CR 611.2 + CR 514.2 — the resolution
+///   generates the continuous effect, and the cleanup step ends it). Waiting
 ///   is not "free" for those; they are window-bound, and `EffectTimingPolicy`'s
 ///   `combat_trick_score` already owns their timing.
 ///
@@ -177,9 +178,10 @@ impl TacticalPolicy for ActivationPatiencePolicy {
             return PolicyVerdict::neutral(PolicyReason::new("activation_patience_lethal_line"));
         }
 
-        // Escape hatch 3 — CR 603.4: an intervening-if condition is checked on
-        // activation. One that holds now may not hold later, so waiting is not
-        // free. `ConditionGatedActivationPolicy` owns that judgement.
+        // Escape hatch 3 — CR 602.5: an activated ability's condition is checked
+        // when activation begins. One that holds now may not hold later, so
+        // waiting is not free. `ConditionGatedActivationPolicy` owns that
+        // judgement.
         if ctx
             .effective_activated_ability()
             .is_some_and(|ability| ability.condition.is_some())

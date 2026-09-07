@@ -855,7 +855,7 @@ fn own_permanent_with_opponent_alternative(
 /// AI's own lone attacker.
 ///
 /// Board-wide by design, unlike that slot-local sibling: the question here is
-/// "does this action have anywhere worth going at all", and CR 115.3 makes
+/// "does this action have anywhere worth going at all", and CR 115.2 makes
 /// target legality the engine's to answer — so it asks `find_legal_targets`,
 /// which already honours hexproof, shroud, protection and ward.
 fn harmful_activation_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {

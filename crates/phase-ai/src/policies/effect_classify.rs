@@ -773,7 +773,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         // creature permanents — a counterspell does not target creatures.
         TargetFilter::StackAbility { .. } | TargetFilter::StackSpell => FilterDomain::STACK_OBJECT,
 
-        // CR 120.2 + CR 614.1: a damage event's recipient may be a permanent or
+        // CR 120.1 + CR 614.1: a damage event's recipient may be a permanent or
         // a player, so these two reach both axes.
         TargetFilter::EventTarget | TargetFilter::PostReplacementDamageTarget => {
             FilterDomain::ANYTHING
@@ -808,11 +808,12 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         TargetFilter::TrackedSetFiltered { filter, .. } => filter_domain(filter),
 
         TargetFilter::Typed(typed) => {
-            // CR 205.1: `type_filters` is a CONJUNCTION, and an EMPTY list is an
-            // empty conjunction — "no type-line constraint", not "matches
-            // nothing" (see the invariant on `TypedFilter::type_filters`). An
-            // unrestricted `Typed` therefore also matches players, exactly as
-            // `engine::game::filter::player_matches_target_filter_with` does.
+            // Repo invariant (not a CR rule): `type_filters` is a CONJUNCTION,
+            // and an EMPTY list is an empty conjunction — "no type-line
+            // constraint", not "matches nothing" (see the invariant on
+            // `TypedFilter::type_filters`). An unrestricted `Typed` therefore
+            // also matches players, in the same direction as
+            // `engine::game::filter::player_matches_target_filter_with`.
             if typed.type_filters.is_empty() {
                 return FilterDomain::ANYTHING;
             }
@@ -3863,9 +3864,10 @@ mod filter_domain_tests {
 
     #[test]
     fn untyped_typed_filter_still_reaches_players() {
-        // CR 205.1: an EMPTY `type_filters` is an empty conjunction — "no
-        // type-line constraint" — and the engine's own player matcher admits a
-        // player for it. The old `Typed(_) => false` blanket answered this wrong.
+        // Repo invariant (not a CR rule): an EMPTY `type_filters` is an empty
+        // conjunction — "no type-line constraint" — and the engine's own player
+        // matcher admits a player for it. The old `Typed(_) => false` blanket
+        // answered this wrong.
         let untyped = TargetFilter::Typed(TypedFilter::default());
         assert!(filter_admits_player(&untyped));
         assert!(filter_admits_creature(&untyped));
