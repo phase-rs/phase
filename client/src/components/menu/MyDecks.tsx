@@ -712,6 +712,11 @@ export function MyDecks({
   const [sortAsc, setSortAsc] = useState(mode !== "select");
   const [searchQuery, setSearchQuery] = useState("");
   const [folderPrompt, setFolderPrompt] = useState<FolderPromptRequest | null>(null);
+  const lastFolderPrompt = useRef<FolderPromptRequest | null>(null);
+  if (folderPrompt) {
+    lastFolderPrompt.current = folderPrompt;
+  }
+  const activePrompt = folderPrompt ?? lastFolderPrompt.current;
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Folder/star organization (user decks only). The grouping authority +
@@ -2038,20 +2043,20 @@ export function MyDecks({
       <TextPromptDialog
         open={folderPrompt != null}
         title={
-          folderPrompt?.kind === "rename"
+          activePrompt?.kind === "rename"
             ? t("folder.rename")
             : t("folder.newFolder")
         }
         label={
-          folderPrompt?.kind === "rename"
+          activePrompt?.kind === "rename"
             ? t("folder.renamePrompt")
             : t("folder.newFolderPrompt")
         }
         initialValue={
-          folderPrompt?.kind === "rename" ? folderPrompt.currentName : ""
+          activePrompt?.kind === "rename" ? activePrompt.currentName : ""
         }
         confirmLabel={
-          folderPrompt?.kind === "rename"
+          activePrompt?.kind === "rename"
             ? t("common:actions.save")
             : t("folder.createButton")
         }
