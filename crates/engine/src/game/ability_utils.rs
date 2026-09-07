@@ -2031,7 +2031,8 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 /// illegal the stamped node keeps them, `legal_targets` stays non-empty, and the
 /// spell resolves instead of being countered — the same CR 608.2b masking this
 /// function fixes for anaphoric riders, in a different class. That is a KNOWN,
-/// PRE-EXISTING gap, deliberately out of scope here and tracked separately; it
+/// PRE-EXISTING gap, deliberately out of scope here and tracked separately in
+/// issue #8684 (Grim Contest is the one affected printed card today); it
 /// is recorded so the omission is discoverable rather than latent. If this
 /// function is ever widened to cover it, the discriminator must key off
 /// `stamp_other_batch_source_targets`' own condition, exactly as it keys off the
@@ -11916,7 +11917,10 @@ mod tests {
             "reach-guard: the head must NOT be in the deferring set, or conjunct 1 \
              refuses first and the conjunct under test is never exercised"
         );
-        // REACH GUARD — the predicate must hold, or conjunct 3 refuses first:
+        // REACH GUARD — the predicate must hold. It is conjunct 3, evaluated
+        // LAST, so it does not refuse "first" in any ordering sense; the point
+        // is that a false predicate would make this test pass vacuously under
+        // the conjunct-2 deletion mutation, since `&&` would never reach it:
         assert!(
             sub_ability_inherits_parent_creature_target_only(
                 &ability,
