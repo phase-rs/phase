@@ -9510,13 +9510,6 @@ enum EventField {
     /// when only multiplicative count modifiers are involved (double then
     /// substitute vs substitute then double yields the same batch).
     TokenSpec,
-    /// `ProposedEvent::RollDice::count` — raised by a die-roll replacement's
-    /// `execute` (`Effect::RollDie { count }`, resolved against the event count
-    /// by `roll_dice_applier`). Distinct from `Count`: the two are carried by
-    /// different `ProposedEvent` variants and can never collide on one event, so
-    /// sharing `Count` would let a die-roll raise and an unrelated count
-    /// modifier be compared as if they wrote the same field.
-    RollDieCount,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9571,50 +9564,6 @@ fn damage_commute_class(modification: &DamageModification) -> CommuteClass {
         | DamageModification::SetTo { .. }
         | DamageModification::LifeFloor { .. } => CommuteClass::NonCommuting,
     }
-}
-
-/// CR 706.6 + CR 616.1: The commuting class of a die-roll count raise, keyed by
-/// the shape of the `Effect::RollDie` count expression that `roll_dice_applier`
-/// resolves against the event's current count.
-///
-/// Classified by shape rather than assumed additive. The printed cards are all
-/// "roll that many dice plus one" (`Offset` over `EventContextAmount`), which
-/// commutes: two `+1` raises give 1 -> 2 -> 3 either way. But
-/// `resolve_event_replacement_quantity` accepts the whole `QuantityExpr`
-/// grammar, and a `Multiply` raise would NOT commute with an `Offset` one
-/// ((x+1)*2 != (x*2)+1), so hard-coding `Additive` here would auto-resolve a
-/// genuinely order-material pair if such a card is ever printed.
-///
-/// Anything not rooted in `EventContextAmount` is not a relative raise at all
-/// (a `Fixed` count OVERWRITES the rolled count, last-applied-wins), so it stays
-/// `NonCommuting`.
-fn die_roll_count_commute_class(count: &QuantityExpr) -> CommuteClass {
-    match count {
-        QuantityExpr::Offset { inner, .. } if is_event_context_amount(inner) => {
-            CommuteClass::Additive
-        }
-        QuantityExpr::Multiply { inner, .. } if is_event_context_amount(inner) => {
-            CommuteClass::Multiplicative
-        }
-        // A bare `EventContextAmount` leaves the count untouched — an identity
-        // raise commutes with anything, but it also writes nothing, so it is the
-        // caller's `Disjoint` case rather than a write. Everything else
-        // (`Fixed`, `DivideRounded`, `Max`, `Sum`, `ClampMin`, ...) either
-        // overwrites the count or mixes classes.
-        _ => CommuteClass::NonCommuting,
-    }
-}
-
-/// True for the `EventContextAmount` reference that makes a die-roll count
-/// expression RELATIVE to the count already being rolled ("roll that many dice
-/// plus one") rather than an absolute overwrite.
-fn is_event_context_amount(expr: &QuantityExpr) -> bool {
-    matches!(
-        expr,
-        QuantityExpr::Ref {
-            qty: crate::types::ability::QuantityRef::EventContextAmount,
-        }
-    )
 }
 
 /// CR 106.12b + CR 616.1: Mana-production modifiers on the same `ProduceMana`
@@ -9949,38 +9898,6 @@ fn candidate_materiality(
             Effect::Token { .. } if matches!(proposed, ProposedEvent::CreateToken { .. }) => {
                 field = Some(EventField::TokenSpec);
                 enter_tapped_commute = Some(CommuteClass::NonCommuting);
-            }
-            // CR 706.6 + CR 616.1: a die-roll count raise ("instead roll that
-            // many dice plus one and ignore the lowest roll" — Barbarian Class,
-            // Pixie Guide, Wyll). Both halves of the replacement commute, so a
-            // stacked pair must auto-apply rather than raise a degenerate
-            // ordering prompt:
-            //
-            //   * the COUNT half is classified by expression shape below — two
-            //     `+1` raises give 1 -> 2 -> 3 in either order;
-            //   * the IGNORE half is appended to `ProposedEvent::RollDice::
-            //     ignore_rules` by `roll_dice_applier`, and both consumers are
-            //     insensitive to that vector's ORDER:
-            //     `DieRollIgnoreRule::ignore_outcome_for_rules` reads only
-            //     `rules.len()` and `rules.contains(PlayerChoice)` over sorted
-            //     naturals, and `attractions::unprompted_ignored_indices`
-            //     forfeits the whole auto-pick on any `PlayerChoice`, so its
-            //     sequential loop only ever walks a homogeneous `Lowest` list.
-            //
-            // Guarded on the exact shape `roll_dice_applier` honors: it reads
-            // `count` only from a root-level `RollDie` with no `sub_ability`,
-            // and ignores `results` / `modifier` entirely. A definition carrying
-            // die-result BRANCHES is doing more than raising the count, so it
-            // falls through to the conservative default rather than being
-            // asserted commutative on a payload the applier never reads.
-            Effect::RollDie {
-                count,
-                results,
-                modifier,
-                ..
-            } if def.sub_ability.is_none() && results.is_empty() && modifier.is_none() => {
-                field = Some(EventField::RollDieCount);
-                enter_tapped_commute = Some(die_roll_count_commute_class(count));
             }
             // CR 616.1: any unrecognized effect shape defaults to MATERIAL —
             // never auto-resolve a set whose order-sensitivity is unproven.
@@ -12865,113 +12782,6 @@ mod tests {
         assert!(
             matches!(result, ReplacementResult::Execute(_)),
             "identical untap replacements must auto-apply without ordering prompt, got {result:?}"
-        );
-    }
-
-    /// CR 706.6 + CR 616.1: Barbarian Class + Pixie Guide. Both halves of a
-    /// die-roll replacement commute — the `+1` count raises compose to 1 -> 2 -> 3
-    /// in either order, and the appended ignore rules are read order-insensitively
-    /// by `ignore_outcome_for_rules` — so the pair must auto-apply rather than
-    /// raise a degenerate ordering prompt the player cannot answer meaningfully.
-    fn plus_one_die_roll_replacement() -> ReplacementDefinition {
-        // Mirrors exactly what `oracle_replacement.rs` builds for "instead roll
-        // that many dice plus one and ignore the lowest roll".
-        let mut def =
-            ReplacementDefinition::new(ReplacementEvent::RollDice).execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::RollDie {
-                    count: QuantityExpr::Offset {
-                        inner: Box::new(QuantityExpr::Ref {
-                            qty: crate::types::ability::QuantityRef::EventContextAmount,
-                        }),
-                        offset: 1,
-                    },
-                    sides: 0,
-                    results: vec![],
-                    modifier: None,
-                },
-            ));
-        def.die_ignore_rule = Some(crate::types::ability::DieRollIgnoreRule::Lowest);
-        def
-    }
-
-    #[test]
-    fn two_die_roll_count_raises_commute_no_prompt() {
-        let repl = plus_one_die_roll_replacement();
-        let mut state =
-            test_state_with_object(ObjectId(1), Zone::Battlefield, vec![repl.clone(), repl]);
-
-        let mut events = Vec::new();
-        let proposed = ProposedEvent::RollDice {
-            player_id: PlayerId(0),
-            count: 1,
-            sides: 6,
-            ignore_rules: Vec::new(),
-            applied: Default::default(),
-        };
-        let result = replace_event(&mut state, proposed, &mut events);
-
-        // Both raises applied without a CR 616.1 ordering prompt, and both
-        // ignore rules survived: 1 + 1 + 1 = 3 dice, two of them ignored.
-        match result {
-            ReplacementResult::Execute(ProposedEvent::RollDice {
-                count,
-                ignore_rules,
-                ..
-            }) => {
-                assert_eq!(count, 3, "CR 614.1a: two +1 raises compose to 3 dice");
-                assert_eq!(
-                    ignore_rules.len(),
-                    2,
-                    "CR 706.6: each applied replacement contributes its own ignore rule"
-                );
-            }
-            other => panic!(
-                "commuting die-roll replacements must auto-apply without an ordering prompt, got {other:?}"
-            ),
-        }
-    }
-
-    #[test]
-    fn die_roll_count_raise_with_result_branches_stays_material() {
-        // The applier reads `count` only from a bare root-level `RollDie` and
-        // never looks at `results`, so a definition carrying die-result BRANCHES
-        // is doing more than raising the count. Its order-sensitivity is
-        // unproven, so it must NOT be asserted commutative.
-        let mut branchy = plus_one_die_roll_replacement();
-        if let Some(execute) = branchy.execute.as_deref_mut() {
-            if let Effect::RollDie { results, .. } = &mut *execute.effect {
-                results.push(crate::types::ability::DieResultBranch {
-                    min: 1,
-                    max: 6,
-                    effect: Box::new(AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::Draw {
-                            count: QuantityExpr::Fixed { value: 1 },
-                            target: TargetFilter::Controller,
-                        },
-                    )),
-                });
-            }
-        }
-        let rid = ReplacementId {
-            source: ObjectId(1),
-            index: 0,
-        };
-        let state = test_state_with_object(ObjectId(1), Zone::Battlefield, vec![branchy]);
-        let proposed = ProposedEvent::RollDice {
-            player_id: PlayerId(0),
-            count: 1,
-            sides: 6,
-            ignore_rules: Vec::new(),
-            applied: Default::default(),
-        };
-        assert!(
-            matches!(
-                candidate_materiality(&state, rid, &proposed),
-                CandidateMateriality::Unconditional
-            ),
-            "CR 616.1: a die-roll effect carrying result branches must stay conservative"
         );
     }
 
