@@ -178,6 +178,12 @@ class SkillDocGate(unittest.TestCase):
                 "row " + repr(pat) + " carries an unescaped ERE metacharacter",
             )
             keywords, _, symbol = body.rpartition(" ")
+            # The row is an ERE, so a metacharacter it carries is backslash
+            # escaped. Drop those escapes before `re.escape`, which would
+            # otherwise escape the backslash itself and send `decl` looking for
+            # a literal one -- failing the row with "names no declaration"
+            # rather than matching the declaration it does name.
+            symbol = re.sub(r"\\(.)", r"\1", symbol)
             decl = re.compile(
                 re.escape(keywords) + r"\s+" + re.escape(symbol) + r"\b"
             )
@@ -250,6 +256,52 @@ class SkillDocGate(unittest.TestCase):
             0,
             "a longer-named citation must not fire the dead-cite guard",
         )
+
+    @gate
+    def test_skill_citing_prefix_sibling_does_not_false_fire(self, g: Gate) -> None:
+        """The leading edge of the dead-cite anchor.
+
+        Companion to the suffix case above. Anchored only on the trailing side,
+        retired `extract_keyword_line` matched a legitimate citation of
+        `new_extract_keyword_line()` and redded a tree that was not stale.
+        """
+        g.write(SKILL, g.read(SKILL) + "\nSee `new_extract_keyword_line()`.\n")
+        self.assertEqual(
+            g.run().returncode,
+            0,
+            "a prefix-sibling citation must not fire the dead-cite guard",
+        )
+
+    @gate
+    def test_self_test_hook_survives_a_relative_invocation(self, g: Gate) -> None:
+        """The gate must not skip its own suite when invoked by a relative path.
+
+        The script `cd`s, so a relative `$0` re-resolves against the new working
+        directory. Before `SELF_DIR`, `cd crates && bash ../scripts/...` printed
+        the success line and exited 0 without running the suite at all -- a
+        self-test hook silently bypassed, which is the failure class this gate
+        exists to refuse.
+
+        Asserted behaviourally: a deliberately broken stand-in suite is planted
+        beside the gate, so reaching it MUST red. A green here means the hook
+        did not run.
+        """
+        (g.root / "scripts" / "check_skill_doc_tests.py").write_text(
+            "import sys\nsys.exit(1)\n", encoding="utf-8", newline="\n"
+        )
+        result = subprocess.run(
+            [SHELL_BIN, "../scripts/" + SCRIPT.name],
+            cwd=g.root / "crates",
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            1,
+            "the self-test hook was skipped under a relative invocation: "
+            + (result.stdout or "") + (result.stderr or ""),
+        )
+        self.assertIn("gate self-tests failed", result.stderr)
 
     @gate
     def test_missing_documented_path_is_caught(self, g: Gate) -> None:

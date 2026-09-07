@@ -15,7 +15,10 @@
 #       interleaved handlers are documented as `| — |` rows, which the count
 #       ignores.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# Resolved BEFORE the cd: a relative $0 re-resolves against the new working
+# directory, and the self-test block below would then silently find no suite.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SELF_DIR/.."
 
 SKILL=".claude/skills/oracle-parser/SKILL.md"
 ORACLE="crates/engine/src/parser/oracle.rs"
@@ -240,15 +243,18 @@ done < <(grep -oE '// Priority [^:]+:' "$ORACLE" | sed -E 's#// Priority ##; s#:
 # `extract_keyword_line_v2()` trips the dead-cite guard. Both fail closed (a
 # spurious red, never a silent green), which is why this trailed invariant (2).
 #
-# The anchor is trailing-only, so a live `try_extract_keyword_line` would still
-# trip both guards. That also fails closed, and no such name exists today.
+# Anchored on BOTH edges. Trailing alone still absorbs on the leading side, so a
+# legitimate citation of `new_extract_keyword_line()` matched retired
+# `extract_keyword_line` and redded a tree that was not stale. The non-vacuity
+# guard needs no leading `\b`: `fn ` already pins that edge, and a leading
+# boundary there would reject the `pub fn ` and `fn ` forms it must match.
 #
 # As with invariant (2), these are EREs now: an entry below must be a bare
 # identifier with no unescaped ERE metacharacter, or grep exits 2 and the `||`
 # reports a regex bug as doc drift.
 while IFS= read -r dead; do
   [ -n "$dead" ] || continue
-  if grep -qE "$dead\b" "$SKILL"; then
+  if grep -qE "\b$dead\b" "$SKILL"; then
     err "SKILL.md cites '$dead', which no longer exists in the parser tree (renamed/removed)"
   fi
   # Non-vacuity: if the symbol came BACK, this list is the stale thing.
@@ -273,10 +279,19 @@ EOF
 # The guard is also the recursion stop: the throwaway repos the suite builds
 # copy only this script, so the file is absent there and the fixture's own
 # invocation skips this block.
+#
+# Skipped when the tree is already failing. The fixtures copy the LIVE tree, so
+# genuine drift breaks them too, and reporting it a second time as "self-tests
+# failed" points at the suite rather than at the drift that actually caused it.
 # ---------------------------------------------------------------------------
-if [ -f "$(dirname "$0")/check_skill_doc_tests.py" ]; then
-  python3 "$(dirname "$0")/check_skill_doc_tests.py" >/dev/null 2>&1 ||
-    err "gate self-tests failed — run: python3 scripts/check_skill_doc_tests.py"
+if [ "$fail" -eq 0 ] && [ -f "$SELF_DIR/check_skill_doc_tests.py" ]; then
+  # Invoked through the repo-relative path (we are at the repo root by now), so
+  # the interpreter never sees $SELF_DIR's shell-native spelling -- which is not
+  # the same string as a native path on every host.
+  if ! self_test_output="$(python3 scripts/check_skill_doc_tests.py 2>&1)"; then
+    printf '%s\n' "$self_test_output" >&2
+    err "gate self-tests failed — rerun: python3 scripts/check_skill_doc_tests.py"
+  fi
 fi
 
 if [ "$fail" -ne 0 ]; then
