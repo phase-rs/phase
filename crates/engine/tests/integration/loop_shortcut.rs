@@ -5068,9 +5068,9 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // Guide, Wyll) added `DieKeepChoice { player, results, ignorable_indices, ignore_count }`.
     // Measured, not inferred from the diff: that body holds NO `DecisionTemplate` (zero matches),
     // so it is not a third carrier and the carrier assertion below is unchanged by it. It is
-    // also deliberately absent from the `filter_state_for_viewer` redaction loop: CR 706.2 makes
-    // die results public information (the die is rolled openly), exactly as CR 705.1 does for
-    // `CoinFlipKeepChoice`, which is likewise unredacted.
+    // also deliberately absent from the `filter_state_for_viewer` redaction loop. That omission is
+    // engine convention carrying no CR annotation — no Comprehensive Rule states that die results
+    // are public information — and mirrors `CoinFlipKeepChoice`, which is likewise unredacted.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(
