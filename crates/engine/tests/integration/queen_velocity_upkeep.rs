@@ -80,8 +80,9 @@ fn any_upkeep_activation_timing_allows_either_players_upkeep_only() {
     );
 }
 
-// CR 602.2 + CR 602.5b: an explicit any-player permission and the timing
-// restriction both apply when a noncontroller activates the ability.
+// CR 602.1b + CR 602.2 + CR 602.5: an explicit any-player permission allows
+// noncontroller activation, but the timing instruction still restricts it.
+// CR 503.1: the upkeep step gives players a priority window for activation.
 #[test]
 fn opponent_can_activate_any_player_abilities_only_during_either_upkeep() {
     let cards = [

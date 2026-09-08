@@ -43215,7 +43215,8 @@ fn flip_n_coins_emits_flip_coins_variant() {
     );
 }
 
-/// CR 614.10: controller and targeted forms share the same optional count grammar.
+/// CR 614.10: skipping a future turn replaces that turn with nothing.
+/// Controller and targeted phrases share the parser's optional count grammar.
 #[test]
 fn skip_next_turn_parses_controller_and_targeted_singular_plural_forms() {
     for (text, expected_count) in [

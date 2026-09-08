@@ -9683,7 +9683,7 @@ fn parse_activation_turn_window(i: &str) -> OracleResult<'_, ActivationTurnWindo
     .parse(i)
 }
 
-/// CR 602.5b: the composed `during <role> <window>` activation gate — the
+/// CR 602.1b: the composed `during <role> <window>` activation gate — the
 /// shared prefix is consumed once, then each axis by its own sub-combinator.
 fn parse_activation_during_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
     preceded(
@@ -9753,8 +9753,8 @@ fn opponents_upkeep_activation_restriction() -> ActivationRestriction {
     }
 }
 
-/// "Any upkeep" has no player-scope predicate: it permits activation during
-/// the upkeep step of either player's turn.
+/// CR 602.1b + CR 503.1: activation instructions can restrict activation to
+/// the upkeep step. "Any upkeep" imposes no active-player restriction.
 fn any_upkeep_activation_restriction() -> ActivationRestriction {
     ActivationRestriction::RequiresCondition {
         condition: Some(ParsedCondition::IsDuringUpkeep),
