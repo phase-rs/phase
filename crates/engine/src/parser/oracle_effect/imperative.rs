@@ -8415,11 +8415,8 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
         // "their" is ambiguous (controller vs owner vs plural antecedent)
         // and would mis-classify "each player shuffles their library".
         // "your library" leaves owner_library: false (the default).
-        // TODO(CR 400.3): When `owner_library: true`, the `Shuffle` sub_ability
-        // produced by `with_shuffle_sub_ability` still targets `Controller`,
-        // so a stolen creature shuffles its current controller's library
-        // instead of its owner's. Fixing this requires lifting `Effect::Shuffle`
-        // to accept an owner-of-target binding (separate commit).
+        // `with_shuffle_sub_ability` publishes the prospective subject owners
+        // before delivery, then scopes the terminal shuffle to that typed set.
         let owner_library = nom_primitives::scan_at_word_boundaries(lower, |input| {
             alt((
                 value((), tag::<_, _, OracleError<'_>>("its owner's library")),
@@ -8624,7 +8621,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             // CR 701.24c + CR 400.3: `target` and `owner_library` are
             // populated by `parse_shuffle_ast`'s combinator-based pronoun /
             // possessive classification. See the construction site for the
-            // detection grammar and the TODO on the `Shuffle` sub-target.
+            // detection grammar and the owner-scoped terminal Shuffle.
             let effect = Effect::ChangeZone {
                 origin: None,
                 destination: Zone::Library,

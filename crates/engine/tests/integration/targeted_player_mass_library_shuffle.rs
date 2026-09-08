@@ -63,6 +63,41 @@ fn reminisce_moves_and_shuffles_only_the_target_players_graveyard() {
     assert_eq!(shuffled_players, vec![P1]);
 }
 
+/// CR 701.24a: The designated player still shuffles when the prospective
+/// graveyard population is empty. The participant ledger, rather than a moved
+/// object, carries the target player through to the terminal shuffle.
+#[test]
+fn reminisce_empty_graveyard_still_shuffles_the_target_player() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let reminisce = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reminisce", false, REMINISCE_ORACLE)
+        .id();
+    scenario.add_card_to_library_top(P0, "Caster Library Card");
+    scenario.add_card_to_library_top(P1, "Target Library Card");
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(reminisce).target_player(P1).resolve();
+
+    let shuffled_players: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled_players,
+        vec![P1],
+        "the empty designated set must still publish and shuffle P1"
+    );
+}
+
 const HEAD_GAMES_ORACLE: &str = "Target opponent puts the cards from their hand on top of their library. Search that player's library for that many cards. The player puts those cards into their hand, then shuffles.";
 
 /// CR 701.23a + CR 701.24a: Head Games searches and shuffles the targeted

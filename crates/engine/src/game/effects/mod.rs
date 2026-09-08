@@ -7336,6 +7336,10 @@ pub(crate) fn prospective_subject_participants(
         .iter()
         .filter_map(|id| state.objects.get(id).map(|object| object.owner))
         .collect();
+    participants.extend(ability.targets.iter().filter_map(|target| match target {
+        TargetRef::Player(player) => Some(*player),
+        _ => None,
+    }));
     if ability.player_scope.is_some() {
         participants.extend(ability.scoped_player);
     }
@@ -35336,10 +35340,9 @@ mod tests {
     }
 
     /// CR 608.2c + CR 701.24a + CR 701.24c/d: Each player's whole-hand move
-    /// and terminal shuffle stay local to that player, while the draw tail is
-    /// detached until every player has completed the shuffle process.
+    /// terminal shuffle, and EventContextAmount draw stay local to that player.
     #[test]
-    fn all_player_hand_shuffle_keeps_shuffle_local_and_draws_after_the_scope() {
+    fn all_player_hand_shuffle_and_event_count_draw_stay_local() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
         let source = ObjectId(900);
         let players = [PlayerId(0), PlayerId(1), PlayerId(2)];
@@ -35431,10 +35434,10 @@ mod tests {
         let first_draw = events
             .iter()
             .position(|event| matches!(event, GameEvent::CardDrawn { .. }))
-            .expect("the detached draw tail emitted card-draw events");
+            .expect("the local draw emitted card-draw events");
         assert!(
-            last_shuffle < first_draw,
-            "the draw tail must start only after every scoped move/shuffle pass"
+            first_draw < last_shuffle,
+            "the first player's local draw must precede the last player's shuffle"
         );
     }
 
