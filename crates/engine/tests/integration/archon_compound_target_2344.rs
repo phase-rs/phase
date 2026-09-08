@@ -87,6 +87,17 @@ fn compound_target_opponent_chosen_once_and_all_three_effects_apply() {
                  target slot, got {}",
                 target_slots.len()
             );
+            assert_eq!(
+                target_slots[0].legal_targets.len(),
+                2,
+                "both opponents, and only opponents, must be legal targets"
+            );
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Player(P1)),
+                "the first opponent must remain a legal target"
+            );
             assert!(
                 target_slots[0]
                     .legal_targets
