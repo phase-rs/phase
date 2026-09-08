@@ -2488,7 +2488,7 @@ mod tests {
             "Option consumer".to_string(),
             Zone::Hand,
         );
-        let option_draw = create_object(
+        create_object(
             &mut state,
             CardId(91_864),
             P0,
@@ -2937,7 +2937,7 @@ mod tests {
     #[test]
     fn held_fuse_right_half_history_payoff_is_paired_and_resolves() {
         let (mut state, congregate) = funded_zero_congregate_state();
-        let draw = create_object(
+        create_object(
             &mut state,
             CardId(91_870),
             P0,
@@ -3034,7 +3034,7 @@ mod tests {
     #[test]
     fn held_cleave_history_payload_is_paired_and_resolves() {
         let (mut state, congregate) = funded_zero_congregate_state();
-        let draw = create_object(
+        create_object(
             &mut state,
             CardId(91_871),
             P0,
@@ -3112,7 +3112,7 @@ mod tests {
             "Filtered exile consumer".to_string(),
             Zone::Exile,
         );
-        let filtered_draw = create_object(
+        create_object(
             &mut state,
             CardId(91_865),
             P0,
@@ -5011,7 +5011,7 @@ mod tests {
         let issued = engine::ai_support::candidate_actions(runner.state());
         assert!(
             cast_is_retained_from_issued(runner.state(), spell, issued.clone()),
-            "a tapped {Q} source makes the engine-issued Auto cast strategically relevant"
+            "a tapped {{Q}} source makes the engine-issued Auto cast strategically relevant"
         );
         let cast = issued
             .into_iter()
