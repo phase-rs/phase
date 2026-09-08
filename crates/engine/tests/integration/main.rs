@@ -1164,6 +1164,7 @@ mod talon_gates_from_hand_activation;
 mod tap_cost_another_self_exclusion;
 mod target_choice_kind_7692;
 mod targeted_exchange_preview_budget;
+mod targeted_player_mass_library_shuffle;
 mod tchaka_venerable_king;
 mod teamwork_aggregate_legal_actions;
 mod teamwork_origin_composition;
