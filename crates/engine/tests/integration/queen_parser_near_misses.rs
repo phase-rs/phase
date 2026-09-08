@@ -12,7 +12,7 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -21,6 +21,7 @@ use super::rules::run_combat;
 
 const QUEEN_OF_DALE: &str = "Whenever an opponent casts their first noncreature spell each turn, you recruit. (Draw a card, then discard a card. If you discarded a nonland card, create a 1/1 white Human Soldier creature token.)";
 const ASSIMILATE_ESSENCE: &str = "Counter target creature or battle spell unless its controller pays {4}. If they do, you incubate 2. (Create an Incubator token with two +1/+1 counters on it and \"{2}: Transform this token.\" It transforms into a 0/0 Phyrexian artifact creature.)";
+const EXCISE_THE_IMPERFECT: &str = "Exile target nonland permanent. Its controller incubates X, where X is its mana value. (They create an Incubator token with X +1/+1 counters on it and \"{2}: Transform this token.\" It transforms into a 0/0 Phyrexian artifact creature.)";
 const NECROGEN_ROTPRIEST: &str = "Toxic 2 (Players dealt combat damage by this creature also get two poison counters.)\nWhenever a creature you control with toxic deals combat damage to a player, that player gets an additional poison counter.\n{1}{B}{G}: Target creature you control with toxic gains deathtouch until end of turn.";
 const AWAKENED_INFERNO: &str = "This spell can't be countered.\n[+2]: Each opponent gets an emblem with \"At the beginning of your upkeep, this emblem deals 1 damage to you.\"\n[−3]: Chandra deals 3 damage to each non-Elemental creature.\n[−X]: Chandra deals X damage to target creature or planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.";
 const DRESSED_TO_KILL: &str = "[+1]: Add {R}. Chandra deals 1 damage to up to one target player or planeswalker.\n[+1]: Exile the top card of your library. If it's red, you may cast it this turn.\n[−7]: Exile the top five cards of your library. You may cast red spells from among them this turn. You get an emblem with \"Whenever you cast a red spell, this emblem deals X damage to any target, where X is the amount of mana spent to cast that spell.\"";
@@ -370,6 +371,59 @@ fn assimilate_essence_paid_unless_creates_controller_incubator_with_two_counters
             .get(&CounterType::Plus1Plus1)
             .copied(),
         Some(2)
+    );
+}
+
+/// Pinned AtomicCards Oracle: Excise's second instruction belongs to the
+/// controller of the permanent exiled by the first. CR 608.2c applies the
+/// instructions in order; CR 701.53a makes that controller's Incubator with
+/// the exiled permanent's mana value in +1/+1 counters.
+#[test]
+fn excise_the_imperfect_exiled_permanents_controller_incubates_its_mana_value() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario
+        .add_creature(P1, "P1's Four-Mana Permanent", 2, 2)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let excise = scenario
+        .add_spell_to_hand_from_oracle(P0, "Excise the Imperfect", true, EXCISE_THE_IMPERFECT)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(excise).target_object(target).resolve();
+    assert_eq!(
+        runner.state().objects[&target].zone,
+        Zone::Exile,
+        "Excise must exile the chosen nonland permanent before incubating"
+    );
+
+    let incubators = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| {
+            object.is_token && object.zone == Zone::Battlefield && object.name == "Incubator"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(incubators.len(), 1, "exactly one Incubator must be created");
+    assert_eq!(
+        incubators[0].controller, P1,
+        "the exiled permanent's controller, not Excise's caster, incubates"
+    );
+    assert_eq!(
+        incubators[0]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        Some(4),
+        "Incubator counters equal the exiled permanent's known mana value"
+    );
+    assert!(
+        incubators
+            .iter()
+            .all(|incubator| incubator.controller != P0),
+        "P0 must not receive an Incubator from P1's permanent"
     );
 }
 

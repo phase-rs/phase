@@ -8501,11 +8501,53 @@ mod tests {
             assert_eq!(stripped, predicate, "wrong predicate for {text:?}");
             let ability =
                 crate::parser::oracle_effect::parse_effect_chain(text, AbilityKind::Spell);
-            assert!(
-                !matches!(*ability.effect, Effect::Unimplemented { .. }),
-                "{text:?} must reach its existing imperative lowering, got {:?}",
-                ability.effect
-            );
+            if predicate == "incubate 2" {
+                assert!(matches!(
+                    ability.effect.as_ref(),
+                    Effect::Incubate {
+                        count: QuantityExpr::Fixed { value: 2 }
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    ability.effect.as_ref(),
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                ));
+                let discard = ability
+                    .sub_ability
+                    .as_deref()
+                    .expect("Recruit must discard");
+                assert!(matches!(
+                    discard.effect.as_ref(),
+                    Effect::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                ));
+                let token = discard
+                    .sub_ability
+                    .as_deref()
+                    .expect("Recruit must create a token");
+                assert!(matches!(
+                    token.effect.as_ref(),
+                    Effect::Token {
+                        power: PtValue::Fixed(1),
+                        toughness: PtValue::Fixed(1),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    token.condition.as_ref(),
+                    Some(
+                        crate::types::ability::AbilityCondition::DiscardedCardMatchesFilter {
+                            filter: TargetFilter::Not { .. }
+                        }
+                    )
+                ));
+            }
         }
     }
 

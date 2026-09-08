@@ -23358,20 +23358,23 @@ fn lower_subject_predicate_ast(
             if let Some(wrapped) = wrap_target_subject_damage(clause.clone(), &subject) {
                 return wrapped;
             }
-            // CR 608.2c + CR 109.4 + CR 701.16a: `Effect::Investigate` is a
-            // fieldless unit variant with no player slot for `inject_subject_target`
-            // to stamp the subject onto, so an explicit non-caster subject ("That
-            // player investigates" — Declaration in Stone, where "that player" is
-            // the controller of the exiled target) would be silently dropped and
-            // the Clue handed to the caster. Record the subject as a pending
-            // `player_scope` (consumed by the effect-chain loop) so resolution fans
-            // the Investigate out to the anchored player instead. Only lifts an
-            // explicit parent-target player anaphor; a bare "investigate" leaves
-            // `affected == SelfRef`/`Controller` and is untouched (caster default).
-            if matches!(clause.effect, Effect::Investigate) {
+            // CR 608.2c + CR 109.4 + CR 701.16a + CR 701.53a: Investigate and
+            // Incubate have no player slot for `inject_subject_target` to stamp
+            // the subject onto. An explicit non-caster subject ("That player
+            // investigates" / "Its controller incubates") must therefore become
+            // a pending `player_scope`, so the effect-chain loop resolves the
+            // fieldless effect as the anchored player. A bare predicate retains
+            // `affected == SelfRef`/`Controller` and the caster default.
+            if matches!(clause.effect, Effect::Investigate | Effect::Incubate { .. }) {
                 if let Some(scope) = player_scope_from_parent_target_subject(&affected) {
                     ctx.pending_player_scope = Some(scope);
                 }
+            }
+
+            // CR 701.16a + CR 608.2c + CR 400.7: only Investigate supports the
+            // "for each ... this way" repetition grammar below. Incubate carries
+            // its own count expression and must not inherit this repeat-for path.
+            if matches!(clause.effect, Effect::Investigate) {
                 // CR 701.16a + CR 608.2c + CR 400.7: "investigate FOR EACH nontoken
                 // creature exiled this way" — the fieldless Investigate carries no
                 // count slot, so lift the "for each <filter> … this way" suffix to a

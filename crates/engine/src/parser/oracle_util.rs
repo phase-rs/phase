@@ -924,6 +924,7 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
     "this aura",
     "this vehicle",
     "this planeswalker",
+    // CR 114.1 + CR 114.3: An emblem is an object, usually nameless; this phrase refers to that source.
     "this emblem",
     "this battle",
     "this token",
