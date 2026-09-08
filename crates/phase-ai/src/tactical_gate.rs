@@ -15,19 +15,19 @@ use engine::game::functioning_abilities::{
 };
 use engine::game::quantity::{
     ability_definition_has_only_unbound_variable_quantities_for_pre_cast,
-    ability_definition_is_cast_stable_for_pre_cast, quantity_is_cast_stable_for_pre_cast,
-    static_definition_is_cast_stable_for_pre_cast, try_resolve_quantity_in_source_context,
+    ability_definition_is_cast_stable_for_pre_cast, additional_cost_is_cast_stable_for_pre_cast,
+    modal_choice_is_cast_stable_for_pre_cast, quantity_is_cast_stable_for_pre_cast,
+    static_definition_is_cast_stable_for_pre_cast, trigger_definition_is_cast_stable_for_pre_cast,
+    try_resolve_quantity_in_source_context,
 };
 use engine::game::triggers::{
     synthetic_keyword_spell_cast_trigger_applies, trigger_definition_functions_in_zone,
 };
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    CastingRestriction, ContinuousModification, CostCategory, Effect, ParsedCondition, PtValue,
-    TargetFilter, TargetRef, TriggerCondition, TypeFilter, TypedFilter,
+    ContinuousModification, CostCategory, Effect, PtValue, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
-#[cfg(test)]
-use engine::types::ability::{StaticCondition, StaticDefinition};
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -595,6 +595,14 @@ fn object_has_cast_unstable_consumer(
     object: &engine::game::game_object::GameObject,
 ) -> bool {
     !object.casting_restrictions.is_empty()
+        || object
+            .modal
+            .as_ref()
+            .is_some_and(|modal| !modal_choice_is_cast_stable_for_pre_cast(modal))
+        || object
+            .additional_cost
+            .as_ref()
+            .is_some_and(|cost| !additional_cost_is_cast_stable_for_pre_cast(cost))
         || object.abilities.iter().any(|ability| {
             ability_has_cast_unstable_consumer(ability)
                 && !(object.zone == Zone::Battlefield
@@ -624,36 +632,17 @@ fn mana_ability_has_only_unbound_variable_quantities(definition: &AbilityDefinit
     ability_definition_has_only_unbound_variable_quantities_for_pre_cast(definition)
 }
 
-fn casting_restriction_has_cast_unstable_condition(_: &CastingRestriction) -> bool {
+#[cfg(test)]
+fn casting_restriction_has_cast_unstable_condition(
+    _: &engine::types::ability::CastingRestriction,
+) -> bool {
     true
 }
 
 fn trigger_definition_has_cast_unstable_consumer(
     definition: &engine::types::ability::TriggerDefinition,
 ) -> bool {
-    definition
-        .condition
-        .as_ref()
-        .is_some_and(|condition| !trigger_condition_is_cast_stable_for_pre_cast(condition))
-        || definition
-            .execute
-            .as_deref()
-            .is_some_and(ability_has_cast_unstable_consumer)
-}
-
-fn trigger_condition_is_cast_stable_for_pre_cast(condition: &TriggerCondition) -> bool {
-    match condition {
-        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
-            quantity_is_cast_stable_for_pre_cast(lhs) && quantity_is_cast_stable_for_pre_cast(rhs)
-        }
-        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => conditions
-            .iter()
-            .all(trigger_condition_is_cast_stable_for_pre_cast),
-        TriggerCondition::Not { condition } => {
-            trigger_condition_is_cast_stable_for_pre_cast(condition)
-        }
-        _ => false,
-    }
+    !trigger_definition_is_cast_stable_for_pre_cast(definition)
 }
 
 /// Storm and Surge share `KeywordKind::Unknown` with other keyword variants.
@@ -1533,9 +1522,10 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use engine::types::ability::{
-        AbilityCondition, BounceSelection, CardTypeSetSource, CastingPermission, Comparator,
-        CountScope, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-        FilterProp, ManaProduction, ModalChoice, MultiTargetSpec, PlayerScope, QuantityExpr,
+        AbilityCondition, AbilityCost, AdditionalCost, BounceSelection, CardTypeSetSource,
+        CastingPermission, CastingRestriction, Comparator, CountScope, CounterCostSelection,
+        DelayedTriggerCondition, Duration, EffectKind, FilterProp, ManaProduction, ModalChoice,
+        MultiTargetSpec, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
         QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, SubAbilityLink,
         TargetFilter, TurnJournalKind, REMOVE_COUNTER_COST_X,
     };
@@ -2739,6 +2729,341 @@ mod tests {
             runner.state().players[P0.0 as usize].hand.len(),
             hand_before_attack + 1,
             "Rhino's production attack trigger draws after Bountiful Harvest's mana-value-five cast"
+        );
+    }
+
+    #[test]
+    fn zero_harvest_cast_sensitive_attack_filter_is_paired_and_resolves() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let attacker = scenario.add_vanilla(P0, 1, 1);
+        let harvest = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bountiful Harvest",
+                false,
+                "You gain 1 life for each land you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        scenario.with_library_top(P0, &["attack-filter draw"]);
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 4));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state.objects.get_mut(&attacker).unwrap().mana_cost = ManaCost::generic(1);
+
+        let hook = add_battlefield_trigger(state, 91_004, TriggerMode::Attacks);
+        let cast_count = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        };
+        {
+            let trigger = state.objects.get_mut(&hook).expect("attack hook exists");
+            trigger.trigger_definitions[0].definition.valid_source = Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: cast_count,
+                }]),
+            ));
+            trigger.trigger_definitions[0].definition.execute =
+                Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )));
+        }
+
+        assert_eq!(harvest_amount(state, harvest), Some(0));
+        assert!(
+            trigger_definition_has_cast_unstable_consumer(
+                &state.objects[&hook].trigger_definitions[0].definition
+            ),
+            "the live mana-value threshold in valid_source must reach the engine-owned trigger proof"
+        );
+        assert!(
+            zero_cast_is_retained(state, harvest),
+            "the engine-issued zero Harvest is retained because it enables the later attack trigger"
+        );
+
+        let mut without_filter = state.clone();
+        without_filter
+            .objects
+            .get_mut(&hook)
+            .expect("paired hook exists")
+            .trigger_definitions
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&without_filter, harvest),
+            "removing only the cast-sensitive attack trigger restores known-zero rejection"
+        );
+
+        let mut before_harvest = engine::game::scenario::GameRunner::from_state(state.clone());
+        let hand_before_unenabled_attack = before_harvest.state().players[P0.0 as usize].hand.len();
+        {
+            let state = before_harvest.state_mut();
+            state.phase = Phase::BeginCombat;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        before_harvest
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(attacker, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .expect("the production combat reducer accepts the unenabled one-mana attack");
+        before_harvest.pass_both_players();
+        assert_eq!(
+            before_harvest.state().players[P0.0 as usize].hand.len(),
+            hand_before_unenabled_attack,
+            "before Harvest, the one-mana attacker misses the zero spell-count threshold"
+        );
+
+        runner.cast(harvest).resolve();
+        let hand_before_attack = runner.state().players[P0.0 as usize].hand.len();
+        {
+            let state = runner.state_mut();
+            state.phase = Phase::BeginCombat;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(attacker, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .expect("the production combat reducer accepts the one-mana attack");
+        runner.pass_both_players();
+        assert_eq!(
+            runner.state().players[P0.0 as usize].hand.len(),
+            hand_before_attack + 1,
+            "the production attack trigger draws only after Harvest records its spell cast"
+        );
+    }
+
+    #[test]
+    fn zero_harvest_graveyard_additional_cost_is_paired_and_payable() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let harvest = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bountiful Harvest",
+                false,
+                "You gain 1 life for each land you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let held_draw = scenario
+            .add_spell_to_hand(P0, "Graveyard Payment Draw", true)
+            .with_mana_cost(ManaCost::zero())
+            .from_oracle_text("Draw a card.")
+            .with_additional_cost(AdditionalCost::Required(AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            }))
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 4));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+
+        assert_eq!(harvest_amount(state, harvest), Some(0));
+        assert!(
+            !engine::ai_support::candidate_actions(state).iter().any(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == held_draw)
+            }),
+            "the production availability authority rejects the held spell before a graveyard card exists"
+        );
+        assert!(
+            zero_cast_is_retained(state, harvest),
+            "a held graveyard additional cost is an object-level cast consumer"
+        );
+        let mut without_cost = state.clone();
+        without_cost
+            .objects
+            .get_mut(&held_draw)
+            .expect("held draw exists")
+            .additional_cost = None;
+        assert!(
+            !zero_cast_is_retained(&without_cost, harvest),
+            "removing only the object additional cost restores known-zero rejection"
+        );
+
+        runner.cast(harvest).resolve();
+        assert_eq!(runner.state().objects[&harvest].zone, Zone::Graveyard);
+        let cast = engine::ai_support::candidate_actions(runner.state())
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == held_draw)
+            })
+            .expect("Harvest makes the held spell castable")
+            .action;
+        runner
+            .act(cast)
+            .expect("the production cast enters additional-cost payment");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: engine::types::game_state::PayCostKind::ExileFromZone {
+                    zone: engine::types::zones::ExileCostSourceZone::Graveyard,
+                },
+                count: 1,
+                ..
+            }
+        ));
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![harvest],
+            })
+            .expect("the Harvest card pays the held spell's required exile cost");
+        assert_eq!(runner.state().objects[&harvest].zone, Zone::Exile);
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.id == held_draw),
+            "the held Draw spell reaches the stack after the production payment"
+        );
+    }
+
+    #[test]
+    fn zero_harvest_modal_chooser_is_paired_and_routes_to_the_new_player() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_vanilla(P0, 1, 1);
+        let harvest = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bountiful Harvest",
+                false,
+                "You gain 1 life for each land you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let modal_spell = scenario
+            .add_spell_to_hand(P0, "Live Chooser Instant", true)
+            .with_mana_cost(ManaCost::zero())
+            .from_oracle_text("You gain 1 life.")
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 4));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let spell_count = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery))),
+            },
+        };
+        let object = state
+            .objects
+            .get_mut(&modal_spell)
+            .expect("modal spell exists");
+        object.modal = Some(ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            chooser: PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                comparator: Comparator::LE,
+                count: Box::new(spell_count),
+            },
+            ..Default::default()
+        });
+        *Arc::make_mut(&mut object.abilities) = vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: Some(TargetFilter::Controller),
+                },
+            ),
+        ];
+
+        assert_eq!(harvest_amount(state, harvest), Some(0));
+        assert!(zero_cast_is_retained(state, harvest));
+        let mut without_modal = state.clone();
+        without_modal
+            .objects
+            .get_mut(&modal_spell)
+            .expect("modal spell exists")
+            .modal = None;
+        assert!(
+            !zero_cast_is_retained(&without_modal, harvest),
+            "removing only the live chooser metadata restores known-zero rejection"
+        );
+
+        let mut before_harvest = state.clone();
+        let before_cast = engine::ai_support::candidate_actions(&before_harvest)
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == modal_spell)
+            })
+            .expect("the modal instant is initially castable")
+            .action;
+        engine::game::engine::apply_as_current(&mut before_harvest, before_cast)
+            .expect("the production casting reducer opens the initial mode choice");
+        assert!(matches!(
+            before_harvest.waiting_for,
+            WaitingFor::ModeChoice { player: P1, .. }
+        ));
+
+        runner.cast(harvest).resolve();
+        let after_cast = engine::ai_support::candidate_actions(runner.state())
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == modal_spell)
+            })
+            .expect("the modal instant remains castable after Harvest")
+            .action;
+        runner
+            .act(after_cast)
+            .expect("the production casting reducer opens the updated mode choice");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ModeChoice { player: P0, .. }
+        ));
+        assert_eq!(
+            runner
+                .state()
+                .spells_cast_this_turn_by_player
+                .get(&P0)
+                .map_or(0, |spells| spells.len()),
+            1,
+            "the instant's unfinalized own cast does not inflate the sorcery-only chooser threshold"
         );
     }
 

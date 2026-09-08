@@ -23,7 +23,8 @@ use crate::types::ability::{
     ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis, QuantityExpr, QuantityRef,
     RepeatContinuation, ResolvedAbility, RoundingMode, StaticCondition, StaticDefinition,
     SubtypeExclusion, TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause,
-    TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -749,7 +750,9 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         && unless_pay
             .as_ref()
             .is_none_or(|modifier| ability_cost_is_cast_stable_for_pre_cast(&modifier.cost))
-        && modal.as_ref().is_none_or(modal_is_cast_stable_for_pre_cast)
+        && modal
+            .as_ref()
+            .is_none_or(modal_choice_is_cast_stable_for_pre_cast)
         && repeat_for
             .as_ref()
             .is_none_or(quantity_is_cast_stable_for_pre_cast)
@@ -986,15 +989,49 @@ fn target_constraint_is_cast_stable_for_pre_cast(constraint: &TargetSelectionCon
     }
 }
 
-fn modal_is_cast_stable_for_pre_cast(modal: &crate::types::ability::ModalChoice) -> bool {
+/// Returns whether every mode-selection input is unchanged by the ordinary cast
+/// considered by the tactical gate.
+///
+/// Text, fixed mana costs, and scalar mode limits carry no game-state read.
+/// The chooser and every dynamic condition do, so they are positively proved
+/// here rather than being omitted from a quantity-only walk.
+pub fn modal_choice_is_cast_stable_for_pre_cast(
+    modal: &crate::types::ability::ModalChoice,
+) -> bool {
     modal
         .dynamic_max_choices
         .as_ref()
         .is_none_or(quantity_is_cast_stable_for_pre_cast)
+        && matches!(modal.chooser, PlayerFilter::Controller)
         && modal
             .constraints
             .iter()
             .all(modal_constraint_is_cast_stable_for_pre_cast)
+}
+
+/// Returns whether an object-level additional-cost choice can remain unchanged
+/// by the ordinary cast considered by the tactical gate.
+///
+/// The object carries this metadata independently from its ability tree, so it
+/// must be checked at the object boundary instead of assuming a mirrored
+/// ability field. Each choice shape delegates its payment payload to the same
+/// cost proof used by abilities.
+pub fn additional_cost_is_cast_stable_for_pre_cast(
+    additional_cost: &crate::types::ability::AdditionalCost,
+) -> bool {
+    match additional_cost {
+        crate::types::ability::AdditionalCost::Optional { cost, .. }
+        | crate::types::ability::AdditionalCost::Required(cost) => {
+            ability_cost_is_cast_stable_for_pre_cast(cost)
+        }
+        crate::types::ability::AdditionalCost::Kicker { costs, .. } => {
+            costs.iter().all(ability_cost_is_cast_stable_for_pre_cast)
+        }
+        crate::types::ability::AdditionalCost::Choice(first, second) => {
+            ability_cost_is_cast_stable_for_pre_cast(first)
+                && ability_cost_is_cast_stable_for_pre_cast(second)
+        }
+    }
 }
 
 fn modal_constraint_is_cast_stable_for_pre_cast(constraint: &ModalSelectionConstraint) -> bool {
@@ -1036,6 +1073,85 @@ fn static_condition_is_cast_stable_for_pre_cast(condition: &StaticCondition) -> 
         }
         // Every other condition either reads a changing game fact or carries a
         // filter whose nested quantities are not a cast-stability proof.
+        _ => false,
+    }
+}
+
+/// Returns whether every cast-sensitive trigger payload is proven unchanged by
+/// the ordinary cast considered by the tactical gate.
+///
+/// This is intentionally an exhaustive positive proof over `TriggerDefinition`.
+/// Trigger mode and scalar event discriminators select an event family but do
+/// not read mutable state themselves; descriptions are presentation text.
+/// Filters, clauses, constraints, and tax costs are semantic consumers and
+/// therefore must be absent unless a dedicated proof is added below.
+pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefinition) -> bool {
+    let TriggerDefinition {
+        mode: _,
+        execute,
+        valid_card: None,
+        origin: _,
+        origin_zones: _,
+        zone_change_clauses,
+        destination: _,
+        destination_constraint: _,
+        trigger_zones: _,
+        phase: _,
+        optional: _,
+        damage_kind: _,
+        secondary: _,
+        valid_target: None,
+        valid_subject_player: None,
+        valid_source: None,
+        spell_cast_origin: _,
+        description: _,
+        constraint: None,
+        condition,
+        counter_filter: _,
+        saga_chapter: _,
+        unless_pay: None,
+        batched: _,
+        die_sides: _,
+        expend_threshold: _,
+        attack_target_filter: _,
+        player_actions: _,
+        scry_bottom_count: _,
+        damage_amount: _,
+        life_amount: _,
+        coin_flip_result: _,
+        die_result: _,
+        taps_for_mana_produced: _,
+        mana_ability_produced: _,
+        clash_result: _,
+        room_door: _,
+    } = definition
+    else {
+        return false;
+    };
+
+    zone_change_clauses.is_empty()
+        && condition
+            .as_ref()
+            .is_none_or(trigger_condition_is_cast_stable_for_pre_cast)
+        && execute
+            .as_deref()
+            .is_none_or(ability_definition_is_cast_stable_for_pre_cast)
+}
+
+fn trigger_condition_is_cast_stable_for_pre_cast(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_is_cast_stable_for_pre_cast(lhs) && quantity_is_cast_stable_for_pre_cast(rhs)
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => conditions
+            .iter()
+            .all(trigger_condition_is_cast_stable_for_pre_cast),
+        TriggerCondition::Not { condition } => {
+            trigger_condition_is_cast_stable_for_pre_cast(condition)
+        }
+        // Every other trigger condition reads a game, event, filter, or journal
+        // fact that the ordinary cast can change. Keep the cast when it is not
+        // explicitly proven stable above.
         _ => false,
     }
 }
