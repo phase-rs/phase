@@ -9116,8 +9116,10 @@ fn node_slot_filters(ability: &ResolvedAbility) -> NodeSlotFilters {
 ///     condition is a DIFFERENT authority from the one that produced `Legacy`.
 ///     BASE's `retarget_slot_violation` is a no-op at a position exactly when
 ///
-///         mana_multi_role(&ability.effect).is_none()
-///             && paired_subject_slot_filters(&ability.effect).next().is_none()
+///     ```text
+///     mana_multi_role(&ability.effect).is_none()
+///         && paired_subject_slot_filters(&ability.effect).next().is_none()
+///     ```
 ///
 ///     (its `filters.is_empty()` early-out). `Legacy` is produced by
 ///     `node_slot_filters`' `NotDerivable` verdict or by its arity gate
