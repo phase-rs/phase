@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use engine::ai_support::{
     is_targeted_exchange_root, targeted_exchange_verdict, AiDecisionContext, CandidateAction,
@@ -6,6 +6,7 @@ use engine::ai_support::{
 };
 use engine::game::casting::{
     effective_spell_cost, spell_cost_is_payable_from_pool, spell_has_effective_keywords,
+    spell_objects_available_to_cast,
 };
 use engine::game::combat::AttackTarget;
 use engine::game::functioning_abilities::{
@@ -21,8 +22,8 @@ use engine::game::triggers::{
 };
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    ContinuousModification, CostCategory, Effect, PtValue, StaticDefinition, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    CastingRestriction, ContinuousModification, CostCategory, Effect, ParsedCondition, PtValue,
+    StaticCondition, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
@@ -530,39 +531,101 @@ fn cast_history_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool
         && std::iter::once(caster)
             .chain(engine::game::players::teammates(state, caster))
             .any(|player| {
-                state.players[player.0 as usize].hand.iter().any(|spell| {
-                    state.objects.get(spell).is_some_and(|object| {
+                spell_objects_available_to_cast(state, player)
+                    .into_iter()
+                    .filter_map(|spell| state.objects.get(&spell))
+                    .filter(|object| spell_identity_is_available_to_caster(state, caster, object))
+                    .any(|object| {
                         object
                             .keywords
                             .iter()
                             .any(|keyword| matches!(keyword, Keyword::Surge(_)))
                     })
-                })
             });
+
+    // The casting authority includes hand, permission-backed exile/graveyard/
+    // command cards, and top-of-library permissions. Only a card identity the
+    // caster can actually observe may affect hard candidate support.
+    let castable_spells: HashSet<_> = spell_objects_available_to_cast(state, caster)
+        .into_iter()
+        .collect();
 
     enables_surge
         || state.objects.values().any(|object| {
-            matches!(object.zone, Zone::Hand | Zone::Battlefield | Zone::Stack)
-                && object
-                    .abilities
-                    .iter()
-                    .any(ability_uses_cast_history_quantity)
+            (matches!(object.zone, Zone::Battlefield | Zone::Stack)
+                || castable_spells.contains(&object.id)
+                    && spell_identity_is_available_to_caster(state, caster, object))
+                && object_uses_cast_history_quantity(object)
         })
-        || state.objects.values().any(|object| {
-            matches!(
-                object.zone,
-                Zone::Hand | Zone::Stack | Zone::Command | Zone::Graveyard | Zone::Exile
-            ) && object.static_definitions.iter_all().any(|definition| {
-                matches!(definition.affected, Some(TargetFilter::SelfRef))
-                    && definition.active_zones.contains(&object.zone)
-                    && static_cost_modifier_uses_cast_history_quantity(definition)
+        || castable_spells.iter().any(|object_id| {
+            state.objects.get(object_id).is_some_and(|object| {
+                spell_identity_is_available_to_caster(state, caster, object)
+                    && object
+                        .static_definitions
+                        .as_slice()
+                        .iter()
+                        .any(|definition| {
+                            matches!(definition.affected, Some(TargetFilter::SelfRef))
+                                && definition.active_zones.contains(&object.zone)
+                                && static_cost_modifier_uses_cast_history(definition)
+                        })
             })
         })
         || game_functioning_statics(state)
-            .any(|(_, definition)| static_cost_modifier_uses_cast_history_quantity(definition))
+            .any(|(_, definition)| static_cost_modifier_uses_cast_history(definition))
+}
+
+fn spell_identity_is_available_to_caster(
+    state: &GameState,
+    caster: PlayerId,
+    object: &engine::game::game_object::GameObject,
+) -> bool {
+    object.zone.is_public()
+        || object.zone == Zone::Hand && object.owner == caster
+        || state.viewer_knows_card_identity(caster, object.id)
 }
 
 fn ability_uses_cast_history_quantity(definition: &AbilityDefinition) -> bool {
+    definition
+        .condition
+        .as_ref()
+        .is_some_and(ability_condition_uses_cast_history)
+        || definition
+            .activation_restrictions
+            .iter()
+            .any(activation_restriction_uses_cast_history)
+        || definition
+            .cost_reduction
+            .as_ref()
+            .and_then(|reduction| reduction.condition.as_ref())
+            .is_some_and(parsed_condition_uses_cast_history)
+        || definition
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_uses_cast_history_quantity)
+        || definition
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_uses_cast_history_quantity)
+        || definition
+            .mode_abilities
+            .iter()
+            .any(ability_uses_cast_history_quantity)
+        || ability_effect_uses_cast_history_quantity(definition)
+}
+
+fn object_uses_cast_history_quantity(object: &engine::game::game_object::GameObject) -> bool {
+    object
+        .casting_restrictions
+        .iter()
+        .any(casting_restriction_uses_cast_history)
+        || object
+            .abilities
+            .iter()
+            .any(ability_uses_cast_history_quantity)
+}
+
+fn ability_effect_uses_cast_history_quantity(definition: &AbilityDefinition) -> bool {
     let mut uses_cast_history = false;
     let _ = visit_ability_def(definition, &mut |effect| {
         effect.for_each_quantity_expr(&mut |quantity| {
@@ -577,14 +640,78 @@ fn ability_uses_cast_history_quantity(definition: &AbilityDefinition) -> bool {
     uses_cast_history
 }
 
-fn static_cost_modifier_uses_cast_history_quantity(definition: &StaticDefinition) -> bool {
+fn ability_condition_uses_cast_history(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_expr_uses_cast_history(lhs) || quantity_expr_uses_cast_history(rhs)
+        }
+        AbilityCondition::ConditionInstead { inner }
+        | AbilityCondition::Not { condition: inner } => ability_condition_uses_cast_history(inner),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(ability_condition_uses_cast_history)
+        }
+        _ => false,
+    }
+}
+
+fn activation_restriction_uses_cast_history(restriction: &ActivationRestriction) -> bool {
     matches!(
-        &definition.mode,
-        StaticMode::ModifyCost {
-            dynamic_count: Some(quantity),
-            ..
-        } if quantity_ref_uses_cast_history(quantity)
+        restriction,
+        ActivationRestriction::RequiresCondition {
+            condition: Some(condition)
+        } if parsed_condition_uses_cast_history(condition)
     )
+}
+
+fn casting_restriction_uses_cast_history(restriction: &CastingRestriction) -> bool {
+    matches!(
+        restriction,
+        CastingRestriction::RequiresCondition {
+            condition: Some(condition)
+        } if parsed_condition_uses_cast_history(condition)
+    )
+}
+
+fn parsed_condition_uses_cast_history(condition: &ParsedCondition) -> bool {
+    match condition {
+        ParsedCondition::QuantityVsEachOpponent { lhs, rhs, .. } => {
+            quantity_ref_uses_cast_history(lhs) || quantity_ref_uses_cast_history(rhs)
+        }
+        ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_uses_cast_history(lhs) || quantity_expr_uses_cast_history(rhs)
+        }
+        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => {
+            conditions.iter().any(parsed_condition_uses_cast_history)
+        }
+        ParsedCondition::Not { condition } => parsed_condition_uses_cast_history(condition),
+        _ => false,
+    }
+}
+
+fn static_cost_modifier_uses_cast_history(definition: &StaticDefinition) -> bool {
+    let StaticMode::ModifyCost { dynamic_count, .. } = &definition.mode else {
+        return false;
+    };
+    dynamic_count
+        .as_ref()
+        .is_some_and(quantity_ref_uses_cast_history)
+        || definition
+            .condition
+            .as_ref()
+            .is_some_and(static_condition_uses_cast_history)
+}
+
+fn static_condition_uses_cast_history(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_uses_cast_history(lhs) || quantity_expr_uses_cast_history(rhs)
+        }
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(static_condition_uses_cast_history)
+        }
+        StaticCondition::Not { condition } => static_condition_uses_cast_history(condition),
+        _ => false,
+    }
 }
 
 fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: ObjectId) -> bool {
@@ -1440,26 +1567,29 @@ fn unblocked_attack_becomes_lethal(
 mod tests {
     use super::*;
     use crate::config::{create_config, AiDifficulty, Platform};
+    use crate::determinize::determinize_opponents;
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::combat::{AttackerInfo, CombatState};
+    use engine::game::deck_loading::DeckEntry;
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use engine::types::ability::{
-        AbilityCondition, BounceSelection, CardTypeSetSource, Comparator, CountScope,
-        CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, FilterProp,
-        ManaProduction, ModalChoice, MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef,
-        ResolvedAbility, StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter,
-        TurnJournalKind, REMOVE_COUNTER_COST_X,
+        AbilityCondition, BounceSelection, CardTypeSetSource, CastingPermission, Comparator,
+        CountScope, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
+        FilterProp, ManaProduction, ModalChoice, MultiTargetSpec, PlayerScope, QuantityExpr,
+        QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, SubAbilityLink,
+        TargetFilter, TurnJournalKind, REMOVE_COUNTER_COST_X,
     };
     use engine::types::ability::{
         QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
     };
+    use engine::types::card::CardFace;
     use engine::types::counter::{CounterMatch, CounterType};
     use engine::types::game_state::{
-        DelayedTrigger, NextSpellModifier, PendingCast, PendingNextSpellModifier, StackEntry,
-        StackEntryKind, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
-        WaitingFor,
+        CastingVariant, DelayedTrigger, NextSpellModifier, PendingCast, PendingNextSpellModifier,
+        PlayerDeckPool, StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress,
+        TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::CardId;
     use engine::types::keywords::{Keyword, WardCost};
@@ -2136,6 +2266,232 @@ mod tests {
         assert!(
             !zero_cast_is_retained(&state, congregate),
             "removing only the Surge payoff restores known-zero rejection"
+        );
+    }
+
+    #[test]
+    fn zero_cast_second_spell_condition_payoff_is_paired_and_changes_runtime_cost() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let uthros = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Uthros Psionicist",
+                1,
+                1,
+                "The second spell you cast each turn costs {2} less to cast.",
+            )
+            .id();
+        let bountiful_harvest = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bountiful Harvest",
+                false,
+                "You gain 1 life for each land you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let second_spell = scenario
+            .add_creature_to_hand(P0, "Second-spell witness", 1, 1)
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 6));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+
+        assert_eq!(
+            effective_spell_cost(state, P0, second_spell),
+            Some(ManaCost::generic(2)),
+            "the condition is false before the first spell is cast"
+        );
+        assert!(
+            zero_cast_is_retained(state, bountiful_harvest),
+            "the supported second-spell condition must retain the first zero cast"
+        );
+
+        let mut without_payoff = state.clone();
+        without_payoff.objects.remove(&uthros);
+        without_payoff
+            .battlefield
+            .retain(|object_id| *object_id != uthros);
+        assert!(
+            !zero_cast_is_retained(&without_payoff, bountiful_harvest),
+            "removing only the Uthros condition payoff restores known-zero rejection"
+        );
+
+        runner.cast(bountiful_harvest).resolve();
+        assert_eq!(
+            effective_spell_cost(runner.state(), P0, second_spell),
+            Some(ManaCost::zero()),
+            "the production cost authority activates the second-spell reduction"
+        );
+        let mana_before_second_spell = runner.state().players[P0.0 as usize].mana_pool.total();
+        runner.cast(second_spell).resolve();
+        assert_eq!(
+            runner.state().players[P0.0 as usize].mana_pool.total(),
+            mana_before_second_spell,
+            "the condition-based reduction changes the actual second-spell payment"
+        );
+    }
+
+    #[test]
+    fn zero_cast_plotted_lock_and_load_payoff_is_paired() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let congregate = scenario
+            .add_spell_to_hand_from_oracle(P0, "Congregate", true, CONGREGATE_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::White],
+            })
+            .id();
+        let lock_and_load = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Lock and Load",
+                false,
+                "Draw a card, then draw a card for each other instant and sorcery spell you've cast this turn.\nPlot {3}{U} (You may pay {3}{U} and exile this card from your hand. Cast it as a sorcery on a later turn without paying its mana cost. Plot only as a sorcery.)",
+            )
+            .id();
+        scenario.with_library_top(P0, &["Lock and Load draw 1", "Lock and Load draw 2"]);
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 3));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::White, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state.turn_number = 2;
+        state.players[P0.0 as usize]
+            .hand
+            .retain(|object_id| *object_id != lock_and_load);
+        state.exile.push_back(lock_and_load);
+        let object = state
+            .objects
+            .get_mut(&lock_and_load)
+            .expect("Lock and Load exists");
+        object.zone = Zone::Exile;
+        object
+            .casting_permissions
+            .push(CastingPermission::Plotted { turn_plotted: 1 });
+
+        assert!(
+            spell_objects_available_to_cast(state, P0).contains(&lock_and_load),
+            "the production permission authority admits the plotted public exile card"
+        );
+        assert!(
+            zero_cast_is_retained(state, congregate),
+            "a plotted public Lock and Load payoff retains the prior zero cast"
+        );
+
+        let mut payoff_witness = engine::game::scenario::GameRunner::from_state(state.clone());
+        payoff_witness.cast(congregate).target_player(P0).resolve();
+        payoff_witness
+            .cast(lock_and_load)
+            .casting_variant(CastingVariant::Plot)
+            .resolve()
+            .assert_hand_drawn(P0, 2);
+
+        state
+            .objects
+            .get_mut(&lock_and_load)
+            .expect("Lock and Load exists")
+            .casting_permissions
+            .clear();
+        assert!(
+            !spell_objects_available_to_cast(state, P0).contains(&lock_and_load),
+            "removing only Plot permission makes the exile card unavailable"
+        );
+        assert!(
+            !zero_cast_is_retained(state, congregate),
+            "the unavailable exile card no longer defeats known-zero rejection"
+        );
+    }
+
+    fn hidden_cast_history_payoff_face() -> CardFace {
+        let mut face = CardFace {
+            name: "Hidden cast-history payoff".to_string(),
+            mana_cost: ManaCost::generic(1),
+            ..Default::default()
+        };
+        face.card_type.core_types.push(CoreType::Instant);
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+        ));
+        face
+    }
+
+    #[test]
+    fn hidden_sampled_cast_history_identity_cannot_change_zero_cast_support() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let hidden = create_object(
+            &mut state,
+            CardId(91_704),
+            P1,
+            "Hidden slot".to_string(),
+            Zone::Hand,
+        );
+        state.players[P1.0 as usize].hand.push_back(hidden);
+        state.deck_pools.push(PlayerDeckPool {
+            player: P1,
+            current_main: Arc::new(vec![
+                DeckEntry {
+                    card: hidden_cast_history_payoff_face(),
+                    count: 1,
+                },
+                DeckEntry {
+                    card: CardFace {
+                        name: "Hidden non-payoff".to_string(),
+                        mana_cost: ManaCost::generic(1),
+                        ..Default::default()
+                    },
+                    count: 1,
+                },
+            ]),
+            ..Default::default()
+        });
+
+        let mut sampled_identities = HashSet::new();
+        let mut sampled_support = HashSet::new();
+        for seed in 0..64 {
+            let mut rng = ChaCha20Rng::seed_from_u64(seed);
+            let sampled = determinize_opponents(&state, P0, &mut rng);
+            sampled_identities.insert(
+                sampled
+                    .objects
+                    .get(&hidden)
+                    .expect("sampled hidden slot exists")
+                    .name
+                    .clone(),
+            );
+            sampled_support.insert(zero_cast_is_retained(&sampled, congregate));
+        }
+
+        assert!(
+            sampled_identities.contains("Hidden cast-history payoff")
+                && sampled_identities.contains("Hidden non-payoff"),
+            "the paired samples must reach both hidden identities"
+        );
+        assert_eq!(
+            sampled_support,
+            HashSet::from([false]),
+            "hidden opponent identities must not change hard zero-cast candidate support"
         );
     }
 
