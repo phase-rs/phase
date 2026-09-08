@@ -52,6 +52,7 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 
 use super::anti_self_harm::extract_damage_amount;
 use super::context::PolicyContext;
@@ -126,10 +127,54 @@ fn ability_is_deferrable(ability: &AbilityDefinition) -> bool {
 /// The end step is deliberately NOT here either, but for a different reason —
 /// it is the *patient* window, the one a held ability is being saved for, and
 /// `FetchLandPatiencePolicy` already treats it as the correct time to act.
-fn is_low_information_window(state: &GameState) -> bool {
+///
+/// # Why `ai_player` must control no beginning-of-upkeep trigger
+///
+/// CR 503.1a: "at the beginning of your upkeep" triggers are put on the stack
+/// BEFORE the active player ever receives priority for the step — and once
+/// they're on the stack, `state.stack` is non-empty, so THIS predicate does
+/// not fire yet (correctly: a live stack is `StackResponse` territory, not a
+/// quiet window). But every one of those triggers must still be responded to
+/// and resolved before the stack empties again, and priority then returns to
+/// exactly the same shape this predicate matches — `Phase::Upkeep`, empty
+/// stack, `Priority` — this time AFTER something already happened. Left
+/// unguarded, that second window reads as identically "nothing has happened
+/// yet" as the pristine first one, even when the resolved trigger drew a
+/// card (Phyrexian Arena), scried, or revealed information. Excluding it
+/// whenever `ai_player` controls ANY such trigger source is deliberately
+/// coarse rather than trying to classify which triggers are
+/// information-producing: CR 503.1a guarantees such a trigger is ALREADY
+/// queued (and, by the time the stack is next empty, already resolved)
+/// before the truly first grant, so the pristine window this predicate wants
+/// is provably unreachable whenever one exists — there is no non-conservative
+/// case being given up.
+fn is_low_information_window(state: &GameState, ai_player: PlayerId) -> bool {
     state.phase == Phase::Upkeep
         && state.stack.is_empty()
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !controls_beginning_of_upkeep_trigger(state, ai_player)
+}
+
+/// Does `player` control a permanent with a printed "at the beginning of your
+/// upkeep" trigger (CR 503.1a)? Deliberately NOT gated on the trigger
+/// currently functioning — `Definitions::iter_unchecked` is the sanctioned
+/// classification-only accessor (engine runtime paths use the CR-gated
+/// `functioning_*` helpers instead; this is neither, so a source under a
+/// static suppression still counts). That is the safe direction: this
+/// predicate exists only to EXCLUDE a window from patience-gating, so
+/// over-including a source that could not actually have fired only means the
+/// policy declines to nudge a few boards it safely could have — never the
+/// reverse.
+fn controls_beginning_of_upkeep_trigger(state: &GameState, player: PlayerId) -> bool {
+    state.battlefield.iter().any(|&id| {
+        state.objects.get(&id).is_some_and(|object| {
+            object.controller == player
+                && object.trigger_definitions.iter_unchecked().any(|entry| {
+                    let def = entry.definition();
+                    def.mode == TriggerMode::Phase && def.phase == Some(Phase::Upkeep)
+                })
+        })
+    })
 }
 
 /// Is this activation part of a line that can end the game now? CR 104.3b — a
@@ -176,7 +221,7 @@ impl TacticalPolicy for ActivationPatiencePolicy {
             return na();
         };
 
-        if !is_low_information_window(ctx.state) {
+        if !is_low_information_window(ctx.state, ctx.ai_player) {
             return na();
         }
 
@@ -197,10 +242,17 @@ impl TacticalPolicy for ActivationPatiencePolicy {
             return PolicyVerdict::neutral(PolicyReason::new("activation_patience_lethal_line"));
         }
 
-        // Escape hatch 3 — CR 602.5: an activated ability's condition is checked
-        // when activation begins. One that holds now may not hold later, so
-        // waiting is not free. `ConditionGatedActivationPolicy` owns that
-        // judgement.
+        // Escape hatch 3 — CR 608.2c: `ability.condition` on an ACTIVATED
+        // ability (as opposed to a triggered ability's CR 603.4 intervening-if)
+        // gates the PAYOFF at resolution, not the activation itself — CR 602.5
+        // has no bearing here; per the Shelldock Isle ruling `condition_gated_
+        // activation.rs`'s own module doc already cites, activating is legal
+        // regardless of whether the condition holds (the effect simply does
+        // nothing if it's false at resolution). What makes patience wrong here
+        // is narrower: a condition that's TRUE now may not still be true after
+        // waiting, so deferring risks losing a real payoff for a purely
+        // informational gain. `ConditionGatedActivationPolicy` is this hatch's
+        // mirror image — it prices activating while the condition is FALSE.
         if ctx
             .effective_activated_ability()
             .is_some_and(|ability| ability.condition.is_some())

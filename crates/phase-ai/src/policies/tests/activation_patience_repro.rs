@@ -276,9 +276,21 @@ fn phase_draw_is_not_gated() {
     assert_eq!(delta, 0.0);
 }
 
-/// Review finding (PR #8696): escape hatch 3 (an unmet intervening-if
-/// condition — CR 602.5) had no test, unlike its two siblings. A regression
-/// deleting that branch would have passed this suite silently.
+/// Review finding (PR #8696): escape hatch 3 had no test, unlike its two
+/// siblings, AND its CR citation was wrong twice over — first as CR 603.4
+/// (a TRIGGERED ability's intervening-if), then, in a maintainer fixup, as
+/// CR 602.5 ("a player can't begin to activate a PROHIBITED ability" —
+/// summoning-sickness-gated tap costs, "activate only once each turn",
+/// "activate only as a sorcery"). Neither describes this shape. Agadeem
+/// Occultist's trailing "if" is a PAYOFF condition on an ACTIVATED ability,
+/// evaluated at resolution per CR 608.2c — activating it is legal regardless
+/// of whether the condition holds; only the effect can do nothing. This is
+/// the exact class `condition_gated_activation.rs`'s own module doc already
+/// describes correctly for hideaway lands: "the payoff ability IS legal to
+/// activate under the threshold ... and it correctly does nothing at
+/// resolution (CR 608.2c) when the condition is false." A regression deleting
+/// the escape-hatch branch itself would still have passed this suite
+/// silently, independent of the citation error — this test closes both gaps.
 ///
 /// Agadeem Occultist's activated ability ("{T}: Put target creature card from
 /// an opponent's graveyard onto the battlefield under your control if its mana
@@ -326,8 +338,88 @@ fn a_conditional_ability_overrides_patience() {
     let (delta, reason) = score_and_reason(&verdict_for(&board));
     assert_eq!(
         reason, "activation_patience_conditional",
-        "an ability with an intervening-if condition (CR 602.5) must stand down: the \
-         condition holding now may not hold later, so waiting is not free"
+        "an activated ability's resolution-time payoff condition (CR 608.2c) must stand \
+         down patience: activation is legal either way, but a condition TRUE now may not \
+         still be true after waiting, risking the payoff for no real gain"
+    );
+    assert_eq!(delta, 0.0);
+}
+
+/// Review finding (PR #8696): `is_low_information_window` treated EVERY
+/// empty-stack `Phase::Upkeep` priority state as the pristine "nothing has
+/// happened yet" window. CR 503.1a queues "at the beginning of your upkeep"
+/// triggers onto the stack BEFORE the active player's first priority grant —
+/// so once such a trigger exists and resolves, priority returns to the SAME
+/// shape (`Phase::Upkeep`, empty stack, `Priority`) a SECOND time, now
+/// post-resolution. An unguarded predicate cannot tell the two apart, so an
+/// information-producing trigger (Phyrexian Arena's "you draw a card and you
+/// lose 1 life", verified against `data/card-data.json`) can resolve and the
+/// policy still penalises the very next activation as though the AI "hasn't
+/// drawn yet" — when, for that turn's extra card, it already has.
+///
+/// This does not attempt to distinguish the truly-first grant from a
+/// post-resolution one (that needs engine-level provenance the AI has no way
+/// to observe from a single `GameState` snapshot). Instead it is deliberately
+/// coarse in the safe direction: ANY permanent the AI controls with a printed
+/// "at the beginning of your upkeep" trigger (`TriggerMode::Phase` +
+/// `phase: Some(Phase::Upkeep)`) stands the whole gate down for the AI's
+/// upkeep, because CR 503.1a guarantees such a trigger is ALREADY queued (and,
+/// by the time the stack is next empty, already resolved) before the
+/// genuinely pristine window — so that window is provably unreachable
+/// whenever one exists, and nothing is being given up by excluding it.
+#[test]
+fn an_upkeep_trigger_source_disables_the_whole_gate() {
+    let mut ids = Ids::new();
+    let mut state = GameState::new_two_player(4242);
+    state.phase = Phase::Upkeep;
+    state.active_player = AI;
+    state.priority_player = AI;
+
+    let pinger = creature(
+        &mut state,
+        &mut ids,
+        AI,
+        "Prodigal Sorcerer",
+        1,
+        1,
+        Some("{T}: This creature deals 1 damage to any target."),
+    );
+    creature(&mut state, &mut ids, OPP, "Wall", 1, 5, None);
+
+    // A separate permanent carrying Phyrexian Arena's real, verified upkeep
+    // trigger. Card type is irrelevant to the predicate under test (it reads
+    // `trigger_definitions`, not `core_types`), so the shared `creature()`
+    // builder is reused rather than adding a second, enchantment-flavored one.
+    let arena_trigger = parse_oracle_text(
+        "At the beginning of your upkeep, you draw a card and you lose 1 life.",
+        "Phyrexian Arena",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    )
+    .triggers
+    .into_iter()
+    .next()
+    .expect("Phyrexian Arena parses one triggered ability");
+    let arena = creature(&mut state, &mut ids, AI, "Phyrexian Arena", 0, 0, None);
+    state
+        .objects
+        .get_mut(&arena)
+        .unwrap()
+        .trigger_definitions
+        .push(arena_trigger);
+
+    state.players[AI.0 as usize].life = 20;
+    state.players[OPP.0 as usize].life = 20;
+    state.waiting_for = WaitingFor::Priority { player: AI };
+    let board = Board { state, pinger };
+
+    let (delta, reason) = score_and_reason(&verdict_for(&board));
+    assert_eq!(
+        reason, "activation_patience_na",
+        "an upkeep-trigger source on the AI's own board must disable the low-information \
+         gate entirely: whatever resolved before this priority window (possibly a real draw) \
+         already invalidates the 'wait, you haven't drawn yet' premise"
     );
     assert_eq!(delta, 0.0);
 }
