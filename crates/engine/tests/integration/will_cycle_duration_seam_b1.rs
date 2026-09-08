@@ -129,6 +129,31 @@ fn v1_leading_until_end_of_turn_head_no_longer_blocks_the_permission() {
     let (g_freq, g_mode) = permission_mode(&headless);
     assert_eq!(*g_freq, CastFrequency::Unlimited);
     assert_eq!(*g_mode, CardPlayMode::Play);
+
+    // THE WINDOW MUST NOT NARROW THE PERMISSION.
+    //
+    // This row was the gap that let a real bug through. The two assertions above
+    // compare `frequency` and `play_mode` between the windowed and headless
+    // forms, and both matched — while `affected`, the field that decides WHICH
+    // graveyard cards the permission actually offers, silently differed:
+    //
+    //     headless  -> Or[ Typed[Land], Typed[Card] ]   (play lands AND cast spells)
+    //     windowed  -> Typed[Land]                      (the cast half, gone)
+    //
+    // Cause: `try_parse_unlimited_combined_graveyard_permission` — the only
+    // branch that builds the two-part filter — requires a leading
+    // `"you may play "`, and the duration-head strip ran AFTER it. A windowed
+    // sentence fell through to the single-verb dispatch instead.
+    //
+    // Invisible to every parse-shape assertion in this suite, and only
+    // observable at runtime through `graveyard_permission_sources`, which reads
+    // `affected` to decide what a player may cast. Comparing the two forms'
+    // FULL definitions is what closes that class.
+    assert_eq!(
+        def.affected, headless.affected,
+        "CR 611.2a: a stated window scopes the permission, it must not narrow which \
+         cards the permission covers — windowed and headless must agree"
+    );
 }
 
 #[test]
