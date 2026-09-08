@@ -35342,11 +35342,11 @@ mod tests {
     /// CR 608.2c + CR 701.24a + CR 701.24c/d: Each player's whole-hand move
     /// terminal shuffle, and EventContextAmount draw stay local to that player.
     #[test]
-    fn all_player_hand_shuffle_and_event_count_draw_stay_local() {
+    fn great_aurora_three_players_draw_their_local_moved_counts() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
         let source = ObjectId(900);
         let players = [PlayerId(0), PlayerId(1), PlayerId(2)];
-        for (player, hand_count) in players.into_iter().zip([9, 3, 7]) {
+        for (player, hand_count) in players.into_iter().zip([0, 2, 4]) {
             for card in 0..hand_count {
                 create_object(
                     &mut state,
@@ -35367,40 +35367,17 @@ mod tests {
             }
         }
 
-        let mut move_hand = ResolvedAbility::new(
-            hand_to_library_effect(TargetFilter::ScopedPlayer),
-            vec![],
-            source,
-            PlayerId(0),
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            "Each player shuffles all cards from their hand and all permanents they own into their library, then draws that many cards.",
+            AbilityKind::Spell,
         );
-        move_hand.player_scope = Some(PlayerFilter::All);
-        let mut shuffle = ResolvedAbility::new(
-            Effect::Shuffle {
-                target: TargetFilter::ScopedPlayer,
-            },
-            vec![],
-            source,
-            PlayerId(0),
-        );
-        let mut draw = ResolvedAbility::new(
-            Effect::Draw {
-                count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
-                target: TargetFilter::ScopedPlayer,
-            },
-            vec![],
-            source,
-            PlayerId(0),
-        );
-        draw.player_scope = Some(PlayerFilter::All);
-        shuffle.sub_ability = Some(Box::new(draw));
-        move_hand.sub_ability = Some(Box::new(shuffle));
+        let ability =
+            crate::game::ability_utils::build_resolved_from_def(&definition, source, PlayerId(0));
 
         let mut events = Vec::new();
-        resolve_ability_chain(&mut state, &move_hand, &mut events, 0).unwrap();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
-        for (player, expected_draws) in players.into_iter().zip([9, 3, 7]) {
+        for (player, expected_draws) in players.into_iter().zip([0, 2, 4]) {
             assert_eq!(
                 state.players[player.0 as usize].cards_drawn_this_turn, expected_draws,
                 "P{} must draw exactly the number of cards they moved",

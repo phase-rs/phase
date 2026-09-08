@@ -2456,8 +2456,9 @@ mod tests {
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, FilterProp, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr,
-        QuantityRef, StaticDefinition, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, FilterProp, MultiTargetSpec, PlayerFilter,
+        PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+        StaticDefinition, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
         TypedFilter,
     };
     use crate::types::actions::GameAction;
@@ -2468,6 +2469,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{ProhibitionScope, StaticMode};
     use std::sync::Arc;
 
@@ -9616,6 +9618,174 @@ mod tests {
                 }
             )),
             "CantShuffle suppresses the terminal Shuffle and the paused member moves"
+        );
+    }
+
+    /// CR 614.12 + CR 701.24a: A parser-produced owner shuffle publishes its
+    /// complete owner population before the first replacement pause and keeps
+    /// that same ledger through every resumed member. The terminal shuffle then
+    /// runs once for the designated owner after both moves complete.
+    #[test]
+    fn prospective_owner_shuffle_survives_repeated_replacement_pauses() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let first = create_object(
+            &mut state,
+            CardId(9_601),
+            PlayerId(0),
+            "First owned permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(9_602),
+            PlayerId(0),
+            "Second owned permanent".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [first, second] {
+            state
+                .objects
+                .get_mut(&id)
+                .expect("owned permanent exists")
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        let replacement_source = create_object(
+            &mut state,
+            CardId(9_603),
+            PlayerId(1),
+            "Optional library redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement_source)
+            .expect("replacement source exists")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    ))
+                    .destination_zone(Zone::Library),
+            );
+
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            "Shuffle all permanents you own into your library.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            definition.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ));
+        let ability = crate::game::ability_utils::build_resolved_from_def(
+            &definition,
+            ObjectId(9_600),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("owner shuffle reaches its first replacement pause");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let set_id = state
+            .chain_tracked_set_id
+            .expect("prospective publication establishes a tracked set");
+        assert_eq!(
+            state.tracked_object_sets.get(&set_id),
+            Some(&vec![first, second])
+        );
+        assert_eq!(
+            state.tracked_set_participants.get(&set_id),
+            Some(&vec![(
+                PlayerId(0),
+                ThisWayCause::OwnerLibraryShuffleSubject
+            )])
+        );
+
+        let first_resume = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("decline first redirect");
+        events.extend(first_resume.events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(state.chain_tracked_set_id, Some(set_id));
+        assert!(state.tracked_set_participants.get(&set_id).is_some_and(
+            |ledger| ledger.contains(&(PlayerId(0), ThisWayCause::OwnerLibraryShuffleSubject))
+        ));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )),
+            "the first resumed member must retain terminal-shuffle suppression"
+        );
+
+        let second_resume =
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+                .expect("decline second redirect");
+        events.extend(second_resume.events);
+        assert_eq!(state.objects[&first].zone, Zone::Library);
+        assert_eq!(state.objects[&second].zone, Zone::Library);
+        let shuffle_instructions = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Shuffle,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            shuffle_instructions, 1,
+            "the resumed chain must execute exactly one terminal Shuffle instruction"
+        );
+        let shuffled_players: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                    ..
+                } => Some(*player_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shuffled_players,
+            vec![PlayerId(0)],
+            "the two resumed members must not auto-shuffle before the one terminal shuffle"
         );
     }
 
