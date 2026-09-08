@@ -13,6 +13,7 @@ pub(crate) mod feature;
 pub(crate) mod relation;
 pub(crate) mod replacement;
 pub(crate) mod static_ir;
+pub mod trace;
 pub(crate) mod trigger;
 
 #[cfg(test)]

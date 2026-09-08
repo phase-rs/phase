@@ -7,7 +7,9 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
+use crate::parser::oracle_ir::trace::OuterRoute;
 use crate::parser::oracle_ir::trigger::TriggerNodeIr;
+use crate::parser::{parse_oracle_text, parse_oracle_text_traced};
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCost, ActivationRestriction, Effect, TargetChoiceTiming, TriggerCondition,
@@ -49,6 +51,95 @@ fn parse_two_layer_with_keywords(
     let mut ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
     let lowered = lower_oracle_ir(&mut ir);
     (ir, lowered)
+}
+
+#[test]
+fn parser_trace_uses_production_output_and_records_real_item_routes() {
+    let text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a nontoken creature, create a 2/2 black Zombie creature token.";
+    let keywords = vec!["Exploit".to_string()];
+    let types = vec!["Creature".to_string()];
+    let subtypes = vec!["Zombie".to_string()];
+    let traced = parse_oracle_text_traced(text, "Skull Skaab", &keywords, &types, &subtypes);
+    let ordinary = parse_oracle_text(text, "Skull Skaab", &keywords, &types, &subtypes);
+
+    assert_eq!(
+        serde_json::to_value(&traced.production_output).expect("serialize traced output"),
+        serde_json::to_value(&ordinary).expect("serialize ordinary output")
+    );
+    assert!(traced
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Trigger));
+    assert!(traced
+        .events
+        .iter()
+        .all(|event| event.span.first_line <= event.span.last_line));
+    let unique_items = traced
+        .events
+        .iter()
+        .map(|event| event.item_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique_items.len(),
+        traced.events.len(),
+        "one outer event per emitted item"
+    );
+}
+
+#[test]
+fn parser_trace_skull_skaab_pair_preserves_input_difference_and_omits_trigger_carrier() {
+    let left_text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a nontoken creature, create a 2/2 black Zombie creature token.";
+    let right_text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a creature, create a 2/2 black Zombie creature token.";
+    let keywords = vec!["Exploit".to_string()];
+    let types = vec!["Creature".to_string()];
+    let subtypes = vec!["Zombie".to_string()];
+    let left = parse_oracle_text_traced(left_text, "Skull Skaab", &keywords, &types, &subtypes);
+    let right = parse_oracle_text_traced(right_text, "A-Skull Skaab", &keywords, &types, &subtypes);
+
+    assert_ne!(left.normalized_source, right.normalized_source);
+    assert!(left
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Trigger));
+    assert!(right
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Trigger));
+    assert!(left
+        .omitted_evidence
+        .iter()
+        .any(|evidence| evidence.identity_sensitive_omission));
+    assert!(right
+        .omitted_evidence
+        .iter()
+        .any(|evidence| evidence.identity_sensitive_omission));
+}
+
+#[test]
+fn parser_trace_distinguishes_routes_that_emit_spell_ir() {
+    let activated = parse_oracle_text_traced(
+        "{T}: Add {G}.",
+        "Test Druid",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let imperative = parse_oracle_text_traced(
+        "Draw a card.",
+        "Test Spell",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+
+    assert!(activated
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::Activated));
+    assert!(imperative
+        .events
+        .iter()
+        .any(|event| event.route == OuterRoute::ImperativeEffect));
 }
 
 /// CR 707.9a + CR 602.1a: generic activated abilities are emitted as native

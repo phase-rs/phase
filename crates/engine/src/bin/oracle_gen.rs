@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::thread;
@@ -12,12 +14,19 @@ use engine::database::mtgjson::{
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::set_catalog::load_set_catalog;
 use engine::database::synthesis::{
-    build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
+    build_oracle_face, build_oracle_face_multi, layout_faces, map_layout,
+    prepare_oracle_parser_input, LayoutKind,
 };
 use engine::database::{set_gating, BracketLists, BracketSignals, CardDatabase};
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
+use engine::parser::oracle_ir::trace::{
+    canonicalize_events, classify_collapse, sha256_bytes, sha256_json, sha256_string, CensusFace,
+    FaceCounts, FaceRef, OuterRoute, OuterRouteCensusRow, PairManifest, PairOmittedEvidence,
+    PairReport, ParserTrace, ParserTraceReport, StageComparison, TraceStage,
+};
+use engine::parser::parse_oracle_text_traced;
 use engine::types::card::{CardFace, CardLayout, Rarity};
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +63,312 @@ struct CardExportEntry {
     /// flags are false to keep card-data.json compact.
     #[serde(default, skip_serializing_if = "is_clean_signals")]
     bracket_signals: BracketSignals,
+    #[serde(skip)]
+    trace_input: Option<OracleTraceInput>,
+}
+
+#[derive(Debug, Clone)]
+struct OracleTraceInput {
+    oracle_text: String,
+    card_name: String,
+    mtgjson_keyword_names: Vec<String>,
+    types: Vec<String>,
+    subtypes: Vec<String>,
+    has_cleave_variant: bool,
+}
+
+impl OracleTraceInput {
+    fn from_atomic(source: &AtomicCard, skip_mtgjson_keywords: bool) -> Self {
+        let input = prepare_oracle_parser_input(source, skip_mtgjson_keywords);
+        Self {
+            oracle_text: input.oracle_text,
+            card_name: input.card_name,
+            mtgjson_keyword_names: input.keyword_names,
+            types: input.types,
+            subtypes: input.subtypes,
+            has_cleave_variant: input.has_cleave_variant,
+        }
+    }
+
+    fn trace(&self) -> ParserTrace {
+        parse_oracle_text_traced(
+            &self.oracle_text,
+            &self.card_name,
+            &self.mtgjson_keyword_names,
+            &self.types,
+            &self.subtypes,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParserTraceArgs {
+    pairs: PathBuf,
+    output: PathBuf,
+}
+
+fn parse_trace_args(args: &[String]) -> Result<(Option<ParserTraceArgs>, Vec<String>), String> {
+    let mut pairs = None;
+    let mut output = None;
+    let mut remaining = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        let slot = match args[index].as_str() {
+            "--parser-trace-pairs" => Some(&mut pairs),
+            "--parser-trace-out" => Some(&mut output),
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            if slot.is_some() {
+                return Err(format!("duplicate trace flag: {}", args[index]));
+            }
+            index += 1;
+            let value = args
+                .get(index)
+                .filter(|value| !value.starts_with('-'))
+                .ok_or_else(|| format!("{} requires a path argument", args[index - 1]))?;
+            *slot = Some(PathBuf::from(value));
+        } else {
+            remaining.push(args[index].clone());
+        }
+        index += 1;
+    }
+    match (pairs, output) {
+        (None, None) => Ok((None, remaining)),
+        (Some(pairs), Some(output)) => Ok((Some(ParserTraceArgs { pairs, output }), remaining)),
+        _ => Err("--parser-trace-pairs and --parser-trace-out must be supplied together".into()),
+    }
+}
+
+fn load_pair_manifest(path: &Path) -> Result<PairManifest, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut manifest: PairManifest =
+        serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "unsupported pair manifest schema_version {}",
+            manifest.schema_version
+        ));
+    }
+    manifest.pairs.sort();
+    let mut seen = BTreeSet::new();
+    for pair in &manifest.pairs {
+        if pair.left_card_face_key == pair.right_card_face_key {
+            return Err(format!(
+                "pair uses the same key twice: {}",
+                pair.left_card_face_key
+            ));
+        }
+        let canonical = if pair.left_card_face_key <= pair.right_card_face_key {
+            (&pair.left_card_face_key, &pair.right_card_face_key)
+        } else {
+            (&pair.right_card_face_key, &pair.left_card_face_key)
+        };
+        if !seen.insert(canonical) {
+            return Err(format!(
+                "duplicate pair: {} / {}",
+                pair.left_card_face_key, pair.right_card_face_key
+            ));
+        }
+    }
+    Ok(manifest)
+}
+
+fn stage_comparison(stage: TraceStage, left_hash: String, right_hash: String) -> StageComparison {
+    StageComparison {
+        stage,
+        candidate_equal: left_hash == right_hash,
+        left_sha256: left_hash,
+        right_sha256: right_hash,
+    }
+}
+
+fn build_trace_report(
+    face_index: &BTreeMap<String, CardExportEntry>,
+    manifest: PairManifest,
+    card_data_bytes: &[u8],
+) -> Result<ParserTraceReport, String> {
+    for pair in &manifest.pairs {
+        for key in [&pair.left_card_face_key, &pair.right_card_face_key] {
+            if !face_index.contains_key(key) {
+                return Err(format!("unknown card_face_key: {key}"));
+            }
+        }
+    }
+    let mut traces: BTreeMap<String, Option<ParserTrace>> = BTreeMap::new();
+    let mut census: BTreeMap<OuterRoute, (usize, BTreeMap<String, String>)> = BTreeMap::new();
+    let mut unavailable = 0;
+    for (key, entry) in face_index {
+        let trace = entry.trace_input.as_ref().map(OracleTraceInput::trace);
+        if let Some(trace) = &trace {
+            for event in &trace.events {
+                let row = census.entry(event.route).or_default();
+                row.0 += 1;
+                row.1.insert(key.clone(), entry.face.name.clone());
+            }
+        } else {
+            unavailable += 1;
+        }
+        traces.insert(key.clone(), trace);
+    }
+    let mut pairs = Vec::with_capacity(manifest.pairs.len());
+    for pair in manifest.pairs {
+        let left_entry = &face_index[&pair.left_card_face_key];
+        let right_entry = &face_index[&pair.right_card_face_key];
+        let left = traces[&pair.left_card_face_key]
+            .as_ref()
+            .ok_or_else(|| format!("trace input unavailable: {}", pair.left_card_face_key))?;
+        let right = traces[&pair.right_card_face_key]
+            .as_ref()
+            .ok_or_else(|| format!("trace input unavailable: {}", pair.right_card_face_key))?;
+        let stages = vec![
+            stage_comparison(
+                TraceStage::OriginalSource,
+                sha256_string(&left.original_source),
+                sha256_string(&right.original_source),
+            ),
+            stage_comparison(
+                TraceStage::NormalizedSource,
+                sha256_string(&left.normalized_source),
+                sha256_string(&right.normalized_source),
+            ),
+            stage_comparison(
+                TraceStage::DocumentIr,
+                sha256_json(&left.document_ir_candidate),
+                sha256_json(&right.document_ir_candidate),
+            ),
+            stage_comparison(
+                TraceStage::RawLoweredIr,
+                sha256_json(&left.raw_lowered_candidate),
+                sha256_json(&right.raw_lowered_candidate),
+            ),
+            stage_comparison(
+                TraceStage::ProductionParsedOutput,
+                sha256_json(&left.production_candidate),
+                sha256_json(&right.production_candidate),
+            ),
+        ];
+        let mut collapse = classify_collapse(&stages);
+        if collapse.from == Some(TraceStage::DocumentIr) {
+            collapse.kind = "earliest_loss_unresolved".to_string();
+            collapse.from = None;
+        }
+        let mut left_events = left.events.clone();
+        let mut right_events = right.events.clone();
+        canonicalize_events("left", &mut left_events);
+        canonicalize_events("right", &mut right_events);
+        let left_routes = left_events
+            .iter()
+            .map(|event| event.route)
+            .collect::<BTreeSet<_>>();
+        let right_routes = right_events
+            .iter()
+            .map(|event| event.route)
+            .collect::<BTreeSet<_>>();
+        let mut shared_outer_routes = left_routes
+            .intersection(&right_routes)
+            .copied()
+            .collect::<Vec<_>>();
+        shared_outer_routes.sort_by_key(|route| route.stable_id());
+        let mut limitations = BTreeSet::from(["no_inner_recognizer_trace".to_string()]);
+        limitations.insert("earlier_stage_comparison_incomplete".to_string());
+        if left_entry
+            .trace_input
+            .as_ref()
+            .is_some_and(|input| input.has_cleave_variant)
+            || right_entry
+                .trace_input
+                .as_ref()
+                .is_some_and(|input| input.has_cleave_variant)
+        {
+            limitations.insert("cleave_variant_secondary_parse_out_of_scope".to_string());
+        }
+        if left_events.iter().chain(&right_events).any(|event| {
+            event.payload_visibility
+                != engine::parser::oracle_ir::trace::PayloadVisibility::NativeIr
+        }) {
+            limitations.insert("opaque_outer_payload".into());
+        }
+        pairs.push(PairReport {
+            left: FaceRef {
+                card_face_key: pair.left_card_face_key,
+                name: left_entry.face.name.clone(),
+            },
+            right: FaceRef {
+                card_face_key: pair.right_card_face_key,
+                name: right_entry.face.name.clone(),
+            },
+            collapse,
+            stages,
+            left_outer_route_events: left_events,
+            right_outer_route_events: right_events,
+            shared_outer_routes,
+            location_precision: "outer_document_route",
+            limitation_codes: limitations,
+            omitted_evidence: PairOmittedEvidence {
+                left: left.omitted_evidence.clone(),
+                right: right.omitted_evidence.clone(),
+            },
+        });
+    }
+    let mut outer_route_census = census
+        .into_iter()
+        .map(|(route, (event_count, faces))| {
+            let card_faces = faces
+                .into_iter()
+                .map(|(card_face_key, name)| CensusFace {
+                    card_face_key,
+                    name,
+                })
+                .collect::<Vec<_>>();
+            OuterRouteCensusRow {
+                route,
+                event_count,
+                face_count: card_faces.len(),
+                card_faces,
+            }
+        })
+        .collect::<Vec<_>>();
+    outer_route_census.sort_by_key(|row| row.route.stable_id());
+    Ok(ParserTraceReport {
+        schema_version: 1,
+        algorithm_version: "parser-stage-trace-v1",
+        card_data_sha256: sha256_bytes(card_data_bytes),
+        faces: FaceCounts {
+            winning_faces: face_index.len(),
+            traced_faces: face_index.len() - unavailable,
+            unavailable_events: unavailable,
+            faces_with_unavailable_events: unavailable,
+        },
+        pairs,
+        outer_route_census,
+    })
+}
+
+fn write_trace_report_atomic(path: &Path, report: &ParserTraceReport) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "trace output has no file name")
+    })?;
+    let temp = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        process::id()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        serde_json::to_writer_pretty(&mut file, report).map_err(io::Error::other)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 fn is_clean_signals(sig: &BracketSignals) -> bool {
@@ -356,6 +671,7 @@ struct CardWorkCtx<'a> {
     token_source_metadata: &'a HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
     rarity_map: &'a HashMap<String, BTreeSet<Rarity>>,
     bracket_lists: &'a BracketLists,
+    trace_enabled: bool,
     #[cfg(feature = "forge")]
     forge_index: Option<&'a engine::database::forge::ForgeIndex>,
 }
@@ -452,6 +768,9 @@ fn build_card_work<'a>(
                     rulings: source.rulings.clone(),
                     rarities,
                     bracket_signals,
+                    trace_input: ctx
+                        .trace_enabled
+                        .then(|| OracleTraceInput::from_atomic(source, false)),
                 },
                 FacePriority::Homonym,
             ));
@@ -518,6 +837,9 @@ fn build_card_work<'a>(
                     rulings,
                     rarities,
                     bracket_signals,
+                    trace_input: ctx
+                        .trace_enabled
+                        .then(|| OracleTraceInput::from_atomic(source, true)),
                 },
                 FacePriority::SameClass,
             ));
@@ -555,6 +877,9 @@ fn build_card_work<'a>(
                 rulings: faces[0].rulings.clone(),
                 rarities,
                 bracket_signals,
+                trace_input: ctx
+                    .trace_enabled
+                    .then(|| OracleTraceInput::from_atomic(&faces[0], false)),
             },
             FacePriority::SameClass,
         ));
@@ -870,28 +1195,39 @@ fn stamp_token_source_metadata(
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let initial_args: Vec<String> = std::env::args().collect();
 
     // Check for semantic-audit subcommand before normal parsing
-    if args.get(1).map(|s| s.as_str()) == Some("semantic-audit") {
-        run_semantic_audit(&args[2..]);
+    if initial_args.get(1).map(|s| s.as_str()) == Some("semantic-audit") {
+        run_semantic_audit(&initial_args[2..]);
         return;
     }
 
-    if args.get(1).map(|s| s.as_str()) == Some("rulings") {
-        run_rulings(&args[2..]);
+    if initial_args.get(1).map(|s| s.as_str()) == Some("rulings") {
+        run_rulings(&initial_args[2..]);
         return;
     }
 
-    if args.get(1).map(|s| s.as_str()) == Some("set-list") {
-        run_set_list(&args[2..]);
+    if initial_args.get(1).map(|s| s.as_str()) == Some("set-list") {
+        run_set_list(&initial_args[2..]);
         return;
     }
 
-    if args.get(1).map(|s| s.as_str()) == Some("decks") {
-        run_decks(&args[2..]);
+    if initial_args.get(1).map(|s| s.as_str()) == Some("decks") {
+        run_decks(&initial_args[2..]);
         return;
     }
+
+    let (trace_args, args) = parse_trace_args(&initial_args).unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        process::exit(2);
+    });
+    let trace_manifest = trace_args.as_ref().map(|trace| {
+        load_pair_manifest(&trace.pairs).unwrap_or_else(|error| {
+            eprintln!("Error loading parser trace pairs: {error}");
+            process::exit(2);
+        })
+    });
 
     let mut data_dir: Option<PathBuf> = None;
     let mut mtgjson_override: Option<PathBuf> = None;
@@ -1135,6 +1471,7 @@ fn main() {
         token_source_metadata: &token_source_metadata,
         rarity_map: &rarity_map,
         bracket_lists: &bracket_lists,
+        trace_enabled: trace_args.is_some(),
         #[cfg(feature = "forge")]
         forge_index: forge_index.as_ref(),
     };
@@ -1236,6 +1573,21 @@ fn main() {
     }
 
     let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
+    if let (Some(trace), Some(manifest)) = (&trace_args, trace_manifest) {
+        if output.as_ref() == Some(&trace.output) {
+            eprintln!("Error: --output and --parser-trace-out must be different paths");
+            process::exit(2);
+        }
+        let report =
+            build_trace_report(&face_index, manifest, json.as_bytes()).unwrap_or_else(|error| {
+                eprintln!("Error building parser trace report: {error}");
+                process::exit(2);
+            });
+        write_trace_report_atomic(&trace.output, &report).unwrap_or_else(|error| {
+            eprintln!("Error writing {}: {error}", trace.output.display());
+            process::exit(2);
+        });
+    }
     if let Some(ref out_path) = output {
         std::fs::write(out_path, &json)
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", out_path.display()));
@@ -1820,6 +2172,65 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn parser_trace_args_require_a_complete_unique_pair() {
+        let args = vec![
+            "oracle-gen".to_string(),
+            "/data".to_string(),
+            "--parser-trace-pairs".to_string(),
+            "pairs.json".to_string(),
+            "--stats".to_string(),
+            "--parser-trace-out".to_string(),
+            "report.json".to_string(),
+        ];
+        let (trace, remaining) = parse_trace_args(&args).expect("paired flags are valid");
+        assert_eq!(
+            trace.expect("trace mode").output,
+            PathBuf::from("report.json")
+        );
+        assert_eq!(remaining, vec!["oracle-gen", "/data", "--stats"]);
+        assert!(
+            parse_trace_args(&["oracle-gen".into(), "--parser-trace-out".into(), "x".into()])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parser_trace_manifest_rejects_duplicate_and_same_key_pairs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pairs.json");
+        std::fs::write(&path, r#"{"schema_version":1,"pairs":[{"left_card_face_key":"a","right_card_face_key":"a"}]}"#).expect("write fixture");
+        assert!(load_pair_manifest(&path).is_err());
+        std::fs::write(&path, r#"{"schema_version":1,"unknown":true,"pairs":[]}"#)
+            .expect("write fixture");
+        assert!(load_pair_manifest(&path).is_err());
+        std::fs::write(&path, r#"{"schema_version":1,"pairs":[{"left_card_face_key":"a","right_card_face_key":"b"},{"left_card_face_key":"a","right_card_face_key":"b"}]}"#).expect("write fixture");
+        assert!(load_pair_manifest(&path).is_err());
+    }
+
+    #[test]
+    fn parser_trace_atomic_writer_uses_one_trailing_newline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("report.json");
+        let report = ParserTraceReport {
+            schema_version: 1,
+            algorithm_version: "parser-stage-trace-v1",
+            card_data_sha256: "00".into(),
+            faces: FaceCounts {
+                winning_faces: 0,
+                traced_faces: 0,
+                unavailable_events: 0,
+                faces_with_unavailable_events: 0,
+            },
+            pairs: Vec::new(),
+            outer_route_census: Vec::new(),
+        };
+        write_trace_report_atomic(&path, &report).expect("atomic report write");
+        let bytes = std::fs::read(path).expect("read report");
+        assert!(bytes.ends_with(b"\n"));
+        assert!(!bytes.ends_with(b"\n\n"));
+    }
+
     fn make_entry(oracle_id: &str, printings: &[&str], layout: Option<&str>) -> CardExportEntry {
         make_entry_with_legalities(oracle_id, printings, layout, &[])
     }
@@ -1845,6 +2256,7 @@ mod tests {
             rulings: Vec::new(),
             rarities: BTreeSet::new(),
             bracket_signals: BracketSignals::default(),
+            trace_input: None,
         }
     }
 
