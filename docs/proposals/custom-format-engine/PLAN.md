@@ -932,8 +932,10 @@ not appear as a selectable format until that item resolves:
   and `legal_sets: Some(...)` here — never `None` — since this preset DOES
   restrict the pool); restricted = [**25** names, verbatim in CONTEXT.md —
   corrected this round from a "23" miscount]; legacy = default (all
-  `false`/`Modern` — no mana burn, no damage-on-stack, no Wish/legend-rule
-  reversion). `reprint_policy` (on `CustomFormatDef`): `None` for now — NOT
+  `false`/`Modern`/`Excluded` — no mana burn, no damage-on-stack, no
+  Wish/legend-rule reversion, and ante cards excluded per CR 407.3, which is
+  what the source's own carve-out asks for). `reprint_policy` (on
+  `CustomFormatDef`): `None` for now — NOT
   a value pending confirmation, but the genuinely correct value until
   CONTEXT.md Open item 6 resolves (there is no confirmed authored intent to
   declare yet; `None` says exactly that, distinctly from a lobby save's
@@ -942,8 +944,12 @@ not appear as a selectable format until that item resolves:
   None` per §1's pairing rule — revisit alongside Open item 6, since resolving
   that item to a real `Some(_)` value also flips this to
   `SetCodeApproximation` with a matching `description` update. Ante-card
-  handling remains open per Open item 5 separately; do not encode either
-  without resolving its own item first.
+  handling — CONTEXT.md Open item 5 — **is** resolved, in Phase 1d: the
+  `AntePolicy` axis carries it, this preset declares nothing of its own for
+  it, and the seven cards the source carves out are excluded by CR 407.3's
+  printed-text class rather than by any list here. See that item for why
+  neither originally-offered option (a third list, or an `ante_enabled`
+  toggle over `banned`) was taken.
 
 **Phase 2 presets — the four EC formats**, unchanged from the original design,
 now explicitly sequenced after phase 1 (§8) since they need the
@@ -1131,6 +1137,15 @@ Everything in this section is deferred to phase 2 (§8) — the phase-1 preset
 Swedish ruleset makes no mention of any of these rules and uses fully modern
 defaults. This section is unchanged from the original design and remains the
 correct plan for phase 2's four EC-format presets.
+
+**One clarification since Phase 1d added the `ante` axis (CONTEXT.md Open item
+5):** the sentence above still holds, because it is about *runtime rules
+wiring*. `AntePolicy::Excluded` needs none — CR 407.3 is a deck-construction
+rule, enforced in `deck_validation.rs` where the other card-pool rules already
+live, not at any game-rules seam. `AntePolicy::Enabled` is what would need
+wiring (the CR 407.2 ante zone, the CR 407.4 ante action), and it is gated
+unimplemented exactly like every axis below. No preset in either phase
+declares it.
 
 - **Mana burn** (`LegacyRuleSet.mana_burn`) — **REWRITTEN AGAIN per
   maintainer review round 3** (CONTEXT.md point 1). Round 2 fixed the
@@ -1546,15 +1561,21 @@ mechanism §6's "actually enforced, not just documented" test targets.
 **Gate scope, precisely (maintainer review round 5 caught that this wasn't
 stated precisely enough; round 6's `reprint_policy` relocation, §1/§3, makes
 it precise by construction rather than by exemption): `IMPLEMENTED_LEGACY_AXES`
-covers exactly `LegacyRuleSet`'s four axes — `mana_burn`, `damage_timing`,
-`wish_scope`, `legend_rule_scope` — because those are now the ONLY fields on
-`CustomFormatRules` that are independently declarable AND behavior-bearing.**
+covers exactly `LegacyRuleSet`'s five axes — `mana_burn`, `damage_timing`,
+`wish_scope`, `legend_rule_scope`, `ante` — because those are now the ONLY
+fields on `CustomFormatRules` that are independently declarable AND
+behavior-bearing.**
 `reprint_policy` doesn't need an exemption from this gate anymore — it isn't
 on `CustomFormatRules` at all after round 6's move to `CustomFormatDef`, so
-there's nothing there for the gate to either cover or exempt. There is no
-ante-card field to cover yet either (CONTEXT.md Open item 5 — no schema slot
-exists). If a future field is ever added to `CustomFormatRules` with real
-behavior attached (an ante-list, say), it must be added to this gate in the
+there's nothing there for the gate to either cover or exempt. `ante` was added
+in Phase 1d (CONTEXT.md Open item 5, resolved there) and followed this rule
+exactly — added to `LegacyRuleSet` and to the gate in the SAME change. It is
+also the one axis whose coverage is PARTIAL by design: only the non-default
+`AntePolicy::Enabled` is a declared axis, because `Excluded`'s CR 407.3
+deck-construction consequence is enforced from the moment the field exists.
+Gating the default too would reject every custom format in existence. If a
+future field is ever added to `CustomFormatRules` with real
+behavior attached, it must be added to this gate in the
 SAME change — the gate's job is to cover every behavior-bearing field on the
 RESOLVED RULES struct, and it is a review-time checklist item whenever
 `CustomFormatRules`/`LegacyRuleSet` gains a member, not a one-time list to

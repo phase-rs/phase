@@ -10,7 +10,7 @@ use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allow
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::custom_format::{
-    passes_legacy_axis_gate, CommandZoneMode, LegalityRules, SetCode,
+    passes_legacy_axis_gate, AntePolicy, CommandZoneMode, LegalityRules, SetCode,
 };
 use crate::types::format::{
     DeckCopyLimit, FormatConfig, GameFormat, SelectedFormat, SideboardPolicy,
@@ -612,6 +612,13 @@ impl CardPoolAuthority<'_> {
 #[derive(Debug)]
 struct DeclaredPool {
     legal_sets: Option<Vec<SetCode>>,
+    /// CR 407.3's deck-construction consequence, as declared by the format.
+    /// Stored rather than assumed even though `custom_format_pool`'s legacy-
+    /// axis gate rejects [`AntePolicy::Enabled`] today: when an ante zone
+    /// eventually exists, `IMPLEMENTED_LEGACY_AXES` gains `LegacyAxis::Ante`
+    /// and `Enabled` starts arriving here, and the match in [`Self::status`]
+    /// is then already correct.
+    ante: AntePolicy,
     /// CR 201.3b: canonical (`canonical_deck_count_key`) names, so a banned
     /// entry naming a split/DFC's whole-card identity ("Fire // Ice") matches
     /// a decklist naming just one face ("Fire"). A banned/restricted entry
@@ -626,6 +633,7 @@ impl DeclaredPool {
     fn resolve(db: &CardDatabase, rules: &LegalityRules) -> Self {
         Self {
             legal_sets: rules.legal_sets.clone(),
+            ante: rules.legacy.ante,
             banned: rules
                 .banned
                 .iter()
@@ -639,7 +647,7 @@ impl DeclaredPool {
         }
     }
 
-    /// Order: pool membership → banned → restricted → legal. Returns `None`
+    /// Order: pool membership → ante → banned → restricted → legal. Returns `None`
     /// (never `Some(LegalityStatus::NotLegal)`) for a card outside a declared
     /// `legal_sets` restriction, matching `LegalityTable`'s own "no data for
     /// this format" `None` — both feed the same "(not legal in
@@ -650,6 +658,24 @@ impl DeclaredPool {
             if !printed_in_any_set(db, name, sets) {
                 return None;
             }
+        }
+        match self.ante {
+            // CR 407.3: "When not playing for ante, players can't include
+            // these cards in their decks or sideboards" — a deck-construction
+            // prohibition, which is exactly what `Banned` reports (and NOT
+            // `None`: the card is inside the declared pool, so "not legal in
+            // {format}" would misreport why it was rejected). Ordered ahead of
+            // the declared lists because the CR forbids the card outright: a
+            // format may also RESTRICT an ante card — Swedish Old School
+            // restricts three of the seven it carves out — and one legal copy
+            // is still one copy too many.
+            AntePolicy::Excluded if deck_entry_uses_ante(db, name) => {
+                return Some(LegalityStatus::Banned)
+            }
+            // CR 407.2: playing for ante makes the class legal again. The
+            // `Excluded` arm repeats here for a non-ante card, which the guard
+            // above passes over.
+            AntePolicy::Excluded | AntePolicy::Enabled => {}
         }
         let canonical = canonical_deck_count_key(db, name);
         if self.banned.contains(&canonical) {
@@ -2034,9 +2060,46 @@ fn tiny_leaders_category_banned(face: &CardFace) -> bool {
         .to_ascii_lowercase();
     face.card_type.subtypes.iter().any(|subtype| {
         subtype.eq_ignore_ascii_case("Conspiracy") || subtype.eq_ignore_ascii_case("Attraction")
-    }) || text.contains("playing for ante")
+    }) || face_uses_ante(face)
         || text.contains("sticker")
         || text.contains("attraction")
+}
+
+/// CR 407.3: "A few cards have the text 'Remove this card from your deck
+/// before playing if you're not playing for ante.' These are the only cards
+/// that can add or remove cards from the ante zone or change a card's owner.
+/// When not playing for ante, players can't include these cards in their
+/// decks or sideboards".
+///
+/// The rule identifies this class by the cards' own printed text, so this
+/// predicate matches that text rather than a hardcoded roster — a name list
+/// would be a snapshot that silently misses anything else printed with the
+/// clause, and would have to be repeated by every format that excludes them.
+///
+/// Matches the substring `playing for ante`, the templated clause's stable
+/// core (unaffected by the "Remove this card"/"Remove ~ from your deck"
+/// wording differences across printings). Verified exact at implementation
+/// time: Scryfall's `oracle:"playing for ante"` returns 9 cards — Amulet of
+/// Quoz, Bronze Tablet, Contract from Below, Darkpact, Demonic Attorney,
+/// Jeweled Bird, Rebirth, Tempest Efreet, Timmerian Fiends — which is the
+/// whole class with no false positives.
+///
+/// This is the exact test `tiny_leaders_category_banned` has always used,
+/// extracted here so its second caller shares one definition of the class.
+fn face_uses_ante(face: &CardFace) -> bool {
+    face.oracle_text
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .contains("playing for ante")
+}
+
+/// Whether a decklist entry resolves to a card of the CR 407.3 ante class.
+/// Reads the entry's resolved face, the same way `tiny_leaders_category_banned`'s
+/// call site does; an unknown name is not an ante card (unknown entries are
+/// reported separately, by name, before any legality verdict is formed).
+fn deck_entry_uses_ante(db: &CardDatabase, name: &str) -> bool {
+    db.get_face_by_name(name).is_some_and(face_uses_ante)
 }
 
 fn name_in_list(name: &str, list: &[&str]) -> bool {
@@ -9357,6 +9420,108 @@ mod tests {
         assert_eq!(pool.status(&db, "No Printings Card"), None);
     }
 
+    /// CR 407.3: the ante class is identified by the cards' own printed text,
+    /// so this fixture gives two of them the templated clause and withholds it
+    /// from the controls. All four cards are printed in sets Swedish Old
+    /// School declares legal, so pool membership never confounds the verdict.
+    fn ante_db_json() -> String {
+        let mut cards = serde_json::Map::new();
+        let ante_text = "Remove this card from your deck before playing if you're not playing for \
+                         ante.";
+        for (key, name, printing, oracle_text) in [
+            // On the format's restricted list AND an ante card.
+            (
+                "contract from below",
+                "Contract from Below",
+                "LEA",
+                Some(ante_text),
+            ),
+            // An ante card the format's own lists never mention.
+            ("jeweled bird", "Jeweled Bird", "ARN", Some(ante_text)),
+            // Restricted, not ante — the paired control that keeps the
+            // restricted verdict reachable.
+            ("black lotus", "Black Lotus", "LEA", None),
+            // In pool, on no list, not ante.
+            ("savannah lions", "Savannah Lions", "LEA", None),
+        ] {
+            let mut card = card_json_with_printings(name, &[printing]);
+            card["oracle_text"] = match oracle_text {
+                Some(text) => Value::String(text.to_string()),
+                None => Value::Null,
+            };
+            cards.insert(key.to_string(), card);
+        }
+        Value::Object(cards).to_string()
+    }
+
+    /// CR 407.3: "When not playing for ante, players can't include these cards
+    /// in their decks or sideboards." Exercised through `swedish_old_school()`'s
+    /// own declared rules, because that preset is where the carve-out comes
+    /// from: three of the seven ante cards its source names are also on its
+    /// restricted list, so the ordering is load-bearing rather than incidental.
+    #[test]
+    fn declared_pool_excludes_ante_cards_ahead_of_the_restricted_list() {
+        let db = CardDatabase::from_json_str(&ante_db_json()).unwrap();
+        let rules = crate::types::custom_format::swedish_old_school()
+            .rules
+            .legality;
+        let pool = DeclaredPool::resolve(&db, &rules);
+
+        // Restricted AND ante. CR 407.3 forbids the card outright, so the ante
+        // verdict must win: one legal copy is still one copy too many.
+        assert_eq!(
+            pool.status(&db, "Contract from Below"),
+            Some(LegalityStatus::Banned)
+        );
+
+        // Ante, and on none of the format's own lists — still excluded,
+        // because the class is the CR's printed-text class, not a roster the
+        // preset has to enumerate.
+        assert_eq!(
+            pool.status(&db, "Jeweled Bird"),
+            Some(LegalityStatus::Banned)
+        );
+
+        // Paired controls on the SAME pool value, so an ante predicate that
+        // always returned `true` would fail here instead of silently passing
+        // both assertions above.
+        assert_eq!(
+            pool.status(&db, "Black Lotus"),
+            Some(LegalityStatus::Restricted)
+        );
+        assert_eq!(
+            pool.status(&db, "Savannah Lions"),
+            Some(LegalityStatus::Legal)
+        );
+    }
+
+    /// CR 407.2: playing for ante makes the class legal again. `AntePolicy::
+    /// Enabled` is gated out of every production path by
+    /// `passes_legacy_axis_gate` today, so this reaches `DeclaredPool`
+    /// directly — the point being that when an ante zone exists and the gate
+    /// opens, the exclusion lifts on its own rather than needing a second
+    /// change here.
+    #[test]
+    fn declared_pool_admits_ante_cards_when_the_format_plays_for_ante() {
+        let db = CardDatabase::from_json_str(&ante_db_json()).unwrap();
+        let mut rules = crate::types::custom_format::swedish_old_school()
+            .rules
+            .legality;
+        rules.legacy.ante = AntePolicy::Enabled;
+        let pool = DeclaredPool::resolve(&db, &rules);
+
+        // The declared lists take over again: restricted stays restricted...
+        assert_eq!(
+            pool.status(&db, "Contract from Below"),
+            Some(LegalityStatus::Restricted)
+        );
+        // ...and an ante card on no list is simply legal.
+        assert_eq!(
+            pool.status(&db, "Jeweled Bird"),
+            Some(LegalityStatus::Legal)
+        );
+    }
+
     /// CR 201.3b: a banned/restricted entry naming a split/DFC's whole-card
     /// identity ("Fire // Ice") must match a decklist naming just one face
     /// ("Fire"), and banned beats restricted when a name (implausibly)
@@ -9580,7 +9745,7 @@ mod tests {
     fn custom_format_rejects_every_undeclared_legacy_axis() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         // Loops over every axis NOT in `IMPLEMENTED_LEGACY_AXES` — currently
-        // all four, since that list is empty; a future phase populating it
+        // all five, since that list is empty; a future phase populating it
         // narrows this loop automatically (each entry is still exercised
         // above by `passes_legacy_axis_gate`'s own direct assertion, so a
         // freshly-implemented axis fails loudly here instead of silently
@@ -9600,6 +9765,14 @@ mod tests {
             },
             LegacyRuleSet {
                 legend_rule_scope: LegendRuleScope::PreM14AnyController,
+                ..LegacyRuleSet::default()
+            },
+            // CR 407.2/407.4: only `Enabled` is a declared axis — it promises
+            // an ante zone and the ante action. The default `Excluded` is
+            // enforced (CR 407.3) and so is deliberately NOT gated, which is
+            // why it does not appear in this list.
+            LegacyRuleSet {
+                ante: AntePolicy::Enabled,
                 ..LegacyRuleSet::default()
             },
         ];

@@ -114,6 +114,12 @@ function isLegacyRuleSet(value: unknown): boolean {
     && (value.damage_timing === "Modern" || value.damage_timing === "OnStack")
     && (value.wish_scope === "PostM10SideboardOnly" || value.wish_scope === "PreM10ReachesExile")
     && (value.legend_rule_scope === "Modern" || value.legend_rule_scope === "PreM14AnyController")
+    // Absent is valid: this axis postdates the Axis-A save path, and this
+    // predicate also validates definitions persisted locally before it
+    // existed. Rejecting those would discard every saved custom format
+    // outright — the same back-compat the engine's `#[serde(default)]`
+    // provides on the same field, where absent means "Excluded".
+    && (value.ante === undefined || value.ante === "Excluded" || value.ante === "Enabled")
   );
 }
 

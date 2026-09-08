@@ -368,6 +368,26 @@ Phase 2a) produce `CustomFormatDef` values the same way `from_lobby_config`
 does — a definition, not an active `FormatConfig` — and reuse Phase 1c's
 shared resolver when a preset is actually selected to start a game.
 
+> **Correction, as shipped.** The last sentence of the paragraph above
+> overstated what this phase could deliver, and the code does NOT match it:
+> `swedish_old_school()` exists and passes both gates, but
+> `custom_format_registry()` still returns empty, so the preset is not
+> selectable. PLAN.md §7/§8 make Open item 6 (the reprint-policy metadata
+> VALUE, unconfirmed against the primary source) a registration blocker in its
+> own right, and this document simply assumed that item would be resolved by
+> now. It is not: re-fetching `oldschool-mtg.blogspot.com/p/banrestriction.html`
+> on 2026-09-07 confirmed every other list verbatim but yielded only "Only
+> English versions are allowed in Oldschool" on reprints. When PLAN.md and this
+> charter disagree, PLAN.md wins — it is the design; this is the sequencing
+> view of it. Registration is a one-line change to `custom_format_registry()`
+> the moment Open item 6 resolves.
+
+Phase 1d also resolved **CONTEXT.md Open item 5** (ante-card handling), which
+PLAN.md §8 step 3 requires closed before this preset's constructor is
+finalized: a fifth `LegacyRuleSet` axis, `AntePolicy`, whose default
+`Excluded` enforces CR 407.3 against a printed-text class predicate rather
+than any card list. See that item for the full resolution.
+
 **Owns widening `DeckCompatibilityRequest.selected_format`.** Today it's a
 bare `Option<GameFormat>` — confirmed to have no `FormatConfig`/
 `custom_rules` field at all (`CONTEXT.md` open item 1), so `Custom` reaches

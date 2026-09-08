@@ -1,10 +1,16 @@
-//! Schema for engine-validated custom formats. Phase 1a: types +
-//! validation + registration gates only. No behavior is wired into the
-//! engine yet — `custom_format_registry()` is a stub returning
-//! `Vec::new()`, and `IMPLEMENTED_LEGACY_AXES` is empty. Later phases
-//! (2a/2b/2cd) populate the registry with real presets and wire
-//! `LegacyRuleSet`'s axes into engine behavior (mana pool cleanup, combat
-//! damage step, etc.).
+//! Schema for engine-validated custom formats: types, validation, the
+//! registration gates, and the bundled Axis-B preset constructors.
+//!
+//! `IMPLEMENTED_LEGACY_AXES` is still empty, so no `LegacyRuleSet` axis has
+//! runtime behavior yet — later phases (2a/2b/2cd) wire them in (mana pool
+//! cleanup, combat damage step, etc.). The one exception is
+//! [`AntePolicy::Excluded`], whose CR 407.3 deck-construction consequence
+//! `game::deck_validation` enforces today; it is a default rather than a
+//! declared axis, which is why it needs no entry in that list.
+//!
+//! `custom_format_registry()` still returns `Vec::new()`, but no longer for
+//! want of a preset: [`swedish_old_school`] exists and passes both gates, and
+//! is withheld for the sourcing reason its own doc comment gives.
 
 use serde::{Deserialize, Serialize};
 
@@ -126,6 +132,36 @@ pub enum LegendRuleScope {
     PreM14AnyController,
 }
 
+/// CR 407.1: an ante rule was in "earlier versions of the Magic rules";
+/// playing for ante "is now considered an optional variation on the game" and
+/// is "strictly forbidden under the Magic: The Gathering Tournament Rules".
+/// That makes it the same shape as the other axes here — a rule this engine
+/// plays the modern way, which a historically-accurate custom format may opt
+/// back out of.
+///
+/// Unlike its siblings, this axis' DEFAULT carries an enforced consequence
+/// rather than merely describing the modern status quo: CR 407.3 says that
+/// "when not playing for ante, players can't include these cards in their
+/// decks or sideboards", which
+/// `game::deck_validation::DeclaredPool::status` enforces today for every
+/// custom format. `Enabled` is what remains unimplemented — it promises the
+/// CR 407.2 ante zone and the CR 407.4 ante action, which no engine code
+/// provides — so it is gated by [`IMPLEMENTED_LEGACY_AXES`] like any other
+/// declared-but-unbuilt axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AntePolicy {
+    /// CR 407.3: cards bearing "Remove this card from your deck before
+    /// playing if you're not playing for ante" may not be in a deck or
+    /// sideboard. The modern default, and the only value the engine
+    /// implements.
+    #[default]
+    Excluded,
+    /// CR 407.2: each player antes a card after determining who goes first;
+    /// the winner takes the ante zone. Schema only — gated until an ante zone
+    /// exists.
+    Enabled,
+}
+
 /// `Default` is every axis at its modern value — the rule set an Axis-A
 /// lobby save always declares (it models no historical paper ruleset), and
 /// the only one `passes_legacy_axis_gate` accepts while
@@ -136,6 +172,15 @@ pub struct LegacyRuleSet {
     pub damage_timing: CombatDamageTiming,
     pub wish_scope: WishOutsideGameScope,
     pub legend_rule_scope: LegendRuleScope,
+    /// `#[serde(default)]` because this axis was added after Phase 1c shipped
+    /// the Axis-A save path: a `CustomFormatDef` already persisted by a
+    /// client carries no `ante` key, and must keep deserializing to the
+    /// modern `Excluded` — which is exactly what such a save meant. The
+    /// sibling axes need no default, having been present since Phase 1a.
+    /// Mirrors `StructuralRules.range_of_influence`'s use of the same
+    /// attribute for the same reason.
+    #[serde(default)]
+    pub ante: AntePolicy,
 }
 
 /// CR 903.3 (and the Tiny Leaders / Oathbreaker RC / Brawl deck-construction
@@ -252,6 +297,40 @@ pub struct StructuralRules {
     /// `UpTo(1)` fallback — the same silent-data-loss bug `sideboard_policy`
     /// exists to prevent.
     pub default_deck_copy_limit: DeckCopyLimit,
+}
+
+impl StructuralRules {
+    /// Projects the structural half of a resolved [`FormatConfig`], reading
+    /// every value from the config's own fields rather than from a bare
+    /// `GameFormat` method (see [`CustomFormatDef::from_lobby_config`]'s doc
+    /// comment for why that distinction matters).
+    ///
+    /// `command_zone_mode` is a parameter rather than a derivation because
+    /// deriving it is fallible — a source format whose command zone holds
+    /// something other than a commander has no representation here — and both
+    /// callers already know the answer more directly than this function
+    /// could: `from_lobby_config` has just run the fallible match (and owns
+    /// the error messages for it), and a bundled constructed-shaped preset
+    /// passes [`CommandZoneMode::Disabled`] outright.
+    ///
+    /// Shared by Axis A (`from_lobby_config`) and the Axis-B preset
+    /// constructors so the field-by-field projection exists once. Adding a
+    /// field to this struct then has exactly one place to update, instead of
+    /// one per preset.
+    fn from_format_config(config: &FormatConfig, command_zone_mode: CommandZoneMode) -> Self {
+        Self {
+            starting_life: config.starting_life,
+            min_players: config.min_players,
+            max_players: config.max_players,
+            deck_size: config.deck_size,
+            singleton: config.singleton,
+            command_zone_mode,
+            range_of_influence: config.range_of_influence.clone(),
+            team_based: config.team_based,
+            sideboard_policy: config.sideboard_policy,
+            default_deck_copy_limit: config.default_deck_copy_limit,
+        }
+    }
 }
 
 /// Legality/era rules. `legal_sets: None` means unrestricted (every card
@@ -503,18 +582,7 @@ impl CustomFormatDef {
             (false, _) => CommandZoneMode::Disabled,
         };
 
-        let structural = StructuralRules {
-            starting_life: config.starting_life,
-            min_players: config.min_players,
-            max_players: config.max_players,
-            deck_size: config.deck_size,
-            singleton: config.singleton,
-            command_zone_mode,
-            range_of_influence: config.range_of_influence.clone(),
-            team_based: config.team_based,
-            sideboard_policy: config.sideboard_policy,
-            default_deck_copy_limit: config.default_deck_copy_limit,
-        };
+        let structural = StructuralRules::from_format_config(config, command_zone_mode);
         let description = derive_structural_description(&structural);
         let short_label = short_label_from_name(&name);
 
@@ -571,6 +639,7 @@ pub enum LegacyAxis {
     CombatDamageTiming,
     WishOutsideGameScope,
     LegendRuleScope,
+    Ante,
 }
 
 /// Axes of `LegacyRuleSet` the engine actually enforces at runtime. Empty in
@@ -591,6 +660,14 @@ fn declared_legacy_axes(rules: &LegacyRuleSet) -> Vec<LegacyAxis> {
     if rules.legend_rule_scope != LegendRuleScope::default() {
         axes.push(LegacyAxis::LegendRuleScope);
     }
+    // Only the non-default `AntePolicy::Enabled` is a declared axis. The
+    // default `Excluded` is already enforced (CR 407.3, at
+    // `DeclaredPool::status`), so gating it would reject every custom format
+    // in existence — including the Axis-A lobby saves whose whole
+    // `LegacyRuleSet` is `Default`.
+    if rules.ante != AntePolicy::default() {
+        axes.push(LegacyAxis::Ante);
+    }
     axes
 }
 
@@ -609,9 +686,14 @@ fn declared_legacy_axes(rules: &LegacyRuleSet) -> Vec<LegacyAxis> {
 /// NOT gated: those are declarative card-pool data the evaluator either
 /// applies in full or not at all, so there is no partial-implementation risk.
 /// A `LegacyRuleSet` axis instead promises runtime behavior (mana burn, the
-/// legend rule's scope, Wish reach) that may not be built yet, so declaring
-/// one the engine does not implement silently misrepresents how the game will
-/// actually play.
+/// legend rule's scope, Wish reach, an ante zone) that may not be built yet,
+/// so declaring one the engine does not implement silently misrepresents how
+/// the game will actually play.
+///
+/// Note the asymmetry inside [`AntePolicy`] itself, which
+/// [`declared_legacy_axes`] documents: only `Enabled` is a declared axis.
+/// `Excluded`'s CR 407.3 deck-construction consequence is enforced today and
+/// is the default every custom format carries, so it is never gated.
 pub fn passes_legacy_axis_gate(rules: &LegacyRuleSet) -> bool {
     declared_legacy_axes(rules)
         .into_iter()
@@ -656,9 +738,119 @@ pub fn assert_no_lobby_save_sentinel_collision(presets: &[CustomFormatDef]) {
     }
 }
 
+/// Registry id for [`swedish_old_school`]. The first id after
+/// [`LOBBY_SAVE_CUSTOM_FORMAT_ID`]'s reserved `0`; ids are registry-stable
+/// and must never be reused or renumbered, since a persisted
+/// `FormatConfig`/`GameFormat::Custom(id)` refers to a format by this number.
+pub const SWEDISH_OLD_SCHOOL_ID: CustomFormatId = CustomFormatId(1);
+
+/// Swedish Old School 93/94, per the primary source
+/// (`oldschool-mtg.blogspot.com/p/banrestriction.html`, re-fetched
+/// 2026-09-07 and matching `docs/proposals/custom-format-engine/CONTEXT.md`'s
+/// captured lists verbatim): the Alpha-through-The-Dark card pool plus
+/// "Summer Magic", no banned cards at all, 25 restricted cards, and fully
+/// modern rules.
+///
+/// **Constructed but deliberately NOT registered.** `custom_format_registry`
+/// does not list this def, per PLAN.md §7/§8: the format's reprint policy is
+/// CONTEXT.md Open item 6, unresolved. Re-fetching the primary source
+/// confirmed every other list here but yielded only "Only English versions
+/// are allowed in Oldschool" on reprints — the secondary "no Revised-or-later
+/// reprints" claim remains unconfirmed — so `reprint_policy` stays `None`
+/// ("no confirmed authored intent to declare", distinct from a lobby save's
+/// permanent `None`), `printing_fidelity` stays `NotApplicable` per the §1
+/// pairing rule, and the def stays out of the selectable list rather than
+/// shipping a label a future maintainer would inherit as fact.
+///
+/// The empty `banned` list is real data, not a placeholder: Swedish Old
+/// School bans nothing, restricting instead. `legal_sets` is `Some(_)` — this
+/// format genuinely restricts its pool, and `None` would mean "unrestricted".
+///
+/// The seven ante cards the source carves out ("must be removed before play
+/// unless the tournament is specifically played for ante") need no entry
+/// here: `legality.legacy.ante` is [`AntePolicy::Excluded`] by default, and
+/// CR 407.3 identifies that class by the cards' own printed text, so
+/// `DeclaredPool` excludes them without a name list. Three of the seven
+/// (Contract from Below, Darkpact, Tempest Efreet) also appear on the
+/// restricted list below, exactly as the source spells it.
+///
+/// The structural half is `FormatConfig::standard()`'s — 20 life, two
+/// players, a 60-card minimum deck, a 15-card sideboard, four copies. The
+/// primary source states pool and restriction rules only, so rather than
+/// invent structural values this reads them from the shape every built-in
+/// 60-card constructed format already spreads (`premodern()`, `legacy()`,
+/// `vintage()` and `timeless()` are each literally `..Self::standard()`).
+pub fn swedish_old_school() -> CustomFormatDef {
+    CustomFormatDef {
+        rules: CustomFormatRules {
+            id: SWEDISH_OLD_SCHOOL_ID,
+            structural: StructuralRules::from_format_config(
+                &FormatConfig::standard(),
+                CommandZoneMode::Disabled,
+            ),
+            legality: LegalityRules {
+                legal_sets: Some(
+                    ["LEA", "LEB", "2ED", "ARN", "ATQ", "LEG", "DRK", "SUM"]
+                        .into_iter()
+                        .map(|code| SetCode(code.to_string()))
+                        .collect(),
+                ),
+                banned: Vec::new(),
+                restricted: [
+                    "Ancestral Recall",
+                    "Balance",
+                    "Black Lotus",
+                    "Braingeyser",
+                    "Channel",
+                    "Chaos Orb",
+                    "Contract from Below",
+                    "Darkpact",
+                    "Demonic Tutor",
+                    "Library of Alexandria",
+                    "Mana Drain",
+                    "Mind Twist",
+                    "Mishra's Workshop",
+                    "Mox Emerald",
+                    "Mox Jet",
+                    "Mox Pearl",
+                    "Mox Ruby",
+                    "Mox Sapphire",
+                    "Regrowth",
+                    "Sol Ring",
+                    "Strip Mine",
+                    "Tempest Efreet",
+                    "Time Walk",
+                    "Timetwister",
+                    "Wheel of Fortune",
+                ]
+                .into_iter()
+                .map(CardName::from)
+                .collect(),
+                // The source mentions no mana burn, no damage on the stack, no
+                // pre-M10 Wish templating and no modified legend rule: Swedish
+                // Old School is an old card pool played under modern rules.
+                legacy: LegacyRuleSet::default(),
+            },
+        },
+        label: "Swedish Old School 93/94".to_string(),
+        short_label: "OSS".to_string(),
+        description: "Alpha through The Dark (plus Summer Magic), nothing banned, 25 restricted \
+                      cards, modern rules"
+            .to_string(),
+        reprint_policy: None,
+        printing_fidelity: PrintingFidelity::NotApplicable,
+    }
+}
+
 /// Authoritative list of bundled custom-format presets, filtered through
-/// both registration gates. Empty in Phase 1a — no presets exist until a
-/// later phase introduces them.
+/// both registration gates.
+///
+/// Still empty, but no longer for Phase 1a's reason ("no presets exist").
+/// [`swedish_old_school`] exists and passes both gates; it is withheld
+/// because CONTEXT.md Open item 6 blocks its REGISTRATION specifically — see
+/// that constructor. A preset is listed here only once every claim it makes
+/// about a paper ruleset is sourced, so the gates below are the last line of
+/// defense, not the only one.
 pub fn custom_format_registry() -> Vec<CustomFormatDef> {
     let presets: Vec<CustomFormatDef> = Vec::new();
     assert_no_lobby_save_sentinel_collision(&presets);

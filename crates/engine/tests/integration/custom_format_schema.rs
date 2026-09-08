@@ -12,10 +12,10 @@
 
 use engine::types::custom_format::{
     assert_no_lobby_save_sentinel_collision, passes_legacy_axis_gate, passes_reprint_fidelity_gate,
-    validate_custom_rules_consistency, CombatDamageTiming, CommandZoneMode,
-    CommanderEligibilityRule, CustomFormatDef, CustomFormatId, CustomFormatRules, LegacyRuleSet,
-    LegalityRules, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode, StructuralRules,
-    WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
+    swedish_old_school, validate_custom_rules_consistency, AntePolicy, CombatDamageTiming,
+    CommandZoneMode, CommanderEligibilityRule, CustomFormatDef, CustomFormatId, CustomFormatRules,
+    LegacyRuleSet, LegalityRules, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode,
+    StructuralRules, WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
 };
 use engine::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
@@ -52,6 +52,7 @@ fn sample_rules(id: u16) -> CustomFormatRules {
                 damage_timing: CombatDamageTiming::default(),
                 wish_scope: WishOutsideGameScope::default(),
                 legend_rule_scope: engine::types::custom_format::LegendRuleScope::default(),
+                ante: AntePolicy::default(),
             },
         },
     }
@@ -172,6 +173,43 @@ fn legacy_axis_gate_accepts_all_default_axes() {
 }
 
 #[test]
+fn ante_enabled_is_gated_but_ante_excluded_is_not() {
+    // CR 407.2/407.4: `Enabled` promises an ante zone and the ante action,
+    // which no engine code provides — so it is a declared-but-unbuilt axis
+    // like any other, and the gate must reject it.
+    let mut def = sample_def(1);
+    def.rules.legality.legacy.ante = AntePolicy::Enabled;
+    assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
+
+    // CR 407.3's exclusion, by contrast, IS enforced (in `DeclaredPool`), and
+    // is the default every custom format carries — including every Axis-A
+    // lobby save, whose whole LegacyRuleSet is `Default`. Gating it would
+    // reject every custom format in existence.
+    assert_eq!(AntePolicy::default(), AntePolicy::Excluded);
+    def.rules.legality.legacy.ante = AntePolicy::Excluded;
+    assert!(passes_legacy_axis_gate(&def.rules.legality.legacy));
+}
+
+#[test]
+fn a_legacy_rule_set_saved_before_the_ante_axis_still_deserializes() {
+    // Backward compatibility for a `CustomFormatDef` a client persisted
+    // before this axis existed (Phase 1c shipped the Axis-A save path): the
+    // payload has no `ante` key, and must resolve to the modern `Excluded` —
+    // which is exactly what such a save meant.
+    let legacy: LegacyRuleSet = serde_json::from_str(
+        r#"{
+            "mana_burn": "Modern",
+            "damage_timing": "Modern",
+            "wish_scope": "PostM10SideboardOnly",
+            "legend_rule_scope": "Modern"
+        }"#,
+    )
+    .expect("a pre-ante LegacyRuleSet payload must still deserialize");
+    assert_eq!(legacy.ante, AntePolicy::Excluded);
+    assert_eq!(legacy, LegacyRuleSet::default());
+}
+
+#[test]
 fn reprint_fidelity_gate_rejects_mismatch() {
     let mut def = sample_def(3);
     def.reprint_policy = Some(ReprintPolicy::OriginalPrintingsOnly);
@@ -196,8 +234,117 @@ fn reprint_fidelity_gate_accepts_agreement() {
 }
 
 #[test]
-fn custom_format_registry_is_empty_in_phase_1a() {
-    assert!(engine::types::custom_format::custom_format_registry().is_empty());
+fn custom_format_registry_withholds_swedish_old_school_on_open_item_6() {
+    // The registry is still empty, but no longer because no preset exists:
+    // `swedish_old_school()` is built and passes both registration gates. It
+    // is withheld because its reprint policy is unconfirmed against the
+    // primary source (CONTEXT.md Open item 6), which PLAN.md §7/§8 make a
+    // registration blocker in its own right. Asserting BOTH halves is the
+    // point — an empty-registry assertion alone would keep passing if the
+    // preset silently stopped passing the gates.
+    let preset = swedish_old_school();
+    assert!(passes_legacy_axis_gate(&preset.rules.legality.legacy));
+    assert!(passes_reprint_fidelity_gate(&preset));
+
+    let registry = engine::types::custom_format::custom_format_registry();
+    assert!(
+        registry.is_empty(),
+        "swedish_old_school() must not be selectable while Open item 6 is unresolved; got {:?}",
+        registry.iter().map(|def| &def.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn swedish_old_school_declares_its_sourced_card_pool() {
+    // Preset integrity against `docs/proposals/custom-format-engine/CONTEXT.md`'s
+    // captured lists, themselves re-verified against the primary source
+    // (oldschool-mtg.blogspot.com/p/banrestriction.html). Every set code was
+    // checked against Scryfall's set list at implementation time.
+    let preset = swedish_old_school();
+    let legality = &preset.rules.legality;
+
+    let sets = legality
+        .legal_sets
+        .as_ref()
+        .expect("Swedish Old School restricts its pool, so legal_sets is Some(_), never None");
+    assert_eq!(
+        sets.iter().map(|code| code.0.as_str()).collect::<Vec<_>>(),
+        ["LEA", "LEB", "2ED", "ARN", "ATQ", "LEG", "DRK", "SUM"],
+        "Alpha, Beta, Unlimited, Arabian Nights, Antiquities, Legends, The Dark, Summer Magic"
+    );
+
+    // A genuinely empty list, not an unpopulated one: the format bans nothing
+    // and restricts instead. The schema must carry that faithfully.
+    assert!(legality.banned.is_empty());
+
+    assert_eq!(
+        legality.restricted.len(),
+        25,
+        "the source's restricted list is 25 cards (CONTEXT.md corrected an earlier 23 miscount)"
+    );
+    for expected in [
+        "Ancestral Recall",
+        "Black Lotus",
+        "Mishra's Workshop",
+        "Mox Sapphire",
+        "Timetwister",
+    ] {
+        assert!(
+            legality.restricted.iter().any(|name| name == expected),
+            "restricted list is missing {expected}"
+        );
+    }
+    // Three of the seven ante cards are also restricted, exactly as the
+    // source spells it — the ante exclusion below is what actually keeps them
+    // out of a deck.
+    assert!(legality
+        .restricted
+        .iter()
+        .any(|name| name == "Contract from Below"));
+
+    // An old card pool played under modern rules: the source mentions no mana
+    // burn, damage on the stack, pre-M10 Wish templating or modified legend
+    // rule. This is what makes it the one Axis-B preset needing zero
+    // LegacyRuleSet engine wiring.
+    assert_eq!(legality.legacy, LegacyRuleSet::default());
+}
+
+#[test]
+fn swedish_old_school_carries_honest_unresolved_reprint_metadata() {
+    let preset = swedish_old_school();
+    // Open item 6: the primary source states only "Only English versions are
+    // allowed in Oldschool". `None` says "no confirmed authored intent to
+    // declare" rather than inventing OriginalPrintingsOnly from a secondary
+    // source, and NotApplicable is the pairing PLAN.md §1 requires of it.
+    assert_eq!(preset.reprint_policy, None);
+    assert_eq!(preset.printing_fidelity, PrintingFidelity::NotApplicable);
+
+    // A registry-stable id of its own, never the Axis-A lobby-save sentinel.
+    assert_ne!(preset.rules.id, LOBBY_SAVE_CUSTOM_FORMAT_ID);
+    assert_no_lobby_save_sentinel_collision(&[preset]);
+}
+
+#[test]
+fn swedish_old_school_inherits_the_shared_constructed_structural_shape() {
+    // The primary source states pool and restriction rules only. Rather than
+    // invent structural values, the preset projects `FormatConfig::standard()`
+    // — the shape every built-in 60-card constructed format spreads. This
+    // pins that they stay identical.
+    let preset = swedish_old_school();
+    let structural = &preset.rules.structural;
+    let base = FormatConfig::standard();
+
+    assert_eq!(structural.starting_life, base.starting_life);
+    assert_eq!(structural.deck_size, base.deck_size);
+    assert_eq!(structural.min_players, base.min_players);
+    assert_eq!(structural.max_players, base.max_players);
+    assert_eq!(structural.sideboard_policy, base.sideboard_policy);
+    assert_eq!(
+        structural.default_deck_copy_limit,
+        base.default_deck_copy_limit
+    );
+    assert!(!structural.singleton);
+    assert_eq!(structural.command_zone_mode, CommandZoneMode::Disabled);
 }
 
 #[test]
