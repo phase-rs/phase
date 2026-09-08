@@ -43,6 +43,7 @@ use std::sync::Arc;
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::AbilityDefinition;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -596,6 +597,145 @@ mod cast_arm {
             Some("anti_self_harm_harmful_activation_own_board_only"),
             "activating Royal Assassin when the only legal 'tapped creature' is the AI's own \
              must still be vetoed"
+        );
+    }
+}
+
+/// Review finding (PR #8696): the veto's per-effect loop reads `ctx.effects()`
+/// through `extract_target_filter`, and several REAL, unconditionally
+/// beneficial effects — `Effect::Draw` chief among them — are absent from that
+/// function's match arms and fall to `_ => None`. Such a leg is silently
+/// `continue`d past by `anti_self_harm.rs`'s per-effect loop and never reaches
+/// the `EffectPolarity::Beneficial => return None` arm, because that arm only
+/// fires for legs the loop actually visits.
+///
+/// Garruk, Cursed Huntsman's [−3] ("Destroy target creature. Draw a card.",
+/// verified against `data/card-data.json`) is the sharpest case: a chained
+/// `sub_ability` shape the engine's own parser produces byte-identically from
+/// the bare ability line (pinned in `destroy_then_draw_ability` below), so this
+/// fixture needs no planeswalker/loyalty machinery to reproduce it faithfully.
+/// `Effect::Draw` DOES carry a `target` field (defaulting to `Controller`) —
+/// so "it has no target, it can't be missed" is the wrong refutation. The
+/// field exists; the VARIANT is simply absent from `extract_target_filter`'s
+/// match arms, and only those arms decide what the loop can see.
+///
+/// On a board where the only legal "target creature" is the AI's own, this
+/// activation was hard-`Reject`ed pre-fix — deleting a card the AI was
+/// guaranteed to draw. Whether the trade (give up a creature, get a card) is
+/// actually worth making is a soft-scoring question for other policies; a hard
+/// veto has no business answering it.
+mod split_ability_leg {
+    use super::*;
+
+    /// The shipped parser's own output for Garruk's [−3], pinned so a parser
+    /// shape change fails this test rather than leaving it green on a shape no
+    /// card produces. Matches `data/card-data.json`'s parse of the printed
+    /// card: `Effect::Destroy` on the root, `Effect::Draw { target: Controller }`
+    /// chained as a `SequentialSibling` `sub_ability`.
+    fn destroy_then_draw_ability() -> AbilityDefinition {
+        parse_oracle_text(
+            "[−3]: Destroy target creature. Draw a card.",
+            "Garruk, Cursed Huntsman",
+            &[],
+            &["Planeswalker".to_string()],
+            &[],
+        )
+        .abilities
+        .into_iter()
+        .next()
+        .expect("Garruk's [-3] parses one activated ability")
+    }
+
+    fn board_with_only_own_creature() -> (GameState, ObjectId, ObjectId) {
+        let mut ids = Ids::new();
+        let mut state = GameState::new_two_player(4242);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = AI;
+        state.priority_player = AI;
+
+        let own_creature = vanilla_creature(&mut state, &mut ids, AI, "Own Body", 2, 2);
+
+        let planeswalker = create_object(
+            &mut state,
+            ids.next(),
+            AI,
+            "Garruk, Cursed Huntsman".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&planeswalker).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            *Arc::make_mut(&mut obj.abilities) = vec![destroy_then_draw_ability()];
+        }
+
+        state.waiting_for = WaitingFor::Priority { player: AI };
+        (state, planeswalker, own_creature)
+    }
+
+    fn verdict_for(state: &GameState, source_id: ObjectId) -> PolicyVerdict {
+        let config = AiConfig::default();
+        let mut session = AiSession::empty();
+        session.features.insert(AI, Default::default());
+        let mut context = AiContext::empty(&config.weights);
+        context.session = Arc::new(session);
+        context.player = AI;
+
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: AI },
+            candidates: Vec::new(),
+        };
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        };
+        AntiSelfHarmPolicy.verdict(&ctx)
+    }
+
+    /// The regression. A chained "Destroy target creature. Draw a card." whose
+    /// Destroy leg can only reach the AI's own creature must NOT be vetoed —
+    /// the Draw leg is a real, guaranteed payoff the harmful leg's own-board
+    /// confinement does not erase.
+    #[test]
+    fn own_board_destroy_with_a_guaranteed_draw_is_not_vetoed() {
+        let (state, planeswalker, _own_creature) = board_with_only_own_creature();
+        assert_eq!(
+            reject_kind(&verdict_for(&state, planeswalker)),
+            None,
+            "'Destroy target creature. Draw a card.' must not be hard-rejected when the \
+             Destroy leg's only legal target is the AI's own creature — the Draw leg is a \
+             real, engine-guaranteed payoff the veto's per-effect loop must not go blind to"
+        );
+    }
+
+    /// Non-vacuity: remove the Draw leg (a bare "Destroy target creature.")
+    /// and the SAME board is still vetoed. Proves the fix isn't a blanket
+    /// stand-down — it responds specifically to the untargeted beneficial leg.
+    #[test]
+    fn without_the_draw_leg_the_same_board_is_still_vetoed() {
+        let (mut state, planeswalker, _own_creature) = board_with_only_own_creature();
+        {
+            let obj = state.objects.get_mut(&planeswalker).unwrap();
+            let mut bare = Arc::make_mut(&mut obj.abilities)[0].clone();
+            bare.sub_ability = None;
+            *Arc::make_mut(&mut obj.abilities) = vec![bare];
+        }
+        assert_eq!(
+            reject_kind(&verdict_for(&state, planeswalker)),
+            Some("anti_self_harm_harmful_activation_own_board_only"),
+            "with no Draw leg to rescue it, a bare own-board-only Destroy must still be vetoed"
         );
     }
 }

@@ -6,14 +6,25 @@
 //! situations where the AI should activate the Grim Lavamancer to deal 2 damage
 //! to my 5-toughness creature **without drawing a card first**."
 //!
-//! The observation generalises past that one card. Upkeep, the untap step and
-//! the draw step are the AI's LOWEST-INFORMATION windows of the turn: it has
-//! not drawn yet, no spell has been cast, and combat has not been declared. For
-//! an ability that is still going to be there in the main phase, activating in
-//! one of those windows spends a resource to buy strictly less information than
-//! waiting would. Nothing in the corpus modelled that: `TacticalWindow`
+//! The observation generalises past that one card. The upkeep step, taken with
+//! an empty stack, is the AI's LOWEST-INFORMATION window of the turn: it has
+//! not drawn yet this turn, no spell has been cast, and combat has not been
+//! declared. For an ability that is still going to be there in the main phase,
+//! activating during upkeep spends a resource to buy strictly less information
+//! than waiting would. Nothing in the corpus modelled that: `TacticalWindow`
 //! (`tactical_gate.rs`) has no upkeep variant, and `card_hints` gives every
 //! `ActivateAbility` a flat base score with no timing term at all.
+//!
+//! The draw step is deliberately NOT one of the gated windows, even though it
+//! looks like the same class. CR 117.3a and CR 504.1/504.2 (matched by the
+//! engine's own comment beside `execute_draw` in `crates/engine/src/game/turns.rs`):
+//! the active player receives priority during the draw step only AFTER the
+//! turn-based draw has been dealt with — a skipped draw still runs that step
+//! first. So whenever this policy could observe draw-step priority, the card
+//! is already in hand; gating there would hold an activation back for
+//! information the AI already has. The untap step is excluded for a stronger
+//! reason: CR 502.4 means no player ever receives priority in it at all, so
+//! `WaitingFor::Priority` cannot occur there to gate on.
 //!
 //! So this policy asks one question — **does waiting cost anything?** — and
 //! penalises the activation when the answer is no.
@@ -100,15 +111,23 @@ fn ability_is_deferrable(ability: &AbilityDefinition) -> bool {
         && ability.ability_tag != Some(AbilityTag::Cycling)
 }
 
-/// CR 500.1 + CR 502 / CR 503 / CR 504: the untap, upkeep and draw steps, taken
-/// with an empty stack, are the turn's low-information windows — nothing has
+/// CR 503.1: the upkeep step has no turn-based actions of its own, so taken
+/// with an empty stack it is the turn's low-information window — nothing has
 /// been drawn, cast, or declared yet.
 ///
-/// The end step is deliberately NOT here. It is the *patient* window, the one a
-/// held ability is being saved for, and `FetchLandPatiencePolicy` already treats
-/// it as the correct time to act.
+/// The draw step and the untap step are NOT included, and both exclusions are
+/// load-bearing rather than incidental — see the module doc for the CR
+/// citations. In short: any draw-step priority this predicate could see is
+/// already post-draw (CR 504.1/504.2), so gating there would be pointless: the
+/// AI has exactly the information waiting would have bought it. And the untap
+/// step never grants priority at all (CR 502.4), so a `Phase::Untap` arm here
+/// would be dead code that misleadingly reads as though it were a live window.
+///
+/// The end step is deliberately NOT here either, but for a different reason —
+/// it is the *patient* window, the one a held ability is being saved for, and
+/// `FetchLandPatiencePolicy` already treats it as the correct time to act.
 fn is_low_information_window(state: &GameState) -> bool {
-    matches!(state.phase, Phase::Untap | Phase::Upkeep | Phase::Draw)
+    state.phase == Phase::Upkeep
         && state.stack.is_empty()
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
 }

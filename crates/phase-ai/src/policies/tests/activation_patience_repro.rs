@@ -28,9 +28,20 @@
 //!
 //! # The arms
 //!
-//! One negative arm (hold at upkeep) and four positive controls, one per escape
-//! hatch plus the phase gate. A policy that simply always penalised would pass
-//! the negative arm alone.
+//! One negative arm (hold at upkeep) and positive controls: one per escape
+//! hatch (three), the phase gate, a deferrability check, and — added on review
+//! (PR #8696) — a check that the draw step is correctly NOT gated. A policy
+//! that simply always penalised would pass the negative arm alone.
+//!
+//! # Why the draw step is not one of the gated phases
+//!
+//! CR 117.3a and CR 504.1/504.2: the active player receives priority during
+//! the draw step only AFTER the turn-based draw has been dealt with. So by the
+//! time this predicate could ever see `Phase::Draw` with `WaitingFor::Priority`,
+//! the card is already in hand — there is no more "wait to draw first"
+//! information left to buy. `phase_draw_is_not_gated` below pins that; it is
+//! the corrected reading of what was previously (incorrectly) one of the three
+//! gated phases.
 
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
@@ -243,5 +254,80 @@ fn a_mana_ability_is_not_treated_as_deferrable() {
     let board = Board { state, pinger };
     let (delta, reason) = score_and_reason(&verdict_for(&board));
     assert_eq!(reason, "activation_patience_na");
+    assert_eq!(delta, 0.0);
+}
+
+/// Review finding (PR #8696): the module previously gated `Phase::Draw` on
+/// the theory that it was one of the turn's low-information windows. It is
+/// not — CR 117.3a / CR 504.1/504.2 mean the active player only receives
+/// priority in the draw step AFTER the turn-based draw (and its triggers)
+/// have been dealt with, so any draw-step priority is already post-draw. This
+/// pins the corrected behavior: activating during the draw step must be
+/// treated exactly like the main phase, not like upkeep.
+#[test]
+fn phase_draw_is_not_gated() {
+    let board = build_board(Phase::Draw, 20, 20);
+    let (delta, reason) = score_and_reason(&verdict_for(&board));
+    assert_eq!(
+        reason, "activation_patience_na",
+        "the draw step is post-draw by the time priority is offered (CR 504.1/504.2), so it \
+         must not be treated as a low-information window"
+    );
+    assert_eq!(delta, 0.0);
+}
+
+/// Review finding (PR #8696): escape hatch 3 (an unmet intervening-if
+/// condition — CR 602.5) had no test, unlike its two siblings. A regression
+/// deleting that branch would have passed this suite silently.
+///
+/// Agadeem Occultist's activated ability ("{T}: Put target creature card from
+/// an opponent's graveyard onto the battlefield under your control if its mana
+/// value is less than or equal to the number of Allies you control.", verified
+/// against `data/card-data.json`) is a real, verified `{T}`-only conditional
+/// activated ability — no self-cost, so `SelfCostValuePolicy` does not already
+/// cover it, keeping this test isolated to the escape hatch under test.
+#[test]
+fn a_conditional_ability_overrides_patience() {
+    let mut ids = Ids::new();
+    let mut state = GameState::new_two_player(4242);
+    state.phase = Phase::Upkeep;
+    state.active_player = AI;
+    state.priority_player = AI;
+
+    let source = creature(
+        &mut state,
+        &mut ids,
+        AI,
+        "Agadeem Occultist",
+        2,
+        2,
+        Some(
+            "{T}: Put target creature card from an opponent's graveyard onto the battlefield \
+             under your control if its mana value is less than or equal to the number of \
+             Allies you control.",
+        ),
+    );
+    assert!(
+        state
+            .objects
+            .get(&source)
+            .unwrap()
+            .abilities
+            .first()
+            .is_some_and(|a| a.condition.is_some()),
+        "premise of this test: the parser must produce a non-None `condition`"
+    );
+
+    state.waiting_for = WaitingFor::Priority { player: AI };
+    let board = Board {
+        state,
+        pinger: source,
+    };
+    let (delta, reason) = score_and_reason(&verdict_for(&board));
+    assert_eq!(
+        reason, "activation_patience_conditional",
+        "an ability with an intervening-if condition (CR 602.5) must stand down: the \
+         condition holding now may not hold later, so waiting is not free"
+    );
     assert_eq!(delta, 0.0);
 }

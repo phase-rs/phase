@@ -877,6 +877,34 @@ fn harmful_activation_reaches_only_own_board(ctx: &PolicyContext<'_>) -> Option<
         return None;
     }
 
+    // A chained leg that is unconditionally beneficial and carries NO target
+    // slot (`extract_target_filter` returns `None`) is invisible to the loop
+    // below by construction — it never sets `reaches_beyond_own_board` and
+    // never reaches the `EffectPolarity::Beneficial => return None` arm inside
+    // that loop, because that arm only runs for legs the loop actually visits.
+    // `Effect::Draw` is the sharpest case: it DOES carry a `target` field
+    // (defaulting to `Controller`), so "it has no target, it can't be missed"
+    // is the wrong refutation — the field exists, but the variant is simply
+    // absent from `extract_target_filter`'s match arms, and only the match
+    // arms decide what this loop can see. `GainLife`, `Token`, `Mana` and
+    // `SearchLibrary` are the same shape.
+    //
+    // "Destroy target creature. Draw a card." (Garruk, Cursed Huntsman's [-3],
+    // and the same shape on Vraska, Relic Seeker and Teferi, Time Raveler) is
+    // therefore a real, engine-guaranteed payoff this veto must not blind
+    // itself to just because the Destroy leg's only legal target is the AI's
+    // own creature. This mirrors `score_selected_modes`'s own reasoning for
+    // the analogous case one level up: "the engine has already removed modes
+    // with no legal target at all ... so this mode IS playable" — a real,
+    // non-targeted payoff means the activation is not a pure whiff, whatever
+    // its harmful leg can see.
+    if effects.iter().any(|effect| {
+        extract_target_filter(effect).is_none()
+            && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
+    }) {
+        return None;
+    }
+
     let mut harmful_own_board_effects = 0i64;
     for effect in &effects {
         let Some(filter) = extract_target_filter(effect) else {
