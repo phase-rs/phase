@@ -12,7 +12,8 @@ use crate::parser::oracle_ir::trigger::TriggerNodeIr;
 use crate::parser::{parse_oracle_text, parse_oracle_text_traced};
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, Effect, TargetChoiceTiming, TriggerCondition,
+    AbilityCost, ActivationRestriction, ControllerRef, Effect, FilterProp, TargetChoiceTiming,
+    TargetFilter, TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::DistributionUnit;
 
@@ -84,6 +85,24 @@ fn parser_trace_uses_production_output_and_records_real_item_routes() {
         traced.events.len(),
         "one outer event per emitted item"
     );
+    let exploit = ordinary
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == crate::types::triggers::TriggerMode::Exploited)
+        .expect("Skull Skaab exploit payoff trigger");
+    assert_eq!(
+        exploit.valid_source,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+    assert!(matches!(
+        exploit.valid_card.as_ref(),
+        Some(TargetFilter::Typed(filter)) if filter.properties.contains(&FilterProp::NonToken)
+    ));
+    assert!(!ability_has_unimplemented(
+        exploit.execute.as_deref().expect("Skull Skaab payoff")
+    ));
 }
 
 #[test]
@@ -95,6 +114,64 @@ fn parser_trace_skull_skaab_pair_preserves_input_difference_and_omits_trigger_ca
     let subtypes = vec!["Zombie".to_string()];
     let left = parse_oracle_text_traced(left_text, "Skull Skaab", &keywords, &types, &subtypes);
     let right = parse_oracle_text_traced(right_text, "A-Skull Skaab", &keywords, &types, &subtypes);
+    let (left_ir, left_lowered) = parse_two_layer_with_keywords(
+        left_text,
+        "Skull Skaab",
+        &["Exploit"],
+        &["Creature"],
+        &["Zombie"],
+    );
+    let (right_ir, right_lowered) = parse_two_layer_with_keywords(
+        right_text,
+        "A-Skull Skaab",
+        &["Exploit"],
+        &["Creature"],
+        &["Zombie"],
+    );
+
+    for (ir, expects_nontoken) in [(&left_ir, true), (&right_ir, false)] {
+        let parsed = ir
+            .items
+            .iter()
+            .find_map(|item| match &item.node {
+                OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger))
+                    if trigger.partial_def.mode
+                        == crate::types::triggers::TriggerMode::Exploited =>
+                {
+                    Some(trigger)
+                }
+                _ => None,
+            })
+            .expect("typed Exploited TriggerIr");
+        assert_eq!(
+            parsed.partial_def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(
+            matches!(
+                parsed.partial_def.valid_card.as_ref(),
+                Some(TargetFilter::Typed(filter))
+                    if filter.properties.contains(&FilterProp::NonToken)
+            ),
+            expects_nontoken
+        );
+    }
+
+    assert_eq!(
+        serde_json::to_value(&left.production_output).unwrap(),
+        serde_json::to_value(&left_lowered).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&right.production_output).unwrap(),
+        serde_json::to_value(&right_lowered).unwrap()
+    );
+    let mut left_projection = serde_json::to_value(&left_lowered).unwrap();
+    let mut right_projection = serde_json::to_value(&right_lowered).unwrap();
+    crate::parser::audit_projection::omit_definition_descriptions(&mut left_projection);
+    crate::parser::audit_projection::omit_definition_descriptions(&mut right_projection);
+    assert_ne!(left_projection, right_projection);
 
     assert_ne!(left.normalized_source, right.normalized_source);
     assert!(left

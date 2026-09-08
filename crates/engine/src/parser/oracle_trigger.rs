@@ -13126,8 +13126,9 @@ fn try_parse_event(
         BecomesMonstrous,
         BecomesRenowned,
         Mutates,
-        ExploitsCreature,
-        Exploits,
+        Exploits {
+            victim: Option<TargetFilter>,
+        },
         /// CR 701.44b: A permanent "explores" after the explore process completes.
         Explores,
         /// CR 701.50f: A permanent "connives" after the connive process completes.
@@ -13165,6 +13166,34 @@ fn try_parse_event(
             )));
         }
         Ok((rest, SimpleEvent::BecomesUnattached(Some(filter))))
+    }
+    fn parse_exploit_victim(input: &str) -> OracleResult<'_, TargetFilter> {
+        let (filter, remaining) = parse_type_phrase_folding(input);
+        if matches!(filter, TargetFilter::Any) || remaining.len() == input.len() {
+            return Err(nom::Err::Error(OracleError::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        Ok((remaining, filter))
+    }
+    /// CR 702.110b + CR 603.2: an exploit event distinguishes the creature
+    /// performing exploit from the creature sacrificed as the ability resolves.
+    fn parse_exploits_event(input: &str) -> OracleResult<'_, SimpleEvent> {
+        let (remaining, _) = tag("exploits").parse(input)?;
+        if remaining.is_empty() {
+            return Ok((remaining, SimpleEvent::Exploits { victim: None }));
+        }
+
+        let (victim_text, _) =
+            preceded(space1, terminated(alt((tag("a"), tag("an"))), space1)).parse(remaining)?;
+        let (_, victim) = all_consuming(parse_exploit_victim).parse(victim_text)?;
+        Ok((
+            "",
+            SimpleEvent::Exploits {
+                victim: Some(victim),
+            },
+        ))
     }
     /// CR 120.4 + CR 120.4b: the source-scoping tail on the received-damage
     /// grammar — `"…by a single source"` (Pain Magnification). It narrows the
@@ -13349,9 +13378,7 @@ fn try_parse_event(
                 (tag("becomes"), space1, tag("renowned")),
             ),
             value(SimpleEvent::Mutates, tag("mutates")),
-            // CR 702.110b: "exploits a creature" — exploit trigger
-            value(SimpleEvent::ExploitsCreature, tag("exploits a creature")),
-            value(SimpleEvent::Exploits, tag("exploits")),
+            parse_exploits_event,
             // CR 701.44b: "explores" / "explore" — explore trigger
             value(SimpleEvent::Explores, tag("explores")),
             value(SimpleEvent::Explores, tag("explore")),
@@ -13604,9 +13631,10 @@ fn try_parse_event(
                 def.mode = TriggerMode::Mutates;
                 def.valid_card = Some(subject.clone());
             }
-            SimpleEvent::ExploitsCreature | SimpleEvent::Exploits => {
+            SimpleEvent::Exploits { victim } => {
                 def.mode = TriggerMode::Exploited;
-                def.valid_card = Some(subject.clone());
+                def.valid_source = Some(subject.clone());
+                def.valid_card = victim;
             }
             SimpleEvent::Explores => {
                 if !remaining.trim().is_empty() {

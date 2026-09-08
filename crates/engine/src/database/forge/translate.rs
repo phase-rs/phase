@@ -409,6 +409,8 @@ fn replace_unimplemented_replacements(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     use crate::database::forge::loader::parse_params;
@@ -493,6 +495,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
             },
         );
 
@@ -505,5 +508,165 @@ mod tests {
         ));
         // Second ability (was Unimplemented) should now be Draw
         assert!(matches!(&*face.abilities[1].effect, Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn exploited_fallback_replaces_only_execute_and_preserves_oracle_roles() {
+        let directory = tempfile::tempdir().expect("temporary Forge cardsfolder");
+        fs::write(
+            directory.path().join("card.txt"),
+            "Name:Test Card\nTypes:Creature\nT:Mode$ Exploited | ValidSource$ Creature.YouCtrl | ValidCard$ Creature | Execute$ Payoff\nSVar:Payoff:DB$ Draw | NumCards$ 1\n",
+        )
+        .expect("write Forge card script");
+        let index = ForgeIndex::scan(directory.path());
+        assert_eq!(
+            index.len(),
+            1,
+            "the fallback test reached a real Forge index"
+        );
+
+        let mut face = CardFace {
+            name: "Test Card".to_string(),
+            ..CardFace::default()
+        };
+        let mut oracle = TriggerDefinition::new(crate::types::triggers::TriggerMode::Exploited);
+        oracle.valid_source = Some(TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature()
+                .controller(crate::types::ability::ControllerRef::You),
+        ));
+        oracle.valid_card = Some(TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature()
+                .properties(vec![crate::types::ability::FilterProp::NonToken]),
+        ));
+        oracle.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::unimplemented("create", "create a Zombie token"),
+        )));
+        face.triggers.push(oracle.clone());
+
+        apply_forge_fallback(&mut face, &index);
+
+        assert_eq!(face.metadata.forge_triggers, 1);
+        assert_eq!(face.triggers[0].valid_source, oracle.valid_source);
+        assert_eq!(face.triggers[0].valid_card, oracle.valid_card);
+        assert!(matches!(
+            face.triggers[0]
+                .execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn exploited_fallback_appends_supported_translated_roles() {
+        let directory = tempfile::tempdir().expect("temporary Forge cards folder");
+        fs::write(
+            directory.path().join("card.txt"),
+            "Name:Test Card\nTypes:Creature\nT:Mode$ Exploited | ValidSource$ Creature.YouCtrl | ValidCard$ Creature.OppCtrl | Execute$ Payoff\nSVar:Payoff:DB$ Draw | NumCards$ 1\n",
+        )
+        .expect("write Forge card script");
+        let index = ForgeIndex::scan(directory.path());
+        let mut face = CardFace {
+            name: "Test Card".to_string(),
+            ..CardFace::default()
+        };
+
+        apply_forge_fallback(&mut face, &index);
+
+        assert_eq!(face.metadata.forge_triggers, 1);
+        assert_eq!(face.triggers.len(), 1);
+        assert_eq!(
+            face.triggers[0].valid_source,
+            Some(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .controller(crate::types::ability::ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            face.triggers[0].valid_card,
+            Some(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .controller(crate::types::ability::ControllerRef::Opponent),
+            ))
+        );
+        assert!(matches!(
+            face.triggers[0]
+                .execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejected_exploited_forge_filter_does_not_replace_or_append() {
+        let directory = tempfile::tempdir().expect("temporary Forge cards folder");
+        fs::write(
+            directory.path().join("card.txt"),
+            "Name:Test Card\nTypes:Creature\nT:Mode$ Exploited | ValidSource$ Creature.YouCtrl | ValidCard$ Creature.!token | Execute$ Payoff\nSVar:Payoff:DB$ Draw | NumCards$ 1\n",
+        )
+        .expect("write Forge card script");
+        let index = ForgeIndex::scan(directory.path());
+        let mut face = CardFace {
+            name: "Test Card".to_string(),
+            ..CardFace::default()
+        };
+        let mut oracle = TriggerDefinition::new(crate::types::triggers::TriggerMode::Unknown(
+            "unsupported exploit clause".to_string(),
+        ));
+        oracle.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::unimplemented("exploit", "unsupported exploit clause"),
+        )));
+        face.triggers.push(oracle.clone());
+
+        apply_forge_fallback(&mut face, &index);
+
+        assert_eq!(face.metadata.forge_triggers, 0);
+        assert_eq!(face.triggers, vec![oracle]);
+    }
+
+    #[test]
+    fn supported_oracle_exploit_filter_survives_rejected_forge_filter() {
+        let directory = tempfile::tempdir().expect("temporary Forge cards folder");
+        fs::write(
+            directory.path().join("card.txt"),
+            "Name:Test Card\nTypes:Creature\nT:Mode$ Exploited | ValidSource$ Creature.YouCtrl | ValidCard$ Creature.!token | Execute$ Payoff\nSVar:Payoff:DB$ Draw | NumCards$ 1\n",
+        )
+        .expect("write Forge card script");
+        let index = ForgeIndex::scan(directory.path());
+        let mut face = CardFace {
+            name: "Test Card".to_string(),
+            ..CardFace::default()
+        };
+        let mut oracle = TriggerDefinition::new(crate::types::triggers::TriggerMode::Exploited);
+        oracle.valid_source = Some(TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature()
+                .controller(crate::types::ability::ControllerRef::You),
+        ));
+        oracle.valid_card = Some(TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature()
+                .properties(vec![crate::types::ability::FilterProp::NonToken]),
+        ));
+        oracle.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        face.triggers.push(oracle.clone());
+
+        apply_forge_fallback(&mut face, &index);
+
+        assert_eq!(face.metadata.forge_triggers, 0);
+        assert_eq!(face.triggers, vec![oracle]);
     }
 }
