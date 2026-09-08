@@ -43215,23 +43215,45 @@ fn flip_n_coins_emits_flip_coins_variant() {
     );
 }
 
-/// CR 614.10: "Target opponent skips their next turn." (no X, no flip)
-/// parses as a standalone SkipNextTurn with count=1 and opponent target.
+/// CR 614.10: controller and targeted forms share the same optional count grammar.
 #[test]
-fn target_opponent_skips_next_turn_parses() {
-    let def = parse_effect_chain("Target opponent skips their next turn.", AbilityKind::Spell);
-    let Effect::SkipNextTurn { target, count } = &*def.effect else {
-        panic!("expected SkipNextTurn, got {:?}", def.effect);
-    };
-    assert_eq!(
-        count,
-        &crate::types::ability::QuantityExpr::Fixed { value: 1 }
-    );
-    assert!(matches!(
-        target,
-        TargetFilter::Typed(tf)
-            if tf.controller == Some(ControllerRef::Opponent)
-    ));
+fn skip_next_turn_parses_controller_and_targeted_singular_plural_forms() {
+    for (text, expected_count) in [
+        ("You skip your next turn.", 1),
+        ("You skip your next two turns.", 2),
+        ("Skip your next turn.", 1),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::SkipNextTurn {
+                    target: TargetFilter::Controller,
+                    count: crate::types::ability::QuantityExpr::Fixed { value },
+                } if *value == expected_count
+            ),
+            "expected controller to skip {expected_count} turn(s), got {:?}",
+            def.effect
+        );
+    }
+
+    for (text, expected_count) in [
+        ("Target opponent skips their next turn.", 1),
+        ("Target opponent skips their next two turns.", 2),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::SkipNextTurn {
+                    target: TargetFilter::Typed(tf),
+                    count: crate::types::ability::QuantityExpr::Fixed { value },
+                } if tf.controller == Some(ControllerRef::Opponent) && *value == expected_count
+            ),
+            "expected opponent to skip {expected_count} turn(s), got {:?}",
+            def.effect
+        );
+    }
 }
 
 /// CR 614.10a: "You skip your next untap step" is a one-shot step skip,

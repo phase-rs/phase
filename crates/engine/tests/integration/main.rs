@@ -1054,6 +1054,8 @@ mod purged_source_attacked_this_turn_lki;
 mod purged_source_intervening_if_lki;
 mod purged_source_matches_filter_lki;
 mod queen_parser_near_misses;
+mod queen_velocity_skip_turns;
+mod queen_velocity_upkeep;
 mod quirion_ranger_activation;
 mod rage_reflection_double_strike_grant;
 mod random_discard_cost_replacement_resume;

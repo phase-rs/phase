@@ -946,6 +946,49 @@ fn activation_during_gate_composes_turn_role_and_window_axes() {
     }
 }
 
+#[test]
+fn activated_ability_any_upkeep_restriction_uses_unscoped_upkeep_condition() {
+    const DWARVEN_ARMORY: &str =
+        "{2}, Sacrifice a land: Put a +2/+2 counter on target creature. Activate only during any upkeep step.";
+    const TOLARIA: &str = "{T}: Add {U}.\n{T}: Target creature loses banding and all \"bands with other\" abilities until end of turn. Activate only during any upkeep step.";
+    let expected = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::IsDuringUpkeep),
+    };
+    fn has_unimplemented(definition: &AbilityDefinition) -> bool {
+        matches!(definition.effect.as_ref(), Effect::Unimplemented { .. })
+            || definition
+                .sub_ability
+                .as_deref()
+                .is_some_and(has_unimplemented)
+    }
+
+    let armory = parse(DWARVEN_ARMORY, "Dwarven Armory", &[], &["Enchantment"], &[]);
+    assert_eq!(armory.abilities.len(), 1, "got {:#?}", armory.abilities);
+    assert!(
+        armory.abilities[0]
+            .activation_restrictions
+            .contains(&expected),
+        "Dwarven Armory must retain its any-upkeep restriction: {:#?}",
+        armory.abilities[0]
+    );
+    assert!(
+        !has_unimplemented(&armory.abilities[0]),
+        "Dwarven Armory's parsed ability must not retain an unimplemented timing tail: {:#?}",
+        armory.abilities[0]
+    );
+
+    let tolaria = parse(TOLARIA, "Tolaria", &[], &["Land"], &[]);
+    assert_eq!(tolaria.abilities.len(), 2, "got {:#?}", tolaria.abilities);
+    assert!(
+        tolaria
+            .abilities
+            .iter()
+            .any(|ability| ability.activation_restrictions.contains(&expected)),
+        "Tolaria's second ability must retain its any-upkeep restriction: {:#?}",
+        tolaria.abilities
+    );
+}
+
 /// CR 508.1: a STANDALONE combat-window activation gate — "Activate only before
 /// attackers are declared" / "Activate only before combat" (Arcum's Whistle,
 /// Arcum's Sleigh) with no "during <role>" first half — must map to the enforced
