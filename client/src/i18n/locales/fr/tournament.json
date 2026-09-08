@@ -150,7 +150,7 @@
     "connectionLost": "Connexion au lobby perdue. Vérifiez l'adresse du serveur.",
     "aborted": "Cette requête a été annulée.",
     "unsupported": "La requête a été envoyée, mais ce serveur est trop ancien pour la confirmer. Vérifiez le tournoi avant de réessayer.",
-    "incompatible": "Non pris en charge par ce serveur : {{message}}",
+    "incompatible": "Ce serveur est trop ancien pour cette structure de match (il faut le protocole de lobby {{needed}}). Rien n’a été envoyé.",
     "notFound": "Aucun tournoi avec ce code."
   }
 }

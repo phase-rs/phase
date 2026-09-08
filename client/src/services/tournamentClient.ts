@@ -566,21 +566,28 @@ export interface CreateTournamentRequest {
 /**
  * Whether a `CreateTournament` request needs lobby protocol
  * `MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE` to be honored — i.e. it selects a match
- * structure a pre-v8 broker would silently replace with the arity default.
+ * structure a pre-v8 broker would silently apply DIFFERENTLY from a v8 broker.
  *
- * The single such case is **Bo1 at head-to-head**: a pre-v8 broker ignores
- * `match_type` and runs a head-to-head event as Bo3. Every other selection
- * either already matches the default a pre-v8 broker applies (Bo3 head-to-head,
- * and `Bo1`/`null` for pods) or is refused by the broker on its own (an explicit
- * `Bo3` at a non-head-to-head arity), so none needs the capability gate. This
- * encodes only that one capability boundary, not the broker's full default table
- * — the broker stays the single authority for defaulting.
+ * A pre-v8 broker discards `match_type` and applies the arity default: Bo3 for
+ * head-to-head, Bo1 for pods. So a request needs the capability exactly when its
+ * explicit `match_type` differs from that default:
+ * - **Bo1 head-to-head** — a pre-v8 broker runs it as Bo3.
+ * - **Bo3 pod** (any non-head-to-head arity) — a v8 broker *rejects* it (Bo3 is
+ *   head-to-head only), but a pre-v8 broker silently makes an arity-default Bo1
+ *   pod. Either way the organizer must not get a silent Bo1 pod.
+ *
+ * A selection that matches the pre-v8 default (Bo3 head-to-head, `Bo1`/`null`
+ * pods) is honored identically by both, so it is never gated. This encodes only
+ * the pre-v8 default boundary as a capability check; the broker stays the single
+ * authority for actually resolving and validating the structure.
  */
 export function matchTypeNeedsCapability(
   arity: MatchArity,
   matchType: MatchType | null | undefined,
 ): boolean {
-  return arity === 2 && matchType === "Bo1";
+  if (matchType == null) return false;
+  const preV8Default: MatchType = arity === 2 ? "Bo3" : "Bo1";
+  return matchType !== preV8Default;
 }
 
 /** `CreateTournament` → `TournamentCreated` (point reply, carries the token). */

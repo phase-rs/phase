@@ -150,7 +150,7 @@
     "connectionLost": "Verbindung zur Lobby verloren. Prüfe deine Serveradresse.",
     "aborted": "Diese Anfrage wurde abgebrochen.",
     "unsupported": "Die Anfrage wurde gesendet, aber dieser Server ist zu alt, um sie zu bestätigen. Prüfe das Turnier, bevor du es erneut versuchst.",
-    "incompatible": "Von diesem Server nicht unterstützt: {{message}}",
+    "incompatible": "Dieser Server ist zu alt für diese Matchstruktur (er benötigt Lobby-Protokoll {{needed}}). Es wurde nichts gesendet.",
     "notFound": "Kein Turnier mit diesem Code."
   }
 }

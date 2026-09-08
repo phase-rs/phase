@@ -3383,7 +3383,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               ok: false,
               reason: "incompatible",
               neededLobbyVersion: MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
-              message: `A best-of-one head-to-head event needs a server speaking lobby protocol ${MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE}; this one speaks ${version ?? "an older version"}, which would run it as best-of-three. Nothing was sent.`,
+              // Non-localized fallback for logs/non-UI consumers. The user-facing
+              // copy is rendered from the typed `neededLobbyVersion` via the
+              // `errors.incompatible` catalog entry, not from this string.
+              message: `The selected match structure needs a server speaking lobby protocol ${MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE}; this one speaks ${version ?? "an older version"} and would apply its default structure instead. Nothing was sent.`,
             };
           }
           const result = await createTournamentOver(socket, req, { signal });

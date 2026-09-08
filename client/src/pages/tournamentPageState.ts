@@ -485,7 +485,7 @@ export type FailureLabel =
   | { readonly key: "errors.connectionLost" }
   | { readonly key: "errors.aborted" }
   | { readonly key: "errors.unsupported" }
-  | { readonly key: "errors.incompatible"; readonly message: string }
+  | { readonly key: "errors.incompatible"; readonly needed: number }
   | { readonly key: "errors.serverRejected"; readonly message: string };
 
 /**
@@ -555,10 +555,11 @@ export function failureLabel(failure: TournamentFailure): FailureLabel {
   if (failure.reason === "aborted") return { key: "errors.aborted" };
   if (failure.reason === "unsupported") return { key: "errors.unsupported" };
   // Locally-produced, pre-send refusal: the target broker cannot honor the
-  // requested match structure. Its `message` names the version gap, so pass it
-  // through the same way `serverRejected` does.
+  // requested match structure. Carry the TYPED required version, not the
+  // store's English `message`, so each locale renders its own sentence with
+  // `{{needed}}` interpolated — the same posture as `not_authorized`'s `role`.
   if (failure.reason === "incompatible") {
-    return { key: "errors.incompatible", message: failure.message };
+    return { key: "errors.incompatible", needed: failure.neededLobbyVersion };
   }
   const unreachable: never = failure.reason;
   return unreachable;

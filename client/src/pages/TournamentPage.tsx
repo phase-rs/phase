@@ -388,7 +388,9 @@ export function TournamentPage() {
             >
               {"message" in failure
                 ? t(failure.key, { message: failure.message })
-                : t(failure.key)}
+                : "needed" in failure
+                  ? t(failure.key, { needed: failure.needed })
+                  : t(failure.key)}
             </div>
           )}
 
