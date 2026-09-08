@@ -4602,9 +4602,10 @@ mod tests {
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification,
-        ControllerRef, Duration, Effect, EffectKind, ManaProduction, ModalChoice, PlayerFilter,
-        PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
+        AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, CommanderOwnership,
+        ContinuousModification, ControllerRef, Duration, Effect, EffectKind, ManaProduction,
+        ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, PtValue,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticCondition,
         StaticDefinition, TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition,
         TypedFilter,
     };
@@ -6875,7 +6876,7 @@ mod tests {
                             name: "X".to_string(),
                         },
                     },
-                    target: TargetFilter::Controller,
+                    target: TargetFilter::Player,
                 },
             ),
             AbilityDefinition::new(
@@ -6889,15 +6890,24 @@ mod tests {
                             },
                         }),
                     },
-                    target: TargetFilter::Controller,
+                    target: TargetFilter::Player,
                     destination: Zone::Graveyard,
                 },
             ),
         ];
         object.modal = Some(ModalChoice {
             min_choices: 1,
-            max_choices: 1,
+            max_choices: 2,
             mode_count: 2,
+            constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::Static {
+                    condition: StaticCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Any,
+                    },
+                },
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }],
             ..ModalChoice::default()
         });
         id
@@ -7043,11 +7053,39 @@ mod tests {
             .into_iter()
             .find(|candidate| candidate.action == selected_mode)
             .expect("selected mode is engine-issued");
-        let x_state = apply_candidate(&mode_state, &mode_candidate)
+        let target_state = apply_candidate(&mode_state, &mode_candidate)
             .expect("selecting the mode continues the cast");
+        assert!(
+            matches!(target_state.waiting_for, WaitingFor::TargetSelection { .. }),
+            "the chosen Drown mode must declare its player target before X"
+        );
+        let selected_target = choose_action(
+            &target_state,
+            PlayerId(0),
+            &config,
+            &mut SmallRng::seed_from_u64(3),
+        )
+        .expect("AI selects a legal player target for Drown");
+        let target_candidate = build_decision_context(&target_state)
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.action == selected_target)
+            .expect("selected target is engine-issued");
+        let x_state = apply_candidate(&target_state, &target_candidate)
+            .expect("declaring the target continues to X selection");
         assert!(
             matches!(x_state.waiting_for, WaitingFor::ChooseXValue { max: 1, .. }),
             "the paid fixed component leaves exactly X=1 affordable"
+        );
+        assert_eq!(
+            choose_action(
+                &x_state,
+                PlayerId(0),
+                &AiConfig::default(),
+                &mut SmallRng::seed_from_u64(4),
+            ),
+            Some(GameAction::ChooseX { value: 1 }),
+            "the real X-value policy prefers the funded modal X"
         );
         let chosen_x_candidate = build_decision_context(&x_state)
             .candidates

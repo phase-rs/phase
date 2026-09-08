@@ -34,7 +34,9 @@ use crate::features::DeckFeatures;
 use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
-use super::x_reference::{effect_references_x, spell_object_references_x};
+use super::x_reference::{
+    ability_definition_references_x, effect_references_x, spell_object_references_x,
+};
 
 pub struct XValuePolicy;
 
@@ -116,7 +118,10 @@ fn ability_references_x(ability: &ResolvedAbility) -> bool {
             return true;
         }
     }
-    false
+    ability
+        .mode_abilities
+        .iter()
+        .any(ability_definition_references_x)
 }
 
 #[cfg(test)]

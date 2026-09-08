@@ -280,7 +280,10 @@ fn prove_modal_root_at_x_zero(
         let effect = ability.effect.as_ref();
 
         let effect_proof = if x_reference::effect_references_previous_amount(effect) {
-            if previous_zero {
+            // `PreviousEffectAmount` is zero only as the exact quantity leaf.
+            // A wrapper such as `that much plus one` has its own zero result and
+            // must not inherit the predecessor proof wholesale.
+            if effect_has_exact_previous_amount(effect) && previous_zero {
                 Some((XDependency::XDependent, ZeroProof::ProvenZero))
             } else {
                 Some((XDependency::NotXDependent, ZeroProof::Unknown))
@@ -329,6 +332,15 @@ fn prove_modal_root_at_x_zero(
         ResidualVerdict::MeaningfulAtXZero => (dependency, ZeroProof::Meaningful),
         ResidualVerdict::Unknown => (dependency, ZeroProof::Unknown),
     }
+}
+
+fn effect_has_exact_previous_amount(effect: &Effect) -> bool {
+    matches!(
+        effect_quantity(effect),
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount { .. }
+        })
+    )
 }
 
 fn combine_zero_proofs(left: ZeroProof, right: ZeroProof) -> ZeroProof {
@@ -1389,6 +1401,43 @@ mod tests {
             let mut state = base_state();
             let (object, card) =
                 modal_x_spell_source(&mut state, "Optional predecessor", vec![mode]);
+            assert_not_reject(&verdict_for_cast(&state, object, card));
+        }
+    }
+
+    #[test]
+    fn modal_wrapped_previous_amount_fails_open() {
+        let previous = || QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: engine::types::ability::DamageChannel::Total,
+                aggregate: engine::types::ability::AggregateFunction::Sum,
+            },
+        };
+        let wrapped = [
+            QuantityExpr::Offset {
+                inner: Box::new(previous()),
+                offset: 1,
+            },
+            QuantityExpr::Sum {
+                exprs: vec![previous(), QuantityExpr::Fixed { value: 1 }],
+            },
+            QuantityExpr::Max {
+                exprs: vec![previous(), QuantityExpr::Fixed { value: 1 }],
+            },
+        ];
+
+        for count in wrapped {
+            let mut state = base_state();
+            let mut first = spell(Effect::Draw {
+                count: x_expr(),
+                target: TargetFilter::Controller,
+            });
+            first.sub_ability = Some(Box::new(spell(Effect::Draw {
+                count,
+                target: TargetFilter::Controller,
+            })));
+            let (object, card) =
+                modal_x_spell_source(&mut state, "Wrapped previous amount", vec![first]);
             assert_not_reject(&verdict_for_cast(&state, object, card));
         }
     }
