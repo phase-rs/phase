@@ -131,7 +131,7 @@ use crate::types::ability::{
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
 // `tests` module still names it through `use super::*`.
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject, DoubleTarget};
+use crate::types::ability::{AttackScope, AttackSubject, DoubleTarget, PossessionAxis};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -20520,12 +20520,14 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         .parse(lower.as_str())
         .ok()?;
 
-    if let Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) =
-        parse_shuffle_ast(text, &lower)
-    {
-        return Some(lower_shuffle_ast(
-            ShuffleImperativeAst::ChangeZoneAllToLibrary { origins },
-        ));
+    if let Some(ast) = parse_shuffle_ast(text, &lower) {
+        if matches!(
+            ast,
+            ShuffleImperativeAst::ChangeZoneAllToLibrary { .. }
+                | ShuffleImperativeAst::TargetedChangeZoneToLibrary { all: true, .. }
+        ) {
+            return Some(lower_shuffle_ast(ast));
+        }
     }
 
     // Try to split compound subject from the text after "shuffle "
@@ -20544,15 +20546,10 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 
     let owner_library = is_owner_library;
 
-    // CR 701.24a: Compound shuffle is ChangeZone(first) → ChangeZone(second) → Shuffle.
-    let shuffle_def = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Shuffle {
-            target: TargetFilter::Controller,
-        },
-    );
-
-    // Build ChangeZone for the second subject, chained to the Shuffle
+    // CR 701.24a + CR 400.3: Compound shuffle is
+    // ChangeZone(first) → ChangeZone(second) → the common owner-aware Shuffle.
+    // Routing the terminal node through the common constructor keeps compound
+    // and single-subject forms on the same prospective-subject authority.
     let sub_effect = Effect::ChangeZone {
         origin: None,
         destination: Zone::Library,
@@ -20568,8 +20565,9 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         face_down_profile: None,
         enters_modified_if: None,
     };
-    let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_effect);
-    sub_def.sub_ability = Some(Box::new(shuffle_def));
+    let sub_clause = imperative::with_shuffle_sub_ability(sub_effect);
+    let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
+    sub_def.sub_ability = sub_clause.sub_ability;
 
     // Build ChangeZone for the first subject as the primary effect
     let primary_effect = Effect::ChangeZone {
@@ -40427,8 +40425,17 @@ fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
     let shuffle = def.sub_ability.as_ref().expect("shuffle sub");
     assert_eq!(
         shuffle.effect.target_filter(),
-        Some(&TargetFilter::ParentTargetOwner)
+        Some(&TargetFilter::ScopedPlayer)
     );
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
+    ));
     let reveal = shuffle
         .sub_ability
         .as_ref()

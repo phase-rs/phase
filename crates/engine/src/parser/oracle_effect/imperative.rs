@@ -8178,6 +8178,48 @@ fn parse_shuffle_origin_zones(input: &str) -> nom::IResult<&str, Vec<Zone>, Orac
     .parse(input)
 }
 
+/// CR 701.24c + CR 400.3: parse a compound all-subject shuffle whose operands
+/// span a private zone and the battlefield (The Great Aurora class). The two
+/// independently typed operands lower through one `TargetFilter::Or`, allowing
+/// `ChangeZoneAll` to freeze one complete prospective population.
+fn parse_compound_all_subjects_to_library(lower: &str) -> Option<TargetFilter> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(lower).ok()?;
+    let (input, _) = tag::<_, _, OracleError<'_>>("all cards from ")
+        .parse(input)
+        .ok()?;
+    let (input, _) = parse_possessive_determiner(input).ok()?;
+    let (input, _) = tag::<_, _, OracleError<'_>>(" hand and ")
+        .parse(input)
+        .ok()?;
+    let (input, _) = tag::<_, _, OracleError<'_>>("all permanents ")
+        .parse(input)
+        .ok()?;
+    let (input, _) = alt((tag::<_, _, OracleError<'_>>("they own"), tag("you own")))
+        .parse(input)
+        .ok()?;
+    let (input, _) = tag::<_, _, OracleError<'_>>(" into ").parse(input).ok()?;
+    let (input, _) = parse_possessive_determiner(input).ok()?;
+    let (input, _) = tag::<_, _, OracleError<'_>>(" library").parse(input).ok()?;
+    let (_, _) = eof::<_, OracleError<'_>>(input).ok()?;
+
+    Some(TargetFilter::Or {
+        filters: vec![
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone { zone: Zone::Hand }],
+            }),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Permanent],
+                controller: None,
+                properties: vec![FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer,
+                }],
+            }),
+        ],
+    })
+}
+
 /// Parse "shuffle [the cards {from|in}] {possessive} {zone-list} into
 /// {possessive} library" and return the origin zones.
 ///
@@ -8317,6 +8359,14 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     // into your library" fall through to the zone-change parser below.
     if let Ok((_, target)) = parse_shuffle_library_target(lower) {
         return Some(ShuffleImperativeAst::ShuffleLibrary { target });
+    }
+    if let Some(target) = parse_compound_all_subjects_to_library(lower) {
+        return Some(ShuffleImperativeAst::TargetedChangeZoneToLibrary {
+            target,
+            origin: None,
+            all: true,
+            multi_target: None,
+        });
     }
     // CR 701.24c + CR 400.3: "shuffle <pronoun> into <possessive> library" —
     // covers "shuffle it into its owner's library" (Cavalier cycle), "shuffle
@@ -8459,9 +8509,24 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
         // Only accept a real typed object target — never a whole-zone phrase
         // (which the mass-move paths above already handled).
         if matches!(target, TargetFilter::Typed(_)) {
-            return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
-                target,
-                owner_library: true,
+            let all = preceded(
+                tag::<_, _, OracleError<'_>>("shuffle "),
+                alt((tag("all "), tag("each "))),
+            )
+            .parse(lower)
+            .is_ok();
+            return Some(if all {
+                ShuffleImperativeAst::TargetedChangeZoneToLibrary {
+                    target,
+                    origin: None,
+                    all: true,
+                    multi_target: None,
+                }
+            } else {
+                ShuffleImperativeAst::ChangeZoneToLibrary {
+                    target,
+                    owner_library: true,
+                }
             });
         }
     }
@@ -8885,6 +8950,13 @@ fn lower_target_referenced_search_library(
 
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause {
+    let owner_library = !matches!(
+        effect,
+        Effect::ChangeZone {
+            owner_library: false,
+            ..
+        }
+    );
     if let Effect::ChangeZoneAll {
         destination: Zone::Library,
         library_shuffle,
@@ -8899,15 +8971,21 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     let mut shuffle = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Shuffle {
-            target: TargetFilter::ScopedPlayer,
+            target: if owner_library {
+                TargetFilter::ScopedPlayer
+            } else {
+                TargetFilter::Controller
+            },
         },
     );
-    shuffle.player_scope = Some(PlayerFilter::TrackedSetPossessor {
-        relation: PlayerRelation::All,
-        possession: PossessionAxis::Owner,
-        filter: TargetFilter::Any,
-        caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-    });
+    if owner_library {
+        shuffle.player_scope = Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        });
+    }
     ParsedEffectClause {
         effect,
         duration: None,

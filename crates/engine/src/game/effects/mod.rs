@@ -4556,10 +4556,10 @@ fn is_player_scope_local_continuation(
     }
 
     // CR 608.2c + CR 701.24a: "<each subject> shuffles the cards from their hand
-    // into their library" is ONE per-player move/shuffle instruction. Keep the
-    // terminal shuffle with its immediately preceding ChangeZoneAll; a following
-    // Draw remains the detached post-loop instruction.
-    let is_scoped_whole_hand_shuffle = matches!(
+    // into their library, then draws that many cards" is one per-player
+    // instruction. Keep the terminal shuffle and its EventContextAmount draw in
+    // the current iteration so the draw observes that player's moved count.
+    let is_scoped_library_shuffle_chain = matches!(
         (parent, child),
         (
             Effect::ChangeZoneAll {
@@ -4569,9 +4569,19 @@ fn is_player_scope_local_continuation(
             Effect::Shuffle {
                 target: TargetFilter::ScopedPlayer,
             }
+        ) | (
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            Effect::Draw {
+                target: TargetFilter::ScopedPlayer,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            }
         )
     );
-    is_scoped_whole_hand_shuffle && scope_keeps_scoped_whole_hand_shuffle_local(scope)
+    is_scoped_library_shuffle_chain && scope_keeps_scoped_whole_hand_shuffle_local(scope)
 }
 
 /// CR 115.10 + CR 608.2c + CR 701.24a: Does this `player_scope` filter keep the
@@ -4863,17 +4873,7 @@ fn detach_after_player_scope_local_chain(
         // inherit the outer iteration — redundant `player_scope` on the child
         // would re-enter the fan-out driver mid-instruction (Grave Sifter:
         // Choose → graveyard ChangeZone must run once per outer iteration).
-        if next_is_local_continuation
-            && !matches!(
-                next.player_scope,
-                Some(PlayerFilter::TrackedSetPossessor {
-                    relation: PlayerRelation::All,
-                    possession: PossessionAxis::Owner,
-                    filter: TargetFilter::Any,
-                    caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-                })
-            )
-        {
+        if next_is_local_continuation {
             next.player_scope = None;
         }
         let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);

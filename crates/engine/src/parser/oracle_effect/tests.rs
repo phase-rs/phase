@@ -14406,7 +14406,7 @@ fn compound_shuffle_graveyard_into_library() {
     assert!(matches!(
         &*def.effect,
         Effect::ChangeZoneAll {
-            origin: Some(Zone::Graveyard),
+            origin: None,
             destination: Zone::Library,
             ..
         }
@@ -14424,7 +14424,7 @@ fn compound_shuffle_hand_into_library() {
     assert!(matches!(
         &*def.effect,
         Effect::ChangeZoneAll {
-            origin: Some(Zone::Hand),
+            origin: None,
             destination: Zone::Library,
             ..
         }
@@ -14445,9 +14445,9 @@ fn compound_shuffle_hand_and_graveyard_into_library() {
     assert!(matches!(
         &*def.effect,
         Effect::ChangeZoneAll {
-            origin: Some(Zone::Hand),
+            origin: None,
             destination: Zone::Library,
-            target: TargetFilter::Controller,
+            target: TargetFilter::Or { filters },
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
@@ -14456,39 +14456,27 @@ fn compound_shuffle_hand_and_graveyard_into_library() {
             library_position: None,
             library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
             random_order: false,
-        }
+        } if filters.len() == 2
     ));
 
-    let graveyard = def
+    let shuffle = def
         .sub_ability
         .as_deref()
-        .expect("hand move should chain graveyard move");
-    assert!(matches!(
-        &*graveyard.effect,
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Library,
-            target: TargetFilter::Controller,
-            enters_under: None,
-            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-            enters_attacking: false,
-            enter_with_counters: _,
-            face_down_profile: None,
-            library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
-            random_order: false,
-        }
-    ));
-
-    let shuffle = graveyard
-        .sub_ability
-        .as_deref()
-        .expect("graveyard move should chain Shuffle");
+        .expect("mass move should chain Shuffle");
     assert!(matches!(
         &*shuffle.effect,
         Effect::Shuffle {
-            target: TargetFilter::Controller
+            target: TargetFilter::ScopedPlayer
         }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
     ));
 }
 
@@ -14499,44 +14487,75 @@ fn compound_parent_target_shuffle_hand_and_graveyard_keeps_player_scope() {
             AbilityKind::Spell,
         );
 
-    let hand = def
+    let move_all = def
         .sub_ability
         .as_deref()
-        .expect("library exile should chain hand move");
+        .expect("library exile should chain mass move");
     assert!(matches!(
-        &*hand.effect,
+        &*move_all.effect,
         Effect::ChangeZoneAll {
-            origin: Some(Zone::Hand),
+            origin: None,
             destination: Zone::Library,
-            target: TargetFilter::ParentTargetController,
+            target: TargetFilter::Or { .. },
             ..
         }
     ));
 
-    let graveyard = hand
+    let shuffle = move_all
         .sub_ability
         .as_deref()
-        .expect("hand move should chain graveyard move");
-    assert!(matches!(
-        &*graveyard.effect,
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Library,
-            target: TargetFilter::ParentTargetController,
-            ..
-        }
-    ));
-
-    let shuffle = graveyard
-        .sub_ability
-        .as_deref()
-        .expect("graveyard move should chain Shuffle");
+        .expect("mass move should chain Shuffle");
     assert!(matches!(
         &*shuffle.effect,
         Effect::Shuffle {
-            target: TargetFilter::ParentTargetController
+            target: TargetFilter::ScopedPlayer
         }
     ));
+}
+
+#[test]
+fn great_aurora_keeps_move_shuffle_draw_inside_each_player_iteration() {
+    let def = parse_effect_chain(
+        "Each player shuffles all cards from their hand and all permanents they own into their library, then draws that many cards. Each player may put any number of land cards from their hand onto the battlefield. Exile The Great Aurora.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    let Effect::ChangeZoneAll {
+        origin: None,
+        destination: Zone::Library,
+        target: TargetFilter::Or { filters },
+        library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("Great Aurora must begin with one union ChangeZoneAll: {def:#?}");
+    };
+    assert_eq!(filters.len(), 2);
+    let shuffle = def.sub_ability.as_deref().expect("terminal shuffle");
+    assert!(matches!(
+        shuffle.effect.as_ref(),
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+            ..
+        })
+    ));
+    let draw = shuffle.sub_ability.as_deref().expect("per-player draw");
+    assert!(matches!(
+        draw.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            target: TargetFilter::ScopedPlayer,
+        }
+    ));
+    assert_eq!(draw.sub_link, SubAbilityLink::ContinuationStep);
 }
 
 fn targeted_zone_move_tree_has_unimplemented(def: &AbilityDefinition) -> bool {
@@ -14567,9 +14586,9 @@ fn assert_targeted_graveyard_shuffle_shape<'a>(
         matches!(
             move_graveyard.effect.as_ref(),
             Effect::ChangeZoneAll {
-                origin: Some(Zone::Graveyard),
+                origin: None,
                 destination: Zone::Library,
-                target: TargetFilter::ParentTarget,
+                target: TargetFilter::Or { .. },
                 library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
                 ..
             }
@@ -14586,10 +14605,10 @@ fn assert_targeted_graveyard_shuffle_shape<'a>(
         matches!(
             shuffle.effect.as_ref(),
             Effect::Shuffle {
-                target: TargetFilter::ParentTarget
+                target: TargetFilter::ScopedPlayer
             }
         ),
-        "{card_name} must shuffle the same chosen player's library, got {:?}",
+        "{card_name} must shuffle the prospective owners' libraries, got {:?}",
         shuffle.effect
     );
     shuffle
