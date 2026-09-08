@@ -62,3 +62,55 @@ fn reminisce_moves_and_shuffles_only_the_target_players_graveyard() {
         .collect();
     assert_eq!(shuffled_players, vec![P1]);
 }
+
+const HEAD_GAMES_ORACLE: &str = "Target opponent puts the cards from their hand on top of their library. Search that player's library for that many cards. The player puts those cards into their hand, then shuffles.";
+
+/// CR 701.23a + CR 701.24a: Head Games searches and shuffles the targeted
+/// opponent's library. The search result replaces object targets only; the
+/// original player target remains available to the final parent-target shuffle.
+#[test]
+fn head_games_search_selection_preserves_targeted_opponent_for_final_shuffle() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let head_games = scenario
+        .add_spell_to_hand_from_oracle(P0, "Head Games", false, HEAD_GAMES_ORACLE)
+        .id();
+    let p0_library = scenario.add_card_to_library_top(P0, "Caster Library Card");
+    let p1_hand = scenario.add_card_to_hand(P1, "Target Hand Card");
+    let p1_library = scenario.add_card_to_library_top(P1, "Target Library Card");
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(head_games).target_player(P1).resolve();
+    match outcome.final_waiting_for() {
+        engine::types::game_state::WaitingFor::SearchChoice { cards, .. } => {
+            assert!(
+                cards.contains(&p1_library),
+                "the targeted opponent's original library card must be searchable: {cards:?}"
+            );
+        }
+        other => panic!("expected Head Games search choice, got {other:?}"),
+    }
+
+    let selection = runner
+        .act(engine::types::actions::GameAction::SelectCards {
+            cards: vec![p1_library],
+        })
+        .expect("selecting a card from the targeted opponent's library resolves Head Games");
+
+    assert_eq!(runner.state().objects[&p1_library].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&p1_hand].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&p0_library].zone, Zone::Library);
+    let shuffled_players: Vec<_> = selection
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shuffled_players, vec![P1]);
+}

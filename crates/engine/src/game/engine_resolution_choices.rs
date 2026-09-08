@@ -1222,12 +1222,7 @@ fn finalize_standard_search_selection(
                 &frame.pending.chain,
             );
         state.resolving_continuation_attach_host = frame.pending.search_attach_host;
-        let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
-        // CR 701.23a + CR 701.24a: propagate the semantic searcher for
-        // library-owner-sensitive shuffle and tail instructions.
-        if player != frame.pending.chain.controller {
-            targets.push(TargetRef::Player(player));
-        }
+        let targets = search_selection_targets(&frame.pending.chain, player, chosen);
         frame.pending.chain.targets = targets.clone();
         propagate_targets_through_search_shuffle(&mut frame.pending.chain, &targets);
         state.push_ability_continuation(frame);
@@ -1239,10 +1234,7 @@ fn finalize_standard_search_selection(
             state,
             &continuation.pending.chain,
         );
-        let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
-        if player != continuation.pending.chain.controller {
-            targets.push(TargetRef::Player(player));
-        }
+        let targets = search_selection_targets(&continuation.pending.chain, player, chosen);
         let continuation = state
             .outer_ability_continuation_of_active_post_replacement_draw_mut()
             .expect("checked paired continuation must remain resident while the draw is active");
@@ -9104,6 +9096,37 @@ fn resume_with_error_propagation(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     super::engine::resume_pending_continuation_if_priority(state, events)
+}
+
+/// CR 608.2c + CR 701.23a: A search selection replaces the continuation's
+/// object targets with the found cards. Preserve the existing player target
+/// only when a later node still resolves a parent reference: the found-card
+/// delivery must see the chosen cards, while that tail must still see the
+/// player named before the search (Head Games / Jester's Mask).
+fn search_selection_targets(
+    chain: &ResolvedAbility,
+    player: crate::types::player::PlayerId,
+    chosen: &[ObjectId],
+) -> Vec<TargetRef> {
+    let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
+    if chain
+        .sub_ability
+        .as_deref()
+        .is_some_and(effects::ability_refs_parent_target)
+    {
+        if let Some(parent_player) = chain.targets.iter().find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            TargetRef::Object(_) => None,
+        }) {
+            targets.push(TargetRef::Player(parent_player));
+        }
+    }
+    // CR 701.23a + CR 701.24a: propagate the semantic searcher for
+    // library-owner-sensitive shuffle and tail instructions.
+    if player != chain.controller && !targets.contains(&TargetRef::Player(player)) {
+        targets.push(TargetRef::Player(player));
+    }
+    targets
 }
 
 fn propagate_targets_through_search_shuffle(ability: &mut ResolvedAbility, targets: &[TargetRef]) {
