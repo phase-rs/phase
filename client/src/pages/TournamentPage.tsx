@@ -565,6 +565,7 @@ export function TournamentPage() {
                 <ReportResultDialog
                   isOpen
                   pairing={freshPairing}
+                  matchType={view?.summary.match_type}
                   submitting={busy !== null}
                   onSubmit={handleReport}
                   onCancel={() => setReporting(null)}
