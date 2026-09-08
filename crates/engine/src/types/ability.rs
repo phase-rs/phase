@@ -6819,6 +6819,10 @@ pub mod source_exclusion_bool_compat {
 /// action), distinguished by destination (battlefield vs. hand).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThisWayCause {
+    /// CR 701.24c-e + CR 400.3: the member (or an explicitly designated empty
+    /// population) is the subject of a compound instruction that moves cards
+    /// into their owners' libraries and then shuffles those libraries.
+    OwnerLibraryShuffleSubject,
     /// CR 701.13a: the member was exiled this way.
     Exiled,
     /// CR 701.21a: the member was sacrificed this way (cause survives a

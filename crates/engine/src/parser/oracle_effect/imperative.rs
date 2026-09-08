@@ -44,8 +44,9 @@ use crate::types::ability::{
     CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
     FilterProp, ForceBlockAttackerRef, GrantedAbilityScope, LibraryPosition,
     MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
-    ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerScope,
-    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
+    PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat, PtValue,
+    QuantityExpr, QuantityRef,
     ReassembleControlMode, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
     TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
     ZoneOwner,
@@ -8885,16 +8886,6 @@ fn lower_target_referenced_search_library(
 
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause {
-    // CR 400.3: When the parent `ChangeZone` routes to the target's owner's
-    // library (`owner_library: true`), the implicit shuffle must randomize that
-    // same library — not the spell controller's (Chaos Warp stolen-permanent case).
-    let shuffle_target = match &effect {
-        Effect::ChangeZone {
-            owner_library: true,
-            ..
-        } => TargetFilter::ParentTargetOwner,
-        _ => TargetFilter::Controller,
-    };
     if let Effect::ChangeZoneAll {
         destination: Zone::Library,
         library_shuffle,
@@ -8903,12 +8894,21 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     {
         *library_shuffle = MassLibraryShuffleMode::TerminalShuffle;
     }
-    let shuffle = AbilityDefinition::new(
+    // CR 701.24c-e + CR 400.3: the terminal shuffle is driven by the owners of
+    // the exact prospective subject population. Cause filtering prevents an
+    // unrelated tracked-set producer in the same chain from selecting players.
+    let mut shuffle = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Shuffle {
-            target: shuffle_target,
+            target: TargetFilter::ScopedPlayer,
         },
     );
+    shuffle.player_scope = Some(PlayerFilter::TrackedSetPossessor {
+        relation: PlayerRelation::All,
+        possession: PossessionAxis::Owner,
+        filter: TargetFilter::Any,
+        caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+    });
     ParsedEffectClause {
         effect,
         duration: None,
@@ -8921,11 +8921,22 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     }
 }
 
-fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
+fn change_zone_all_to_library_effect(origins: Vec<Zone>) -> Effect {
     Effect::ChangeZoneAll {
-        origin: Some(origin),
+        origin: None,
         destination: Zone::Library,
-        target: TargetFilter::Controller,
+        target: TargetFilter::Or {
+            filters: origins
+                .into_iter()
+                .map(|zone| {
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![FilterProp::InZone { zone }],
+                    })
+                })
+                .collect(),
+        },
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
@@ -8938,29 +8949,11 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
 }
 
 fn lower_change_zone_all_to_library(origins: Vec<Zone>) -> ParsedEffectClause {
-    let (first, rest) = origins
-        .split_first()
-        .expect("ChangeZoneAllToLibrary must have at least one origin");
-    let first = *first;
-
-    let mut tail: Option<Box<AbilityDefinition>> = Some(Box::new(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Shuffle {
-            target: TargetFilter::Controller,
-        },
-    )));
-    for origin in rest.iter().rev().copied() {
-        let mut def = AbilityDefinition::new(
-            AbilityKind::Spell,
-            change_zone_all_to_library_effect(origin),
-        );
-        def.sub_ability = tail;
-        tail = Some(Box::new(def));
-    }
-
-    let mut clause = parsed_clause(change_zone_all_to_library_effect(first));
-    clause.sub_ability = tail;
-    clause
+    assert!(
+        !origins.is_empty(),
+        "ChangeZoneAllToLibrary must have at least one origin"
+    );
+    with_shuffle_sub_ability(change_zone_all_to_library_effect(origins))
 }
 
 pub(super) fn parse_destroy_ast(

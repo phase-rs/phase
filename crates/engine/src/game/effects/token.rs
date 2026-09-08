@@ -637,6 +637,7 @@ pub fn resolve(
             // CR 608.2c: drop the consumed set's member-cause provenance too so
             // the side map never outlives its `tracked_object_sets` entry.
             state.tracked_set_member_causes.remove(&id);
+            state.tracked_set_participants.remove(&id);
         }
     }
 

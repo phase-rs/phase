@@ -18054,6 +18054,15 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_map")]
     pub tracked_set_member_causes: HashMap<TrackedSetId, HashMap<ObjectId, ThisWayCause>>,
 
+    /// CR 701.24c-e + CR 608.2c: players explicitly designated by a tracked-set
+    /// producer even when their subject population is empty. The object ledger
+    /// alone cannot represent "shuffle your empty graveyard into your library";
+    /// this sidecar preserves that participant so the cause-filtered owner
+    /// consumer still performs the shuffle.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
+    pub tracked_set_participants: HashMap<TrackedSetId, Vec<(PlayerId, ThisWayCause)>>,
+
     // Commander support
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
@@ -23934,6 +23943,7 @@ impl GameState {
             chain_tracked_set_id: None,
             resolving_modal_instruction: None,
             tracked_set_member_causes: HashMap::new(),
+            tracked_set_participants: HashMap::new(),
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
@@ -26063,6 +26073,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // resolution — the same reason that field is projected out here.
         resolving_modal_instruction: _,
         tracked_set_member_causes: _,
+        tracked_set_participants: _,
         commander_cast_count: _,
         commander_cast_owners: _,
         commander_declined_zone_return: _,
@@ -26407,6 +26418,7 @@ impl PartialEq for GameState {
             && self.chain_tracked_set_id == other.chain_tracked_set_id
             && self.resolving_modal_instruction == other.resolving_modal_instruction
             && self.tracked_set_member_causes == other.tracked_set_member_causes
+            && self.tracked_set_participants == other.tracked_set_participants
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
             && self.commander_declined_zone_return == other.commander_declined_zone_return

@@ -7535,6 +7535,20 @@ pub(crate) fn possessed_tracked_set_member(
     let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
         return false;
     };
+    // CR 701.24d-e: an explicitly designated player remains a participant in a
+    // shuffle instruction when the designated set contains zero cards. This
+    // cause-filtered ledger is owner-only: controller possession still requires
+    // an actual object whose live/LKI controller can be inspected below.
+    if matches!(possession, PossessionAxis::Owner)
+        && caused_by.is_some_and(|cause| {
+            state
+                .tracked_set_participants
+                .get(set_id)
+                .is_some_and(|participants| participants.contains(&(player, cause)))
+        })
+    {
+        return true;
+    }
     let filter_ctx = FilterContext::from_source_with_controller(source_id, controller);
     ids.iter().any(|&oid| {
         // CR 608.2c + CR 614.6: an action-bound population ("a creature

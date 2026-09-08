@@ -2458,6 +2458,9 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
             Some(cause) => {
                 use crate::types::ability::ThisWayCause;
                 let verb = match cause {
+                    ThisWayCause::OwnerLibraryShuffleSubject => {
+                        "designated for an owner-library shuffle"
+                    }
                     ThisWayCause::Discarded => "discarded",
                     ThisWayCause::Exiled => "exiled",
                     ThisWayCause::Milled => "milled",
