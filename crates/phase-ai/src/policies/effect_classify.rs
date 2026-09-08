@@ -1854,14 +1854,13 @@ mod live_quantity_targeting_tests {
     }
 
     fn hand_source(state: &mut GameState, card_id: u64) -> ObjectId {
-        let source = create_object(
+        create_object(
             state,
             CardId(card_id),
             PlayerId(0),
             "exact pending source".to_string(),
             Zone::Hand,
-        );
-        source
+        )
     }
 
     fn direct_draw(source: ObjectId, count: QuantityExpr) -> ResolvedAbility {

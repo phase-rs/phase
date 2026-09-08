@@ -5721,7 +5721,7 @@ mod tests {
         let ContinuousModification::GrantAbility { definition } = &mut modifications[0] else {
             panic!("fixture has one granted definition");
         };
-        *definition = Box::new(AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp));
+        **definition = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
         assert!(
             !zero_cast_is_retained(&state, congregate),
             "replacing only the granted definition's latent metadata with a stable definition restores known-zero rejection"
