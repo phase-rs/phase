@@ -2,6 +2,7 @@ import type {
   BracketShape,
   GameFormat,
   MatchArity,
+  MatchType,
   PairingId,
   PodOutcome,
   ScoringPolicy,
@@ -553,6 +554,13 @@ export interface CreateTournamentRequest {
    * lobby protocol 7; ignored by a pre-v7 broker.
    */
   format?: GameFormat | null;
+  /**
+   * The match structure (Bo1 / Bo3). `null`/omitted resolves to the arity
+   * default (Bo3 head-to-head, Bo1 for pods). `Bo3` is head-to-head only — the
+   * broker rejects it at any other arity. Additive in lobby protocol 8; ignored
+   * by a pre-v8 broker.
+   */
+  matchType?: MatchType | null;
 }
 
 /** `CreateTournament` → `TournamentCreated` (point reply, carries the token). */
@@ -573,6 +581,7 @@ export function createTournamentOver(
         total_rounds: req.totalRounds ?? null,
         plus_rounds: req.plusRounds ?? null,
         format: req.format ?? null,
+        match_type: req.matchType ?? null,
       },
     },
     matchReply<TournamentCreatedReply>("TournamentCreated", null),

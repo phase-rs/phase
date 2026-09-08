@@ -41,6 +41,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use engine::types::format::GameFormat;
+pub use engine::types::match_config::MatchType;
 
 use crate::env::BrokerEnv;
 
@@ -723,6 +724,20 @@ pub struct TournamentPlayer {
     pub dropped: bool,
 }
 
+/// The match structure an event runs at a given arity when the organizer names
+/// none. Head-to-head defaults to best-of-three (MTR §2.1); pods default to
+/// best-of-one, because MSTR pods are single-game — and [`MatchType::Bo3`] is
+/// inherently 2-player besides. An organizer may override head-to-head to
+/// [`MatchType::Bo1`] (e.g. a single-game single-elimination event), but a `Bo3`
+/// override at any other arity is rejected at create time.
+pub fn default_match_type(arity: MatchArity) -> MatchType {
+    if arity == MatchArity::HEAD_TO_HEAD {
+        MatchType::Bo3
+    } else {
+        MatchType::Bo1
+    }
+}
+
 /// Fields a caller supplies when creating a tournament. A request struct
 /// rather than a long positional argument list, matching
 /// [`crate::lobby::RegisterGameRequest`]'s precedent in this crate.
@@ -749,6 +764,10 @@ pub struct CreateTournamentRequest {
     /// enforces no deck legality and never touches `GameState`). `None` names
     /// no format.
     pub format: Option<GameFormat>,
+    /// The match structure (Bo1 / Bo3). `None` resolves to
+    /// [`default_match_type`] for the arity. An explicit `Bo3` at an arity other
+    /// than head-to-head is rejected before this request is built.
+    pub match_type: Option<MatchType>,
 }
 
 /// One tournament's durable record.
@@ -800,6 +819,12 @@ pub struct TournamentMeta {
     /// Display metadata only: the tournament enforces no deck legality and
     /// never touches `GameState`. Surfaced on [`crate::protocol::TournamentSummary::format`].
     pub format: Option<GameFormat>,
+    /// The RESOLVED match structure (Bo1 / Bo3) — the organizer's choice or the
+    /// arity default ([`default_match_type`]), fixed at creation. Governs the
+    /// reported outcome shape in [`validate_match_result`] (Bo1 ⇒ single winner,
+    /// empty `game_wins`; Bo3 ⇒ the completed 2-of-3 tally). Bo3 only ever holds
+    /// at head-to-head. Surfaced on [`crate::protocol::TournamentSummary::match_type`].
+    pub match_type: MatchType,
     pub current_round: u32,
     pub status: TournamentStatus,
     pub players: Vec<TournamentPlayer>,
@@ -1322,6 +1347,7 @@ pub fn validate_match_result(
     pairing: &TournamentPairing,
     result: &PodOutcome,
     players: &[TournamentPlayer],
+    match_type: MatchType,
 ) -> Result<(), String> {
     match result {
         // MSTR: all seated players draw together.
@@ -1339,35 +1365,54 @@ pub fn validate_match_result(
                     "Winner {winner} has dropped and cannot be credited a win"
                 ));
             }
-            if pairing.players.len() == 2 {
-                // HEAD_TO_HEAD: require exactly the two participant keys with
-                // a legal completed-Bo3 tally. An empty or single-key map is a
-                // hard rejection, not a silently-skipped check.
-                let (a, b) = (&pairing.players[0], &pairing.players[1]);
-                if game_wins.len() != 2 || !game_wins.contains_key(a) || !game_wins.contains_key(b)
-                {
-                    return Err(
-                        "Head-to-head result must report game wins for exactly both players"
-                            .to_string(),
-                    );
+            // The expected outcome shape is keyed on the event's match type, not
+            // on arity: a `Bo1` head-to-head event reports a single game exactly
+            // like a pod does, and `Bo3` only ever holds at head-to-head (pods
+            // are single-game per MSTR; `Bo3` is inherently 2-player, and an
+            // explicit `Bo3` at a larger arity is rejected at create time).
+            match match_type {
+                MatchType::Bo3 => {
+                    // Require exactly the two participant keys with a legal
+                    // completed-Bo3 tally. Bo3 implies head-to-head; a non-pair
+                    // pairing here is a caller error, not a silently-skipped check.
+                    if pairing.players.len() != 2 {
+                        return Err(
+                            "Best-of-three is head-to-head only; a pod match is single-game"
+                                .to_string(),
+                        );
+                    }
+                    let (a, b) = (&pairing.players[0], &pairing.players[1]);
+                    if game_wins.len() != 2
+                        || !game_wins.contains_key(a)
+                        || !game_wins.contains_key(b)
+                    {
+                        return Err(
+                            "Head-to-head Bo3 result must report game wins for exactly both players"
+                                .to_string(),
+                        );
+                    }
+                    let (wa, wb) = (game_wins[a], game_wins[b]);
+                    // Legal completed best-of-three tallies only: someone reaches
+                    // 2, the other has 0 or 1. Rejects 0-0/1-0 (unfinished), 2-2,
+                    // 3-anything.
+                    if !matches!((wa, wb), (2, 0) | (2, 1) | (0, 2) | (1, 2)) {
+                        return Err(format!("Illegal Bo3 game-win tally {wa}-{wb}"));
+                    }
+                    let expected = if wa > wb { a } else { b };
+                    if winner != expected {
+                        return Err("Winner must match the player with more game wins".to_string());
+                    }
                 }
-                let (wa, wb) = (game_wins[a], game_wins[b]);
-                // Legal completed best-of-three tallies only: someone reaches
-                // 2, the other has 0 or 1. Rejects 0-0/1-0 (unfinished), 2-2,
-                // 3-anything.
-                if !matches!((wa, wb), (2, 0) | (2, 1) | (0, 2) | (1, 2)) {
-                    return Err(format!("Illegal Bo3 game-win tally {wa}-{wb}"));
+                MatchType::Bo1 => {
+                    // A single game — every pod, and a head-to-head Bo1 event.
+                    // One winner, no per-game tally to report.
+                    if !game_wins.is_empty() {
+                        return Err(
+                            "Single-game result (Bo1 / pod) carries no game_wins - it must be empty"
+                                .to_string(),
+                        );
+                    }
                 }
-                let expected = if wa > wb { a } else { b };
-                if winner != expected {
-                    return Err("Winner must match the player with more game wins".to_string());
-                }
-            } else if !game_wins.is_empty() {
-                // Pod (arity > 2): MSTR pods are single-game, so a client
-                // attaching game-win data has no value for it to mean.
-                return Err(
-                    "Pod results are single-game per MSTR - game_wins must be empty".to_string(),
-                );
             }
             Ok(())
         }
@@ -1878,6 +1923,20 @@ impl TournamentManager {
         if req.total_rounds == Some(0) {
             return Err("total_rounds override must be at least 1".to_string());
         }
+        // CR: best-of-three is inherently 2-player; MSTR pods are single-game.
+        // An explicit Bo3 at any arity other than head-to-head is a contradiction
+        // the organizer cannot see the outcome of, rejected at the boundary like
+        // the single-elimination gate above. `None` and `Bo1` are fine at every
+        // arity; the resolve below fills a `None`.
+        if req.match_type == Some(MatchType::Bo3) && req.arity != MatchArity::HEAD_TO_HEAD {
+            return Err(format!(
+                "Best-of-three is head-to-head only (pods are single-game); got arity {}",
+                req.arity.get()
+            ));
+        }
+        let match_type = req
+            .match_type
+            .unwrap_or_else(|| default_match_type(req.arity));
         let now = env.now_ms() / 1000;
         let (organizer_token, minted) = TournamentCredential::mint(env);
         self.tournaments.insert(
@@ -1895,6 +1954,7 @@ impl TournamentManager {
                 resolved_total_rounds: None,
                 plus_rounds: req.plus_rounds,
                 format: req.format,
+                match_type,
                 current_round: 0,
                 status: TournamentStatus::Registration,
                 players: Vec::new(),
@@ -2212,7 +2272,12 @@ impl TournamentManager {
                 ))
             }
         }
-        validate_match_result(&meta.pairings[index], &outcome, &meta.players)?;
+        validate_match_result(
+            &meta.pairings[index],
+            &outcome,
+            &meta.players,
+            meta.match_type,
+        )?;
         meta.pairings[index].outcome = Some(PairingOutcome::Reported(outcome));
         meta.last_activity_at = now;
         Ok(())
@@ -2478,6 +2543,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             env,
         )
@@ -2516,6 +2582,7 @@ mod tests {
                 total_rounds: Some(total_rounds),
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             env,
         )
@@ -2769,6 +2836,7 @@ mod tests {
                     total_rounds: Some(4),
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -2809,6 +2877,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -2845,6 +2914,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             };
             assert!(
                 mgr.create_tournament(&format!("SE{seats}"), request, &env)
@@ -2864,6 +2934,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -2879,6 +2950,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -3449,46 +3521,86 @@ mod tests {
 
         // Illegal shapes.
         assert!(
-            validate_match_result(&pairing, &decisive("a", HashMap::new()), &players).is_err(),
+            validate_match_result(
+                &pairing,
+                &decisive("a", HashMap::new()),
+                &players,
+                MatchType::Bo3
+            )
+            .is_err(),
             "empty game_wins must be rejected"
         );
         assert!(validate_match_result(
             &pairing,
             &decisive("a", HashMap::from([("a".to_string(), 2u8)])),
-            &players
+            &players,
+            MatchType::Bo3,
         )
         .is_err());
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 1, "b", 0)), &players).is_err()
-        );
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 0, "b", 0)), &players).is_err()
-        );
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 2, "b", 2)), &players).is_err()
-        );
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 3, "b", 0)), &players).is_err()
-        );
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 1, "b", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 0, "b", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 2, "b", 2)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 3, "b", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
         // Right tally, wrong winner named.
-        assert!(
-            validate_match_result(&pairing, &decisive("b", bo3("a", 2, "b", 1)), &players).is_err()
-        );
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("b", bo3("a", 2, "b", 1)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
         // A key that is not in the pairing at all.
-        assert!(
-            validate_match_result(&pairing, &decisive("c", bo3("a", 2, "b", 0)), &players).is_err()
-        );
-        assert!(
-            validate_match_result(&pairing, &decisive("a", bo3("a", 2, "c", 0)), &players).is_err()
-        );
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("c", bo3("a", 2, "b", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
+        assert!(validate_match_result(
+            &pairing,
+            &decisive("a", bo3("a", 2, "c", 0)),
+            &players,
+            MatchType::Bo3
+        )
+        .is_err());
 
         // The four legal completed tallies, with the correct winner.
         for (wa, wb, winner) in [(2u8, 0u8, "a"), (2, 1, "a"), (0, 2, "b"), (1, 2, "b")] {
-            validate_match_result(&pairing, &decisive(winner, bo3("a", wa, "b", wb)), &players)
-                .unwrap_or_else(|e| panic!("{wa}-{wb} to {winner} must validate: {e}"));
+            validate_match_result(
+                &pairing,
+                &decisive(winner, bo3("a", wa, "b", wb)),
+                &players,
+                MatchType::Bo3,
+            )
+            .unwrap_or_else(|e| panic!("{wa}-{wb} to {winner} must validate: {e}"));
         }
         // A draw never carries game wins and is always legal.
-        validate_match_result(&pairing, &PodOutcome::Draw, &players).expect("draw");
+        validate_match_result(&pairing, &PodOutcome::Draw, &players, MatchType::Bo3).expect("draw");
     }
 
     #[test]
@@ -3509,6 +3621,7 @@ mod tests {
                 game_wins: HashMap::new(),
             },
             &players,
+            MatchType::Bo1,
         )
         .expect("pod decisive with no game wins");
 
@@ -3519,6 +3632,7 @@ mod tests {
                 game_wins: HashMap::from([("c".to_string(), 1u8)]),
             },
             &players,
+            MatchType::Bo1,
         )
         .is_err());
     }
@@ -3539,6 +3653,7 @@ mod tests {
                 game_wins: bo3("a", 2, "b", 0),
             },
             &players,
+            MatchType::Bo3,
         )
         .is_err());
         // The player who did not drop can still be credited.
@@ -3549,6 +3664,7 @@ mod tests {
                 game_wins: bo3("a", 0, "b", 2),
             },
             &players,
+            MatchType::Bo3,
         )
         .expect("undropped winner");
     }
@@ -4313,6 +4429,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: Some(2),
                 format: None,
+                match_type: None,
             },
             &env,
         )
@@ -4352,6 +4469,7 @@ mod tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: Some(GameFormat::Commander),
+                match_type: None,
             },
             &env,
         )
@@ -4365,6 +4483,114 @@ mod tests {
             Some(GameFormat::Commander),
             "the From<&TournamentMeta> projection carries the label"
         );
+    }
+
+    #[test]
+    fn default_match_type_is_bo3_head_to_head_and_bo1_for_pods() {
+        assert_eq!(default_match_type(MatchArity::HEAD_TO_HEAD), MatchType::Bo3);
+        assert_eq!(
+            default_match_type(MatchArity::COMMANDER_POD),
+            MatchType::Bo1
+        );
+        assert_eq!(default_match_type(arity(8)), MatchType::Bo1);
+    }
+
+    /// The single-game path: a 2-player Bo1 match reports one winner and an
+    /// EMPTY `game_wins`, exactly like a pod — no completed-Bo3 tally required,
+    /// and a tally is rejected. This is what lets a single-game single-elim run.
+    #[test]
+    fn bo1_head_to_head_validates_a_single_game_result() {
+        let pairing = head_to_head_pairing("a", "b");
+        let players = undropped(&["a", "b"]);
+        validate_match_result(
+            &pairing,
+            &PodOutcome::Decisive {
+                winner: "a".to_string(),
+                game_wins: HashMap::new(),
+            },
+            &players,
+            MatchType::Bo1,
+        )
+        .expect("Bo1 head-to-head single-game result validates");
+        assert!(
+            validate_match_result(
+                &pairing,
+                &PodOutcome::Decisive {
+                    winner: "a".to_string(),
+                    game_wins: bo3("a", 2, "b", 0),
+                },
+                &players,
+                MatchType::Bo1,
+            )
+            .is_err(),
+            "a Bo3 tally is illegal under Bo1"
+        );
+    }
+
+    /// Create-time resolution of `match_type`: omitted resolves to the arity
+    /// default (preserving pre-8 behaviour), an explicit head-to-head Bo1 is
+    /// accepted (single-game single-elimination), and an explicit `Bo3` at pod
+    /// arity is rejected (Bo3 is inherently 2-player).
+    #[test]
+    fn create_resolves_match_type_and_rejects_bo3_at_pod_arity() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+
+        let req = |arity: MatchArity, bracket, match_type| CreateTournamentRequest {
+            name: "T".to_string(),
+            arity,
+            scoring: ScoringPolicy::default_for_arity(arity),
+            bracket,
+            total_rounds: None,
+            plus_rounds: None,
+            format: None,
+            match_type,
+        };
+
+        // Omitted → Bo3 head-to-head (unchanged from before this feature).
+        mgr.create_tournament(
+            "HH",
+            req(MatchArity::HEAD_TO_HEAD, BracketShape::Swiss, None),
+            &env,
+        )
+        .expect("hh");
+        assert_eq!(mgr.get("HH").expect("hh").match_type, MatchType::Bo3);
+
+        // Explicit head-to-head Bo1 single-elimination bracket.
+        mgr.create_tournament(
+            "SE",
+            req(
+                MatchArity::HEAD_TO_HEAD,
+                BracketShape::SingleElimination,
+                Some(MatchType::Bo1),
+            ),
+            &env,
+        )
+        .expect("single-game SE");
+        assert_eq!(mgr.get("SE").expect("se").match_type, MatchType::Bo1);
+
+        // Omitted → Bo1 for a pod.
+        mgr.create_tournament(
+            "POD",
+            req(MatchArity::COMMANDER_POD, BracketShape::Swiss, None),
+            &env,
+        )
+        .expect("pod");
+        assert_eq!(mgr.get("POD").expect("pod").match_type, MatchType::Bo1);
+
+        // Explicit Bo3 at pod arity is a hard rejection.
+        let err = mgr
+            .create_tournament(
+                "BAD",
+                req(
+                    MatchArity::COMMANDER_POD,
+                    BracketShape::Swiss,
+                    Some(MatchType::Bo3),
+                ),
+                &env,
+            )
+            .expect_err("Bo3 at pod arity is rejected");
+        assert!(err.contains("head-to-head only"), "{err}");
     }
 
     /// The three resolution tiers, at the one point where they can disagree.
@@ -4668,6 +4894,7 @@ mod tests {
             resolved_total_rounds: Some(3),
             plus_rounds: None,
             format: None,
+            match_type: MatchType::Bo3,
             current_round: 1,
             status,
             players: undropped(&["a", "b"]),
@@ -4981,6 +5208,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -5021,6 +5249,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -5069,6 +5298,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -5105,6 +5335,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )
@@ -5167,6 +5398,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
                 &env,
             )

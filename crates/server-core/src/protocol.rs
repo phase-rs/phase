@@ -13,7 +13,7 @@ use engine::types::interaction::{
 };
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
-use engine::types::match_config::MatchConfig;
+use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
@@ -559,6 +559,12 @@ pub enum ClientMessage {
         /// display label only; the tournament enforces no deck legality.
         #[serde(default)]
         format: Option<GameFormat>,
+        /// The match structure (Bo1 / Bo3), mirroring
+        /// [`lobby_broker::LobbyClientMessage::CreateTournament`]'s field in the
+        /// same position with the same serde attribute (lobby protocol 8).
+        /// `None` resolves to the arity default; `Bo3` is head-to-head only.
+        #[serde(default)]
+        match_type: Option<MatchType>,
     },
     JoinTournament {
         code: String,

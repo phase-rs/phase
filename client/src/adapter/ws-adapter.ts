@@ -480,6 +480,16 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
+ * 8 — Tournament match structure. CreateTournament gains `match_type` (Bo1 /
+ *     Bo3), optional (`#[serde(default)]`); `None` resolves to the arity default
+ *     (Bo3 head-to-head, Bo1 for pods — single-game per MSTR), preserving pre-8
+ *     behaviour. TournamentSummary gains the resolved `match_type`, server →
+ *     client. This lets a 2-player event be Bo1 (e.g. single-game single
+ *     elimination). Purely ADDITIVE, so MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *     stays at 2 and no client-side floor is needed: a client's `match_type`
+ *     reaching a pre-8 broker deserializes away (the event runs the default
+ *     structure — a silent capability loss, not a parse error), and a pre-8
+ *     broker's summary omitting it is inert against a `JSON.parse` client.
  * 7 — Tournament game-format label and an "automatic + N" round option. Two
  *     fields added to CreateTournament, both optional (`#[serde(default)]`):
  *     `format` (a GameFormat display label, mirroring the one a LobbyGame
@@ -545,7 +555,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 7;
+export const LOBBY_PROTOCOL_VERSION = 8;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.

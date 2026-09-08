@@ -7,7 +7,7 @@ const EXPECTED_PROTOCOL_VERSION = 67;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 7;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 8;
 // The capability FLOOR for correlated tournament settlement — a different kind
 // of number from the other version constants here, and the reason it is pinned
 // separately. Those track a surface's current version; this one is frozen at the

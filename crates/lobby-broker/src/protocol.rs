@@ -18,7 +18,7 @@
 
 use engine::starter_decks::DeckData;
 use engine::types::format::{FormatConfig, GameFormat};
-use engine::types::match_config::MatchConfig;
+use engine::types::match_config::{MatchConfig, MatchType};
 use serde::{Deserialize, Serialize};
 
 /// Machine-readable reasons for server error replies.
@@ -439,6 +439,22 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 8 — Tournament match structure: a per-event best-of choice. `CreateTournament`
+///     gains `match_type: Option<MatchType>` (Bo1 / Bo3); `None` resolves to the
+///     arity default (`Bo3` head-to-head, `Bo1` for pods — which are single-game
+///     per MSTR), preserving pre-8 behaviour exactly. `TournamentSummary` gains
+///     the resolved `match_type`, server → client. One field added, optional
+///     (`#[serde(default)]`) — the "a lobby field is added" trigger and nothing
+///     else. Purely ADDITIVE, so [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move
+///     and no client-side floor is needed: a client's `match_type` reaching a
+///     pre-8 broker deserializes away as an unknown field (a silent capability
+///     loss — the event runs Bo3 head-to-head as before — not a parse error),
+///     and a pre-8 broker's summary omitting it is inert against a `JSON.parse`
+///     client. This lets a 2-player event be Bo1 (e.g. single-game single
+///     elimination); the broker's `validate_match_result` keys the reported
+///     outcome shape on `match_type` (Bo1 ⇒ single winner, empty `game_wins`;
+///     Bo3 ⇒ the completed 2-of-3 tally, head-to-head only).
+///     [`PROTOCOL_VERSION`] does not move: no variant here carries `GameState`.
 /// 7 — Tournament game-format label and an "automatic + N" round option. Three
 ///     fields are added, all `#[serde(default)]` and OPTIONAL, so this is the
 ///     "a lobby field is added" trigger and nothing else. (a)
@@ -580,7 +596,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 7;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 8;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -800,6 +816,12 @@ pub struct TournamentSummary {
     /// Additive in lobby protocol 7; absent from a pre-7 broker's summary.
     #[serde(default)]
     pub format: Option<GameFormat>,
+    /// The RESOLVED match structure (Bo1 / Bo3) this event runs — the organizer's
+    /// explicit choice or the arity default the broker applied. Bo3 only ever
+    /// appears at head-to-head; pods are always Bo1 (single-game per MSTR).
+    /// Additive in lobby protocol 8; absent from a pre-8 broker's summary.
+    #[serde(default)]
+    pub match_type: MatchType,
 }
 
 impl From<&crate::tournament::TournamentMeta> for TournamentSummary {
@@ -817,6 +839,7 @@ impl From<&crate::tournament::TournamentMeta> for TournamentSummary {
             scoring: meta.scoring,
             open_actions: meta.open_actions(),
             format: meta.format,
+            match_type: meta.match_type,
         }
     }
 }
@@ -1004,6 +1027,14 @@ pub enum LobbyClientMessage {
         /// `None` names no format. Additive in lobby protocol 7.
         #[serde(default)]
         format: Option<GameFormat>,
+        /// The match structure (Bo1 / Bo3). `None` resolves to the arity default
+        /// ([`crate::tournament::default_match_type`]: Bo3 head-to-head, Bo1 for
+        /// pods, which are single-game per MSTR), sent back resolved on
+        /// [`TournamentSummary::match_type`]. An explicit `Bo3` at an arity other
+        /// than head-to-head is rejected at create time (Bo3 is inherently
+        /// 2-player). Additive in lobby protocol 8.
+        #[serde(default)]
+        match_type: Option<MatchType>,
     },
     /// Register as an entrant. `player_key` is **client-supplied** and opaque
     /// to the broker — the stable per-entrant identity, following
@@ -1431,7 +1462,7 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 7);
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 8);
         // Deliberately still 2, not 6: lobby versions 3, 4 and 5 are purely
         // additive, and 6 is additive in the only direction this floor governs
         // — its server → client fields are ignored by a consumer that does not
@@ -1552,6 +1583,7 @@ mod tests {
             resolved_total_rounds: None,
             plus_rounds: None,
             format: None,
+            match_type: MatchType::Bo3,
             current_round: 1,
             status: TournamentStatus::InProgress,
             players: vec![
@@ -1600,17 +1632,19 @@ mod tests {
     /// correlation took 5. Retargeting its number alone would have left a test
     /// whose name states a relationship it no longer checks, so the span is
     /// what it pins now, and the name says so. The same reasoning applies
-    /// again at 6, and once more at 7 for the format label and the "automatic +
-    /// N" round option: the chain grows a step and the name grows with it,
-    /// rather than the tail constant being quietly re-pointed.
+    /// again at 6, once more at 7 for the format label and the "automatic + N"
+    /// round option, and again at 8 for the match structure (Bo1 / Bo3): the
+    /// chain grows a step and the name grows with it, rather than the tail
+    /// constant being quietly re-pointed.
     #[test]
-    fn the_tournament_surface_spans_lobby_versions_four_through_seven() {
+    fn the_tournament_surface_spans_lobby_versions_four_through_eight() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
         const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;
         const BROKER_OWNED_POLICY_LOBBY_VERSION: u32 = CORRELATED_SETTLEMENT_LOBBY_VERSION + 1;
         const FORMAT_AND_PLUS_ROUNDS_LOBBY_VERSION: u32 = BROKER_OWNED_POLICY_LOBBY_VERSION + 1;
-        assert_eq!(LOBBY_PROTOCOL_VERSION, FORMAT_AND_PLUS_ROUNDS_LOBBY_VERSION);
+        const MATCH_STRUCTURE_LOBBY_VERSION: u32 = FORMAT_AND_PLUS_ROUNDS_LOBBY_VERSION + 1;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, MATCH_STRUCTURE_LOBBY_VERSION);
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and
@@ -1730,6 +1764,7 @@ mod tests {
                 total_rounds: Some(4),
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             LobbyClientMessage::JoinTournament {
                 code: "TOUR01".to_string(),
@@ -2118,6 +2153,7 @@ mod tests {
             total_rounds: Some(3),
             plus_rounds: None,
             format: None,
+            match_type: None,
         };
         let json = serde_json::to_string(&msg).expect("serializes");
         assert!(
@@ -2135,6 +2171,7 @@ mod tests {
             total_rounds: Some(3),
             plus_rounds: None,
             format: None,
+            match_type: None,
         };
         let omitted_json = serde_json::to_string(&omitted).expect("serializes");
         assert!(!omitted_json.contains(r#""win_points""#), "{omitted_json}");

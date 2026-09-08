@@ -4847,6 +4847,13 @@ export interface TournamentSummary {
    * {@link LobbyGame} listing carries; resolve its label through `FORMAT_REGISTRY`.
    */
   format?: GameFormat | null;
+  /**
+   * The RESOLVED match structure (Bo1 / Bo3) the event runs — the organizer's
+   * choice or the broker's arity default (Bo3 head-to-head, Bo1 for pods, which
+   * are single-game). `Bo3` only ever appears at head-to-head. `undefined`
+   * against a pre-v8 broker that omits the field (lobby protocol 8 added it).
+   */
+  match_type?: MatchType;
 }
 
 /**

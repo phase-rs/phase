@@ -123,6 +123,32 @@ describe("CreateTournamentForm", () => {
     expect(onSubmit.mock.calls[1][0].format).toBe("Commander");
   });
 
+  // Protocol v8: head-to-head defaults to Bo3 and can be set to Bo1 (single-game
+  // single-elim); a pod is forced to Bo1 (Bo3 is inherently 2-player), and its
+  // control is disabled.
+  it("submits Bo3 by default at head-to-head, Bo1 when chosen, Bo1 forced for pods", () => {
+    const onSubmit = vi.fn();
+    render(<CreateTournamentForm onSubmit={onSubmit} />);
+
+    // Default head-to-head → Bo3.
+    fireEvent.click(submitButton());
+    expect(onSubmit.mock.calls[0][0].matchType).toBe("Bo3");
+
+    // Head-to-head, explicitly Bo1.
+    fireEvent.change(screen.getByLabelText("Match"), { target: { value: "Bo1" } });
+    fireEvent.click(submitButton());
+    expect(onSubmit.mock.calls[1][0].matchType).toBe("Bo1");
+
+    // A pod forces Bo1 regardless of the (now disabled) control.
+    fireEvent.change(screen.getByLabelText("Match"), { target: { value: "Bo3" } });
+    fireEvent.change(screen.getByLabelText("Players per match"), {
+      target: { value: "4" },
+    });
+    expect(screen.getByLabelText("Match")).toBeDisabled();
+    fireEvent.click(submitButton());
+    expect(onSubmit.mock.calls[2][0].matchType).toBe("Bo1");
+  });
+
   // "Automatic + N": extra rounds ride as `plusRounds` while the count is
   // automatic, and are dropped when an exact count is set (mutually exclusive).
   it("submits extra rounds as plusRounds only while the count is automatic", () => {

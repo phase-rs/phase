@@ -853,6 +853,7 @@ mod tests {
                     total_rounds: None,
                     plus_rounds: None,
                     format: None,
+                    match_type: None,
                 },
             ),
             (
@@ -937,6 +938,7 @@ mod tests {
                 total_rounds: Some(3),
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             ClientMessage::JoinTournament {
                 code: "TOUR01".into(),

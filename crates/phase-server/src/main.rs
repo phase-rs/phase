@@ -3257,6 +3257,7 @@ mod lifecycle_tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             &env,
         );
@@ -4597,6 +4598,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             total_rounds,
             plus_rounds,
             format,
+            match_type,
         } => L::CreateTournament {
             name: name.clone(),
             arity: *arity,
@@ -4605,6 +4607,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             total_rounds: *total_rounds,
             plus_rounds: *plus_rounds,
             format: *format,
+            match_type: *match_type,
         },
         ClientMessage::JoinTournament {
             code,
@@ -15025,6 +15028,7 @@ mod mode_gate_tests {
                 // projection that hardcoded `format: None` instead of forwarding
                 // it — matching the server-direction fixture's treatment.
                 format: Some(engine::types::format::GameFormat::Commander),
+                match_type: None,
             },
             ClientMessage::JoinTournament {
                 code: "TOUR01".into(),
@@ -15111,6 +15115,7 @@ mod mode_gate_tests {
                 ]),
                 // A concrete label, so the round-trip cannot pass by dropping it.
                 format: Some(engine::types::format::GameFormat::Commander),
+                match_type: engine::types::match_config::MatchType::Bo3,
             },
             players: vec![alice.clone(), bob.clone()],
             // Every `PairingOutcome` shape, so the round-trip cannot pass by
@@ -15899,6 +15904,7 @@ mod handshake_tests {
                 total_rounds: None,
                 plus_rounds: None,
                 format: None,
+                match_type: None,
             },
             &env,
         );
