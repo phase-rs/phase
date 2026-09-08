@@ -16,23 +16,26 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
-    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PossessionAxis,
-    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion,
-    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource,
-    TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    AbilityCondition, AbilityCost, AbilityDefinition, AggregateFunction, AttackScope,
+    BasicLandType, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
+    ContinuousModification, ControllerRef, CountScope, DamageChannel, Duration, Effect, FilterProp,
+    ModalSelectionCondition, ModalSelectionConstraint, ObjectProperty, ObjectScope,
+    ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis, QuantityExpr, QuantityRef,
+    RepeatContinuation, ResolvedAbility, RoundingMode, StaticCondition, StaticDefinition,
+    SubtypeExclusion, TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause,
+    TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     BattlefieldDepartureSourceContext, CastOccurrence, DamageRecord, GameState,
-    LinkedExileSnapshot, TriggerSourceContext,
+    LinkedExileSnapshot, TargetSelectionConstraint, TriggerSourceContext,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 /// Scope information for quantity resolution.
@@ -661,6 +664,477 @@ pub fn quantity_ref_is_cast_stable_for_pre_cast(qty: &QuantityRef) -> bool {
         QuantityRef::ObjectCount { filter } => target_filter_is_property_free_population(filter),
         _ => false,
     }
+}
+
+/// Returns whether every cast-sensitive quantity consumer in an ability tree is
+/// proven unchanged by the ordinary cast considered by the tactical gate.
+///
+/// This is deliberately a proof, rather than a best-effort classifier: a
+/// condition, filter, deferred definition carrier, or quantity slot that this
+/// walk cannot model makes the definition unstable. The gate may then score the
+/// cast normally, but must not hard-reject it as a known no-op.
+pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefinition) -> bool {
+    let AbilityDefinition {
+        kind: _,
+        effect,
+        cost,
+        sub_ability,
+        else_ability,
+        duration,
+        description: _,
+        target_prompt: _,
+        activation_restrictions,
+        activation_mana_payment_restriction,
+        activator_filter,
+        activation_zone,
+        ability_tag: _,
+        condition,
+        optional_targeting: _,
+        optional: _,
+        optional_player,
+        optional_for: _,
+        multi_target,
+        target_constraints,
+        target_choice_timing: _,
+        distribute,
+        unless_pay,
+        modal,
+        mode_abilities,
+        repeat_for,
+        min_x_value: _,
+        announced_x,
+        cant_be_copied: _,
+        cost_reduction,
+        forward_result: _,
+        player_scope,
+        starting_with,
+        target_selection_mode: _,
+        target_chooser,
+        repeat_until,
+        sub_link: _,
+        iteration_kind_binding: _,
+        sibling_condition: _,
+    } = definition;
+
+    activation_mana_payment_restriction.is_none()
+        && activator_filter.is_none()
+        && activation_zone.is_none()
+        && optional_player.is_none()
+        && distribute.is_none()
+        && player_scope.is_none()
+        && starting_with.is_none()
+        && target_chooser.is_none()
+        && cost
+            .as_ref()
+            .is_none_or(ability_cost_is_cast_stable_for_pre_cast)
+        && condition
+            .as_ref()
+            .is_none_or(ability_condition_is_cast_stable_for_pre_cast)
+        && activation_restrictions
+            .iter()
+            .all(activation_restriction_is_cast_stable_for_pre_cast)
+        && duration
+            .as_ref()
+            .is_none_or(duration_is_cast_stable_for_pre_cast)
+        && multi_target.as_ref().is_none_or(|spec| {
+            quantity_is_cast_stable_for_pre_cast(&spec.min)
+                && spec
+                    .max
+                    .as_ref()
+                    .is_none_or(quantity_is_cast_stable_for_pre_cast)
+        })
+        && target_constraints
+            .iter()
+            .all(target_constraint_is_cast_stable_for_pre_cast)
+        && unless_pay
+            .as_ref()
+            .is_none_or(|modifier| ability_cost_is_cast_stable_for_pre_cast(&modifier.cost))
+        && modal.as_ref().is_none_or(modal_is_cast_stable_for_pre_cast)
+        && repeat_for
+            .as_ref()
+            .is_none_or(quantity_is_cast_stable_for_pre_cast)
+        && announced_x
+            .as_ref()
+            .is_none_or(quantity_is_cast_stable_for_pre_cast)
+        && cost_reduction.as_ref().is_none_or(|reduction| {
+            quantity_is_cast_stable_for_pre_cast(&reduction.count)
+                && reduction
+                    .condition
+                    .as_ref()
+                    .is_none_or(parsed_condition_is_cast_stable_for_pre_cast)
+        })
+        && repeat_until
+            .as_ref()
+            .is_none_or(repeat_continuation_is_cast_stable_for_pre_cast)
+        && effect_is_cast_stable_for_pre_cast(effect)
+        && sub_ability
+            .as_deref()
+            .is_none_or(ability_definition_is_cast_stable_for_pre_cast)
+        && else_ability
+            .as_deref()
+            .is_none_or(ability_definition_is_cast_stable_for_pre_cast)
+        && mode_abilities
+            .iter()
+            .all(ability_definition_is_cast_stable_for_pre_cast)
+}
+
+/// The narrow mana-source exception is sound only when the same complete
+/// metadata proof succeeds and every unstable quantity is an unbound X-like
+/// variable selected while paying that mana ability.
+pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
+    definition: &AbilityDefinition,
+) -> bool {
+    // This exception is deliberately narrower than the main proof: it admits
+    // only a root Mana payload and rejects every nested or metadata quantity
+    // carrier outright. The X chooser therefore has no second partial walk.
+    let AbilityDefinition {
+        kind: _,
+        effect,
+        cost,
+        sub_ability: None,
+        else_ability: None,
+        duration: None,
+        // Text and scalar selection flags have no game-state payload.
+        description: _,
+        target_prompt: _,
+        activation_restrictions,
+        activation_mana_payment_restriction: None,
+        activator_filter: None,
+        activation_zone: None,
+        ability_tag: _,
+        condition: None,
+        optional_targeting: _,
+        optional: _,
+        optional_player: None,
+        optional_for: _,
+        multi_target: None,
+        target_constraints,
+        target_choice_timing: _,
+        distribute: None,
+        unless_pay: None,
+        modal: None,
+        mode_abilities,
+        repeat_for: None,
+        min_x_value: _,
+        announced_x: None,
+        cant_be_copied: _,
+        cost_reduction: None,
+        forward_result: _,
+        player_scope: None,
+        starting_with: None,
+        target_selection_mode: _,
+        target_chooser: None,
+        repeat_until: None,
+        sub_link: _,
+        iteration_kind_binding: _,
+        sibling_condition: _,
+    } = definition
+    else {
+        return false;
+    };
+    if !activation_restrictions.is_empty()
+        || !target_constraints.is_empty()
+        || !mode_abilities.is_empty()
+        || !cost.as_ref().is_none_or(mana_exception_cost_is_static)
+    {
+        return false;
+    }
+
+    let Effect::Mana {
+        restrictions,
+        grants,
+        expiry,
+        target,
+        ..
+    } = effect.as_ref()
+    else {
+        return false;
+    };
+    if !restrictions.is_empty() || !grants.is_empty() || expiry.is_some() || target.is_some() {
+        return false;
+    }
+
+    let mut saw_unbound_variable = false;
+    let mut only_unbound_variables = true;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        classify_unstable_quantity_for_mana_exception(
+            quantity,
+            &mut saw_unbound_variable,
+            &mut only_unbound_variables,
+        );
+    });
+    saw_unbound_variable && only_unbound_variables
+}
+
+fn mana_exception_cost_is_static(cost: &AbilityCost) -> bool {
+    matches!(
+        cost,
+        AbilityCost::Mana { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+    )
+}
+
+fn classify_unstable_quantity_for_mana_exception(
+    quantity: &QuantityExpr,
+    saw_unbound_variable: &mut bool,
+    only_unbound_variables: &mut bool,
+) {
+    if !quantity_is_cast_stable_for_pre_cast(quantity) {
+        *saw_unbound_variable = true;
+        *only_unbound_variables &= matches!(
+            quantity,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { .. }
+            }
+        );
+    }
+}
+
+fn ability_cost_is_cast_stable_for_pre_cast(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Mana { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. } => true,
+        AbilityCost::ManaDynamic { quantity } => quantity_is_cast_stable_for_pre_cast(quantity),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().all(ability_cost_is_cast_stable_for_pre_cast)
+        }
+        // Exile/CollectEvidence availability, filter-bearing population costs,
+        // and EffectCost are semantic cast consumers even when their quantity
+        // visitor finds no expression.
+        _ => false,
+    }
+}
+
+fn ability_condition_is_cast_stable_for_pre_cast(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_is_cast_stable_for_pre_cast(lhs) && quantity_is_cast_stable_for_pre_cast(rhs)
+        }
+        AbilityCondition::ConditionInstead { inner }
+        | AbilityCondition::Not { condition: inner } => {
+            ability_condition_is_cast_stable_for_pre_cast(inner)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
+            .iter()
+            .all(ability_condition_is_cast_stable_for_pre_cast),
+        // An ordinary cast cannot change the monarch designation. This keeps
+        // an otherwise-only mana grant eligible for the narrow variable-mana
+        // exception without treating arbitrary conditions as stable.
+        AbilityCondition::IsMonarch => true,
+        // Conditions have independent state/journal/filter consumers. Until a
+        // variant is proven here, retaining the cast is the only sound result.
+        _ => false,
+    }
+}
+
+fn parsed_condition_is_cast_stable_for_pre_cast(condition: &ParsedCondition) -> bool {
+    match condition {
+        ParsedCondition::QuantityVsEachOpponent { lhs, rhs, .. } => {
+            quantity_ref_is_cast_stable_for_pre_cast(lhs)
+                && quantity_ref_is_cast_stable_for_pre_cast(rhs)
+        }
+        ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_is_cast_stable_for_pre_cast(lhs) && quantity_is_cast_stable_for_pre_cast(rhs)
+        }
+        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => conditions
+            .iter()
+            .all(parsed_condition_is_cast_stable_for_pre_cast),
+        ParsedCondition::Not { condition } => {
+            parsed_condition_is_cast_stable_for_pre_cast(condition)
+        }
+        // Legacy hand/zone/cast-history predicates and filter-bearing forms
+        // intentionally fail open; a cast may change their answer.
+        _ => false,
+    }
+}
+
+fn activation_restriction_is_cast_stable_for_pre_cast(
+    restriction: &crate::types::ability::ActivationRestriction,
+) -> bool {
+    match restriction {
+        crate::types::ability::ActivationRestriction::RequiresCondition {
+            condition: Some(condition),
+        } => parsed_condition_is_cast_stable_for_pre_cast(condition),
+        crate::types::ability::ActivationRestriction::RequiresCondition { condition: None } => {
+            false
+        }
+        _ => true,
+    }
+}
+
+fn duration_is_cast_stable_for_pre_cast(duration: &Duration) -> bool {
+    match duration {
+        Duration::ForAsLongAs { condition } => {
+            static_condition_is_cast_stable_for_pre_cast(condition)
+        }
+        _ => true,
+    }
+}
+
+fn target_constraint_is_cast_stable_for_pre_cast(constraint: &TargetSelectionConstraint) -> bool {
+    match constraint {
+        TargetSelectionConstraint::TotalManaValue { value, .. } => {
+            quantity_is_cast_stable_for_pre_cast(value)
+        }
+        TargetSelectionConstraint::DifferentTargetPlayers
+        | TargetSelectionConstraint::DifferentObjectControllers
+        | TargetSelectionConstraint::SameZoneOwner { .. } => true,
+    }
+}
+
+fn modal_is_cast_stable_for_pre_cast(modal: &crate::types::ability::ModalChoice) -> bool {
+    modal
+        .dynamic_max_choices
+        .as_ref()
+        .is_none_or(quantity_is_cast_stable_for_pre_cast)
+        && modal
+            .constraints
+            .iter()
+            .all(modal_constraint_is_cast_stable_for_pre_cast)
+}
+
+fn modal_constraint_is_cast_stable_for_pre_cast(constraint: &ModalSelectionConstraint) -> bool {
+    match constraint {
+        ModalSelectionConstraint::DifferentTargetPlayers => true,
+        ModalSelectionConstraint::ConditionalMaxChoices { condition, .. } => match condition {
+            ModalSelectionCondition::Static { condition } => {
+                static_condition_is_cast_stable_for_pre_cast(condition)
+            }
+            ModalSelectionCondition::AdditionalCostPaid { .. } => false,
+        },
+        ModalSelectionConstraint::NoRepeatThisTurn | ModalSelectionConstraint::NoRepeatThisGame => {
+            false
+        }
+    }
+}
+
+fn repeat_continuation_is_cast_stable_for_pre_cast(repeat: &RepeatContinuation) -> bool {
+    match repeat {
+        RepeatContinuation::WhileCondition { condition, .. } => {
+            ability_condition_is_cast_stable_for_pre_cast(condition)
+        }
+        RepeatContinuation::ControllerChoice | RepeatContinuation::UntilStopConditions { .. } => {
+            true
+        }
+    }
+}
+
+fn static_condition_is_cast_stable_for_pre_cast(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_is_cast_stable_for_pre_cast(lhs) && quantity_is_cast_stable_for_pre_cast(rhs)
+        }
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .all(static_condition_is_cast_stable_for_pre_cast),
+        StaticCondition::Not { condition } => {
+            static_condition_is_cast_stable_for_pre_cast(condition)
+        }
+        // Every other condition either reads a changing game fact or carries a
+        // filter whose nested quantities are not a cast-stability proof.
+        _ => false,
+    }
+}
+
+/// Static definitions are another source of delayed ability payloads. This
+/// deliberately recognizes only the inert mode used by the tactical census;
+/// every other mode or modification remains a possible cast consumer.
+pub fn static_definition_is_cast_stable_for_pre_cast(definition: &StaticDefinition) -> bool {
+    let StaticDefinition {
+        mode: StaticMode::CantBeBlocked,
+        affected: None,
+        modifications,
+        condition: None,
+        per_player_condition: None,
+        affected_zone: None,
+        effect_zone: None,
+        active_zones,
+        characteristic_defining: false,
+        description: None,
+        attack_defended: None,
+        source_controller: None,
+        source_object: None,
+        bypass_beneficiary: None,
+        protection_does_not_remove: None,
+        room_door: None,
+    } = definition
+    else {
+        // This is intentionally a positive proof over every direct static
+        // field. Any unmodeled scope, filter, gate, or zone carrier retains
+        // the cast instead of silently disappearing from the census.
+        return false;
+    };
+
+    active_zones.is_empty()
+        && modifications
+            .iter()
+            .all(continuous_modification_is_cast_stable_for_pre_cast)
+}
+
+fn continuous_modification_is_cast_stable_for_pre_cast(
+    modification: &ContinuousModification,
+) -> bool {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            ability_definition_is_cast_stable_for_pre_cast(definition)
+        }
+        ContinuousModification::GrantStaticAbility { definition } => {
+            static_definition_is_cast_stable_for_pre_cast(definition)
+        }
+        // GrantTrigger, GrantReplacement, GrantAll* and every other carrier
+        // are not modeled as pre-cast-stable; their later materialization must
+        // retain the cast instead of disappearing from the proof.
+        _ => false,
+    }
+}
+
+fn effect_metadata_is_cast_stable_for_pre_cast(effect: &Effect) -> bool {
+    // This proof has a positive boundary: only effects whose full immediate
+    // payload is modeled below may participate. All other Effect variants may
+    // hide filters, continuous modifications, copies, or deferred definitions.
+    matches!(
+        effect,
+        Effect::NoOp
+            | Effect::GainLife {
+                player: TargetFilter::Player | TargetFilter::Controller,
+                ..
+            }
+            | Effect::Draw {
+                target: TargetFilter::Player | TargetFilter::Controller,
+                ..
+            }
+            | Effect::LoseLife {
+                target: None | Some(TargetFilter::Player | TargetFilter::Controller),
+                ..
+            }
+            | Effect::DealDamage {
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+                ..
+            }
+    ) || matches!(
+        effect,
+        Effect::Mana {
+            restrictions,
+            grants,
+            expiry: None,
+            target: None,
+            ..
+        } if restrictions.is_empty() && grants.is_empty()
+    )
+}
+
+fn effect_is_cast_stable_for_pre_cast(effect: &Effect) -> bool {
+    let mut stable = effect_metadata_is_cast_stable_for_pre_cast(effect);
+    effect.for_each_quantity_expr(&mut |quantity| {
+        stable &= quantity_is_cast_stable_for_pre_cast(quantity);
+    });
+    stable
 }
 
 fn quantity_expr_is_source_context_previewable(
@@ -8080,10 +8554,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AggregateFunction, ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel,
-        DamageKindFilter, DevotionColors, Effect, FilterProp, KickerVariant, ObjectProperty,
-        ObjectScope, PlayerRelation, SharedQuality, TargetFilter, TargetRef, ThisWayCause,
-        TypeFilter, TypedFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, ChoiceValue,
+        Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter, DevotionColors,
+        Duration, Effect, FilterProp, KickerVariant, ModalSelectionCondition,
+        ModalSelectionConstraint, ObjectProperty, ObjectScope, PlayerRelation, RepeatContinuation,
+        SharedQuality, StaticCondition, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -8293,6 +8769,85 @@ mod tests {
             try_resolve_quantity_in_source_context(&state, &up_to_one, PlayerId(0), source),
             None,
             "a nonzero upper bound still requires a resolution-time choice"
+        );
+    }
+
+    #[test]
+    fn cast_stability_definition_walks_direct_metadata_and_fails_open_elsewhere() {
+        let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        assert!(ability_definition_is_cast_stable_for_pre_cast(&definition));
+
+        let graveyard_count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+            },
+        };
+        definition
+            .target_constraints
+            .push(TargetSelectionConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: graveyard_count.clone(),
+            });
+        assert!(!ability_definition_is_cast_stable_for_pre_cast(&definition));
+        definition.target_constraints.clear();
+
+        definition.repeat_until = Some(RepeatContinuation::WhileCondition {
+            condition: Box::new(AbilityCondition::QuantityCheck {
+                lhs: graveyard_count.clone(),
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }),
+            max_iterations: None,
+        });
+        assert!(!ability_definition_is_cast_stable_for_pre_cast(&definition));
+        definition.repeat_until = None;
+
+        definition.duration = Some(Duration::ForAsLongAs {
+            condition: StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Fixed { value: 0 },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        });
+        assert!(ability_definition_is_cast_stable_for_pre_cast(&definition));
+        definition.duration = Some(Duration::ForAsLongAs {
+            condition: StaticCondition::QuantityComparison {
+                lhs: graveyard_count.clone(),
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        });
+        assert!(!ability_definition_is_cast_stable_for_pre_cast(&definition));
+        definition.duration = None;
+
+        let mut modal = crate::types::ability::ModalChoice::default();
+        modal
+            .constraints
+            .push(ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::Static {
+                    condition: StaticCondition::QuantityComparison {
+                        lhs: graveyard_count,
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 0 },
+                    },
+                },
+                max_choices: 1,
+                otherwise_max_choices: 0,
+            });
+        definition.modal = Some(modal);
+        assert!(!ability_definition_is_cast_stable_for_pre_cast(&definition));
+
+        definition.modal = None;
+        definition.condition = Some(AbilityCondition::IsMonarch);
+        assert!(ability_definition_is_cast_stable_for_pre_cast(&definition));
+        definition.condition = Some(AbilityCondition::SourceEnteredThisTurn);
+        assert!(
+            !ability_definition_is_cast_stable_for_pre_cast(&definition),
+            "unmodelled conditions fail open rather than being silently treated as stable"
         );
     }
 

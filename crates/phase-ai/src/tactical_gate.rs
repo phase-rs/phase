@@ -14,8 +14,9 @@ use engine::game::functioning_abilities::{
     game_functioning_statics,
 };
 use engine::game::quantity::{
-    quantity_is_cast_stable_for_pre_cast, quantity_ref_is_cast_stable_for_pre_cast,
-    try_resolve_quantity_in_source_context,
+    ability_definition_has_only_unbound_variable_quantities_for_pre_cast,
+    ability_definition_is_cast_stable_for_pre_cast, quantity_is_cast_stable_for_pre_cast,
+    static_definition_is_cast_stable_for_pre_cast, try_resolve_quantity_in_source_context,
 };
 use engine::game::triggers::{
     synthetic_keyword_spell_cast_trigger_applies, trigger_definition_functions_in_zone,
@@ -23,12 +24,11 @@ use engine::game::triggers::{
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     CastingRestriction, ContinuousModification, CostCategory, Effect, ParsedCondition, PtValue,
-    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-    TriggerCondition, TypeFilter, TypedFilter,
+    TargetFilter, TargetRef, TriggerCondition, TypeFilter, TypedFilter,
 };
-use engine::types::ability_visit::{
-    visit_ability_def, visit_replacement, visit_static, visit_trigger,
-};
+#[cfg(test)]
+use engine::types::ability::{StaticCondition, StaticDefinition};
+use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, DayNight, GameState, WaitingFor};
@@ -512,8 +512,14 @@ fn cast_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool {
         .get(&caster)
         .map_or(0, |spells| spells.len());
 
-    // CR 502.2: an active player's zero-to-one Day cast prevents the
-    // Day-to-Night transition, while Night's one-to-two cast causes Day.
+    // CR 502.2a: Day/Night counts the active TEAM's spells. The day/night
+    // transition reducer currently keys this on `active_player`, so do not
+    // treat any shared-team boundary as proven until that separate authority
+    // becomes team-aware.
+    let caster_has_teammate = !engine::game::players::teammates(state, caster).is_empty();
+    if state.day_night.is_some() && caster_has_teammate {
+        return true;
+    }
     if caster == state.active_player
         && matches!(
             (state.day_night, casts_this_turn),
@@ -560,7 +566,7 @@ fn cast_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool {
                 && object_has_cast_unstable_consumer(state, object)
         })
         || game_functioning_statics(state)
-            .any(|(_, definition)| static_definition_has_cast_unstable_consumer(definition))
+            .any(|(_, definition)| !static_definition_is_cast_stable_for_pre_cast(definition))
 }
 
 fn object_has_surge_keyword(
@@ -581,80 +587,14 @@ fn spell_identity_is_available_to_caster(
 }
 
 fn ability_has_cast_unstable_consumer(definition: &AbilityDefinition) -> bool {
-    definition
-        .cost
-        .as_ref()
-        .is_some_and(ability_cost_has_cast_unstable_quantity)
-        || definition
-            .condition
-            .as_ref()
-            .is_some_and(ability_condition_has_cast_unstable_quantity)
-        || definition
-            .activation_restrictions
-            .iter()
-            .any(activation_restriction_has_cast_unstable_condition)
-        || definition.multi_target.as_ref().is_some_and(|spec| {
-            !quantity_is_cast_stable_for_pre_cast(&spec.min)
-                || spec
-                    .max
-                    .as_ref()
-                    .is_some_and(|max| !quantity_is_cast_stable_for_pre_cast(max))
-        })
-        || definition
-            .unless_pay
-            .as_ref()
-            .is_some_and(|modifier| ability_cost_has_cast_unstable_quantity(&modifier.cost))
-        || definition
-            .modal
-            .as_ref()
-            .and_then(|modal| modal.dynamic_max_choices.as_ref())
-            .is_some_and(|quantity| !quantity_is_cast_stable_for_pre_cast(quantity))
-        || definition
-            .repeat_for
-            .as_ref()
-            .is_some_and(|quantity| !quantity_is_cast_stable_for_pre_cast(quantity))
-        || definition
-            .announced_x
-            .as_ref()
-            .is_some_and(|quantity| !quantity_is_cast_stable_for_pre_cast(quantity))
-        || definition.cost_reduction.as_ref().is_some_and(|reduction| {
-            !quantity_is_cast_stable_for_pre_cast(&reduction.count)
-                || reduction
-                    .condition
-                    .as_ref()
-                    .is_some_and(parsed_condition_has_cast_unstable_quantity)
-        })
-        || definition
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_has_cast_unstable_consumer)
-        || definition
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_has_cast_unstable_consumer)
-        || definition
-            .mode_abilities
-            .iter()
-            .any(ability_has_cast_unstable_consumer)
-        || ability_effect_has_cast_unstable_quantity(definition)
-}
-
-fn ability_cost_has_cast_unstable_quantity(cost: &AbilityCost) -> bool {
-    let mut stable = true;
-    cost.for_each_quantity_expr(&mut |quantity| {
-        stable &= quantity_is_cast_stable_for_pre_cast(quantity);
-    });
-    !stable
+    !ability_definition_is_cast_stable_for_pre_cast(definition)
 }
 
 fn object_has_cast_unstable_consumer(
     state: &GameState,
     object: &engine::game::game_object::GameObject,
 ) -> bool {
-    object
-        .casting_restrictions
-        .iter()
-        .any(casting_restriction_has_cast_unstable_condition)
+    !object.casting_restrictions.is_empty()
         || object.abilities.iter().any(|ability| {
             ability_has_cast_unstable_consumer(ability)
                 && !(object.zone == Zone::Battlefield
@@ -665,13 +605,9 @@ fn object_has_cast_unstable_consumer(
             .static_definitions
             .as_slice()
             .iter()
-            .any(static_definition_has_cast_unstable_consumer)
+            .any(|definition| !static_definition_is_cast_stable_for_pre_cast(definition))
         || object_has_cast_history_keyword(state, object)
-        || object
-            .replacement_definitions
-            .as_slice()
-            .iter()
-            .any(replacement_definition_has_cast_unstable_consumer)
+        || !object.replacement_definitions.as_slice().is_empty()
         || object
             .trigger_definitions
             .as_slice()
@@ -685,59 +621,39 @@ fn object_has_cast_unstable_consumer(
 /// future payoff, while all zone, hand, journal, snapshot, and condition reads
 /// remain conservative consumers.
 fn mana_ability_has_only_unbound_variable_quantities(definition: &AbilityDefinition) -> bool {
-    if !mana_ability_direct_metadata_is_quantity_free(definition) {
-        return false;
-    }
-
-    let mut saw_unbound_variable = false;
-    let mut only_unbound_variables_are_unstable = true;
-    let _ = visit_ability_def(definition, &mut |effect| {
-        effect.for_each_quantity_expr(&mut |quantity| {
-            if !quantity_is_cast_stable_for_pre_cast(quantity) {
-                saw_unbound_variable = true;
-                only_unbound_variables_are_unstable &= matches!(
-                    quantity,
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::Variable { .. }
-                    }
-                );
-            }
-        });
-        if only_unbound_variables_are_unstable {
-            ControlFlow::Continue(())
-        } else {
-            ControlFlow::Break(())
-        }
-    });
-
-    saw_unbound_variable && only_unbound_variables_are_unstable
+    ability_definition_has_only_unbound_variable_quantities_for_pre_cast(definition)
 }
 
-fn mana_ability_direct_metadata_is_quantity_free(definition: &AbilityDefinition) -> bool {
+fn casting_restriction_has_cast_unstable_condition(_: &CastingRestriction) -> bool {
+    true
+}
+
+fn trigger_definition_has_cast_unstable_consumer(
+    definition: &engine::types::ability::TriggerDefinition,
+) -> bool {
     definition
-        .cost
+        .condition
         .as_ref()
-        .is_none_or(|cost| !ability_cost_has_cast_unstable_quantity(cost))
-        && definition.condition.is_none()
-        && definition.activation_restrictions.is_empty()
-        && definition.multi_target.is_none()
-        && definition.unless_pay.is_none()
-        && definition.modal.is_none()
-        && definition.repeat_for.is_none()
-        && definition.announced_x.is_none()
-        && definition.cost_reduction.is_none()
-        && definition
-            .sub_ability
+        .is_some_and(|condition| !trigger_condition_is_cast_stable_for_pre_cast(condition))
+        || definition
+            .execute
             .as_deref()
-            .is_none_or(mana_ability_direct_metadata_is_quantity_free)
-        && definition
-            .else_ability
-            .as_deref()
-            .is_none_or(mana_ability_direct_metadata_is_quantity_free)
-        && definition
-            .mode_abilities
+            .is_some_and(ability_has_cast_unstable_consumer)
+}
+
+fn trigger_condition_is_cast_stable_for_pre_cast(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_is_cast_stable_for_pre_cast(lhs) && quantity_is_cast_stable_for_pre_cast(rhs)
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => conditions
             .iter()
-            .all(mana_ability_direct_metadata_is_quantity_free)
+            .all(trigger_condition_is_cast_stable_for_pre_cast),
+        TriggerCondition::Not { condition } => {
+            trigger_condition_is_cast_stable_for_pre_cast(condition)
+        }
+        _ => false,
+    }
 }
 
 /// Storm and Surge share `KeywordKind::Unknown` with other keyword variants.
@@ -753,219 +669,6 @@ fn object_has_cast_history_keyword(
         object.id,
         KeywordKind::Unknown,
     )
-}
-
-fn trigger_definition_has_cast_unstable_consumer(
-    definition: &engine::types::ability::TriggerDefinition,
-) -> bool {
-    definition
-        .condition
-        .as_ref()
-        .is_some_and(trigger_condition_has_cast_unstable_quantity)
-        || definition
-            .execute
-            .as_deref()
-            .is_some_and(ability_has_cast_unstable_consumer)
-        || effects_visited_by(effect_has_cast_unstable_quantity, |visit| {
-            visit_trigger(definition, visit)
-        })
-}
-
-fn trigger_condition_has_cast_unstable_quantity(condition: &TriggerCondition) -> bool {
-    match condition {
-        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
-            !quantity_is_cast_stable_for_pre_cast(lhs) || !quantity_is_cast_stable_for_pre_cast(rhs)
-        }
-        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => conditions
-            .iter()
-            .any(trigger_condition_has_cast_unstable_quantity),
-        TriggerCondition::Not { condition } => {
-            trigger_condition_has_cast_unstable_quantity(condition)
-        }
-        _ => false,
-    }
-}
-
-fn ability_effect_has_cast_unstable_quantity(definition: &AbilityDefinition) -> bool {
-    let mut unstable = false;
-    let _ = visit_ability_def(definition, &mut |effect| {
-        effect.for_each_quantity_expr(&mut |quantity| {
-            unstable |= !quantity_is_cast_stable_for_pre_cast(quantity);
-        });
-        if unstable {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    });
-    unstable
-}
-
-fn ability_condition_has_cast_unstable_quantity(condition: &AbilityCondition) -> bool {
-    match condition {
-        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-            !quantity_is_cast_stable_for_pre_cast(lhs) || !quantity_is_cast_stable_for_pre_cast(rhs)
-        }
-        AbilityCondition::ConditionInstead { inner }
-        | AbilityCondition::Not { condition: inner } => {
-            ability_condition_has_cast_unstable_quantity(inner)
-        }
-        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
-            .iter()
-            .any(ability_condition_has_cast_unstable_quantity),
-        _ => false,
-    }
-}
-
-fn activation_restriction_has_cast_unstable_condition(restriction: &ActivationRestriction) -> bool {
-    matches!(
-        restriction,
-        ActivationRestriction::RequiresCondition {
-            condition: Some(condition)
-        } if parsed_condition_has_cast_unstable_quantity(condition)
-    )
-}
-
-fn casting_restriction_has_cast_unstable_condition(restriction: &CastingRestriction) -> bool {
-    matches!(
-        restriction,
-        CastingRestriction::RequiresCondition {
-            condition: Some(condition)
-        } if parsed_condition_has_cast_unstable_quantity(condition)
-    )
-}
-
-fn parsed_condition_has_cast_unstable_quantity(condition: &ParsedCondition) -> bool {
-    match condition {
-        ParsedCondition::QuantityVsEachOpponent { lhs, rhs, .. } => {
-            !quantity_ref_is_cast_stable_for_pre_cast(lhs)
-                || !quantity_ref_is_cast_stable_for_pre_cast(rhs)
-        }
-        ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
-            !quantity_is_cast_stable_for_pre_cast(lhs) || !quantity_is_cast_stable_for_pre_cast(rhs)
-        }
-        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => conditions
-            .iter()
-            .any(parsed_condition_has_cast_unstable_quantity),
-        ParsedCondition::Not { condition } => {
-            parsed_condition_has_cast_unstable_quantity(condition)
-        }
-        _ => false,
-    }
-}
-
-fn static_definition_has_cast_unstable_consumer(definition: &StaticDefinition) -> bool {
-    definition
-        .condition
-        .as_ref()
-        .is_some_and(static_condition_has_cast_unstable_quantity)
-        || definition
-            .per_player_condition
-            .as_ref()
-            .is_some_and(parsed_condition_has_cast_unstable_quantity)
-        || static_mode_has_cast_unstable_quantity(&definition.mode)
-        || definition
-            .modifications
-            .iter()
-            .any(continuous_modification_has_cast_unstable_quantity)
-        || effects_visited_by(effect_has_cast_unstable_quantity, |visit| {
-            visit_static(definition, visit)
-        })
-}
-
-fn continuous_modification_has_cast_unstable_quantity(
-    modification: &ContinuousModification,
-) -> bool {
-    match modification {
-        ContinuousModification::GrantStaticAbility { definition } => {
-            static_definition_has_cast_unstable_consumer(definition)
-        }
-        ContinuousModification::SetDynamicPower { value }
-        | ContinuousModification::SetDynamicToughness { value }
-        | ContinuousModification::SetPowerDynamic { value }
-        | ContinuousModification::SetToughnessDynamic { value }
-        | ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value }
-        | ContinuousModification::AddDynamicKeyword { value, .. } => {
-            !quantity_is_cast_stable_for_pre_cast(value)
-        }
-        _ => false,
-    }
-}
-
-fn static_mode_has_cast_unstable_quantity(mode: &StaticMode) -> bool {
-    match mode {
-        StaticMode::ModifyCost { dynamic_count, .. }
-        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
-            .as_ref()
-            .is_some_and(|quantity| !quantity_ref_is_cast_stable_for_pre_cast(quantity)),
-        _ => false,
-    }
-}
-
-fn static_condition_has_cast_unstable_quantity(condition: &StaticCondition) -> bool {
-    match condition {
-        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
-            !quantity_is_cast_stable_for_pre_cast(lhs) || !quantity_is_cast_stable_for_pre_cast(rhs)
-        }
-        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
-            .iter()
-            .any(static_condition_has_cast_unstable_quantity),
-        StaticCondition::Not { condition } => {
-            static_condition_has_cast_unstable_quantity(condition)
-        }
-        _ => false,
-    }
-}
-
-fn replacement_definition_has_cast_unstable_consumer(
-    definition: &engine::types::ability::ReplacementDefinition,
-) -> bool {
-    definition.runtime_execute.is_some()
-        || definition
-            .condition
-            .as_ref()
-            .is_some_and(replacement_condition_has_cast_unstable_quantity)
-        || effects_visited_by(effect_has_cast_unstable_quantity, |visit| {
-            visit_replacement(definition, visit)
-        })
-}
-
-fn replacement_condition_has_cast_unstable_quantity(
-    condition: &engine::types::ability::ReplacementCondition,
-) -> bool {
-    match condition {
-        engine::types::ability::ReplacementCondition::And { conditions } => conditions
-            .iter()
-            .any(replacement_condition_has_cast_unstable_quantity),
-        engine::types::ability::ReplacementCondition::UnlessQuantity { lhs, rhs, .. }
-        | engine::types::ability::ReplacementCondition::OnlyIfQuantity { lhs, rhs, .. } => {
-            !quantity_is_cast_stable_for_pre_cast(lhs) || !quantity_is_cast_stable_for_pre_cast(rhs)
-        }
-        _ => false,
-    }
-}
-
-fn effect_has_cast_unstable_quantity(effect: &Effect) -> ControlFlow<()> {
-    let mut unstable = false;
-    effect.for_each_quantity_expr(&mut |quantity| {
-        unstable |= !quantity_is_cast_stable_for_pre_cast(quantity);
-    });
-    if unstable {
-        ControlFlow::Break(())
-    } else {
-        ControlFlow::Continue(())
-    }
-}
-
-fn effects_visited_by<F>(
-    mut visit_effect: F,
-    visit_definitions: impl FnOnce(&mut F) -> ControlFlow<()>,
-) -> bool
-where
-    F: FnMut(&Effect) -> ControlFlow<()>,
-{
-    visit_definitions(&mut visit_effect).is_break()
 }
 
 fn payment_population_is_stable(state: &GameState, caster: PlayerId, spell_id: ObjectId) -> bool {
@@ -2515,6 +2218,36 @@ mod tests {
     }
 
     #[test]
+    fn shared_team_day_night_boundaries_fail_open_for_nonactive_teammates() {
+        for (day_night, prior_casts) in [(DayNight::Day, 0), (DayNight::Night, 1)] {
+            let mut state = GameState::new(
+                engine::types::format::FormatConfig::two_headed_giant(),
+                4,
+                91_215,
+            );
+            state.active_player = P0;
+            state.day_night = Some(day_night);
+            if prior_casts > 0 {
+                state.spells_cast_this_turn_by_player.insert(
+                    PlayerId(1),
+                    engine::im::Vector::from(vec![Default::default()]),
+                );
+            }
+
+            assert!(
+                cast_has_relevant_payoff(&state, PlayerId(1)),
+                "a nonactive teammate's {day_night:?} boundary is retained until the transition authority is team-aware"
+            );
+
+            state.day_night = None;
+            assert!(
+                !cast_has_relevant_payoff(&state, PlayerId(1)),
+                "removing only the shared-team Day/Night boundary restores the no-payoff result"
+            );
+        }
+    }
+
+    #[test]
     fn zero_cast_surge_payoff_is_paired() {
         let (mut state, congregate) = funded_zero_congregate_state();
         let surge = create_object(
@@ -3453,6 +3186,39 @@ mod tests {
             !zero_cast_is_retained(&state, harvest),
             "an otherwise-clean unbound X mana choice is not a read of the zero cast"
         );
+
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("graveyard mana source exists")
+                .abilities,
+        )[0]
+        .repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+            },
+        });
+        assert!(
+            zero_cast_is_retained(&state, harvest),
+            "a typed latent repeat count prevents the unbound-X mana exception from bypassing the production census"
+        );
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("graveyard mana source exists")
+                .abilities,
+        )[0]
+        .repeat_for = None;
+        assert!(
+            !zero_cast_is_retained(&state, harvest),
+            "clearing only the latent repeat metadata restores the unbound-X exception"
+        );
     }
 
     #[test]
@@ -3813,6 +3579,248 @@ mod tests {
                 player: TargetFilter::Player,
             },
         )
+    }
+
+    fn add_battlefield_metadata_consumer(
+        state: &mut GameState,
+        card_id: u64,
+        definition: AbilityDefinition,
+    ) -> ObjectId {
+        let object_id = create_object(
+            state,
+            CardId(card_id),
+            P0,
+            "Typed latent metadata consumer".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&object_id)
+                .expect("metadata consumer exists")
+                .abilities,
+        )
+        .push(definition);
+        state.battlefield.push_back(object_id);
+        object_id
+    }
+
+    fn graveyard_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    engine::types::ability::FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+            },
+        }
+    }
+
+    #[test]
+    fn zero_cast_direct_and_deferred_metadata_consumers_are_paired() {
+        #[derive(Debug)]
+        enum MetadataCase {
+            TargetCap,
+            RepeatUntil,
+            Duration,
+            ModalConditionalMax,
+            DeferredManaGrant,
+            LegacyHandRestriction,
+            FilterBearingDuration,
+            GraveyardExileCost,
+            OptionalPlayerFilter,
+            TargetChooserFilter,
+        }
+
+        for (index, case) in [
+            MetadataCase::TargetCap,
+            MetadataCase::RepeatUntil,
+            MetadataCase::Duration,
+            MetadataCase::ModalConditionalMax,
+            MetadataCase::DeferredManaGrant,
+            MetadataCase::LegacyHandRestriction,
+            MetadataCase::FilterBearingDuration,
+            MetadataCase::GraveyardExileCost,
+            MetadataCase::OptionalPlayerFilter,
+            MetadataCase::TargetChooserFilter,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (mut state, congregate) = funded_zero_congregate_state();
+            let count = graveyard_count();
+            let mut definition = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
+            match case {
+                MetadataCase::TargetCap => definition.target_constraints.push(
+                    engine::types::game_state::TargetSelectionConstraint::TotalManaValue {
+                        comparator: Comparator::LE,
+                        value: count,
+                    },
+                ),
+                MetadataCase::RepeatUntil => {
+                    definition.repeat_until =
+                        Some(engine::types::ability::RepeatContinuation::WhileCondition {
+                            condition: Box::new(AbilityCondition::QuantityCheck {
+                                lhs: count,
+                                comparator: Comparator::GE,
+                                rhs: QuantityExpr::Fixed { value: 0 },
+                            }),
+                            max_iterations: None,
+                        });
+                }
+                MetadataCase::Duration => {
+                    definition.duration = Some(engine::types::ability::Duration::ForAsLongAs {
+                        condition: StaticCondition::QuantityComparison {
+                            lhs: count,
+                            comparator: Comparator::GE,
+                            rhs: QuantityExpr::Fixed { value: 0 },
+                        },
+                    });
+                }
+                MetadataCase::ModalConditionalMax => {
+                    let mut modal = engine::types::ability::ModalChoice::default();
+                    modal.constraints.push(
+                        engine::types::ability::ModalSelectionConstraint::ConditionalMaxChoices {
+                            condition: engine::types::ability::ModalSelectionCondition::Static {
+                                condition: StaticCondition::QuantityComparison {
+                                    lhs: count,
+                                    comparator: Comparator::GE,
+                                    rhs: QuantityExpr::Fixed { value: 0 },
+                                },
+                            },
+                            max_choices: 1,
+                            otherwise_max_choices: 0,
+                        },
+                    );
+                    definition.modal = Some(modal);
+                }
+                MetadataCase::DeferredManaGrant => {
+                    *definition.effect = Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![engine::types::mana::ManaSpellGrant::TriggerOnSpend {
+                            filter: TargetFilter::Any,
+                            ability: Box::new(zero_gain_definition()),
+                        }],
+                        expiry: None,
+                        target: None,
+                    };
+                }
+                MetadataCase::LegacyHandRestriction => definition.activation_restrictions.push(
+                    ActivationRestriction::RequiresCondition {
+                        condition: Some(ParsedCondition::HandSizeExact { count: 0 }),
+                    },
+                ),
+                MetadataCase::FilterBearingDuration => {
+                    definition.duration = Some(engine::types::ability::Duration::ForAsLongAs {
+                        condition: StaticCondition::IsPresent {
+                            filter: Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                                vec![engine::types::ability::FilterProp::Cmc {
+                                    comparator: Comparator::LE,
+                                    value: count,
+                                }],
+                            ))),
+                        },
+                    });
+                }
+                MetadataCase::GraveyardExileCost => {
+                    definition.cost = Some(AbilityCost::Exile {
+                        count: 1,
+                        zone: Some(Zone::Graveyard),
+                        filter: None,
+                    });
+                }
+                MetadataCase::OptionalPlayerFilter => {
+                    definition.optional_player =
+                        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                            vec![engine::types::ability::FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: count,
+                            }],
+                        )));
+                }
+                MetadataCase::TargetChooserFilter => {
+                    definition.target_chooser =
+                        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                            vec![engine::types::ability::FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: count,
+                            }],
+                        )));
+                }
+            }
+
+            let consumer =
+                add_battlefield_metadata_consumer(&mut state, 91_300 + index as u64, definition);
+            assert!(
+                zero_cast_is_retained(&state, congregate),
+                "{case:?} typed latent consumer reaches the production zero-cast census"
+            );
+
+            let consumer_definition = Arc::make_mut(
+                &mut state
+                    .objects
+                    .get_mut(&consumer)
+                    .expect("metadata consumer remains")
+                    .abilities,
+            )
+            .first_mut()
+            .expect("metadata consumer has one ability");
+            *consumer_definition = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
+            assert!(
+                !zero_cast_is_retained(&state, congregate),
+                "replacing only the {case:?} consumer with stable metadata restores known-zero rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_cast_static_granted_definition_metadata_is_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let mut granted = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
+        granted.duration = Some(Duration::ForAsLongAs {
+            condition: StaticCondition::QuantityComparison {
+                lhs: graveyard_count(),
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        });
+        let mut static_definition = StaticDefinition::new(StaticMode::CantBeBlocked);
+        static_definition.modifications = vec![ContinuousModification::GrantAbility {
+            definition: Box::new(granted),
+        }];
+        let source =
+            add_battlefield_static_for_controller(&mut state, 91_350, P0, static_definition);
+        state.battlefield.retain(|object_id| *object_id != source);
+        state.players[P0.0 as usize].hand.push_back(source);
+        state
+            .objects
+            .get_mut(&source)
+            .expect("static metadata source remains")
+            .zone = Zone::Hand;
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a held typed latent duration on a statically granted definition reaches the production zero-cast census"
+        );
+
+        let modifications = &mut state
+            .objects
+            .get_mut(&source)
+            .expect("static metadata source remains")
+            .static_definitions[0]
+            .modifications;
+        let ContinuousModification::GrantAbility { definition } = &mut modifications[0] else {
+            panic!("fixture has one granted definition");
+        };
+        *definition = Box::new(AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp));
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "replacing only the granted definition's latent metadata with a stable definition restores known-zero rejection"
+        );
     }
 
     #[test]
