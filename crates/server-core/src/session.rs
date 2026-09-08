@@ -1172,6 +1172,7 @@ impl GameSession {
         load_and_hydrate_decks(
             &mut self.state,
             &DeckPayload {
+                booster_pack_pool: None,
                 player: player_deck,
                 opponent: opponent_deck,
                 ai_decks,

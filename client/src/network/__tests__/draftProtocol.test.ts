@@ -727,7 +727,7 @@ describe("draftProtocol", () => {
 
       expect(msg.type).toBe("draft_state_update");
       if (msg.type === "draft_state_update") {
-        expect((msg.view as Record<string, unknown>).booster_pack_pool).toBeUndefined();
+        expect("booster_pack_pool" in msg.view).toBe(false);
       }
     });
 

@@ -41,7 +41,7 @@ const wasm = vi.hoisted(() => ({
   suggest_lands: vi.fn(),
   get_bot_deck: vi.fn(),
   export_draft_session: vi.fn(() => "session"),
-  booster_pack_pool_for_game: vi.fn(() => null),
+  booster_pack_pool_for_game: vi.fn<() => string[] | null | undefined>(() => null),
 }));
 
 const persistence = vi.hoisted(() => ({

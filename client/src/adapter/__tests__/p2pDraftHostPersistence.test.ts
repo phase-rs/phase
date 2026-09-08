@@ -231,10 +231,10 @@ describe("P2PDraftHost persistence disposal", () => {
       expect(publicSnapshot.booster_pack_pool).toBeUndefined();
       expect(publicSnapshot.poolInput.data.cube_list_text).toBeUndefined();
       expect(publicSnapshot.matchLaunches[0].launch.deckPayload.booster_pack_pool).toBeUndefined();
-      if (typeof draftSessionJson === "string") {
+      if (typeof snapshot.draftSessionJson === "string") {
         expect(JSON.parse(publicSnapshot.draftSessionJson).booster_pack_pool).toBeUndefined();
         expect(JSON.parse(snapshot.draftSessionJson).booster_pack_pool).toEqual(["Nested cube"]);
-      } else if (draftSessionJson && typeof draftSessionJson === "object") {
+      } else if (snapshot.draftSessionJson && typeof snapshot.draftSessionJson === "object") {
         expect(publicSnapshot.draftSessionJson.booster_pack_pool).toBeUndefined();
         expect((snapshot.draftSessionJson as { booster_pack_pool: string[] }).booster_pack_pool).toEqual(["Nested cube"]);
       } else {
