@@ -4945,6 +4945,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
+        | FilterProp::AttachedToPlayer { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another

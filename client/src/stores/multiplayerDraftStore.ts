@@ -25,6 +25,7 @@ import type { EngineAdapter, GameAction, GameEvent, GameLogEntry, MatchScore, Su
 import type { DraftCommanderLaunch, DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import { MAX_MATERIALIZED_VIRTUAL_BASICS } from "../components/draft/workspace/types";
 import type { DraftCardPlacement, DraftWorkspaceState } from "../components/draft/workspace/types";
+import { BASIC_LAND_NAMES } from "../constants/game";
 import {
   appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
@@ -355,6 +356,8 @@ interface MultiplayerDraftActions {
   confirmPick: (destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
   /** Both: pick a card from the current pack using a deterministic draft heuristic. */
   autoPickCard: (placementHints?: DraftAutoPickPlacementHints) => Promise<DraftPickOutcome>;
+  /** Ask the authoritative pod host to suggest basics for the current deckbuilding workspace. */
+  autoSuggestLands: () => Promise<void>;
   setWorkspaceState: (next: DraftWorkspaceState) => void;
   setWorkspacePlacement: (instanceId: string, placement: DraftCardPlacement) => void;
   addBasicLand: (name: string) => void;
@@ -598,6 +601,34 @@ function workspaceFacades(workspace: DraftWorkspaceState, view: DraftPlayerView)
     mainDeck: projectWorkspaceMainDeck(workspace, view.pool),
     landCounts: projectWorkspaceLandCounts(workspace),
   };
+}
+
+function mergeSuggestedVirtualBasics(
+  workspace: DraftWorkspaceState,
+  pool: DraftPlayerView["pool"],
+  suggestions: Readonly<Record<string, number>>,
+): DraftWorkspaceState {
+  let next = workspace;
+  for (const basic of workspace.virtualBasics) {
+    if (BASIC_LAND_NAMES.has(basic.name)) {
+      next = removeVirtualBasic(next, basic.instanceId);
+    }
+  }
+
+  let remaining = MAX_MATERIALIZED_VIRTUAL_BASICS - next.virtualBasics.length;
+  for (const name of Object.keys(suggestions).sort()) {
+    if (!BASIC_LAND_NAMES.has(name)) continue;
+    const suggestion = suggestions[name];
+    if (!Number.isSafeInteger(suggestion) || suggestion < 0) continue;
+    const count = Math.min(suggestion, remaining);
+    for (let index = 0; index < count; index += 1) {
+      const instanceId = makeInteractiveVirtualBasicInstanceId(next, pool);
+      next = addVirtualBasic(next, pool, { instanceId, name });
+    }
+    remaining -= count;
+    if (remaining === 0) break;
+  }
+  return next;
 }
 
 function activeWorkspaceAdapter(): DraftPodHostAdapter | DraftPodGuestAdapter | null {
@@ -1681,6 +1712,39 @@ export const useMultiplayerDraftStore = create<
       destination: "deck",
       placementHints,
     });
+  },
+
+  autoSuggestLands: async () => {
+    const state = get();
+    const { role, view, workspaceState } = state;
+    if (!view || !workspaceState || view.status !== "Deckbuilding") return;
+    const adapter = role === "host" ? activeHostAdapter : role === "guest" ? activeGuestAdapter : null;
+    if (!adapter) return;
+    const generation = lifecycleGeneration;
+    const revision = workspaceRevision;
+    const isFresh = () => {
+      const current = get();
+      return generation === lifecycleGeneration
+        && revision === workspaceRevision
+        && current.role === role
+        && current.view === view
+        && current.view?.status === "Deckbuilding"
+        && current.workspaceState === workspaceState
+        && (role === "host" ? activeHostAdapter : activeGuestAdapter) === adapter;
+    };
+
+    try {
+      const suggestions = await adapter.suggestLands();
+      if (!isFresh()) return;
+      installWorkspace({
+        view,
+        base: mergeSuggestedVirtualBasics(workspaceState, view.pool, suggestions),
+        publish: true,
+      });
+    } catch (error) {
+      if (!isFresh()) return;
+      set({ workspaceSyncError: error instanceof Error ? error.message : String(error) });
+    }
   },
 
   setWorkspaceState: (next) => {

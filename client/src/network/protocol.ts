@@ -106,6 +106,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  52 — game_setup and state_update carry GameEvent[] and can now carry the
+ *       tagged ExtraTurnCreated event. First contact therefore rejects a v51
+ *       peer before state delivery. Bumped in lockstep with full-game protocol
+ *       69.
  *  51 — PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
  *       Option<Vec<ObjectId>> (#8698), separating an ANSWERED zero-tapper
  *       CR 107.3a X-sentinel selection (X=0) from an unanswered one. A PARSE
@@ -369,7 +373,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 51 as const;
+export const WIRE_PROTOCOL_VERSION = 52 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

@@ -2452,6 +2452,11 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         }
         FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
+        // CR 303.4 + CR 301.5: the attachment referent is a `ControllerRef`, so
+        // whether this prop nests a frozen-12 event-context tag is exactly
+        // whether that referent is one — delegate rather than assert, mirroring
+        // the sibling `ControllerRef`-bearing props.
+        | FilterProp::AttachedToPlayer { player: controller }
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
         } => legacy_controller_ref(controller),
@@ -2731,6 +2736,12 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         }
         FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
+        // CR 303.4 + CR 301.5: the attachment referent is a `ControllerRef`
+        // resolved against the reading ability's OWN source (an
+        // `EnchantedPlayer` referent is that source's enchanted player), so its
+        // member-boundness is exactly the referent's — delegate rather than
+        // assert, mirroring the sibling `ControllerRef`-bearing props.
+        | FilterProp::AttachedToPlayer { player: controller }
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
         } => member_bound_controller_ref(controller),
@@ -3011,7 +3022,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ApplyPerpetual { target, .. }
         | Effect::TurnFaceUp { target }
         | Effect::TurnFaceDown { target, .. }
-        | Effect::ExtraTurn { target }
         | Effect::Double { target, .. }
         | Effect::CrankContraptions { target }
         | Effect::ReassembleContraption { target, .. }
@@ -3080,6 +3090,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Connive { target, count }
         | Effect::GivePlayerCounter { count, target, .. }
         | Effect::PutAtLibraryPosition { target, count, .. }
+        | Effect::ExtraTurn { target, count }
         | Effect::SkipNextTurn { target, count }
         | Effect::SkipNextStep { target, count, .. }
         | Effect::AdditionalPhase { target, count, .. }
@@ -5832,8 +5843,9 @@ fn rw_effect(
         // profiled read observes, NOT the `Other` catch-all (which falsely
         // conflicted with a co-occurring source counter/life read on Lighthouse
         // Chronologist / Second Chance / Regenerations Restored / Time Bends).
-        Effect::ExtraTurn { target } => {
+        Effect::ExtraTurn { target, count } => {
             let mut p = ext_write(StateKind::TurnStructure);
+            p.merge(rw_quantity_expr(count));
             flag_legacy_write_target(&mut p, target);
             (p, None)
         }
@@ -7728,6 +7740,17 @@ mod tests {
                 properties: vec![FilterProp::SameNameAsExiledBySource],
                 ..TypedFilter::creature()
             }),
+            // CR 303.4 + CR 301.5: an attachment-relative player referent is
+            // read against the ability's OWN source (the enchanted player of
+            // THIS Aura), so distinct sources are not one shared function —
+            // `AttachedToPlayer` must delegate its `ControllerRef` rather than
+            // answer FALSE outright.
+            TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::AttachedToPlayer {
+                    player: ControllerRef::EnchantedPlayer,
+                }],
+                ..TypedFilter::creature()
+            }),
         ] {
             assert!(
                 member_bound_target_filter(&f),
@@ -7745,6 +7768,15 @@ mod tests {
             TargetFilter::LastRevealed,
             TargetFilter::DefendingPlayer,
             typed_ctrl(ControllerRef::You),
+            // The delegation is the referent's own verdict, not a blanket TRUE
+            // for the prop: a controller-relative attachment referent stays
+            // member-invariant under uniformity.
+            TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::AttachedToPlayer {
+                    player: ControllerRef::You,
+                }],
+                ..TypedFilter::creature()
+            }),
             TargetFilter::None,
         ] {
             assert!(
@@ -8917,6 +8949,14 @@ mod tests {
             ap.writes_external.turn_structure,
             "AdditionalPhase is a TurnStructure write"
         );
+
+        let dynamic = ability_rw_profile(&ra(Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        }));
+        assert!(dynamic.reads_event_live);
         assert!(
             !ap.writes_external.other,
             "AdditionalPhase is not the `Other` catch-all"
@@ -8927,6 +8967,7 @@ mod tests {
             cond(
                 ra(Effect::ExtraTurn {
                     target: TargetFilter::Controller,
+                    count: qfix(1),
                 }),
                 qcheck(counters_src(), 3),
             )

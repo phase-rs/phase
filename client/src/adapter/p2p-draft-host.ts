@@ -48,6 +48,7 @@ import {
   type DraftWorkspaceState,
 } from "../components/draft/workspace/types";
 import { reconcileWorkspaceState } from "../components/draft/workspace/workspacePlacement";
+import { projectWorkspaceMainDeck } from "../components/draft/workspace/workspaceProjection";
 import { assertNever } from "../utils/assertNever";
 
 function matchConfigForView(view: DraftPlayerView): MatchConfig {
@@ -127,6 +128,11 @@ interface Bo3MatchState {
   gameNumber: number;
   score: MatchScore;
   decks: Array<{ seat: number; main: DeckCardCount[]; sideboard: DeckCardCount[] }>;
+}
+
+interface GuestLandSuggestionReservation {
+  readonly session: DraftPeerSession;
+  readonly requestId: string;
 }
 
 export type DraftHostEvent =
@@ -435,6 +441,8 @@ export class P2PDraftHost {
   /** Authoritative guest actions cannot race a snapshot/export boundary. */
   private mutationQueue = Promise.resolve();
   private pendingMutations = 0;
+  /** One connected guest may have one queued or in-flight land suggestion. */
+  private guestLandSuggestionReservations = new Map<number, GuestLandSuggestionReservation>();
   /** Admissions mutate token state before their durability fence, so serialize them. */
   private admissionQueue = Promise.resolve();
   private perSeatWorkspaceSnapshots = new Map<number, DraftWorkspaceState>();
@@ -677,7 +685,7 @@ export class P2PDraftHost {
       return;
     }
     session.onMessage((msg) => {
-      this.runDetachedMutation("guest message", () => this.handleGuestMessage(seat, msg, session));
+      this.handleGuestSessionMessage(seat, msg, session);
     });
 
     // Send welcome with empty view (draft hasn't started)
@@ -782,7 +790,7 @@ export class P2PDraftHost {
       this.clearReconnectGrace(reconnectSeat);
       this.guestSessions.set(reconnectSeat, session);
       session.onMessage((msg) => {
-        this.runDetachedMutation("guest message", () => this.handleGuestMessage(reconnectSeat, msg, session));
+        this.handleGuestSessionMessage(reconnectSeat, msg, session);
       });
 
       // The prior fence makes the engine's connected bitmap recoverable while
@@ -857,6 +865,80 @@ export class P2PDraftHost {
 
   // ── Message handling ───────────────────────────────────────────────
 
+  private handleGuestSessionMessage(
+    seat: number,
+    msg: DraftP2PMessage,
+    session: DraftPeerSession,
+  ): void {
+    if (msg.type !== "draft_suggest_lands") {
+      this.runDetachedMutation("guest message", () => this.handleGuestMessage(seat, msg, session));
+      return;
+    }
+
+    // DataChannels can still invoke an old callback after reconnect. It must
+    // not be allowed to alter the replacement session's reservation.
+    if (this.guestSessions.get(seat) !== session) return;
+
+    const existing = this.guestLandSuggestionReservations.get(seat);
+    if (existing?.session === session) {
+      if (existing.requestId === msg.requestId) return;
+      void session.send({
+        type: "draft_suggest_lands_rejected",
+        requestId: msg.requestId,
+        reason: "A land suggestion is already in progress",
+      }).catch(() => undefined);
+      return;
+    }
+
+    const reservation: GuestLandSuggestionReservation = { session, requestId: msg.requestId };
+    this.guestLandSuggestionReservations.set(seat, reservation);
+    this.runDetachedMutation("guest land suggestion", async () => {
+      try {
+        await this.handleGuestLandSuggestion(seat, msg.requestId, reservation);
+      } finally {
+        if (this.guestLandSuggestionReservations.get(seat) === reservation) {
+          this.guestLandSuggestionReservations.delete(seat);
+        }
+      }
+    });
+  }
+
+  private isCurrentGuestLandSuggestion(
+    seat: number,
+    reservation: GuestLandSuggestionReservation,
+  ): boolean {
+    return this.guestSessions.get(seat) === reservation.session
+      && this.guestLandSuggestionReservations.get(seat) === reservation;
+  }
+
+  private async handleGuestLandSuggestion(
+    seat: number,
+    requestId: string,
+    reservation: GuestLandSuggestionReservation,
+  ): Promise<void> {
+    if (!this.isCurrentGuestLandSuggestion(seat, reservation)) return;
+    try {
+      const lands = await this.suggestLandsForSeatInner(
+        seat,
+        () => this.isCurrentGuestLandSuggestion(seat, reservation),
+      );
+      if (!this.isCurrentGuestLandSuggestion(seat, reservation)) return;
+      await reservation.session.send({
+        type: "draft_suggest_lands_result",
+        requestId,
+        lands,
+      });
+    } catch (error) {
+      if (!this.isCurrentGuestLandSuggestion(seat, reservation)) return;
+      const reason = error instanceof Error ? error.message : String(error);
+      await reservation.session.send({
+        type: "draft_suggest_lands_rejected",
+        requestId,
+        reason,
+      });
+    }
+  }
+
   private async handleGuestMessage(
     seat: number,
     msg: DraftP2PMessage,
@@ -905,6 +987,26 @@ export class P2PDraftHost {
           const reason = err instanceof Error ? err.message : String(err);
           const errorSend = originatingSession?.send({ type: "draft_error", reason });
           if (errorSend) void errorSend.catch(() => undefined);
+        }
+        break;
+      }
+      case "draft_suggest_lands": {
+        try {
+          const lands = await this.suggestLandsForSeatInner(seat);
+          if (this.guestSessions.get(seat) !== originatingSession) return;
+          await originatingSession?.send({
+            type: "draft_suggest_lands_result",
+            requestId: msg.requestId,
+            lands,
+          });
+        } catch (error) {
+          if (this.guestSessions.get(seat) !== originatingSession) return;
+          const reason = error instanceof Error ? error.message : String(error);
+          await originatingSession?.send({
+            type: "draft_suggest_lands_rejected",
+            requestId: msg.requestId,
+            reason,
+          });
         }
         break;
       }
@@ -1061,6 +1163,34 @@ export class P2PDraftHost {
 
   getHostWorkspaceState(): DraftWorkspaceState | null {
     return this.perSeatWorkspaceSnapshots.get(0) ?? null;
+  }
+
+  suggestLandsForSeat(seat: number): Promise<Record<string, number>> {
+    return this.enqueueAuthoritativeMutation(() => this.suggestLandsForSeatInner(seat));
+  }
+
+  private async suggestLandsForSeatInner(
+    seat: number,
+    isLive: () => boolean = () => true,
+  ): Promise<Record<string, number>> {
+    const view = await this.adapter.getViewForSeat(seat);
+    if (!isLive()) throw new Error("Guest session is no longer current");
+    if (view.status !== "Deckbuilding") {
+      throw new Error("Land suggestions are available only during deckbuilding");
+    }
+    const reconciliation = this.reconcileRetainedWorkspace(seat, view.pool);
+    if (!reconciliation.workspaceState) {
+      throw new Error("No retained workspace is available for this seat");
+    }
+    if (reconciliation.changed) {
+      if (!isLive()) throw new Error("Guest session is no longer current");
+      await this.persistSessionStrict();
+    }
+    if (!isLive()) throw new Error("Guest session is no longer current");
+    return this.adapter.suggestLandsForSeat(
+      seat,
+      projectWorkspaceMainDeck(reconciliation.workspaceState, view.pool),
+    );
   }
 
   private async applyWorkspaceUpdate(

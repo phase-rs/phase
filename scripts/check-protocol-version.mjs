@@ -3,11 +3,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 68;
+const EXPECTED_PROTOCOL_VERSION = 69;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
-const EXPECTED_LOBBY_PROTOCOL_VERSION = 7;
+const EXPECTED_LOBBY_PROTOCOL_VERSION = 8;
 // The capability FLOOR for correlated tournament settlement — a different kind
 // of number from the other version constants here, and the reason it is pinned
 // separately. Those track a surface's current version; this one is frozen at the
@@ -30,7 +30,7 @@ const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
 // here, so a full-game bump could ship with an unbumped P2P version and CI
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
-const EXPECTED_WIRE_PROTOCOL_VERSION = 51;
+const EXPECTED_WIRE_PROTOCOL_VERSION = 52;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
@@ -143,6 +143,13 @@ const AUTHORED_LITERALS = [
     // floor must stay a literal so re-deriving it from the current version
     // fails this check instead of silently pinning the client forever.
     "MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING",
+    // The client-only send-path floor for per-event `match_type`. Frozen at the
+    // version that introduced it, for the same reason as the two floors above:
+    // deriving it from the current version would, at the next lobby bump,
+    // silently start refusing v8 brokers that honor `match_type` perfectly. It
+    // has no shared Rust constant to mirror, so unlike the ack/scoring floors it
+    // is not additionally value-pinned by an EXPECTED_* assertion below.
+    "MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE",
     "MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL",
     "PROTOCOL_VERSION",
   ]],

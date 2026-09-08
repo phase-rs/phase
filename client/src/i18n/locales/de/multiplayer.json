@@ -1,4 +1,22 @@
 {
+  "lan": {
+    "title": "Lokales Netzwerk",
+    "guidance": "Gib eine Serveradresse ein, um manuell beizutreten. HTTPS-Browserseiten benötigen einen sicheren wss://-Server; verwende die Desktop-App für lokale ws://-Adressen.",
+    "unavailable": "LAN-Hosting und -Suche erfordern eine aktuelle Desktop-App.",
+    "checking": "LAN-Unterstützung wird geprüft…",
+    "start": "LAN-Hosting starten",
+    "stop": "LAN-Hosting stoppen",
+    "scan": "LAN-Server suchen",
+    "pending": "Wird ausgeführt…",
+    "running": "LAN-Hosting läuft. Teile eine Adresse mit Spielern in deinem Netzwerk.",
+    "empty": "Keine LAN-Server gefunden. Prüfe, ob der Host im selben Netzwerk läuft, und versuche es erneut.",
+    "add": "Server hinzufügen",
+    "copy": "Adresse kopieren",
+    "copied": "Adresse kopiert",
+    "error": "LAN-Vorgang fehlgeschlagen. {{detail}}",
+    "added": "Server hinzugefügt. Verwende einen dedizierten Server, sobald seine Verbindung kompatibel und bereit ist.",
+    "originUnavailable": "LAN-Hosting ist für diese App-Version oder Herkunft nicht verfügbar."
+  },
   "concedeDialog": {
     "title": "Spiel aufgeben?",
     "game": {
@@ -206,6 +224,7 @@
     "invalidJoinServer": "Die Serveradresse in diesem Beitrittscode ist ungültig."
   },
   "hostSetup": {
+    "dedicatedUnavailable": "Derzeit ist kein dedizierter Server verfügbar. Du kannst ein Spiel per P2P hosten.",
     "hostDirectMatch": "Direkte Partie hosten",
     "hostMatch": "Partie hosten",
     "p2pNotice": "Peer-to-Peer-Modus. Dieser Raum verbindet die Spieler direkt, statt auf einem Server zu laufen.",

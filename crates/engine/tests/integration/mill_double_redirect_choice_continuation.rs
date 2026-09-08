@@ -28,7 +28,9 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::replacements::ReplacementEvent;
-use engine::types::resolution::{ResolutionFrame, ResolutionStateWire};
+use engine::types::resolution::{
+    ResolutionFrame, ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
+};
 use engine::types::zones::{EtbTapState, Zone};
 
 /// CR 614.6: "If a card would be put into a graveyard from anywhere, exile it
@@ -103,12 +105,15 @@ fn mill_under_two_graveyard_redirects_delivers_every_card_through_ordering_choic
         Some(ResolutionFrame::BatchDelivery(_))
     ));
     let saved = serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
-        .expect("paused BatchDelivery prompt serializes as v2");
-    assert_eq!(saved["resolution_state_version"], 2);
+        .expect("paused BatchDelivery prompt serializes through the current wire");
+    assert_eq!(
+        saved["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
     assert!(saved.get("pending_batch_deliveries").is_none());
     assert!(saved.get("resolution_frames").is_some());
     let restored: ResolutionStateWire =
-        serde_json::from_value(saved).expect("v2 BatchDelivery prompt restores");
+        serde_json::from_value(saved).expect("current BatchDelivery prompt restores");
     *runner.state_mut() = restored.into_game_state();
 
     // CR 616.1: each milled card surfaces an ordering prompt between the two

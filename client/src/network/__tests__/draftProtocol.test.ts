@@ -55,8 +55,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 27", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(27);
+    it("is version 28", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(28);
     });
   });
 
@@ -279,6 +279,52 @@ describe("draftProtocol", () => {
   });
 
   describe("validateDraftMessage", () => {
+    it.each([
+      { type: "draft_suggest_lands", requestId: "request-1" },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: 17 } },
+      { type: "draft_suggest_lands_rejected", requestId: "request-1", reason: "Deckbuilding is unavailable" },
+    ])("accepts a strict v28 land-suggestion envelope", (message) => {
+      expect(validateDraftMessage(message)).toEqual(message);
+    });
+
+    it.each(["deck", "seat", "seatIndex", "spells"])(
+      "rejects surplus %s fields on every v28 land-suggestion envelope",
+      (surplus) => {
+        for (const message of [
+          { type: "draft_suggest_lands", requestId: "request-1" },
+          { type: "draft_suggest_lands_result", requestId: "request-1", lands: {} },
+          { type: "draft_suggest_lands_rejected", requestId: "request-1", reason: "No workspace" },
+        ]) {
+          expect(() => validateDraftMessage({ ...message, [surplus]: "forbidden" })).toThrow();
+        }
+      },
+    );
+
+    it.each([
+      { requestId: "" },
+      { requestId: "x".repeat(257) },
+      { requestId: 1 },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Unknown: 1 } },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: -1 } },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: 1.5 } },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: Number.NaN } },
+      { type: "draft_suggest_lands_result", requestId: "request-1", lands: { Island: 1001 } },
+    ])("rejects invalid v28 land-suggestion data", (message) => {
+      expect(() => validateDraftMessage({ type: "draft_suggest_lands", ...message })).toThrow();
+    });
+
+    it("rejects inherited, symbol, and non-enumerable v28 envelope fields", () => {
+      const inherited = Object.create({ requestId: "request-1" });
+      inherited.type = "draft_suggest_lands";
+      const symbolKey = Symbol("surplus");
+      const symbol = { type: "draft_suggest_lands", requestId: "request-1", [symbolKey]: true };
+      const nonEnumerable = { type: "draft_suggest_lands", requestId: "request-1" };
+      Object.defineProperty(nonEnumerable, "spells", { value: [], enumerable: false });
+      expect(() => validateDraftMessage(inherited)).toThrow();
+      expect(() => validateDraftMessage(symbol)).toThrow();
+      expect(() => validateDraftMessage(nonEnumerable)).toThrow();
+    });
+
     it("accepts only versioned, token-bound draft leave messages", () => {
       expect(validateDraftMessage({
         type: "draft_leave",

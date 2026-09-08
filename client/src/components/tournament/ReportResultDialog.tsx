@@ -2,7 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useId, useRef, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { PodOutcome, TournamentPairingView } from "../../adapter/types";
+import type { MatchType, PodOutcome, TournamentPairingView } from "../../adapter/types";
 import { FocusScope } from "../ui/FocusScope";
 
 interface ReportResultDialogProps {
@@ -10,23 +10,27 @@ interface ReportResultDialogProps {
   /**
    * The pairing whose result is being entered.
    *
-   * There is deliberately **no `arity` prop**. The broker branches on
-   * `pairing.players.len() == 2`, not on the tournament's `MatchArity`
-   * (`validate_match_result`,
-   * `crates/lobby-broker/src/tournament.rs:967-1021`), and the two differ in
-   * production: a short pod at arity 3 seats two players
-   * (`short_pod_size = arity - 1`, `:123-126`, reached by `partition_round`,
-   * `:1058-1095`). Gating on the tournament's arity there would submit an
-   * empty tally for a two-seat pairing, which the broker rejects every time.
-   * Omitting the prop makes the wrong authority unrepresentable rather than
-   * merely unused.
-   *
    * Entry state (winner, tally) is scoped to **this** pairing by the component
    * itself — see {@link EntryState}. A caller may reuse one mounted dialog
    * across pairings freely; it does not need to pass `key={pairing.id}`, and
    * forgetting to would not carry a result from one pairing to another.
    */
   pairing: TournamentPairingView;
+  /**
+   * The tournament's **broker-resolved** match structure, from
+   * `TournamentSummary.match_type`. It — not the pairing's seat count — decides
+   * whether a per-game tally is entered, because that is what the broker's
+   * `validate_match_result` now branches on: `Bo3` requires a completed tally,
+   * every `Bo1` event (head-to-head or a short two-seat pod) requires an empty
+   * one (`crates/lobby-broker/src/tournament.rs`, the `MatchType` arms).
+   *
+   * Required but nullable: a pre-v8 broker sends no `match_type`, and against
+   * one the broker still branches on `pairing.players.len() == 2`, so `undefined`
+   * falls back to the seat count. Passing it is not optional — making the caller
+   * state it (even as `undefined`) is what keeps `TournamentPage` from silently
+   * dropping the authority the way an omitted prop could.
+   */
+  matchType: MatchType | undefined;
   onSubmit: (outcome: PodOutcome) => void;
   onCancel: () => void;
   submitting?: boolean;
@@ -84,6 +88,7 @@ function entryFor(held: EntryState, pairingId: TournamentPairingView["id"]): Ent
 export function ReportResultDialog({
   isOpen,
   pairing,
+  matchType,
   onSubmit,
   onCancel,
   submitting = false,
@@ -114,12 +119,17 @@ export function ReportResultDialog({
   if (entry !== entered) setEntered(entry);
   const { selection, gameWins } = entry;
 
-  // The sole gate on game-wins inputs: the pairing's own seat count, which is
-  // what `validate_match_result` branches on. At three or more seats the
-  // broker rejects any non-empty map unconditionally ("Pod results are
-  // single-game per MSTR"), so rendering inputs there would build a request
-  // that can never succeed.
-  const isHeadToHead = pairing.players.length === 2;
+  // The sole gate on game-wins inputs: the tournament's resolved match type.
+  // Only `Bo3` carries a per-game tally (and Bo3 is inherently two-player);
+  // every `Bo1` event — head-to-head OR a short two-seat pod — must submit an
+  // EMPTY map, which is what `validate_match_result` now branches on. Rendering
+  // tally inputs for a Bo1 pairing would build a request the broker rejects
+  // every time ("Single-game result carries no game_wins").
+  //
+  // A pre-v8 broker sends no `match_type` and still branches on the pairing's
+  // seat count, so `undefined` falls back to that older authority.
+  const needsGameWins =
+    matchType === undefined ? pairing.players.length === 2 : matchType === "Bo3";
 
   function submit() {
     if (selection === null) return;
@@ -129,7 +139,7 @@ export function ReportResultDialog({
       return;
     }
     const tally: Record<string, number> = {};
-    if (isHeadToHead) {
+    if (needsGameWins) {
       for (const seat of pairing.players) {
         tally[seat.player_key] = gameWins[seat.player_key] ?? 0;
       }
@@ -220,7 +230,7 @@ export function ReportResultDialog({
                   </label>
                 </fieldset>
 
-                {isHeadToHead && (
+                {needsGameWins && (
                   <fieldset className="mb-4 flex flex-col gap-2">
                     <legend className="mb-1 text-xs text-gray-400">
                       {t("report.gameWinsLabel")}

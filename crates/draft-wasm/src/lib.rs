@@ -897,6 +897,38 @@ pub fn suggest_lands(spells_json: &str) -> Result<JsValue, JsValue> {
     })
 }
 
+/// Suggest land counts for spells in a specific multiplayer seat's pool.
+///
+/// The spells payload is parsed before the active session is accessed, so a
+/// malformed request cannot observe or depend on the current draft state.
+#[wasm_bindgen]
+pub fn suggest_lands_for_seat(seat: u8, spells_json: &str) -> Result<JsValue, JsValue> {
+    let lands = suggest_lands_for_seat_inner(seat, spells_json)
+        .map_err(|error| JsValue::from_str(&error))?;
+    Ok(to_js(&lands))
+}
+
+/// Native-testable core for the multiplayer Auto Lands boundary.
+fn suggest_lands_for_seat_inner(
+    seat: u8,
+    spells_json: &str,
+) -> Result<std::collections::HashMap<String, u8>, String> {
+    let spell_names: Vec<String> = serde_json::from_str(spells_json)
+        .map_err(|error| format!("Failed to parse spells: {error}"))?;
+
+    with_draft_inner(|session| {
+        let pool = session
+            .pools
+            .get(seat as usize)
+            .ok_or_else(|| format!("Seat {seat} has no pool"))?;
+        Ok(suggest::suggest_lands(
+            &spell_names,
+            pool,
+            session.config.min_deck_size,
+        ))
+    })
+}
+
 // ── Multi-seat draft API (P2P Tournament Host) ─────────────────────────
 //
 // These exports support the P2P draft host running an authoritative
@@ -2100,6 +2132,71 @@ mod create_multiplayer_draft_tests {
             })
             .collect();
         DraftSession::new(config, seats, "persisted-draft".to_string())
+    }
+
+    fn colored_spell(name: &str, color: &str) -> DraftCardInstance {
+        DraftCardInstance {
+            instance_id: format!("{name}-id"),
+            name: name.to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: vec![color.to_string()],
+            cmc: 1,
+            type_line: "Creature".to_string(),
+            draft_effect: None,
+        }
+    }
+
+    #[test]
+    fn suggest_lands_for_seat_uses_the_requested_seat_pool() {
+        clear_state();
+        let mut session = persisted_premier_session(SetLayout::UniformByRound {
+            codes: vec!["TST".to_string()],
+        });
+        session.pools[0] = vec![colored_spell("Host Blue", "U")];
+        session.pools[1] = vec![colored_spell("Guest Red", "R")];
+        DRAFT_SESSION.with(|cell| cell.set(Some(session)));
+
+        let lands = suggest_lands_for_seat_inner(1, r#"["Guest Red"]"#)
+            .expect("seat-one suggestion should succeed");
+        assert_eq!(lands.get("Mountain"), Some(&18));
+        assert!(!lands.contains_key("Island"));
+
+        clear_state();
+    }
+
+    #[test]
+    fn suggest_lands_for_seat_parses_before_accessing_the_session() {
+        clear_state();
+        let error = suggest_lands_for_seat_inner(1, "not JSON")
+            .expect_err("malformed spells must be rejected");
+        assert!(
+            error.contains("Failed to parse spells"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !error.contains("Draft not initialized"),
+            "parse must precede session access"
+        );
+    }
+
+    #[test]
+    fn suggest_lands_for_seat_rejects_a_missing_pool() {
+        clear_state();
+        let session = persisted_premier_session(SetLayout::UniformByRound {
+            codes: vec!["TST".to_string()],
+        });
+        DRAFT_SESSION.with(|cell| cell.set(Some(session)));
+
+        let error =
+            suggest_lands_for_seat_inner(8, "[]").expect_err("out-of-range seat must be rejected");
+        assert!(
+            error.contains("Seat 8 has no pool"),
+            "unexpected error: {error}"
+        );
+
+        clear_state();
     }
 
     #[test]

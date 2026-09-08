@@ -1,4 +1,7 @@
+import { Channel, invoke } from "@tauri-apps/api/core";
+
 import { isDesktopTauri } from "./platform";
+import { normalizeLanEndpoint } from "./lan";
 
 type BridgeEvent =
   | { type: "message"; text: string }
@@ -12,7 +15,8 @@ type MessageListener = (event: MessageEvent<string>) => void;
  * WebSocket-shaped client for the shell-owned native-engine bridge.
  *
  * The bridge accepts and forwards JSON text frames only; it intentionally has
- * no URL, binary-frame, or feature-detection surface for remote content.
+ * no binary-frame negotiation surface. A typed LAN destination selects the
+ * independent desktop LAN registry; no destination preserves the solo bridge.
  */
 export class NativeEngineSocket {
   static readonly CONNECTING = 0;
@@ -36,7 +40,7 @@ export class NativeEngineSocket {
   private bridgeId: number | null = null;
   private _readyState = NativeEngineSocket.CONNECTING;
 
-  constructor() {
+  constructor(private readonly destination?: { type: "lan"; url: string; origin: string }) {
     // Match the browser WebSocket lifecycle: construction returns while the
     // socket is CONNECTING, giving callers a chance to install terminal-event
     // handlers before even a platform-boundary failure can be dispatched.
@@ -78,7 +82,7 @@ export class NativeEngineSocket {
     if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null) {
       throw new DOMException("WebSocket is not open.", "InvalidStateError");
     }
-    void this.invokeDesktop("native_engine_bridge_send", { id: this.bridgeId, text }).catch(
+    void this.invokeDesktop(this.destination ? "lan_bridge_send" : "native_engine_bridge_send", { id: this.bridgeId, text }).catch(
       (error) => {
         this.handleBridgeFailure(error);
       },
@@ -104,13 +108,17 @@ export class NativeEngineSocket {
       if (!isDesktopTauri()) {
         throw new Error("Native engine bridge is available only in the desktop shell.");
       }
-      const { Channel } = await import("@tauri-apps/api/core");
+      const lanUrl = this.destination ? normalizeLanEndpoint(this.destination.url) : null;
+      if (this.destination && !lanUrl) throw new Error("Invalid LAN endpoint");
       const channel = new Channel<BridgeEvent>((event) => {
         this.handleBridgeEvent(event);
       });
-      const bridgeId = await this.invokeDesktop<number>("connect_native_engine", {
-        onEvent: channel,
-      });
+      const bridgeId = await this.invokeDesktop<number>(
+        this.destination ? "connect_lan_server" : "connect_native_engine",
+        this.destination
+          ? { url: lanUrl, origin: this.destination.origin, onEvent: channel }
+          : { onEvent: channel },
+      );
       this.bridgeId = bridgeId;
       if (this.readyState === NativeEngineSocket.CLOSING) {
         this.closeBridge(bridgeId);
@@ -130,7 +138,7 @@ export class NativeEngineSocket {
   }
 
   private closeBridge(bridgeId: number): void {
-    void this.invokeDesktop("native_engine_bridge_close", { id: bridgeId }).catch((error) => {
+    void this.invokeDesktop(this.destination ? "lan_bridge_close" : "native_engine_bridge_close", { id: bridgeId }).catch((error) => {
       this.handleBridgeFailure(error);
     });
   }
@@ -142,7 +150,6 @@ export class NativeEngineSocket {
     if (!isDesktopTauri()) {
       throw new Error("Native engine bridge is available only in the desktop shell.");
     }
-    const { invoke } = await import("@tauri-apps/api/core");
     return invoke<T>(command, args);
   }
 

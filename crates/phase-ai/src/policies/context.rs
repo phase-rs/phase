@@ -303,18 +303,28 @@ impl<'a> PolicyContext<'a> {
 /// `cast_facts::collect_definition_effects`, which does the same walk one level
 /// up on `AbilityDefinition`.
 pub(crate) fn collect_ability_effects(ability: &ResolvedAbility) -> Vec<&Effect> {
-    let mut effects = Vec::new();
-    push_resolved_effects(&mut effects, ability);
-    effects
+    collect_resolved_abilities(ability)
+        .into_iter()
+        .map(|node| &node.effect)
+        .collect()
 }
 
-fn push_resolved_effects<'a>(effects: &mut Vec<&'a Effect>, ability: &'a ResolvedAbility) {
-    effects.push(&ability.effect);
+pub(crate) fn collect_resolved_abilities(ability: &ResolvedAbility) -> Vec<&ResolvedAbility> {
+    let mut abilities = Vec::new();
+    push_resolved_abilities(&mut abilities, ability);
+    abilities
+}
+
+fn push_resolved_abilities<'a>(
+    abilities: &mut Vec<&'a ResolvedAbility>,
+    ability: &'a ResolvedAbility,
+) {
+    abilities.push(ability);
     if let Some(sub_ability) = &ability.sub_ability {
-        push_resolved_effects(effects, sub_ability);
+        push_resolved_abilities(abilities, sub_ability);
     }
     if let Some(else_ability) = &ability.else_ability {
-        push_resolved_effects(effects, else_ability);
+        push_resolved_abilities(abilities, else_ability);
     }
 }
 
@@ -398,6 +408,49 @@ mod tests {
             target: TargetFilter::Any,
             cant_regenerate: false,
         }
+    }
+
+    #[test]
+    fn resolved_ability_collection_preserves_node_context_and_order() {
+        let mut root = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        root.chosen_x = Some(1);
+        let mut sub = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Player(PlayerId(2))],
+            ObjectId(2),
+            PlayerId(1),
+        );
+        sub.chosen_x = Some(2);
+        let mut otherwise = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(3),
+            PlayerId(2),
+        );
+        otherwise.chosen_x = Some(3);
+        root.sub_ability = Some(Box::new(sub));
+        root.else_ability = Some(Box::new(otherwise));
+
+        let nodes = collect_resolved_abilities(&root);
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(
+            (nodes[0].chosen_x, nodes[0].controller),
+            (Some(1), PlayerId(0))
+        );
+        assert_eq!(
+            (nodes[1].chosen_x, nodes[1].controller),
+            (Some(2), PlayerId(1))
+        );
+        assert_eq!(nodes[1].targets, vec![TargetRef::Player(PlayerId(2))]);
+        assert_eq!(
+            (nodes[2].chosen_x, nodes[2].controller),
+            (Some(3), PlayerId(2))
+        );
+        assert_eq!(
+            collect_ability_effects(&root).len(),
+            nodes.len(),
+            "the compatibility projection walks the same nodes"
+        );
     }
 
     /// A modal spell on the stack whose printed modes are its spell-kind

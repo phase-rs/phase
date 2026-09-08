@@ -25,8 +25,8 @@ use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     BatchCompletion, CastPaymentMode, CollectEvidenceResume, ExileLinkKind, GameState,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
-    PayCostKind, PendingCast, PendingCostMoveResume, PendingReplacement, StackEntryKind,
-    WaitingFor, ZoneDeliveryExileTracking,
+    PayCostKind, PendingCast, PendingCostMoveResume, PendingReplacement, PersistedGameState,
+    StackEntryKind, WaitingFor, ZoneDeliveryExileTracking,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -34,6 +34,7 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::proposed_event::{ProposedEvent, ReplacementId};
 use engine::types::replacements::ReplacementEvent;
+use engine::types::resolution::ResolutionStateWire;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::{EtbTapState, Zone};
 use std::sync::Arc;
@@ -12684,52 +12685,125 @@ fn effect_zone_sacrifice_replacement_preserves_tracked_set_and_tail() {
 
 /// W-163-D: Exploit emits its per-creature event and terminal event only after
 /// the replacement-delivered sacrifice has actually completed.
-#[test]
-fn exploit_replacement_preserves_creature_exploited_follow_up() {
+fn run_exploit_replacement_restore_case(
+    replacement_index: usize,
+    restore_through_persisted_raw: bool,
+    victim_is_token: bool,
+) {
+    const GURMAG_DROWNER: &str = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhen this creature exploits a creature, look at the top four cards of your library. Put one of them into your hand and the rest into your graveyard.";
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let exploiter = scenario
-        .add_creature(P0, "Exploit Replacement Source", 1, 1)
-        .id();
+    let exploiter = {
+        let mut card = scenario.add_creature_to_hand(P0, "Gurmag Drowner", 2, 4);
+        card.from_oracle_text_with_keywords(&["Exploit"], GURMAG_DROWNER)
+            .id()
+    };
     let victim = scenario
         .add_creature(P0, "Exploit Replacement Victim", 1, 1)
         .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
         .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
         .id();
-    let ability = ResolvedAbility::new(
-        Effect::Exploit {
-            target: TargetFilter::Any,
-        },
-        vec![TargetRef::Object(victim)],
-        exploiter,
-        P0,
-    );
     let mut runner = scenario.build();
-    let mut initial_events = Vec::new();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&victim)
+        .expect("fixture victim exists")
+        .is_token = victim_is_token;
+    let paused = runner
+        .cast(exploiter)
+        .target_object(victim)
+        .accept_optional()
+        .effect_zone(&[victim])
+        .resolve();
+    assert!(matches!(
+        paused.final_waiting_for(),
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(!paused
+        .events()
+        .iter()
+        .any(|event| matches!(event, GameEvent::CreatureExploited { .. })));
 
-    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
-        .expect("exploit reaches the replacement choice");
+    let restored = if restore_through_persisted_raw {
+        let encoded =
+            serde_json::to_value(PersistedGameState::Raw(Box::new(paused.state().clone())))
+                .expect("paused raw state serializes");
+        serde_json::from_value::<PersistedGameState>(encoded)
+            .expect("paused raw state decodes")
+            .into_game_state()
+            .expect("paused raw state satisfies restore finalization")
+    } else {
+        let encoded =
+            serde_json::to_value(ResolutionStateWire::from_game_state(paused.state().clone()))
+                .expect("paused resolution wire serializes");
+        serde_json::from_value::<ResolutionStateWire>(encoded)
+            .expect("paused resolution wire decodes")
+            .into_game_state()
+    };
+    let mut runner = GameRunner::from_state(restored);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert!(!initial_events
-        .iter()
-        .any(|event| matches!(event, GameEvent::CreatureExploited { .. })));
 
     let completed = runner
-        .act(GameAction::ChooseReplacement { index: 0 })
+        .act(GameAction::ChooseReplacement {
+            index: replacement_index,
+        })
         .expect("replacement delivery completes exploit");
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    let expected_destination = if replacement_index == 0 {
+        Zone::Exile
+    } else {
+        Zone::Hand
+    };
+    let departure_record = completed
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to,
+                record,
+            } if *object_id == victim && *to == expected_destination => Some(record),
+            _ => None,
+        })
+        .expect("replacement completion exposes the victim's actual departure record");
+    let exploited_event = completed
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event,
+                GameEvent::CreatureExploited {
+                    exploiter: event_exploiter,
+                    sacrificed,
+                    ..
+                } if *event_exploiter == exploiter && *sacrificed == victim
+            )
+        })
+        .expect("completed sacrifice emits the exploit event");
+    let GameEvent::CreatureExploited { record, .. } = exploited_event else {
+        unreachable!("the event was matched as CreatureExploited")
+    };
+    assert_eq!(record, departure_record);
     assert_eq!(
-        initial_events
+        serde_json::to_value(exploited_event).expect("event serializes")["data"]["record"],
+        serde_json::to_value(departure_record).expect("departure record serializes")
+    );
+    assert_eq!(
+        completed
+            .events
             .iter()
-            .chain(completed.events.iter())
             .filter(|event| matches!(
                 event,
                 GameEvent::CreatureExploited {
                     exploiter: event_exploiter,
                     sacrificed,
+                    ..
                 } if *event_exploiter == exploiter && *sacrificed == victim
             ))
             .count(),
@@ -12737,9 +12811,9 @@ fn exploit_replacement_preserves_creature_exploited_follow_up() {
         "the exploit follow-up is emitted once after delivery"
     );
     assert_eq!(
-        initial_events
+        completed
+            .events
             .iter()
-            .chain(completed.events.iter())
             .filter(|event| matches!(
                 event,
                 GameEvent::EffectResolved {
@@ -12751,6 +12825,25 @@ fn exploit_replacement_preserves_creature_exploited_follow_up() {
             .count(),
         1
     );
+    assert!(runner
+        .state()
+        .pending_player_scope_sacrifice_choice
+        .is_none());
+}
+
+#[test]
+fn exploit_replacement_preserves_creature_exploited_follow_up() {
+    for replacement_index in [0, 1] {
+        for restore_through_persisted_raw in [false, true] {
+            for victim_is_token in [false, true] {
+                run_exploit_replacement_restore_case(
+                    replacement_index,
+                    restore_through_persisted_raw,
+                    victim_is_token,
+                );
+            }
+        }
+    }
 }
 
 /// W-163-E: the terminal sweep of choose-and-sacrifice-rest keeps its complete

@@ -49,6 +49,7 @@ const mockHostAdapter = {
   submitPick: vi.fn(async () => mockView("Drafting")),
   submitPickWithDraftEffect: vi.fn(async () => mockView("Drafting")),
   submitDeck: vi.fn(async () => mockView("Deckbuilding")),
+  suggestLands: vi.fn(async () => ({})),
   updateWorkspace: vi.fn(async () => {}),
   getHostView: vi.fn(async () => mockView("Lobby")),
   kickPlayer: vi.fn(),
@@ -74,6 +75,7 @@ const mockGuestAdapter = {
   submitPick: vi.fn(async () => {}),
   submitPickWithDraftEffect: vi.fn(async () => {}),
   submitDeck: vi.fn(async () => {}),
+  suggestLands: vi.fn(async () => ({})),
   updateWorkspace: vi.fn(async () => {}),
   submitAuthorized: vi.fn(),
   acknowledgeAuthorized: vi.fn(),
@@ -1624,6 +1626,85 @@ describe("multiplayerDraftStore", () => {
       expect(useMultiplayerDraftStore.getState().workspaceState?.virtualBasics).toHaveLength(1);
       useMultiplayerDraftStore.getState().removeBasicLand("Island");
       expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(2);
+      expect(useMultiplayerDraftStore.getState().workspaceState?.virtualBasics).toEqual([]);
+    });
+
+    it("replaces only canonical virtual basics with a sorted host suggestion", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const deckbuildingView = { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] };
+      capturedHostEventHandler!({
+        type: "workspaceRestored",
+        workspaceState: {
+          schemaVersion: 1,
+          placements: {
+            spell: { zone: "deck", row: 0, column: 0, order: 0 },
+            island: { zone: "deck", row: 0, column: 1, order: 0 },
+            custom: { zone: "deck", row: 0, column: 2, order: 0 },
+          },
+          virtualBasics: [
+            { instanceId: "island", name: "Island" },
+            { instanceId: "custom", name: "Custom Basin" },
+          ],
+        },
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+      mockHostAdapter.updateWorkspace.mockClear();
+      mockHostAdapter.suggestLands.mockResolvedValueOnce({ Mountain: 2, Island: 1, Unknown: 99 });
+
+      await useMultiplayerDraftStore.getState().autoSuggestLands();
+
+      const workspace = useMultiplayerDraftStore.getState().workspaceState!;
+      expect(mockHostAdapter.suggestLands).toHaveBeenCalledOnce();
+      expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledOnce();
+      expect(workspace.placements.spell?.zone).toBe("deck");
+      expect(workspace.virtualBasics.map((basic) => basic.name)).toEqual([
+        "Custom Basin", "Island", "Mountain", "Mountain",
+      ]);
+    });
+
+    it("routes an Auto Lands request through the guest adapter", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Guest" });
+      capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedGuestEventHandler!({ type: "viewUpdated", view: mockView("Deckbuilding") });
+      mockGuestAdapter.updateWorkspace.mockClear();
+      mockGuestAdapter.suggestLands.mockResolvedValueOnce({ Island: 17 });
+
+      await useMultiplayerDraftStore.getState().autoSuggestLands();
+
+      expect(mockGuestAdapter.suggestLands).toHaveBeenCalledOnce();
+      expect(mockGuestAdapter.updateWorkspace).toHaveBeenCalledOnce();
+    });
+
+    it("ignores a suggestion result after the active view leaves deckbuilding", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Deckbuilding") });
+      mockHostAdapter.updateWorkspace.mockClear();
+      let resolveSuggestion!: (lands: Record<string, number>) => void;
+      mockHostAdapter.suggestLands.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveSuggestion = resolve;
+      }));
+
+      const suggested = useMultiplayerDraftStore.getState().autoSuggestLands();
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Pairing") });
+      resolveSuggestion({ Island: 17 });
+      await suggested;
+
+      expect(mockHostAdapter.updateWorkspace).not.toHaveBeenCalled();
       expect(useMultiplayerDraftStore.getState().workspaceState?.virtualBasics).toEqual([]);
     });
 

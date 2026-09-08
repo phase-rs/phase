@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{one_of, space0, space1, u8 as parse_u8};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -67,6 +67,32 @@ use super::super::oracle_util::{
     parse_mana_symbols, parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding,
     split_around, starts_with_possessive, TextPair,
 };
+
+fn parse_extra_turn(input: &str) -> OracleResult<'_, QuantityExpr> {
+    all_consuming(terminated(
+        preceded(
+            (alt((tag("takes"), tag("take"))), space1),
+            terminated(
+                alt((
+                    value(QuantityExpr::Fixed { value: 1 }, tag("an extra turn")),
+                    map_res(
+                        (
+                            nom_primitives::parse_number,
+                            space1,
+                            alt((tag("extra turns"), tag("extra turn"))),
+                        ),
+                        |(value, _, _)| {
+                            i32::try_from(value).map(|value| QuantityExpr::Fixed { value })
+                        },
+                    ),
+                )),
+                (space1, tag("after this one")),
+            ),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(input)
+}
 
 /// CR 611.2 + CR 601.2f + CR 118.7: Parse the transient (this-turn)
 /// activated-ability cost-reduction effect — "activated abilities of <subject>
@@ -6435,7 +6461,7 @@ pub(super) fn parse_utility_imperative_ast(
             {
                 (TargetFilter::ParentTarget, "")
             } else {
-                parse_attach_recipient(recipient_text, ctx)
+                parse_attach_recipient(recipient_text, ctx, None)
             }
         };
         #[cfg(debug_assertions)]
@@ -6468,7 +6494,8 @@ pub(super) fn parse_utility_imperative_ast(
     {
         if rem.trim().is_empty() {
             let (attachment, _attachment_rem) = parse_attachment_anaphor(&attachment_text, ctx);
-            let (target, _target_rem) = parse_attach_recipient(&target_text, ctx);
+            let (target, _target_rem) =
+                parse_attach_recipient(&target_text, ctx, Some(&attachment));
             #[cfg(debug_assertions)]
             assert_no_compound_remainder(_attachment_rem, text);
             #[cfg(debug_assertions)]
@@ -6624,7 +6651,11 @@ fn parse_attach_target_quantifier(
     opt(alt((any_number, up_to))).parse(input)
 }
 
-fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
+fn parse_attach_recipient<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+    attachment: Option<&TargetFilter>,
+) -> (TargetFilter, &'a str) {
     // CR 608.2k: thread `ctx` so "attach this Equipment to it" in trigger
     // bodies binds "it" to the triggering subject (Ancestral Katana —
     // "Whenever a Samurai or Warrior you control attacks alone … attach this
@@ -6636,6 +6667,19 @@ fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetF
         let lower = trimmed.to_ascii_lowercase();
         if parse_gendered_attach_self_recipient(lower.trim()).is_ok() {
             return (TargetFilter::SelfRef, &trimmed[lower.len()..]);
+        }
+        // CR 608.2c: a selected attachment and a newly created permanent are
+        // distinct referents in "attach that Equipment to it." Bind the bare
+        // recipient only after parsing the attachment role, so source-owned
+        // Equipment and face-down card attachment semantics remain unchanged.
+        if parse_neuter_attach_self_recipient(lower.trim()).is_ok()
+            && ctx.token_created_in_chain
+            && matches!(
+                attachment,
+                Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. })
+            )
+        {
+            return (TargetFilter::LastCreated, &trimmed[lower.len()..]);
         }
         if parse_neuter_attach_self_recipient(lower.trim()).is_ok()
             && attach_neuter_recipient_resolves_via_subject(ctx)
@@ -11729,20 +11773,24 @@ pub(super) fn parse_imperative_family_ast(
         // CR 500.7: "take an extra turn after this one"
         // CR 726.1: "take the initiative"
         "take" | "takes" => {
-            if alt((
-                value((), tag::<_, _, OracleError<'_>>("take the initiative")),
-                value((), tag("takes the initiative")),
+            if all_consuming(terminated(
+                alt((
+                    value((), tag::<_, _, OracleError<'_>>("take the initiative")),
+                    value((), tag("takes the initiative")),
+                )),
+                opt(tag(".")),
             ))
-            .parse(lower)
+            .parse(lower.trim())
             .is_ok()
             {
                 Some(ImperativeFamilyAst::TakeTheInitiative)
-            } else if nom_primitives::scan_contains(lower, "extra turn") {
-                Some(ImperativeFamilyAst::GainKeyword(Effect::ExtraTurn {
-                    target: TargetFilter::Controller,
-                }))
             } else {
-                None
+                nom_parse_lower(lower.trim(), parse_extra_turn).map(|count| {
+                    ImperativeFamilyAst::GainKeyword(Effect::ExtraTurn {
+                    target: TargetFilter::Controller,
+                    count,
+                    })
+                })
             }
         }
         // CR 702.26a + CR 702.26c: "phase out" / "phases out" / "phase in" /
@@ -16350,6 +16398,26 @@ mod tests {
             panic!("{input}: expected Attach, got {result:?}");
         };
         assert_eq!(target, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn parse_attach_parent_attachment_to_created_referent_keeps_roles_distinct() {
+        let input = "attach that Equipment to it";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            parent_target_available: true,
+            token_created_in_chain: true,
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach {
+            attachment, target, ..
+        }) = result
+        else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::ParentTarget);
+        assert_eq!(target, TargetFilter::LastCreated);
     }
 
     #[test]

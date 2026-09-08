@@ -13,7 +13,7 @@ use engine::types::interaction::{
 };
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
-use engine::types::match_config::MatchConfig;
+use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
@@ -559,6 +559,12 @@ pub enum ClientMessage {
         /// display label only; the tournament enforces no deck legality.
         #[serde(default)]
         format: Option<GameFormat>,
+        /// The match structure (Bo1 / Bo3), mirroring
+        /// [`lobby_broker::LobbyClientMessage::CreateTournament`]'s field in the
+        /// same position with the same serde attribute (lobby protocol 8).
+        /// `None` resolves to the arity default; `Bo3` is head-to-head only.
+        #[serde(default)]
+        match_type: Option<MatchType>,
     },
     JoinTournament {
         code: String,
@@ -3204,21 +3210,18 @@ mod tests {
         }
     }
 
-    /// The bump this number is at: `PendingManaAbility::chosen_tappers` moved
-    /// from `Vec<ObjectId>` to `Option<Vec<ObjectId>>` (#8698), so an ANSWERED
-    /// zero-tapper selection of the CR 107.3a X-sentinel form stops decoding
-    /// as an unanswered one. The field carries no `#[serde(default)]`, so the
-    /// pre-68 shape fails deserialization instead of inverting silently — see
-    /// `engine::types::game_state`'s
-    /// `chosen_tappers_pre_option_wire_shape_is_rejected`.
+    /// The bump this number is at: `GameEvent` gained the tagged variant
+    /// `ExtraTurnCreated { player_id, anchor }`. `StateUpdate.events` and
+    /// `GameStarted.events` can now carry that tag, so a v68 peer must be
+    /// refused before it receives an event it cannot deserialize.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_68_for_pending_mana_ability_chosen_tappers() {
-        assert_eq!(PROTOCOL_VERSION, 68);
+    fn protocol_version_is_69_for_extra_turn_created_event() {
+        assert_eq!(PROTOCOL_VERSION, 69);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3229,7 +3232,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_68_for_pending_mana_ability_chosen_tappers` stays
+    /// `protocol_version_is_69_for_extra_turn_created_event` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

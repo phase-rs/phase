@@ -18,6 +18,7 @@ import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import {
   useDraftShellChrome,
+  useInShell,
   type DraftShellPhoneAction,
   type DraftShellTopAction,
 } from "../components/chrome/ShellContext";
@@ -713,9 +714,11 @@ function RoundCompleteView() {
 
 function BetweenGamesView({
   responsiveLayout,
+  fillEmbeddedHeight,
   onDismiss,
 }: {
   responsiveLayout: ResponsiveDraftLayout;
+  fillEmbeddedHeight: boolean;
   onDismiss: () => void;
 }) {
   const { t } = useTranslation("draft");
@@ -801,7 +804,7 @@ function BetweenGamesView({
 
     return (
       <div className={tabletLayout
-        ? "mx-auto flex h-[calc(100dvh_-_4rem)] min-h-0 w-full max-w-none flex-col gap-4 overflow-hidden"
+        ? `mx-auto flex ${fillEmbeddedHeight ? "h-full flex-1" : "h-[calc(100dvh_-_4rem)]"} min-h-0 w-full max-w-none flex-col gap-4 overflow-hidden`
         : "mx-auto flex w-full max-w-4xl flex-col gap-4 py-8"}
       >
         <div className="flex items-center justify-between">
@@ -837,7 +840,7 @@ function BetweenGamesView({
                 );
               },
             }}
-            showSuggestions={false}
+            showSuggestions
             responsiveLayout={responsiveLayout}
             responsiveHeightMode={tabletLayout ? "container" : "viewport"}
           />
@@ -927,6 +930,8 @@ function DraftingPhaseContent({
   const interactionLocked = paused || pickInteractionLocked;
   const dragController = useDraftWorkspaceDrag({
     enabled: introDismissed && !interactionLocked,
+    workspaceProjectionEnabled: responsiveLayout === "desktop",
+    retainLastValidWorkspaceTarget: true,
     readPickInteraction,
     subscribePickInteraction,
     onDrop: handleDrop,
@@ -1098,6 +1103,7 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
   const workspace = useMultiplayerDraftStore((s) => s.workspaceState);
   const interactionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
   const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+  const autoSuggestLands = useMultiplayerDraftStore((s) => s.autoSuggestLands);
   const submissionError = useMultiplayerDraftStore((s) => s.error);
   const [preferences, setPreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
   const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
@@ -1114,15 +1120,16 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
         workspace,
         preferences,
         interactionLocked,
-        capabilities: { kind: "editable-pool", suggestions: false },
+        capabilities: { kind: "editable-pool", suggestions: true },
         onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
         onPreferencesChange: handlePreferencesChange,
         onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
         onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
+        onAutoSuggestLands: autoSuggestLands,
         onSubmitDeck: submitDeck,
       }}
       submissionError={submissionError}
-      showSuggestions={false}
+      showSuggestions
       responsiveLayout={responsiveLayout}
     />
   );
@@ -1311,6 +1318,7 @@ function phaseContent(
   screen: DraftPodScreen,
   onLeave: () => void,
   responsiveLayout: ResponsiveDraftLayout,
+  fillEmbeddedHeight: boolean,
   phoneLayout: boolean,
   mobileWorkspaceOpen: boolean,
   setMobileWorkspaceOpen: (open: boolean) => void,
@@ -1337,7 +1345,7 @@ function phaseContent(
     case "deckbuilding":
       return <PodDeckBuilder responsiveLayout={responsiveLayout} />;
     case "betweenGames":
-      return <BetweenGamesView responsiveLayout={responsiveLayout} onDismiss={onDismissOverlay} />;
+      return <BetweenGamesView responsiveLayout={responsiveLayout} fillEmbeddedHeight={fillEmbeddedHeight} onDismiss={onDismissOverlay} />;
     case "pairing":
       return <PairingPhaseView />;
     case "matchInProgress":
@@ -1438,6 +1446,8 @@ function DraftPodPageContent() {
     && !sideboardSubmitted
     && playDrawPrompt === null;
   const tabletDeckbuilding = tabletLayout && (phase === "deckbuilding" || betweenGamesEditorActive);
+  const fillEmbeddedHeight = useInShell()
+    && (responsiveDrafting || phoneDeckbuilding || tabletDeckbuilding);
 
   useEffect(() => {
     const refreshViewport = () => setResponsiveViewport({
@@ -1489,7 +1499,7 @@ function DraftPodPageContent() {
           : "default",
     phoneAction,
     "pod",
-    !(phase === "drafting" && responsiveLayout === "phone-portrait"),
+    !phoneLayout,
     hostDraftTopActions,
   );
 
@@ -1573,7 +1583,7 @@ function DraftPodPageContent() {
   const showBack = phase === "idle" || phase === "connecting";
 
   return (
-    <div className={`menu-scene relative flex flex-col overflow-hidden ${phoneDrafting ? "h-dvh min-h-0 overscroll-none" : tabletLayout && phase === "drafting" ? "h-full min-h-0" : "min-h-screen"}`}>
+    <div className={`menu-scene relative flex flex-col overflow-hidden ${fillEmbeddedHeight ? "h-full min-h-0 flex-1" : phoneDrafting ? "h-dvh min-h-0 overscroll-none" : tabletLayout && phase === "drafting" ? "h-full min-h-0" : "min-h-screen"}`}>
       <ScreenChrome onBack={showBack ? handleLeave : undefined} />
 
       {/* Centered MenuShell column — same responsive framing as every other
@@ -1586,8 +1596,9 @@ function DraftPodPageContent() {
           (phoneLayout && (phase === "drafting" || phase === "deckbuilding"))
           || tabletDeckbuilding
         }
+        fillEmbeddedHeight={fillEmbeddedHeight}
       >
-        <div className="flex w-full flex-col">
+        <div className={`flex w-full flex-col ${fillEmbeddedHeight ? "h-full min-h-0 flex-1" : ""}`}>
           {screen === "betweenGames" && overlayDismissed && (
             <div
               role="status"
@@ -1608,6 +1619,7 @@ function DraftPodPageContent() {
             visibleScreen,
             handleLeave,
             responsiveLayout,
+            fillEmbeddedHeight,
             phoneLayout,
             mobileWorkspaceOpen,
             setMobileWorkspaceOpen,

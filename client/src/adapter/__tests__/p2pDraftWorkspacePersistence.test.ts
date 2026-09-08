@@ -36,7 +36,7 @@ vi.mock("../draft-adapter", () => ({
 import type { DraftPlayerView } from "../draft-adapter";
 import { P2PDraftGuest } from "../p2p-draft-guest";
 import { P2PDraftHost } from "../p2p-draft-host";
-import { DRAFT_PROTOCOL_VERSION, encodeDraftWireMessage, type DraftP2PMessage } from "../../network/draftProtocol";
+import { DRAFT_PROTOCOL_VERSION, decodeDraftWireMessage, encodeDraftWireMessage, type DraftP2PMessage } from "../../network/draftProtocol";
 import { FakeDraftDataConnection } from "../../network/__tests__/fakeDraftDataConnection";
 import type { PersistedDraftHostSession } from "../../services/draftPersistence";
 import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
@@ -130,6 +130,7 @@ type PrivateHost = {
   persistSession: () => void;
   persistSessionStrict: () => Promise<void>;
   runDetachedMutation: (label: string, operation: () => Promise<unknown>) => void;
+  handleGuestSessionMessage: (seat: number, message: DraftP2PMessage, session: SessionStub) => void;
   recoverSettlementOutbox: (view: DraftPlayerView) => Promise<void>;
   procedure: unknown;
   handleGuestMessage: (seat: number, message: DraftP2PMessage) => Promise<void>;
@@ -250,6 +251,244 @@ describe("P2P draft workspace persistence", () => {
     await host.updateHostWorkspace(workspace());
     expect(privateHost.perSeatWorkspaceSnapshots.get(0)?.placements).toHaveProperty("later");
     expect(privateHost.persistSessionStrict).toHaveBeenCalledOnce();
+  });
+
+  it("derives a seat's suggestion from its reconciled retained main deck", async () => {
+    const host = makeHost();
+    const privateHost = host as unknown as PrivateHost & {
+      adapter: PrivateHost["adapter"] & {
+        suggestLandsForSeat: (seat: number, spells: string[]) => Promise<Record<string, number>>;
+      };
+    };
+    const freshView = { ...view("guest-card"), status: "Deckbuilding" as const };
+    privateHost.adapter = {
+      getViewForSeat: vi.fn(async () => freshView),
+      suggestLandsForSeat: vi.fn(async () => ({ Mountain: 17 })),
+    };
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.perSeatWorkspaceSnapshots.set(1, workspace({
+      "guest-card": { zone: "deck", row: 0, column: 0, order: 0 },
+      stale: { zone: "deck", row: 0, column: 0, order: 1 },
+    }));
+
+    await expect(host.suggestLandsForSeat(1)).resolves.toEqual({ Mountain: 17 });
+    expect(privateHost.adapter.suggestLandsForSeat).toHaveBeenCalledWith(1, ["Card guest-card"]);
+    expect(privateHost.persistSessionStrict).toHaveBeenCalledOnce();
+  });
+
+  it("refuses host-local suggestions outside deckbuilding before wasm", async () => {
+    const host = makeHost();
+    const privateHost = host as unknown as PrivateHost & {
+      adapter: PrivateHost["adapter"] & {
+        suggestLandsForSeat: (seat: number, spells: string[]) => Promise<Record<string, number>>;
+      };
+    };
+    privateHost.adapter = {
+      getViewForSeat: vi.fn(async () => ({ ...view("guest-card"), status: "Drafting" as const })),
+      suggestLandsForSeat: vi.fn(async () => ({})),
+    };
+
+    await expect(host.suggestLandsForSeat(0)).rejects.toThrow("only during deckbuilding");
+    expect(privateHost.adapter.suggestLandsForSeat).not.toHaveBeenCalled();
+  });
+
+  it("bounds guest land suggestions before the authoritative queue and releases the live reservation", async () => {
+    const host = makeHost();
+    const privateHost = host as unknown as PrivateHost & {
+      adapter: PrivateHost["adapter"] & {
+        suggestLandsForSeat: (seat: number, spells: string[]) => Promise<Record<string, number>>;
+        submitDeckForSeat: (seat: number, mainDeck: string[], commanders: string[]) => Promise<DraftPlayerView>;
+      };
+    };
+    const firstView = deferred<DraftPlayerView>();
+    const sent: DraftP2PMessage[] = [];
+    const operationOrder: string[] = [];
+    const session: SessionStub = {
+      send: vi.fn(async (message) => { sent.push(message); }),
+      onMessage: () => () => {}, onDisconnect: () => () => {}, close: () => {},
+    };
+    privateHost.guestSessions.set(1, session);
+    privateHost.perSeatWorkspaceSnapshots.set(1, workspace({
+      "guest-card": { zone: "deck", row: 0, column: 0, order: 0 },
+    }));
+    privateHost.adapter = {
+      getViewForSeat: vi.fn()
+        .mockResolvedValueOnce(firstView.promise)
+        .mockImplementation(async (seat) => seat === 0
+          ? {
+            ...view("host-card"),
+            seats: [{ has_submitted_deck: false }],
+          } as DraftPlayerView
+          : { ...view("guest-card"), status: "Deckbuilding" }),
+      suggestLandsForSeat: vi.fn(async () => {
+        operationOrder.push("suggestion");
+        return { Mountain: 17 };
+      }),
+      submitDeckForSeat: vi.fn(async () => {
+        operationOrder.push("deck");
+        return {
+          ...view("host-card"),
+          seats: [{ has_submitted_deck: false }],
+        } as DraftPlayerView;
+      }),
+    };
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.draftStarted = true;
+
+    privateHost.handleGuestSessionMessage(1, { type: "draft_suggest_lands", requestId: "first" }, session);
+    await Promise.resolve();
+    privateHost.handleGuestSessionMessage(1, { type: "draft_suggest_lands", requestId: "first" }, session);
+    privateHost.handleGuestSessionMessage(1, { type: "draft_suggest_lands", requestId: "second" }, session);
+
+    expect(privateHost.adapter.getViewForSeat).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([{
+      type: "draft_suggest_lands_rejected",
+      requestId: "second",
+      reason: "A land suggestion is already in progress",
+    }]);
+
+    const deckSubmission = host.submitHostDeck([], []);
+    await Promise.resolve();
+    expect(operationOrder).toEqual([]);
+
+    firstView.resolve({ ...view("guest-card"), status: "Deckbuilding" });
+    await deckSubmission;
+    expect(privateHost.adapter.suggestLandsForSeat).toHaveBeenCalledTimes(1);
+    expect(operationOrder).toEqual(["suggestion", "deck"]);
+    expect(sent).toContainEqual({ type: "draft_suggest_lands_result", requestId: "first", lands: { Mountain: 17 } });
+
+    privateHost.handleGuestSessionMessage(1, { type: "draft_suggest_lands", requestId: "third" }, session);
+    await privateHost.mutationQueue;
+    expect(privateHost.adapter.suggestLandsForSeat).toHaveBeenCalledTimes(2);
+  });
+
+  it("enforces guest land-suggestion admission through the production session callback", async () => {
+    let acceptConnection: ((connection: unknown) => void) | undefined;
+    const host = new P2PDraftHost(
+      { id: "host" } as never,
+      (handler) => {
+        acceptConnection = handler as (connection: unknown) => void;
+        return () => {};
+      },
+      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      "Premier",
+      8,
+      "Host",
+      "Swiss",
+      "Competitive",
+    );
+    const privateHost = host as unknown as PrivateHost & {
+      adapter: PrivateHost["adapter"] & {
+        draftProcedure: () => Promise<{ packs_per_player: number; min_deck_size: number; launch_capability: "None"; commanders_required: number; pick_selection_mode: "Direct"; match_config: { match_type: "Bo1" } }>;
+        suggestLandsForSeat: (seat: number, spells: string[]) => Promise<Record<string, number>>;
+        submitDeckForSeat: (seat: number, mainDeck: string[], commanders: string[]) => Promise<DraftPlayerView>;
+      };
+    };
+    const firstView = deferred<DraftPlayerView>();
+    const operationOrder: string[] = [];
+    privateHost.adapter.draftProcedure = vi.fn(async () => ({
+      packs_per_player: 3,
+      min_deck_size: 40,
+      launch_capability: "None",
+      commanders_required: 0,
+      pick_selection_mode: "Direct",
+      match_config: { match_type: "Bo1" },
+    } as const));
+    privateHost.adapter.getViewForSeat = vi.fn()
+      .mockResolvedValueOnce(firstView.promise)
+      .mockImplementation(async (seat) => seat === 0
+        ? { ...view("host-card"), seats: [{ has_submitted_deck: false }] } as DraftPlayerView
+        : { ...view("guest-card"), status: "Deckbuilding" });
+    privateHost.adapter.suggestLandsForSeat = vi.fn(async () => {
+      operationOrder.push("suggestion");
+      return { Mountain: 17 };
+    });
+    privateHost.adapter.submitDeckForSeat = vi.fn(async () => {
+      operationOrder.push("deck");
+      return { ...view("host-card"), seats: [{ has_submitted_deck: false }] } as DraftPlayerView;
+    });
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    const connection = new FakeDraftDataConnection();
+
+    await host.initialize();
+    if (!acceptConnection) throw new Error("Host did not install a guest connection handler");
+    acceptConnection(connection);
+    await connection.receiveRaw(await encodeDraftWireMessage({
+      type: "draft_join",
+      draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      displayName: "Guest",
+    }));
+    await privateHost.mutationQueue;
+    privateHost.draftStarted = true;
+    privateHost.perSeatWorkspaceSnapshots.set(1, workspace({
+      "guest-card": { zone: "deck", row: 0, column: 0, order: 0 },
+    }));
+    connection.sentRaw.length = 0;
+
+    await connection.receiveRaw(await encodeDraftWireMessage({ type: "draft_suggest_lands", requestId: "first" }));
+    await connection.receiveRaw(await encodeDraftWireMessage({ type: "draft_suggest_lands", requestId: "first" }));
+    await connection.receiveRaw(await encodeDraftWireMessage({ type: "draft_suggest_lands", requestId: "second" }));
+    const deckSubmission = host.submitHostDeck([], []);
+    await Promise.resolve();
+
+    expect(privateHost.adapter.getViewForSeat).toHaveBeenCalledTimes(1);
+    expect(operationOrder).toEqual([]);
+    await vi.waitFor(async () => expect(await Promise.all(connection.sentRaw.map(decodeDraftWireMessage))).toContainEqual({
+      type: "draft_suggest_lands_rejected",
+      requestId: "second",
+      reason: "A land suggestion is already in progress",
+    }));
+
+    firstView.resolve({ ...view("guest-card"), status: "Deckbuilding" });
+    await deckSubmission;
+    expect(operationOrder).toEqual(["suggestion", "deck"]);
+    expect(await Promise.all(connection.sentRaw.map(decodeDraftWireMessage))).toContainEqual({
+      type: "draft_suggest_lands_result",
+      requestId: "first",
+      lands: { Mountain: 17 },
+    });
+  });
+
+  it("ignores old-session land suggestions without replacing a reconnect reservation", async () => {
+    const host = makeHost();
+    const privateHost = host as unknown as PrivateHost & {
+      adapter: PrivateHost["adapter"] & {
+        suggestLandsForSeat: (seat: number, spells: string[]) => Promise<Record<string, number>>;
+      };
+    };
+    const blockedView = deferred<DraftPlayerView>();
+    const oldSession: SessionStub = {
+      send: vi.fn(async () => {}), onMessage: () => () => {}, onDisconnect: () => () => {}, close: () => {},
+    };
+    const replacementSession: SessionStub = {
+      send: vi.fn(async () => {}), onMessage: () => () => {}, onDisconnect: () => () => {}, close: () => {},
+    };
+    privateHost.perSeatWorkspaceSnapshots.set(1, workspace({
+      "guest-card": { zone: "deck", row: 0, column: 0, order: 0 },
+    }));
+    privateHost.adapter = {
+      getViewForSeat: vi.fn(() => blockedView.promise),
+      suggestLandsForSeat: vi.fn(async () => ({ Island: 17 })),
+    };
+    privateHost.guestSessions.set(1, oldSession);
+    privateHost.handleGuestSessionMessage(1, { type: "draft_suggest_lands", requestId: "old" }, oldSession);
+    await Promise.resolve();
+    privateHost.guestSessions.set(1, replacementSession);
+    privateHost.handleGuestSessionMessage(1, { type: "draft_suggest_lands", requestId: "replacement" }, replacementSession);
+    privateHost.handleGuestSessionMessage(1, { type: "draft_suggest_lands", requestId: "stale" }, oldSession);
+
+    expect(privateHost.adapter.getViewForSeat).toHaveBeenCalledTimes(1);
+    expect(oldSession.send).not.toHaveBeenCalled();
+    expect(replacementSession.send).not.toHaveBeenCalled();
+
+    blockedView.resolve({ ...view("guest-card"), status: "Deckbuilding" });
+    await privateHost.mutationQueue;
+    expect(privateHost.adapter.suggestLandsForSeat).toHaveBeenCalledTimes(1);
+    expect(oldSession.send).not.toHaveBeenCalled();
+    expect(replacementSession.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "draft_suggest_lands_result",
+      requestId: "replacement",
+    }));
   });
 
   it("reports guest validation error and processes the next update", async () => {

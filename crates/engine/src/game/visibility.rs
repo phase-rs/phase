@@ -2670,6 +2670,7 @@ mod tests {
             base_cost: None,
             declared_mana_additions: Vec::new(),
             activation_cost: None,
+            deferred_random_discard_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
