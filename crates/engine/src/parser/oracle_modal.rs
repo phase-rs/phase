@@ -4573,7 +4573,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         assert!(
             description
                 .as_deref()
-                .is_some_and(|fragment| fragment.contains("if the moon is full")),
+                .is_some_and(|fragment| fragment.contains("if the moon is full")), // allow-noncombinator: assertion over diagnostic output, not parsing dispatch
             "the unsupported effect must retain the unmodeled guard fragment"
         );
         assert!(
