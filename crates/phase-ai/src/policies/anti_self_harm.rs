@@ -1471,6 +1471,8 @@ fn is_unbranched_resolved_ability(ability: &engine::types::ability::ResolvedAbil
     ability.else_ability.is_none()
         && ability.condition.is_none()
         && !ability.optional
+        && ability.optional_player.is_none()
+        && ability.optional_for.is_none()
         && !ability.optional_targeting
         && ability.modal.is_none()
         && ability.mode_abilities.is_empty()
@@ -1568,7 +1570,7 @@ mod tests {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AdditionalCostRepeatability,
         BounceSelection, CardSelectionMode, ContinuousModification, ControllerRef,
-        DiscardSelfScope, Duration, EffectKind, FilterProp, ModalChoice, PtValue,
+        DiscardSelfScope, Duration, EffectKind, FilterProp, ModalChoice, OpponentMayScope, PtValue,
         QuantityModification, QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost,
         StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, TriggerConstraint,
         TriggerDefinition, TypeFilter, TypedFilter, UnlessPayScaling,
@@ -5485,6 +5487,19 @@ mod tests {
             anti_self_harm,
             PolicyVerdict::Score { delta, .. } if delta < 0.0
         ));
+    }
+
+    #[test]
+    fn unbranched_resolved_ability_rejects_optional_player_and_opponent_scopes() {
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(1), PlayerId(0));
+        assert!(is_unbranched_resolved_ability(&ability));
+
+        ability.optional_player = Some(TargetFilter::Any);
+        assert!(!is_unbranched_resolved_ability(&ability));
+
+        ability.optional_player = None;
+        ability.optional_for = Some(OpponentMayScope::AnyOpponent);
+        assert!(!is_unbranched_resolved_ability(&ability));
     }
 
     #[test]

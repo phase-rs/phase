@@ -1,5 +1,8 @@
 use engine::ai_support::current_target_selection_targets;
-use engine::game::combat::get_valid_block_targets;
+use engine::game::combat::{
+    attacker_blockability_in_maximum_free_declaration, defending_player_for_attacker,
+    MaximumBlockDeclarationBlockability,
+};
 use engine::game::{players, turn_control};
 use engine::types::ability::{
     ContinuousModification, Duration, Effect, StaticDefinition, TargetRef,
@@ -115,7 +118,10 @@ fn evasion_target_verdict(ctx: &PolicyContext<'_>, target: &TargetRef) -> Policy
     let TargetRef::Object(target_id) = target else {
         return PolicyVerdict::neutral(PolicyReason::new("effect_timing_evasion_target_na"));
     };
-    if ai_controlled_declared_pair_blockable(ctx.state, ctx.ai_player, *target_id) {
+    if !matches!(
+        ai_controlled_declared_attacker_blockability(ctx.state, ctx.ai_player, *target_id),
+        MaximumBlockDeclarationBlockability::NotBlockable
+    ) {
         return PolicyVerdict::neutral(PolicyReason::new(
             "effect_timing_pair_blockable_evasion_target",
         ));
@@ -128,7 +134,12 @@ fn evasion_target_verdict(ctx: &PolicyContext<'_>, target: &TargetRef) -> Policy
             TargetRef::Object(id) => Some(*id),
             _ => None,
         })
-        .any(|sibling| ai_controlled_declared_pair_blockable(ctx.state, ctx.ai_player, sibling))
+        .any(|sibling| {
+            matches!(
+                ai_controlled_declared_attacker_blockability(ctx.state, ctx.ai_player, sibling),
+                MaximumBlockDeclarationBlockability::Blockable
+            )
+        })
     {
         PolicyVerdict::strong(
             -STRONG_MAX,
@@ -242,32 +253,32 @@ fn prompt_has_team_defender(state: &GameState) -> bool {
         .any(|attacker| !players::teammates(state, attacker.defending_player).is_empty())
 }
 
-/// CR 509.1a-b: in a non-team game, this records only whether at least one
-/// blocker/attacker pair is currently legal, not a complete blocker declaration.
-fn declared_pair_blockable(
+/// CR 509.1b-c: in a non-team game, whether the target attacker can appear in
+/// some tax-free maximum-requirement declaration for its defending player.
+fn declared_attacker_blockability(
     state: &GameState,
     target_id: engine::types::identifiers::ObjectId,
-) -> bool {
-    state.combat.as_ref().is_some_and(|combat| {
-        combat
-            .attackers
-            .iter()
-            .any(|attacker| attacker.object_id == target_id)
-    }) && get_valid_block_targets(state)
-        .values()
-        .any(|targets| targets.contains(&target_id))
+) -> MaximumBlockDeclarationBlockability {
+    defending_player_for_attacker(state, target_id).map_or(
+        MaximumBlockDeclarationBlockability::NotBlockable,
+        |defender| attacker_blockability_in_maximum_free_declaration(state, defender, target_id),
+    )
 }
 
-fn ai_controlled_declared_pair_blockable(
+fn ai_controlled_declared_attacker_blockability(
     state: &GameState,
     ai_player: PlayerId,
     target_id: engine::types::identifiers::ObjectId,
-) -> bool {
-    state
+) -> MaximumBlockDeclarationBlockability {
+    if state
         .objects
         .get(&target_id)
         .is_some_and(|object| object.controller == ai_player)
-        && declared_pair_blockable(state, target_id)
+    {
+        declared_attacker_blockability(state, target_id)
+    } else {
+        MaximumBlockDeclarationBlockability::NotBlockable
+    }
 }
 
 fn score_action_shape(ctx: &PolicyContext<'_>) -> f64 {
@@ -547,7 +558,7 @@ mod tests {
         build_decision_context, validated_candidate_actions_for_semantic_owner, ActionMetadata,
         AiDecisionContext, CandidateAction, TacticalClass,
     };
-    use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+    use engine::game::combat::{get_valid_block_targets, AttackTarget, AttackerInfo, CombatState};
     use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -846,26 +857,48 @@ mod tests {
         ));
     }
 
+    /// Each attacker must use its actual FFA defender's declaration. The Player
+    /// One pair is unrelated; Player Two's blocker can block only its ground
+    /// attacker, not the flying Player Two attacker.
     #[test]
-    fn declared_pair_blockability_uses_the_blockers_actual_defender() {
+    fn declared_attacker_blockability_uses_the_actual_defender() {
         let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
         state.phase = Phase::DeclareAttackers;
-        let attacker = creature(&mut state, P0, "Attacker");
-        let right_defender_blocker = creature(&mut state, PlayerId(1), "Right Blocker");
-        let wrong_defender_blocker = creature(&mut state, PlayerId(2), "Wrong Blocker");
+        let player_one_attacker = creature(&mut state, P0, "Player One Attacker");
+        let player_two_attacker = creature(&mut state, P0, "Player Two Attacker");
+        let player_two_flying_attacker = creature(&mut state, P0, "Player Two Flyer");
+        state
+            .objects
+            .get_mut(&player_two_flying_attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let player_one_blocker = creature(&mut state, PlayerId(1), "Player One Blocker");
+        let player_two_blocker = creature(&mut state, PlayerId(2), "Player Two Blocker");
         state.combat = Some(CombatState {
-            attackers: vec![declared_attacker(attacker, PlayerId(1))],
+            attackers: vec![
+                declared_attacker(player_one_attacker, PlayerId(1)),
+                declared_attacker(player_two_attacker, PlayerId(2)),
+                declared_attacker(player_two_flying_attacker, PlayerId(2)),
+            ],
             ..Default::default()
         });
 
         let targets = get_valid_block_targets(&state);
         assert!(targets
-            .get(&right_defender_blocker)
-            .is_some_and(|targets| targets.contains(&attacker)));
-        assert!(targets
-            .get(&wrong_defender_blocker)
-            .is_none_or(|targets| !targets.contains(&attacker)));
-        assert!(declared_pair_blockable(&state, attacker));
+            .get(&player_one_blocker)
+            .is_some_and(|targets| targets.contains(&player_one_attacker)));
+        assert!(targets.get(&player_two_blocker).is_some_and(|targets| {
+            targets.contains(&player_two_attacker) && !targets.contains(&player_two_flying_attacker)
+        }));
+        assert_eq!(
+            declared_attacker_blockability(&state, player_two_attacker),
+            MaximumBlockDeclarationBlockability::Blockable
+        );
+        assert_eq!(
+            declared_attacker_blockability(&state, player_two_flying_attacker),
+            MaximumBlockDeclarationBlockability::NotBlockable
+        );
     }
 
     #[test]
@@ -901,11 +934,11 @@ mod tests {
     }
 
     #[test]
-    fn pair_blockable_candidate_is_neutral_when_menace_makes_a_sibling_coupled() {
+    fn menace_with_one_blocker_is_not_a_maximum_declaration_block() {
         let mut state = GameState::new_two_player(42);
         state.phase = Phase::DeclareAttackers;
         let source = creature(&mut state, P0, "Source");
-        let chosen = creature(&mut state, P0, "Chosen Attacker");
+        let normal = creature(&mut state, P0, "Normal Attacker");
         let menace = creature(&mut state, P0, "Menace Attacker");
         state
             .objects
@@ -916,24 +949,66 @@ mod tests {
         let blocker = creature(&mut state, PlayerId(1), "Only Blocker");
         state.combat = Some(CombatState {
             attackers: vec![
-                declared_attacker(chosen, PlayerId(1)),
+                declared_attacker(normal, PlayerId(1)),
                 declared_attacker(menace, PlayerId(1)),
             ],
             ..Default::default()
         });
-        install_whirler_prompt(&mut state, source, vec![chosen, menace]);
+        install_whirler_prompt(&mut state, source, vec![normal, menace]);
 
         assert!(get_valid_block_targets(&state)
             .get(&blocker)
-            .is_some_and(|targets| targets.contains(&chosen) && targets.contains(&menace)));
-        assert!(engine::game::combat::validate_blockers_for_player(
-            &state,
-            PlayerId(1),
-            &[(blocker, menace)],
-        )
-        .is_err());
+            .is_some_and(|targets| targets.contains(&normal) && targets.contains(&menace)));
+        assert_eq!(
+            declared_attacker_blockability(&state, normal),
+            MaximumBlockDeclarationBlockability::Blockable
+        );
+        assert_eq!(
+            declared_attacker_blockability(&state, menace),
+            MaximumBlockDeclarationBlockability::NotBlockable
+        );
         assert!(matches!(
-            effect_timing_verdict(&state, &target_candidate(chosen), &AiConfig::default()),
+            effect_timing_verdict(&state, &target_candidate(menace), &AiConfig::default()),
+            PolicyVerdict::Score { delta, reason }
+                if delta < 0.0 && reason.kind == "effect_timing_futile_evasion_target"
+        ));
+    }
+
+    #[test]
+    fn menace_with_two_blockers_is_a_maximum_declaration_block() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::DeclareAttackers;
+        let source = creature(&mut state, P0, "Source");
+        let normal = creature(&mut state, P0, "Normal Attacker");
+        let menace = creature(&mut state, P0, "Menace Attacker");
+        state
+            .objects
+            .get_mut(&menace)
+            .unwrap()
+            .keywords
+            .push(Keyword::Menace);
+        let first_blocker = creature(&mut state, PlayerId(1), "First Blocker");
+        let second_blocker = creature(&mut state, PlayerId(1), "Second Blocker");
+        state.combat = Some(CombatState {
+            attackers: vec![
+                declared_attacker(normal, PlayerId(1)),
+                declared_attacker(menace, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+        install_whirler_prompt(&mut state, source, vec![normal, menace]);
+
+        for blocker in [first_blocker, second_blocker] {
+            assert!(get_valid_block_targets(&state)
+                .get(&blocker)
+                .is_some_and(|targets| targets.contains(&normal) && targets.contains(&menace)));
+        }
+        assert_eq!(
+            declared_attacker_blockability(&state, menace),
+            MaximumBlockDeclarationBlockability::Blockable
+        );
+        assert!(matches!(
+            effect_timing_verdict(&state, &target_candidate(menace), &AiConfig::default()),
             PolicyVerdict::Score { delta: 0.0, reason }
                 if reason.kind == "effect_timing_pair_blockable_evasion_target"
         ));
