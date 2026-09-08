@@ -3298,6 +3298,44 @@ fn object_may_enter_cast_path(obj: &GameObject) -> bool {
         .contains(&crate::types::card_type::CoreType::Land)
 }
 
+/// Returns whether an object-carried permission could authorize `player` to
+/// cast this visible spell from its current zone if a dynamic payload becomes
+/// true. This keeps analysis consumers bound to the casting authority's zone,
+/// grantee, land, and companion-grant boundaries without predicting a later
+/// game state.
+pub fn has_potentially_authorizing_object_cast_permission(
+    obj: &GameObject,
+    player: PlayerId,
+) -> bool {
+    matches!(obj.zone, Zone::Exile | Zone::Graveyard)
+        && object_may_enter_cast_path(obj)
+        && obj
+            .casting_permissions
+            .iter()
+            .any(|permission| match permission {
+                CastingPermission::AdventureCreature
+                | CastingPermission::ExileWithEnergyCost
+                | CastingPermission::WarpExile { .. }
+                | CastingPermission::Plotted { .. }
+                | CastingPermission::Foretold { .. } => obj.owner == player,
+                CastingPermission::ExileWithAltCost { granted_to, .. }
+                | CastingPermission::ExileWithAltAbilityCost { granted_to, .. } => {
+                    exile_alt_cost_permission_grants_to_player(player, *granted_to)
+                }
+                CastingPermission::PlayFromExile {
+                    granted_to,
+                    provenance,
+                    ..
+                } => {
+                    *granted_to == player
+                        && !matches!(
+                            provenance,
+                            crate::types::ability::PlayFromExileProvenance::LandLookCompanion
+                        )
+                }
+            })
+}
+
 /// CR 305.9 + CR 601.2a: Lands in exile may be played by permissions that say
 /// "play", but they never enter the spell-cast path.
 ///
@@ -10050,7 +10088,7 @@ fn is_castable_split_face(types: &crate::types::card_type::CardType) -> bool {
 
 /// CR 712.11b + CR 709.3: Cast-time face choice for spell//spell MDFCs and
 /// spell//spell split cards.
-fn cast_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+pub fn cast_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
     // CR 601.2b (#7565): a choice already made for the CURRENT cast is not
     // offered again on pipeline re-entry; the transient flag clears once the
     // cast conversation ends, so a later recast prompts afresh.

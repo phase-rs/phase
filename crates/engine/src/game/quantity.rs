@@ -18,13 +18,13 @@ use crate::game::speed::effective_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AggregateFunction, AttackScope,
     BasicLandType, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
-    ContinuousModification, ControllerRef, CountScope, DamageChannel, Duration, Effect, FilterProp,
-    ModalSelectionCondition, ModalSelectionConstraint, ObjectProperty, ObjectScope,
-    ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, RoundingMode, StaticCondition, StaticDefinition,
-    SubtypeExclusion, TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter,
-    TypedFilter, ZoneRef,
+    CastPermissionConstraint, CastingPermission, ContinuousModification, ControllerRef, CountScope,
+    DamageChannel, Duration, Effect, FilterProp, ModalSelectionCondition, ModalSelectionConstraint,
+    ObjectProperty, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RoundingMode,
+    SpellCastingOption, StaticCondition, StaticDefinition, SubtypeExclusion,
+    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource,
+    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -1035,6 +1035,87 @@ pub fn additional_cost_is_cast_stable_for_pre_cast(
         crate::types::ability::AdditionalCost::Choice(first, second) => {
             ability_cost_is_cast_stable_for_pre_cast(first)
                 && ability_cost_is_cast_stable_for_pre_cast(second)
+        }
+    }
+}
+
+/// Returns whether an object-level spell-casting option is proven unchanged by
+/// an ordinary cast considered by the tactical gate.
+///
+/// Options are stored independently from the spell's ability tree, so their
+/// cost and condition payloads must pass through the same positive proofs as
+/// the corresponding ability fields.
+pub fn spell_casting_option_is_cast_stable_for_pre_cast(option: &SpellCastingOption) -> bool {
+    option
+        .cost
+        .as_ref()
+        .is_none_or(ability_cost_is_cast_stable_for_pre_cast)
+        && option
+            .condition
+            .as_ref()
+            .is_none_or(parsed_condition_is_cast_stable_for_pre_cast)
+}
+
+/// Returns whether an object-attached casting permission is proven unchanged
+/// by an ordinary cast considered by the tactical gate.
+///
+/// This is a positive proof over the complete permission payload. Scalar
+/// provenance, turn stamps, and fixed mana costs do not observe the cast;
+/// dynamic conditions, non-mana costs, card filters, permission lifetimes,
+/// and ETB modifications delegate to their existing stability authorities.
+pub fn casting_permission_is_cast_stable_for_pre_cast(permission: &CastingPermission) -> bool {
+    let lifetime_is_stable = permission
+        .lifetime()
+        .duration
+        .is_none_or(duration_is_cast_stable_for_pre_cast);
+    let payload_is_stable = match permission {
+        CastingPermission::AdventureCreature
+        | CastingPermission::ExileWithEnergyCost
+        | CastingPermission::WarpExile { .. }
+        | CastingPermission::Plotted { .. }
+        | CastingPermission::Foretold { .. } => true,
+        CastingPermission::ExileWithAltCost {
+            constraint,
+            enters_with_modifications,
+            ..
+        } => {
+            constraint
+                .as_ref()
+                .is_none_or(cast_permission_constraint_is_cast_stable_for_pre_cast)
+                && enters_with_modifications
+                    .iter()
+                    .all(continuous_modification_is_cast_stable_for_pre_cast)
+        }
+        CastingPermission::PlayFromExile {
+            card_filter,
+            alt_ability_cost,
+            ..
+        } => {
+            card_filter
+                .as_ref()
+                .is_none_or(target_filter_is_property_free_population)
+                && alt_ability_cost
+                    .as_ref()
+                    .is_none_or(ability_cost_is_cast_stable_for_pre_cast)
+        }
+        CastingPermission::ExileWithAltAbilityCost {
+            cost, constraint, ..
+        } => {
+            ability_cost_is_cast_stable_for_pre_cast(cost)
+                && constraint
+                    .as_ref()
+                    .is_none_or(cast_permission_constraint_is_cast_stable_for_pre_cast)
+        }
+    };
+    lifetime_is_stable && payload_is_stable
+}
+
+fn cast_permission_constraint_is_cast_stable_for_pre_cast(
+    constraint: &CastPermissionConstraint,
+) -> bool {
+    match constraint {
+        CastPermissionConstraint::ManaValue { value, .. } => {
+            quantity_is_cast_stable_for_pre_cast(value)
         }
     }
 }

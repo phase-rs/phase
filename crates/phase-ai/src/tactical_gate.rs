@@ -5,8 +5,9 @@ use engine::ai_support::{
     TargetedExchangeVerdict,
 };
 use engine::game::casting::{
-    effective_spell_cost, spell_cost_is_payable_from_pool, spell_has_effective_keywords,
-    spell_objects_available_to_cast,
+    cast_spell_face_choice_available, effective_spell_cost,
+    has_potentially_authorizing_object_cast_permission, spell_cost_is_payable_from_pool,
+    spell_has_effective_keywords, spell_objects_available_to_cast,
 };
 use engine::game::combat::AttackTarget;
 use engine::game::functioning_abilities::{
@@ -16,7 +17,8 @@ use engine::game::functioning_abilities::{
 use engine::game::quantity::{
     ability_definition_has_only_unbound_variable_quantities_for_pre_cast,
     ability_definition_is_cast_stable_for_pre_cast, additional_cost_is_cast_stable_for_pre_cast,
-    modal_choice_is_cast_stable_for_pre_cast, quantity_is_cast_stable_for_pre_cast,
+    casting_permission_is_cast_stable_for_pre_cast, modal_choice_is_cast_stable_for_pre_cast,
+    quantity_is_cast_stable_for_pre_cast, spell_casting_option_is_cast_stable_for_pre_cast,
     static_definition_is_cast_stable_for_pre_cast, trigger_definition_is_cast_stable_for_pre_cast,
     try_resolve_quantity_in_source_context,
 };
@@ -420,6 +422,7 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
         || object.controller != ctx.ai_player
         || object.owner != ctx.ai_player
         || object.modal.is_some()
+        || cast_spell_face_choice_available(object)
         || !object.parse_warnings.is_empty()
         || !(object.card_types.core_types.contains(&CoreType::Instant)
             || object.card_types.core_types.contains(&CoreType::Sorcery))
@@ -571,6 +574,14 @@ fn cast_has_relevant_payoff(
                 && spell_identity_is_available_to_caster(state, caster, object)
                 && object_has_cast_unstable_consumer(state, object, candidate_spell)
         })
+        || state.objects.values().any(|object| {
+            spell_identity_is_available_to_caster(state, caster, object)
+                && has_potentially_authorizing_object_cast_permission(object, caster)
+                && object
+                    .casting_permissions
+                    .iter()
+                    .any(|permission| !casting_permission_is_cast_stable_for_pre_cast(permission))
+        })
         || game_functioning_statics(state)
             .any(|(_, definition)| !static_definition_is_cast_stable_for_pre_cast(definition))
 }
@@ -602,6 +613,14 @@ fn object_has_cast_unstable_consumer(
     candidate_spell: Option<ObjectId>,
 ) -> bool {
     !object.casting_restrictions.is_empty()
+        || object
+            .casting_options
+            .iter()
+            .any(|option| !spell_casting_option_is_cast_stable_for_pre_cast(option))
+        || object
+            .casting_permissions
+            .iter()
+            .any(|permission| !casting_permission_is_cast_stable_for_pre_cast(permission))
         || object
             .modal
             .as_ref()
@@ -637,6 +656,49 @@ fn object_has_cast_unstable_consumer(
             .as_slice()
             .iter()
             .any(|trigger| trigger_definition_has_cast_unstable_consumer(&trigger.definition))
+        || cast_spell_face_choice_available(object)
+            && object
+                .back_face
+                .as_ref()
+                .is_some_and(back_face_has_cast_unstable_consumer)
+}
+
+fn back_face_has_cast_unstable_consumer(
+    back_face: &engine::game::game_object::BackFaceData,
+) -> bool {
+    !back_face.parse_warnings.is_empty()
+        || !back_face.casting_restrictions.is_empty()
+        || back_face
+            .casting_options
+            .iter()
+            .any(|option| !spell_casting_option_is_cast_stable_for_pre_cast(option))
+        || back_face
+            .modal
+            .as_ref()
+            .is_some_and(|modal| !modal_choice_is_cast_stable_for_pre_cast(modal))
+        || back_face
+            .additional_cost
+            .as_ref()
+            .is_some_and(|cost| !additional_cost_is_cast_stable_for_pre_cast(cost))
+        || back_face
+            .abilities
+            .iter()
+            .any(ability_has_cast_unstable_consumer)
+        || back_face
+            .static_definitions
+            .as_slice()
+            .iter()
+            .any(|definition| !static_definition_is_cast_stable_for_pre_cast(definition))
+        || !back_face.replacement_definitions.as_slice().is_empty()
+        || back_face
+            .trigger_definitions
+            .as_slice()
+            .iter()
+            .any(trigger_definition_has_cast_unstable_consumer)
+        || back_face
+            .keywords
+            .iter()
+            .any(|keyword| keyword.kind() == KeywordKind::Unknown)
 }
 
 /// A mana ability's declared variable is selected while that ability is paid;
@@ -1534,21 +1596,23 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::deck_loading::DeckEntry;
-    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::game::game_object::BackFaceData;
+    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AdditionalCost, BounceSelection, CardTypeSetSource,
-        CastingPermission, CastingRestriction, Comparator, CountScope, CounterCostSelection,
-        DelayedTriggerCondition, Duration, EffectKind, FilterProp, ManaProduction, ModalChoice,
-        MultiTargetSpec, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
-        QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, SubAbilityLink,
-        TargetFilter, TurnJournalKind, REMOVE_COUNTER_COST_X,
+        CastPermissionConstraint, CastingPermission, CastingRestriction, Comparator, CountScope,
+        CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, FilterProp,
+        ManaProduction, ModalChoice, MultiTargetSpec, ParsedCondition, PlayerFilter,
+        PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        SpellCastingOption, StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter,
+        TurnJournalKind, REMOVE_COUNTER_COST_X,
     };
     use engine::types::ability::{
         QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
     };
-    use engine::types::card::CardFace;
+    use engine::types::card::{CardFace, LayoutKind};
     use engine::types::counter::{CounterMatch, CounterType};
     use engine::types::game_state::{
         CastingVariant, DelayedTrigger, NextSpellModifier, PendingCast, PendingNextSpellModifier,
@@ -2365,6 +2429,412 @@ mod tests {
             runner.state().players[P0.0 as usize].mana_pool.total(),
             mana_before_second_spell,
             "the condition-based reduction changes the actual second-spell payment"
+        );
+    }
+
+    #[test]
+    fn zero_cast_dynamic_object_option_and_permission_consumers_are_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let history = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        };
+        let option_spell = create_object(
+            &mut state,
+            CardId(91_860),
+            P0,
+            "Option consumer".to_string(),
+            Zone::Hand,
+        );
+        state.players[P0.0 as usize].hand.push_back(option_spell);
+        let option_draw = create_object(
+            &mut state,
+            CardId(91_864),
+            P0,
+            "Option draw witness".to_string(),
+            Zone::Library,
+        );
+        state.players[P0.0 as usize].library.push_back(option_draw);
+        {
+            let option_object = state
+                .objects
+                .get_mut(&option_spell)
+                .expect("option consumer exists");
+            option_object.card_types.core_types.push(CoreType::Instant);
+            option_object.mana_cost = ManaCost::generic(1);
+            option_object.abilities = Arc::new(vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )]);
+            option_object
+                .casting_options
+                .push(SpellCastingOption::free_cast().condition(
+                    ParsedCondition::QuantityComparison {
+                        lhs: history.clone(),
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    },
+                ));
+        }
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a held free-cast option whose spell-history condition changes after the cast retains the zero spell"
+        );
+        let option_cast = engine::ai_support::candidate_actions(&state)
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == option_spell)
+            })
+            .expect("the production cast list offers the held spell's normal-cost path")
+            .action;
+        let mut pre_option_state = state.clone();
+        pre_option_state.players[P0.0 as usize].mana_pool.clear();
+        let pre_option_boundary = pre_option_state.clone();
+        let rejected_option =
+            engine::game::engine::apply_as_current(&mut pre_option_state, option_cast);
+        assert!(
+            matches!(
+                rejected_option,
+                Err(engine::game::engine::EngineError::ActionNotAllowed(_))
+            ),
+            "before cast history satisfies the condition, the reducer rejects the unfunded normal-cost fallback"
+        );
+        assert_eq!(
+            pre_option_state.players[P0.0 as usize].hand,
+            pre_option_boundary.players[P0.0 as usize].hand,
+            "the rejected pre-history option cast rolls the held spell back"
+        );
+        assert_eq!(
+            pre_option_state.stack, pre_option_boundary.stack,
+            "the rejected pre-history option cast does not commit a stack entry"
+        );
+        assert_eq!(
+            pre_option_state.pending_cast, pre_option_boundary.pending_cast,
+            "the rejected pre-history option cast restores its pending boundary"
+        );
+        assert_eq!(
+            pre_option_state.waiting_for, pre_option_boundary.waiting_for,
+            "the rejected pre-history option cast restores priority"
+        );
+        let mut option_runner = GameRunner::from_state(state.clone());
+        option_runner.cast(congregate).target_player(P0).resolve();
+        option_runner
+            .cast(option_spell)
+            .accept_optional()
+            .resolve()
+            .assert_hand_drawn(P0, 1);
+        state
+            .objects
+            .get_mut(&option_spell)
+            .expect("option consumer remains")
+            .casting_options
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the dynamic option restores known-zero rejection"
+        );
+
+        let permission_spell = create_object(
+            &mut state,
+            CardId(91_861),
+            P0,
+            "Permission consumer".to_string(),
+            Zone::Exile,
+        );
+        state.exile.push_back(permission_spell);
+        {
+            let permission_object = state
+                .objects
+                .get_mut(&permission_spell)
+                .expect("permission consumer exists");
+            permission_object
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+            permission_object.mana_cost = ManaCost::generic(1);
+            permission_object.abilities = Arc::new(vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )]);
+            permission_object.casting_permissions.push(
+                CastingPermission::ExileWithAltAbilityCost {
+                    cost: AbilityCost::PayLife {
+                        amount: history.clone(),
+                    },
+                    constraint: Some(CastPermissionConstraint::ManaValue {
+                        comparator: Comparator::LE,
+                        value: history,
+                    }),
+                    granted_to: Some(P0),
+                    duration: None,
+                    source_id: None,
+                },
+            );
+        }
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "the grantee-authorized exile permission's dynamic cost and constraint retain the zero spell even before its constraint admits the cast"
+        );
+        let permission_cast = engine::ai_support::candidate_actions(&state)
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == permission_spell)
+            })
+            .expect("the deferred dynamic permission reaches the production cast reducer")
+            .action;
+        let mut pre_permission_state = state.clone();
+        let pre_permission_boundary = pre_permission_state.clone();
+        let rejected_permission =
+            engine::game::engine::apply_as_current(&mut pre_permission_state, permission_cast);
+        assert!(
+            matches!(
+                rejected_permission,
+                Err(engine::game::engine::EngineError::ActionNotAllowed(_))
+            ),
+            "the production reducer rejects the deferred mana-value constraint before cast history changes"
+        );
+        assert_eq!(
+            pre_permission_state.exile, pre_permission_boundary.exile,
+            "the rejected permission cast preserves the exiled card"
+        );
+        assert_eq!(
+            pre_permission_state.stack, pre_permission_boundary.stack,
+            "the rejected permission cast does not commit a stack entry"
+        );
+        assert_eq!(
+            pre_permission_state.pending_cast, pre_permission_boundary.pending_cast,
+            "the rejected permission cast restores its pending boundary"
+        );
+        assert_eq!(
+            pre_permission_state.waiting_for, pre_permission_boundary.waiting_for,
+            "the rejected permission cast restores priority"
+        );
+        let mut permission_runner = GameRunner::from_state(state.clone());
+        permission_runner
+            .cast(congregate)
+            .target_player(P0)
+            .resolve();
+        assert!(
+            spell_objects_available_to_cast(permission_runner.state(), P0).contains(&permission_spell),
+            "the production permission authority admits the exile spell after the cast-history threshold"
+        );
+        permission_runner
+            .cast(permission_spell)
+            .resolve()
+            .assert_life_delta(P0, -1);
+        state
+            .objects
+            .get_mut(&permission_spell)
+            .expect("permission consumer remains")
+            .casting_permissions
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the dynamic permission restores known-zero rejection"
+        );
+    }
+
+    #[test]
+    fn zero_front_modal_spell_face_is_retained_and_back_face_resolves() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mdfc = scenario
+            .add_spell_to_hand_from_oracle(P0, "Typed modal witness", true, "You gain 0 life.")
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        scenario.with_library_top(P0, &["drawn back face card"]);
+        let mut runner = scenario.build();
+        let object = runner
+            .state_mut()
+            .objects
+            .get_mut(&mdfc)
+            .expect("modal witness exists");
+        let mut back_face = BackFaceData {
+            name: "Typed modal draw face".to_string(),
+            layout_kind: Some(LayoutKind::Modal),
+            mana_cost: ManaCost::zero(),
+            ..BackFaceData::default()
+        };
+        back_face.card_types.core_types.push(CoreType::Sorcery);
+        back_face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        object.back_face = Some(back_face);
+
+        assert!(
+            zero_cast_is_retained(runner.state(), mdfc),
+            "an uncommitted spell//spell face choice is not a front-only zero proof"
+        );
+        runner
+            .cast(mdfc)
+            .modal_face(true)
+            .resolve()
+            .assert_hand_drawn(P0, 1);
+    }
+
+    #[test]
+    fn held_selectable_back_face_cast_history_payoff_is_paired() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let held = create_object(
+            &mut state,
+            CardId(91_862),
+            P0,
+            "Held face witness".to_string(),
+            Zone::Hand,
+        );
+        state.players[P0.0 as usize].hand.push_back(held);
+        {
+            let object = state.objects.get_mut(&held).expect("held witness exists");
+            object.card_types.core_types.push(CoreType::Instant);
+            object.abilities = Arc::new(vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::NoOp,
+            )]);
+            let mut back_face = BackFaceData {
+                name: "Held history payoff".to_string(),
+                layout_kind: Some(LayoutKind::Modal),
+                ..BackFaceData::default()
+            };
+            back_face.card_types.core_types.push(CoreType::Sorcery);
+            back_face.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
+                            filter: None,
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            object.back_face = Some(back_face);
+        }
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a visible, selectable back-face cast-history payoff retains the zero spell"
+        );
+        state
+            .objects
+            .get_mut(&held)
+            .expect("held witness remains")
+            .back_face = None;
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the selectable back-face payoff restores known-zero rejection"
+        );
+    }
+
+    #[test]
+    fn currently_false_play_from_exile_filter_is_admitted_after_zero_cast() {
+        let (mut state, harvest) = funded_zero_harvest_state();
+        let consumer = create_object(
+            &mut state,
+            CardId(91_863),
+            P0,
+            "Filtered exile consumer".to_string(),
+            Zone::Exile,
+        );
+        state.exile.push_back(consumer);
+        let filtered_draw = create_object(
+            &mut state,
+            CardId(91_865),
+            P0,
+            "Filtered permission draw witness".to_string(),
+            Zone::Library,
+        );
+        state.players[P0.0 as usize]
+            .library
+            .push_back(filtered_draw);
+        {
+            let object = state.objects.get_mut(&consumer).expect("consumer exists");
+            object.card_types.core_types.push(CoreType::Instant);
+            object.mana_cost = ManaCost::generic(1);
+            object.abilities = Arc::new(vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )]);
+            object
+                .casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
+                    duration: Duration::Permanent,
+                    granted_to: P0,
+                    mode: engine::types::ability::CardPlayMode::Cast,
+                    frequency: engine::types::statics::CastFrequency::Unlimited,
+                    source_id: None,
+                    invalidation: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: None,
+                    card_filter: Some(TargetFilter::Typed(TypedFilter {
+                        controller: None,
+                        type_filters: vec![TypeFilter::Instant],
+                        properties: vec![FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::ZoneCardCount {
+                                    zone: engine::types::ability::ZoneRef::Graveyard,
+                                    card_types: vec![],
+                                    filter: None,
+                                    scope: CountScope::All,
+                                },
+                            },
+                        }],
+                    })),
+                    single_use_group: None,
+                    single_use: false,
+                    cast_cost_raise: None,
+                    alt_ability_cost: Some(AbilityCost::Mana {
+                        cost: ManaCost::NoCost,
+                    }),
+                    land_enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                });
+        }
+
+        assert!(
+            !spell_objects_available_to_cast(&state, P0).contains(&consumer),
+            "the empty graveyard keeps the permission-backed consumer out of the current cast list"
+        );
+        assert!(
+            zero_cast_is_retained(&state, harvest),
+            "the visible grantee's dynamically filtered permission is still a future consumer"
+        );
+
+        let mut runner = GameRunner::from_state(state.clone());
+        runner.cast(harvest).resolve();
+        assert!(
+            spell_objects_available_to_cast(runner.state(), P0).contains(&consumer),
+            "the zero spell's normal graveyard move satisfies the production permission filter"
+        );
+        runner.cast(consumer).resolve().assert_hand_drawn(P0, 1);
+
+        state
+            .objects
+            .get_mut(&consumer)
+            .expect("consumer remains")
+            .casting_permissions
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&state, harvest),
+            "removing only the filtered permission restores known-zero rejection"
         );
     }
 
