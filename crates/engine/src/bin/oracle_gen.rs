@@ -198,9 +198,15 @@ fn build_trace_report(
     let mut traces: BTreeMap<String, Option<ParserTrace>> = BTreeMap::new();
     let mut census: BTreeMap<OuterRoute, (usize, BTreeMap<String, String>)> = BTreeMap::new();
     let mut unavailable = 0;
+    let mut unavailable_events = 0;
+    let mut faces_with_unavailable_events = 0;
     for (key, entry) in face_index {
         let trace = entry.trace_input.as_ref().map(OracleTraceInput::trace);
         if let Some(trace) = &trace {
+            unavailable_events += trace.omitted_evidence.len();
+            if !trace.omitted_evidence.is_empty() {
+                faces_with_unavailable_events += 1;
+            }
             for event in &trace.events {
                 let row = census.entry(event.route).or_default();
                 row.0 += 1;
@@ -250,8 +256,7 @@ fn build_trace_report(
         ];
         let mut collapse = classify_collapse(&stages);
         if collapse.from == Some(TraceStage::DocumentIr) {
-            collapse.kind = "earliest_loss_unresolved".to_string();
-            collapse.from = None;
+            collapse = collapse.earliest_loss_unresolved();
         }
         let mut left_events = left.events.clone();
         let mut right_events = right.events.clone();
@@ -337,8 +342,8 @@ fn build_trace_report(
         faces: FaceCounts {
             winning_faces: face_index.len(),
             traced_faces: face_index.len() - unavailable,
-            unavailable_events: unavailable,
-            faces_with_unavailable_events: unavailable,
+            unavailable_events,
+            faces_with_unavailable_events,
         },
         pairs,
         outer_route_census,
@@ -2229,6 +2234,49 @@ mod tests {
         let bytes = std::fs::read(path).expect("read report");
         assert!(bytes.ends_with(b"\n"));
         assert!(!bytes.ends_with(b"\n\n"));
+    }
+
+    #[test]
+    fn parser_trace_face_counts_measure_omitted_evidence_on_traced_faces() {
+        let mut traced = make_entry("traced", &["TST"], None);
+        traced.face.name = "Traced".to_string();
+        traced.trace_input = Some(OracleTraceInput {
+            oracle_text: "You gain 3 life.".to_string(),
+            card_name: "Traced".to_string(),
+            mtgjson_keyword_names: Vec::new(),
+            types: vec!["Instant".to_string()],
+            subtypes: Vec::new(),
+            has_cleave_variant: false,
+        });
+        let expected_events = traced
+            .trace_input
+            .as_ref()
+            .unwrap()
+            .trace()
+            .omitted_evidence
+            .len();
+        assert!(expected_events > 0, "fixture must produce omitted evidence");
+
+        let mut unavailable = make_entry("unavailable", &["TST"], None);
+        unavailable.face.name = "Unavailable".to_string();
+        let face_index = BTreeMap::from([
+            ("traced".to_string(), traced),
+            ("unavailable".to_string(), unavailable),
+        ]);
+        let report = build_trace_report(
+            &face_index,
+            PairManifest {
+                schema_version: 1,
+                pairs: Vec::new(),
+            },
+            b"fixture card data",
+        )
+        .unwrap();
+
+        assert_eq!(report.faces.winning_faces, 2);
+        assert_eq!(report.faces.traced_faces, 1);
+        assert_eq!(report.faces.unavailable_events, expected_events);
+        assert_eq!(report.faces.faces_with_unavailable_events, 1);
     }
 
     fn make_entry(oracle_id: &str, printings: &[&str], layout: Option<&str>) -> CardExportEntry {
