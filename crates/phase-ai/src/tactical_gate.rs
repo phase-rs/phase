@@ -5035,12 +5035,14 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     &candidate.action,
-                    GameAction::ActivateManaSource { selection }
-                        if selection.source.object_id == untap_source
+                    GameAction::ActivateAbility {
+                        source_id,
+                        ability_index: 0,
+                    } if *source_id == untap_source
                 )
             })
             .map(|candidate| candidate.action)
-            .expect("the engine must offer the tapped {Q} source in the live payment domain");
+            .expect("the engine must offer the tapped {Q} mana ability in the live payment domain");
         // CR 107.6 + CR 601.2h: paying {Q} untaps the source while completing the cast.
         runner
             .act(payment)
