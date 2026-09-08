@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use engine::game::casting::can_pay_ability_mana_cost_after_auto_tap_excluding;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, ContinuousModification, CostCategory, Effect, PtValue,
+    StaticDefinition, TargetFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -26,23 +27,59 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 
-/// True when activating `ability` turns its source into a creature. Structural:
-/// walks the ability's full effect chain (including sub-abilities and modal
-/// branches, via [`crate::cast_facts::collect_definition_effects`]).
+/// True when activating `ability` turns **its own source** into a creature.
+/// Structural: walks the ability's full effect chain (including sub-abilities and
+/// modal branches, via [`crate::cast_facts::collect_definition_effects`]).
+///
+/// Attachment-targeted animation is explicitly unsupported: a Genju-style Aura
+/// whose ability makes its *enchanted* land a creature (`affected: AttachedTo`,
+/// or an `Effect::Animate` targeting anything but `SelfRef`) is NOT reported —
+/// its source (the Aura) does not become a blocker (CR 201.5b).
 pub(crate) fn animates_source(ability: &AbilityDefinition) -> bool {
     crate::cast_facts::collect_definition_effects(ability)
         .into_iter()
-        .any(effect_animates_land)
+        .any(effect_animates_self)
 }
 
-fn effect_animates_land(effect: &Effect) -> bool {
+/// CR 201.5b: `SelfRef` (or unset) refers to the ability's own source. Anything
+/// else names a different permanent — a Genju-style Aura's `AttachedTo`, a
+/// targeted animate.
+fn filter_is_self(target: &Option<TargetFilter>) -> bool {
+    matches!(target, None | Some(TargetFilter::SelfRef))
+}
+
+fn static_targets_self(static_ability: &StaticDefinition) -> bool {
+    filter_is_self(&static_ability.affected)
+}
+
+fn effect_animates_self(effect: &Effect) -> bool {
     match effect {
-        Effect::Animate { .. } => true,
+        Effect::Animate {
+            target,
+            types,
+            remove_types,
+            ..
+        } => {
+            matches!(target, TargetFilter::SelfRef)
+                && types.iter().any(|t| t.eq_ignore_ascii_case("creature"))
+                && !remove_types
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case("creature"))
+        }
+        // A `GenericEffect` whose own target — or any of its statics' `affected`
+        // scope — names a non-self permanent applies elsewhere, not to the
+        // source.
         Effect::GenericEffect {
-            static_abilities, ..
-        } => static_abilities
-            .iter()
-            .any(|static_ability| static_ability.modifications.iter().any(adds_creature_type)),
+            static_abilities,
+            target,
+            ..
+        } => {
+            filter_is_self(target)
+                && static_abilities.iter().any(|static_ability| {
+                    static_targets_self(static_ability)
+                        && static_ability.modifications.iter().any(adds_creature_type)
+                })
+        }
         _ => false,
     }
 }
@@ -91,20 +128,42 @@ fn merge_keyword(list: &mut Vec<Keyword>, keyword: &Keyword) {
     }
 }
 
-pub(crate) fn extract_body(ability: &AbilityDefinition) -> AnimatedBody {
+/// The self-animated body, or `None` when the ability offers more than one
+/// mutually exclusive body (a modal "becomes X, or becomes Y" — no single legal
+/// activation produces a merged body, so treating it as one blocker would be
+/// wrong). Only self-scoped animation contributes (see [`effect_animates_self`]).
+pub(crate) fn extract_body(ability: &AbilityDefinition) -> Option<AnimatedBody> {
     let mut body = AnimatedBody::default();
+    let mut set_power: Option<i32> = None;
+    let mut set_toughness: Option<i32> = None;
+    // Reject a modal ability whose branches disagree on the body's stats.
+    let mut conflict = false;
+    let assign = |slot: &mut Option<i32>, value: i32, conflict: &mut bool| {
+        if slot.is_some_and(|prev| prev != value) {
+            *conflict = true;
+        }
+        *slot = Some(value);
+    };
+
     for effect in crate::cast_facts::collect_definition_effects(ability) {
         match effect {
             Effect::GenericEffect {
-                static_abilities, ..
-            } => {
+                static_abilities,
+                target,
+                ..
+            } if filter_is_self(target) => {
                 for modification in static_abilities
                     .iter()
+                    .filter(|sa| static_targets_self(sa))
                     .flat_map(|sa| sa.modifications.iter())
                 {
                     match modification {
-                        ContinuousModification::SetPower { value } => body.power = *value,
-                        ContinuousModification::SetToughness { value } => body.toughness = *value,
+                        ContinuousModification::SetPower { value } => {
+                            assign(&mut set_power, *value, &mut conflict)
+                        }
+                        ContinuousModification::SetToughness { value } => {
+                            assign(&mut set_toughness, *value, &mut conflict)
+                        }
                         ContinuousModification::AddKeyword { keyword } => {
                             merge_keyword(&mut body.keywords, keyword)
                         }
@@ -116,13 +175,14 @@ pub(crate) fn extract_body(ability: &AbilityDefinition) -> AnimatedBody {
                 power,
                 toughness,
                 keywords,
+                target: TargetFilter::SelfRef,
                 ..
             } => {
                 if let Some(PtValue::Fixed(value)) = power {
-                    body.power = *value;
+                    assign(&mut set_power, *value, &mut conflict);
                 }
                 if let Some(PtValue::Fixed(value)) = toughness {
-                    body.toughness = *value;
+                    assign(&mut set_toughness, *value, &mut conflict);
                 }
                 for keyword in keywords {
                     merge_keyword(&mut body.keywords, keyword);
@@ -131,7 +191,13 @@ pub(crate) fn extract_body(ability: &AbilityDefinition) -> AnimatedBody {
             _ => {}
         }
     }
-    body
+
+    if conflict {
+        return None;
+    }
+    body.power = set_power.unwrap_or(0);
+    body.toughness = set_toughness.unwrap_or(0);
+    Some(body)
 }
 
 fn cost_taps_source(ability: &AbilityDefinition) -> bool {
@@ -193,7 +259,7 @@ pub(crate) fn activation_leaves_source_tapped(
 mod tests {
     use super::*;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Duration, Effect, StaticDefinition,
+        AbilityDefinition, AbilityKind, Duration, Effect, StaticDefinition, TargetFilter,
     };
     use engine::types::mana::ManaCost;
     use engine::types::statics::StaticMode;
@@ -252,14 +318,13 @@ mod tests {
                 },
             ],
         );
-        let body = extract_body(&ability);
         assert_eq!(
-            body,
-            AnimatedBody {
+            extract_body(&ability),
+            Some(AnimatedBody {
                 power: 3,
                 toughness: 3,
                 keywords: vec![Keyword::Trample],
-            }
+            })
         );
     }
 
@@ -267,5 +332,78 @@ mod tests {
     fn animation_mana_value_reads_generic_cost() {
         let ability = animate_ability(3, vec![]);
         assert_eq!(animation_mana_value(&ability), Some(3));
+    }
+
+    /// B9: an ability that animates its *attached* permanent (a Genju-style
+    /// Aura) does not turn its own source into a blocker.
+    #[test]
+    fn attachment_targeted_animation_does_not_animate_the_source() {
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::AttachedTo)
+                    .modifications(vec![
+                        ContinuousModification::SetPower { value: 8 },
+                        ContinuousModification::SetToughness { value: 12 },
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        },
+                    ])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        ability.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::generic(2),
+        });
+
+        assert!(!animates_source(&ability));
+        assert_eq!(extract_body(&ability), Some(AnimatedBody::default()));
+    }
+
+    /// Non-blocking review note: a modal "becomes X or becomes Y" ability yields
+    /// no single body, so `extract_body` returns `None`.
+    #[test]
+    fn modal_animation_with_conflicting_bodies_yields_no_body() {
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                    .modifications(vec![
+                        ContinuousModification::SetPower { value: 3 },
+                        ContinuousModification::SetToughness { value: 3 },
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        },
+                    ])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        );
+        ability.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                    .modifications(vec![
+                        ContinuousModification::SetPower { value: 5 },
+                        ContinuousModification::SetToughness { value: 1 },
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        },
+                    ])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+        )));
+        ability.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::generic(2),
+        });
+
+        assert!(animates_source(&ability));
+        assert_eq!(extract_body(&ability), None);
     }
 }

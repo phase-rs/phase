@@ -2991,8 +2991,12 @@ struct BlockStats {
     first_strike: bool,
     double_strike: bool,
     deathtouch: bool,
+    /// CR 702.80a / 702.90c: this creature's combat damage to a creature is
+    /// dealt as -1/-1 counters (wither / infect), not marked damage.
+    damage_as_counters: bool,
     /// CR 702.12b: damage never destroys an indestructible creature, and
-    /// deathtouch's destroy (CR 702.2c) is likewise prevented.
+    /// deathtouch's destroy (CR 702.2c) is likewise prevented. It does NOT
+    /// prevent the CR 704.5f 0-toughness state-based death.
     indestructible: bool,
 }
 
@@ -3005,6 +3009,8 @@ impl BlockStats {
             first_strike: obj.has_keyword(&Keyword::FirstStrike),
             double_strike: obj.has_keyword(&Keyword::DoubleStrike),
             deathtouch: obj.has_keyword(&Keyword::Deathtouch),
+            damage_as_counters: obj.has_keyword(&Keyword::Wither)
+                || obj.has_keyword(&Keyword::Infect),
             indestructible: obj.has_keyword(&Keyword::Indestructible),
         }
     }
@@ -3019,58 +3025,108 @@ impl BlockStats {
             first_strike: body.has_keyword(&Keyword::FirstStrike),
             double_strike: body.has_keyword(&Keyword::DoubleStrike),
             deathtouch: body.has_keyword(&Keyword::Deathtouch),
+            damage_as_counters: body.has_keyword(&Keyword::Wither)
+                || body.has_keyword(&Keyword::Infect),
             indestructible: body.has_keyword(&Keyword::Indestructible),
         }
     }
 }
 
-/// Does `taken` combat damage kill `target`, given its already-marked damage and
-/// whether the dealer had deathtouch? CR 704.5g (lethal = marked ≥ toughness),
-/// CR 702.2c (any deathtouch damage is lethal), CR 702.12b (indestructible is
-/// never destroyed by damage — deathtouch included).
-fn combat_lethal(target: &BlockStats, taken: i32, dealer_deathtouch: bool) -> bool {
-    if target.indestructible || taken <= 0 {
-        return false;
+/// One creature's mutable state threaded through the two combat damage steps.
+struct Combatant<'a> {
+    stats: &'a BlockStats,
+    /// -1/-1 counters accrued during this exchange (wither / infect hits).
+    minus_counters: i32,
+    /// Damage marked (starts at the pre-existing `damage_marked`).
+    marked: i32,
+    /// CR 702.2b: has been dealt damage by a deathtouch source this exchange.
+    deathtouched: bool,
+}
+
+impl<'a> Combatant<'a> {
+    fn new(stats: &'a BlockStats) -> Self {
+        Self {
+            stats,
+            minus_counters: 0,
+            marked: stats.damage_marked,
+            deathtouched: false,
+        }
     }
-    if dealer_deathtouch {
-        return true;
+
+    /// CR 613: -1/-1 counters lower power and toughness.
+    fn power(&self) -> i32 {
+        (self.stats.power - self.minus_counters).max(0)
     }
-    target.toughness > 0 && target.damage_marked + taken >= target.toughness
+    fn toughness(&self) -> i32 {
+        self.stats.toughness - self.minus_counters
+    }
+
+    /// Apply one creature's combat damage. `amount` is the dealer's effective
+    /// power at the start of the step (simultaneity).
+    fn take_hit(&mut self, amount: i32, from_deathtouch: bool, as_counters: bool) {
+        if amount <= 0 {
+            return;
+        }
+        if as_counters {
+            self.minus_counters += amount; // CR 702.80a / 702.90c
+        } else {
+            self.marked += amount; // CR 120.3e
+        }
+        if from_deathtouch {
+            self.deathtouched = true; // CR 702.2b
+        }
+    }
+
+    /// State-based death check after a damage step.
+    fn dead(&self) -> bool {
+        // CR 704.5f: 0-or-less toughness — nothing (indestructible included)
+        // saves it.
+        if self.toughness() <= 0 {
+            return true;
+        }
+        // CR 702.12b: indestructible is not destroyed by lethal damage or by a
+        // deathtouch source.
+        if self.stats.indestructible {
+            return false;
+        }
+        // CR 702.2b: any deathtouch damage; CR 704.5g: marked >= toughness.
+        self.deathtouched || self.marked >= self.toughness()
+    }
 }
 
 /// `(blocker_kills_attacker, blocker_survives)` for one blocker vs. one
 /// attacker. Resolves the two combat damage steps in sequence per CR 510.1a–d:
 /// first-strike / double-strike creatures assign in the first step; then any
 /// creature still alive that has double strike (CR 702.4b) or lacks first
-/// strike (CR 702.7b) assigns in the second. A creature that died in the first
-/// step deals nothing in the second — so a double striker killed by a
-/// first-strike blocker only lands its first hit.
+/// strike (CR 702.7b) assigns in the second. A creature dead after step 1 deals
+/// nothing in step 2. Wither / infect damage (CR 702.80 / 702.90) accrues as
+/// -1/-1 counters, so it shrinks P/T for the second step and can push a
+/// blocker — indestructible included — to 0 toughness (CR 704.5f).
 fn block_exchange(blocker: &BlockStats, attacker: &BlockStats) -> (bool, bool) {
     let a_first = attacker.first_strike || attacker.double_strike;
     let b_first = blocker.first_strike || blocker.double_strike;
 
-    // Step 1 — only first/double strikers assign (CR 510.1a).
-    let a_step1 = if a_first { attacker.power.max(0) } else { 0 };
-    let b_step1 = if b_first { blocker.power.max(0) } else { 0 };
-    let attacker_dead_after_1 = combat_lethal(attacker, b_step1, blocker.deathtouch);
-    let blocker_dead_after_1 = combat_lethal(blocker, a_step1, attacker.deathtouch);
+    let mut atk = Combatant::new(attacker);
+    let mut blk = Combatant::new(blocker);
 
-    // Step 2 — survivors that either double strike or did not strike first.
-    let a_step2 = if !attacker_dead_after_1 && (attacker.double_strike || !a_first) {
-        attacker.power.max(0)
-    } else {
-        0
-    };
-    let b_step2 = if !blocker_dead_after_1 && (blocker.double_strike || !b_first) {
-        blocker.power.max(0)
-    } else {
-        0
-    };
+    // Step 1 (CR 510.1a) — only first/double strikers assign, simultaneously.
+    let a_p1 = if a_first { atk.power() } else { 0 };
+    let b_p1 = if b_first { blk.power() } else { 0 };
+    blk.take_hit(a_p1, attacker.deathtouch, attacker.damage_as_counters);
+    atk.take_hit(b_p1, blocker.deathtouch, blocker.damage_as_counters);
+    let atk_dead_1 = atk.dead();
+    let blk_dead_1 = blk.dead();
 
-    let attacker_dies = combat_lethal(attacker, b_step1 + b_step2, blocker.deathtouch);
-    let blocker_dies = combat_lethal(blocker, a_step1 + a_step2, attacker.deathtouch);
+    // Step 2 (CR 510.1c/d) — survivors that double strike or did not strike
+    // first, using their step-2 (counter-reduced) power, simultaneously.
+    let atk_deals_2 = !atk_dead_1 && (attacker.double_strike || !a_first);
+    let blk_deals_2 = !blk_dead_1 && (blocker.double_strike || !b_first);
+    let a_p2 = if atk_deals_2 { atk.power() } else { 0 };
+    let b_p2 = if blk_deals_2 { blk.power() } else { 0 };
+    blk.take_hit(a_p2, attacker.deathtouch, attacker.damage_as_counters);
+    atk.take_hit(b_p2, blocker.deathtouch, blocker.damage_as_counters);
 
-    (attacker_dies, !blocker_dies)
+    (atk.dead(), !blk.dead())
 }
 
 /// Evaluate whether a single blocker kills the attacker and/or survives combat.
@@ -3118,7 +3174,11 @@ fn latent_blockers(state: &GameState, defender: PlayerId) -> Vec<AnimatedBody> {
             if manland::activation_leaves_source_tapped(state, defender, id, index, &ability) {
                 continue;
             }
-            bodies.push(manland::extract_body(&ability));
+            // `None` = a modal ability with mutually exclusive bodies; skip
+            // rather than credit a body no legal activation produces.
+            if let Some(body) = manland::extract_body(&ability) {
+                bodies.push(body);
+            }
             break;
         }
     }
@@ -8793,6 +8853,69 @@ mod tests {
         assert!(
             !blocker_kills_attacker,
             "the 3/3 does not kill the 5/5 attacker"
+        );
+    }
+
+    #[test]
+    fn block_exchange_infect_kills_indestructible_blocker() {
+        // CR 702.90c + CR 704.5f: infect damage is -1/-1 counters; three of them
+        // make a 3/3 indestructible blocker 0/0, which dies regardless of
+        // indestructible.
+        let mut state = setup();
+        let atk = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Plague",
+            3,
+            3,
+            vec![Keyword::Infect],
+        );
+        let blk = add_creature(
+            &mut state,
+            PlayerId(1),
+            "Rock",
+            3,
+            3,
+            vec![Keyword::Indestructible],
+        );
+
+        let (_, blocker_survives) = evaluate_block_outcome(
+            state.objects.get(&blk).unwrap(),
+            state.objects.get(&atk).unwrap(),
+        );
+        assert!(
+            !blocker_survives,
+            "three -1/-1 counters take the indestructible 3/3 to 0 toughness — it dies"
+        );
+    }
+
+    #[test]
+    fn block_exchange_first_strike_wither_shrinks_pt_before_the_second_step() {
+        // A 2/2 first-strike wither attacker puts 2 -1/-1 counters on a 3/3
+        // blocker in step 1, making it a 1/1; in step 2 that 1/1 deals only 1,
+        // not 3 — the 2/2 attacker survives.
+        let mut state = setup();
+        let atk = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Corroder",
+            2,
+            2,
+            vec![Keyword::FirstStrike, Keyword::Wither],
+        );
+        let blk = add_creature(&mut state, PlayerId(1), "Bear", 3, 3, vec![]);
+
+        let (blocker_kills_attacker, blocker_survives) = evaluate_block_outcome(
+            state.objects.get(&blk).unwrap(),
+            state.objects.get(&atk).unwrap(),
+        );
+        assert!(
+            !blocker_kills_attacker,
+            "the counter-reduced 1/1 deals 1 in step 2, not lethal to the 2/2"
+        );
+        assert!(
+            blocker_survives,
+            "the 1/1 blocker is not dealt lethal damage"
         );
     }
 }
