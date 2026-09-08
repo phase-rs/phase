@@ -230,7 +230,7 @@ Return after final acceptance:
 1. Plan-review rounds (count), whether surgical-fix mode was used, and final clean result.
 2. What changed, grouped by subsystem and file.
 3. Key architectural decisions.
-4. `BASE_SHA`, accepted `CANDIDATE_SHA`, the materialized `SCOPE_PATHS` (administrative extensions included), and run-artifact root.
+4. `BASE_SHA`, accepted `CANDIDATE_SHA`, the materialized `SCOPE_PATHS` (review-only extensions included), and run-artifact root.
 5. The `START_SHA` each round began from, and what the parser measurement found when the change touched the parser.
 6. Verification commands run and results, separated into preparatory and completion evidence.
 7. Implementation-review rounds (count), reviewed SHA, and final clean result.
