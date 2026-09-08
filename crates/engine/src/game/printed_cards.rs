@@ -1370,7 +1370,10 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
     // advancing the game stream a restore-count-dependent number of steps.
     if state.booster_shelf.is_empty() && crate::game::boosters::game_opens_booster_packs(state, db)
     {
-        state.booster_shelf = Arc::new(crate::game::boosters::build_shelf(db, state.rng_seed));
+        state.booster_shelf = Arc::new(match &state.booster_pack_pool {
+            Some(names) => crate::game::boosters::build_pool_shelf(db, names),
+            None => crate::game::boosters::build_shelf(db, state.rng_seed),
+        });
     }
 }
 

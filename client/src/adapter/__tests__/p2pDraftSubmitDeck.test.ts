@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { P2PDraftHost } from "../p2p-draft-host";
+import type { DraftPlayerView, PairingView } from "../draft-adapter";
+import type { DraftMatchLaunch } from "../../network/draftProtocol";
 
 /**
  * U17 — the commander designation's submission channel at the P2P host seam.
@@ -45,6 +47,9 @@ type PrivateHost = {
   guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
   adapter: Record<string, ReturnType<typeof vi.fn>>;
   handleGuestMessage: (seat: number, message: unknown) => Promise<void>;
+  dispatchMatchLaunch: (pairing: PairingView, view: DraftPlayerView) => Promise<void>;
+  persistSessionStrict: () => Promise<void>;
+  matchLaunches: Map<string, Map<number, DraftMatchLaunch>>;
 };
 
 function asPrivate(host: P2PDraftHost): PrivateHost {
@@ -83,6 +88,46 @@ function seatGuestSession(privateHost: PrivateHost, seat: number) {
 }
 
 describe("P2P deck-submission channel", () => {
+  it.each([false, true])("persists and sends the exact cube source for a bot pairing: %s", async (bot) => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    const source = ["Cube A", "Cube A", "Undealt sentinel"];
+    const draftView = {
+      seats: [0, 1, 2, 3].map((seat_index) => ({ seat_index, is_bot: bot && seat_index === 3 })),
+      booster_pack_pool: source, match_config: { match_type: "Bo1" },
+    } as DraftPlayerView;
+    privateHost.adapter = stubAdapter({
+      exportSession: vi.fn(async () => JSON.stringify({
+        pools: [[], [], [], []], submitted_decks: {
+          2: { seat: 2, main_deck: ["Human deck"], commanders: [] },
+          3: { seat: 3, main_deck: ["Guest deck"], commanders: [] },
+        },
+      })),
+      getBotDeck: vi.fn(async () => ({ main_deck: ["Bot deck"], lands: {}, commander: [] })),
+    });
+    const persisted: DraftMatchLaunch[][] = [];
+    privateHost.persistSessionStrict = vi.fn(async () => {
+      persisted.push([...privateHost.matchLaunches.get("cube-match")!.values()]);
+    });
+    const send = seatGuestSession(privateHost, 2);
+    seatGuestSession(privateHost, 3);
+    await privateHost.dispatchMatchLaunch({
+      match_id: "cube-match", round: 1, seat_a: 2, seat_b: 3, name_a: "Human", name_b: "Other",
+    } as PairingView, draftView);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "draft_match_start", launch: expect.objectContaining({
+        type: bot ? "Bot" : "HumanHost", localSeat: 2,
+        deckPayload: expect.objectContaining({ booster_pack_pool: source,
+          player: expect.objectContaining({ main_deck: ["Human deck"] }) }),
+      }),
+    }));
+    expect(persisted[0][0]).toMatchObject({ deckPayload: { booster_pack_pool: source } });
+    const commander = await host.podCommanderDeckPayload({ ...draftView, seats: draftView.seats.slice(2) }, 3);
+    expect(commander.booster_pack_pool).toEqual(source);
+    expect(commander.player.main_deck).toEqual([bot ? "Bot deck" : "Guest deck"]);
+    expect(commander.opponent.main_deck).toEqual(["Human deck"]);
+  });
+
   /**
    * V-TS-1. The wire message's designation reaches the adapter, in order.
    *

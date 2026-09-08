@@ -2276,6 +2276,7 @@ export class P2PDraftHost {
       opponent,
       ai_decks: aiDecks,
       draft_set_codes: view.draft_set_codes,
+      booster_pack_pool: view.booster_pack_pool,
     };
   }
 
@@ -2302,6 +2303,7 @@ export class P2PDraftHost {
         player: humanDeck,
         opponent: botDeck,
         ai_decks: [],
+        booster_pack_pool: view.booster_pack_pool,
       };
 
       await this.sendMatchLaunch(humanSeat, {
@@ -2330,6 +2332,7 @@ export class P2PDraftHost {
       player: hostDeck,
       opponent: guestDeck,
       ai_decks: [],
+      booster_pack_pool: view.booster_pack_pool,
     };
 
     await this.sendMatchLaunch(matchHostSeat, {

@@ -203,6 +203,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
         // cEDH bracket validation ran at game 1 setup; decks haven't
         // changed between games, so re-validation is unnecessary.
         ai_difficulties: vec![],
+        booster_pack_pool: state.booster_pack_pool.as_deref().cloned(),
     })
 }
 
@@ -516,6 +517,9 @@ fn restart_between_games_with_starting_player(
     let interaction_session = state.interaction_session_id.clone();
 
     load_deck_into_state(&mut next_state, &payload);
+    if state.booster_pack_pool.is_some() {
+        next_state.booster_shelf = state.booster_shelf.clone();
+    }
     let start = super::engine::start_game_with_starting_player(&mut next_state, starting_player);
     events.extend(start.events);
 

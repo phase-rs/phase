@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
@@ -102,6 +103,9 @@ pub struct PlayerDeckPayload {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeckPayload {
+    /// Original bounded booster source, separate from every player's deck.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booster_pack_pool: Option<Vec<String>>,
     pub player: PlayerDeckPayload,
     pub opponent: PlayerDeckPayload,
     #[serde(default)]
@@ -148,6 +152,9 @@ pub struct PlayerDeckList {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeckList {
+    /// Original bounded booster source; preserve order, copies, and empty lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booster_pack_pool: Option<Vec<String>>,
     pub player: PlayerDeckList,
     pub opponent: PlayerDeckList,
     #[serde(default)]
@@ -327,6 +334,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
         // ai_difficulties is carried through from the DeckList so the caller's
         // per-seat difficulty annotations survive resolution.
         ai_difficulties: list.ai_difficulties.clone(),
+        booster_pack_pool: list.booster_pack_pool.clone(),
     }
 }
 
@@ -491,6 +499,7 @@ fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckP
         opponent: fixed_seat(),
         ai_decks: submitted.ai_decks.iter().map(|_| fixed_seat()).collect(),
         ai_difficulties: submitted.ai_difficulties.clone(),
+        booster_pack_pool: submitted.booster_pack_pool.clone(),
     }
 }
 
@@ -735,6 +744,8 @@ pub fn create_signature_spell_from_card_face(
 
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
 pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
+    state.booster_pack_pool = payload.booster_pack_pool.clone().map(Arc::new);
+    state.booster_shelf = Arc::default();
     state.deck_pools.clear();
     state.outside_game_cards_brought_in.clear();
     state.sideboard_submitted.clear();
@@ -1740,6 +1751,7 @@ mod tests {
             },
             ai_decks: vec![],
             ai_difficulties: vec![],
+            booster_pack_pool: None,
         };
 
         load_deck_into_state(&mut state, &payload);

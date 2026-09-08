@@ -1203,7 +1203,8 @@ describe("draftProtocol", () => {
       }
     });
 
-    it("round-trips a deck-carrying draft match start message", async () => {
+    it.each([{ pool: ["Cube A", "Cube A", "Undealt sentinel"] }, { pool: [] }, { pool: undefined }])(
+      "round-trips a deck-carrying draft match start message: $pool", async ({ pool }) => {
       const deck = {
         main_deck: ["Island"],
         sideboard: [],
@@ -1222,6 +1223,7 @@ describe("draftProtocol", () => {
             player: deck,
             opponent: { main_deck: ["Mountain"], sideboard: [], commander: [] },
             ai_decks: [],
+            booster_pack_pool: pool,
           },
           matchConfig: { match_type: "Bo1" },
           binding: {

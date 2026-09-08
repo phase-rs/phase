@@ -195,6 +195,7 @@ interface DeckListPayload {
    * identically as constructed play (no grant).
    */
   draft_set_codes?: string[] | null;
+  booster_pack_pool?: string[] | null;
 }
 
 /** The desktop host has already ensured this exact local phase-server binary
@@ -2164,6 +2165,7 @@ export class P2PHostAdapter implements EngineAdapter {
         // discarded before it can reach the engine. Naming it is what carries
         // the Commander Masters partner grant into the game.
         draft_set_codes: hostDeck.draft_set_codes,
+        booster_pack_pool: hostDeck.booster_pack_pool,
       };
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1

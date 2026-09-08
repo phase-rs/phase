@@ -219,6 +219,8 @@ export interface DraftMatchDeckPayload {
    * which the engine reads as constructed play (no grant).
    */
   draft_set_codes?: string[] | null;
+  /** Opaque original cube entries, including copies; empty is still bounded. */
+  booster_pack_pool?: string[] | null;
 }
 
 /**

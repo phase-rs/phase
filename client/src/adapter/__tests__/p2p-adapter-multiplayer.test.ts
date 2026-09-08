@@ -1009,7 +1009,9 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
    * CMM+CLB draft that forwarded a single representative code could drop the
    * very set the grant keys on.
    */
-  it("carries the pod's draft set codes through the rebuilt payload to the engine", async () => {
+  it.each([
+    { pool: ["Cube A", "Cube A", "Undealt sentinel"] }, { pool: [] }, { pool: undefined },
+  ])("carries the pod's metadata through the rebuilt payload to the engine: $pool", async ({ pool }) => {
     const { peer, onGuestConnected } = createFakePeer();
     const adapter = new P2PHostAdapter(
       {
@@ -1017,6 +1019,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         opponent: { main_deck: ["Forest"], sideboard: [] },
         ai_decks: [],
         draft_set_codes: ["CMM", "CLB"],
+        booster_pack_pool: pool,
       },
       peer as unknown as Peer,
       onGuestConnected,
@@ -1041,9 +1044,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     // be read at all — the same reason `nativeWebSocketMocks.onEvent`'s
     // recorded handler is cast where it is read.
     const [payload] = mockInitializeHostGame.mock.calls[0] as unknown as [
-      { draft_set_codes?: string[] },
+      { draft_set_codes?: string[]; booster_pack_pool?: string[] },
     ];
     expect(payload.draft_set_codes).toEqual(["CMM", "CLB"]);
+    expect(payload.booster_pack_pool).toEqual(pool);
   });
 
   it("does not reinitialize the host during the lobby-to-game handoff", async () => {

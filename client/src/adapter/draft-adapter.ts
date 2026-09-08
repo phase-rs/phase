@@ -448,6 +448,8 @@ export interface DraftPlayerView {
    * a mixed-set draft contained all of them.
    */
   draft_set_codes?: string[] | null;
+  /** Original cube entries for in-game packs; an empty array stays bounded. */
+  booster_pack_pool?: string[] | null;
   timer_remaining_ms: number | null;
   standings: StandingEntry[];
   current_round: number;

@@ -8597,6 +8597,8 @@ fn default_one_u32() -> u32 {
 /// the resident cost stays proportional to the shelf, not to the corpus.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BoosterShelf {
+    /// Bounded source takes precedence over products, including when empty.
+    pub card_pool: Option<Vec<CardFace>>,
     /// Products in deterministic order. Empty when no card in the game opens
     /// booster packs, or when the loaded card database carries no set that can
     /// fill a pack.
@@ -8605,7 +8607,9 @@ pub struct BoosterShelf {
 
 impl BoosterShelf {
     pub fn is_empty(&self) -> bool {
-        self.products.is_empty()
+        self.card_pool
+            .as_ref()
+            .map_or_else(|| self.products.is_empty(), Vec::is_empty)
     }
 }
 
@@ -19214,6 +19218,11 @@ declare_game_state! {
     #[serde(skip)]
     pub booster_shelf: Arc<BoosterShelf>,
 
+    /// Original source entries for in-game packs. Shared across search clones,
+    /// persisted as names, and hydrated independently of the game RNG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booster_pack_pool: Option<Arc<Vec<String>>>,
+
     /// Display names for log resolution. Set by server; WASM leaves empty (defaults to "Player N").
     /// Skipped in serialization — runtime context only.
     #[serde(skip)]
@@ -24337,6 +24346,7 @@ impl GameState {
             meld_pair_registry: Arc::new(HashMap::new()),
             card_db: None,
             booster_shelf: Arc::new(BoosterShelf::default()),
+            booster_pack_pool: None,
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
@@ -26469,6 +26479,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         meld_pair_registry: _,
         card_db: _,
         booster_shelf: _,
+        booster_pack_pool: _,
         log_player_names: _,
         last_created_token_ids: _,
         last_revealed_ids: _,
@@ -26713,6 +26724,7 @@ impl PartialEq for GameState {
             && self.current_starting_player == other.current_starting_player
             && self.next_game_chooser == other.next_game_chooser
             && self.deck_pools == other.deck_pools
+            && self.booster_pack_pool == other.booster_pack_pool
             && self.outside_game_cards_brought_in == other.outside_game_cards_brought_in
             && self.sideboard_submitted == other.sideboard_submitted
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn

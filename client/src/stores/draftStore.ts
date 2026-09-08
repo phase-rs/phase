@@ -46,6 +46,7 @@ import {
   publishInitialDraftMatch,
   publishStagedDraftMatch,
   recordDraftMatchResult,
+  saveDraftRun,
   runLimits,
   type ActiveQuickDraftMeta,
   type DraftMatchPayload,
@@ -803,11 +804,18 @@ function unresolvedStageMatches(
     && stage.resultCountAtLaunch === run.results.length;
 }
 
-function matchPayload(playerDeck: string[], opponentDeck: string[]): DraftMatchPayload {
+function withBoosterPackPool(run: DraftRunState, view: DraftPlayerView): DraftRunState {
+  return run.booster_pack_pool === undefined && view.booster_pack_pool !== undefined
+    ? { ...run, booster_pack_pool: view.booster_pack_pool }
+    : run;
+}
+
+function matchPayload(run: DraftRunState): DraftMatchPayload {
   return {
-    player: { main_deck: playerDeck, sideboard: [], commander: [] },
-    opponent: { main_deck: opponentDeck, sideboard: [], commander: [] },
+    player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
+    opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
     ai_decks: [],
+    booster_pack_pool: run.booster_pack_pool,
   };
 }
 
@@ -905,7 +913,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const meta = await inspectActiveQuickDraftLifecycle("inspect");
       if (!meta || lifecycle !== lifecycleGeneration) return;
       resumeId = meta.id;
-      const [saved, run] = await Promise.all([loadQuickDraftSession(meta.id), loadDraftRun(meta.id)]);
+      const [saved, savedRun] = await Promise.all([loadQuickDraftSession(meta.id), loadDraftRun(meta.id)]);
+      let run = savedRun;
       if (!saved || ((meta.phase === "playing" || meta.phase === "complete") && !run)) {
         await cleanupQuickDraftLifecycle(meta.id);
         return;
@@ -919,6 +928,14 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         return lease.importSession(saved.sessionJson, meta.difficulty);
       });
       if (lifecycle !== lifecycleGeneration) return;
+      if (run) {
+        const upgraded = withBoosterPackPool(run, view);
+        if (upgraded !== run) {
+          await saveDraftRun(meta.id, upgraded);
+          if (lifecycle !== lifecycleGeneration) return;
+          run = upgraded;
+        }
+      }
       // The durable run is authoritative for run phases: the run and the meta
       // are persisted as separate writes (publishInitialDraftMatch /
       // recordDraftMatchResult save the run first), so a crash between them
@@ -1221,7 +1238,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (durableRun) {
         if (!unresolvedStageMatches(durableRun, state.draftId, state.runFormat, playerDeck)
           || durableRun.results.length !== 0) throw new Error("Conflicting staged draft match");
-        run = durableRun;
+        run = withBoosterPackPool(durableRun, state.view);
       } else {
         const botSeat = pickBotSeat([], state.view);
         const prepared = await withDraftEngineOperation((lease) => {
@@ -1235,6 +1252,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         const gameId = crypto.randomUUID();
         run = {
           format: state.runFormat,
+          booster_pack_pool: state.view.booster_pack_pool,
           results: [],
           playerDeck,
           opponentDeck,
@@ -1265,14 +1283,15 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           },
           run,
           gameId,
-          payload: matchPayload(run.playerDeck, run.opponentDeck),
+          payload: matchPayload(run),
           meta,
         });
       } else {
         await publishStagedDraftMatch({
           draftId: state.draftId,
+          run: run !== durableRun ? run : undefined,
           gameId,
-          payload: matchPayload(run.playerDeck, run.opponentDeck),
+          payload: matchPayload(run),
           meta,
         });
       }
@@ -1329,12 +1348,13 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
     try {
-      const durableRun = await loadDraftRun(state.draftId);
-      if (!durableRun) throw new Error("Missing durable draft run");
+      const savedRun = await loadDraftRun(state.draftId);
+      if (!savedRun) throw new Error("Missing durable draft run");
+      const durableRun = withBoosterPackPool(savedRun, state.view);
       const playerDeck = projectDeckNames(state.workspaceState, state.view.pool);
       if (draftRunPhase(durableRun) === "complete") throw new Error("Draft run is complete");
       let run = durableRun;
-      let saveRun = false;
+      let saveRun = durableRun !== savedRun;
       if (durableRun.activeMatch) {
         if (!unresolvedStageMatches(durableRun, state.draftId, state.runFormat, playerDeck)) {
           throw new Error("Conflicting staged draft match");
@@ -1373,7 +1393,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         draftId: state.draftId,
         run: saveRun ? run : undefined,
         gameId,
-        payload: matchPayload(run.playerDeck, run.opponentDeck),
+        payload: matchPayload(run),
         meta,
       });
       if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) return;

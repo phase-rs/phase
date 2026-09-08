@@ -462,6 +462,9 @@ pub struct DraftPlayerView {
     /// printed in the granting sets' own boosters, so a card's printing is
     /// evidence of the grant in neither direction.
     pub draft_set_codes: Vec<String>,
+    /// Opaque original source for in-game booster packs; empty is still bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booster_pack_pool: Option<Vec<String>>,
     /// Milliseconds remaining on the pick timer. Always None from the reducer;
     /// the P2P host injects the authoritative value on the wire.
     pub timer_remaining_ms: Option<u32>,
@@ -974,6 +977,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
             Vec::new()
         },
         timer_remaining_ms: None,
+        booster_pack_pool: session.booster_pack_pool_for_game().map(<[String]>::to_vec),
         standings,
         current_round: session.current_round,
         next_pairing_round: session.next_pairing_round(),
@@ -3153,6 +3157,24 @@ mod tests {
             },
         );
         assert!(filter_for_player(&from_cube, 0).draft_set_codes.is_empty());
+        for original in [&from_cube, &from_set] {
+            let mut json = serde_json::to_value(original).unwrap();
+            json.as_object_mut().unwrap().remove("booster_pack_pool");
+            let mut restored: DraftSession = serde_json::from_value(json).unwrap();
+            for status in [
+                DraftStatus::Drafting,
+                DraftStatus::Deckbuilding,
+                DraftStatus::Complete,
+            ] {
+                restored.status = status;
+                let projected = filter_for_player(&restored, 0);
+                assert_eq!(projected.status, status);
+                assert_eq!(
+                    projected.booster_pack_pool,
+                    matches!(restored.config.source, DraftSource::Cube { .. }).then(Vec::new)
+                );
+            }
+        }
 
         // (iii) CR 903.13 scopes both concessions to Commander Draft.
         let sealed = session_with(DraftKind::Sealed, DraftSource::single_set("CMM"));

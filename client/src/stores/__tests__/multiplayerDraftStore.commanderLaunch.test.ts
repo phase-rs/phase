@@ -76,11 +76,12 @@ const sendCommanderLaunches = vi.fn();
  * letting the stash assertion below pass on a shape `GameProvider` could never
  * read.
  */
-const podCommanderDeckPayload = vi.fn(async () => ({
+const podCommanderDeckPayload = vi.fn(async (view: DraftPlayerView) => ({
   player: deckFor(0),
   opponent: deckFor(1),
-  ai_decks: [],
+  ai_decks: Array.from({ length: view.seats.length - 2 }, (_, i) => deckFor(i + 2)),
   draft_set_codes: ["CMR"],
+  booster_pack_pool: view.booster_pack_pool,
 }));
 
 const mockHostAdapter = {
@@ -388,6 +389,7 @@ function commanderView(
   seatCount: number,
   options: {
     draftSetCodes?: string[] | null;
+    boosterPackPool?: string[] | null;
     humanSeats?: number[];
     /**
      * Human seats whose `connected` flag is FALSE — a player who has dropped.
@@ -412,6 +414,7 @@ function commanderView(
     pool: [],
     draft_effects: [],
     draft_set_codes: options.draftSetCodes,
+    booster_pack_pool: options.boosterPackPool,
     seats: Array.from({ length: seatCount }, (_, i) => seat(i, !humans.has(i), !dropped.has(i))),
     cards_per_pack: 14,
     pack_count: 3,
@@ -650,15 +653,18 @@ describe("multiplayerDraftStore Commander launch", () => {
    * key is invisible to `tsc`: no type check can replace this assertion.
    */
   it("carries the view's draft set codes onto the host deck payload", async () => {
-    await installCompletedPod(commanderView(4, { draftSetCodes: ["CMM", "CLB"] }));
+    const pool = ["Cube A", "Cube A", "Undealt sentinel"];
+    await installCompletedPod(commanderView(4, { draftSetCodes: ["CMM", "CLB"], boosterPackPool: pool }));
 
     await useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
 
     const payload = vi.mocked(P2PHostAdapter).mock.calls[0][0] as {
       player: DraftDeckPayload;
       draft_set_codes: string[] | null;
+      booster_pack_pool: string[];
     };
     expect(payload.draft_set_codes).toEqual(["CMM", "CLB"]);
+    expect(payload.booster_pack_pool).toEqual(pool);
     expect(payload.player).toEqual(deckFor(0));
   });
 
@@ -716,8 +722,9 @@ describe("multiplayerDraftStore Commander launch", () => {
    * none of the P2P machinery may be entered, because the two share nothing
    * past the ceiling check.
    */
-  it("launches a local game for a pod over the peer-to-peer seat ceiling", async () => {
-    await installCompletedPod(commanderView(7));
+  it.each([7, 8])("launches a local game for a %i-seat pod over the peer-to-peer seat ceiling", async (seats) => {
+    const pool = ["Cube A", "Cube A", "Undealt sentinel"];
+    await installCompletedPod(commanderView(seats, { boosterPackPool: pool }));
 
     await useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
 
@@ -727,12 +734,18 @@ describe("multiplayerDraftStore Commander launch", () => {
     const target = vi.mocked(navigate).mock.calls[0]?.[0] as string;
     expect(target).toContain("mode=ai");
     expect(target).toContain("format=CommanderDraft");
-    expect(target).toContain("players=7");
+    const url = new URL(target, "https://phase.test");
+    expect(url.searchParams.get("players")).toBe(String(seats));
+    expect(url.searchParams.get("source")).toBe("multiplayer");
+    expect(url.searchParams.has("draftId")).toBe(false);
     // The payload is assembled by the HOST adapter, in game-player order, and
     // stashed where the game route reads it.
     expect(podCommanderDeckPayload).toHaveBeenCalledTimes(1);
     const gameId = target.slice("/game/".length, target.indexOf("?"));
     expect(sessionStorage.getItem(`phase:draft-deck:${gameId}`)).toContain("Commander 0");
+    const payload = JSON.parse(sessionStorage.getItem(`phase:draft-deck:${gameId}`)!);
+    expect(payload.booster_pack_pool).toEqual(pool);
+    expect(payload.ai_decks).toEqual(Array.from({ length: seats - 2 }, (_, i) => deckFor(i + 2)));
     // No banner: this is a supported outcome, not a degraded one.
     expect(useMultiplayerDraftStore.getState().error).toBeNull();
     // NONE of the peer-to-peer bring-up is entered.

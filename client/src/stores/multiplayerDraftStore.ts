@@ -1901,15 +1901,12 @@ export const useMultiplayerDraftStore = create<
       const localGameId = crypto.randomUUID();
       sessionStorage.setItem(`${DRAFT_DECK_SESSION_KEY}:${localGameId}`, JSON.stringify(payload));
       useGameStore.setState({ gameId: localGameId });
-      // No `source=draft`/`draftId=`: those bind a game to a LOCAL Quick-Draft
-      // run's bookkeeping, and a pod has neither a `DraftRun` nor active-quick-
-      // draft meta. The pod is already `Complete`, so there is nothing to
-      // report back to it. `commanderLaunch` is deliberately left NULL — no
-      // launch went on any wire, there is no pod session to end, and
-      // `endCommanderSession` must therefore leave this pod alone.
+      // `source=multiplayer` keeps desktop routing on the full WASM payload.
+      // This pod has no quick-draft run; commanderLaunch stays null because
+      // there was no P2P game launch to end.
       navigate(
         `/game/${localGameId}?mode=ai&difficulty=${DRAFT_BOT_AI_SEAT.difficulty}` +
-          `&format=CommanderDraft&players=${view.seats.length}&match=bo1`,
+          `&format=CommanderDraft&players=${view.seats.length}&match=bo1&source=multiplayer`,
       );
       return;
     }
@@ -2013,6 +2010,7 @@ export const useMultiplayerDraftStore = create<
           // wire's required-nullable one; it is not `?? []`, which would assert
           // "the draft contained zero sets" where the host knows the answer.
           draft_set_codes: launchView.draft_set_codes ?? null,
+          booster_pack_pool: launchView.booster_pack_pool,
         },
         host.peer,
         host.onGuestConnected,

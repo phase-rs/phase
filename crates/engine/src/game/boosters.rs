@@ -10,6 +10,10 @@
 //! from the loaded card database and collates a fresh pack from one of them on
 //! demand.
 //!
+//! Cube-derived games instead hydrate their original source entries with
+//! [`build_pool_shelf`]. [`open_pack`] samples fifteen entries from that source,
+//! preserving its copies and ignoring set printings and rarity buckets.
+//!
 //! # Why a shelf and not the whole corpus
 //!
 //! There is no `CardDatabase` at effect-resolution time — resolvers see only
@@ -52,6 +56,9 @@ use crate::types::game_state::{BoosterProduct, BoosterShelf, GameState};
 /// resolution picks one at random, so this is the number of distinct sets a
 /// single game can open packs from — not a cap on how many packs it can open.
 pub const SHELF_PRODUCTS: usize = 8;
+
+/// Digital Cube convention: every in-game booster contains fifteen entries.
+pub const CUBE_PACK_SIZE: usize = 15;
 
 /// Maximum cards sampled into one product's rarity bucket. Caps the resident
 /// cost of sets with very large card pools (compilation products such as "The
@@ -118,6 +125,15 @@ pub fn game_opens_booster_packs(state: &GameState, db: &CardDatabase) -> bool {
         for entry_list in entry_lists {
             for entry in entry_list.iter() {
                 if face_opens_booster_packs(&entry.card, &mut visit).is_break() {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(names) = &state.booster_pack_pool {
+        for name in names.iter() {
+            if let Some(face) = db.get_face_by_name(name) {
+                if face_opens_booster_packs(face, &mut visit).is_break() {
                     return true;
                 }
             }
@@ -206,7 +222,46 @@ pub fn build_shelf(db: &CardDatabase, seed: u64) -> BoosterShelf {
     // Deterministic shelf order regardless of the shuffle, so a product index is
     // stable for logs and tests.
     products.sort_by(|a, b| a.set_code.cmp(&b.set_code));
-    BoosterShelf { products }
+    BoosterShelf {
+        products,
+        card_pool: None,
+    }
+}
+
+/// Hydrate the original source atomically. Missing entries make the bounded
+/// source unavailable instead of changing membership or substituting a set.
+pub fn build_pool_shelf(db: &CardDatabase, names: &[String]) -> BoosterShelf {
+    let cards = names
+        .iter()
+        .map(|name| db.get_face_by_name(name).cloned())
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    BoosterShelf {
+        card_pool: Some(cards),
+        products: Vec::new(),
+    }
+}
+
+/// Open from the active source. Cube entries are sampled without replacement
+/// within each shuffled cycle; small cubes refill until fifteen are dealt.
+/// Every opening starts with the full source, retaining duplicate occurrences.
+pub fn open_pack(shelf: &BoosterShelf, rng: &mut impl Rng) -> Option<(String, Vec<CardFace>)> {
+    if let Some(pool) = &shelf.card_pool {
+        if pool.is_empty() {
+            return None;
+        }
+        let mut pack = Vec::with_capacity(CUBE_PACK_SIZE);
+        let mut indices: Vec<_> = (0..pool.len()).collect();
+        while pack.len() < CUBE_PACK_SIZE {
+            indices.shuffle(rng);
+            let remaining = CUBE_PACK_SIZE - pack.len();
+            pack.extend(indices.iter().take(remaining).map(|&i| pool[i].clone()));
+        }
+        Some(("CUBE".to_string(), pack))
+    } else {
+        let product = shelf.products.choose(rng)?;
+        Some((product.set_code.clone(), collate_pack(product, rng)))
+    }
 }
 
 /// Collate one booster pack from `product`, drawing from `rng`.
