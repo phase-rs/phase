@@ -288,19 +288,21 @@ fn prove_modal_root_at_x_zero(
             } else {
                 Some((XDependency::NotXDependent, ZeroProof::Unknown))
             }
-        } else if let Some(quantity) = effect_quantity(effect) {
-            if quantity.contains_x() {
-                let zero_proof = if quantity_is_proven_zero_at_x_zero(quantity) {
-                    ZeroProof::ProvenZero
-                } else {
-                    ZeroProof::Meaningful
-                };
-                Some((XDependency::XDependent, zero_proof))
-            } else {
-                None
+        } else if effect_has_any_x_reference(effect) {
+            match effect_quantity(effect) {
+                Some(quantity) if quantity.contains_x() => {
+                    let zero_proof = if quantity_is_proven_zero_at_x_zero(quantity) {
+                        ZeroProof::ProvenZero
+                    } else {
+                        ZeroProof::Meaningful
+                    };
+                    Some((XDependency::XDependent, zero_proof))
+                }
+                // X can live outside the scalar payload: for example, a fixed
+                // counter count can still use an X-filtered target. The modal
+                // gate must fail open unless the scalar X behavior is proven.
+                _ => Some((XDependency::XDependent, ZeroProof::Unknown)),
             }
-        } else if x_reference::effect_references_x(effect) {
-            Some((XDependency::XDependent, ZeroProof::Unknown))
         } else {
             None
         };
@@ -377,6 +379,16 @@ fn effect_quantity(effect: &Effect) -> Option<&QuantityExpr> {
         Effect::Token { count, .. } => Some(count),
         _ => None,
     }
+}
+
+/// True when `effect` contains an announced-X reference in either its scalar
+/// payload or its primary target filter. The latter has no structural zero
+/// proof, so [`prove_modal_root_at_x_zero`] treats it as unknown.
+fn effect_has_any_x_reference(effect: &Effect) -> bool {
+    x_reference::effect_references_x(effect)
+        || effect
+            .target_filter()
+            .is_some_and(x_reference::target_filter_references_x)
 }
 
 /// Exact structural zero proof for a `QuantityExpr` that already references X.
@@ -1314,6 +1326,30 @@ mod tests {
     }
 
     // --- Drown in Dreams: spell-level modal roots (Discord #1544805279936282634) ---
+    #[test]
+    fn modal_root_with_x_filtered_fixed_scalar_fails_open() {
+        let state = base_state();
+        let mut root = spell(Effect::Draw {
+            count: x_expr(),
+            target: TargetFilter::Controller,
+        });
+        root.sub_ability = Some(Box::new(spell(Effect::PutCounter {
+            counter_type: CounterType::Generic("tower".to_string()),
+            count: QuantityExpr::Fixed { value: 0 },
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: x_expr(),
+                },
+            ])),
+        })));
+
+        assert_eq!(
+            prove_modal_root_at_x_zero(&state, AI, ObjectId(0), &root),
+            (XDependency::XDependent, ZeroProof::Unknown),
+            "an X reference outside the scalar payload must prevent a modal veto"
+        );
+    }
 
     #[test]
     fn drown_in_dreams_modal_x_zero_rejected() {
