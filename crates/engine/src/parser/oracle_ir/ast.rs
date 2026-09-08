@@ -2278,7 +2278,7 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
     let mut refused_bound: Option<crate::types::ability::ResolutionCastWindow> = None;
     // CR 611.2a (#7959): the inner lifetime condition the engine cannot evaluate.
     let mut unevaluable_lifetime: Option<String> = None;
-    // CR 601.2b + CR 118.9a: the card filter of a hand-origin FREE cast grant that
+    // CR 601.2b + CR 118.9: the card filter of a hand-origin FREE cast grant that
     // a stated lifetime turns into a player-scoped permission (see the arm below).
     let mut hand_free_permission_filter: Option<TargetFilter> = None;
     match effect {
@@ -2366,7 +2366,7 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
             ref mana_spend_permission,
             ..
         } => {
-            // CR 601.2b + CR 118.9a + CR 611.2a: "Until end of turn, you may cast
+            // CR 601.2b + CR 118.9 + CR 611.2a: "Until end of turn, you may cast
             // spells FROM YOUR HAND without paying their mana costs" (Chandra,
             // Flame's Catalyst) is Omniscience for a turn — a PLAYER-scoped
             // permission over a set the game keeps re-reading, not a per-object
@@ -2525,7 +2525,7 @@ fn apply_duration_to_effect(effect: &mut Effect, duration: &Duration) {
     } else if let Some(fragment) = unevaluable_lifetime {
         *effect = Effect::unimplemented("cast_from_zone_unevaluable_lifetime", fragment);
     } else if let Some(filter) = hand_free_permission_filter {
-        // CR 601.2b + CR 118.9a: see the `CastFromZone` arm. `modifications`
+        // CR 601.2b + CR 118.9: see the `CastFromZone` arm. `modifications`
         // carries the mode a second time because that is the shape
         // `effect.rs::register_transient_effect` dispatches on — the same pairing
         // `MayLookAtFaceDown` uses. The duration is written here rather than left

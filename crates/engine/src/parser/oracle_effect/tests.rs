@@ -61612,7 +61612,7 @@ fn a_free_cast_grant_with_a_stated_lifetime_is_a_lingering_permission() {
     }
 }
 
-/// CR 601.2b + CR 118.9a + CR 611.2a: the HAND-ORIGIN row of this class does not
+/// CR 601.2b + CR 118.9 + CR 611.2a: the HAND-ORIGIN row of this class does not
 /// take the lingering `CastFromZone` mechanism at all — it is promoted out of
 /// `CastFromZone` entirely.
 ///

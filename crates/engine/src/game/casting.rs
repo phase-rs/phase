@@ -5809,7 +5809,7 @@ fn cast_free_permission_from_source(
     })
 }
 
-/// CR 601.2b + CR 118.9a + CR 611.2a: The player-scoped counterpart to
+/// CR 601.2b + CR 118.9 + CR 611.2a: The player-scoped counterpart to
 /// `cast_free_permission_from_source`. A `CastFromHandFree` permission created by
 /// a RESOLVING ability ("Until end of turn, you may cast spells from your hand
 /// without paying their mana costs" — Chandra, Flame's Catalyst's ultimate) is

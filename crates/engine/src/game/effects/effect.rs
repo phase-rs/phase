@@ -303,7 +303,7 @@ fn register_transient_effect(
         }
     }
 
-    // CR 601.2b + CR 118.9a + CR 611.2c: A duration-bound "you may cast [filter]
+    // CR 601.2b + CR 118.9 + CR 611.2c: A duration-bound "you may cast [filter]
     // from your hand without paying their mana costs" permission (Chandra,
     // Flame's Catalyst's ultimate) is a PLAYER-scoped rules modification, not an
     // object grant. The set of cards it covers is re-read at every cast attempt —

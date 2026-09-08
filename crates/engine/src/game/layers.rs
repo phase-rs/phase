@@ -7019,7 +7019,7 @@ pub(crate) fn gather_transient_continuous_effects(
             // characteristic. Grafting it onto each affected object would let
             // `battlefield_active_statics` see it too and double-apply the
             // discount, so skip it here for the same reason.
-            // CR 601.2b + CR 118.9a: `CastFromHandFree` joins them for the same
+            // CR 601.2b + CR 118.9: `CastFromHandFree` joins them for the same
             // reason. It is read directly off the TCE by
             // `casting::transient_cast_free_permission` — the transient arm of
             // the single free-cast authority

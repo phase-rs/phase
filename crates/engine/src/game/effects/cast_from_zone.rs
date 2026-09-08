@@ -3310,10 +3310,8 @@ mod tests {
     /// every priority. That is the same re-offer the `from == Zone::Stack` block
     /// exists to prevent, reached through the other door.
     ///
-    /// Driven through `zones::move_to_zone` rather than a `GameRunner` fixture
-    /// because the rule under test IS the zone-exit lifecycle: the production
-    /// entry point for that lifecycle is this move, and the assertion is about
-    /// what the move leaves behind.
+    /// Driven through the resolved zone-command core and then replayed, because
+    /// both live execution and journal replay must leave the same permission state.
     ///
     /// DISCRIMINATING: with `Zone::Hand` dropped from the exit condition, the
     /// permission is still on the card in the graveyard.
@@ -3330,7 +3328,20 @@ mod tests {
             "reach guard: the in-place hand grant must have been recorded"
         );
 
-        crate::game::zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        let mut replayed = state.clone();
+        let command = crate::game::zones::resolve_and_apply_zone_change(
+            &mut state,
+            card,
+            Zone::Hand,
+            Zone::Graveyard,
+            PlayerId(0),
+            crate::types::game_state::ZoneChangeRecord::test_minimal(
+                card,
+                Some(Zone::Hand),
+                Zone::Graveyard,
+            ),
+        )
+        .expect("live hand exit must resolve");
 
         assert_eq!(
             state.objects[&card].zone,
@@ -3342,6 +3353,12 @@ mod tests {
             "CR 400.7: the hand grant must not ride the discard into the graveyard, \
              where the graveyard cast path would re-offer it; got {:?}",
             state.objects[&card].casting_permissions
+        );
+        crate::game::zones::apply_resolved_zone_change(&mut replayed, &command)
+            .expect("hand exit command must replay");
+        assert!(
+            replayed.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: replay must not retain a hand-origin cast permission"
         );
     }
 
@@ -3375,7 +3392,20 @@ mod tests {
             "reach guard: the in-place graveyard grant must have been recorded"
         );
 
-        crate::game::zones::move_to_zone(&mut state, card, Zone::Exile, &mut events);
+        let mut replayed = state.clone();
+        let command = crate::game::zones::resolve_and_apply_zone_change(
+            &mut state,
+            card,
+            Zone::Graveyard,
+            Zone::Exile,
+            PlayerId(0),
+            crate::types::game_state::ZoneChangeRecord::test_minimal(
+                card,
+                Some(Zone::Graveyard),
+                Zone::Exile,
+            ),
+        )
+        .expect("live graveyard exit must resolve");
 
         assert_eq!(
             state.objects[&card].zone,
@@ -3387,6 +3417,12 @@ mod tests {
             "CR 400.7: the graveyard grant must not travel with the card into exile, \
              where the exile cast path would re-offer it; got {:?}",
             state.objects[&card].casting_permissions
+        );
+        crate::game::zones::apply_resolved_zone_change(&mut replayed, &command)
+            .expect("graveyard exit command must replay");
+        assert!(
+            replayed.objects[&card].casting_permissions.is_empty(),
+            "CR 400.7: replay must not retain a graveyard-origin cast permission"
         );
     }
 

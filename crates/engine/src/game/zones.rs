@@ -478,16 +478,7 @@ pub(crate) fn apply_zone_exit_cleanup(
         // (`Plotted` from CR 702.170a, `Foretold` from CR 702.143a) are
         // deliberately absent: those are granted at the exile side of the same
         // move and must survive it.
-        if matches!(from, Zone::Hand | Zone::Graveyard) && to != Zone::Stack {
-            obj_mut.casting_permissions.retain(|p| {
-                !matches!(
-                    p,
-                    crate::types::ability::CastingPermission::ExileWithAltCost { .. }
-                        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
-                        | crate::types::ability::CastingPermission::PlayFromExile { .. }
-                )
-            });
-        }
+        clear_hand_or_graveyard_casting_permissions_on_exit(obj_mut, from, to);
 
         if from == Zone::Battlefield {
             obj_mut.reset_for_battlefield_exit();
@@ -988,6 +979,26 @@ pub(crate) fn clear_cast_origin_off_provenance_zones(
     }
 }
 
+/// CR 400.7 + CR 118.9: an in-place hand/graveyard cast or play permission
+/// cannot survive a zone change other than the permitted cast to the stack.
+/// Both the live cleanup and resolved-command replay call this authority.
+fn clear_hand_or_graveyard_casting_permissions_on_exit(
+    obj: &mut crate::game::game_object::GameObject,
+    from: Zone,
+    to: Zone,
+) {
+    if matches!(from, Zone::Hand | Zone::Graveyard) && to != Zone::Stack {
+        obj.casting_permissions.retain(|permission| {
+            !matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                    | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+                    | crate::types::ability::CastingPermission::PlayFromExile { .. }
+            )
+        });
+    }
+}
+
 pub fn apply_resolved_zone_change(
     state: &mut GameState,
     command: &ResolvedZoneChangeCommand,
@@ -1082,6 +1093,7 @@ pub fn apply_resolved_zone_change(
         .get_mut(&command.object.object_id)
         .expect("validated zone command object remains live");
     object.zone = command.to;
+    clear_hand_or_graveyard_casting_permissions_on_exit(object, command.from, command.to);
     // CR 400.7 + CR 601.2i: replay bypasses `apply_zone_exit_cleanup`, so it
     // must reproduce the live Stack-exit carrier clear from the recorded move.
     if command.from == Zone::Stack && command.to != Zone::Stack {
