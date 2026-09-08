@@ -495,7 +495,7 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
     }
 
     if has_relevant_functioning_trigger(ctx.state, *object_id)
-        || cast_has_relevant_payoff(ctx.state, ctx.ai_player)
+        || cast_has_relevant_payoff(ctx.state, ctx.ai_player, Some(*object_id))
     {
         return false;
     }
@@ -504,9 +504,15 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
 }
 
 /// Returns whether recording this cast leaves a currently available consumer
-/// not proven unchanged. This remains a narrow fail-open check rather than a
-/// projection of later game state.
-fn cast_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool {
+/// not proven unchanged. The candidate's already-proven direct spell tree is
+/// not counted as its own consumer; all other metadata and definitions remain
+/// fail-open. This remains a narrow check rather than a projection of later
+/// game state.
+fn cast_has_relevant_payoff(
+    state: &GameState,
+    caster: PlayerId,
+    candidate_spell: Option<ObjectId>,
+) -> bool {
     let casts_this_turn = state
         .spells_cast_this_turn_by_player
         .get(&caster)
@@ -563,7 +569,7 @@ fn cast_has_relevant_payoff(state: &GameState, caster: PlayerId) -> bool {
             (matches!(object.zone, Zone::Battlefield | Zone::Stack)
                 || castable_spells.contains(&object.id))
                 && spell_identity_is_available_to_caster(state, caster, object)
-                && object_has_cast_unstable_consumer(state, object)
+                && object_has_cast_unstable_consumer(state, object, candidate_spell)
         })
         || game_functioning_statics(state)
             .any(|(_, definition)| !static_definition_is_cast_stable_for_pre_cast(definition))
@@ -593,6 +599,7 @@ fn ability_has_cast_unstable_consumer(definition: &AbilityDefinition) -> bool {
 fn object_has_cast_unstable_consumer(
     state: &GameState,
     object: &engine::game::game_object::GameObject,
+    candidate_spell: Option<ObjectId>,
 ) -> bool {
     !object.casting_restrictions.is_empty()
         || object
@@ -605,6 +612,15 @@ fn object_has_cast_unstable_consumer(
             .is_some_and(|cost| !additional_cost_is_cast_stable_for_pre_cast(cost))
         || object.abilities.iter().any(|ability| {
             ability_has_cast_unstable_consumer(ability)
+                && !(candidate_spell == Some(object.id)
+                    && definition_is_componentwise_known_zero(
+                        state,
+                        ability,
+                        object.controller,
+                        object.id,
+                        true,
+                        false,
+                    ))
                 && !(object.zone == Zone::Battlefield
                     && engine::game::mana_abilities::is_mana_ability(ability)
                     && mana_ability_has_only_unbound_variable_quantities(ability))
@@ -2225,13 +2241,13 @@ mod tests {
             }
 
             assert!(
-                cast_has_relevant_payoff(&state, PlayerId(1)),
+                cast_has_relevant_payoff(&state, PlayerId(1), None),
                 "a nonactive teammate's {day_night:?} boundary is retained until the transition authority is team-aware"
             );
 
             state.day_night = None;
             assert!(
-                !cast_has_relevant_payoff(&state, PlayerId(1)),
+                !cast_has_relevant_payoff(&state, PlayerId(1), None),
                 "removing only the shared-team Day/Night boundary restores the no-payoff result"
             );
         }
@@ -2886,11 +2902,45 @@ mod tests {
         state.waiting_for = WaitingFor::Priority { player: P0 };
 
         assert_eq!(harvest_amount(state, harvest), Some(0));
-        assert!(
-            !engine::ai_support::candidate_actions(state).iter().any(|candidate| {
+        let pre_harvest_cast = engine::ai_support::candidate_actions(state)
+            .into_iter()
+            .find(|candidate| {
                 matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == held_draw)
-            }),
-            "the production availability authority rejects the held spell before a graveyard card exists"
+            })
+            .expect("the engine issues a held-spell cast before resource payment preflight")
+            .action;
+        let pre_harvest_state = state.clone();
+        let mut rejected_state = state.clone();
+        let rejected =
+            engine::game::engine::apply_as_current(&mut rejected_state, pre_harvest_cast);
+        assert!(
+            matches!(
+                rejected,
+                Err(engine::game::engine::EngineError::ActionNotAllowed(_))
+            ),
+            "the casting authority rejects the unpayable graveyard-exile cost"
+        );
+        assert_eq!(
+            rejected_state.players[P0.0 as usize].hand,
+            pre_harvest_state.players[P0.0 as usize].hand,
+            "the rejected cast rolls back the held spell"
+        );
+        assert_eq!(
+            rejected_state.players[P0.0 as usize].graveyard,
+            pre_harvest_state.players[P0.0 as usize].graveyard,
+            "the rejected cast rolls back graveyard payment state"
+        );
+        assert_eq!(
+            rejected_state.stack, pre_harvest_state.stack,
+            "the rejected cast does not commit a stack entry"
+        );
+        assert_eq!(
+            rejected_state.pending_cast, pre_harvest_state.pending_cast,
+            "the rejected cast restores the pending-cast boundary"
+        );
+        assert_eq!(
+            rejected_state.waiting_for, pre_harvest_state.waiting_for,
+            "the rejected cast restores the priority boundary"
         );
         assert!(
             zero_cast_is_retained(state, harvest),
@@ -3419,7 +3469,7 @@ mod tests {
         state.battlefield.push_back(source);
 
         assert!(
-            object_has_cast_unstable_consumer(&state, &state.objects[&source]),
+            object_has_cast_unstable_consumer(&state, &state.objects[&source], None),
             "a battlefield non-mana activated ability reading the graveyard is a cast payoff"
         );
         assert!(
@@ -4287,6 +4337,102 @@ mod tests {
             true,
             false,
         ));
+    }
+
+    #[test]
+    fn zero_cast_unrestricted_discard_is_rejected_and_positive_is_retained() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mind_sludge = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Mind Sludge",
+                false,
+                "Target player discards a card for each Swamp you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Black],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 4));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Black, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+
+        assert!(
+            !zero_cast_is_retained(state, mind_sludge),
+            "the production gate rejects a pool-funded unrestricted zero Discard"
+        );
+
+        let swamp = create_object(
+            state,
+            CardId(91_601),
+            P0,
+            "Swamp".to_string(),
+            Zone::Battlefield,
+        );
+        let swamp_object = state.objects.get_mut(&swamp).expect("Swamp exists");
+        swamp_object.card_types.core_types.push(CoreType::Land);
+        swamp_object.card_types.subtypes.push("Swamp".to_string());
+        state.battlefield.push_back(swamp);
+        assert!(
+            zero_cast_is_retained(state, mind_sludge),
+            "the same production candidate remains when its unrestricted Discard is positive"
+        );
+    }
+
+    #[test]
+    fn zero_cast_bound_parent_target_chain_is_rejected_and_positive_is_retained() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let mut zero_chain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Player,
+            },
+        );
+        zero_chain.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::ParentTarget,
+            },
+        )));
+        *Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&congregate)
+                .expect("candidate spell exists")
+                .abilities,
+        ) = vec![zero_chain];
+
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "the production gate rejects a zero direct root with its bound ParentTarget continuation"
+        );
+
+        let Effect::GainLife { amount, .. } = &mut *Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&congregate)
+                .expect("candidate spell exists")
+                .abilities,
+        )
+        .first_mut()
+        .expect("candidate has one root ability")
+        .effect
+        else {
+            unreachable!("fixture root remains GainLife");
+        };
+        *amount = QuantityExpr::Fixed { value: 1 };
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "the same production candidate remains when its bound-root chain is positive"
+        );
     }
 
     #[test]

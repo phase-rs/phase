@@ -789,7 +789,8 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
 ) -> bool {
     // This exception is deliberately narrower than the main proof: it admits
     // only a root Mana payload and rejects every nested or metadata quantity
-    // carrier outright. The X chooser therefore has no second partial walk.
+    // carrier outright. A source-local counter-removal cost is an independent
+    // payment choice, so the X chooser has no second partial quantity walk.
     let AbilityDefinition {
         kind: _,
         effect,
@@ -838,7 +839,9 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
     if !activation_restrictions.is_empty()
         || !target_constraints.is_empty()
         || !mode_abilities.is_empty()
-        || !cost.as_ref().is_none_or(mana_exception_cost_is_static)
+        || !cost
+            .as_ref()
+            .is_none_or(mana_exception_cost_is_source_local)
     {
         return false;
     }
@@ -869,14 +872,16 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
     saw_unbound_variable && only_unbound_variables
 }
 
-fn mana_exception_cost_is_static(cost: &AbilityCost) -> bool {
-    matches!(
-        cost,
+fn mana_exception_cost_is_source_local(cost: &AbilityCost) -> bool {
+    match cost {
         AbilityCost::Mana { .. }
-            | AbilityCost::Tap
-            | AbilityCost::Untap
-            | AbilityCost::Loyalty { .. }
-    )
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::RemoveCounter { target: None, .. } => true,
+        AbilityCost::Composite { costs } => costs.iter().all(mana_exception_cost_is_source_local),
+        _ => false,
+    }
 }
 
 fn classify_unstable_quantity_for_mana_exception(
@@ -1083,13 +1088,15 @@ fn static_condition_is_cast_stable_for_pre_cast(condition: &StaticCondition) -> 
 /// This is intentionally an exhaustive positive proof over `TriggerDefinition`.
 /// Trigger mode and scalar event discriminators select an event family but do
 /// not read mutable state themselves; descriptions are presentation text.
-/// Filters, clauses, constraints, and tax costs are semantic consumers and
-/// therefore must be absent unless a dedicated proof is added below.
+/// Clauses, constraints, and tax costs are semantic consumers and therefore
+/// must be absent unless a dedicated proof is added below. Fixed type-only
+/// filters and `SelfRef` are the explicit exception: they do not read a game
+/// fact that recording an unrelated cast can change.
 pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefinition) -> bool {
     let TriggerDefinition {
         mode: _,
         execute,
-        valid_card: None,
+        valid_card,
         origin: _,
         origin_zones: _,
         zone_change_clauses,
@@ -1100,9 +1107,9 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         optional: _,
         damage_kind: _,
         secondary: _,
-        valid_target: None,
-        valid_subject_player: None,
-        valid_source: None,
+        valid_target,
+        valid_subject_player,
+        valid_source,
         spell_cast_origin: _,
         description: _,
         constraint: None,
@@ -1130,12 +1137,28 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
     };
 
     zone_change_clauses.is_empty()
+        && valid_card
+            .as_ref()
+            .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
+        && valid_target
+            .as_ref()
+            .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
+        && valid_subject_player
+            .as_ref()
+            .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
+        && valid_source
+            .as_ref()
+            .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
         && condition
             .as_ref()
             .is_none_or(trigger_condition_is_cast_stable_for_pre_cast)
         && execute
             .as_deref()
             .is_none_or(ability_definition_is_cast_stable_for_pre_cast)
+}
+
+fn trigger_filter_is_cast_stable_for_pre_cast(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::SelfRef) || target_filter_is_property_free_population(filter)
 }
 
 fn trigger_condition_is_cast_stable_for_pre_cast(condition: &TriggerCondition) -> bool {
@@ -1231,6 +1254,11 @@ fn effect_metadata_is_cast_stable_for_pre_cast(effect: &Effect) -> bool {
                 target: TargetFilter::Any,
                 damage_source: None,
                 excess: None,
+                ..
+            }
+            | Effect::PutCounter {
+                count: QuantityExpr::Fixed { .. },
+                target: TargetFilter::SelfRef,
                 ..
             }
     ) || matches!(
