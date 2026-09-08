@@ -7459,7 +7459,7 @@ pub enum PendingDiscardForCostResume {
         pending: PendingCast,
         remaining_eligible: Vec<ObjectId>,
         remaining_count: usize,
-        paused_pick: RandomDiscardCostPick,
+        paused_pick: Box<RandomDiscardCostPick>,
     },
 }
 

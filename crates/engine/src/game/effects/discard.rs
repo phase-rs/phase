@@ -598,11 +598,6 @@ pub fn resolve(
                 remaining_eligible,
                 remaining_count,
                 paused_card,
-                // `discard_at_random` already set `waiting_for` from this value
-                // and this path parks without re-setting it, so there is
-                // nothing here to keep in step. The drain that RE-parks does
-                // consume it.
-                chooser: _,
                 ..
             } = discard_at_random(
                 state,
@@ -815,7 +810,7 @@ pub(crate) enum RandomDiscardOutcome {
         paused_card: ObjectIncarnationRef,
         /// Pre-move cost referent data for the paused pick. Effect callers
         /// ignore it; cost callers preserve it until delivery completes.
-        paused_pick: crate::types::game_state::RandomDiscardCostPick,
+        paused_pick: Box<crate::types::game_state::RandomDiscardCostPick>,
         /// The replacement pipeline's selected chooser. Published by this
         /// authority rather than re-derived at the call site, because it is NOT
         /// always the discarding player — see the commander carve-out in
@@ -927,7 +922,7 @@ pub(crate) fn discard_at_random(
                 // CR 400.7: pinned before the redirect moves it, so the resume
                 // settles against this occurrence and not a later same-id one.
                 paused_card: selected.occurrence,
-                paused_pick: selected,
+                paused_pick: Box::new(selected),
                 // Same value this function just set `waiting_for` from, so a
                 // re-parking caller cannot drift from the prompt actually shown.
                 chooser,

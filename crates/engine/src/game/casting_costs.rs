@@ -2086,7 +2086,11 @@ fn resume_random_discard_cost_payment(
     else {
         unreachable!("random discard resume requires the random carrier")
     };
-    commit_random_discard_cost_picks(state, &mut pending, &[paused_pick]);
+    commit_random_discard_cost_picks(
+        state,
+        &mut pending,
+        std::slice::from_ref(paused_pick.as_ref()),
+    );
     if remaining_count > 0 {
         match super::effects::discard::discard_at_random(
             state,
