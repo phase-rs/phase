@@ -16772,7 +16772,9 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::{PlayerCounterKind, PlayerId};
-    use crate::types::resolution::{OptionalEffectFrame, ResolutionStateWire};
+    use crate::types::resolution::{
+        OptionalEffectFrame, ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
+    };
     use crate::types::statics::CastFrequency;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -18539,14 +18541,19 @@ mod tests {
         ));
         state.current_trigger_event = None;
 
-        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
-            .expect("real optional-effect prompt serializes as v2");
-        assert_eq!(v2["resolution_state_version"], 2);
-        assert!(v2.get("pending_optional_effect").is_none());
-        assert!(v2.get("pending_optional_trigger_event").is_none());
-        assert!(v2.get("pending_optional_trigger_match_count").is_none());
-        state = serde_json::from_value::<ResolutionStateWire>(v2)
-            .expect("real optional-effect prompt round-trips through the v2 wire")
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("real optional-effect prompt serializes through the current wire");
+        assert_eq!(
+            current["resolution_state_version"],
+            RESOLUTION_STATE_WIRE_VERSION
+        );
+        assert!(current.get("pending_optional_effect").is_none());
+        assert!(current.get("pending_optional_trigger_event").is_none());
+        assert!(current
+            .get("pending_optional_trigger_match_count")
+            .is_none());
+        state = serde_json::from_value::<ResolutionStateWire>(current)
+            .expect("real optional-effect prompt round-trips through the current wire")
             .into_game_state();
 
         crate::game::engine::apply(

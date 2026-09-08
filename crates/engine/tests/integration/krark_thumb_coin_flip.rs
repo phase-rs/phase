@@ -28,7 +28,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::ProposedEvent;
 use engine::types::replacements::ReplacementEvent;
-use engine::types::resolution::ResolutionStateWire;
+use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use std::collections::HashSet;
@@ -262,16 +262,20 @@ fn keeping_a_flip_emits_exactly_one_coin_flipped_and_returns_to_priority() {
         runner.state().active_coin_flip_frame().is_some(),
         "the typed coin-flip frame owns the real keep prompt"
     );
-    let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
-        .expect("real coin-flip prompt serializes as v2");
-    assert_eq!(v2["resolution_state_version"], 2);
-    assert!(v2.get("pending_coin_flip").is_none());
+    let current =
+        serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+            .expect("real coin-flip prompt serializes through the current wire");
+    assert_eq!(
+        current["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
+    assert!(current.get("pending_coin_flip").is_none());
     let restored: ResolutionStateWire =
-        serde_json::from_value(v2).expect("v2 coin-flip prompt round-trips");
+        serde_json::from_value(current).expect("current coin-flip prompt round-trips");
     *runner.state_mut() = restored.into_game_state();
     assert!(
         runner.state().active_coin_flip_frame().is_some(),
-        "the v2 round-trip preserves the prompt-owning coin-flip frame"
+        "the current round-trip preserves the prompt-owning coin-flip frame"
     );
 
     // Keep the first flip. (`act` dispatches as the current acting player, P0.)
