@@ -6,8 +6,10 @@ use engine::ai_support::{
 };
 use engine::game::casting::{
     cast_spell_face_choice_available, effective_spell_cost,
+    for_each_structurally_selectable_alternate_spell_payload,
     has_potentially_authorizing_object_cast_permission, spell_cost_is_payable_from_pool,
     spell_has_effective_keywords, spell_objects_available_to_cast,
+    StructurallySelectableAlternateSpellPayload,
 };
 use engine::game::combat::AttackTarget;
 use engine::game::functioning_abilities::{
@@ -572,7 +574,7 @@ fn cast_has_relevant_payoff(
             (matches!(object.zone, Zone::Battlefield | Zone::Stack)
                 || castable_spells.contains(&object.id))
                 && spell_identity_is_available_to_caster(state, caster, object)
-                && object_has_cast_unstable_consumer(state, object, candidate_spell)
+                && object_has_cast_unstable_consumer(state, caster, object, candidate_spell)
         })
         || state.objects.values().any(|object| {
             spell_identity_is_available_to_caster(state, caster, object)
@@ -609,6 +611,7 @@ fn ability_has_cast_unstable_consumer(definition: &AbilityDefinition) -> bool {
 
 fn object_has_cast_unstable_consumer(
     state: &GameState,
+    caster: PlayerId,
     object: &engine::game::game_object::GameObject,
     candidate_spell: Option<ObjectId>,
 ) -> bool {
@@ -656,11 +659,36 @@ fn object_has_cast_unstable_consumer(
             .as_slice()
             .iter()
             .any(|trigger| trigger_definition_has_cast_unstable_consumer(&trigger.definition))
+        || structurally_selectable_alternate_spell_payload_has_cast_unstable_consumer(
+            state, caster, object,
+        )
         || cast_spell_face_choice_available(object)
             && object
                 .back_face
                 .as_ref()
                 .is_some_and(back_face_has_cast_unstable_consumer)
+}
+
+fn structurally_selectable_alternate_spell_payload_has_cast_unstable_consumer(
+    state: &GameState,
+    caster: PlayerId,
+    object: &engine::game::game_object::GameObject,
+) -> bool {
+    let mut has_unstable_consumer = false;
+    for_each_structurally_selectable_alternate_spell_payload(state, caster, object.id, |payload| {
+        match payload {
+            StructurallySelectableAlternateSpellPayload::BackFace(back_face) => {
+                has_unstable_consumer |= back_face_has_cast_unstable_consumer(back_face);
+            }
+            StructurallySelectableAlternateSpellPayload::FuseRightSpellAbility(ability) => {
+                has_unstable_consumer |= ability_has_cast_unstable_consumer(ability);
+            }
+            StructurallySelectableAlternateSpellPayload::Cleave(cleave_variant) => {
+                has_unstable_consumer |= cleave_variant_has_cast_unstable_consumer(cleave_variant);
+            }
+        }
+    });
+    has_unstable_consumer
 }
 
 fn back_face_has_cast_unstable_consumer(
@@ -699,6 +727,24 @@ fn back_face_has_cast_unstable_consumer(
             .keywords
             .iter()
             .any(|keyword| keyword.kind() == KeywordKind::Unknown)
+}
+
+fn cleave_variant_has_cast_unstable_consumer(
+    cleave_variant: &engine::types::card::CleaveVariant,
+) -> bool {
+    cleave_variant
+        .abilities
+        .iter()
+        .any(ability_has_cast_unstable_consumer)
+        || cleave_variant
+            .static_abilities
+            .iter()
+            .any(|definition| !static_definition_is_cast_stable_for_pre_cast(definition))
+        || !cleave_variant.replacements.is_empty()
+        || cleave_variant
+            .triggers
+            .iter()
+            .any(trigger_definition_has_cast_unstable_consumer)
 }
 
 /// A mana ability's declared variable is selected while that ability is paid;
@@ -1612,7 +1658,7 @@ mod tests {
     use engine::types::ability::{
         QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
     };
-    use engine::types::card::{CardFace, LayoutKind};
+    use engine::types::card::{CardFace, CleaveVariant, LayoutKind};
     use engine::types::counter::{CounterMatch, CounterType};
     use engine::types::game_state::{
         CastingVariant, DelayedTrigger, NextSpellModifier, PendingCast, PendingNextSpellModifier,
@@ -2737,6 +2783,340 @@ mod tests {
         assert!(
             !zero_cast_is_retained(&state, congregate),
             "removing only the selectable back-face payoff restores known-zero rejection"
+        );
+    }
+
+    fn spell_count_after_this_cast() -> QuantityExpr {
+        QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }),
+            right: Box::new(QuantityExpr::Fixed { value: 1 }),
+        }
+    }
+
+    fn history_payoff_back_face(layout_kind: Option<LayoutKind>) -> BackFaceData {
+        let mut back_face = BackFaceData {
+            name: "Typed alternate history payoff".to_string(),
+            layout_kind,
+            ..BackFaceData::default()
+        };
+        back_face.card_types.core_types.push(CoreType::Sorcery);
+        back_face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: spell_count_after_this_cast(),
+                target: TargetFilter::Controller,
+            },
+        ));
+        back_face
+    }
+
+    fn alternate_payload_count(state: &GameState, player: PlayerId, object_id: ObjectId) -> usize {
+        let mut count = 0;
+        for_each_structurally_selectable_alternate_spell_payload(state, player, object_id, |_| {
+            count += 1
+        });
+        count
+    }
+
+    #[test]
+    fn alternate_payload_routes_are_zone_owner_and_keyword_bounded() {
+        let (mut state, _) = funded_zero_congregate_state();
+        let adventure = create_object(
+            &mut state,
+            CardId(91_864),
+            P0,
+            "Typed Adventure payload".to_string(),
+            Zone::Hand,
+        );
+        state.players[P0.0 as usize].hand.push_back(adventure);
+        {
+            let object = state
+                .objects
+                .get_mut(&adventure)
+                .expect("Adventure payload exists");
+            object.card_types.core_types.push(CoreType::Creature);
+            let mut back_face = history_payoff_back_face(Some(LayoutKind::Adventure));
+            back_face.card_types.subtypes.push("Adventure".to_string());
+            object.back_face = Some(back_face);
+        }
+
+        let omen = create_object(
+            &mut state,
+            CardId(91_865),
+            P0,
+            "Typed Omen payload".to_string(),
+            Zone::Hand,
+        );
+        state.players[P0.0 as usize].hand.push_back(omen);
+        {
+            let object = state.objects.get_mut(&omen).expect("Omen payload exists");
+            object.card_types.core_types.push(CoreType::Enchantment);
+            let mut back_face = history_payoff_back_face(Some(LayoutKind::Omen));
+            back_face.card_types.subtypes.push("Omen".to_string());
+            object.back_face = Some(back_face);
+        }
+
+        let mtmte = create_object(
+            &mut state,
+            CardId(91_868),
+            P0,
+            "Typed MTMTE payload".to_string(),
+            Zone::Hand,
+        );
+        state.players[P0.0 as usize].hand.push_back(mtmte);
+        {
+            let object = state.objects.get_mut(&mtmte).expect("MTMTE payload exists");
+            object.card_types.core_types.push(CoreType::Creature);
+            object
+                .keywords
+                .push(Keyword::MoreThanMeetsTheEye(ManaCost::zero()));
+            object.back_face = Some(history_payoff_back_face(Some(LayoutKind::Transform)));
+        }
+
+        let disturb = create_object(
+            &mut state,
+            CardId(91_869),
+            P0,
+            "Typed Disturb payload".to_string(),
+            Zone::Graveyard,
+        );
+        state.players[P0.0 as usize].graveyard.push_back(disturb);
+        {
+            let object = state
+                .objects
+                .get_mut(&disturb)
+                .expect("Disturb payload exists");
+            object.card_types.core_types.push(CoreType::Creature);
+            object.keywords.push(Keyword::Disturb(ManaCost::zero()));
+            object
+                .base_keywords
+                .push(Keyword::Disturb(ManaCost::zero()));
+            object.back_face = Some(history_payoff_back_face(Some(LayoutKind::Transform)));
+        }
+
+        for (family, object_id) in [
+            ("Adventure", adventure),
+            ("Omen", omen),
+            ("More Than Meets the Eye", mtmte),
+            ("Disturb", disturb),
+        ] {
+            assert_eq!(
+                alternate_payload_count(&state, P0, object_id),
+                1,
+                "{family} admits its production alternate payload"
+            );
+            assert!(
+                structurally_selectable_alternate_spell_payload_has_cast_unstable_consumer(
+                    &state,
+                    P0,
+                    &state.objects[&object_id],
+                ),
+                "{family}'s alternate payload reaches the stability walker"
+            );
+        }
+
+        state
+            .objects
+            .get_mut(&adventure)
+            .expect("Adventure remains")
+            .zone = Zone::Battlefield;
+        assert_eq!(
+            alternate_payload_count(&state, P0, adventure),
+            0,
+            "Adventure's stored spell face is not scanned outside its hand/commander route"
+        );
+        state.objects.get_mut(&mtmte).expect("MTMTE remains").owner = P1;
+        assert_eq!(
+            alternate_payload_count(&state, P0, mtmte),
+            0,
+            "another player's hand payload is not attributed to this caster"
+        );
+        state
+            .objects
+            .get_mut(&disturb)
+            .expect("Disturb remains")
+            .zone = Zone::Hand;
+        assert_eq!(
+            alternate_payload_count(&state, P0, disturb),
+            0,
+            "Disturb's transformed payload is limited to its graveyard route"
+        );
+    }
+
+    #[test]
+    fn held_fuse_right_half_history_payoff_is_paired_and_resolves() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let draw = create_object(
+            &mut state,
+            CardId(91_870),
+            P0,
+            "Fuse payoff draw".to_string(),
+            Zone::Library,
+        );
+        state.players[P0.0 as usize].library.push_back(draw);
+        let fuse = create_object(
+            &mut state,
+            CardId(91_866),
+            P0,
+            "Typed Fuse witness".to_string(),
+            Zone::Hand,
+        );
+        state.players[P0.0 as usize].hand.push_back(fuse);
+        {
+            let object = state.objects.get_mut(&fuse).expect("Fuse witness exists");
+            object.card_types.core_types.push(CoreType::Instant);
+            object.abilities = Arc::new(vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::NoOp,
+            )]);
+            object.keywords.push(Keyword::Fuse);
+            let mut right_half = BackFaceData {
+                name: "Typed Fuse right half".to_string(),
+                layout_kind: Some(LayoutKind::Split),
+                ..BackFaceData::default()
+            };
+            right_half.card_types.core_types.push(CoreType::Sorcery);
+            right_half.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: spell_count_after_this_cast(),
+                    target: TargetFilter::Controller,
+                },
+            ));
+            object.back_face = Some(right_half);
+        }
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "the Fuse right-half payload retains the setup cast"
+        );
+
+        let mut before_setup = GameRunner::from_state(state.clone());
+        before_setup
+            .cast(fuse)
+            .casting_variant(CastingVariant::Fuse)
+            .resolve()
+            .assert_hand_drawn(P0, 0);
+
+        let mut after_setup = GameRunner::from_state(state.clone());
+        after_setup.cast(congregate).target_player(P0).resolve();
+        after_setup
+            .cast(fuse)
+            .casting_variant(CastingVariant::Fuse)
+            .resolve()
+            .assert_hand_drawn(P0, 1);
+
+        state
+            .objects
+            .get_mut(&fuse)
+            .and_then(|object| object.back_face.as_mut())
+            .expect("Fuse right half remains")
+            .abilities
+            .clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the Fuse right-half payload restores known-zero rejection"
+        );
+
+        state
+            .objects
+            .get_mut(&fuse)
+            .and_then(|object| object.back_face.as_mut())
+            .expect("Fuse right half remains")
+            .abilities
+            .push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: spell_count_after_this_cast(),
+                    target: TargetFilter::Controller,
+                },
+            ));
+        assert_eq!(
+            alternate_payload_count(&state, P0, fuse),
+            0,
+            "Fuse exposes only right-half spell definitions to the payload visitor"
+        );
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "a typed non-spell right-half definition cannot retain the setup cast"
+        );
+    }
+
+    #[test]
+    fn held_cleave_history_payload_is_paired_and_resolves() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let draw = create_object(
+            &mut state,
+            CardId(91_871),
+            P0,
+            "Cleave payoff draw".to_string(),
+            Zone::Library,
+        );
+        state.players[P0.0 as usize].library.push_back(draw);
+        let cleave = create_object(
+            &mut state,
+            CardId(91_867),
+            P0,
+            "Typed Cleave witness".to_string(),
+            Zone::Hand,
+        );
+        state.players[P0.0 as usize].hand.push_back(cleave);
+        {
+            let object = state
+                .objects
+                .get_mut(&cleave)
+                .expect("Cleave witness exists");
+            object.card_types.core_types.push(CoreType::Instant);
+            object.abilities = Arc::new(vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::NoOp,
+            )]);
+            object.keywords.push(Keyword::Cleave(ManaCost::zero()));
+            object.cleave_variant = Some(CleaveVariant {
+                abilities: vec![AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: spell_count_after_this_cast(),
+                        target: TargetFilter::Controller,
+                    },
+                )],
+                ..CleaveVariant::default()
+            });
+        }
+
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "the Cleave payload retains the setup cast"
+        );
+
+        let mut before_setup = GameRunner::from_state(state.clone());
+        before_setup
+            .cast(cleave)
+            .alternative_cast(engine::types::actions::AlternativeCastDecision::Alternative)
+            .resolve()
+            .assert_hand_drawn(P0, 0);
+
+        let mut after_setup = GameRunner::from_state(state.clone());
+        after_setup.cast(congregate).target_player(P0).resolve();
+        after_setup
+            .cast(cleave)
+            .alternative_cast(engine::types::actions::AlternativeCastDecision::Alternative)
+            .resolve()
+            .assert_hand_drawn(P0, 1);
+
+        state
+            .objects
+            .get_mut(&cleave)
+            .expect("Cleave witness remains")
+            .cleave_variant = None;
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the Cleave payload restores known-zero rejection"
         );
     }
 
@@ -3939,7 +4319,7 @@ mod tests {
         state.battlefield.push_back(source);
 
         assert!(
-            object_has_cast_unstable_consumer(&state, &state.objects[&source], None),
+            object_has_cast_unstable_consumer(&state, P0, &state.objects[&source], None),
             "a battlefield non-mana activated ability reading the graveyard is a cast payoff"
         );
         assert!(

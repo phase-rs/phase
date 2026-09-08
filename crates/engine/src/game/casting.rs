@@ -6431,6 +6431,121 @@ struct PreparedCastingVariant {
     prepared: PreparedSpellCast,
 }
 
+/// CR 601.2b: A player chooses an alternative casting method while casting,
+/// before mutable cost and condition checks determine whether it is payable.
+///
+/// An independently stored spell-definition payload that the current casting
+/// routes can select before cast-time affordability and other mutable checks.
+///
+/// These are deliberately definition payloads rather than prepared variants:
+/// a consumer deciding whether a prospective cast can change a later payoff
+/// must not discard a route merely because its cost or condition is false now.
+pub enum StructurallySelectableAlternateSpellPayload<'a> {
+    /// CR 715.3a + CR 720.3a + CR 712.8c: Adventure and Omen casts evaluate
+    /// their alternative characteristics, while transformed or converted
+    /// double-faced casts use their back-face characteristics.
+    ///
+    /// An Adventure/Omen, More Than Meets the Eye, or Disturb route swaps to
+    /// the stored face before the spell is prepared.
+    BackFace(&'a super::game_object::BackFaceData),
+    /// CR 702.102a: Fuse lets a player cast both halves of a split card from
+    /// their hand, appending the right-half spell instructions.
+    FuseRightSpellAbility(&'a AbilityDefinition),
+    /// CR 702.148a: Cleave replaces the card's normal spell text with its
+    /// bracketless alternate definition while casting it.
+    ///
+    /// Cleave replaces all four stored definition classes before preparation.
+    Cleave(&'a crate::types::card::CleaveVariant),
+}
+
+/// Visits alternate variant or offer payloads beyond ordinary face choice that
+/// are structurally selectable by the existing cast routes for `player`.
+///
+/// The route gates intentionally precede dynamic preparation and payment. A
+/// cast made now can alter a condition or cost that makes one of these routes
+/// available later in the same turn.
+pub fn for_each_structurally_selectable_alternate_spell_payload(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    mut visit: impl FnMut(StructurallySelectableAlternateSpellPayload<'_>),
+) {
+    let Some(object) = state.objects.get(&object_id) else {
+        return;
+    };
+    let owned_hand_card = object.zone == Zone::Hand && object.owner == player;
+    let owned_commander = state.format_config.command_zone
+        && object.zone == Zone::Command
+        && object.owner == player
+        && object.is_commander;
+
+    if (owned_hand_card || owned_commander) && alternative_spell_layout(object).is_some() {
+        if let Some(back_face) = object.back_face.as_ref() {
+            visit(StructurallySelectableAlternateSpellPayload::BackFace(
+                back_face,
+            ));
+        }
+    }
+
+    if owned_hand_card
+        && object
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Fuse))
+        && object
+            .back_face
+            .as_ref()
+            .is_some_and(|back_face| back_face.layout_kind == Some(LayoutKind::Split))
+    {
+        if let Some(back_face) = object.back_face.as_ref() {
+            for ability in back_face
+                .abilities
+                .iter()
+                .filter(|ability| ability.kind == AbilityKind::Spell)
+            {
+                visit(StructurallySelectableAlternateSpellPayload::FuseRightSpellAbility(ability));
+            }
+        }
+    }
+
+    if owned_hand_card
+        && object
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::MoreThanMeetsTheEye(_)))
+    {
+        if let Some(back_face) = object.back_face.as_ref() {
+            visit(StructurallySelectableAlternateSpellPayload::BackFace(
+                back_face,
+            ));
+        }
+    }
+
+    if object.zone == Zone::Graveyard
+        && object.owner == player
+        && super::keywords::effective_disturb_cost(state, object_id).is_some()
+    {
+        if let Some(back_face) = object.back_face.as_ref() {
+            visit(StructurallySelectableAlternateSpellPayload::BackFace(
+                back_face,
+            ));
+        }
+    }
+
+    if owned_hand_card
+        && object
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Cleave(_)))
+    {
+        if let Some(cleave_variant) = object.cleave_variant.as_ref() {
+            visit(StructurallySelectableAlternateSpellPayload::Cleave(
+                cleave_variant,
+            ));
+        }
+    }
+}
+
 struct CastableSpellVerdict {
     payment_state: Option<GameState>,
     prepared_cost: Option<ManaCost>,
