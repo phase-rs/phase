@@ -3187,7 +3187,7 @@ fn score_candidates_core(
             ai_player,
             &effective_profile,
             Some(session.as_ref()),
-            context.opponent_threat.as_ref(),
+            services.context.opponent_threat.as_ref(),
             Some(services.deadline),
         ) {
             return vec![(action, 1.0)];
