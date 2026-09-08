@@ -6866,7 +6866,7 @@ mod tests {
             shards: vec![ManaCostShard::X, ManaCostShard::Blue],
             generic: 2,
         };
-        object.card_types.core_types.push(CoreType::Sorcery);
+        object.card_types.core_types.push(CoreType::Instant);
         *Arc::make_mut(&mut object.abilities) = vec![
             AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -6897,7 +6897,7 @@ mod tests {
         ];
         object.modal = Some(ModalChoice {
             min_choices: 1,
-            max_choices: 2,
+            max_choices: 1,
             mode_count: 2,
             constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: ModalSelectionCondition::Static {

@@ -516,9 +516,10 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCondition, Comparator, ContinuousModification, Duration, FilterProp, ModalChoice,
-        OpponentMayScope, QuantityExpr, QuantityRef, ReplacementDefinition, StaticDefinition,
-        TargetFilter, TypedFilter,
+        AbilityCondition, CommanderOwnership, Comparator, ContinuousModification, Duration,
+        FilterProp, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+        OpponentMayScope, QuantityExpr, QuantityRef, ReplacementDefinition, StaticCondition,
+        StaticDefinition, TargetFilter, TypedFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
@@ -653,7 +654,7 @@ mod tests {
             shards: vec![ManaCostShard::X, ManaCostShard::Blue],
             generic: 2,
         };
-        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.card_types.core_types.push(CoreType::Instant);
         *Arc::make_mut(&mut obj.abilities) = vec![
             spell(Effect::Draw {
                 count: x_expr(),
@@ -672,6 +673,15 @@ mod tests {
             min_choices: 1,
             max_choices: 1,
             mode_count: 2,
+            constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::Static {
+                    condition: StaticCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Any,
+                    },
+                },
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }],
             ..ModalChoice::default()
         });
         (id, card_id)
