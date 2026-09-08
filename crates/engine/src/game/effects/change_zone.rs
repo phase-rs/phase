@@ -480,12 +480,8 @@ pub(crate) fn exact_scoped_graveyard_exile_is_infeasible(
     else {
         return None;
     };
-    let Some(spec) = ability.multi_target.as_ref() else {
-        return None;
-    };
-    let Some(max) = spec.max.as_ref() else {
-        return None;
-    };
+    let spec = ability.multi_target.as_ref()?;
+    let max = spec.max.as_ref()?;
     let canonical_properties = [
         FilterProp::Owned {
             controller: ControllerRef::ScopedPlayer,
