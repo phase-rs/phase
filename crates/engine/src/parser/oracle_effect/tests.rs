@@ -13624,7 +13624,7 @@ fn all_player_hand_shuffle_normalizer_requires_an_immediate_defaulted_pair() {
             target: TargetFilter::Any,
         },
     ]);
-    normalize_all_player_hand_to_library_shuffle_targets(&mut exact);
+    normalize_all_player_library_shuffle_chain(&mut exact);
     assert!(matches!(
         &*exact.effect,
         Effect::ChangeZoneAll {
@@ -13645,7 +13645,7 @@ fn all_player_hand_shuffle_normalizer_requires_an_immediate_defaulted_pair() {
             target: TargetFilter::Controller,
         },
     ]);
-    normalize_all_player_hand_to_library_shuffle_targets(&mut non_hand);
+    normalize_all_player_library_shuffle_chain(&mut non_hand);
     assert!(matches!(
         &*non_hand.effect,
         Effect::ChangeZoneAll {
@@ -13669,7 +13669,7 @@ fn all_player_hand_shuffle_normalizer_requires_an_immediate_defaulted_pair() {
             target: TargetFilter::Controller,
         },
     ]);
-    normalize_all_player_hand_to_library_shuffle_targets(&mut anaphoric_target);
+    normalize_all_player_library_shuffle_chain(&mut anaphoric_target);
     assert!(matches!(
         &*anaphoric_target.effect,
         Effect::ChangeZoneAll {
@@ -13694,7 +13694,7 @@ fn all_player_hand_shuffle_normalizer_requires_an_immediate_defaulted_pair() {
             target: TargetFilter::Controller,
         },
     ]);
-    normalize_all_player_hand_to_library_shuffle_targets(&mut intervening_move);
+    normalize_all_player_library_shuffle_chain(&mut intervening_move);
     assert!(matches!(
         &*intervening_move.effect,
         Effect::ChangeZoneAll {
@@ -13734,7 +13734,7 @@ fn all_player_hand_shuffle_normalizer_requires_an_immediate_defaulted_pair() {
             target: TargetFilter::Controller,
         },
     ]);
-    normalize_all_player_hand_to_library_shuffle_targets(&mut intervening_draw);
+    normalize_all_player_library_shuffle_chain(&mut intervening_draw);
     assert!(matches!(
         &*intervening_draw.effect,
         Effect::ChangeZoneAll {

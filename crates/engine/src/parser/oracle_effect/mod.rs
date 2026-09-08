@@ -30682,12 +30682,11 @@ fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
     }
 }
 
-/// CR 608.2c + CR 701.24a: An all-player whole-hand shuffle is one local
-/// instruction per player: move that player's hand into their library, then
-/// shuffle that same library. The ordinary target walker intentionally excludes
-/// `Shuffle`, so normalize only the immediate exact structural pair rather than
-/// making shuffle targets globally rewritable.
-fn normalize_all_player_hand_to_library_shuffle_targets(def: &mut AbilityDefinition) {
+/// CR 608.2c + CR 701.24a: An all-player library shuffle is one local
+/// instruction per player. Normalize only its immediate structural chain:
+/// the ordinary target walker intentionally excludes `Shuffle`, and an
+/// EventContextAmount draw after that shuffle belongs to the same iteration.
+fn normalize_all_player_library_shuffle_chain(def: &mut AbilityDefinition) {
     if !matches!(def.player_scope, Some(PlayerFilter::All)) {
         return;
     }
@@ -30696,20 +30695,44 @@ fn normalize_all_player_hand_to_library_shuffle_targets(def: &mut AbilityDefinit
         return;
     };
 
-    let (
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Hand),
-            destination: Zone::Library,
-            target: move_target,
-            ..
-        },
-        Effect::Shuffle {
-            target: shuffle_target,
-        },
-    ) = (&mut *def.effect, &mut *shuffle.effect)
+    let Effect::ChangeZoneAll {
+        origin,
+        destination: Zone::Library,
+        target: move_target,
+        ..
+    } = &mut *def.effect
     else {
         return;
     };
+    let Effect::Shuffle {
+        target: shuffle_target,
+    } = &mut *shuffle.effect
+    else {
+        return;
+    };
+
+    // CR 608.2c + CR 121.1: The Great Aurora class keeps "then draws
+    // that many" in the same per-player shuffle instruction. This pass runs
+    // after the full chain is assembled, so bind that continuation here rather
+    // than in the clause-local subject injector.
+    if let Some(draw) = shuffle.sub_ability.as_deref_mut() {
+        if let Effect::Draw {
+            count:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            target,
+        } = &mut *draw.effect
+        {
+            if matches!(target, TargetFilter::Controller | TargetFilter::Any) {
+                *target = TargetFilter::ScopedPlayer;
+            }
+        }
+    }
+
+    if *origin != Some(Zone::Hand) {
+        return;
+    }
 
     // Only parser-default controller/any targets may be rebound. A concrete
     // player class or anaphoric target is semantically meaningful and must not
@@ -30865,7 +30888,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     if matches!(def.player_scope, Some(PlayerFilter::All)) {
         each_target_filter_mut(&mut def.effect, &mut rewrite_filter_controller_to_scoped);
     }
-    normalize_all_player_hand_to_library_shuffle_targets(def);
+    normalize_all_player_library_shuffle_chain(def);
     // CR 406.2 + CR 610.3: Under the `OwnersOfCardsExiledBySource` scope ("the
     // owner of each card exiled with ~ puts that card on the bottom of their
     // library", Trial of a Time Lord IV), the "that card" anaphor (parsed as the
