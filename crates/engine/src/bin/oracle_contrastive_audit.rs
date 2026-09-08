@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -719,6 +719,31 @@ fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
     matches!((resolved(left), resolved(right)), (Some(left), Some(right)) if left == right)
 }
 
+fn write_report_atomic(path: &Path, rendered: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "output has no file name")
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        process::id()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(rendered)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 #[cfg(unix)]
 fn same_file_identity(left: &Path, right: &Path) -> Option<bool> {
     use std::os::unix::fs::MetadataExt;
@@ -756,7 +781,7 @@ fn run_with_args(
     }
     let rendered = render_report(&audit(&input, input_label)?)?;
     if let Some(path) = output {
-        fs::write(path, rendered)?;
+        write_report_atomic(&path, &rendered)?;
     } else {
         stdout.write_all(&rendered)?;
     }
@@ -1217,6 +1242,30 @@ mod tests {
             &corpus,
             &directory.path().join("new-report.json")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_output_replaces_a_raced_symlink_without_modifying_the_corpus() {
+        let directory = tempfile::tempdir().unwrap();
+        let corpus = directory.path().join("AtomicCards.json");
+        let output = directory.path().join("report.json");
+        let original = br#"{"data":{}}"#;
+        fs::write(&corpus, original).unwrap();
+        fs::write(&output, b"old report").unwrap();
+
+        assert!(!paths_refer_to_same_file(&corpus, &output));
+        fs::remove_file(&output).unwrap();
+        std::os::unix::fs::symlink(&corpus, &output).unwrap();
+
+        write_report_atomic(&output, b"new report\n").unwrap();
+
+        assert_eq!(fs::read(&corpus).unwrap(), original);
+        assert_eq!(fs::read(&output).unwrap(), b"new report\n");
+        assert!(!fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
