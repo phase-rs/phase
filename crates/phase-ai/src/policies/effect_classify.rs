@@ -2200,6 +2200,15 @@ mod live_quantity_targeting_tests {
         let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
             unreachable!("the exact fixture installs a live pending cast");
         };
+        pending_cast.object_id = different_existing_source;
+        assert_eq!(
+            exact_pending_impact_from_live_state(&state, TargetRef::Player(PlayerId(1))),
+            None,
+            "two existing source ids still must match before exact source-context resolution"
+        );
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            unreachable!("the source-mismatch fixture remains live");
+        };
         pending_cast.object_id = source;
         pending_cast.ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::Discard {
