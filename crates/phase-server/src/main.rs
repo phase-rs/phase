@@ -15028,7 +15028,10 @@ mod mode_gate_tests {
                 // projection that hardcoded `format: None` instead of forwarding
                 // it — matching the server-direction fixture's treatment.
                 format: Some(engine::types::format::GameFormat::Commander),
-                match_type: None,
+                // A concrete value (not `None`), so the round-trip cannot pass
+                // against a projection that dropped `match_type` and emitted
+                // `None`. `Bo1` is the valid single-game structure for a pod.
+                match_type: Some(engine::types::match_config::MatchType::Bo1),
             },
             ClientMessage::JoinTournament {
                 code: "TOUR01".into(),

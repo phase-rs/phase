@@ -118,9 +118,11 @@ export function CreateTournamentForm({
           // `""` is the "no format named" choice; everything else is a
           // `GameFormat` submitted verbatim.
           format: format === "" ? null : format,
-          // Bo3 is inherently 2-player; a pod is always single-game. The broker
-          // rejects Bo3 at any non-head-to-head arity, so force Bo1 there.
-          matchType: arity === 2 ? matchType : "Bo1",
+          // Bo3 is inherently 2-player. For a pod we send `null` and let the
+          // broker resolve the arity default (single-game per MSTR) rather than
+          // duplicate that rule here; the disabled selector below is a UI
+          // affordance only. Head-to-head sends the organizer's explicit choice.
+          matchType: arity === 2 ? matchType : null,
         });
       }}
       className="flex flex-col gap-4 rounded-xl border border-white/10 bg-black/20 p-4"

@@ -1204,7 +1204,18 @@ fn player_records(meta: &TournamentMeta) -> HashMap<String, PlayerRecord> {
                     } else {
                         scoring.loss_points()
                     });
-                    if !game_wins.is_empty() {
+                    if game_wins.is_empty() {
+                        // MTR §3.1: a single-game result (a Bo1 event or a pod —
+                        // both validated to carry an empty `game_wins`) is still
+                        // one played game. Record it as 1-0 for the winner and
+                        // 0-1 for every other seated player, so the winner earns
+                        // a real game-win percentage instead of collapsing to the
+                        // `1 / win_points` floor the way an unplayed record does.
+                        record.games_played += 1;
+                        if winner == key {
+                            record.game_wins += 1;
+                        }
+                    } else {
                         record.game_wins += u32::from(game_wins.get(key).copied().unwrap_or(0));
                         record.games_played +=
                             game_wins.values().map(|w| u32::from(*w)).sum::<u32>();
@@ -3638,6 +3649,52 @@ mod tests {
     }
 
     #[test]
+    fn bo1_result_rejects_a_winner_outside_the_pairing() {
+        // The `pairing.players.contains(winner)` guard at the top of `Decisive`
+        // runs before the match-type branch, so a single-game (Bo1 / pod)
+        // result naming a player who never sat in the pairing is rejected
+        // exactly like a Bo3 one. There is no match-type-specific bypass: the
+        // Bo1 arm only checks the game-win tally, never re-opening membership.
+        let outsider = "z".to_string();
+        let empty = || PodOutcome::Decisive {
+            winner: outsider.clone(),
+            game_wins: HashMap::new(),
+        };
+
+        // Head-to-head Bo1.
+        let duel = head_to_head_pairing("a", "b");
+        let duel_players = undropped(&["a", "b", "z"]);
+        assert!(
+            validate_match_result(&duel, &empty(), &duel_players, MatchType::Bo1).is_err(),
+            "an outsider cannot be recorded as the Bo1 head-to-head winner"
+        );
+        // A seated member is still accepted at the same shape.
+        validate_match_result(
+            &duel,
+            &PodOutcome::Decisive {
+                winner: "a".to_string(),
+                game_wins: HashMap::new(),
+            },
+            &duel_players,
+            MatchType::Bo1,
+        )
+        .expect("a seated member is a valid Bo1 winner");
+
+        // Pod (also single-game, so also MatchType::Bo1).
+        let pod = TournamentPairing {
+            id: 0,
+            round: 1,
+            players: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            outcome: None,
+        };
+        let pod_players = undropped(&["a", "b", "c", "d", "z"]);
+        assert!(
+            validate_match_result(&pod, &empty(), &pod_players, MatchType::Bo1).is_err(),
+            "an outsider cannot be recorded as the single-game pod winner"
+        );
+    }
+
+    #[test]
     fn dropped_player_cannot_be_credited_a_win() {
         let pairing = head_to_head_pairing("a", "b");
         let mut players = undropped(&["a", "b"]);
@@ -3836,6 +3893,67 @@ mod tests {
         }
         // Best first.
         assert!(rows[0].match_points >= rows[3].match_points);
+    }
+
+    #[test]
+    fn bo1_head_to_head_counts_the_single_game_in_game_win_percentage() {
+        // Regression (MTR §3.1): a Bo1 decisive result carries an empty
+        // `game_wins`, but the one game that was played still counts. Before the
+        // fix both players fell to the `1 / win_points` floor because
+        // `games_played` stayed 0; now the winner is 1-0 (100%) and the loser
+        // 0-1 (0%, floored). This is the single-game single-elimination path.
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        mgr.create_tournament(
+            "T",
+            CreateTournamentRequest {
+                name: "Single-Game Duel".to_string(),
+                arity: MatchArity::HEAD_TO_HEAD,
+                scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                bracket: BracketShape::SingleElimination,
+                total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: Some(MatchType::Bo1),
+            },
+            &env,
+        )
+        .expect("create Bo1 head-to-head");
+        join_n(&mut mgr, "T", 2, &env);
+        mgr.generate_pairings("T", &env).expect("round 1");
+
+        let pairing = mgr.get("T").expect("t").pairings[0].clone();
+        let (winner, loser) = (pairing.players[0].clone(), pairing.players[1].clone());
+        // A single-game report: no per-game tally, exactly as the Bo1 wire shape.
+        mgr.report_result(
+            "T",
+            pairing.id,
+            PodOutcome::Decisive {
+                winner: winner.clone(),
+                game_wins: HashMap::new(),
+            },
+            &env,
+        )
+        .expect("single-game report");
+
+        let rows = mgr.get("T").expect("t").standings();
+        let gwp = |player: &str| match standing_of(&rows, player).tiebreaks {
+            Tiebreaks::HeadToHead { game_win_pct, .. } => game_win_pct,
+            Tiebreaks::Multiplayer { .. } => panic!("head-to-head must select the MTR order"),
+        };
+        let floor = 1.0 / 3.0;
+        assert!(
+            (gwp(&winner) - 1.0).abs() < 1e-12,
+            "the Bo1 winner won the only game played"
+        );
+        assert!(
+            (gwp(&loser) - floor).abs() < 1e-12,
+            "the Bo1 loser is 0-1, floored — not the same value as the winner"
+        );
+        assert!(
+            gwp(&winner) > gwp(&loser),
+            "the winner must outrank the loser on game-win percentage"
+        );
     }
 
     // -- single elimination ----------------------------------------------------

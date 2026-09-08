@@ -124,9 +124,9 @@ describe("CreateTournamentForm", () => {
   });
 
   // Protocol v8: head-to-head defaults to Bo3 and can be set to Bo1 (single-game
-  // single-elim); a pod is forced to Bo1 (Bo3 is inherently 2-player), and its
-  // control is disabled.
-  it("submits Bo3 by default at head-to-head, Bo1 when chosen, Bo1 forced for pods", () => {
+  // single-elim); a pod sends `null` so the broker resolves the arity default
+  // (single-game per MSTR), and its control is disabled as a UI affordance.
+  it("submits Bo3 by default at head-to-head, Bo1 when chosen, null for pods", () => {
     const onSubmit = vi.fn();
     render(<CreateTournamentForm onSubmit={onSubmit} />);
 
@@ -139,14 +139,15 @@ describe("CreateTournamentForm", () => {
     fireEvent.click(submitButton());
     expect(onSubmit.mock.calls[1][0].matchType).toBe("Bo1");
 
-    // A pod forces Bo1 regardless of the (now disabled) control.
+    // A pod sends `null` regardless of the (now disabled) control, letting the
+    // broker resolve the single-game default.
     fireEvent.change(screen.getByLabelText("Match"), { target: { value: "Bo3" } });
     fireEvent.change(screen.getByLabelText("Players per match"), {
       target: { value: "4" },
     });
     expect(screen.getByLabelText("Match")).toBeDisabled();
     fireEvent.click(submitButton());
-    expect(onSubmit.mock.calls[2][0].matchType).toBe("Bo1");
+    expect(onSubmit.mock.calls[2][0].matchType).toBeNull();
   });
 
   // "Automatic + N": extra rounds ride as `plusRounds` while the count is
