@@ -804,8 +804,8 @@ function unresolvedStageMatches(
     && stage.resultCountAtLaunch === run.results.length;
 }
 
-function withBoosterPackPool(run: DraftRunState, boosterPackPool: string[] | null): DraftRunState {
-  return run.booster_pack_pool === undefined
+function withBoosterPackPool(run: DraftRunState, boosterPackPool: string[] | null | undefined): DraftRunState {
+  return run.booster_pack_pool === undefined && boosterPackPool !== undefined
     ? { ...run, booster_pack_pool: boosterPackPool }
     : run;
 }
