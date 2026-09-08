@@ -9109,11 +9109,16 @@ fn search_selection_targets(
     chosen: &[ObjectId],
 ) -> Vec<TargetRef> {
     let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
-    if chain
+    let consumes_parent_player = matches!(
+        &chain.effect,
+        Effect::Shuffle {
+            target: crate::types::ability::TargetFilter::ParentTarget
+        }
+    ) || chain
         .sub_ability
         .as_deref()
-        .is_some_and(effects::ability_refs_parent_target)
-    {
+        .is_some_and(effects::ability_refs_parent_target);
+    if consumes_parent_player {
         if let Some(parent_player) = chain.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),
             TargetRef::Object(_) => None,
@@ -9158,6 +9163,30 @@ mod tests {
     use crate::types::proposed_event::ReplacementId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{ProhibitionScope, StaticMode};
+
+    /// CR 701.23a + CR 701.24a: A search whose continuation begins with a
+    /// parent-target shuffle must retain the player target after replacing the
+    /// found-card object targets. A normal found-card delivery is a ChangeZone
+    /// head, so this deliberately does not retain players for arbitrary heads.
+    #[test]
+    fn search_selection_targets_preserves_player_for_leading_parent_target_shuffle() {
+        let chain = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(90_100),
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            search_selection_targets(&chain, PlayerId(0), &[ObjectId(90_101)]),
+            vec![
+                TargetRef::Object(ObjectId(90_101)),
+                TargetRef::Player(PlayerId(1)),
+            ]
+        );
+    }
 
     fn resolution_choice_source(
         state: &GameState,
