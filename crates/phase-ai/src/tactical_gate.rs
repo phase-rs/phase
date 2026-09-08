@@ -23,14 +23,17 @@ use engine::game::triggers::{
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     CastingRestriction, ContinuousModification, CostCategory, Effect, ParsedCondition, PtValue,
-    StaticCondition, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TypeFilter,
+    TypedFilter,
 };
-use engine::types::ability_visit::{visit_ability_def, visit_replacement, visit_static};
+use engine::types::ability_visit::{
+    visit_ability_def, visit_replacement, visit_static, visit_trigger,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, DayNight, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaSourcePenalty, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -564,9 +567,7 @@ fn object_has_surge_keyword(
     state: &GameState,
     object: &engine::game::game_object::GameObject,
 ) -> bool {
-    engine::game::off_zone_characteristics::effective_off_zone_keywords(state, object.id)
-        .iter()
-        .any(|keyword| matches!(keyword, Keyword::Surge(_)))
+    object_has_cast_history_keyword(state, object)
 }
 
 fn spell_identity_is_available_to_caster(
@@ -625,17 +626,63 @@ fn object_uses_cast_history_quantity(
             .as_slice()
             .iter()
             .any(static_definition_uses_cast_history)
-        || engine::game::off_zone_characteristics::effective_off_zone_keywords(state, object.id)
-            .iter()
-            .any(keyword_uses_cast_history)
+        || object_has_cast_history_keyword(state, object)
         || object
             .replacement_definitions
+            .as_slice()
             .iter()
             .any(replacement_definition_uses_cast_history)
+        || object
+            .trigger_definitions
+            .as_slice()
+            .iter()
+            .any(|trigger| trigger_definition_uses_cast_history(&trigger.definition))
 }
 
-fn keyword_uses_cast_history(keyword: &Keyword) -> bool {
-    matches!(keyword, Keyword::Storm | Keyword::Surge(_))
+/// Storm and Surge share `KeywordKind::Unknown` with other keyword variants.
+/// The public effective-keyword authority therefore yields a conservative
+/// superset here: an unrelated unknown kind may retain a cast, but no
+/// off-zone Storm or Surge payoff can be rejected as known-zero.
+fn object_has_cast_history_keyword(
+    state: &GameState,
+    object: &engine::game::game_object::GameObject,
+) -> bool {
+    engine::game::keywords::object_has_effective_keyword_kind(
+        state,
+        object.id,
+        KeywordKind::Unknown,
+    )
+}
+
+fn trigger_definition_uses_cast_history(
+    definition: &engine::types::ability::TriggerDefinition,
+) -> bool {
+    definition
+        .condition
+        .as_ref()
+        .is_some_and(trigger_condition_uses_cast_history)
+        || definition
+            .execute
+            .as_deref()
+            .is_some_and(ability_uses_cast_history_quantity)
+        || effects_visited_by(effect_uses_cast_history_quantity, |visit| {
+            visit_trigger(definition, visit)
+        })
+}
+
+fn trigger_condition_uses_cast_history(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::CastSpellThisTurn { .. }
+        | TriggerCondition::SpellCastWithVariantThisTurn { .. } => true,
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_uses_cast_history(lhs) || quantity_expr_uses_cast_history(rhs)
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().any(trigger_condition_uses_cast_history)
+        }
+        TriggerCondition::Not { condition } => trigger_condition_uses_cast_history(condition),
+        _ => false,
+    }
 }
 
 fn ability_effect_uses_cast_history_quantity(definition: &AbilityDefinition) -> bool {
@@ -1727,6 +1774,39 @@ mod tests {
         (state.clone(), congregate)
     }
 
+    fn funded_zero_harvest_state() -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let harvest = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bountiful Harvest",
+                false,
+                "You gain 1 life for each land you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 4));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        (state.clone(), harvest)
+    }
+
+    fn harvest_amount(state: &GameState, harvest: ObjectId) -> Option<i32> {
+        let object = state.objects.get(&harvest)?;
+        let Effect::GainLife { amount, .. } = object.abilities.first()?.effect.as_ref() else {
+            return None;
+        };
+        try_resolve_quantity_in_source_context(state, amount, object.controller, harvest)
+    }
+
     fn zero_cast_is_retained(state: &GameState, spell: ObjectId) -> bool {
         let issued = engine::ai_support::candidate_actions(state);
         assert!(issued.iter().any(|candidate| {
@@ -2665,8 +2745,8 @@ mod tests {
     }
 
     #[test]
-    fn hidden_face_down_cast_restriction_cannot_change_zero_cast_support() {
-        let (mut state, congregate) = funded_zero_congregate_state();
+    fn hidden_face_down_cast_restriction_cannot_change_zero_harvest_support() {
+        let (mut state, harvest) = funded_zero_harvest_state();
         let payoff = create_object(
             &mut state,
             CardId(91_706),
@@ -2693,8 +2773,13 @@ mod tests {
                 }),
             });
 
+        assert_eq!(
+            harvest_amount(&state, harvest),
+            Some(0),
+            "the public fixture's engine quantity authority proves Bountiful Harvest is zero"
+        );
         assert!(
-            zero_cast_is_retained(&state, congregate),
+            zero_cast_is_retained(&state, harvest),
             "the face-up public counterpart reaches the zero-direct-effect gate"
         );
 
@@ -2717,10 +2802,172 @@ mod tests {
             !spell_identity_is_available_to_caster(&state, P0, &state.objects[&payoff]),
             "the opponent's face-down permanent has no public identity for the caster"
         );
+        assert_eq!(
+            harvest_amount(&state, harvest),
+            Some(0),
+            "the hidden fixture still has a zero Bountiful Harvest under the engine quantity authority"
+        );
         assert!(
-            !zero_cast_is_retained(&state, congregate),
+            !zero_cast_is_retained(&state, harvest),
             "unknown face-down metadata cannot decide zero-cast candidate support"
         );
+    }
+
+    #[test]
+    fn zero_harvest_rhino_attack_trigger_is_paired_and_draws_after_a_mana_value_five_cast() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let rhino = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Rhino, Barreling Brute",
+                6,
+                7,
+                "Vigilance, trample, haste\nWhenever Rhino attacks, if you've cast a spell with mana value 4 or greater this turn, draw a card.",
+            )
+            .id();
+        let harvest = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bountiful Harvest",
+                false,
+                "You gain 1 life for each land you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        scenario.with_library_top(P0, &["Rhino attack draw"]);
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 4));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+
+        assert_eq!(
+            harvest_amount(state, harvest),
+            Some(0),
+            "the mana-value-five Bountiful Harvest has zero direct magnitude with no lands"
+        );
+        assert!(
+            state.objects[&rhino]
+                .trigger_definitions
+                .as_slice()
+                .iter()
+                .any(|trigger| trigger_definition_uses_cast_history(&trigger.definition)),
+            "the real Rhino Oracle trigger reaches the cast-history trigger census"
+        );
+        assert!(
+            zero_cast_is_retained(state, harvest),
+            "Rhino's delayed attack payoff retains the otherwise-zero prior cast"
+        );
+
+        let mut without_rhino_trigger = state.clone();
+        let rhino_object = without_rhino_trigger
+            .objects
+            .get_mut(&rhino)
+            .expect("Rhino exists in the paired control");
+        rhino_object.trigger_definitions.clear();
+        rhino_object.base_trigger_definitions = Arc::new(vec![]);
+        assert!(
+            !zero_cast_is_retained(&without_rhino_trigger, harvest),
+            "removing only Rhino's cast-history trigger restores known-zero rejection"
+        );
+
+        runner.cast(harvest).resolve();
+        let hand_before_attack = runner.state().players[P0.0 as usize].hand.len();
+        {
+            let state = runner.state_mut();
+            state.phase = Phase::BeginCombat;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(rhino, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .expect("the production combat reducer accepts Rhino's attack");
+        runner.pass_both_players();
+        assert_eq!(
+            runner.state().players[P0.0 as usize].hand.len(),
+            hand_before_attack + 1,
+            "Rhino's production attack trigger draws after Bountiful Harvest's mana-value-five cast"
+        );
+    }
+
+    #[test]
+    fn zero_harvest_loan_shark_etb_trigger_is_paired_and_draws_after_the_second_spell() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let harvest = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Bountiful Harvest",
+                false,
+                "You gain 1 life for each land you control.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let loan_shark = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Loan Shark",
+                3,
+                4,
+                "When Loan Shark enters the battlefield, if you've cast two or more spells this turn, draw a card.\nPlot {3}{U} (You may pay {3}{U} and exile this card from your hand. Cast it as a sorcery on a later turn without paying its mana cost. Plot only as a sorcery.)",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_library_top(P0, &["Loan Shark draw"]);
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 7));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+
+        assert_eq!(
+            harvest_amount(state, harvest),
+            Some(0),
+            "the first spell has zero direct magnitude before Loan Shark enters"
+        );
+        assert!(
+            state.objects[&loan_shark]
+                .trigger_definitions
+                .as_slice()
+                .iter()
+                .any(|trigger| trigger_definition_uses_cast_history(&trigger.definition)),
+            "the real Loan Shark Oracle trigger reaches the visible castable-card census"
+        );
+        assert!(
+            zero_cast_is_retained(state, harvest),
+            "Loan Shark's self-ETB payoff retains the first otherwise-zero spell"
+        );
+
+        let mut without_loan_shark = state.clone();
+        without_loan_shark.players[P0.0 as usize]
+            .hand
+            .retain(|object_id| *object_id != loan_shark);
+        without_loan_shark.objects.remove(&loan_shark);
+        assert!(
+            !zero_cast_is_retained(&without_loan_shark, harvest),
+            "removing only the available Loan Shark payoff restores known-zero rejection"
+        );
+
+        runner.cast(harvest).resolve();
+        runner.cast(loan_shark).resolve().assert_hand_drawn(P0, 1);
     }
 
     #[test]
@@ -2776,7 +3023,18 @@ mod tests {
 
         let mut with_prior_cast = engine::game::scenario::GameRunner::from_state(state);
         with_prior_cast.cast(congregate).target_player(P0).resolve();
-        with_prior_cast.cast(grapeshot).target_player(P1).resolve();
+        let storm_outcome = with_prior_cast.cast(grapeshot).target_player(P1).resolve();
+        assert!(
+            matches!(
+                storm_outcome.final_waiting_for(),
+                WaitingFor::CopyRetarget { .. }
+            ),
+            "the real Storm copy reaches its production keep-or-retarget prompt"
+        );
+        with_prior_cast
+            .act(GameAction::KeepAllCopyTargets)
+            .expect("keeping Grapeshot's existing target resolves the Storm copy");
+        with_prior_cast.advance_until_stack_empty();
         assert_eq!(
             with_prior_cast.state().players[P1.0 as usize].life,
             18,
